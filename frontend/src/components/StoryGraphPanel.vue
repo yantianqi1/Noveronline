@@ -9,8 +9,8 @@
         <button class="btn" :disabled="loading" @click="$emit('refresh')">
           {{ loading ? "刷新中..." : "刷新图谱" }}
         </button>
-        <button class="btn" @click="resetVisibleTypes">核心视图</button>
-        <button class="btn" @click="showEdgeLabels = !showEdgeLabels">
+        <button class="btn" type="button" @click="resetVisibleTypes">核心视图</button>
+        <button class="btn" type="button" @click="showEdgeLabels = !showEdgeLabels">
           {{ showEdgeLabels ? "隐藏关系标签" : "显示关系标签" }}
         </button>
       </div>
@@ -27,51 +27,23 @@
       >
         {{ item.label }} {{ countsByType[item.key] || 0 }}
       </button>
-      <span class="graph-meta mono">当前显示 {{ positionedNodes.length }} / {{ props.nodes.length }} 个节点</span>
+      <span class="graph-meta mono">当前显示 {{ visibleNodeCount }} / {{ props.nodes.length }} 个节点</span>
     </div>
 
     <div class="panel-body">
-      <div class="canvas-area">
-        <svg v-if="positionedNodes.length" viewBox="0 0 900 520" class="graph-svg">
-          <line
-            v-for="edge in normalizedEdges"
-            :key="edge.id"
-            :x1="getNode(edge.source_id)?.x || 0"
-            :y1="getNode(edge.source_id)?.y || 0"
-            :x2="getNode(edge.target_id)?.x || 0"
-            :y2="getNode(edge.target_id)?.y || 0"
-            class="edge-line"
-            @click="selectEdge(edge)"
-          />
-          <text
-            v-for="edge in normalizedEdges"
-            v-show="showEdgeLabels"
-            :key="`${edge.id}_label`"
-            :x="((getNode(edge.source_id)?.x || 0) + (getNode(edge.target_id)?.x || 0)) / 2"
-            :y="((getNode(edge.source_id)?.y || 0) + (getNode(edge.target_id)?.y || 0)) / 2"
-            class="edge-label"
-          >
-            {{ edge.name || "关系" }}
-          </text>
-          <g v-for="node in positionedNodes" :key="node.id" @click="selectNode(node)">
-            <circle
-              :cx="node.x"
-              :cy="node.y"
-              :r="node.id === selectedNode?.id ? 16 : 12"
-              :fill="node.color"
-              class="node-dot"
-            />
-            <text
-              v-if="shouldShowNodeLabel(node)"
-              :x="node.x + 14"
-              :y="node.y + 4"
-              class="node-name"
-            >
-              {{ node.name }}
-            </text>
-          </g>
-        </svg>
-        <div v-else class="empty-box">暂无图谱数据。可先选择项目并构建图谱。</div>
+      <div ref="canvasRef" class="canvas-area">
+        <svg ref="svgRef" class="graph-svg" aria-label="故事图谱" />
+        <div class="canvas-mask" aria-hidden="true"></div>
+        <div v-if="!visibleNodeCount" class="empty-box">暂无图谱数据。可先选择项目并构建图谱。</div>
+        <div v-if="legendItems.length" class="legend-card">
+          <p class="legend-title">图例</p>
+          <div class="legend-list">
+            <span v-for="item in legendItems" :key="item.key" class="legend-item">
+              <span class="legend-dot" :style="{ backgroundColor: item.color }"></span>
+              {{ item.label }} {{ item.count }}
+            </span>
+          </div>
+        </div>
       </div>
       <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" />
     </div>
@@ -79,8 +51,15 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+
 import StoryGraphInspector from "./StoryGraphInspector.vue";
+import { createStoryGraphRenderer } from "../views/story-graph/storyGraphRenderer.js";
+import {
+  buildLegendItems,
+  resolveEdgeId,
+  resolveNodeId,
+} from "../views/story-graph/storyGraphRenderModel.js";
 import {
   buildGraphDisplayState,
   buildHighlightedNodeIds,
@@ -97,18 +76,14 @@ const props = defineProps({
 
 defineEmits(["refresh"]);
 
+const canvasRef = ref(null);
+const svgRef = ref(null);
+const renderer = ref(null);
 const showEdgeLabels = ref(false);
 const selectedNode = ref(null);
 const selectedEdge = ref(null);
 const visibleTypes = reactive({ ...DEFAULT_GRAPH_TYPE_VISIBILITY });
 const typeOptions = GRAPH_TYPE_OPTIONS;
-
-const palette = {
-  character: "#8f4f1f",
-  organization: "#275a78",
-  faction: "#386a4f",
-  group: "#6b5f40",
-};
 
 const graphDisplayState = computed(() =>
   buildGraphDisplayState({
@@ -118,67 +93,37 @@ const graphDisplayState = computed(() =>
   }),
 );
 
+const visibleNodes = computed(() => graphDisplayState.value.visibleNodes);
+const visibleEdges = computed(() => graphDisplayState.value.visibleEdges);
+const visibleNodeCount = computed(() => visibleNodes.value.length);
 const countsByType = computed(() => graphDisplayState.value.countsByType);
 const highlightedNodeIds = computed(() =>
-  buildHighlightedNodeIds(graphDisplayState.value.visibleNodes, graphDisplayState.value.visibleEdges),
+  buildHighlightedNodeIds(visibleNodes.value, visibleEdges.value),
 );
+const legendItems = computed(() =>
+  buildLegendItems({ nodes: visibleNodes.value, typeOptions }),
+);
+const selectedNodeId = computed(() => resolveNodeId(selectedNode.value || {}));
+const selectedEdgeId = computed(() => {
+  const edge = selectedEdge.value;
+  if (!edge) {
+    return "";
+  }
 
-const positionedNodes = computed(() => {
-  const nodesByType = groupNodesByType(graphDisplayState.value.visibleNodes);
-  const centerX = 390;
-  const centerY = 250;
-  return Object.entries(nodesByType).flatMap(([type, nodes]) =>
-    nodes.map((node, index) => {
-      const angleStep = nodes.length ? (Math.PI * 2) / nodes.length : 0;
-      const angle = angleStep * index;
-      const radius = ringRadius(type);
-      return {
-        ...node,
-        color: palette[type] || "#866f4d",
-        x: centerX + Math.cos(angle) * radius + ((index % 3) - 1) * 6,
-        y: centerY + Math.sin(angle) * radius + ((index % 4) - 1.5) * 5,
-      };
-    }),
-  );
+  const visibleIndex = visibleEdges.value.findIndex((item) => item === edge);
+  return resolveEdgeId(edge, visibleIndex >= 0 ? visibleIndex : 0);
 });
-
-const normalizedEdges = computed(() =>
-  graphDisplayState.value.visibleEdges.map((edge, idx) => ({
-    id: edge.uuid || edge.id || `edge_${idx}`,
-    ...edge,
-  }))
-);
-
-function getNode(nodeId) {
-  return positionedNodes.value.find((node) => node.id === nodeId || node.uuid === nodeId);
-}
-
-function ringRadius(type) {
-  if (type === "character") {
-    return 135;
+const visibleLabelNodeIds = computed(() => {
+  if (shouldRenderNodeLabels(visibleNodeCount.value)) {
+    return new Set(visibleNodes.value.map((node) => resolveNodeId(node)));
   }
-  if (type === "organization" || type === "faction" || type === "group") {
-    return 220;
-  }
-  if (type === "artifact" || type === "knowledgeitem") {
-    return 290;
-  }
-  if (type === "plotevent") {
-    return 95;
-  }
-  return 330;
-}
 
-function groupNodesByType(nodes) {
-  return nodes.reduce((accumulator, node) => {
-    const type = String(node.normalizedType || "unknown");
-    if (!accumulator[type]) {
-      accumulator[type] = [];
-    }
-    accumulator[type].push(node);
-    return accumulator;
-  }, {});
-}
+  const labelIds = new Set(highlightedNodeIds.value);
+  if (selectedNodeId.value) {
+    labelIds.add(selectedNodeId.value);
+  }
+  return labelIds;
+});
 
 function resetVisibleTypes() {
   for (const key of Object.keys(visibleTypes)) {
@@ -190,111 +135,82 @@ function toggleType(type) {
   visibleTypes[type] = !visibleTypes[type];
 }
 
-function shouldShowNodeLabel(node) {
-  return (
-    shouldRenderNodeLabels(positionedNodes.value.length) ||
-    highlightedNodeIds.value.has(node.id) ||
-    selectedNode.value?.id === node.id
-  );
+function clearSelection() {
+  selectedNode.value = null;
+  selectedEdge.value = null;
 }
 
-function selectNode(node) {
+function handleNodeSelect(node) {
   selectedEdge.value = null;
   selectedNode.value = node;
 }
 
-function selectEdge(edge) {
+function handleEdgeSelect(edge) {
   selectedNode.value = null;
   selectedEdge.value = edge;
 }
 
-watch(
-  () => positionedNodes.value.map((node) => node.id),
-  (visibleIds) => {
-    if (selectedNode.value && !visibleIds.includes(selectedNode.value.id)) {
-      selectedNode.value = null;
-    }
-  },
-);
+function syncRenderer() {
+  renderer.value?.setGraphData({
+    nodes: visibleNodes.value,
+    edges: visibleEdges.value,
+  });
+  renderer.value?.setShowEdgeLabels(showEdgeLabels.value);
+  renderer.value?.setVisibleLabelNodeIds(visibleLabelNodeIds.value);
+  renderer.value?.setSelection({
+    selectedNodeId: selectedNodeId.value || null,
+    selectedEdgeId: selectedEdgeId.value || null,
+  });
+}
+
+watch([visibleNodes, visibleEdges], ([nodes, edges]) => {
+  const visibleNodeIds = new Set(nodes.map((node) => resolveNodeId(node)));
+  const visibleEdgeIds = new Set(edges.map((edge, index) => resolveEdgeId(edge, index)));
+
+  if (selectedNode.value && !visibleNodeIds.has(selectedNodeId.value)) {
+    selectedNode.value = null;
+  }
+  if (selectedEdge.value && !visibleEdgeIds.has(selectedEdgeId.value)) {
+    selectedEdge.value = null;
+  }
+
+  renderer.value?.setGraphData({ nodes, edges });
+});
+
+watch(showEdgeLabels, (value) => {
+  renderer.value?.setShowEdgeLabels(value);
+});
+
+watch(visibleLabelNodeIds, (nodeIds) => {
+  renderer.value?.setVisibleLabelNodeIds(nodeIds);
+});
+
+watch([selectedNodeId, selectedEdgeId], ([nodeId, edgeId]) => {
+  renderer.value?.setSelection({
+    selectedNodeId: nodeId || null,
+    selectedEdgeId: edgeId || null,
+  });
+});
+
+onMounted(() => {
+  if (!canvasRef.value || !svgRef.value) {
+    return;
+  }
+
+  renderer.value = createStoryGraphRenderer({
+    container: canvasRef.value,
+    svg: svgRef.value,
+    onNodeSelect: handleNodeSelect,
+    onEdgeSelect: handleEdgeSelect,
+    onCanvasSelect: clearSelection,
+  });
+  syncRenderer();
+});
+
+onBeforeUnmount(() => {
+  renderer.value?.destroy();
+  renderer.value = null;
+});
 </script>
 
-<style scoped>
-.panel {
-  padding: 16px;
-}
-
-.panel-head p {
-  margin: 6px 0 0;
-  color: var(--text-sub);
-}
-
-.filter-row {
-  margin-top: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.btn.active {
-  border-color: var(--line-strong);
-  background: rgba(255, 252, 244, 0.92);
-}
-
-.graph-meta {
-  color: var(--text-sub);
-}
-
-.panel-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.canvas-area {
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: linear-gradient(180deg, #fffcf4, #fbf5e8);
-  min-height: 520px;
-}
-
-.graph-svg {
-  width: 100%;
-  height: 520px;
-}
-
-.edge-line {
-  stroke: #c4b393;
-  stroke-width: 1.6;
-  cursor: pointer;
-}
-
-.edge-label {
-  font-size: 11px;
-  fill: #806d4e;
-}
-
-.node-dot {
-  cursor: pointer;
-  transition: r 120ms ease;
-}
-
-.node-name {
-  font-size: 12px;
-  fill: #2d2418;
-}
-
-.empty-box {
-  min-height: 520px;
-  display: grid;
-  place-items: center;
-  color: var(--text-sub);
-}
-
-@media (max-width: 1180px) {
-  .panel-body {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
+<style scoped src="./StoryGraphPanel.css"></style>
