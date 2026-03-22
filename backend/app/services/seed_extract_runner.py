@@ -19,8 +19,8 @@ class SeedExtractRunner:
 
     def __init__(self, service: Any, task_id: str, use_llm: bool):
         self.service = service
-        self.progress = SeedTaskProgressTracker(service.task_manager, task_id, True)
-        self.use_llm = True
+        self.use_llm = use_llm
+        self.progress = SeedTaskProgressTracker(service.task_manager, task_id, use_llm)
 
     def run(
         self,
@@ -328,6 +328,8 @@ class SeedExtractRunner:
         )
 
     def _validate_llm_modules(self) -> None:
+        if not self.use_llm:
+            return
         missing = []
         router = LlmRouter()
         for module_key in (

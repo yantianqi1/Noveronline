@@ -89,3 +89,14 @@ def update_llm_module_binding(module_key: str):
         return _error_response(error, 400)
     except Exception as error:
         return _error_response(error)
+
+
+@llm_bp.route("/module-bindings/<module_key>", methods=["DELETE"])
+def delete_llm_module_binding(module_key: str):
+    try:
+        result = _service().delete_module_binding(module_key)
+        return jsonify({"success": True, "data": result})
+    except ValueError as error:
+        return _error_response(error, 404)
+    except Exception as error:
+        return _error_response(error)

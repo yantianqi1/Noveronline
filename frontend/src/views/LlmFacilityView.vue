@@ -39,7 +39,9 @@
         :modules="modules"
         :channels="channels"
         :saving-key="savingModuleKey"
+        :removing-key="removingModuleKey"
         @save-binding="handleSaveBinding"
+        @remove-binding="handleRemoveBinding"
       />
     </div>
   </div>
@@ -49,6 +51,7 @@
 import { computed, onMounted, ref } from "vue";
 import {
   createLlmChannel,
+  deleteLlmModuleBinding,
   deleteLlmChannel,
   getLlmSettings,
   syncLlmChannelModels,
@@ -67,6 +70,7 @@ const submittingChannelKey = ref("");
 const syncingChannelKey = ref("");
 const deletingChannelKey = ref("");
 const savingModuleKey = ref("");
+const removingModuleKey = ref("");
 
 const channelBusy = computed(() => !!submittingChannelKey.value);
 const modelCount = computed(() => channels.value.reduce((sum, channel) => sum + (channel.models?.length || 0), 0));
@@ -154,6 +158,20 @@ async function handleSaveBinding(moduleKey, payload) {
   }
 }
 
+async function handleRemoveBinding(moduleKey) {
+  if (!window.confirm("确认解绑？")) return;
+  try {
+    removingModuleKey.value = moduleKey;
+    await deleteLlmModuleBinding(moduleKey);
+    statusText.value = "绑定已解绑";
+    await reloadSettings();
+  } catch (error) {
+    errorText.value = error.message || "解绑失败";
+  } finally {
+    removingModuleKey.value = "";
+  }
+}
+
 onMounted(() => { reloadSettings(); });
 </script>
 
@@ -210,4 +228,3 @@ onMounted(() => { reloadSettings(); });
   .facility-grid { grid-template-columns: 1fr; }
 }
 </style>
-

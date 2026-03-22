@@ -155,8 +155,11 @@ class LlmSettingsService:
         model_id = self._require_text(payload, "model_id")
         timestamp = _now()
         with self.storage.connect() as connection:
-            if not self._get_channel_row(connection, channel_key):
+            channel = self._get_channel_row(connection, channel_key)
+            if not channel:
                 raise ValueError(f"渠道不存在: {channel_key}")
+            if not bool(channel["is_enabled"]):
+                raise ValueError("渠道已停用，请先启用后再绑定模型")
             if not self._model_exists(connection, channel_key, model_id):
                 raise ValueError("模型未同步，请先同步该渠道的模型列表")
             connection.execute(
@@ -173,6 +176,18 @@ class LlmSettingsService:
             connection.commit()
             bindings = self._list_bindings(connection)
             return bindings[module_key]
+
+    def delete_module_binding(self, module_key: str) -> Dict[str, Any]:
+        get_llm_module(module_key)
+        with self.storage.connect() as connection:
+            result = connection.execute(
+                "DELETE FROM llm_module_bindings WHERE module_key = ?",
+                (module_key,),
+            )
+            connection.commit()
+        if result.rowcount == 0:
+            raise ValueError(f"模块绑定不存在: {module_key}")
+        return {"module_key": module_key, "deleted": True}
 
     def resolve_module_binding(self, module_key: str) -> Dict[str, Any]:
         module = get_llm_module(module_key)

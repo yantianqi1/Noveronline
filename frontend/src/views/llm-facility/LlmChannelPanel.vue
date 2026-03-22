@@ -66,6 +66,7 @@
         <div class="channel-meta">
           <span class="chip mono">{{ channel.api_key_masked }}</span>
           <span class="chip mono">状态：{{ channel.last_sync_status || "idle" }}</span>
+          <span class="chip mono">上次同步：{{ channel.last_sync_at || "未同步" }}</span>
           <span class="chip mono">模型：{{ channel.models?.length || 0 }}</span>
         </div>
         <p v-if="channel.last_sync_error" class="channel-error">{{ channel.last_sync_error }}</p>

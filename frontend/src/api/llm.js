@@ -35,3 +35,7 @@ export function syncLlmChannelModels(channelKey) {
 export function updateLlmModuleBinding(moduleKey, payload) {
   return put(buildLlmModuleBindingPath(moduleKey), payload);
 }
+
+export function deleteLlmModuleBinding(moduleKey) {
+  return del(buildLlmModuleBindingPath(moduleKey));
+}

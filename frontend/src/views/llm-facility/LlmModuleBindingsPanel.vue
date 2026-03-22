@@ -22,7 +22,12 @@
             <label>渠道</label>
             <select v-model="drafts[module.module_key].channelKey" @change="handleChannelChange(module.module_key)">
               <option value="">请选择渠道</option>
-              <option v-for="channel in channels" :key="channel.channel_key" :value="channel.channel_key">
+              <option
+                v-for="channel in channels"
+                :key="channel.channel_key"
+                :value="channel.channel_key"
+                :disabled="!channel.is_enabled"
+              >
                 {{ channel.name }}{{ channel.is_enabled ? "" : "（停用）" }}
               </option>
             </select>
@@ -43,13 +48,17 @@
         </div>
 
         <div class="binding-meta">
-          <span class="status" :class="module.binding ? 'ok' : 'warn'">
-            {{ module.binding ? "已绑定" : "未绑定" }}
+          <span class="status" :class="bindingStatusClass(module)">
+            {{ bindingStatusText(module) }}
           </span>
           <span class="mono binding-current">
             {{ currentBindingText(module) }}
           </span>
+          <span v-if="module.binding?.updated_at" class="mono binding-stamp">
+            更新时间：{{ module.binding.updated_at }}
+          </span>
         </div>
+        <p v-if="bindingWarning(module)" class="binding-warning">{{ bindingWarning(module) }}</p>
 
         <div class="toolbar-row">
           <button
@@ -58,6 +67,13 @@
             @click="saveBinding(module.module_key)"
           >
             {{ savingKey === module.module_key ? "保存中..." : "保存绑定" }}
+          </button>
+          <button
+            class="btn"
+            :disabled="!module.binding || removingKey === module.module_key"
+            @click="removeBinding(module.module_key)"
+          >
+            {{ removingKey === module.module_key ? "解绑中..." : "解绑" }}
           </button>
         </div>
       </section>
@@ -73,9 +89,10 @@ const props = defineProps({
   modules: { type: Array, required: true },
   channels: { type: Array, required: true },
   savingKey: { type: String, default: "" },
+  removingKey: { type: String, default: "" },
 });
 
-const emit = defineEmits(["save-binding"]);
+const emit = defineEmits(["save-binding", "remove-binding"]);
 
 const drafts = reactive({});
 
@@ -93,7 +110,11 @@ watch(
 );
 
 function availableModels(channelKey) {
-  return props.channels.find((item) => item.channel_key === channelKey)?.models || [];
+  return channelByKey(channelKey)?.models || [];
+}
+
+function channelByKey(channelKey) {
+  return props.channels.find((item) => item.channel_key === channelKey);
 }
 
 function handleChannelChange(moduleKey) {
@@ -106,19 +127,59 @@ function currentBindingText(module) {
   if (!module.binding) {
     return "尚未配置";
   }
-  const channelName = props.channels.find((item) => item.channel_key === module.binding.channel_key)?.name || module.binding.channel_key;
+  const channelName = channelByKey(module.binding.channel_key)?.name || module.binding.channel_key;
   return `${channelName} / ${module.binding.model_id}`;
 }
 
+function bindingStatusText(module) {
+  if (!module.binding) {
+    return "未绑定";
+  }
+  return bindingWarning(module) ? "绑定失效" : "已绑定";
+}
+
+function bindingStatusClass(module) {
+  if (!module.binding) {
+    return "warn";
+  }
+  return bindingWarning(module) ? "warn" : "ok";
+}
+
+function bindingWarning(module) {
+  if (!module.binding) {
+    return "";
+  }
+  const channel = channelByKey(module.binding.channel_key);
+  if (!channel) {
+    return "当前绑定渠道已不存在，请改绑或解绑。";
+  }
+  if (!channel.is_enabled) {
+    return "当前绑定渠道已停用，请改绑或解绑。";
+  }
+  return "";
+}
+
 function saveDisabled(moduleKey) {
-  return !drafts[moduleKey]?.channelKey || !drafts[moduleKey]?.modelId;
+  const draft = drafts[moduleKey];
+  if (!draft?.channelKey || !draft?.modelId) {
+    return true;
+  }
+  const channel = channelByKey(draft.channelKey);
+  return !channel || !channel.is_enabled;
 }
 
 function saveBinding(moduleKey) {
+  if (saveDisabled(moduleKey)) {
+    return;
+  }
   emit("save-binding", moduleKey, {
     channel_key: drafts[moduleKey].channelKey,
     model_id: drafts[moduleKey].modelId,
   });
+}
+
+function removeBinding(moduleKey) {
+  emit("remove-binding", moduleKey);
 }
 </script>
 
@@ -175,6 +236,16 @@ function saveBinding(moduleKey) {
 .binding-current {
   color: var(--text-sub);
   font-size: 12px;
+}
+
+.binding-stamp {
+  color: var(--text-sub);
+  font-size: 12px;
+}
+
+.binding-warning {
+  margin: 10px 0 0;
+  color: #b1452f;
 }
 
 .empty {

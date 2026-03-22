@@ -9,6 +9,31 @@ class DummyService:
         self.task_manager = TaskManager()
 
 
+def test_seed_runner_preserves_use_llm_flag():
+    service = DummyService()
+    task_id = service.task_manager.create_task(task_type="seed_extract", metadata={})
+
+    runner = SeedExtractRunner(service, task_id, use_llm=False)
+
+    assert runner.use_llm is False
+    assert runner.progress.use_llm is False
+
+
+def test_seed_runner_skips_llm_validation_when_use_llm_disabled(monkeypatch):
+    service = DummyService()
+    task_id = service.task_manager.create_task(task_type="seed_extract", metadata={})
+
+    class FakeRouter:
+        def build_client(self, module_key):
+            raise AssertionError(f"should not validate {module_key}")
+
+    monkeypatch.setattr("app.services.seed_extract_runner.LlmRouter", lambda: FakeRouter())
+
+    runner = SeedExtractRunner(service, task_id, use_llm=False)
+
+    runner._validate_llm_modules()
+
+
 def test_seed_runner_llm_validation_reports_missing_bindings(monkeypatch):
     service = DummyService()
     task_id = service.task_manager.create_task(task_type="seed_extract", metadata={})
@@ -21,7 +46,7 @@ def test_seed_runner_llm_validation_reports_missing_bindings(monkeypatch):
 
     monkeypatch.setattr("app.services.seed_extract_runner.LlmRouter", lambda: FakeRouter())
 
-    runner = SeedExtractRunner(service, task_id, use_llm=False)
+    runner = SeedExtractRunner(service, task_id, use_llm=True)
 
     with pytest.raises(ValueError, match="anchor_point_summary"):
         runner._validate_llm_modules()
@@ -37,7 +62,7 @@ def test_seed_runner_llm_validation_does_not_swallow_runtime_errors(monkeypatch)
 
     monkeypatch.setattr("app.services.seed_extract_runner.LlmRouter", lambda: FakeRouter())
 
-    runner = SeedExtractRunner(service, task_id, use_llm=False)
+    runner = SeedExtractRunner(service, task_id, use_llm=True)
 
     with pytest.raises(RuntimeError, match="boom:local_block_facts"):
         runner._validate_llm_modules()

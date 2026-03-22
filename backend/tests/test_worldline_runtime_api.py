@@ -2,6 +2,7 @@ import sqlite3
 
 from app import create_app
 from app.config import Config
+from app.api import worldline_interaction
 from app.models.project import ProjectManager
 from app.models.worldline import WorldlineBranch, WorldlineSession
 from app.services.world_state_store import WorldStateStore
@@ -149,6 +150,12 @@ def test_agent_dialogue_persists_history_and_llm_mode_requires_binding(tmp_path,
     app = create_app()
     client = app.test_client()
 
+    class MissingBindingRouter:
+        def build_client(self, module_key):
+            raise ValueError("世界线 Agent 对话 未配置 LLM 渠道和模型；请先在全局设施面板完成绑定，或显式传入 use_llm=False")
+
+    monkeypatch.setattr(worldline_interaction.character_agent_service, "llm_router", MissingBindingRouter())
+
     session_id = _create_session(client, project.project_id)
     roster = client.get(f"/api/worldline/session/{session_id}/agents").get_json()["data"]["agents"]
     actor = next(item for item in roster if item["agent_kind"] == "character")
@@ -178,6 +185,50 @@ def test_agent_dialogue_persists_history_and_llm_mode_requires_binding(tmp_path,
     )
     assert llm_response.status_code == 400, llm_response.get_json()
     assert "worldline_agent_dialogue" in llm_response.get_json()["error"]
+
+
+def test_agent_dialogue_llm_mode_succeeds_when_router_returns_client(tmp_path, monkeypatch):
+    project = _create_project_with_seed(tmp_path, monkeypatch)
+    app = create_app()
+    client = app.test_client()
+
+    class FakeLlmClient:
+        model = "fake-worldline-model"
+
+        def chat(self, messages, temperature=0.7, max_tokens=4096, response_format=None):
+            return "今晚我不会公开证据，我要先确认谁在盯着我们。"
+
+    class FakeRouter:
+        def build_client(self, module_key):
+            assert module_key == "worldline_agent_dialogue"
+            return FakeLlmClient()
+
+    monkeypatch.setattr(worldline_interaction.character_agent_service, "llm_router", FakeRouter())
+
+    session_id = _create_session(client, project.project_id)
+    roster = client.get(f"/api/worldline/session/{session_id}/agents").get_json()["data"]["agents"]
+    actor = next(item for item in roster if item["agent_kind"] == "character")
+
+    llm_response = client.post(
+        f"/api/worldline/session/{session_id}/agent-dialogue",
+        json={"agent_id": actor["agent_id"], "message": "你怎么看今晚局势？", "mode": "llm"},
+    )
+
+    assert llm_response.status_code == 200, llm_response.get_json()
+    payload = llm_response.get_json()["data"]
+    assert payload["generator_mode"] == "llm"
+    assert payload["model_name"] == "fake-worldline-model"
+    assert "不会公开证据" in payload["result"]["reply"]
+
+    dialogue_list = client.get(
+        f"/api/worldline/session/{session_id}/agent-dialogues",
+        query_string={"agent_id": actor["agent_id"]},
+    )
+    assert dialogue_list.status_code == 200, dialogue_list.get_json()
+    logged = dialogue_list.get_json()["data"]["items"]
+    assert logged[0]["dialogue_id"] == payload["dialogue_id"]
+    assert logged[0]["generator_mode"] == "llm"
+    assert logged[0]["model_name"] == "fake-worldline-model"
 
 
 def test_existing_session_bootstraps_runtime_db_from_session_json(tmp_path, monkeypatch):
@@ -211,4 +262,3 @@ def test_existing_session_bootstraps_runtime_db_from_session_json(tmp_path, monk
     assert response.status_code == 200, response.get_json()
     assert response.get_json()["data"]["agents"]
     assert sqlite3.connect(_runtime_db_path(project.project_id)).execute("SELECT COUNT(*) FROM agent_registry").fetchone()[0] >= 3
-
