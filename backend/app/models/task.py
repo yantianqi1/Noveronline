@@ -1,0 +1,282 @@
+"""
+任务状态管理
+用于跟踪长时间运行的任务（如图谱构建）
+"""
+
+import uuid
+import threading
+import json
+from datetime import datetime
+from enum import Enum
+from typing import Callable, Dict, Any, Optional
+from dataclasses import dataclass, field
+
+from .task_storage import TaskStorage
+
+
+class TaskStatus(str, Enum):
+    """任务状态枚举"""
+    PENDING = "pending"          # 等待中
+    PROCESSING = "processing"    # 处理中
+    COMPLETED = "completed"      # 已完成
+    FAILED = "failed"            # 失败
+
+
+@dataclass
+class Task:
+    """任务数据类"""
+    task_id: str
+    task_type: str
+    status: TaskStatus
+    created_at: datetime
+    updated_at: datetime
+    progress: int = 0              # 总进度百分比 0-100
+    message: str = ""              # 状态消息
+    result: Optional[Dict] = None  # 任务结果
+    error: Optional[str] = None    # 错误信息
+    metadata: Dict = field(default_factory=dict)  # 额外元数据
+    progress_detail: Dict = field(default_factory=dict)  # 详细进度信息
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "task_id": self.task_id,
+            "task_type": self.task_type,
+            "status": self.status.value,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "progress": self.progress,
+            "message": self.message,
+            "progress_detail": self.progress_detail,
+            "result": self.result,
+            "error": self.error,
+            "metadata": self.metadata,
+        }
+
+
+class TaskManager:
+    """
+    任务管理器
+    线程安全的任务状态管理
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        """单例模式"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._task_lock = threading.Lock()
+                    cls._instance._storage = TaskStorage()
+        return cls._instance
+
+    def _serialize(self, task: Task) -> Dict[str, Any]:
+        return {
+            "task_id": task.task_id,
+            "task_type": task.task_type,
+            "status": task.status.value,
+            "created_at": task.created_at.isoformat(),
+            "updated_at": task.updated_at.isoformat(),
+            "progress": task.progress,
+            "message": task.message,
+            "result_json": json.dumps(task.result, ensure_ascii=False) if task.result is not None else None,
+            "error": task.error,
+            "metadata_json": json.dumps(task.metadata, ensure_ascii=False),
+            "progress_detail_json": json.dumps(task.progress_detail, ensure_ascii=False),
+        }
+
+    def _deserialize(self, row) -> Task:
+        return Task(
+            task_id=row["task_id"],
+            task_type=row["task_type"],
+            status=TaskStatus(row["status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            progress=row["progress"],
+            message=row["message"],
+            result=json.loads(row["result_json"]) if row["result_json"] else None,
+            error=row["error"],
+            metadata=json.loads(row["metadata_json"] or "{}"),
+            progress_detail=json.loads(row["progress_detail_json"] or "{}"),
+        )
+
+    def _save_task(self, task: Task) -> None:
+        payload = self._serialize(task)
+        with self._storage.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO task_runs (
+                    task_id, task_type, status, created_at, updated_at, progress,
+                    message, result_json, error, metadata_json, progress_detail_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    task_type = excluded.task_type,
+                    status = excluded.status,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    progress = excluded.progress,
+                    message = excluded.message,
+                    result_json = excluded.result_json,
+                    error = excluded.error,
+                    metadata_json = excluded.metadata_json,
+                    progress_detail_json = excluded.progress_detail_json
+                """,
+                (
+                    payload["task_id"],
+                    payload["task_type"],
+                    payload["status"],
+                    payload["created_at"],
+                    payload["updated_at"],
+                    payload["progress"],
+                    payload["message"],
+                    payload["result_json"],
+                    payload["error"],
+                    payload["metadata_json"],
+                    payload["progress_detail_json"],
+                ),
+            )
+            connection.commit()
+
+    def _load_task(self, task_id: str) -> Optional[Task]:
+        with self._storage.connect() as connection:
+            row = connection.execute("SELECT * FROM task_runs WHERE task_id = ?", (task_id,)).fetchone()
+        return self._deserialize(row) if row else None
+    
+    def create_task(self, task_type: str, metadata: Optional[Dict] = None) -> str:
+        """
+        创建新任务
+        
+        Args:
+            task_type: 任务类型
+            metadata: 额外元数据
+            
+        Returns:
+            任务ID
+        """
+        task_id = str(uuid.uuid4())
+        now = datetime.now()
+        
+        task = Task(
+            task_id=task_id,
+            task_type=task_type,
+            status=TaskStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+            metadata=metadata or {}
+        )
+
+        with self._task_lock:
+            self._save_task(task)
+        
+        return task_id
+    
+    def get_task(self, task_id: str) -> Optional[Task]:
+        """获取任务"""
+        with self._task_lock:
+            return self._load_task(task_id)
+
+    def mutate_task(self, task_id: str, mutator: Callable[[Task], None]) -> None:
+        """在线程锁内原子更新任务。"""
+        with self._task_lock:
+            task = self._load_task(task_id)
+            if not task:
+                return
+            mutator(task)
+            task.updated_at = datetime.now()
+            self._save_task(task)
+    
+    def update_task(
+        self,
+        task_id: str,
+        status: Optional[TaskStatus] = None,
+        progress: Optional[int] = None,
+        message: Optional[str] = None,
+        result: Optional[Dict] = None,
+        error: Optional[str] = None,
+        progress_detail: Optional[Dict] = None
+    ):
+        """
+        更新任务状态
+        
+        Args:
+            task_id: 任务ID
+            status: 新状态
+            progress: 进度
+            message: 消息
+            result: 结果
+            error: 错误信息
+            progress_detail: 详细进度信息
+        """
+        with self._task_lock:
+            task = self._load_task(task_id)
+            if task:
+                task.updated_at = datetime.now()
+                if status is not None:
+                    task.status = status
+                if progress is not None:
+                    task.progress = progress
+                if message is not None:
+                    task.message = message
+                if result is not None:
+                    task.result = result
+                if error is not None:
+                    task.error = error
+                if progress_detail is not None:
+                    task.progress_detail = progress_detail
+                self._save_task(task)
+    
+    def complete_task(self, task_id: str, result: Dict):
+        """标记任务完成"""
+        self.update_task(
+            task_id,
+            status=TaskStatus.COMPLETED,
+            progress=100,
+            message="任务完成",
+            result=result
+        )
+    
+    def fail_task(self, task_id: str, error: str):
+        """标记任务失败"""
+        self.update_task(
+            task_id,
+            status=TaskStatus.FAILED,
+            message="任务失败",
+            error=error
+        )
+    
+    def list_tasks(self, task_type: Optional[str] = None) -> list:
+        """列出任务"""
+        with self._task_lock:
+            with self._storage.connect() as connection:
+                if task_type:
+                    rows = connection.execute(
+                        "SELECT * FROM task_runs WHERE task_type = ? ORDER BY created_at DESC",
+                        (task_type,),
+                    ).fetchall()
+                else:
+                    rows = connection.execute("SELECT * FROM task_runs ORDER BY created_at DESC").fetchall()
+            tasks = [self._deserialize(row) for row in rows]
+            return [t.to_dict() for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)]
+    
+    def cleanup_old_tasks(self, max_age_hours: int = 24):
+        """清理旧任务"""
+        from datetime import timedelta
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        
+        with self._task_lock:
+            with self._storage.connect() as connection:
+                connection.execute(
+                    """
+                    DELETE FROM task_runs
+                    WHERE created_at < ? AND status IN (?, ?)
+                    """,
+                    (
+                        cutoff.isoformat(),
+                        TaskStatus.COMPLETED.value,
+                        TaskStatus.FAILED.value,
+                    ),
+                )
+                connection.commit()

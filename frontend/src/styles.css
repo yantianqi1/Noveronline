@@ -1,0 +1,147 @@
+:root {
+  --bg-paper: #f4efe2;
+  --bg-ink: #171412;
+  --bg-panel: #fffdf7;
+  --line-soft: #d8cdb5;
+  --line-strong: #9f8d6a;
+  --text-main: #271f14;
+  --text-sub: #665843;
+  --accent-copper: #8f4f1f;
+  --accent-green: #386a4f;
+  --accent-blue: #275a78;
+  --radius: 14px;
+  --shadow-card: 0 10px 24px rgba(39, 31, 20, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+  color: var(--text-main);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(143, 79, 31, 0.12), transparent 28%),
+    radial-gradient(circle at 100% 0%, rgba(39, 90, 120, 0.11), transparent 24%),
+    linear-gradient(180deg, #f8f4ea 0%, #efe7d7 100%);
+  font-family: "IBM Plex Sans SC", sans-serif;
+}
+
+a {
+  color: inherit;
+}
+
+.mono {
+  font-family: "JetBrains Mono", monospace;
+}
+
+.workbench-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+
+.card-title {
+  font-family: "ZCOOL XiaoWei", serif;
+  font-size: 24px;
+  margin: 0;
+}
+
+.toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.btn {
+  border: 1px solid var(--line-strong);
+  background: #fff8eb;
+  color: var(--text-main);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 14px rgba(39, 31, 20, 0.12);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  border-color: var(--accent-copper);
+  background: var(--accent-copper);
+  color: #fff4e6;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field label {
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+.field input,
+.field textarea,
+.field select {
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 10px;
+  font-family: inherit;
+  font-size: 14px;
+  background: #fffcf5;
+}
+
+.field textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+.chip {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+  color: var(--text-sub);
+  background: #fcf6e8;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.status.ok {
+  background: rgba(56, 106, 79, 0.13);
+  color: var(--accent-green);
+}
+
+.status.warn {
+  background: rgba(143, 79, 31, 0.12);
+  color: var(--accent-copper);
+}
+
+@media (max-width: 960px) {
+  .card-title {
+    font-size: 20px;
+  }
+}
