@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildComparisonBranchIds,
   buildProjectSessionOptions,
   resolveSelectedBranchId,
+  sanitizeCheckedBranchIds,
+  toggleCheckedBranchId,
   toggleArchiveSelection,
 } from "../src/views/shared/worldlineSelectorState.js";
 
@@ -56,4 +59,36 @@ test("buildProjectSessionOptions groups global sessions separately from project 
     { value: "proj_1", label: "项目会话 · proj_1" },
     { value: "__global__", label: "全局混合会话" },
   ]);
+});
+
+test("toggleCheckedBranchId adds and removes branch ids without mutating order", () => {
+  const added = toggleCheckedBranchId([], "branch_a");
+  const appended = toggleCheckedBranchId(added, "branch_b");
+  const removed = toggleCheckedBranchId(appended, "branch_a");
+
+  assert.deepEqual(added, ["branch_a"]);
+  assert.deepEqual(appended, ["branch_a", "branch_b"]);
+  assert.deepEqual(removed, ["branch_b"]);
+});
+
+test("sanitizeCheckedBranchIds drops stale ids and preserves branch list order", () => {
+  const branches = [
+    { branch_id: "branch_b" },
+    { branch_id: "branch_a" },
+    { branch_id: "branch_c" },
+  ];
+
+  assert.deepEqual(
+    sanitizeCheckedBranchIds(branches, ["branch_x", "branch_a", "branch_b", "branch_a"]),
+    ["branch_b", "branch_a"],
+  );
+});
+
+test("buildComparisonBranchIds falls back to current branch when no branch is checked", () => {
+  assert.deepEqual(buildComparisonBranchIds([], "branch_a"), ["branch_a"]);
+  assert.deepEqual(buildComparisonBranchIds([], ""), []);
+});
+
+test("buildComparisonBranchIds prefers checked branches over current branch", () => {
+  assert.deepEqual(buildComparisonBranchIds(["branch_c", "branch_a"], "branch_b"), ["branch_c", "branch_a"]);
 });

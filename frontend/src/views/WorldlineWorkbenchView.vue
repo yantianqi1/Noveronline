@@ -1,6 +1,5 @@
 <template>
-  <div class="worldline-stage">
-    <!-- Left Stage: Configuration & Control -->
+  <div ref="stageRef" class="worldline-stage" :class="[workbenchMode, { resizing }]" :style="stageStyle">
     <aside class="stage-controls stack">
       <WorldlineControlPanel
         :selected-archives="selectedArchives"
@@ -33,7 +32,16 @@
       />
     </aside>
 
-    <!-- Right Stage: Performance & Visualization -->
+    <button
+      class="stage-divider"
+      type="button"
+      aria-label="拖拽调整左右栏宽度"
+      aria-orientation="vertical"
+      @pointerdown.prevent="beginResize"
+    >
+      <span></span>
+    </button>
+
     <main class="stage-performance stack">
       <div v-if="!sessionId" class="empty-stage workbench-card">
         <div class="empty-icon">⏳</div>
@@ -46,8 +54,11 @@
           <WorldlineBranchOverview
             :branches="branches"
             :branch-id="branchId"
+            :checked-branch-ids="checkedBranchIds"
             :session-id="sessionId"
             @select-branch="chooseBranch"
+            @toggle-branch-check="toggleBranchCheck"
+            @clear-checked-branches="clearCheckedBranches"
             @refresh-branches="loadBranches"
           />
         </section>
@@ -55,6 +66,7 @@
         <section class="performance-mid container-6-4">
           <WorldlineBranchComparison
             :comparison="comparison"
+            :comparison-branch-ids="comparisonBranchIds"
             :selected-branch-id="branchId"
             :session-id="sessionId"
           />
@@ -69,7 +81,7 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import {
   advanceWorldlineStep,
   createWorldlineSession,
@@ -84,7 +96,13 @@ import WorldlineControlPanel from "./worldline/WorldlineControlPanel.vue";
 import WorldlineBranchOverview from "./worldline/WorldlineBranchOverview.vue";
 import WorldlineTimeline from "./worldline/WorldlineTimeline.vue";
 import WorldlineInspirationPanel from "./worldline/WorldlineInspirationPanel.vue";
-import { resolveSelectedBranchId } from "./shared/worldlineSelectorState.js";
+import { useWorldlineWorkbenchLayout } from "../composables/useWorldlineWorkbenchLayout.js";
+import {
+  buildComparisonBranchIds,
+  resolveSelectedBranchId,
+  sanitizeCheckedBranchIds,
+  toggleCheckedBranchId,
+} from "./shared/worldlineSelectorState.js";
 
 const selectedArchives = ref([]);
 const archiveProjectFilter = ref("");
@@ -93,6 +111,7 @@ const singleVariable = ref("");
 const sessionId = ref("");
 const sessionScope = ref("");
 const branchId = ref("");
+const checkedBranchIds = ref([]);
 const branches = ref([]);
 const comparison = ref(null);
 const timeline = ref([]);
@@ -103,6 +122,8 @@ const inspirationPrompt = ref("希望在下一幕引入关键误判，引发阵�
 const inspirationBusy = ref(false);
 const inspirationResult = ref(null);
 const inspirationError = ref("");
+const { beginResize, resizing, stageRef, stageStyle, workbenchMode } = useWorldlineWorkbenchLayout();
+const comparisonBranchIds = computed(() => buildComparisonBranchIds(checkedBranchIds.value, branchId.value));
 
 function parseVariables(text) {
   return text.split("\n").map(v => v.trim()).filter(Boolean);
@@ -122,8 +143,9 @@ async function createSession() {
     });
     sessionId.value = res.data.session_id;
     sessionScope.value = res.data.session_scope || "";
+    checkedBranchIds.value = [];
     branchId.value = resolveSelectedBranchId(res.data.branches || [], branchId.value);
-    feedback.value = `会话已启动`;
+    feedback.value = "会话已启动";
     await loadBranches();
   } catch (err) {
     error.value = err.message;
@@ -144,6 +166,7 @@ async function loadBranches() {
     const res = await listWorldlineBranches(sessionId.value);
     branches.value = res.data.branches || [];
     branchId.value = resolveSelectedBranchId(branches.value, branchId.value);
+    checkedBranchIds.value = sanitizeCheckedBranchIds(branches.value, checkedBranchIds.value);
     await loadComparison();
     if (branchId.value) await loadTimeline();
   } catch (err) {
@@ -154,7 +177,7 @@ async function loadBranches() {
 async function loadComparison() {
   if (!sessionId.value) return;
   try {
-    const res = await getWorldlineComparison(sessionId.value);
+    const res = await getWorldlineComparison(sessionId.value, comparisonBranchIds.value);
     comparison.value = res.data || null;
   } catch {
     comparison.value = null;
@@ -163,7 +186,23 @@ async function loadComparison() {
 
 async function chooseBranch(id) {
   branchId.value = id;
+  if (!checkedBranchIds.value.length) {
+    await loadComparison();
+  }
   await loadTimeline();
+}
+
+async function toggleBranchCheck(id) {
+  checkedBranchIds.value = sanitizeCheckedBranchIds(
+    branches.value,
+    toggleCheckedBranchId(checkedBranchIds.value, id),
+  );
+  await loadComparison();
+}
+
+async function clearCheckedBranches() {
+  checkedBranchIds.value = [];
+  await loadComparison();
 }
 
 async function loadTimeline() {
@@ -227,47 +266,4 @@ async function generateInspirationPlan() {
 }
 </script>
 
-<style scoped>
-.worldline-stage {
-  display: grid;
-  grid-template-columns: 400px minmax(0, 1fr);
-  gap: var(--space-lg);
-  height: calc(100vh - 120px);
-}
-
-.stage-controls {
-  overflow-y: auto;
-  padding-right: var(--space-xs);
-}
-
-.stage-performance {
-  min-width: 0;
-  overflow-y: auto;
-}
-
-.empty-stage {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: var(--space-xl);
-  background: var(--bg-panel-soft);
-  border-style: dashed;
-}
-
-.empty-icon { font-size: 64px; margin-bottom: var(--space-md); }
-
-.timeline-container {
-  padding: var(--space-md);
-}
-
-@media (max-width: 1200px) {
-  .worldline-stage {
-    grid-template-columns: 1fr;
-    height: auto;
-  }
-}
-</style>
-
+<style scoped src="./WorldlineWorkbenchView.css"></style>

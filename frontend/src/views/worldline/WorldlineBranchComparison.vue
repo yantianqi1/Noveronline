@@ -3,16 +3,15 @@
     <div class="header-row">
       <div>
         <h2 class="card-title">平行世界分支对比</h2>
-        <p class="hint-text">并列查看不同世界线的核心偏移、最新事件、关键状态与待处理事项。</p>
+        <p class="hint-text">{{ modeHint }}</p>
+        <p class="mode-note">系统默认生成 3 条分支用于比较不同走向，右侧默认仅展示当前分支。</p>
       </div>
-      <div class="meta-chip mono" v-if="comparisonAxes.selected_branch_ids?.length">
-        {{ comparisonAxes.selected_branch_ids.length }} 条分支
-      </div>
+      <div class="meta-chip mono">{{ modeLabel }}</div>
     </div>
 
     <div v-if="!sessionId" class="empty">先创建世界线会话，对比面板会自动展示各条平行世界的演化差异。</div>
     <div v-else-if="!cards.length" class="empty">当前没有可对比的分支数据。</div>
-    <div v-else class="comparison-grid">
+    <div v-else class="comparison-grid" :class="{ single: cards.length === 1 }">
       <article
         v-for="item in cards"
         :key="item.branch_id"
@@ -110,6 +109,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  comparisonBranchIds: {
+    type: Array,
+    default: () => [],
+  },
   selectedBranchId: {
     type: String,
     default: "",
@@ -121,7 +124,28 @@ const props = defineProps({
 });
 
 const cards = computed(() => props.comparison?.branches || []);
-const comparisonAxes = computed(() => props.comparison?.comparison_axes || {});
+const singleCheckedBranchMode = computed(() => (
+  props.comparisonBranchIds.length === 1
+  && props.comparisonBranchIds[0] !== props.selectedBranchId
+));
+const modeLabel = computed(() => {
+  if (props.comparisonBranchIds.length > 1) {
+    return `已选 ${props.comparisonBranchIds.length} 条分支对比`;
+  }
+  if (singleCheckedBranchMode.value) {
+    return "已选 1 条分支";
+  }
+  return "当前分支";
+});
+const modeHint = computed(() => {
+  if (props.comparisonBranchIds.length > 1) {
+    return "并列查看已选分支的核心偏移、最新事件、关键状态与待处理事项。";
+  }
+  if (singleCheckedBranchMode.value) {
+    return "当前正在查看勾选分支的摘要，可继续勾选更多分支进入并列对比。";
+  }
+  return "当前聚焦所选分支的摘要详情，方便先看清一条世界线的演化状态。";
+});
 
 function joinText(items) {
   return items?.length ? items.join(" / ") : "暂无";
@@ -143,11 +167,26 @@ function joinText(items) {
   background: #fff8ea;
 }
 
+.hint-text,
+.mode-note,
+.empty,
+.mini-empty {
+  color: var(--text-sub);
+}
+
+.mode-note {
+  margin: 6px 0 0;
+}
+
 .comparison-grid {
   margin-top: 14px;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
+}
+
+.comparison-grid.single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .branch-card {
@@ -247,11 +286,6 @@ function joinText(items) {
 .relation-row:first-child {
   border-top: none;
   padding-top: 0;
-}
-
-.empty,
-.mini-empty {
-  color: var(--text-sub);
 }
 
 @media (max-width: 900px) {

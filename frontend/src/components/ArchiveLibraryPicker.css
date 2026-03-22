@@ -1,0 +1,144 @@
+.archive-museum {
+  height: calc(100vh - 160px);
+  display: flex;
+  flex-direction: column;
+}
+
+.museum-header {
+  padding: var(--space-md) var(--space-lg);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-lg);
+  z-index: 5;
+}
+
+.search-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  background: var(--bg-paper);
+  padding: 0 var(--space-md);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--line-soft);
+}
+
+.search-box input {
+  border: none;
+  background: transparent;
+  padding: 10px 0;
+  width: 100%;
+  font-size: 15px;
+}
+
+.search-box input:focus {
+  outline: none;
+}
+
+.filter-controls {
+  display: flex;
+  gap: var(--space-md);
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+.filter-group select {
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.museum-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 388px) minmax(0, 1fr);
+  gap: var(--space-lg);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.museum-list {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.list-status {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 var(--space-sm) var(--space-sm);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.error-text {
+  margin: 0;
+  padding: 0 var(--space-sm);
+  color: var(--accent-seal);
+}
+
+.scroll-list {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  align-content: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: var(--space-sm);
+}
+
+.museum-inspector {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: var(--space-sm);
+}
+
+.empty-museum {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: var(--space-md);
+}
+
+@media (max-width: 1360px) {
+  .museum-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .museum-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-controls {
+    flex-wrap: wrap;
+  }
+
+  .museum-inspector {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .scroll-list {
+    grid-template-columns: 1fr;
+  }
+}
