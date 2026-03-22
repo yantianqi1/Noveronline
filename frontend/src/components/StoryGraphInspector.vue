@@ -34,6 +34,8 @@ defineProps({
   border-radius: 12px;
   background: #fffcf4;
   padding: 12px;
+  height: 100%;
+  min-height: 680px;
 }
 
 .detail h3 {

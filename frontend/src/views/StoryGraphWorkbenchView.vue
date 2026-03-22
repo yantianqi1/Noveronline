@@ -191,12 +191,17 @@ onMounted(async () => {
 <style scoped>
 .graph-workbench {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 368px minmax(0, 1fr);
   gap: var(--space-lg);
-  height: calc(100vh - 120px);
+  min-height: calc(100vh - 104px);
+  height: calc(100vh - 104px);
+  align-items: stretch;
 }
 
 .workbench-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   overflow-y: auto;
   padding-right: var(--space-xs);
 }
@@ -247,7 +252,36 @@ onMounted(async () => {
 }
 
 .workbench-main {
+  display: flex;
   min-width: 0;
+  min-height: 0;
+}
+
+.workbench-sidebar :deep(.control-group:last-child) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.workbench-sidebar :deep(.control-group:last-child .field) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.workbench-sidebar :deep(.control-group:last-child textarea) {
+  flex: 1;
+  min-height: 220px;
+}
+
+.workbench-sidebar :deep(.control-group:last-child .actions) {
+  margin-top: auto;
+}
+
+.workbench-main :deep(.panel) {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 
 @media (max-width: 1024px) {
@@ -257,4 +291,3 @@ onMounted(async () => {
   }
 }
 </style>
-
