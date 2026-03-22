@@ -118,7 +118,7 @@ def evidence_ref(chapter_id: str = "", block_id: str = "", snippet: str = "") ->
     return EvidenceRef(
         chapter_id=str(chapter_id or ""),
         block_id=str(block_id or ""),
-        snippet=str(snippet or "").strip()[:180],
+        snippet=str(snippet or "").strip(),
     )
 
 

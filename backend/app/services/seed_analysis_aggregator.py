@@ -110,7 +110,7 @@ class SeedAnalysisAggregator:
                 {
                     "beat_id": f"beat_{index}",
                     "title": f"剧情块 {index}",
-                    "summary": item.get("plot_summary", "")[:120],
+                    "summary": item.get("plot_summary", ""),
                 }
             )
         return beats

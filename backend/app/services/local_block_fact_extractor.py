@@ -214,10 +214,10 @@ class LocalBlockFactExtractor:
         return {
             "event_id": f"{chapter['chapter_id']}_event",
             "chapter_id": chapter["chapter_id"],
-            "summary": summary[:180],
+            "summary": summary,
             "characters": [item["name"] for item in analysis["characters"][:6]],
             "organizations": [item["name"] for item in analysis["organizations"][:4]],
-            "evidence": [item[:180] for item in sentences[:SUMMARY_SENTENCE_COUNT]],
+            "evidence": [item for item in sentences[:SUMMARY_SENTENCE_COUNT]],
         }
 
     def _build_entities(self, analysis: Dict[str, Any], alias_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -272,5 +272,5 @@ class LocalBlockFactExtractor:
         spans = []
         for event in local_events:
             for snippet in event.get("evidence", [])[:2]:
-                spans.append({"chapter_id": event["chapter_id"], "snippet": snippet[:180]})
+                spans.append({"chapter_id": event["chapter_id"], "snippet": snippet})
         return spans[:12]

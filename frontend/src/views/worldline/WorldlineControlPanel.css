@@ -1,0 +1,244 @@
+.workbench-card {
+  padding: 16px;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.panel-header,
+.section-head,
+.inject-row {
+  display: flex;
+}
+
+.panel-header,
+.section-head {
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
+.panel-kicker,
+.section-index,
+.feedback-label {
+  margin: 0;
+  letter-spacing: 0.14em;
+}
+
+.panel-kicker,
+.section-index {
+  color: var(--accent-copper);
+  font-size: 12px;
+}
+
+.description,
+.section-copy,
+.field-hint,
+.feedback {
+  margin: 0;
+  color: var(--text-sub);
+}
+
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid rgba(176, 125, 75, 0.16);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(244, 239, 226, 0.86), rgba(255, 255, 255, 0.96));
+}
+
+.section-title,
+.action-box-title {
+  margin: 0;
+}
+
+.section-title {
+  font-size: 20px;
+}
+
+.session-summary,
+.setup-grid,
+.runtime-grid {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.session-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.4fr);
+}
+
+.summary-card,
+.action-box {
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--space-xs);
+  min-height: 78px;
+}
+
+.summary-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.summary-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.session-code .summary-value {
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.setup-grid {
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.95fr);
+  align-items: stretch;
+}
+
+.field {
+  margin-top: 0;
+}
+
+.field textarea {
+  min-height: 126px;
+  resize: vertical;
+}
+
+.field-hint {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.action-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  justify-content: space-between;
+}
+
+.create-btn {
+  width: 100%;
+}
+
+.runtime-section.inactive {
+  opacity: 0.8;
+}
+
+.runtime-grid {
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.4fr);
+}
+
+.runtime-box .btn {
+  width: 100%;
+}
+
+.inject-row {
+  gap: var(--space-sm);
+  align-items: stretch;
+}
+
+.inject-row .btn {
+  flex-shrink: 0;
+}
+
+.feedback-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(61, 90, 128, 0.14);
+  background: rgba(61, 90, 128, 0.05);
+}
+
+.feedback-label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.feedback-panel.error {
+  border-color: rgba(155, 67, 38, 0.16);
+  background: rgba(155, 67, 38, 0.06);
+}
+
+.feedback-panel.error .feedback {
+  color: var(--accent-seal);
+}
+
+.source-section :deep(.archive-museum) {
+  height: min(58vh, 700px);
+}
+
+.source-section :deep(.museum-header) {
+  padding: var(--space-sm) var(--space-md);
+  gap: var(--space-md);
+}
+
+.source-section :deep(.museum-grid) {
+  gap: var(--space-md);
+  grid-template-columns: minmax(0, 352px) minmax(0, 1fr);
+}
+
+.source-section :deep(.scroll-list),
+.source-section :deep(.museum-inspector) {
+  padding-right: 0;
+}
+
+@media (max-width: 1280px) {
+  .session-summary,
+  .setup-grid,
+  .runtime-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .session-code,
+  .runtime-box:last-child {
+    grid-column: span 2;
+  }
+
+  .source-section :deep(.archive-museum) {
+    height: min(54vh, 640px);
+  }
+}
+
+@media (max-width: 960px) {
+  .panel-header,
+  .section-head,
+  .inject-row,
+  .session-summary,
+  .setup-grid,
+  .runtime-grid {
+    flex-direction: column;
+    grid-template-columns: 1fr;
+  }
+
+  .session-code,
+  .runtime-box:last-child {
+    grid-column: auto;
+  }
+
+  .source-section :deep(.archive-museum) {
+    height: min(60vh, 560px);
+  }
+}
+
+@media (max-width: 720px) {
+  .workbench-card {
+    padding: 14px;
+  }
+}

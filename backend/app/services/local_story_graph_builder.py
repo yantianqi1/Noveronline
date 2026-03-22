@@ -129,7 +129,7 @@ class LocalStoryGraphBuilder:
     def _event_candidate(self, ontology: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         snippets = [evidence_ref(event.get("chapter_id", ""), event.get("block_id", ""), item) for item in event.get("evidence", [])[:3]]
         return {
-            "name": event.get("summary", "")[:32] or event.get("event_id", "剧情事件"),
+            "name": event.get("summary", "") or event.get("event_id", "剧情事件"),
             "label": preferred_entity_label(ontology, "PlotEvent", "Conflict", fallback="PlotEvent"),
             "summary": event.get("summary", ""),
             "attributes": {"event_id": event.get("event_id", ""), "chapter_id": event.get("chapter_id", "")},
@@ -139,7 +139,7 @@ class LocalStoryGraphBuilder:
     def _rule_candidate(self, ontology: Dict[str, Any], rule_text: str) -> Dict[str, Any]:
         label = preferred_entity_label(ontology, "RuleSystem", "CultivationSystem", "MysticalSystem", fallback="RuleSystem")
         return {
-            "name": rule_text[:24] or "世界规则",
+            "name": rule_text or "世界规则",
             "label": label,
             "summary": rule_text,
             "attributes": {"rule_text": rule_text, "aliases": []},
@@ -226,7 +226,7 @@ class LocalStoryGraphBuilder:
                     source_uuid = self._resolve_entity_uuid(lookup, source_name)
                     target_uuid = self._resolve_entity_uuid(lookup, target_name)
                     if source_uuid and target_uuid:
-                        edges.append({"name": preferred_edge_name(ontology, "POSSESSES", "SEEKS", "UTILIZES_KNOWLEDGE", fallback=DEFAULT_ARTIFACT_EDGE), "fact": sentence[:180], "source_uuid": source_uuid, "target_uuid": target_uuid, "attributes": {}, "weight": 1, "evidence_refs": [evidence_ref(snippet=sentence)]})
+                        edges.append({"name": preferred_edge_name(ontology, "POSSESSES", "SEEKS", "UTILIZES_KNOWLEDGE", fallback=DEFAULT_ARTIFACT_EDGE), "fact": sentence, "source_uuid": source_uuid, "target_uuid": target_uuid, "attributes": {}, "weight": 1, "evidence_refs": [evidence_ref(snippet=sentence)]})
         return edges
 
     def _rule_edges(self, ontology: Dict[str, Any], story_memory: Dict[str, Any], lookup: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:

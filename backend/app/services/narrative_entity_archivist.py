@@ -180,7 +180,7 @@ class NarrativeEntityArchivist:
             entity_name=entity.name,
             entity_type=entity_type,
             importance_tier="supporting",
-            entity_role=entity.summary[:120] or f"{entity.name} 是故事中的 {entity_type}",
+            entity_role=entity.summary or f"{entity.name} 是故事中的 {entity_type}",
             core_drive="推动自身目标并回应外部变量",
             surface_mask="表面立场有待进一步观察",
             hidden_tension="显式离线模式下未生成更深层隐秘动机",

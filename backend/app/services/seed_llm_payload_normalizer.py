@@ -93,10 +93,10 @@ def normalize_local_events(items: Any, chapter_id: str, entities: Sequence[Dict[
             {
                 "event_id": read_text(item.get("event_id")) if isinstance(item, dict) else f"{chapter_id}_event_{index:02d}",
                 "chapter_id": read_text(item.get("chapter_id")) if isinstance(item, dict) else chapter_id,
-                "summary": summary[:180],
+                "summary": summary,
                 "characters": normalize_name_list(item.get("characters"), characters, summary) if isinstance(item, dict) else mentioned_names(summary, characters),
                 "organizations": normalize_name_list(item.get("organizations"), organizations, summary) if isinstance(item, dict) else mentioned_names(summary, organizations),
-                "evidence": normalize_string_list(item.get("evidence"))[:2] if isinstance(item, dict) else [summary[:180]],
+                "evidence": normalize_string_list(item.get("evidence"))[:2] if isinstance(item, dict) else [summary],
             }
         )
     return normalized
@@ -125,7 +125,7 @@ def normalize_relationship_changes(items: Any, entities: Sequence[Dict[str, Any]
                 "target": matched[1] if len(matched) > 1 else "",
                 "change": infer_relationship_change(text),
                 "weight": 1,
-                "evidence": [text[:180]] if text else [],
+                "evidence": [text] if text else [],
             }
         )
     return normalized
@@ -176,7 +176,7 @@ def normalize_evidence_spans(items: Any, chapter_id: str) -> List[Dict[str, Any]
             span_chapter_id = chapter_id
         if not snippet:
             continue
-        normalized.append({"chapter_id": span_chapter_id, "snippet": snippet[:180]})
+        normalized.append({"chapter_id": span_chapter_id, "snippet": snippet})
     return normalized
 
 
@@ -195,7 +195,7 @@ def normalize_character_updates(items: Any, packet: Dict[str, Any]) -> List[Dict
             continue
         text = read_text(item)
         for name in mentioned_names(text, character_names):
-            normalized.append({"name": name, "state": infer_character_state(text), "evidence": [text[:180]]})
+            normalized.append({"name": name, "state": infer_character_state(text), "evidence": [text]})
     return normalized
 
 
@@ -220,7 +220,7 @@ def normalize_relationship_updates(items: Any, packet: Dict[str, Any]) -> List[D
                 "source": matched[0] if len(matched) > 0 else "",
                 "target": matched[1] if len(matched) > 1 else "",
                 "state": infer_relationship_change(text),
-                "evidence": [text[:180]] if text else [],
+                "evidence": [text] if text else [],
             }
         )
     return normalized
