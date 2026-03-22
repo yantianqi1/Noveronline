@@ -1,58 +1,75 @@
 <template>
-  <section class="console-grid">
-    <SessionCommandPanel
-      :project-filter="projectFilter"
-      :project-session-options="projectSessionOptions"
-      :sessions="sessions"
-      :session-id="sessionId"
-      :session-label="sessionLabel"
-      :branches="branches"
-      :branch-id="branchId"
-      :active-session="activeSession"
-      :selected-agent="selectedAgent"
-      :action="action"
-      :busy="busy"
-      :error="error"
-      :message="message"
-      @update:projectFilter="updateProjectFilter"
-      @update:sessionId="updateSessionId"
-      @update:branchId="updateBranchId"
-      @update:action="updateAction"
-      @submitAction="submitAction"
-    />
+  <div class="console-stage">
+    <!-- Left Stage: Selection -->
+    <aside class="stage-selection stack">
+      <SessionCommandPanel
+        :project-filter="projectFilter"
+        :project-session-options="projectSessionOptions"
+        :sessions="sessions"
+        :session-id="sessionId"
+        :session-label="sessionLabel"
+        :branches="branches"
+        :branch-id="branchId"
+        :active-session="activeSession"
+        :selected-agent="selectedAgent"
+        :action="action"
+        :busy="busy"
+        :error="error"
+        :message="message"
+        @update:project-filter="updateProjectFilter"
+        @update:session-id="updateSessionId"
+        @update:branch-id="updateBranchId"
+        @update:action="updateAction"
+        @submit-action="submitAction"
+      />
 
-    <WorldlineAgentRoster
-      :session-id="sessionId"
-      :branch-id="branchId"
-      :selected-agent-ref="selectedAgent?.agent_id || chatActor"
-      @select="handleAgentSelect"
-    />
+      <WorldlineAgentRoster
+        :session-id="sessionId"
+        :branch-id="branchId"
+        :selected-agent-ref="selectedAgent?.agent_id || chatActor"
+        @select="handleAgentSelect"
+      />
+    </aside>
 
-    <InteractionLogPanel :logs="logs" />
+    <!-- Center Stage: Interaction -->
+    <main class="stage-interaction stack">
+      <div v-if="!selectedAgent" class="empty-interaction workbench-card">
+        <div class="empty-icon">🎭</div>
+        <h3 class="title-ancient">请选择交互对象</h3>
+        <p>在左侧名录中点选一个角色或组织，开始对话或下达指令。</p>
+      </div>
 
-    <AgentHistoryPanel
-      :session-id="sessionId"
-      :selected-agent="selectedAgent"
-      :snapshots="agentSnapshots"
-      :actions="agentActions"
-      :dialogues="agentDialogues"
-      :error="historyError"
-    />
+      <template v-else>
+        <AgentDialoguePanel
+          :session-id="sessionId"
+          :selected-agent="selectedAgent"
+          :chat-mode="chatMode"
+          :chat-message="chatMessage"
+          :chat-reply="chatReply"
+          :dialogues="agentDialogues"
+          :chat-error="chatError"
+          :busy="chatBusy"
+          @update:chat-mode="updateChatMode"
+          @update:chat-message="updateChatMessage"
+          @submit="submitChat"
+        />
+        
+        <InteractionLogPanel :logs="logs" />
+      </template>
+    </main>
 
-    <AgentDialoguePanel
-      :session-id="sessionId"
-      :selected-agent="selectedAgent"
-      :chat-mode="chatMode"
-      :chat-message="chatMessage"
-      :chat-reply="chatReply"
-      :dialogues="agentDialogues"
-      :chat-error="chatError"
-      :busy="chatBusy"
-      @update:chatMode="updateChatMode"
-      @update:chatMessage="updateChatMessage"
-      @submit="submitChat"
-    />
-  </section>
+    <!-- Right Stage: Context -->
+    <aside class="stage-context stack">
+      <AgentHistoryPanel
+        :session-id="sessionId"
+        :selected-agent="selectedAgent"
+        :snapshots="agentSnapshots"
+        :actions="agentActions"
+        :dialogues="agentDialogues"
+        :error="historyError"
+      />
+    </aside>
+  </div>
 </template>
 
 <script setup>
@@ -98,59 +115,29 @@ const historyError = ref("");
 const sessionMap = ref({});
 
 const activeSession = computed(() => sessionMap.value[sessionId.value] || null);
-const projectSessionOptions = computed(() => {
-  const sessionOptions = buildProjectSessionOptions(sessions.value);
-  if (sessionOptions.some((item) => item.value === projectFilter.value)) {
-    return sessionOptions;
-  }
-  return sessionOptions;
-});
+const projectSessionOptions = computed(() => buildProjectSessionOptions(sessions.value));
 
-function nowTime() {
-  return new Date().toLocaleTimeString("zh-CN", { hour12: false });
-}
+function nowTime() { return new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
 
 function sessionLabel(session) {
-  return `${session.session_scope === "global" ? "全局混合会话" : "项目会话"} · ${session.session_id} · ${session.source_archive_count || 0} 档案`;
+  return `${session.session_scope === "global" ? "全局会话" : "卷宗会话"} · ${session.session_id.slice(0, 8)}`;
 }
 
-async function updateProjectFilter(value) {
-  projectFilter.value = value;
-  await loadSessions();
-}
-
-async function updateSessionId(value) {
-  sessionId.value = value;
-  await handleSessionChange();
-}
-
-async function updateBranchId(value) {
-  branchId.value = value;
-  await loadAgentHistory();
-}
-
-function updateAction(value) {
-  action.value = value;
-}
-
-function updateChatMessage(value) {
-  chatMessage.value = value;
-}
-
-function updateChatMode(value) {
-  chatMode.value = value || "template";
-}
+async function updateProjectFilter(v) { projectFilter.value = v; await loadSessions(); }
+async function updateSessionId(v) { sessionId.value = v; await handleSessionChange(); }
+async function updateBranchId(v) { branchId.value = v; await loadAgentHistory(); }
+function updateAction(v) { action.value = v; }
+function updateChatMessage(v) { chatMessage.value = v; }
+function updateChatMode(v) { chatMode.value = v || "template"; }
 
 async function loadSessions() {
   const filters = projectFilter.value && projectFilter.value !== "__global__" ? { projectId: projectFilter.value } : {};
   const response = await listWorldlineSessions(filters);
   let items = response.data?.sessions || [];
-  if (projectFilter.value === "__global__") {
-    items = items.filter((item) => item.session_scope === "global");
-  }
+  if (projectFilter.value === "__global__") items = items.filter(i => i.session_scope === "global");
   sessions.value = items;
-  sessionMap.value = Object.fromEntries(items.map((item) => [item.session_id, item]));
-  if (!items.some((item) => item.session_id === sessionId.value)) {
+  sessionMap.value = Object.fromEntries(items.map(i => [i.session_id, i]));
+  if (!items.some(i => i.session_id === sessionId.value)) {
     sessionId.value = items[0]?.session_id || "";
     await handleSessionChange();
   }
@@ -161,13 +148,9 @@ async function handleSessionChange() {
   chatActor.value = "";
   chatReply.value = null;
   clearAgentHistory();
-  if (!sessionId.value) {
-    branches.value = [];
-    branchId.value = "";
-    return;
-  }
-  const response = await getWorldlineSession(sessionId.value);
-  const session = response.data;
+  if (!sessionId.value) { branches.value = []; branchId.value = ""; return; }
+  const res = await getWorldlineSession(sessionId.value);
+  const session = res.data;
   sessionMap.value = { ...sessionMap.value, [session.session_id]: session };
   branches.value = session.branches || [];
   branchId.value = resolveSelectedBranchId(branches.value, branchId.value);
@@ -187,104 +170,111 @@ function clearAgentHistory() {
 }
 
 async function loadAgentHistory() {
-  if (!sessionId.value || !selectedAgent.value?.agent_id) {
-    clearAgentHistory();
-    return;
-  }
+  if (!sessionId.value || !selectedAgent.value?.agent_id) { clearAgentHistory(); return; }
   try {
     historyError.value = "";
-    const filters = {
-      branch_id: branchId.value || undefined,
-      agent_id: selectedAgent.value.agent_id,
-      limit: 20,
-    };
-    const [historyRes, actionsRes, dialoguesRes] = await Promise.all([
+    const filters = { branch_id: branchId.value || undefined, agent_id: selectedAgent.value.agent_id, limit: 20 };
+    const [hRes, aRes, dRes] = await Promise.all([
       getWorldlineAgentHistory(sessionId.value, filters),
       getWorldlineAgentActions(sessionId.value, filters),
       getWorldlineAgentDialogues(sessionId.value, filters),
     ]);
-    agentSnapshots.value = historyRes.data?.snapshots || [];
-    agentActions.value = actionsRes.data?.items || [];
-    agentDialogues.value = dialoguesRes.data?.items || [];
+    agentSnapshots.value = hRes.data?.snapshots || [];
+    agentActions.value = aRes.data?.items || [];
+    agentDialogues.value = dRes.data?.items || [];
   } catch (err) {
     clearAgentHistory();
-    historyError.value = err.message || "读取对象历史失败";
+    historyError.value = err.message || "读取历史失败";
   }
 }
 
 async function submitAction() {
-  if (!sessionId.value || !selectedAgent.value || !action.value.trim()) {
-    error.value = "请先选择会话、对象，并填写动作指令。";
-    return;
-  }
+  if (!sessionId.value || !selectedAgent.value || !action.value.trim()) return;
   try {
     busy.value = true;
-    error.value = "";
-    const response = await issueAgentAction({
+    const res = await issueAgentAction({
       session_id: sessionId.value,
       branch_id: branchId.value || undefined,
       agent_id: selectedAgent.value.agent_id,
       action: action.value.trim(),
     });
-    message.value = response.data.message || "动作提交成功";
-    const actorName = response.data?.agent?.display_name || selectedAgent.value?.display_name || "已选对象";
-    logs.value.unshift({
-      time: nowTime(),
-      text: `[动作][${actorName}] ${action.value.trim()}`,
-    });
+    message.value = res.data.message || "动作成功";
+    logs.value.unshift({ time: nowTime(), text: `[动作][${selectedAgent.value.display_name}] ${action.value}` });
     action.value = "";
     await loadAgentHistory();
   } catch (err) {
     error.value = err.message;
-  } finally {
-    busy.value = false;
-  }
+  } finally { busy.value = false; }
 }
 
 async function submitChat() {
-  if (!sessionId.value || !selectedAgent.value || !chatMessage.value.trim()) {
-    chatError.value = "请先选择会话、对象，并填写对话内容。";
-    return;
-  }
+  if (!sessionId.value || !selectedAgent.value || !chatMessage.value.trim()) return;
   try {
     chatBusy.value = true;
-    chatError.value = "";
-    const response = await chatWithWorldlineAgent({
+    const res = await chatWithWorldlineAgent({
       session_id: sessionId.value,
       branch_id: branchId.value || undefined,
       agent_id: chatActor.value,
       message: chatMessage.value.trim(),
       mode: chatMode.value,
     });
-    chatReply.value = response.data?.result || response.data || null;
-    logs.value.unshift({
-      time: nowTime(),
-      text: `[对话][${selectedAgent.value.display_name}] ${chatMessage.value.trim()}`,
-    });
+    chatReply.value = res.data?.result || res.data || null;
+    logs.value.unshift({ time: nowTime(), text: `[对话][${selectedAgent.value.display_name}] ${chatMessage.value}` });
     await loadAgentHistory();
   } catch (err) {
-    chatReply.value = null;
-    chatError.value = err.message || "对象对话失败";
-  } finally {
-    chatBusy.value = false;
-  }
+    chatError.value = err.message || "对话失败";
+  } finally { chatBusy.value = false; }
 }
 
-onMounted(async () => {
-  await loadSessions();
-});
+onMounted(async () => { await loadSessions(); });
 </script>
 
 <style scoped>
-.console-grid {
+.console-stage {
   display: grid;
-  grid-template-columns: 360px 320px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 320px minmax(0, 1fr) 320px;
+  gap: var(--space-lg);
+  height: calc(100vh - 120px);
 }
 
-@media (max-width: 1200px) {
-  .console-grid {
+.stage-selection, .stage-context {
+  overflow-y: auto;
+  padding-right: var(--space-xs);
+}
+
+.stage-interaction {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.empty-interaction {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-xl);
+  background: var(--bg-panel-soft);
+  border-style: dashed;
+}
+
+.empty-icon { font-size: 64px; margin-bottom: var(--space-md); }
+
+@media (max-width: 1280px) {
+  .console-stage {
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+  .stage-context { display: none; }
+}
+
+@media (max-width: 900px) {
+  .console-stage {
     grid-template-columns: 1fr;
+    height: auto;
   }
 }
 </style>
+

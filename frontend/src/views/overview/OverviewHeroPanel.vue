@@ -1,21 +1,33 @@
 <template>
-  <article class="workbench-card panel hero-panel">
-    <div class="hero-head">
-      <div>
-        <h2 class="card-title">项目总览</h2>
-        <p>{{ heroIntro }}</p>
+  <div class="hero-container stack">
+    <div class="hero-content">
+      <div class="hero-text stack">
+        <h1 class="title-ancient hero-title">开启小说分析之门</h1>
+        <p class="hero-description">
+          {{ heroIntro }}
+          <span v-if="projects.length" class="project-summary">
+            目前已收录 <strong class="mono">{{ projects.length }}</strong> 卷小说，
+            最近正在推演 <strong class="accent-text">「{{ latestProjectName }}」</strong>。
+          </span>
+        </p>
+        <div class="hero-actions">
+          <button class="btn primary hero-btn" @click="$emit('start-new')">开始分析新小说</button>
+          <button class="btn subtle" @click="$emit('refresh')">刷新状态</button>
+        </div>
       </div>
-      <button class="btn" @click="$emit('refresh')">刷新项目列表</button>
+      
+      <div class="hero-status-card workbench-card">
+        <div class="status-header">
+          <span class="status-dot" :class="statusClass"></span>
+          <span class="status-label">{{ latestProjectStatus }}</span>
+        </div>
+        <div class="status-body">
+          <p class="status-note">{{ overviewNote }}</p>
+        </div>
+        <div v-if="errorMessage" class="status-error mono">{{ errorMessage }}</div>
+      </div>
     </div>
-
-    <div class="kpis">
-      <div class="kpi"><span class="mono">项目数</span><strong>{{ projects.length }}</strong></div>
-      <div class="kpi"><span class="mono">最近项目</span><strong>{{ latestProjectName }}</strong></div>
-      <div class="kpi"><span class="mono">当前状态</span><strong>{{ latestProjectStatus }}</strong></div>
-    </div>
-    <p class="overview-note">{{ overviewNote }}</p>
-    <p v-if="errorMessage" class="seed-error">{{ errorMessage }}</p>
-  </article>
+  </div>
 </template>
 
 <script setup>
@@ -29,108 +41,140 @@ const props = defineProps({
   errorMessage: { type: String, default: "" },
 });
 
-defineEmits(["refresh"]);
+defineEmits(["refresh", "start-new"]);
 
 const latestProject = computed(() => props.projects[0] || null);
-const latestProjectName = computed(() => latestProject.value?.name || "还没有项目");
+const latestProjectName = computed(() => latestProject.value?.name || "未知项目");
+const statusClass = computed(() => {
+  if (!latestProject.value) return 'idle';
+  if (latestProject.value.status === 'failed') return 'danger';
+  return latestProject.value.status?.includes('completed') ? 'ok' : 'warn';
+});
+
 const latestProjectStatus = computed(() =>
-  latestProject.value ? formatProjectStatus(latestProject.value.status) : "等待第一部小说进入工作台",
+  latestProject.value ? formatProjectStatus(latestProject.value.status) : "等待投放小说",
 );
+
 const heroIntro = computed(() => {
   if (!props.projects.length) {
-    return "这里保留项目状态与实际操作区，下方可以直接上传小说文本创建第一部作品。";
+    return "欢迎来到 MiroFish-Novel 工作台。在这里，您可以利用 AI 力量，将长篇小说自动解构成结构化的故事图谱与平行世界。";
   }
-  return "这里集中查看项目状态，下方继续上传文本或运行种子分析。";
+  return "小说创作与分析是一个持续进化的过程。您可以随时投放新作品，或继续深入已有的分析卷宗。";
 });
+
 const overviewNote = computed(() => {
   if (props.uploadPhase === "processing") {
-    return `后台分析正在进行，当前重点阶段：${props.activeStageLabel || "等待分析完成"}。`;
+    return `后台管线正在全力运转，当前阶段：${props.activeStageLabel || "准备中"}。`;
   }
   if (!latestProject.value) {
-    return "还没有项目时，从下方上传小说文本开始即可。";
+    return "点击左侧按钮，投放您的第一部小说文本。";
   }
   if (!latestProject.value.ontology && latestProject.value.status === "seed_processing") {
-    return "当前项目仍在种子分析阶段，完成后就可以继续进入档案与图谱环节。";
+    return "种子分析仍在持续。完成后，角色的关系网络与核心设定将自动呈现。";
   }
   if (!latestProject.value.graph_id) {
-    return "当前项目已经有了基础分析结果，下一步适合去档案库或图谱工作台继续完善。";
+    return "初步分析已就绪。建议前往「档案库」或「故事图谱」查看分析结果。";
   }
-  return "项目基础已齐，可以进入世界线工作台继续推演。";
+  return "分析已趋完备。现在可以进入「世界线工作台」进行分支推演与对话。";
 });
 </script>
 
 <style scoped>
-.panel {
-  padding: 18px;
+.hero-container {
+  padding: var(--space-xl) 0;
 }
 
-.hero-panel {
-  background:
-    linear-gradient(180deg, rgba(255, 252, 244, 0.98), rgba(250, 242, 228, 0.92)),
-    radial-gradient(circle at 100% 0%, rgba(39, 90, 120, 0.08), transparent 24%);
-}
-
-.hero-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
+.hero-content {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: var(--space-xl);
   align-items: center;
 }
 
-.hero-head p {
-  margin: 8px 0 0;
+.hero-title {
+  font-size: 48px;
+  color: var(--bg-ink);
+  line-height: 1.2;
+}
+
+.hero-description {
+  font-size: 18px;
   color: var(--text-sub);
+  line-height: 1.8;
+  max-width: 600px;
 }
 
-.overview-note,
-.seed-error {
-  color: var(--text-sub);
-}
-
-.kpis {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.kpi {
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: #fffbf0;
-  padding: 10px;
-}
-
-.kpi span {
-  color: var(--text-sub);
-  font-size: 12px;
-}
-
-.kpi strong {
+.project-summary {
   display: block;
-  margin-top: 8px;
+  margin-top: var(--space-md);
+  color: var(--text-main);
+}
+
+.accent-text {
+  color: var(--accent-copper-deep);
+}
+
+.hero-actions {
+  display: flex;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+}
+
+.hero-btn {
+  padding: 14px 32px;
+  font-size: 16px;
+}
+
+.hero-status-card {
+  padding: var(--space-lg);
+  background: var(--bg-paper-warm);
+  border-style: dashed;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.status-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-weight: 600;
+  color: var(--text-main);
   font-size: 15px;
 }
 
-.overview-note {
-  margin-top: 14px;
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-dim);
 }
 
-@media (max-width: 1180px) {
-  .kpis {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.status-dot.ok { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+.status-dot.warn { background: var(--accent-copper); box-shadow: 0 0 8px var(--accent-copper); }
+.status-dot.danger { background: var(--accent-seal); box-shadow: 0 0 8px var(--accent-seal); }
+.status-dot.idle { background: var(--line-strong); }
+
+.status-note {
+  font-size: 14px;
+  color: var(--text-sub);
+  line-height: 1.6;
+}
+
+.status-error {
+  font-size: 12px;
+  color: var(--accent-seal);
+  background: rgba(155, 67, 38, 0.05);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
 }
 
 @media (max-width: 980px) {
-  .hero-head {
-    flex-direction: column;
-  }
-}
-
-@media (max-width: 720px) {
-  .kpis {
+  .hero-content {
     grid-template-columns: 1fr;
+  }
+  .hero-title {
+    font-size: 36px;
   }
 }
 </style>

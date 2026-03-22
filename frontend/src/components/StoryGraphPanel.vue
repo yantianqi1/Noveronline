@@ -1,38 +1,38 @@
 <template>
-  <section class="workbench-card panel">
-    <div class="panel-head">
-      <div>
-        <h2 class="card-title">故事图谱面板</h2>
-        <p>可视化展示角色、势力与关系，支持节点和边的细节侧栏。</p>
+  <div class="graph-panel stack">
+    <header class="panel-toolbar workbench-card">
+      <div class="toolbar-main">
+        <h3 class="title-ancient">故事实体图谱</h3>
+        <div class="graph-controls">
+          <button class="btn subtle small" :disabled="loading" @click="$emit('refresh')">
+            {{ loading ? "同步中..." : "同步图谱" }}
+          </button>
+          <button class="btn subtle small" @click="resetVisibleTypes">还原视角</button>
+          <button class="btn subtle small" @click="showEdgeLabels = !showEdgeLabels">
+            {{ showEdgeLabels ? "隐去关系" : "显现关系" }}
+          </button>
+        </div>
       </div>
-      <div class="toolbar-row">
-        <button class="btn" :disabled="loading" @click="$emit('refresh')">
-          {{ loading ? "刷新中..." : "刷新图谱" }}
-        </button>
-        <button class="btn" @click="resetVisibleTypes">核心视图</button>
-        <button class="btn" @click="showEdgeLabels = !showEdgeLabels">
-          {{ showEdgeLabels ? "隐藏关系标签" : "显示关系标签" }}
+      <div class="type-filters">
+        <button
+          v-for="item in typeOptions"
+          :key="item.key"
+          class="type-tag"
+          :class="[item.key.toLowerCase(), { active: visibleTypes[item.key] }]"
+          @click="toggleType(item.key)"
+        >
+          {{ item.label }} <small>{{ countsByType[item.key] || 0 }}</small>
         </button>
       </div>
-    </div>
+    </header>
 
-    <div class="filter-row">
-      <button
-        v-for="item in typeOptions"
-        :key="item.key"
-        class="btn subtle"
-        :class="{ active: visibleTypes[item.key] }"
-        type="button"
-        @click="toggleType(item.key)"
-      >
-        {{ item.label }} {{ countsByType[item.key] || 0 }}
-      </button>
-      <span class="graph-meta mono">当前显示 {{ positionedNodes.length }} / {{ props.nodes.length }} 个节点</span>
-    </div>
-
-    <div class="panel-body">
-      <div class="canvas-area">
-        <svg v-if="positionedNodes.length" viewBox="0 0 900 520" class="graph-svg">
+    <div class="panel-layout">
+      <section class="canvas-container workbench-card">
+        <div class="canvas-header">
+          <span class="mono">已映射 {{ positionedNodes.length }} / {{ props.nodes.length }} 实体</span>
+        </div>
+        <svg v-if="positionedNodes.length" viewBox="0 0 900 600" class="graph-canvas">
+          <!-- Edges -->
           <line
             v-for="edge in normalizedEdges"
             :key="edge.id"
@@ -41,6 +41,7 @@
             :x2="getNode(edge.target_id)?.x || 0"
             :y2="getNode(edge.target_id)?.y || 0"
             class="edge-line"
+            :class="{ highlighted: isEdgeHighlighted(edge) }"
             @click="selectEdge(edge)"
           />
           <text
@@ -51,31 +52,40 @@
             :y="((getNode(edge.source_id)?.y || 0) + (getNode(edge.target_id)?.y || 0)) / 2"
             class="edge-label"
           >
-            {{ edge.name || "关系" }}
+            {{ edge.name || "关联" }}
           </text>
-          <g v-for="node in positionedNodes" :key="node.id" @click="selectNode(node)">
+
+          <!-- Nodes -->
+          <g v-for="node in positionedNodes" :key="node.id" class="node-group" @click="selectNode(node)">
             <circle
               :cx="node.x"
               :cy="node.y"
-              :r="node.id === selectedNode?.id ? 16 : 12"
-              :fill="node.color"
-              class="node-dot"
+              :r="node.id === selectedNode?.id ? 16 : 10"
+              class="node-circle"
+              :class="[node.entity_type.toLowerCase(), { selected: node.id === selectedNode?.id }]"
             />
             <text
               v-if="shouldShowNodeLabel(node)"
-              :x="node.x + 14"
-              :y="node.y + 4"
-              class="node-name"
+              :x="node.x"
+              :y="node.y + 24"
+              class="node-label"
+              text-anchor="middle"
             >
               {{ node.name }}
             </text>
           </g>
         </svg>
-        <div v-else class="empty-box">暂无图谱数据。可先选择项目并构建图谱。</div>
-      </div>
-      <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" />
+        <div v-else class="empty-canvas">
+          <div class="empty-icon">🕸️</div>
+          <p>图谱尚未织就。请先在左侧选择卷宗并点击构建。</p>
+        </div>
+      </section>
+
+      <aside class="inspector-container">
+        <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" />
+      </aside>
     </div>
-  </section>
+  </div>
 </template>
 
 <script setup>
@@ -103,19 +113,8 @@ const selectedEdge = ref(null);
 const visibleTypes = reactive({ ...DEFAULT_GRAPH_TYPE_VISIBILITY });
 const typeOptions = GRAPH_TYPE_OPTIONS;
 
-const palette = {
-  character: "#8f4f1f",
-  organization: "#275a78",
-  faction: "#386a4f",
-  group: "#6b5f40",
-};
-
 const graphDisplayState = computed(() =>
-  buildGraphDisplayState({
-    nodes: props.nodes,
-    edges: props.edges,
-    visibleTypes,
-  }),
+  buildGraphDisplayState({ nodes: props.nodes, edges: props.edges, visibleTypes }),
 );
 
 const countsByType = computed(() => graphDisplayState.value.countsByType);
@@ -125,8 +124,8 @@ const highlightedNodeIds = computed(() =>
 
 const positionedNodes = computed(() => {
   const nodesByType = groupNodesByType(graphDisplayState.value.visibleNodes);
-  const centerX = 390;
-  const centerY = 250;
+  const centerX = 450;
+  const centerY = 300;
   return Object.entries(nodesByType).flatMap(([type, nodes]) =>
     nodes.map((node, index) => {
       const angleStep = nodes.length ? (Math.PI * 2) / nodes.length : 0;
@@ -134,9 +133,8 @@ const positionedNodes = computed(() => {
       const radius = ringRadius(type);
       return {
         ...node,
-        color: palette[type] || "#866f4d",
-        x: centerX + Math.cos(angle) * radius + ((index % 3) - 1) * 6,
-        y: centerY + Math.sin(angle) * radius + ((index % 4) - 1.5) * 5,
+        x: centerX + Math.cos(angle) * radius + (Math.random() - 0.5) * 10,
+        y: centerY + Math.sin(angle) * radius + (Math.random() - 0.5) * 10,
       };
     }),
   );
@@ -150,45 +148,32 @@ const normalizedEdges = computed(() =>
 );
 
 function getNode(nodeId) {
-  return positionedNodes.value.find((node) => node.id === nodeId || node.uuid === nodeId);
+  return positionedNodes.value.find((node) => node.id === nodeId);
 }
 
 function ringRadius(type) {
-  if (type === "character") {
-    return 135;
-  }
-  if (type === "organization" || type === "faction" || type === "group") {
-    return 220;
-  }
-  if (type === "artifact" || type === "knowledgeitem") {
-    return 290;
-  }
-  if (type === "plotevent") {
-    return 95;
-  }
-  return 330;
+  const t = String(type).toLowerCase();
+  if (t === "character") return 150;
+  if (["organization", "faction", "group"].includes(t)) return 240;
+  if (["artifact", "knowledgeitem"].includes(t)) return 320;
+  if (t === "plotevent") return 100;
+  return 360;
 }
 
 function groupNodesByType(nodes) {
-  return nodes.reduce((accumulator, node) => {
+  return nodes.reduce((acc, node) => {
     const type = String(node.normalizedType || "unknown");
-    if (!accumulator[type]) {
-      accumulator[type] = [];
-    }
-    accumulator[type].push(node);
-    return accumulator;
+    if (!acc[type]) acc[type] = [];
+    acc[type].push(node);
+    return acc;
   }, {});
 }
 
 function resetVisibleTypes() {
-  for (const key of Object.keys(visibleTypes)) {
-    visibleTypes[key] = DEFAULT_GRAPH_TYPE_VISIBILITY[key];
-  }
+  Object.keys(visibleTypes).forEach(k => visibleTypes[k] = DEFAULT_GRAPH_TYPE_VISIBILITY[k]);
 }
 
-function toggleType(type) {
-  visibleTypes[type] = !visibleTypes[type];
-}
+function toggleType(type) { visibleTypes[type] = !visibleTypes[type]; }
 
 function shouldShowNodeLabel(node) {
   return (
@@ -196,6 +181,11 @@ function shouldShowNodeLabel(node) {
     highlightedNodeIds.value.has(node.id) ||
     selectedNode.value?.id === node.id
   );
+}
+
+function isEdgeHighlighted(edge) {
+  if (!selectedNode.value) return false;
+  return edge.source_id === selectedNode.value.id || edge.target_id === selectedNode.value.id;
 }
 
 function selectNode(node) {
@@ -208,93 +198,156 @@ function selectEdge(edge) {
   selectedEdge.value = edge;
 }
 
-watch(
-  () => positionedNodes.value.map((node) => node.id),
-  (visibleIds) => {
-    if (selectedNode.value && !visibleIds.includes(selectedNode.value.id)) {
-      selectedNode.value = null;
-    }
-  },
-);
+watch(() => positionedNodes.value.map(n => n.id), (ids) => {
+  if (selectedNode.value && !ids.includes(selectedNode.value.id)) selectedNode.value = null;
+});
 </script>
 
 <style scoped>
-.panel {
-  padding: 16px;
-}
-
-.panel-head p {
-  margin: 6px 0 0;
-  color: var(--text-sub);
-}
-
-.filter-row {
-  margin-top: 12px;
+.graph-panel {
+  height: 100%;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+}
+
+.panel-toolbar {
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.toolbar-main {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
 }
 
-.btn.active {
-  border-color: var(--line-strong);
-  background: rgba(255, 252, 244, 0.92);
+.graph-controls {
+  display: flex;
+  gap: var(--space-xs);
 }
 
-.graph-meta {
-  color: var(--text-sub);
+.type-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
 }
 
-.panel-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.canvas-area {
+.type-tag {
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  cursor: pointer;
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: linear-gradient(180deg, #fffcf4, #fbf5e8);
-  min-height: 520px;
+  background: var(--bg-panel-soft);
+  color: var(--text-dim);
+  transition: all 0.2s ease;
 }
 
-.graph-svg {
+.type-tag.active {
+  color: var(--text-main);
+  border-color: var(--line-medium);
+  background: #fff;
+}
+
+.type-tag.character.active { border-color: var(--accent-copper); color: var(--accent-copper-deep); }
+.type-tag.organization.active { border-color: var(--accent-blue); color: var(--accent-blue); }
+
+.panel-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--space-lg);
+  flex: 1;
+  min-height: 0;
+}
+
+.canvas-container {
+  position: relative;
+  background-image: 
+    radial-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(var(--bg-paper-warm), var(--bg-paper-warm));
+  background-size: 40px 40px, 100% 100%;
+  overflow: hidden;
+}
+
+.canvas-header {
+  position: absolute;
+  top: var(--space-sm);
+  left: var(--space-md);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.graph-canvas {
   width: 100%;
-  height: 520px;
+  height: 100%;
 }
 
 .edge-line {
-  stroke: #c4b393;
-  stroke-width: 1.6;
+  stroke: var(--line-medium);
+  stroke-width: 1;
+  opacity: 0.4;
   cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.edge-line:hover, .edge-line.highlighted {
+  stroke: var(--accent-copper);
+  stroke-width: 2;
+  opacity: 1;
 }
 
 .edge-label {
-  font-size: 11px;
-  fill: #806d4e;
+  font-size: 10px;
+  fill: var(--text-dim);
+  pointer-events: none;
 }
 
-.node-dot {
+.node-circle {
   cursor: pointer;
-  transition: r 120ms ease;
+  fill: var(--line-medium);
+  stroke: #fff;
+  stroke-width: 2;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.node-name {
+.node-circle.character { fill: var(--accent-copper); }
+.node-circle.organization { fill: var(--accent-blue); }
+.node-circle.plotevent { fill: var(--accent-seal); }
+
+.node-circle.selected {
+  stroke: var(--bg-ink);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 8px rgba(0,0,0,0.2));
+}
+
+.node-label {
   font-size: 12px;
-  fill: #2d2418;
+  fill: var(--text-main);
+  pointer-events: none;
+  font-family: "ZCOOL XiaoWei", serif;
 }
 
-.empty-box {
-  min-height: 520px;
-  display: grid;
-  place-items: center;
-  color: var(--text-sub);
+.empty-canvas {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
 }
 
-@media (max-width: 1180px) {
-  .panel-body {
-    grid-template-columns: 1fr;
-  }
+.empty-icon { font-size: 64px; margin-bottom: var(--space-md); }
+
+.inspector-container {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+@media (max-width: 1200px) {
+  .panel-layout { grid-template-columns: 1fr; }
+  .inspector-container { display: none; }
 }
 </style>
+

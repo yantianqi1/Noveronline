@@ -1,31 +1,20 @@
 <template>
-  <article class="workbench-card panel upload-panel">
-    <div class="upload-layout">
-      <section class="upload-main">
-        <header class="upload-head">
-          <h2 class="card-title">上传小说文本</h2>
-          <p>把小说正文、设定集或大纲拖进来，系统会创建项目并生成第一轮种子分析。</p>
-        </header>
+  <article class="upload-container stack">
+    <div class="upload-main workbench-card">
+      <header class="upload-header">
+        <h2 class="title-ancient">卷宗投放</h2>
+        <p class="subtitle">将小说文本投放至此，开启自动化解构管线。</p>
+      </header>
 
-        <PipelineVisualization
-          :upload-phase="upload.state.uploadPhase"
-          :task-status="upload.state.taskStatus"
-          :active-stage="upload.state.activeStage"
-        />
-
-        <div class="field"><label>项目名称</label><input v-model="upload.state.projectName" placeholder="例如：天穹秘约" /></div>
+      <div class="upload-form stack">
         <div class="field">
-          <label>分析目标</label>
-          <textarea v-model="upload.state.analysisGoal" placeholder="例如：提取全部有名角色、组织和关系，用于平行世界推演。"></textarea>
-        </div>
-        <div class="field">
-          <label>补充说明</label>
-          <textarea v-model="upload.state.additionalContext" placeholder="可选：补充作品风格、重点角色、世界观信息。"></textarea>
+          <label>项目/卷宗名称</label>
+          <input v-model="upload.state.projectName" placeholder="例如：天穹秘约" :disabled="upload.state.uploadBusy" />
         </div>
 
         <div
           class="dropzone"
-          :class="{ active: upload.state.dragActive, busy: upload.state.uploadBusy }"
+          :class="{ active: upload.state.dragActive, busy: upload.state.uploadBusy, hasFiles: upload.state.files.length }"
           @dragenter.prevent="upload.state.dragActive = true"
           @dragover.prevent="upload.state.dragActive = true"
           @dragleave.prevent="upload.state.dragActive = false"
@@ -40,64 +29,92 @@
             accept=".txt,.md,.markdown,.pdf"
             @change="handleChange"
           />
-          <strong>拖拽文件到这里</strong>
-          <span>或点击选择 `txt / md / markdown / pdf`</span>
-        </div>
-
-        <div v-if="showProgress" class="progress-card">
-          <div class="progress-top">
-            <strong>{{ upload.state.statusText }}</strong>
-            <span class="mono">{{ upload.state.progressPercent }}%</span>
+          <div class="drop-icon">📤</div>
+          <div v-if="!upload.state.files.length" class="drop-text">
+            <strong>拖拽文件到这里</strong>
+            <span>或点击选择 (txt, md, pdf)</span>
           </div>
-          <p class="progress-stage mono">阶段：{{ upload.state.activeStage.label || upload.state.stageLabel || "后台分析" }}</p>
-          <div class="progress-track"><div class="progress-bar" :style="{ width: `${upload.state.progressPercent}%` }"></div></div>
-          <p v-if="upload.state.totalBytes" class="progress-meta mono">
-            {{ upload.formatSize(upload.state.uploadedBytes) }} / {{ upload.formatSize(upload.state.totalBytes) }}
-          </p>
-          <p v-if="upload.state.taskMetrics.totalBlocks" class="progress-meta">
-            当前块进度：{{ upload.state.taskMetrics.completedBlocks }}/{{ upload.state.taskMetrics.totalBlocks }}
-          </p>
-        </div>
-
-        <div v-if="upload.state.files.length" class="file-list">
-          <div v-for="item in upload.state.files" :key="upload.fileKey(item)" class="file-item">
-            <div><strong>{{ item.name }}</strong><div class="meta mono">{{ upload.formatSize(item.size) }}</div></div>
-            <button class="btn subtle" type="button" :disabled="upload.state.uploadBusy" @click.stop="upload.removeFile(item)">移除</button>
+          <div v-else class="selected-files">
+            <div v-for="item in upload.state.files" :key="upload.fileKey(item)" class="file-chip">
+              <span class="file-name">{{ item.name }}</span>
+              <button class="remove-btn" @click.stop="upload.removeFile(item)">×</button>
+            </div>
           </div>
         </div>
-        <div v-else class="empty-tip">还没有选择文件。</div>
 
-        <div class="toolbar-row">
-          <button class="btn" type="button" :disabled="upload.state.uploadBusy" @click="openPicker">选择文件</button>
-          <button class="btn primary" type="button" :disabled="upload.state.uploadBusy" @click="submitUpload">
-            {{ upload.state.uploadBusy ? "上传中..." : "上传并生成项目" }}
+        <div class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+          <span class="toggle-icon">{{ showAdvanced ? '▾' : '▸' }}</span>
+          <span>高级分析配置</span>
+        </div>
+
+        <Transition name="slide">
+          <div v-if="showAdvanced" class="advanced-fields stack">
+            <div class="field">
+              <label>分析目标</label>
+              <textarea v-model="upload.state.analysisGoal" placeholder="明确您的分析重点，如：重点提取支线剧情与隐藏关系。" :disabled="upload.state.uploadBusy"></textarea>
+            </div>
+            <div class="field">
+              <label>补充背景</label>
+              <textarea v-model="upload.state.additionalContext" placeholder="提供世界观、术语表或既定设定，有助于提升分析精度。" :disabled="upload.state.uploadBusy"></textarea>
+            </div>
+          </div>
+        </Transition>
+
+        <div class="upload-actions">
+          <button class="btn primary large" :disabled="!canSubmit || upload.state.uploadBusy" @click="submitUpload">
+            {{ upload.state.uploadBusy ? "管线分析中..." : "启动管线分析" }}
           </button>
         </div>
+      </div>
 
-        <div v-if="upload.state.result" class="result-card">
-          <div class="seed-title">上传完成</div>
-          <p class="mono">{{ upload.state.result.project_id }}</p>
-          <p>{{ upload.state.result.task_message || "项目已创建，可继续做种子分析与世界线建模。" }}</p>
-          <div class="result-grid">
-            <div class="kpi"><span class="mono">角色</span><strong>{{ seedCharacterCount }}</strong></div>
-            <div class="kpi"><span class="mono">组织</span><strong>{{ seedOrganizationCount }}</strong></div>
-            <div class="kpi"><span class="mono">关系</span><strong>{{ seedRelationCount }}</strong></div>
+      <div v-if="upload.state.error" class="status-error mono">{{ upload.state.error }}</div>
+    </div>
+
+    <!-- Active Task Status Section -->
+    <Transition name="fade">
+      <div v-if="upload.state.uploadPhase !== 'idle'" class="active-task-area container-7-5">
+        <div class="task-progress-card workbench-card stack">
+          <h3 class="title-ancient">实时管线状态</h3>
+          <PipelineVisualization
+            :upload-phase="upload.state.uploadPhase"
+            :task-status="upload.state.taskStatus"
+            :active-stage="upload.state.activeStage"
+          />
+          <div class="progress-details stack">
+            <div class="progress-row">
+              <strong>{{ upload.state.statusText }}</strong>
+              <span class="mono">{{ upload.state.progressPercent }}%</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-bar" :style="{ width: `${upload.state.progressPercent}%` }"></div>
+            </div>
+            <div class="progress-meta mono">
+              <span>{{ upload.state.activeStage.label || '准备分析' }}</span>
+              <span v-if="upload.state.taskMetrics.totalBlocks">
+                {{ upload.state.taskMetrics.completedBlocks }}/{{ upload.state.taskMetrics.totalBlocks }} 块
+              </span>
+            </div>
           </div>
         </div>
-        <p v-if="upload.state.error" class="seed-error">{{ upload.state.error }}</p>
-      </section>
 
-      <SeedTaskLogPanel
-        class="upload-log"
-        :upload-phase="upload.state.uploadPhase"
-        :task-status="upload.state.taskStatus"
-        :active-stage="upload.state.activeStage"
-        :task-metrics="upload.state.taskMetrics"
-        :llm-activity="upload.state.llmActivity"
-        :timeline="upload.state.timeline"
-        :task-started-at="upload.state.taskStartedAt"
-      />
-    </div>
+        <div class="task-logs-card workbench-card">
+          <div class="logs-header">
+            <h3 class="title-ancient">后台日志</h3>
+            <button class="btn subtle small" @click="showLogs = !showLogs">{{ showLogs ? '收起日志' : '展开日志' }}</button>
+          </div>
+          <SeedTaskLogPanel
+            v-if="showLogs"
+            :upload-phase="upload.state.uploadPhase"
+            :task-status="upload.state.taskStatus"
+            :active-stage="upload.state.activeStage"
+            :task-metrics="upload.state.taskMetrics"
+            :llm-activity="upload.state.llmActivity"
+            :timeline="upload.state.timeline"
+            :task-started-at="upload.state.taskStartedAt"
+          />
+        </div>
+      </div>
+    </Transition>
   </article>
 </template>
 
@@ -111,13 +128,15 @@ import SeedTaskLogPanel from "./SeedTaskLogPanel.vue";
 const emit = defineEmits(["uploaded"]);
 const upload = useSeedUpload();
 const fileInputRef = ref(null);
-const showProgress = computed(() => upload.state.uploadPhase !== "idle");
-const seedCharacterCount = computed(() => upload.state.result?.task_result?.seed_analysis?.character_count || 0);
-const seedOrganizationCount = computed(() => upload.state.result?.task_result?.seed_analysis?.organization_count || 0);
-const seedRelationCount = computed(() => upload.state.result?.task_result?.seed_analysis?.relation_count || 0);
+const showAdvanced = ref(false);
+const showLogs = ref(true);
+
+const canSubmit = computed(() => upload.state.projectName.trim() && upload.state.files.length > 0);
+
 let lastEmittedProjectId = "";
 
 function openPicker() {
+  if (upload.state.uploadBusy) return;
   fileInputRef.value?.click();
 }
 
@@ -127,6 +146,7 @@ function handleChange(event) {
 }
 
 function handleDrop(event) {
+  if (upload.state.uploadBusy) return;
   upload.state.dragActive = false;
   upload.appendFiles(Array.from(event.dataTransfer?.files || []));
 }
@@ -151,141 +171,195 @@ watch(
 </script>
 
 <style scoped>
-.upload-panel {
-  grid-column: 1 / -1;
-}
-
-.upload-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(360px, 1fr);
-  gap: 18px;
+.upload-container {
+  max-width: 900px;
+  margin: 0 auto;
 }
 
 .upload-main {
-  min-width: 0;
+  padding: var(--space-xl);
+  background-image: 
+    linear-gradient(135deg, rgba(176, 125, 75, 0.02) 0%, transparent 40%),
+    linear-gradient(var(--bg-panel), var(--bg-panel));
 }
 
-.upload-head p,
-.progress-meta,
-.progress-stage,
-.meta,
-.empty-tip {
-  color: var(--text-sub);
+.upload-header {
+  margin-bottom: var(--space-lg);
+  text-align: center;
 }
 
-.progress-top,
-.file-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.field,
-.toolbar-row,
-.file-list,
-.empty-tip,
-.progress-card,
-.result-card {
-  margin-top: 14px;
-}
-
-.dropzone,
-.progress-card,
-.result-card,
-.file-item {
-  border: 1px solid var(--line-soft);
-  border-radius: 14px;
-  background: #fff9ef;
+.subtitle {
+  color: var(--text-dim);
+  font-size: 14px;
+  margin-top: 4px;
 }
 
 .dropzone {
-  margin-top: 14px;
-  border-style: dashed;
-  border-width: 2px;
-  padding: 28px 16px;
-  text-align: center;
-  background: #fffaf0;
+  border: 2px dashed var(--line-medium);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
+  background: var(--bg-paper-warm);
   cursor: pointer;
+  transition: all 0.2s ease;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: var(--space-md);
+  text-align: center;
+}
+
+.dropzone:hover {
+  border-color: var(--accent-copper);
+  background: #ffffff;
 }
 
 .dropzone.active {
-  border-color: var(--line-strong);
-  background: #fff3da;
+  border-color: var(--accent-copper-deep);
+  background: rgba(176, 125, 75, 0.05);
 }
 
 .dropzone.busy {
-  cursor: progress;
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.drop-icon {
+  font-size: 40px;
+  opacity: 0.6;
+}
+
+.drop-text strong {
+  display: block;
+  font-size: 16px;
+  color: var(--text-main);
+}
+
+.drop-text span {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.selected-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: center;
+}
+
+.file-chip {
+  background: #fff;
+  border: 1px solid var(--line-medium);
+  border-radius: var(--radius-full);
+  padding: 4px 12px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  box-shadow: var(--shadow-sm);
+}
+
+.remove-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.remove-btn:hover {
+  color: var(--accent-seal);
 }
 
 .hidden-input {
   display: none;
 }
 
-.progress-card,
-.result-card,
-.file-item {
-  padding: 12px;
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 13px;
+  color: var(--text-sub);
+  cursor: pointer;
+  user-select: none;
+  width: fit-content;
 }
 
-.progress-top,
-.file-item {
+.advanced-toggle:hover {
+  color: var(--accent-copper);
+}
+
+.toggle-icon {
+  font-family: monospace;
+  font-size: 16px;
+}
+
+.upload-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-md);
+}
+
+.large {
+  padding: 14px 48px;
+  font-size: 16px;
+}
+
+.active-task-area {
+  margin-top: var(--space-lg);
+}
+
+.task-progress-card, .task-logs-card {
+  padding: var(--space-lg);
+}
+
+.progress-row {
+  display: flex;
   justify-content: space-between;
 }
 
 .progress-track {
-  margin-top: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #f0e1c7;
+  height: 6px;
+  background: var(--bg-paper);
+  border-radius: 3px;
   overflow: hidden;
 }
 
 .progress-bar {
   height: 100%;
-  background: linear-gradient(90deg, #c87c38, #d7a860);
+  background: var(--accent-copper);
+  transition: width 0.3s ease;
 }
 
-.file-list {
+.progress-meta {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.seed-title {
-  font-weight: 700;
-}
-
-.result-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.kpi {
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: #fffbf0;
-  padding: 10px;
-}
-
-.kpi span {
-  display: block;
-  color: var(--text-sub);
+  justify-content: space-between;
   font-size: 12px;
+  color: var(--text-dim);
 }
 
-.seed-error {
-  margin-top: 12px;
-  color: #9b4326;
+.logs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-md);
 }
 
-@media (max-width: 1180px) {
-  .upload-layout,
-  .result-grid {
+.status-error {
+  padding: var(--space-md);
+  background: rgba(155, 67, 38, 0.05);
+  border-radius: var(--radius-md);
+  color: var(--accent-seal);
+  font-size: 13px;
+  margin-top: var(--space-md);
+}
+
+.slide-enter-active, .slide-leave-active { transition: all 0.3s ease-out; max-height: 300px; overflow: hidden; }
+.slide-enter-from, .slide-leave-to { max-height: 0; opacity: 0; }
+
+@media (max-width: 900px) {
+  .active-task-area {
     grid-template-columns: 1fr;
   }
 }

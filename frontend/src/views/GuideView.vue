@@ -1,79 +1,75 @@
 <template>
-  <section class="guide-layout">
-    <article class="workbench-card panel">
-      <div class="progress-head">
-        <div>
-          <div class="section-kicker mono">使用教程</div>
-          <h2 class="card-title">第一次使用怎么走</h2>
-          <p>教程集中在这里，总览页只保留实际操作区。</p>
-        </div>
-        <div class="progress-badge">
-          <span class="mono">当前进度</span>
-          <strong>{{ currentStep.label }}</strong>
-          <small>{{ progressSummary }}</small>
-        </div>
+  <div class="guide-stage stack">
+    <!-- Header: Purpose -->
+    <header class="guide-header workbench-card">
+      <div class="header-main">
+        <h2 class="title-ancient">帮助与术语指南</h2>
+        <p class="subtitle">理解 MiroFish-Novel 的核心设计理念与操作链路。</p>
       </div>
+    </header>
 
-      <div class="progress-grid">
-        <div class="progress-item">
-          <span class="mono">最近项目</span>
-          <strong>{{ latestProjectName }}</strong>
-        </div>
-        <div class="progress-item">
-          <span class="mono">当前步骤</span>
-          <strong>{{ currentStep.label }}</strong>
-        </div>
-        <div class="progress-item">
-          <span class="mono">项目状态</span>
-          <strong>{{ latestProjectStatus }}</strong>
-        </div>
-      </div>
-    </article>
-
-    <article class="workbench-card panel">
-      <div class="section-head">
-        <div>
-          <h2 class="card-title">四步上手</h2>
-          <p>按顺序走就行，每一步都能直接跳到对应功能页。</p>
-        </div>
-      </div>
-
-      <div class="step-grid">
-        <article v-for="(step, index) in visualSteps" :key="step.key" class="step-card" :class="step.state">
-          <div class="step-top">
-            <span class="step-index mono">0{{ index + 1 }}</span>
-            <span class="step-state mono">{{ formatStepState(step.state) }}</span>
+    <div class="guide-grid container-7-5">
+      <div class="guide-main stack">
+        <!-- Section: Workflow -->
+        <section class="guide-section workbench-card">
+          <h3 class="title-ancient">创作推演链路</h3>
+          <div class="workflow-visual">
+            <div v-for="(step, index) in visualSteps" :key="step.key" class="workflow-node" :class="step.state">
+              <div class="node-circle">
+                <span class="mono">{{ index + 1 }}</span>
+              </div>
+              <div class="node-content">
+                <strong>{{ step.label }}</strong>
+                <p>{{ step.description }}</p>
+                <button class="btn subtle small" @click="handleStepClick(step)">跳转功能</button>
+              </div>
+            </div>
           </div>
-          <h3>{{ step.label }}</h3>
-          <p>{{ step.description }}</p>
-          <button
-            class="btn"
-            :class="{ primary: step.state === 'active' }"
-            type="button"
-            @click="handleStepClick(step)"
-          >
-            前往{{ step.label }}
-          </button>
-        </article>
-      </div>
-    </article>
+        </section>
 
-    <article class="workbench-card panel">
-      <div class="section-head">
-        <div>
-          <h2 class="card-title">术语说明</h2>
-          <p>把首页里原本混在一起的概念解释集中放到这里。</p>
-        </div>
+        <!-- Section: Concepts -->
+        <section class="guide-section workbench-card">
+          <h3 class="title-ancient">核心术语释义</h3>
+          <div class="concept-list">
+            <article v-for="item in conceptItems" :key="item.key" class="concept-item">
+              <h4>{{ item.label }}</h4>
+              <p>{{ item.description }}</p>
+            </article>
+          </div>
+        </section>
       </div>
 
-      <div class="concept-grid">
-        <article v-for="item in conceptItems" :key="item.key" class="concept-card">
-          <h3>{{ item.label }}</h3>
-          <p>{{ item.description }}</p>
-        </article>
-      </div>
-    </article>
-  </section>
+      <aside class="guide-sidebar stack">
+        <!-- Section: Status Summary -->
+        <section class="status-summary workbench-card">
+          <h3 class="title-ancient">当前卷宗状态</h3>
+          <div class="summary-details stack">
+            <div class="summary-row">
+              <label>最近推演</label>
+              <strong>{{ latestProjectName }}</strong>
+            </div>
+            <div class="summary-row">
+              <label>所处阶段</label>
+              <span class="status-tag" :class="currentStep.key === 'done' ? 'ok' : 'warn'">
+                {{ currentStep.label }}
+              </span>
+            </div>
+            <p class="summary-note">{{ progressSummary }}</p>
+          </div>
+        </section>
+
+        <!-- Section: FAQ or Tips -->
+        <section class="tips-card workbench-card">
+          <h3 class="title-ancient">使用小贴士</h3>
+          <ul class="tips-list">
+            <li><strong>投放文本：</strong> 支持 txt、md 与 pdf，建议优先使用纯文本以获得最高解析精度。</li>
+            <li><strong>生成图谱：</strong> 图谱是后续所有推演的基础，建议在档案库完善后再行构建。</li>
+            <li><strong>世界线：</strong> 每一条注入的变量都会引发分支，您可以在不同分支间跳转对比。</li>
+          </ul>
+        </section>
+      </aside>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -82,7 +78,6 @@ import { useRouter } from "vue-router";
 
 import { useProjectCatalog } from "../composables/useProjectCatalog";
 import { useSeedUpload } from "../composables/useSeedUpload";
-import { formatProjectStatus } from "../utils/chineseDisplay";
 import { GUIDE_CONCEPT_ITEMS } from "./guide/guideContent";
 import {
   buildVisualWorkflowSteps,
@@ -91,12 +86,6 @@ import {
   getWorkflowStep,
   resolveWorkflowStep,
 } from "./guide/workflowGuideState";
-
-const STEP_STATE_TEXT = Object.freeze({
-  done: "已完成",
-  active: "当前步骤",
-  upcoming: "下一步",
-});
 
 const router = useRouter();
 const upload = useSeedUpload();
@@ -112,10 +101,8 @@ const currentStepKey = computed(() =>
   }),
 );
 const currentStep = computed(() => getWorkflowStep(currentStepKey.value));
-const latestProjectName = computed(() => latestProject.value?.name || "还没有项目");
-const latestProjectStatus = computed(() =>
-  latestProject.value ? formatProjectStatus(latestProject.value.status) : "等待创建第一个项目",
-);
+const latestProjectName = computed(() => latestProject.value?.name || "尚未开启");
+
 const progressSummary = computed(() =>
   buildWorkflowSummary({
     latestProject: latestProject.value,
@@ -125,152 +112,158 @@ const progressSummary = computed(() =>
 );
 const visualSteps = computed(() => buildVisualWorkflowSteps(currentStepKey.value));
 
-function formatStepState(state) {
-  return STEP_STATE_TEXT[state] || "待开始";
-}
-
 async function handleStepClick(step) {
   const target = workflowTargets[step.key];
-  if (!target) {
-    return;
-  }
-  await router.push(target);
+  if (target) await router.push(target);
 }
 </script>
 
 <style scoped>
-.guide-layout {
-  display: grid;
-  gap: 14px;
+.guide-stage {
+  max-width: 1200px;
+  margin: 0 auto;
 }
 
-.panel {
-  padding: 18px;
+.guide-header {
+  padding: var(--space-md) var(--space-lg);
 }
 
-.section-kicker,
-.panel p,
-.progress-badge span,
-.progress-badge small,
-.progress-item span,
-.step-state {
-  color: var(--text-sub);
+.subtitle {
+  font-size: 14px;
+  color: var(--text-dim);
+  margin-top: 4px;
 }
 
-.progress-head,
-.section-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
+.guide-section {
+  padding: var(--space-lg);
 }
 
-.progress-badge {
-  min-width: 240px;
-  border: 1px solid rgba(159, 141, 106, 0.24);
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.68);
+.workflow-visual {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-lg);
+  margin-top: var(--space-lg);
+  position: relative;
 }
 
-.progress-grid,
-.step-grid,
-.concept-grid {
-  margin-top: 14px;
-  display: grid;
-  gap: 10px;
+.workflow-visual::before {
+  content: '';
+  position: absolute;
+  left: 17px;
+  top: 20px;
+  bottom: 20px;
+  width: 2px;
+  background: var(--line-soft);
+  z-index: 0;
 }
 
-.progress-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.step-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.concept-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.progress-item,
-.step-card,
-.concept-card {
-  border: 1px solid var(--line-soft);
-  border-radius: 14px;
-  background: #fffbf2;
-  padding: 12px;
-}
-
-.progress-item strong,
-.step-card h3,
-.concept-card h3 {
-  display: block;
-  margin: 8px 0 0;
-}
-
-.step-top {
+.workflow-node {
   display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: center;
+  gap: var(--space-md);
+  position: relative;
+  z-index: 1;
 }
 
-.step-index {
+.node-circle {
   width: 36px;
   height: 36px;
-  border-radius: 12px;
-  display: inline-flex;
+  border-radius: 50%;
+  background: var(--bg-panel);
+  border: 2px solid var(--line-medium);
+  display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(159, 141, 106, 0.12);
+  flex-shrink: 0;
+  transition: all 0.3s ease;
 }
 
-.step-card p,
-.concept-card p {
-  margin: 8px 0 14px;
+.workflow-node.done .node-circle {
+  border-color: var(--accent-green);
+  background: rgba(74, 109, 84, 0.1);
+}
+
+.workflow-node.active .node-circle {
+  border-color: var(--accent-copper);
+  background: #fff;
+  box-shadow: 0 0 12px rgba(176, 125, 75, 0.3);
+}
+
+.node-content {
+  flex: 1;
+}
+
+.node-content strong {
+  display: block;
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.node-content p {
+  font-size: 13px;
+  color: var(--text-sub);
+  margin-bottom: var(--space-sm);
   line-height: 1.6;
 }
 
-.step-card.done {
-  border-color: rgba(56, 106, 79, 0.24);
-  background: rgba(241, 248, 243, 0.95);
+.concept-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-lg);
+  margin-top: var(--space-lg);
 }
 
-.step-card.done .step-index {
-  background: rgba(56, 106, 79, 0.14);
-  color: var(--accent-green);
+.concept-item h4 {
+  font-size: 16px;
+  color: var(--accent-copper-deep);
+  margin-bottom: var(--space-xs);
 }
 
-.step-card.active {
-  border-color: rgba(200, 124, 56, 0.4);
-  background: linear-gradient(180deg, rgba(255, 244, 217, 0.96), rgba(255, 251, 242, 0.96));
-  box-shadow: 0 12px 24px rgba(200, 124, 56, 0.08);
+.concept-item p {
+  font-size: 13px;
+  color: var(--text-sub);
+  line-height: 1.6;
 }
 
-.step-card.active .step-index {
-  background: rgba(200, 124, 56, 0.18);
-  color: var(--accent-copper);
+.status-summary, .tips-card {
+  padding: var(--space-lg);
 }
 
-@media (max-width: 980px) {
-  .progress-head,
-  .section-head {
-    flex-direction: column;
-  }
+.summary-details {
+  margin-top: var(--space-md);
+}
 
-  .progress-badge {
-    min-width: 0;
-    width: 100%;
-  }
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
 
-  .progress-grid,
-  .step-grid,
-  .concept-grid {
-    grid-template-columns: 1fr;
-  }
+.summary-row label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.summary-note {
+  font-size: 13px;
+  color: var(--text-sub);
+  margin-top: var(--space-sm);
+  line-height: 1.5;
+}
+
+.tips-list {
+  margin: var(--space-md) 0 0;
+  padding-left: var(--space-md);
+  list-style: square;
+  color: var(--text-sub);
+  font-size: 13px;
+}
+
+.tips-list li {
+  margin-bottom: var(--space-sm);
+}
+
+@media (max-width: 900px) {
+  .concept-list { grid-template-columns: 1fr; }
 }
 </style>
+

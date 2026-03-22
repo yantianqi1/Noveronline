@@ -1,45 +1,60 @@
 <template>
-  <section class="layout">
-    <article class="workbench-card left">
-      <h2 class="card-title">图谱构建流程</h2>
-      <p>选择已有项目后发起图谱构建，并可生成角色/势力档案与平行世界配置。</p>
+  <div class="graph-workbench">
+    <!-- Left Sidebar: Controls -->
+    <aside class="workbench-sidebar stack">
+      <section class="control-group workbench-card">
+        <h3 class="title-ancient">卷宗图谱构建</h3>
+        <p class="subtitle">选择项目卷宗并构建其底层实体关系图谱。</p>
+        
+        <div class="field">
+          <label>当前卷宗</label>
+          <select v-model="projectId" @change="refreshGraph">
+            <option value="">-- 请选择卷宗 --</option>
+            <option v-for="item in projects" :key="item.project_id" :value="item.project_id">
+              {{ item.name }}
+            </option>
+          </select>
+        </div>
 
-      <div class="field">
-        <label>项目</label>
-        <select v-model="projectId">
-          <option value="">请选择项目</option>
-          <option v-for="item in projects" :key="item.project_id" :value="item.project_id">
-            {{ item.name }} ({{ item.status }})
-          </option>
-        </select>
-      </div>
+        <div class="actions stack">
+          <button class="btn primary" :disabled="!projectId || busy" @click="startBuildGraph">
+            {{ busy ? "构建中..." : "启动图谱构建" }}
+          </button>
+          <button class="btn subtle small" @click="loadProjects">刷新卷宗列表</button>
+        </div>
 
-      <div class="toolbar-row">
-        <button class="btn" @click="loadProjects">刷新项目</button>
-        <button class="btn primary" :disabled="!projectId || busy" @click="startBuildGraph">构建图谱</button>
-      </div>
+        <div v-if="taskMessage || taskError" class="status-box" :class="{ error: taskError }">
+          <div class="status-pulse" v-if="busy"></div>
+          <span class="mono">{{ taskError || taskMessage }}</span>
+        </div>
+      </section>
 
-      <div class="status-area">
-        <span class="status" :class="taskError ? 'warn' : 'ok'">
-          {{ taskError || (taskMessage || "等待执行") }}
-        </span>
-      </div>
+      <section class="control-group workbench-card">
+        <h3 class="title-ancient">衍生配置生成</h3>
+        <p class="subtitle">基于图谱生成角色档案或平行世界初始变量。</p>
+        
+        <div class="field">
+          <label>世界线变量 (每行一条)</label>
+          <textarea v-model="variablesText" rows="4"></textarea>
+        </div>
 
-      <hr />
+        <div class="actions stack">
+          <button class="btn" :disabled="!currentGraphId || busy" @click="createArchives">生成全量角色档案</button>
+          <button class="btn" :disabled="!currentGraphId || busy" @click="createParallelConfig">生成世界线初始配置</button>
+        </div>
+      </section>
+    </aside>
 
-      <h3>档案与世界配置</h3>
-      <div class="field">
-        <label>变量 (每行一个)</label>
-        <textarea v-model="variablesText" placeholder="例如：王朝税率上升 20%\n某宗门提前结盟"></textarea>
-      </div>
-      <div class="toolbar-row">
-        <button class="btn" :disabled="!currentGraphId" @click="createArchives">生成角色档案</button>
-        <button class="btn" :disabled="!currentGraphId" @click="createParallelConfig">生成平行世界配置</button>
-      </div>
-    </article>
-
-    <StoryGraphPanel :nodes="graphNodes" :edges="graphEdges" :loading="busy" @refresh="refreshGraph" />
-  </section>
+    <!-- Main Area: Canvas -->
+    <main class="workbench-main">
+      <StoryGraphPanel
+        :nodes="graphNodes"
+        :edges="graphEdges"
+        :loading="busy"
+        @refresh="refreshGraph"
+      />
+    </main>
+  </div>
 </template>
 
 <script setup>
@@ -71,12 +86,12 @@ async function startBuildGraph() {
   try {
     busy.value = true;
     taskError.value = "";
-    taskMessage.value = "图谱构建任务已提交。";
+    taskMessage.value = "图谱构建任务已提交...";
     const res = await buildGraph(projectId.value, "Novel Story Graph");
     const taskId = res.data.task_id;
     const task = await pollGraphTask(taskId, updateTaskMessage);
     currentGraphId.value = task.result?.graph_id || "";
-    taskMessage.value = `图谱构建完成: ${currentGraphId.value || "无 graph_id"}`;
+    taskMessage.value = `图谱构建完成`;
     await refreshGraph();
   } catch (error) {
     taskError.value = error.message;
@@ -96,60 +111,46 @@ async function refreshGraph() {
     currentGraphId.value = "";
     return;
   }
-  const res = await getProject(projectId.value);
-  const project = res.data;
-  currentGraphId.value = project.graph_id || currentGraphId.value;
-  if (!currentGraphId.value) {
-    graphNodes.value = [];
-    graphEdges.value = [];
-    return;
-  }
   try {
-    const graphRes = await getProjectGraph(projectId.value);
-    const graph = graphRes.data;
-    currentGraphId.value = graph.graph_id || currentGraphId.value;
-    graphNodes.value = (graph.nodes || []).map((node) => ({
-      id: node.uuid,
-      uuid: node.uuid,
-      name: node.name,
-      entity_type: node.labels?.find((label) => !["Entity", "Node"].includes(label)) || "Unknown",
-      labels: node.labels || [],
-      summary: node.summary || "",
-      attributes: node.attributes || {},
-      evidence_refs: node.evidence_refs || [],
-    }));
-    const nodeMap = Object.fromEntries(graphNodes.value.map((node) => [node.id, node]));
-    graphEdges.value = (graph.edges || []).map((edge) => ({
-      id: edge.uuid,
-      uuid: edge.uuid,
-      source_id: edge.source_node_uuid,
-      target_id: edge.target_node_uuid,
-      source_name: nodeMap[edge.source_node_uuid]?.name || edge.source_node_uuid,
-      target_name: nodeMap[edge.target_node_uuid]?.name || edge.target_node_uuid,
-      name: edge.name,
-      fact: edge.fact,
-      weight: edge.weight,
-      attributes: edge.attributes || {},
-      evidence_refs: edge.evidence_refs || [],
-    }));
-  } catch (error) {
-    if (String(error.message || "").includes("尚未生成本地图谱")) {
+    const res = await getProject(projectId.value);
+    const project = res.data;
+    currentGraphId.value = project.graph_id || "";
+    
+    if (!currentGraphId.value) {
       graphNodes.value = [];
       graphEdges.value = [];
       return;
     }
-    throw error;
+
+    const graphRes = await getProjectGraph(projectId.value);
+    const graph = graphRes.data;
+    graphNodes.value = (graph.nodes || []).map(node => ({
+      id: node.uuid,
+      name: node.name,
+      entity_type: node.labels?.find(l => !['Entity', 'Node'].includes(l)) || 'Unknown',
+      summary: node.summary || '',
+      attributes: node.attributes || {}
+    }));
+    const nodeMap = Object.fromEntries(graphNodes.value.map(n => [n.id, n]));
+    graphEdges.value = (graph.edges || []).map(edge => ({
+      id: edge.uuid,
+      source_id: edge.source_node_uuid,
+      target_id: edge.target_node_uuid,
+      source_name: nodeMap[edge.source_node_uuid]?.name || 'Unknown',
+      target_name: nodeMap[edge.target_node_uuid]?.name || 'Unknown',
+      name: edge.name,
+      fact: edge.fact
+    }));
+  } catch (error) {
+    graphNodes.value = [];
+    graphEdges.value = [];
   }
 }
 
 async function createArchives() {
   try {
     busy.value = true;
-    const res = await generateArchives({
-      projectId: projectId.value,
-      graphId: currentGraphId.value,
-      useLlm: false,
-    });
+    const res = await generateArchives({ projectId: projectId.value, graphId: currentGraphId.value, useLlm: false });
     taskMessage.value = `已生成档案: ${res.data.count} 项`;
   } catch (error) {
     taskError.value = error.message;
@@ -161,10 +162,7 @@ async function createArchives() {
 async function createParallelConfig() {
   try {
     busy.value = true;
-    const variables = variablesText.value
-      .split("\n")
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const variables = variablesText.value.split("\n").map(v => v.trim()).filter(Boolean);
     const res = await generateParallelWorldConfig({
       projectId: projectId.value,
       graphId: currentGraphId.value,
@@ -173,7 +171,7 @@ async function createParallelConfig() {
       focusQuestion: selectedProject.value?.analysis_goal,
       useLlm: false,
     });
-    taskMessage.value = `已生成平行世界配置: ${res.data.config?.world_name || "完成"}`;
+    taskMessage.value = `世界线配置已就绪`;
   } catch (error) {
     taskError.value = error.message;
   } finally {
@@ -191,33 +189,72 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.layout {
+.graph-workbench {
   display: grid;
-  grid-template-columns: 380px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: var(--space-lg);
+  height: calc(100vh - 120px);
 }
 
-.left {
-  padding: 16px;
+.workbench-sidebar {
+  overflow-y: auto;
+  padding-right: var(--space-xs);
 }
 
-.left p {
-  color: var(--text-sub);
+.control-group {
+  padding: var(--space-md);
 }
 
-.left hr {
-  border: none;
-  border-top: 1px dashed var(--line-soft);
-  margin: 16px 0;
+.subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  margin-bottom: var(--space-md);
 }
 
-.status-area {
-  margin-top: 10px;
+.actions {
+  margin-top: var(--space-md);
 }
 
-@media (max-width: 1200px) {
-  .layout {
+.status-box {
+  margin-top: var(--space-md);
+  padding: var(--space-sm);
+  background: var(--bg-paper-warm);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.status-box.error {
+  color: var(--accent-seal);
+  background: rgba(155, 67, 38, 0.05);
+}
+
+.status-pulse {
+  width: 6px;
+  height: 6px;
+  background: var(--accent-copper);
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}
+
+.workbench-main {
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  .graph-workbench {
     grid-template-columns: 1fr;
+    height: auto;
   }
 }
 </style>
+

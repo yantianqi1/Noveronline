@@ -1,50 +1,71 @@
 <template>
-  <section class="worldline-grid">
-    <WorldlineControlPanel
-      :selected-archives="selectedArchives"
-      :archive-project-filter="archiveProjectFilter"
-      :variables-text="variablesText"
-      :single-variable="singleVariable"
-      :session-id="sessionId"
-      :session-scope="sessionScope"
-      :feedback="feedback"
-      :error="error"
-      :busy="busy"
-      @update:selectedArchives="updateSelectedArchives"
-      @update:archiveProjectFilter="updateArchiveProjectFilter"
-      @update:variablesText="updateVariablesText"
-      @update:singleVariable="updateSingleVariable"
-      @create-session="createSession"
-      @advance-step="stepForward"
-      @inject-variable="injectVariable"
-    />
+  <div class="worldline-stage">
+    <!-- Left Stage: Configuration & Control -->
+    <aside class="stage-controls stack">
+      <WorldlineControlPanel
+        :selected-archives="selectedArchives"
+        :archive-project-filter="archiveProjectFilter"
+        :variables-text="variablesText"
+        :single-variable="singleVariable"
+        :session-id="sessionId"
+        :session-scope="sessionScope"
+        :feedback="feedback"
+        :error="error"
+        :busy="busy"
+        @update:selected-archives="updateSelectedArchives"
+        @update:archive-project-filter="updateArchiveProjectFilter"
+        @update:variables-text="updateVariablesText"
+        @update:single-variable="updateSingleVariable"
+        @create-session="createSession"
+        @advance-step="stepForward"
+        @inject-variable="injectVariable"
+      />
 
-    <WorldlineBranchOverview
-      :branches="branches"
-      :branch-id="branchId"
-      :session-id="sessionId"
-      @select-branch="chooseBranch"
-      @refresh-branches="loadBranches"
-    />
+      <WorldlineInspirationPanel
+        v-if="sessionId"
+        :session-id="sessionId"
+        :inspiration-prompt="inspirationPrompt"
+        :inspiration-result="inspirationResult"
+        :inspiration-error="inspirationError"
+        :inspiration-busy="inspirationBusy"
+        @update:inspiration-prompt="updateInspirationPrompt"
+        @generate-inspiration="generateInspirationPlan"
+      />
+    </aside>
 
-    <WorldlineBranchComparison
-      :comparison="comparison"
-      :selected-branch-id="branchId"
-      :session-id="sessionId"
-    />
+    <!-- Right Stage: Performance & Visualization -->
+    <main class="stage-performance stack">
+      <div v-if="!sessionId" class="empty-stage workbench-card">
+        <div class="empty-icon">⏳</div>
+        <h3 class="title-ancient">等待开启世界线</h3>
+        <p>请在左侧选择角色档案并设定初始变量，以启动平行世界推演会话。</p>
+      </div>
 
-    <WorldlineTimeline :timeline="timeline" />
+      <template v-else>
+        <section class="performance-top workbench-card">
+          <WorldlineBranchOverview
+            :branches="branches"
+            :branch-id="branchId"
+            :session-id="sessionId"
+            @select-branch="chooseBranch"
+            @refresh-branches="loadBranches"
+          />
+        </section>
 
-    <WorldlineInspirationPanel
-      :session-id="sessionId"
-      :inspiration-prompt="inspirationPrompt"
-      :inspiration-result="inspirationResult"
-      :inspiration-error="inspirationError"
-      :inspiration-busy="inspirationBusy"
-      @update:inspirationPrompt="updateInspirationPrompt"
-      @generate-inspiration="generateInspirationPlan"
-    />
-  </section>
+        <section class="performance-mid container-6-4">
+          <WorldlineBranchComparison
+            :comparison="comparison"
+            :selected-branch-id="branchId"
+            :session-id="sessionId"
+          />
+          <div class="timeline-container workbench-card">
+            <h3 class="title-ancient">时空轨迹</h3>
+            <WorldlineTimeline :timeline="timeline" />
+          </div>
+        </section>
+      </template>
+    </main>
+  </div>
 </template>
 
 <script setup>
@@ -84,28 +105,25 @@ const inspirationResult = ref(null);
 const inspirationError = ref("");
 
 function parseVariables(text) {
-  return text
-    .split("\n")
-    .map((item) => item.trim())
-    .filter(Boolean);
+  return text.split("\n").map(v => v.trim()).filter(Boolean);
 }
 
 async function createSession() {
   if (!selectedArchives.value.length) {
-    error.value = "请先从全局档案库选择至少一个档案。";
+    error.value = "请先选择至少一个角色档案。";
     return;
   }
   try {
     busy.value = true;
     error.value = "";
-    const response = await createWorldlineSession({
-      archive_ids: selectedArchives.value.map((item) => item.archive_id),
+    const res = await createWorldlineSession({
+      archive_ids: selectedArchives.value.map(item => item.archive_id),
       variables: parseVariables(variablesText.value),
     });
-    sessionId.value = response.data.session_id;
-    sessionScope.value = response.data.session_scope || "";
-    branchId.value = resolveSelectedBranchId(response.data.branches || [], branchId.value);
-    feedback.value = `会话创建成功: ${sessionId.value}`;
+    sessionId.value = res.data.session_id;
+    sessionScope.value = res.data.session_scope || "";
+    branchId.value = resolveSelectedBranchId(res.data.branches || [], branchId.value);
+    feedback.value = `会话已启动`;
     await loadBranches();
   } catch (err) {
     error.value = err.message;
@@ -114,53 +132,32 @@ async function createSession() {
   }
 }
 
-function updateSelectedArchives(value) {
-  selectedArchives.value = value;
-}
-
-function updateArchiveProjectFilter(value) {
-  archiveProjectFilter.value = value;
-}
-
-function updateVariablesText(value) {
-  variablesText.value = value;
-}
-
-function updateSingleVariable(value) {
-  singleVariable.value = value;
-}
-
-function updateInspirationPrompt(value) {
-  inspirationPrompt.value = value;
-}
+function updateSelectedArchives(v) { selectedArchives.value = v; }
+function updateArchiveProjectFilter(v) { archiveProjectFilter.value = v; }
+function updateVariablesText(v) { variablesText.value = v; }
+function updateSingleVariable(v) { singleVariable.value = v; }
+function updateInspirationPrompt(v) { inspirationPrompt.value = v; }
 
 async function loadBranches() {
+  if (!sessionId.value) return;
   try {
-    if (!sessionId.value) return;
-    error.value = "";
-    const response = await listWorldlineBranches(sessionId.value);
-    branches.value = response.data.branches || [];
+    const res = await listWorldlineBranches(sessionId.value);
+    branches.value = res.data.branches || [];
     branchId.value = resolveSelectedBranchId(branches.value, branchId.value);
     await loadComparison();
-    if (branchId.value) {
-      await loadTimeline();
-    }
+    if (branchId.value) await loadTimeline();
   } catch (err) {
     error.value = err.message;
   }
 }
 
 async function loadComparison() {
+  if (!sessionId.value) return;
   try {
-    if (!sessionId.value) {
-      comparison.value = null;
-      return;
-    }
-    const response = await getWorldlineComparison(sessionId.value);
-    comparison.value = response.data || null;
-  } catch (err) {
+    const res = await getWorldlineComparison(sessionId.value);
+    comparison.value = res.data || null;
+  } catch {
     comparison.value = null;
-    error.value = err.message;
   }
 }
 
@@ -170,10 +167,10 @@ async function chooseBranch(id) {
 }
 
 async function loadTimeline() {
+  if (!sessionId.value || !branchId.value) return;
   try {
-    if (!sessionId.value || !branchId.value) return;
-    const response = await getWorldlineTimeline(sessionId.value, branchId.value);
-    timeline.value = response.data.events || [];
+    const res = await getWorldlineTimeline(sessionId.value, branchId.value);
+    timeline.value = res.data.events || [];
   } catch (err) {
     error.value = err.message;
   }
@@ -182,12 +179,8 @@ async function loadTimeline() {
 async function stepForward() {
   try {
     busy.value = true;
-    error.value = "";
-    const response = await advanceWorldlineStep({
-      session_id: sessionId.value,
-      branch_id: branchId.value || undefined,
-    });
-    feedback.value = response.data.message || "推进完成";
+    const res = await advanceWorldlineStep({ session_id: sessionId.value, branch_id: branchId.value || undefined });
+    feedback.value = res.data.message || "推进完成";
     await loadBranches();
   } catch (err) {
     error.value = err.message;
@@ -197,19 +190,15 @@ async function stepForward() {
 }
 
 async function injectVariable() {
+  if (!singleVariable.value.trim()) return;
   try {
     busy.value = true;
-    error.value = "";
-    if (!singleVariable.value.trim()) {
-      error.value = "请先输入变量。";
-      return;
-    }
-    const response = await injectWorldlineVariable({
+    const res = await injectWorldlineVariable({
       session_id: sessionId.value,
       branch_id: branchId.value || undefined,
       variable: singleVariable.value.trim(),
     });
-    feedback.value = response.data.message || "变量注入成功";
+    feedback.value = res.data.message || "变量注入成功";
     singleVariable.value = "";
     await loadBranches();
   } catch (err) {
@@ -220,20 +209,18 @@ async function injectVariable() {
 }
 
 async function generateInspirationPlan() {
+  if (!sessionId.value) return;
   try {
-    if (!sessionId.value) return;
     inspirationBusy.value = true;
-    inspirationError.value = "";
-    const response = await generatePlotInspiration({
+    const res = await generatePlotInspiration({
       session_id: sessionId.value,
       branch_id: branchId.value || undefined,
       creator_prompt: inspirationPrompt.value.trim(),
-      focus_question: "围绕当前分支推进后续剧情",
+      focus_question: "下一步走向",
     });
-    inspirationResult.value = response.data?.result || response.data || null;
+    inspirationResult.value = res.data?.result || res.data || null;
   } catch (err) {
-    inspirationError.value = err.message || "剧情灵感生成失败";
-    inspirationResult.value = null;
+    inspirationError.value = err.message;
   } finally {
     inspirationBusy.value = false;
   }
@@ -241,27 +228,46 @@ async function generateInspirationPlan() {
 </script>
 
 <style scoped>
-.worldline-grid {
+.worldline-stage {
   display: grid;
-  grid-template-columns: 420px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 400px minmax(0, 1fr);
+  gap: var(--space-lg);
+  height: calc(100vh - 120px);
 }
 
-.panel {
-  padding: 16px;
+.stage-controls {
+  overflow-y: auto;
+  padding-right: var(--space-xs);
 }
 
-.panel p {
-  color: var(--text-sub);
+.stage-performance {
+  min-width: 0;
+  overflow-y: auto;
 }
 
-.full {
-  grid-column: 1 / -1;
+.empty-stage {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-xl);
+  background: var(--bg-panel-soft);
+  border-style: dashed;
+}
+
+.empty-icon { font-size: 64px; margin-bottom: var(--space-md); }
+
+.timeline-container {
+  padding: var(--space-md);
 }
 
 @media (max-width: 1200px) {
-  .worldline-grid {
+  .worldline-stage {
     grid-template-columns: 1fr;
+    height: auto;
   }
 }
 </style>
+
