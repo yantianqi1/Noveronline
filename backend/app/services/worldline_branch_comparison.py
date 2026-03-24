@@ -65,6 +65,8 @@ class WorldlineBranchComparisonService:
             "summary": latest.summary,
             "event_type": latest.event_type,
             "driving_entities": list(latest.driving_entities),
+            "variable_effects": list(latest.variable_effects),
+            "action_effects": list(getattr(latest, "action_effects", [])),
         }
 
     def _state_cards(self, branch, states: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:

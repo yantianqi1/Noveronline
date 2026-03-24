@@ -20,6 +20,8 @@ const BRANCH_STATUS_TEXT = Object.freeze({
   completed: "已完成",
   failed: "失败",
   pending: "待开始",
+  idle: "待启动",
+  paused: "待继续",
 });
 
 const PROJECT_STATUS_TEXT = Object.freeze({
@@ -104,7 +106,7 @@ export const APP_BRAND_NAME = "Novelfish 小说工作台";
 export const APP_SUBTITLE = "中文小说世界线分析与角色推演控制台";
 export const CONCEPT_TOOLTIPS = Object.freeze({
   seed_analysis: "种子分析：从小说原文中提取角色、组织、关系与主线线索，作为后续推演底座。",
-  worldline: "世界线：基于同一部小说，围绕变量扰动生成的不同发展分支。",
+  worldline: "世界线：基于同一部小说，在当前世界状态上持续注入变量并向前推进。",
   skeleton_timeline: "骨架时间线：先顺序扫一遍全文，标记角色和组织在哪些章节出现，为并发分析补齐连续性。",
   archive: "档案：为角色、组织或关系生成的可复用设定卡，可供世界线和控制台继续使用。",
   variable_injection: "变量注入：向当前世界线加入一个新条件，观察它如何改变剧情链条。",

@@ -25,13 +25,13 @@ test("clampWorldlineLeftPaneWidth enforces the desktop minimum width", () => {
 });
 
 test("clampWorldlineLeftPaneWidth enforces the viewport-derived maximum width", () => {
-  assert.equal(clampWorldlineLeftPaneWidth(1200, 1200), 780);
+  assert.equal(clampWorldlineLeftPaneWidth(1400, 1600), WORLDLINE_LEFT_PANE_MAX_WIDTH);
   assert.equal(clampWorldlineLeftPaneWidth(1200, 2000), WORLDLINE_LEFT_PANE_MAX_WIDTH);
 });
 
 test("restoreWorldlineLeftPaneWidth clamps valid persisted values", () => {
-  assert.equal(restoreWorldlineLeftPaneWidth("900", 1600), 900);
-  assert.equal(restoreWorldlineLeftPaneWidth("900", 1200), 780);
+  assert.equal(restoreWorldlineLeftPaneWidth("980", 1600), 980);
+  assert.equal(restoreWorldlineLeftPaneWidth("900", 1600), WORLDLINE_LEFT_PANE_MIN_WIDTH);
 });
 
 test("restoreWorldlineLeftPaneWidth falls back to the default width for invalid values", () => {

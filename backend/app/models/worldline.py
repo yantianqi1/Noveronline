@@ -88,6 +88,7 @@ class WorldEvent:
     event_type: str = "evolution"
     driving_entities: List[str] = field(default_factory=list)
     variable_effects: List[Dict[str, Any]] = field(default_factory=list)
+    action_effects: List[Dict[str, Any]] = field(default_factory=list)
     relation_changes: List[Dict[str, Any]] = field(default_factory=list)
     state_changes: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=_now_iso)
@@ -101,6 +102,7 @@ class WorldEvent:
             "event_type": self.event_type,
             "driving_entities": self.driving_entities,
             "variable_effects": self.variable_effects,
+            "action_effects": self.action_effects,
             "relation_changes": self.relation_changes,
             "state_changes": self.state_changes,
             "created_at": self.created_at,
@@ -116,6 +118,7 @@ class WorldEvent:
             event_type=data.get("event_type", "evolution"),
             driving_entities=list(data.get("driving_entities", [])),
             variable_effects=list(data.get("variable_effects", [])),
+            action_effects=list(data.get("action_effects", [])),
             relation_changes=list(data.get("relation_changes", [])),
             state_changes=list(data.get("state_changes", [])),
             created_at=data.get("created_at", _now_iso()),

@@ -41,7 +41,12 @@ def _row_to_archive(row) -> Dict[str, Any]:
         "entity_uuid": row["entity_uuid"],
         "entity_name": row["entity_name"],
         "entity_type": row["entity_type"],
+        "agent_kind": row["agent_kind"],
         "importance_tier": row["importance_tier"],
+        "recommended_importance_tier": row["recommended_importance_tier"],
+        "selected_importance_tier": row["selected_importance_tier"],
+        "template_key": row["template_key"],
+        "template_version": row["template_version"],
         "entity_role": row["entity_role"],
         "core_drive": row["core_drive"],
         "surface_mask": row["surface_mask"],
@@ -50,7 +55,10 @@ def _row_to_archive(row) -> Dict[str, Any]:
         "agent_behavior_hint": row["agent_behavior_hint"],
         "human_ai_relation_tag": row["human_ai_relation_tag"],
         "can_act_as_agent": bool(row["can_act_as_agent"]),
-        "notable_risks": json.loads(row["notable_risks"] or "[]"),
+        "notable_risks": json.loads(row["notable_risks_json"] or "[]"),
+        "template_sections": json.loads(row["template_sections_json"] or "[]"),
+        "template_payload": json.loads(row["template_payload_json"] or "{}"),
+        "template_metadata": json.loads(row["template_metadata_json"] or "{}"),
         "synced_at": row["synced_at"],
     }
 
@@ -73,12 +81,14 @@ class ArchiveLibraryService:
         q: str = "",
         project_id: str = "",
         entity_type: str = "",
+        agent_kind: str = "",
         importance_tier: str = "",
+        template_key: str = "",
         limit: int = 20,
         offset: int = 0,
     ) -> Dict[str, Any]:
         self.sync_incremental()
-        filters, params = self._search_filters(q, project_id, entity_type, importance_tier)
+        filters, params = self._search_filters(q, project_id, entity_type, agent_kind, importance_tier, template_key)
         limit = max(1, min(limit, 200))
         offset = max(0, offset)
         with self.storage.connect() as connection:
@@ -172,7 +182,9 @@ class ArchiveLibraryService:
         q: str,
         project_id: str,
         entity_type: str,
+        agent_kind: str,
         importance_tier: str,
+        template_key: str,
     ) -> tuple[List[str], List[Any]]:
         filters = ["1 = 1"]
         params: List[Any] = []
@@ -182,9 +194,15 @@ class ArchiveLibraryService:
         if entity_type:
             filters.append("entity_type = ?")
             params.append(entity_type)
+        if agent_kind:
+            filters.append("agent_kind = ?")
+            params.append(agent_kind)
         if importance_tier:
             filters.append("importance_tier = ?")
             params.append(importance_tier)
+        if template_key:
+            filters.append("template_key = ?")
+            params.append(template_key)
         if q.strip():
             keyword = f"%{q.strip()}%"
             clauses = [f"{field} LIKE ?" for field in SEARCH_FIELDS]
@@ -213,10 +231,12 @@ class ArchiveLibraryService:
                 """
                 INSERT INTO archive_library (
                     archive_id, project_id, project_name, entity_uuid, entity_name, entity_type,
-                    importance_tier, entity_role, core_drive, surface_mask, hidden_tension,
+                    agent_kind, importance_tier, recommended_importance_tier, selected_importance_tier,
+                    template_key, template_version, entity_role, core_drive, surface_mask, hidden_tension,
                     relationship_summary, agent_behavior_hint, human_ai_relation_tag,
-                    can_act_as_agent, notable_risks, synced_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    can_act_as_agent, notable_risks_json, template_sections_json, template_payload_json,
+                    template_metadata_json, synced_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 record,
             )
@@ -242,7 +262,12 @@ class ArchiveLibraryService:
             str(archive.get("entity_uuid") or ""),
             str(archive.get("entity_name") or ""),
             str(archive.get("entity_type") or ""),
+            str(archive.get("agent_kind") or "generic"),
             str(archive.get("importance_tier") or "supporting"),
+            str(archive.get("recommended_importance_tier") or archive.get("importance_tier") or "supporting"),
+            str(archive.get("selected_importance_tier") or archive.get("importance_tier") or "supporting"),
+            str(archive.get("template_key") or "generic.supporting.v1"),
+            str(archive.get("template_version") or "v1"),
             str(archive.get("entity_role") or ""),
             str(archive.get("core_drive") or ""),
             str(archive.get("surface_mask") or ""),
@@ -252,6 +277,9 @@ class ArchiveLibraryService:
             str(archive.get("human_ai_relation_tag") or "none"),
             _bool_to_int(archive.get("can_act_as_agent", True)),
             json.dumps(archive.get("notable_risks") or [], ensure_ascii=False),
+            json.dumps(archive.get("template_sections") or [], ensure_ascii=False),
+            json.dumps(archive.get("template_payload") or {}, ensure_ascii=False),
+            json.dumps(archive.get("template_metadata") or {}, ensure_ascii=False),
             _now(),
         )
 

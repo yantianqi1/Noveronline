@@ -15,6 +15,7 @@ from .worldline_branch_support import (
     resolve_evolution_depth,
 )
 from .worldline_agent_registry import WorldlineAgentRegistry
+from .worldline_single_world import MAIN_WORLD_BRANCH_ID, MAIN_WORLD_TITLE
 
 MAX_VARIABLES_PER_STEP = 3
 MAX_ACTIONS_PER_STEP = 2
@@ -37,10 +38,8 @@ class WorldlineBranchService:
         world_variables: List[VariableInjection],
     ) -> List[WorldlineBranch]:
         hypotheses = (source.get("config") or {}).get("branch_hypotheses", [])
-        branches: List[WorldlineBranch] = []
-        for idx in range(branch_count):
-            branches.append(self._build_branch(idx, hypotheses, source, focus_question, world_variables))
-        return branches
+        branch = self._build_branch(0, hypotheses, source, focus_question, world_variables)
+        return [branch]
 
     def advance_branch(
         self,
@@ -77,6 +76,7 @@ class WorldlineBranchService:
                 event_type="evolution",
                 driving_entities=drivers,
                 variable_effects=[item.to_dict() for item in consumed_variables],
+                action_effects=[item.to_dict() for item in consumed_actions],
                 relation_changes=relation_changes,
                 state_changes=state_changes,
             )
@@ -125,21 +125,21 @@ class WorldlineBranchService:
         hypothesis = hypotheses[idx] if idx < len(hypotheses) else {}
         key_agents = list(hypothesis.get("key_agents", [])) or list(source.get("actors", {}).keys())[:3]
         branch = WorldlineBranch(
-            branch_id=hypothesis.get("branch_id") or f"branch_{idx + 1}",
-            title=hypothesis.get("title") or f"世界线 {idx + 1}",
+            branch_id=MAIN_WORLD_BRANCH_ID,
+            title=MAIN_WORLD_TITLE,
             core_change=hypothesis.get("core_change") or self.default_core_change(idx, world_variables),
             narrative_value=hypothesis.get("narrative_value") or f"检验问题：{focus_question}",
             key_agents=key_agents,
             expected_conflicts=list(hypothesis.get("expected_conflicts", [])),
             actor_states=build_branch_states(
                 source.get("actors", {}),
-                hypothesis.get("branch_id") or f"branch_{idx + 1}",
+                MAIN_WORLD_BRANCH_ID,
                 source.get("session_scope", "project"),
                 source.get("graph_id", ""),
             ),
             organization_states=build_branch_states(
                 source.get("organizations", {}),
-                hypothesis.get("branch_id") or f"branch_{idx + 1}",
+                MAIN_WORLD_BRANCH_ID,
                 source.get("session_scope", "project"),
                 source.get("graph_id", ""),
             ),

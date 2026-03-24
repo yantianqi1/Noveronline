@@ -7,14 +7,26 @@ from flask import jsonify, request
 from . import novel_bp
 from .novel_graph_defaults import graph_entity_types
 from ..models.project import ProjectManager
+from ..services.archive_candidate_builder import ArchiveCandidateBuilder
 from ..services.archive_library_service import ArchiveLibraryService
+from ..services.chapter_context_pack_builder import ChapterContextPackBuilder
 from ..services.narrative_entity_archivist import NarrativeEntityArchivist
 from ..services.parallel_world_config_generator import ParallelWorldConfigGenerator
 from ..services.plot_inspiration_engine import PlotInspirationEngine
 from ..services.worldline_engine_factory import build_worldline_engine
+from ..services.worldline_single_world import current_world, resolve_branch_id
 from ..services.zep_entity_reader import EntityNode, ZepEntityReader
 
-archive_library_service = ArchiveLibraryService()
+archive_candidate_builder = ArchiveCandidateBuilder()
+chapter_context_pack_builder = ChapterContextPackBuilder()
+
+
+def _archive_library_service() -> ArchiveLibraryService:
+    return ArchiveLibraryService()
+
+
+def _chapter_context_service() -> ChapterContextPackBuilder:
+    return chapter_context_pack_builder
 
 def _resolve_project_context(data):
     project_id = data.get("project_id")
@@ -64,6 +76,67 @@ def _build_entities_from_seed_analysis(seed_analysis):
             )
         )
     return entities
+
+
+def _candidate_override_map(data):
+    overrides = {}
+    for item in data.get("tier_overrides", []) or []:
+        entity_uuid = str(item.get("entity_uuid") or item.get("candidate_id") or "").strip()
+        importance_tier = str(item.get("importance_tier") or "").strip()
+        if entity_uuid and importance_tier:
+            overrides[entity_uuid] = importance_tier
+    for item in data.get("candidate_snapshot", []) or []:
+        entity_uuid = str(item.get("entity_uuid") or item.get("candidate_id") or "").strip()
+        importance_tier = str(item.get("selected_importance_tier") or "").strip()
+        if entity_uuid and importance_tier:
+            overrides.setdefault(entity_uuid, importance_tier)
+    return overrides
+
+
+def _archive_candidates(graph_id, project, entity_types):
+    if graph_id:
+        reader = ZepEntityReader()
+        filtered = reader.filter_defined_entities(
+            graph_id=graph_id,
+            defined_entity_types=entity_types,
+            enrich_with_edges=True,
+        )
+        return (
+            archive_candidate_builder.build_from_entities(filtered.entities),
+            {item.uuid: item for item in filtered.entities},
+            list(filtered.entity_types) + ["Relationship"],
+        )
+    seed_analysis = _load_seed_analysis(project)
+    if not seed_analysis:
+        raise ValueError("当前项目既没有 graph_id，也没有可用的 seed_analysis.json")
+    return archive_candidate_builder.build_from_seed_analysis(seed_analysis), {}, ["Character", "Organization", "Relationship"]
+
+
+@novel_bp.route("/archives/candidates", methods=["POST"])
+def list_archive_candidates():
+    try:
+        data = request.get_json() or {}
+        graph_id, project = _resolve_project_context(data)
+        entity_types = graph_entity_types(data.get("entity_types"), graph_id)
+        candidates, _, payload_entity_types = _archive_candidates(graph_id, project, entity_types)
+        return jsonify({
+            "success": True,
+            "data": {
+                "project_id": project.project_id if project else None,
+                "graph_id": graph_id,
+                "count": len(candidates),
+                "entity_types": payload_entity_types,
+                "candidates": candidates,
+            },
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }), 500
+
+
 @novel_bp.route("/archives/generate", methods=["POST"])
 def generate_archives():
     try:
@@ -71,24 +144,14 @@ def generate_archives():
         graph_id, project = _resolve_project_context(data)
         use_llm = data.get("use_llm", True)
         entity_types = graph_entity_types(data.get("entity_types"), graph_id)
-        archivist = NarrativeEntityArchivist()
-        payload_entity_types = []
-
-        if graph_id:
-            reader = ZepEntityReader()
-            filtered = reader.filter_defined_entities(
-                graph_id=graph_id,
-                defined_entity_types=entity_types,
-                enrich_with_edges=True,
-            )
-            archives = archivist.generate_archives_from_entities(filtered.entities, use_llm=use_llm)
-            payload_entity_types = list(filtered.entity_types)
-        else:
-            seed_analysis = _load_seed_analysis(project)
-            if not seed_analysis:
-                raise ValueError("当前项目既没有 graph_id，也没有可用的 seed_analysis.json")
-            archives = archivist.generate_archives_from_seed_analysis(seed_analysis)
-            payload_entity_types = ["Character", "Organization"]
+        archivist = NarrativeEntityArchivist(candidate_builder=archive_candidate_builder)
+        candidates, entity_lookup, payload_entity_types = _archive_candidates(graph_id, project, entity_types)
+        archives = archivist.generate_archives_from_candidates(
+            candidates,
+            use_llm=use_llm,
+            tier_overrides=_candidate_override_map(data),
+            entity_lookup=entity_lookup,
+        )
 
         payload = {
             "graph_id": graph_id,
@@ -100,7 +163,7 @@ def generate_archives():
 
         if project:
             ProjectManager.save_project_json(project.project_id, "narrative_archives.json", payload)
-            synced = archive_library_service.sync_project_archives(project.project_id, force=True)
+            synced = _archive_library_service().sync_project_archives(project.project_id, force=True)
             archive_map = {item["entity_uuid"]: item["archive_id"] for item in synced}
             payload["archives"] = [
                 {
@@ -117,6 +180,8 @@ def generate_archives():
             "error": str(e),
             "traceback": traceback.format_exc(),
         }), 500
+
+
 @novel_bp.route("/parallel-world/config", methods=["POST"])
 def generate_parallel_world_config():
     try:
@@ -132,7 +197,7 @@ def generate_parallel_world_config():
         if not analysis_goal and project:
             analysis_goal = project.analysis_goal
         if not analysis_goal:
-            analysis_goal = "分析当前小说世界在变量注入后的平行世界演变"
+            analysis_goal = "分析当前小说世界在变量注入后的持续演化"
 
         if graph_id:
             reader = ZepEntityReader()
@@ -244,9 +309,8 @@ def generate_plot_inspiration():
                 return jsonify({"success": False, "error": f"世界线会话不存在: {session_id}"}), 404
             focus_question = session.focus_question or focus_question
             variables = [item.to_dict() for item in session.world_variables]
-            branch = next((item for item in session.branches if item.branch_id == branch_id), None) if branch_id else session.branches[0]
-            if not branch:
-                return jsonify({"success": False, "error": f"分支不存在: {branch_id}"}), 404
+            resolve_branch_id(branch_id)
+            branch = current_world(session)
             branch_summary = {
                 "branch_id": branch.branch_id,
                 "title": branch.title,
@@ -284,10 +348,44 @@ def generate_plot_inspiration():
                 "project_id": project.project_id if project else None,
                 "graph_id": graph_id,
                 "session_id": session_id,
-                "branch_id": branch_id,
+                "branch_id": branch.branch_id if session_id else None,
                 "result": result,
             },
         })
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }), 500
+
+
+@novel_bp.route("/chapter-context/options", methods=["GET"])
+def chapter_context_options():
+    try:
+        project_id = (request.args.get("project_id") or "").strip()
+        if not project_id:
+            return jsonify({"success": False, "error": "请提供 project_id"}), 400
+        return jsonify({"success": True, "data": _chapter_context_service().build_options(project_id)})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }), 500
+
+
+@novel_bp.route("/chapter-context", methods=["POST"])
+def build_chapter_context():
+    try:
+        data = request.get_json() or {}
+        return jsonify({"success": True, "data": _chapter_context_service().build(data)})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         return jsonify({
             "success": False,

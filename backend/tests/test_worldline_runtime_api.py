@@ -87,16 +87,31 @@ def test_create_session_materializes_runtime_agents_and_snapshots(tmp_path, monk
     assert character["state_source"] in {"seed_analysis", "session_bootstrap"}
     assert character["last_action_at"] is None
     assert character["last_dialogue_at"] is None
+    assert character["importance_tier"] == "protagonist"
+    assert character["template_key"] == "character.protagonist.v1"
+    assert "private" in character["template_sections"]
+
+    relation = next(item for item in data["agents"] if item["agent_kind"] == "relationship")
+    assert relation["template_key"] == "relationship.protagonist.v1"
+    assert "relationship" in relation["template_sections"]
 
     connection = sqlite3.connect(_runtime_db_path(project.project_id))
     try:
         registry_count = connection.execute("SELECT COUNT(*) FROM agent_registry").fetchone()[0]
         snapshot_count = connection.execute("SELECT COUNT(*) FROM agent_state_snapshots").fetchone()[0]
+        template_row = connection.execute(
+            "SELECT importance_tier, template_key, template_version, template_sections_json FROM agent_registry WHERE agent_id = ?",
+            (character["agent_id"],),
+        ).fetchone()
     finally:
         connection.close()
 
     assert registry_count >= 3
     assert snapshot_count >= 3
+    assert template_row[0] == "protagonist"
+    assert template_row[1] == "character.protagonist.v1"
+    assert template_row[2] == "v1"
+    assert "private" in template_row[3]
 
 
 def test_agent_action_transitions_from_queued_to_applied_and_records_history(tmp_path, monkeypatch):
@@ -262,3 +277,18 @@ def test_existing_session_bootstraps_runtime_db_from_session_json(tmp_path, monk
     assert response.status_code == 200, response.get_json()
     assert response.get_json()["data"]["agents"]
     assert sqlite3.connect(_runtime_db_path(project.project_id)).execute("SELECT COUNT(*) FROM agent_registry").fetchone()[0] >= 3
+
+
+def test_runtime_endpoints_reject_non_main_branch_id(tmp_path, monkeypatch):
+    project = _create_project_with_seed(tmp_path, monkeypatch)
+    app = create_app()
+    client = app.test_client()
+
+    session_id = _create_session(client, project.project_id)
+    response = client.get(
+        f"/api/worldline/session/{session_id}/agents",
+        query_string={"branch_id": "branch_1"},
+    )
+
+    assert response.status_code == 400, response.get_json()
+    assert "main" in response.get_json()["error"]

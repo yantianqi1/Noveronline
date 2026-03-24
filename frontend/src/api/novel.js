@@ -1,11 +1,28 @@
-import { post } from "./http";
+import { get, post } from "./http.js";
 
-export function generateArchives({ projectId, graphId, entityTypes, useLlm = false }) {
+export function generateArchiveCandidates({ projectId, graphId, entityTypes }) {
+  return post("/api/novel/archives/candidates", {
+    project_id: projectId,
+    graph_id: graphId,
+    entity_types: entityTypes,
+  });
+}
+
+export function generateArchives({
+  projectId,
+  graphId,
+  entityTypes,
+  useLlm = false,
+  tierOverrides = [],
+  candidateSnapshot = [],
+}) {
   return post("/api/novel/archives/generate", {
     project_id: projectId,
     graph_id: graphId,
     entity_types: entityTypes,
     use_llm: useLlm,
+    tier_overrides: tierOverrides,
+    candidate_snapshot: candidateSnapshot,
   });
 }
 
@@ -44,4 +61,12 @@ export function runSeedAnalysis({
     max_organizations: maxOrganizations,
   };
   return post("/api/novel/seed-analysis", payload);
+}
+
+export function getChapterContextOptions(projectId) {
+  return get(`/api/novel/chapter-context/options?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function buildChapterContext(payload) {
+  return post("/api/novel/chapter-context", payload);
 }

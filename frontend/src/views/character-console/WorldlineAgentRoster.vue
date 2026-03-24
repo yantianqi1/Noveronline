@@ -8,9 +8,9 @@
       <button class="btn" :disabled="!sessionId || busy" @click="loadRoster">刷新</button>
     </div>
 
-    <div v-if="!sessionId" class="empty">先在左侧选择世界线会话，再读取当前分支的对象名册。</div>
+    <div v-if="!sessionId" class="empty">先在左侧选择世界线会话，再读取当前世界的对象名册。</div>
     <p v-else-if="error" class="status-text error">{{ error }}</p>
-    <div v-else-if="!agents.length && !busy" class="empty">当前分支还没有可用对象。</div>
+    <div v-else-if="!agents.length && !busy" class="empty">当前世界还没有可用对象。</div>
 
     <div v-for="group in groups" :key="group.kind" class="agent-group">
       <div class="seed-title">{{ group.label }} · {{ group.items.length }}</div>
@@ -33,6 +33,11 @@
           动作 {{ formatTime(agent.last_action_at) }} · 对话 {{ formatTime(agent.last_dialogue_at) }}
         </div>
         <div class="agent-summary">{{ agent.summary }}</div>
+        <div v-if="buildAgentCardHighlights(agent).length" class="agent-highlights">
+          <div v-for="line in buildAgentCardHighlights(agent)" :key="`${agent.agent_id}-${line}`">
+            {{ line }}
+          </div>
+        </div>
       </button>
     </div>
   </article>
@@ -40,12 +45,13 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+
 import { getWorldlineAgents } from "../../api/worldline";
 import { formatAgentKind, formatAgentStatus, formatRoleText } from "../../utils/chineseDisplay";
+import { buildAgentCardHighlights } from "./agentDetailPresentation.js";
 
 const props = defineProps({
   sessionId: { type: String, default: "" },
-  branchId: { type: String, default: "" },
   selectedAgentRef: { type: String, default: "" },
 });
 
@@ -62,8 +68,8 @@ const groups = computed(() => [
 ].filter((group) => group.items.length));
 
 watch(
-  () => [props.sessionId, props.branchId],
-  async ([sessionId]) => {
+  () => props.sessionId,
+  async (sessionId) => {
     agents.value = [];
     error.value = "";
     if (sessionId) {
@@ -81,7 +87,7 @@ async function loadRoster() {
   try {
     busy.value = true;
     error.value = "";
-    const res = await getWorldlineAgents(props.sessionId, props.branchId || undefined);
+    const res = await getWorldlineAgents(props.sessionId);
     agents.value = res.data?.agents || [];
   } catch (err) {
     agents.value = [];
@@ -138,10 +144,17 @@ function formatTime(value) {
 .agent-meta,
 .agent-metrics,
 .agent-summary,
+.agent-highlights,
 .empty,
 .status-text {
   margin-top: 6px;
   color: var(--text-sub);
+}
+
+.agent-highlights {
+  display: grid;
+  gap: 4px;
+  color: var(--text-main);
 }
 
 .status-text.error {

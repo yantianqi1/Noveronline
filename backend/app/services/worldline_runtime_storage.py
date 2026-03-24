@@ -31,6 +31,10 @@ CREATE_STATEMENTS = (
         last_dialogue_at TEXT,
         source_archive_id TEXT,
         source_entity_uuid TEXT,
+        importance_tier TEXT NOT NULL DEFAULT 'supporting',
+        template_key TEXT NOT NULL DEFAULT 'generic.supporting.v1',
+        template_version TEXT NOT NULL DEFAULT 'v1',
+        template_sections_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (session_id, branch_id, agent_id)
@@ -100,6 +104,31 @@ CREATE_STATEMENTS = (
         created_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS agent_episodic_memory (
+        memory_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        archive_id TEXT NOT NULL DEFAULT '',
+        memory_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_ref_id TEXT NOT NULL,
+        normalized_subject TEXT NOT NULL,
+        salience REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+)
+
+AGENT_REGISTRY_COLUMNS = (
+    ("importance_tier", "TEXT NOT NULL DEFAULT 'supporting'"),
+    ("template_key", "TEXT NOT NULL DEFAULT 'generic.supporting.v1'"),
+    ("template_version", "TEXT NOT NULL DEFAULT 'v1'"),
+    ("template_sections_json", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
 
@@ -117,6 +146,7 @@ class WorldlineRuntimeStorage:
         with self.connect() as connection:
             for statement in CREATE_STATEMENTS:
                 connection.execute(statement)
+            self._ensure_agent_registry_columns(connection)
             connection.commit()
 
     @contextmanager
@@ -132,3 +162,12 @@ class WorldlineRuntimeStorage:
     def _ensure_parent_dir(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
+    def _ensure_agent_registry_columns(self, connection: sqlite3.Connection) -> None:
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(agent_registry)").fetchall()
+        }
+        for name, definition in AGENT_REGISTRY_COLUMNS:
+            if name in existing:
+                continue
+            connection.execute(f"ALTER TABLE agent_registry ADD COLUMN {name} {definition}")

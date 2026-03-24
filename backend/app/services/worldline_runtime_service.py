@@ -8,8 +8,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from .agent_memory_service import AgentMemoryService
 from .worldline_agent_registry import WorldlineAgentRegistry
 from .worldline_runtime_storage import WorldlineRuntimeStorage
+from .worldline_single_world import current_world
 
 
 def _now() -> str:
@@ -19,18 +21,20 @@ def _now() -> str:
 class WorldlineRuntimeService:
     """维护 agent 注册表、动作日志、对话日志和状态快照。"""
 
-    def __init__(self, registry: Optional[WorldlineAgentRegistry] = None):
+    def __init__(self, registry: Optional[WorldlineAgentRegistry] = None, memory_service: Optional[AgentMemoryService] = None):
         self.registry = registry or WorldlineAgentRegistry()
+        self.memory_service = memory_service or AgentMemoryService()
 
     def runtime_db_path(self, container_dir: str) -> str:
         return WorldlineRuntimeStorage(container_dir).db_path
 
     def ensure_session_runtime(self, container_dir: str, session) -> None:
+        branch = current_world(session)
         storage = WorldlineRuntimeStorage(container_dir)
         with storage.connect() as connection:
             row = connection.execute(
-                "SELECT 1 FROM agent_registry WHERE session_id = ? LIMIT 1",
-                (session.session_id,),
+                "SELECT 1 FROM agent_registry WHERE session_id = ? AND branch_id = ? LIMIT 1",
+                (session.session_id, branch.branch_id),
             ).fetchone()
         if row:
             return
@@ -93,6 +97,7 @@ class WorldlineRuntimeService:
                 (created_at, created_at, session_id, branch_id, agent["agent_id"]),
             )
             connection.commit()
+        self.memory_service.record_action_queued(container_dir, session_id, branch_id, agent, action_item)
 
     def record_step(self, container_dir: str, session, branch, step_result: Dict[str, Any]) -> None:
         self.ensure_session_runtime(container_dir, session)
@@ -125,11 +130,12 @@ class WorldlineRuntimeService:
                     INSERT OR REPLACE INTO agent_registry (
                         session_id, branch_id, agent_id, agent_kind, display_name, source_ref, role, drive, tension,
                         status, summary, can_chat, can_act, state_json, state_source, state_version,
-                        last_action_at, last_dialogue_at, source_archive_id, source_entity_uuid, created_at, updated_at
+                        last_action_at, last_dialogue_at, source_archive_id, source_entity_uuid,
+                        importance_tier, template_key, template_version, template_sections_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
                         (SELECT last_dialogue_at FROM agent_registry WHERE session_id = ? AND branch_id = ? AND agent_id = ?),
                         NULL
-                    ), ?, ?, COALESCE((SELECT created_at FROM agent_registry WHERE session_id = ? AND branch_id = ? AND agent_id = ?), ?), ?)
+                    ), ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM agent_registry WHERE session_id = ? AND branch_id = ? AND agent_id = ?), ?), ?)
                     """,
                     (
                         session.session_id,
@@ -154,6 +160,10 @@ class WorldlineRuntimeService:
                         item["agent_id"],
                         item.get("source_archive_id"),
                         item.get("source_entity_uuid"),
+                        item.get("importance_tier", "supporting"),
+                        item.get("template_key", "generic.supporting.v1"),
+                        item.get("template_version", "v1"),
+                        json.dumps(item.get("template_sections") or [], ensure_ascii=False),
                         session.session_id,
                         branch.branch_id,
                         item["agent_id"],
@@ -194,6 +204,7 @@ class WorldlineRuntimeService:
                     ),
                 )
             connection.commit()
+        self.memory_service.record_step(container_dir, session, branch, step_result, self.registry)
 
     def record_dialogue(self, container_dir: str, session, branch_id: str, agent: Dict[str, Any], message: str, result: Dict[str, Any], mode: str, model_name: str, context_summary: str) -> str:
         self.ensure_session_runtime(container_dir, session)
@@ -230,6 +241,7 @@ class WorldlineRuntimeService:
                 (created_at, created_at, session.session_id, branch_id, agent["agent_id"]),
             )
             connection.commit()
+        self.memory_service.record_dialogue(container_dir, session, branch_id, agent, message, result, dialogue_id)
         return dialogue_id
 
     def list_actions(self, container_dir: str, session_id: str, branch_id: Optional[str], agent_id: Optional[str], status: Optional[str], limit: int) -> List[Dict[str, Any]]:
@@ -268,8 +280,9 @@ class WorldlineRuntimeService:
                         INSERT OR REPLACE INTO agent_registry (
                             session_id, branch_id, agent_id, agent_kind, display_name, source_ref, role, drive, tension,
                             status, summary, can_chat, can_act, state_json, state_source, state_version,
-                            last_action_at, last_dialogue_at, source_archive_id, source_entity_uuid, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, ?, ?, ?)
+                            last_action_at, last_dialogue_at, source_archive_id, source_entity_uuid,
+                            importance_tier, template_key, template_version, template_sections_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             session.session_id,
@@ -289,6 +302,10 @@ class WorldlineRuntimeService:
                             agent.get("state_source", "session_bootstrap"),
                             agent.get("source_archive_id"),
                             agent.get("source_entity_uuid"),
+                            agent.get("importance_tier", "supporting"),
+                            agent.get("template_key", "generic.supporting.v1"),
+                            agent.get("template_version", "v1"),
+                            json.dumps(agent.get("template_sections") or [], ensure_ascii=False),
                             created_at,
                             created_at,
                         ),
@@ -374,6 +391,7 @@ class WorldlineRuntimeService:
         payload["can_chat"] = bool(payload["can_chat"])
         payload["can_act"] = bool(payload["can_act"])
         payload["state"] = json.loads(payload["state_json"])
+        payload["template_sections"] = json.loads(payload.get("template_sections_json") or "[]")
         return payload
 
     def _next_version(self, connection, session_id: str, branch_id: str, agent_id: str) -> int:

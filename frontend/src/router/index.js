@@ -4,6 +4,7 @@ import GuideView from "../views/GuideView.vue";
 import ArchiveLibraryView from "../views/ArchiveLibraryView.vue";
 import StoryGraphWorkbenchView from "../views/StoryGraphWorkbenchView.vue";
 import WorldlineWorkbenchView from "../views/WorldlineWorkbenchView.vue";
+import WriterWorkbenchView from "../views/WriterWorkbenchView.vue";
 import CharacterConsoleView from "../views/CharacterConsoleView.vue";
 import LlmFacilityView from "../views/LlmFacilityView.vue";
 
@@ -12,6 +13,7 @@ const routes = [
   { path: "/guide", name: "guide", component: GuideView },
   { path: "/archive-library", name: "archive-library", component: ArchiveLibraryView },
   { path: "/story-graph", name: "story-graph", component: StoryGraphWorkbenchView },
+  { path: "/writer", name: "writer", component: WriterWorkbenchView },
   { path: "/worldline", name: "worldline", component: WorldlineWorkbenchView },
   { path: "/character-console", name: "character-console", component: CharacterConsoleView },
   { path: "/llm-facility", name: "llm-facility", component: LlmFacilityView },

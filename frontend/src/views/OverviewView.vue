@@ -156,20 +156,32 @@ function scrollToUpload() {
 
 <style scoped>
 .overview-stage {
-  max-width: 1200px;
-  margin: 0 auto;
+  width: 100%;
+  align-items: stretch;
+}
+
+.hero-section,
+.recent-projects,
+.phase-preview,
+.active-task-preview,
+.results-preview,
+.task-panel,
+.hidden-upload {
+  width: 100%;
 }
 
 .section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
   margin-bottom: var(--space-md);
 }
 
 .project-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--space-md);
 }
 
@@ -230,7 +242,9 @@ function scrollToUpload() {
 
 .preview-header {
   display: flex;
+  justify-content: space-between;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: var(--space-md);
   margin-bottom: var(--space-md);
 }
@@ -241,6 +255,8 @@ function scrollToUpload() {
 }
 
 .empty-guide-preview {
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  align-items: stretch;
   padding: var(--space-xl);
   background: rgba(255, 255, 255, 0.4);
   border-radius: var(--radius-lg);
@@ -258,11 +274,14 @@ function scrollToUpload() {
   align-items: center;
   justify-content: center;
   background: var(--bg-paper-warm);
+  min-height: 220px;
 }
 
 .flow-placeholder {
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: var(--space-sm);
   color: var(--line-strong);
   font-family: "ZCOOL XiaoWei", serif;
@@ -277,6 +296,12 @@ function scrollToUpload() {
 
 .hidden-upload {
   margin-top: var(--space-xl);
+}
+
+@media (max-width: 1180px) {
+  .empty-guide-preview {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 768px) {

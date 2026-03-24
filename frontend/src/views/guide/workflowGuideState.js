@@ -17,7 +17,7 @@ export const WORKFLOW_STEPS = Object.freeze([
   {
     key: "worldline",
     label: "世界线推演",
-    description: "注入变量，观察剧情分支演化。",
+    description: "注入变量，观察当前世界如何继续演化。",
   },
 ]);
 

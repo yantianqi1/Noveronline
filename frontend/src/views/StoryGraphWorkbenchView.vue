@@ -31,16 +31,10 @@
 
       <section class="control-group workbench-card">
         <h3 class="title-ancient">衍生配置生成</h3>
-        <p class="subtitle">基于图谱生成角色档案或平行世界初始变量。</p>
-        
-        <div class="field">
-          <label>世界线变量 (每行一条)</label>
-          <textarea v-model="variablesText" rows="4"></textarea>
-        </div>
+        <p class="subtitle">基于图谱生成角色档案；世界线创建与变量注入统一在世界线工作台完成。</p>
 
         <div class="actions stack">
-          <button class="btn" :disabled="!currentGraphId || busy" @click="createArchives">生成全量角色档案</button>
-          <button class="btn" :disabled="!currentGraphId || busy" @click="createParallelConfig">生成世界线初始配置</button>
+          <button class="btn" :disabled="!currentGraphId || busy" @click="openArchiveConfigurator">生成全量角色档案</button>
         </div>
       </section>
     </aside>
@@ -54,14 +48,23 @@
         @refresh="refreshGraph"
       />
     </main>
+    <AgentTemplateConfigurator
+      :visible="configuratorVisible"
+      :candidates="archiveCandidates"
+      :busy="busy"
+      :error="taskError"
+      @close="closeArchiveConfigurator"
+      @confirm="createArchives"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
 import StoryGraphPanel from "../components/StoryGraphPanel.vue";
 import { buildGraph, getProject, getProjectGraph, getTask, listProjects } from "../api/project";
-import { generateArchives, generateParallelWorldConfig } from "../api/novel";
+import { generateArchiveCandidates, generateArchives } from "../api/novel";
+import AgentTemplateConfigurator from "./story-graph/AgentTemplateConfigurator.vue";
 import { createGraphBuildTaskPoller } from "./story-graph/graphBuildTaskPoller.js";
 
 const projects = ref([]);
@@ -72,10 +75,9 @@ const taskError = ref("");
 const currentGraphId = ref("");
 const graphNodes = ref([]);
 const graphEdges = ref([]);
-const variablesText = ref("主角提前三个月知晓天灾\n敌对势力误判主角阵营");
+const configuratorVisible = ref(false);
+const archiveCandidates = ref([]);
 const pollGraphTask = createGraphBuildTaskPoller({ getTask });
-
-const selectedProject = computed(() => projects.value.find((p) => p.project_id === projectId.value));
 
 async function loadProjects() {
   const res = await listProjects(50);
@@ -147,11 +149,16 @@ async function refreshGraph() {
   }
 }
 
-async function createArchives() {
+async function openArchiveConfigurator() {
   try {
     busy.value = true;
-    const res = await generateArchives({ projectId: projectId.value, graphId: currentGraphId.value, useLlm: false });
-    taskMessage.value = `已生成档案: ${res.data.count} 项`;
+    taskError.value = "";
+    const res = await generateArchiveCandidates({
+      projectId: projectId.value,
+      graphId: currentGraphId.value,
+    });
+    archiveCandidates.value = res.data.candidates || [];
+    configuratorVisible.value = true;
   } catch (error) {
     taskError.value = error.message;
   } finally {
@@ -159,19 +166,29 @@ async function createArchives() {
   }
 }
 
-async function createParallelConfig() {
+function closeArchiveConfigurator() {
+  configuratorVisible.value = false;
+}
+
+async function createArchives(candidateSnapshot) {
   try {
     busy.value = true;
-    const variables = variablesText.value.split("\n").map(v => v.trim()).filter(Boolean);
-    const res = await generateParallelWorldConfig({
+    taskError.value = "";
+    const tierOverrides = (candidateSnapshot || [])
+      .filter((item) => item.selected_importance_tier && item.selected_importance_tier !== item.recommended_importance_tier)
+      .map((item) => ({
+        entity_uuid: item.entity_uuid,
+        importance_tier: item.selected_importance_tier,
+      }));
+    const res = await generateArchives({
       projectId: projectId.value,
       graphId: currentGraphId.value,
-      variables,
-      branchCount: 4,
-      focusQuestion: selectedProject.value?.analysis_goal,
       useLlm: false,
+      tierOverrides,
+      candidateSnapshot: candidateSnapshot || [],
     });
-    taskMessage.value = `世界线配置已就绪`;
+    taskMessage.value = `已生成档案: ${res.data.count} 项`;
+    configuratorVisible.value = false;
   } catch (error) {
     taskError.value = error.message;
   } finally {

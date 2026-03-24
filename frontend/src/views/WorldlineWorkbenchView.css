@@ -2,11 +2,13 @@
   display: grid;
   grid-template-columns: minmax(0, var(--worldline-left-pane-width)) 16px minmax(0, 1fr);
   gap: 0;
-  height: calc(100vh - 120px);
+  min-height: 0;
+  height: calc(100vh - 144px);
 }
 
 .stage-controls {
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding-right: var(--space-md);
   padding-bottom: var(--space-lg);
@@ -45,6 +47,7 @@
 
 .stage-performance {
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding-left: var(--space-md);
   padding-bottom: var(--space-lg);
@@ -67,8 +70,13 @@
   margin-bottom: var(--space-md);
 }
 
-.timeline-container {
-  padding: var(--space-md);
+.performance-main {
+  min-width: 0;
+  min-height: 100%;
+}
+
+.performance-main :deep(.director-panel) {
+  min-height: calc(100vh - 280px);
 }
 
 .worldline-stage.stacked {

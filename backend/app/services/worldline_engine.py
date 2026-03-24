@@ -10,11 +10,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..config import Config
 from ..models.project import ProjectManager
 from ..models.worldline import AgentAction, VariableInjection, WorldlineSession
+from .agent_memory_service import AgentMemoryService
 from .archive_library_service import ArchiveLibraryService
 from .world_state_store import WorldStateStore
 from .worldline_branch_comparison import WorldlineBranchComparisonService
 from .worldline_branch_service import WorldlineBranchService
 from .worldline_runtime_service import WorldlineRuntimeService
+from .worldline_single_world import current_world, ensure_single_world_session, resolve_branch_id
 from .worldline_source_loader import WorldlineSourceLoader
 
 class WorldlineEngine:
@@ -26,13 +28,18 @@ class WorldlineEngine:
         comparison_service: WorldlineBranchComparisonService,
         archive_library: Optional[ArchiveLibraryService] = None,
         runtime_service: Optional[WorldlineRuntimeService] = None,
+        memory_service: Optional[AgentMemoryService] = None,
     ):
         self.store = store
         self.source_loader = source_loader
         self.branch_service = branch_service
         self.comparison_service = comparison_service
         self.archive_library = archive_library or ArchiveLibraryService()
-        self.runtime_service = runtime_service or WorldlineRuntimeService(self.branch_service.agent_registry)
+        self.memory_service = memory_service or AgentMemoryService()
+        self.runtime_service = runtime_service or WorldlineRuntimeService(
+            self.branch_service.agent_registry,
+            memory_service=self.memory_service,
+        )
 
     def create_session(
         self,
@@ -193,7 +200,7 @@ class WorldlineEngine:
     def get_session(self, session_id: str, project_id: Optional[str] = None, graph_id: Optional[str] = None):
         try:
             session, _ = self._load_for_update(session_id, project_id, graph_id)
-        except ValueError:
+        except LookupError:
             return None
         return session
 
@@ -262,10 +269,19 @@ class WorldlineEngine:
 
     def _record_as_archive(self, record: Dict[str, Any]) -> Dict[str, Any]:
         return {
+            "archive_id": record.get("archive_id"),
             "entity_uuid": record["entity_uuid"],
             "entity_name": record["entity_name"],
             "entity_type": record["entity_type"],
+            "agent_kind": record.get("agent_kind", "generic"),
             "importance_tier": record["importance_tier"],
+            "recommended_importance_tier": record.get("recommended_importance_tier", record["importance_tier"]),
+            "selected_importance_tier": record.get("selected_importance_tier", record["importance_tier"]),
+            "template_key": record.get("template_key", "generic.supporting.v1"),
+            "template_version": record.get("template_version", "v1"),
+            "template_sections": list(record.get("template_sections", [])),
+            "template_payload": dict(record.get("template_payload", {})),
+            "template_metadata": dict(record.get("template_metadata", {})),
             "entity_role": record["entity_role"],
             "core_drive": record["core_drive"],
             "surface_mask": record["surface_mask"],
@@ -296,9 +312,8 @@ class WorldlineEngine:
         return "观察变量扰动下的小说世界线演化"
 
     def _branch_count(self, branch_count: Optional[int], config: Optional[Dict[str, Any]]) -> int:
-        if branch_count is None and config and isinstance(config.get("branch_hypotheses"), list):
-            branch_count = len(config["branch_hypotheses"])
-        return max(1, min(branch_count or Config.NARRATIVE_DEFAULT_BRANCH_COUNT, 12))
+        del branch_count, config
+        return 1
 
     def _apply_to_session(
         self,
@@ -332,7 +347,7 @@ class WorldlineEngine:
     ) -> tuple[WorldlineSession, str]:
         session = self.store.load_session(session_id, project_id=project_id, graph_id=graph_id)
         if not session:
-            raise ValueError(f"世界线会话不存在: {session_id}")
+            raise LookupError(f"世界线会话不存在: {session_id}")
         _, container_dir = self.store.resolve_container(
             session.project_id or project_id,
             session.graph_id,
@@ -344,7 +359,7 @@ class WorldlineEngine:
         return session, container_dir
 
     def _repair_session_state(self, session: WorldlineSession) -> bool:
-        changed = False
+        changed = ensure_single_world_session(session)
         for branch in session.branches:
             changed |= self._repair_entity_states(branch.actor_states, branch.branch_id, session)
             changed |= self._repair_entity_states(branch.organization_states, branch.branch_id, session)
@@ -423,12 +438,8 @@ class WorldlineEngine:
         return True
 
     def _target_branches(self, session: WorldlineSession, branch_id: Optional[str]):
-        if not branch_id:
-            return session.branches
-        branches = [branch for branch in session.branches if branch.branch_id == branch_id]
-        if not branches:
-            raise ValueError(f"分支不存在: {branch_id}")
-        return branches
+        resolve_branch_id(branch_id)
+        return [current_world(session)]
 
     def _global_graph_id(self, archive_ids: List[str]) -> str:
         joined = ",".join(sorted(archive_ids))

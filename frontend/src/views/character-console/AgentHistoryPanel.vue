@@ -33,6 +33,19 @@
           <div>A: {{ item.reply }}</div>
         </div>
       </section>
+
+      <section class="history-block">
+        <div class="seed-title">记忆片段 · {{ sessionMemories.length + longTermMemories.length }}</div>
+        <div v-if="!sessionMemories.length && !longTermMemories.length" class="empty">暂无记忆</div>
+        <div v-for="item in sessionMemories" :key="item.memory_id" class="history-item">
+          <div class="mono">session · {{ item.memory_type }} · {{ formatTime(item.updated_at) }}</div>
+          <div>{{ item.summary }}</div>
+        </div>
+        <div v-for="item in longTermMemories" :key="item.memory_id" class="history-item">
+          <div class="mono">long_term · {{ item.memory_type }} · {{ formatTime(item.updated_at) }}</div>
+          <div>{{ item.summary }}</div>
+        </div>
+      </section>
     </div>
   </article>
 </template>
@@ -44,6 +57,8 @@ defineProps({
   snapshots: { type: Array, default: () => [] },
   actions: { type: Array, default: () => [] },
   dialogues: { type: Array, default: () => [] },
+  sessionMemories: { type: Array, default: () => [] },
+  longTermMemories: { type: Array, default: () => [] },
   error: { type: String, default: "" },
 });
 
@@ -67,7 +82,7 @@ function formatTime(value) {
 
 .history-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-top: 10px;
 }

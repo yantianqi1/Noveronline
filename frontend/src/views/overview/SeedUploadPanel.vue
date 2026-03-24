@@ -1,5 +1,5 @@
 <template>
-  <article class="upload-container stack">
+  <article :class="['upload-container', { stack: !hasActiveTask, 'with-active-task': hasActiveTask }]">
     <div class="upload-main workbench-card">
       <header class="upload-header">
         <h2 class="title-ancient">卷宗投放</h2>
@@ -72,7 +72,7 @@
 
     <!-- Active Task Status Section -->
     <Transition name="fade">
-      <div v-if="upload.state.uploadPhase !== 'idle'" class="active-task-area container-7-5">
+      <aside v-if="hasActiveTask" class="active-task-area stack">
         <div class="task-progress-card workbench-card stack">
           <h3 class="title-ancient">实时管线状态</h3>
           <PipelineVisualization
@@ -113,7 +113,7 @@
             :task-started-at="upload.state.taskStartedAt"
           />
         </div>
-      </div>
+      </aside>
     </Transition>
   </article>
 </template>
@@ -132,6 +132,7 @@ const showAdvanced = ref(false);
 const showLogs = ref(true);
 
 const canSubmit = computed(() => upload.state.projectName.trim() && upload.state.files.length > 0);
+const hasActiveTask = computed(() => upload.state.uploadPhase !== "idle");
 
 let lastEmittedProjectId = "";
 
@@ -172,11 +173,18 @@ watch(
 
 <style scoped>
 .upload-container {
-  max-width: 900px;
-  margin: 0 auto;
+  width: 100%;
+}
+
+.upload-container.with-active-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+  gap: var(--space-lg);
+  align-items: start;
 }
 
 .upload-main {
+  min-width: 0;
   padding: var(--space-xl);
   background-image: 
     linear-gradient(135deg, rgba(176, 125, 75, 0.02) 0%, transparent 40%),
@@ -307,11 +315,12 @@ watch(
 }
 
 .active-task-area {
-  margin-top: var(--space-lg);
+  min-width: 0;
 }
 
 .task-progress-card, .task-logs-card {
   padding: var(--space-lg);
+  min-width: 0;
 }
 
 .progress-row {
@@ -358,8 +367,8 @@ watch(
 .slide-enter-active, .slide-leave-active { transition: all 0.3s ease-out; max-height: 300px; overflow: hidden; }
 .slide-enter-from, .slide-leave-to { max-height: 0; opacity: 0; }
 
-@media (max-width: 900px) {
-  .active-task-area {
+@media (max-width: 1180px) {
+  .upload-container.with-active-task {
     grid-template-columns: 1fr;
   }
 }

@@ -57,7 +57,7 @@ const latestProjectStatus = computed(() =>
 
 const heroIntro = computed(() => {
   if (!props.projects.length) {
-    return "欢迎来到 MiroFish-Novel 工作台。在这里，您可以利用 AI 力量，将长篇小说自动解构成结构化的故事图谱与平行世界。";
+    return "欢迎来到 MiroFish-Novel 工作台。在这里，您可以利用 AI 力量，将长篇小说自动解构成结构化的故事图谱与持续演化的世界线。";
   }
   return "小说创作与分析是一个持续进化的过程。您可以随时投放新作品，或继续深入已有的分析卷宗。";
 });
@@ -75,7 +75,7 @@ const overviewNote = computed(() => {
   if (!latestProject.value.graph_id) {
     return "初步分析已就绪。建议前往「档案库」或「故事图谱」查看分析结果。";
   }
-  return "分析已趋完备。现在可以进入「世界线工作台」进行分支推演与对话。";
+  return "分析已趋完备。现在可以进入「世界线工作台」继续推进当前世界并与角色对话。";
 });
 </script>
 

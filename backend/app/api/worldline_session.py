@@ -6,7 +6,16 @@ import traceback
 
 from flask import jsonify, request
 
-from .worldline_support import error, ok, project_graph_from_request, worldline_bp, worldline_engine
+from .worldline_support import (
+    current_world_payload,
+    error,
+    ok,
+    project_graph_from_request,
+    requested_branch_id,
+    worldline_bp,
+    worldline_engine,
+)
+from ..services.worldline_single_world import current_world
 
 
 def _requested_branch_ids() -> list[str]:
@@ -40,18 +49,7 @@ def create_worldline_session():
             "source_project_ids": session.source_project_ids,
             "source_archive_count": session.source_archive_count,
             "branch_count": session.branch_count,
-            "branches": [
-                {
-                    "branch_id": branch.branch_id,
-                    "title": branch.title,
-                    "core_change": branch.core_change,
-                    "current_step": branch.current_step,
-                    "key_agents": branch.key_agents,
-                    "evolution_intensity": branch.evolution_intensity,
-                    "evolution_depth": branch.evolution_depth,
-                }
-                for branch in session.branches
-            ],
+            "current_world": current_world_payload(session),
             "source_summary": session.source_summary,
             "created_at": session.created_at,
         })
@@ -71,7 +69,11 @@ def get_worldline_session(session_id: str):
         )
         if not session:
             return error(f"世界线会话不存在: {session_id}", 404)
-        return ok(session.to_dict())
+        payload = session.to_dict()
+        payload["current_world"] = current_world_payload(session)
+        return ok(payload)
+    except ValueError as exc:
+        return error(str(exc), 400)
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500
 
@@ -91,57 +93,14 @@ def list_worldline_sessions():
 
 @worldline_bp.route("/session/<session_id>/branches", methods=["GET"])
 def list_worldline_branches(session_id: str):
-    try:
-        session = worldline_engine.get_session(
-            session_id,
-            project_id=request.args.get("project_id"),
-            graph_id=request.args.get("graph_id"),
-        )
-        if not session:
-            return error(f"世界线会话不存在: {session_id}", 404)
-        return ok({
-            "session_id": session_id,
-            "branches": [
-                {
-                    "branch_id": branch.branch_id,
-                    "title": branch.title,
-                    "core_change": branch.core_change,
-                    "narrative_value": branch.narrative_value,
-                    "current_step": branch.current_step,
-                    "status": branch.status,
-                    "key_agents": branch.key_agents,
-                    "expected_conflicts": branch.expected_conflicts,
-                    "evolution_intensity": branch.evolution_intensity,
-                    "evolution_depth": branch.evolution_depth,
-                    "timeline_size": len(branch.timeline),
-                    "pending_variables": len(branch.pending_variables),
-                    "pending_actions": len(branch.pending_actions),
-                }
-                for branch in session.branches
-            ],
-        })
-    except Exception as exc:
-        return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500
+    del session_id
+    return error("单世界世界线已不再支持分支列表接口，请改用 session 或 timeline 接口", 410)
 
 
 @worldline_bp.route("/session/<session_id>/comparison", methods=["GET"])
 def get_worldline_comparison(session_id: str):
-    try:
-        comparison = worldline_engine.compare_branches(
-            session_id,
-            {
-                "project_id": request.args.get("project_id"),
-                "graph_id": request.args.get("graph_id"),
-                "branch_ids": _requested_branch_ids() or None,
-            },
-        )
-        return ok(comparison)
-    except LookupError as exc:
-        return error(str(exc), 404)
-    except ValueError as exc:
-        return error(str(exc), 400)
-    except Exception as exc:
-        return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500
+    del session_id
+    return error("单世界世界线已不再支持分支对比接口，请改用 session 接口读取当前世界", 410)
 
 
 @worldline_bp.route("/session/<session_id>/timeline", methods=["GET"])
@@ -155,22 +114,14 @@ def get_worldline_timeline(session_id: str, branch_id: str = None):
         )
         if not session:
             return error(f"世界线会话不存在: {session_id}", 404)
-        branch_id = branch_id or request.args.get("branch_id")
-        if branch_id:
-            branch = next((item for item in session.branches if item.branch_id == branch_id), None)
-            if not branch:
-                return error(f"分支不存在: {branch_id}", 404)
-            return ok({
-                "session_id": session_id,
-                "branch_id": branch_id,
-                "events": [event.to_dict() for event in branch.timeline[-request.args.get('limit', 30, type=int):]],
-            })
+        requested_branch_id({"branch_id": branch_id or request.args.get("branch_id")})
+        world = current_world(session)
         return ok({
             "session_id": session_id,
-            "timeline": {
-                item.branch_id: [event.to_dict() for event in item.timeline[-request.args.get('limit', 30, type=int):]]
-                for item in session.branches
-            },
+            "branch_id": world.branch_id,
+            "events": [event.to_dict() for event in world.timeline[-request.args.get("limit", 30, type=int):]],
         })
+    except ValueError as exc:
+        return error(str(exc), 400)
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500

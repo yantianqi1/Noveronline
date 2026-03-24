@@ -7,6 +7,7 @@ import hashlib
 from typing import Any, Dict, List, Optional
 
 from .agent_schema_registry import AgentSchemaRegistry
+from .agent_template_registry import AgentTemplateRegistry
 from .genre_plugin import resolve_genre_plugin
 
 CHARACTER_KIND = "character"
@@ -43,8 +44,14 @@ def relation_change_text(change: str) -> str:
 
 
 class WorldlineAgentRegistry:
-    def __init__(self, schema_registry: Optional[AgentSchemaRegistry] = None, genre: str = "default"):
+    def __init__(
+        self,
+        schema_registry: Optional[AgentSchemaRegistry] = None,
+        template_registry: Optional[AgentTemplateRegistry] = None,
+        genre: str = "default",
+    ):
         self.schema_registry = schema_registry or AgentSchemaRegistry()
+        self.template_registry = template_registry or AgentTemplateRegistry()
         resolve_genre_plugin(genre).customize_agent_schema(self.schema_registry)
 
     def list_agents(self, branch) -> List[Dict[str, Any]]:
@@ -95,24 +102,30 @@ class WorldlineAgentRegistry:
     def _state_agents(self, states: Dict[str, Dict[str, Any]], agent_kind: str) -> List[Dict[str, Any]]:
         agents = []
         for name, state in states.items():
-            schema = self.schema_registry.get_schema(agent_kind)
+            resolved_kind = state.get("agent_kind") or agent_kind
+            template = self._template_for_state(resolved_kind, state)
+            schema = self.schema_registry.get_schema(resolved_kind)
             agents.append({
-                "agent_id": self._state_agent_id(name, state, agent_kind),
-                "agent_kind": agent_kind,
+                "agent_id": self._state_agent_id(name, state, resolved_kind),
+                "agent_kind": resolved_kind,
                 "display_name": name,
                 "source_ref": name,
-                "role": state.get("role") or state.get("entity_role") or KIND_ROLE_TEXT[agent_kind],
+                "role": state.get("role") or state.get("entity_role") or KIND_ROLE_TEXT.get(resolved_kind, "对象"),
                 "drive": state.get("drive") or state.get("core_drive") or "围绕当前目标持续行动",
                 "tension": state.get("tension") or state.get("hidden_tension") or "局势仍在变化中",
                 "status": state.get("status", "active"),
                 "summary": self._state_summary(name, state),
                 "schema": schema,
-                "validation_errors": self.schema_registry.validate_state(agent_kind, state),
+                "validation_errors": self.schema_registry.validate_state(resolved_kind, state),
                 "can_chat": True,
                 "can_act": True,
                 "state_source": state.get("state_source", "session_bootstrap"),
                 "source_archive_id": state.get("archive_id"),
                 "source_entity_uuid": state.get("entity_uuid"),
+                "importance_tier": template["importance_tier"],
+                "template_key": template["template_key"],
+                "template_version": template["template_version"],
+                "template_sections": template["template_sections"],
                 "state": state,
             })
         return agents
@@ -129,6 +142,9 @@ class WorldlineAgentRegistry:
             agent_id = relation_agent_id(source_agent_id, target_agent_id)
             display_name = relation_display_name(source, target)
             change = item.get("change", "stable")
+            importance_tier = self._relation_tier(item)
+            template = self.template_registry.describe(RELATIONSHIP_KIND, importance_tier)
+            relationship_payload = dict((item.get("template_payload") or {}).get("relationship") or {})
             state = {
                 "role": KIND_ROLE_TEXT[RELATIONSHIP_KIND],
                 "drive": f"推动或稳住“{source}”与“{target}”之间的关系走势",
@@ -139,8 +155,27 @@ class WorldlineAgentRegistry:
                 "target": target,
                 "source_agent_id": source_agent_id,
                 "target_agent_id": target_agent_id,
+                "importance_tier": template["importance_tier"],
+                "template_key": item.get("template_key") or template["template_key"],
+                "template_version": item.get("template_version") or template["template_version"],
+                "template_sections": list(item.get("template_sections") or template["template_sections"]),
+                "template_payload": item.get("template_payload") or {
+                    "identity": {"entity_name": display_name, "role": KIND_ROLE_TEXT[RELATIONSHIP_KIND]},
+                    "relationship": {
+                        "source": source,
+                        "target": target,
+                        "change": change,
+                        "summary": f"{source} 与 {target} 当前关系变化：{relation_change_text(change)}",
+                    },
+                    "state": {"status": item.get("status", "active")},
+                },
                 "state_source": item.get("state_source", "session_bootstrap"),
-                "last_action": item.get("last_action", ""),
+                "history": item.get("history") or relationship_payload.get("history", ""),
+                "power_dynamic": item.get("power_dynamic") or relationship_payload.get("power_dynamic", ""),
+                "trust_level": item.get("trust_level") or relationship_payload.get("trust_level", ""),
+                "conflict_trigger": item.get("conflict_trigger") or relationship_payload.get("conflict_trigger", ""),
+                "stability_forecast": item.get("stability_forecast") or relationship_payload.get("stability_forecast", ""),
+                "last_action": item.get("last_action") or relationship_payload.get("last_action", ""),
             }
             deduped[agent_id] = {
                 "agent_id": agent_id,
@@ -157,6 +192,10 @@ class WorldlineAgentRegistry:
                 "can_chat": True,
                 "can_act": True,
                 "state_source": item.get("state_source", "session_bootstrap"),
+                "importance_tier": template["importance_tier"],
+                "template_key": state["template_key"],
+                "template_version": state["template_version"],
+                "template_sections": state["template_sections"],
                 "state": state,
             }
         return list(deduped.values())
@@ -177,3 +216,21 @@ class WorldlineAgentRegistry:
         branch_id = str(state.get("branch_id") or "")
         session_scope = str(state.get("session_scope") or "")
         return f"{agent_kind}_{_stable_hash(session_scope, graph_id, branch_id, name)}"
+
+    def _template_for_state(self, agent_kind: str, state: Dict[str, Any]) -> Dict[str, Any]:
+        importance_tier = state.get("importance_tier", "supporting")
+        if state.get("template_key") and state.get("template_sections"):
+            return {
+                "importance_tier": self.template_registry.normalize_tier(importance_tier),
+                "template_key": state.get("template_key"),
+                "template_version": state.get("template_version", "v1"),
+                "template_sections": list(state.get("template_sections") or []),
+            }
+        return self.template_registry.describe(agent_kind, importance_tier)
+
+    def _relation_tier(self, item: Dict[str, Any]) -> str:
+        direct = str(item.get("importance_tier") or "").strip()
+        if direct:
+            return direct
+        tiers = [item.get("source_importance_tier", ""), item.get("target_importance_tier", "")]
+        return self.template_registry.max_tier(tiers)

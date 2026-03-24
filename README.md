@@ -1,6 +1,6 @@
 # MiroFish-Novel
 
-面向小说创作、剧情预测、关系演化与平行世界推演的多智能体分析平台。
+面向小说创作、剧情预测、关系演化与单世界世界线推演的多智能体分析平台。
 
 ## 当前目标
 
@@ -9,7 +9,7 @@
 - 读取完整小说文本、设定、大纲与角色卡
 - 提取所有有名角色、组织、势力与关系网络
 - 将角色、组织、关系节点转为可演化 Agent
-- 注入变量，推演平行世界分支
+- 注入变量，持续改写并推进当前世界线
 - 生成剧情走向、关系变化、人机关系演化与创作灵感报告
 - 与角色、组织、分析 Agent 进行对话或控制行动
 
@@ -19,7 +19,7 @@
 
 - 新仓库已创建
 - 旧项目中可复用的底层模块已迁移
-- 小说专用的 ontology / 档案 / 平行世界配置服务已建立骨架
+- 小说专用的 ontology / 档案 / 世界线设定服务已建立骨架
 - 文档与 Codex 接手说明已落地
 - 已补上世界线演化引擎、角色控制台与前端工作台
 - 已补上离线小说种子分析：角色 / 组织 / 关系提取
@@ -37,7 +37,6 @@
 - LLM 调用封装
 - 小说专用 ontology 生成器
 - 小说角色 / 势力档案生成器
-- 平行世界配置生成器
 - 世界线演化引擎
 - 世界线角色对话服务
 - 剧情灵感生成服务
@@ -48,10 +47,21 @@
 1. 上传完整小说文本
 2. 自动生成 ontology 与离线 seed analysis
 3. 提取角色、组织、关系并生成档案
-4. 生成平行世界配置
-5. 创建世界线会话并注入变量
-6. 推进分支、与角色对话、提交角色动作
-7. 输入创作灵感，获取后续剧情推进建议
+4. 创建世界线会话并注入变量
+5. 推进当前世界、与角色对话、提交角色动作
+6. 在 `/writer` 生成 Chapter Context Pack，拿到作者可直接消费的写作上下文与 prompt block
+7. 在作者工作台审核长期记忆 candidate / canon，避免推演结果直接污染正式设定
+8. 输入创作灵感，获取后续剧情推进建议
+
+## 写作上下文与记忆审核
+
+当前仓库已经不是“泛推演控制台”，而是围绕单世界创作流程组织能力：
+
+- `Chapter Context Pack` 是作者侧的统一写作上下文，固定输出 `must_know / should_know / warnings / scene_candidates / writer_prompt_block / debug_trace`
+- `/writer` 页面同时支持原著章节模式和 worldline 分支模式
+- 长期记忆采用 `canon / candidate / experiment` 分层，其中默认写作链路只注入 active `canon`
+- worldline 自动推演产生的高价值记忆先进入 `candidate`，需要作者审核后才能晋升为 `canon`
+- 记忆 timeline 会保留版本、状态、来源与事件链，方便追溯“这条设定是怎么来的”
 
 ## 目录结构
 
@@ -109,4 +119,4 @@ npm run build
 - [Codex 接手指南](./docs/CODEX_HANDOFF_GUIDE.md)
 - [迁移设计文档](./docs/plans/2026-03-19-mirofish-novel-design.md)
 - [迁移执行计划](./docs/plans/2026-03-19-mirofish-novel-migration-plan.md)
-- [自动生成测试小说](./docs/examples/generated_parallel_world_novel.md)
+- [自动生成测试小说示例](./docs/examples/generated_parallel_world_novel.md)

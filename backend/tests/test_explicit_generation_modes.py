@@ -168,6 +168,87 @@ def test_narrative_archivist_accepts_single_object_list_payload():
     assert archive.entity_role == "主角"
 
 
+def test_narrative_archivist_maps_character_detail_fields_into_template_payload():
+    archivist = NarrativeEntityArchivist(
+        llm_client=StubJsonValueClient(
+            [{
+                "importance_tier": "protagonist",
+                "entity_role": "主角",
+                "core_drive": "查清父亲死因并公开镜湖真相",
+                "surface_mask": "冷静寡言，表面顺从局势",
+                "hidden_tension": "既要利用宗门资源，又无法信任宗门",
+                "relationship_summary": "与秦昭互相利用，与玄霄宗高度对立",
+                "agent_behavior_hint": "会先暗查证据，再选择公开施压",
+                "human_ai_relation_tag": "human",
+                "notable_risks": ["身份暴露", "证据被提前销毁"],
+                "personality": "多疑克制，但在关键时刻会孤注一掷",
+                "skills": ["潜入", "审讯取证"],
+                "loyalty": "优先忠于父亲留下的真相线索，其次才是盟友",
+                "secrets": ["掌握镜湖铜片的真实用途"],
+                "long_term_goal": "摧毁掩盖实验真相的权力结构",
+                "short_term_goal": "在试炼前确认密信与铜片能否互证",
+            }]
+        )
+    )
+    entity = EntityNode(
+        uuid="char_1",
+        name="沈夜",
+        labels=["Entity", "Character"],
+        summary="主角，正在追查父亲死因。",
+        attributes={"importance_tier": "protagonist", "identity_hint": "外门弟子"},
+    )
+
+    archive = archivist.generate_archive(entity)
+
+    assert archive.template_payload["behavior"]["skills"] == ["潜入", "审讯取证"]
+    assert archive.template_payload["behavior"]["loyalty"] == "优先忠于父亲留下的真相线索，其次才是盟友"
+    assert archive.template_payload["behavior"]["long_term_goal"] == "摧毁掩盖实验真相的权力结构"
+    assert archive.template_payload["behavior"]["short_term_goal"] == "在试炼前确认密信与铜片能否互证"
+    assert archive.template_payload["private"]["secrets"] == ["掌握镜湖铜片的真实用途"]
+    assert archive.template_payload["identity"]["identity_hint"] == "外门弟子"
+
+
+def test_narrative_archivist_maps_organization_detail_fields_into_template_payload():
+    archivist = NarrativeEntityArchivist(
+        llm_client=StubJsonValueClient(
+            [{
+                "importance_tier": "major",
+                "entity_role": "宗门统治者",
+                "core_drive": "维持镜湖体系与宗门统治合法性",
+                "surface_mask": "对外宣称维持试炼秩序",
+                "hidden_tension": "既要掩盖旧实验，又担心白泽司反噬",
+                "relationship_summary": "对沈夜实施压制，对白泽司保持脆弱合作",
+                "agent_behavior_hint": "会优先控制信息流并分化反对者",
+                "human_ai_relation_tag": "none",
+                "notable_risks": ["密库曝光", "内部派系分裂"],
+                "resources": ["刑堂", "试炼阵", "镜湖密库"],
+                "internal_factions": ["顾行舟一系", "林雁回一系"],
+                "territorial_control": "玄霄山门、镜湖谷与外门试炼区域",
+                "public_stance": "一切以宗门秩序与弟子安全为先",
+                "strategic_goal": "在白泽司与回声会之间维持主动权",
+                "conflict_targets": ["沈夜", "回声会"],
+            }]
+        )
+    )
+    entity = EntityNode(
+        uuid="org_1",
+        name="玄霄宗",
+        labels=["Entity", "Organization"],
+        summary="掌控试炼与秩序的宗门。",
+        attributes={"importance_tier": "major", "organization_type": "sect"},
+    )
+
+    archive = archivist.generate_archive(entity)
+
+    assert archive.template_payload["behavior"]["resources"] == ["刑堂", "试炼阵", "镜湖密库"]
+    assert archive.template_payload["behavior"]["internal_factions"] == ["顾行舟一系", "林雁回一系"]
+    assert archive.template_payload["behavior"]["public_stance"] == "一切以宗门秩序与弟子安全为先"
+    assert archive.template_payload["behavior"]["strategic_goal"] == "在白泽司与回声会之间维持主动权"
+    assert archive.template_payload["behavior"]["conflict_targets"] == ["沈夜", "回声会"]
+    assert archive.template_payload["private"]["territorial_control"] == "玄霄山门、镜湖谷与外门试炼区域"
+    assert archive.template_payload["identity"]["organization_type"] == "sect"
+
+
 def test_narrative_archivist_rejects_multi_item_list_payload():
     archivist = NarrativeEntityArchivist(
         llm_client=StubJsonValueClient([{"importance_tier": "major"}, {"importance_tier": "minor"}])

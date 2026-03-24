@@ -64,7 +64,7 @@
           <ul class="tips-list">
             <li><strong>投放文本：</strong> 支持 txt、md 与 pdf，建议优先使用纯文本以获得最高解析精度。</li>
             <li><strong>生成图谱：</strong> 图谱是后续所有推演的基础，建议在档案库完善后再行构建。</li>
-            <li><strong>世界线：</strong> 每一条注入的变量都会引发分支，您可以在不同分支间跳转对比。</li>
+            <li><strong>世界线：</strong> 每一条注入的变量都会继续改写当前世界，您可以沿着同一条主线持续推进。</li>
           </ul>
         </section>
       </aside>
@@ -266,4 +266,3 @@ async function handleStepClick(step) {
   .concept-list { grid-template-columns: 1fr; }
 }
 </style>
-

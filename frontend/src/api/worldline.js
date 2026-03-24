@@ -1,7 +1,13 @@
-import { get, post } from "./http";
+import { get, post } from "./http.js";
 
 export function createWorldlineSession(payload) {
   return post("/api/worldline/session/create", payload);
+}
+
+export function startWorldlineAutoEvolve({ session_id: sessionId, ...payload }) {
+  const { branch_ids, ...singleWorldPayload } = payload;
+  void branch_ids;
+  return post(`/api/worldline/session/${sessionId}/auto-evolve`, singleWorldPayload);
 }
 
 export function buildWorldlineSessionListPath({ projectId } = {}) {
@@ -33,21 +39,9 @@ export function issueAgentAction({ session_id: sessionId, ...payload }) {
   return post(`/api/worldline/session/${sessionId}/agent-action`, payload);
 }
 
-export function listWorldlineBranches(sessionId) {
-  return get(`/api/worldline/session/${sessionId}/branches`);
-}
-
-export function getWorldlineComparison(sessionId, branchIds = []) {
-  const params = new URLSearchParams();
-  if (branchIds.length) {
-    params.set("branch_ids", branchIds.join(","));
-  }
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  return get(`/api/worldline/session/${sessionId}/comparison${suffix}`);
-}
-
 export function getWorldlineTimeline(sessionId, branchId) {
-  return get(`/api/worldline/session/${sessionId}/branch/${branchId}/timeline`);
+  void branchId;
+  return get(`/api/worldline/session/${sessionId}/timeline`);
 }
 
 export function getWorldlineAgents(sessionId, branchId) {
@@ -58,6 +52,16 @@ export function getWorldlineAgents(sessionId, branchId) {
 export function getWorldlineAgentHistory(sessionId, filters = {}) {
   const suffix = buildWorldlineQuery(filters);
   return get(`/api/worldline/session/${sessionId}/agent-history${suffix}`);
+}
+
+export function getWorldlineAgentMemory(sessionId, filters = {}) {
+  const suffix = buildWorldlineQuery(filters);
+  return get(`/api/worldline/session/${sessionId}/agent-memory${suffix}`);
+}
+
+export function getWorldlineAgentMemoryContext(sessionId, filters = {}) {
+  const suffix = buildWorldlineQuery(filters);
+  return get(`/api/worldline/session/${sessionId}/agent-memory-context${suffix}`);
 }
 
 export function getWorldlineAgentActions(sessionId, filters = {}) {
@@ -82,6 +86,7 @@ function buildWorldlineQuery({
   agent_id: rawAgentId,
   status,
   limit,
+  message,
 } = {}) {
   const params = new URLSearchParams();
   const resolvedBranchId = branchId || rawBranchId;
@@ -97,6 +102,9 @@ function buildWorldlineQuery({
   }
   if (typeof limit === "number" && Number.isFinite(limit)) {
     params.set("limit", String(limit));
+  }
+  if (message) {
+    params.set("message", message);
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return suffix;

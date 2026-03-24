@@ -3,9 +3,21 @@
 }
 
 .panel {
+  min-height: 0;
+}
+
+.panel.panel-ready {
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
+  min-height: 100%;
+}
+
+.panel.panel-active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  min-height: 100%;
 }
 
 .panel-header,
@@ -52,6 +64,27 @@
   background: linear-gradient(180deg, rgba(244, 239, 226, 0.86), rgba(255, 255, 255, 0.96));
 }
 
+.source-section {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-ready .source-section {
+  min-height: 680px;
+}
+
+.panel-active .source-section {
+  min-height: 520px;
+}
+
+.launchpad-section {
+  z-index: 2;
+  box-shadow: 0 -12px 28px rgba(44, 42, 39, 0.06);
+  backdrop-filter: blur(10px);
+}
+
 .section-title,
 .action-box-title {
   margin: 0;
@@ -73,7 +106,8 @@
 }
 
 .summary-card,
-.action-box {
+.action-box,
+.launchpad-main {
   padding: 14px 16px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line-soft);
@@ -106,8 +140,14 @@
 }
 
 .setup-grid {
-  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.95fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.85fr);
   align-items: stretch;
+}
+
+.launchpad-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }
 
 .field {
@@ -124,6 +164,50 @@
   line-height: 1.7;
 }
 
+.mode-note {
+  margin-top: var(--space-sm);
+}
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.mode-chip {
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 250, 241, 0.95);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.mode-chip span {
+  color: var(--text-sub);
+  font-size: 13px;
+}
+
+.mode-chip.active {
+  border-color: rgba(176, 125, 75, 0.52);
+  background: #fff1d5;
+}
+
+.auto-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.field.compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .action-box {
   display: flex;
   flex-direction: column;
@@ -131,12 +215,13 @@
   justify-content: space-between;
 }
 
-.create-btn {
-  width: 100%;
+.launchpad-action {
+  background:
+    linear-gradient(180deg, rgba(255, 247, 234, 0.98), rgba(255, 255, 255, 0.96));
 }
 
-.runtime-section.inactive {
-  opacity: 0.8;
+.create-btn {
+  width: 100%;
 }
 
 .runtime-grid {
@@ -180,23 +265,16 @@
   color: var(--accent-seal);
 }
 
-.source-section :deep(.archive-museum) {
-  height: min(58vh, 700px);
+.source-section :deep(.archive-museum.variant-worldline) {
+  min-height: 0;
 }
 
-.source-section :deep(.museum-header) {
-  padding: var(--space-sm) var(--space-md);
-  gap: var(--space-md);
+.source-section :deep(.archive-museum.variant-worldline .museum-stage) {
+  min-height: 0;
 }
 
-.source-section :deep(.museum-grid) {
-  gap: var(--space-md);
-  grid-template-columns: minmax(0, 352px) minmax(0, 1fr);
-}
-
-.source-section :deep(.scroll-list),
-.source-section :deep(.museum-inspector) {
-  padding-right: 0;
+.source-section :deep(.archive-museum.variant-worldline .archive-pane) {
+  min-height: 0;
 }
 
 @media (max-width: 1280px) {
@@ -210,19 +288,23 @@
   .runtime-box:last-child {
     grid-column: span 2;
   }
-
-  .source-section :deep(.archive-museum) {
-    height: min(54vh, 640px);
-  }
 }
 
 @media (max-width: 960px) {
+  .panel.panel-ready {
+    height: auto;
+    grid-template-rows: auto;
+    overflow: visible;
+  }
+
   .panel-header,
   .section-head,
   .inject-row,
   .session-summary,
   .setup-grid,
-  .runtime-grid {
+  .runtime-grid,
+  .mode-grid,
+  .auto-config-grid {
     flex-direction: column;
     grid-template-columns: 1fr;
   }
@@ -232,8 +314,13 @@
     grid-column: auto;
   }
 
-  .source-section :deep(.archive-museum) {
-    height: min(60vh, 560px);
+  .source-section,
+  .panel-active .source-section {
+    min-height: 0;
+  }
+
+  .launchpad-section {
+    position: static;
   }
 }
 

@@ -108,7 +108,8 @@ def test_generated_novel_offline_pipeline(tmp_path, monkeypatch):
     assert worldline_resp.status_code == 200, worldline_resp.get_json()
     session_data = worldline_resp.get_json()["data"]
     session_id = session_data["session_id"]
-    assert session_data["branch_count"] == 2
+    assert session_data["branch_count"] == 1
+    assert session_data["current_world"]["branch_id"] == "main"
 
     dialogue_resp = client.post(
         f"/api/worldline/session/{session_id}/agent-dialogue",

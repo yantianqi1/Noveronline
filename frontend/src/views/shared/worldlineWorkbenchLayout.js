@@ -1,12 +1,12 @@
 export const WORLDLINE_LEFT_PANE_STORAGE_KEY = "mirofish.worldline.leftPaneWidth";
 export const WORLDLINE_WORKBENCH_DESKTOP_BREAKPOINT = 1360;
-export const WORLDLINE_LEFT_PANE_DEFAULT_WIDTH = 820;
-export const WORLDLINE_LEFT_PANE_MIN_WIDTH = 760;
-export const WORLDLINE_LEFT_PANE_MAX_WIDTH = 980;
+export const WORLDLINE_LEFT_PANE_DEFAULT_WIDTH = 980;
+export const WORLDLINE_LEFT_PANE_MIN_WIDTH = 900;
+export const WORLDLINE_LEFT_PANE_MAX_WIDTH = 1120;
 export const WORLDLINE_WORKBENCH_MODE_DESKTOP = "desktop";
 export const WORLDLINE_WORKBENCH_MODE_STACKED = "stacked";
 const VIEWPORT_WIDTH_FALLBACK = 1440;
-const LEFT_PANE_MAX_RATIO = 0.65;
+const LEFT_PANE_MAX_RATIO = 0.72;
 
 export function clampWorldlineLeftPaneWidth(width, viewportWidth) {
   const nextWidth = Number(width);

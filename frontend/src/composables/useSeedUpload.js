@@ -9,7 +9,7 @@ import {
   resetStructuredView,
 } from "./seedUploadTaskState";
 
-const DEFAULT_GOAL = "提取全部有名角色、组织和关系，用于平行世界推演。";
+const DEFAULT_GOAL = "提取全部有名角色、组织和关系，用于世界线推演。";
 let activeUploadPromise = null;
 let activeUploadRequest = null;
 const TASK_POLL_INTERVAL_MS = 1200;

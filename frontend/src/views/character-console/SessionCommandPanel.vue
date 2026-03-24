@@ -1,7 +1,7 @@
 <template>
   <article class="workbench-card panel">
     <h2 class="card-title">角色与关系控制台</h2>
-    <p>先选择世界线会话与分支，再从右侧名册点选对象并下达动作或发起对话。</p>
+    <p>先选择世界线会话，再从右侧名册点选对象并下达动作或发起对话。</p>
 
     <div class="field">
       <label>会话范围</label>
@@ -20,17 +20,8 @@
         </option>
       </select>
     </div>
-    <div class="field">
-      <label>分支</label>
-      <select :value="branchId" @change="emitUpdate('branchId', $event.target.value)">
-        <option value="">默认主分支</option>
-        <option v-for="item in branches" :key="item.branch_id" :value="item.branch_id">
-          {{ item.title || item.branch_id }}
-        </option>
-      </select>
-    </div>
 
-    <div class="session-summary" v-if="activeSession">
+    <div v-if="activeSession" class="session-summary">
       <strong>{{ formatSessionScope(activeSession.session_scope) }}</strong>
       <div class="mono">{{ activeSession.session_id }}</div>
       <p>{{ activeSession.simulation_goal || "暂无会话目标" }}</p>
@@ -40,6 +31,9 @@
       <strong>{{ selectedAgent.display_name }}</strong>
       <div class="mono">{{ formatAgentKind(selectedAgent.agent_kind) }} · {{ formatAgentStatus(selectedAgent.status) }}</div>
       <p>{{ selectedAgent.summary }}</p>
+      <div v-if="summaryLines.length" class="agent-highlights">
+        <div v-for="line in summaryLines" :key="line">{{ line }}</div>
+      </div>
     </div>
 
     <div class="field">
@@ -58,16 +52,17 @@
 </template>
 
 <script setup>
-import { formatAgentKind, formatAgentStatus, formatSessionScope } from "../../utils/chineseDisplay.js";
+import { computed } from "vue";
 
-defineProps({
+import { formatAgentKind, formatAgentStatus, formatSessionScope } from "../../utils/chineseDisplay.js";
+import { buildSelectedAgentSummaryLines } from "./agentDetailPresentation.js";
+
+const props = defineProps({
   projectFilter: { type: String, default: "" },
   projectSessionOptions: { type: Array, default: () => [] },
   sessions: { type: Array, default: () => [] },
   sessionId: { type: String, default: "" },
   sessionLabel: { type: Function, required: true },
-  branches: { type: Array, default: () => [] },
-  branchId: { type: String, default: "" },
   activeSession: { type: Object, default: null },
   selectedAgent: { type: Object, default: null },
   action: { type: String, default: "" },
@@ -76,7 +71,8 @@ defineProps({
   message: { type: String, default: "" },
 });
 
-const emit = defineEmits(["update:projectFilter", "update:sessionId", "update:branchId", "update:action", "submitAction"]);
+const emit = defineEmits(["update:projectFilter", "update:sessionId", "update:action", "submitAction"]);
+const summaryLines = computed(() => buildSelectedAgentSummaryLines(props.selectedAgent));
 
 function emitUpdate(field, value) {
   emit(`update:${field}`, value);
@@ -104,6 +100,13 @@ function emitUpdate(field, value) {
 .selected-agent p,
 .session-summary p {
   margin: 6px 0 0;
+}
+
+.agent-highlights {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+  color: var(--text-main);
 }
 
 .status-text.error {

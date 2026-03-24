@@ -18,3 +18,4 @@ from . import archive  # noqa: E402,F401
 from . import worldline_support  # noqa: E402,F401
 from . import worldline_session  # noqa: E402,F401
 from . import worldline_interaction  # noqa: E402,F401
+from . import worldline_auto_evolution  # noqa: E402,F401

@@ -159,14 +159,14 @@ def test_step_endpoint_accepts_evolution_intensity_and_custom_depth(tmp_path):
         json={"steps": 1, "evolution_intensity": "low", "custom_depth": 1},
     )
     assert step_resp.status_code == 200, step_resp.get_json()
-    summary = step_resp.get_json()["data"]["branch_summaries"][0]
-    assert summary["evolution_intensity"] == "low"
-    assert summary["evolution_depth"] == 1
+    current_world = step_resp.get_json()["data"]["current_world"]
+    assert current_world["evolution_intensity"] == "low"
+    assert current_world["evolution_depth"] == 1
 
     session_resp = client.get(f"/api/worldline/session/{session_id}")
     assert session_resp.status_code == 200, session_resp.get_json()
-    branch = session_resp.get_json()["data"]["branches"][0]
-    assert branch["evolution_intensity"] == "low"
-    assert branch["evolution_depth"] == 1
-    assert branch["actor_states"]["秦昭"]["status"] == "engaged"
-    assert branch["actor_states"]["苏半夏"]["last_event"] == "seed"
+    current_world = session_resp.get_json()["data"]["current_world"]
+    assert current_world["evolution_intensity"] == "low"
+    assert current_world["evolution_depth"] == 1
+    assert current_world["actor_states"]["秦昭"]["status"] == "engaged"
+    assert current_world["actor_states"]["苏半夏"]["last_event"] == "seed"

@@ -1,0 +1,282 @@
+.director-panel {
+  padding: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(232, 210, 174, 0.24), transparent 28%),
+    linear-gradient(180deg, rgba(255, 252, 245, 0.98) 0%, rgba(252, 244, 231, 0.98) 100%);
+}
+
+.director-header,
+.section-head,
+.lane-head,
+.lane-meta,
+.spotlight-head,
+.block-head,
+.dispatch-head,
+.shift-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.director-kicker,
+.section-index,
+.story-label,
+.spotlight-step {
+  color: var(--text-sub);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.director-copy,
+.section-copy,
+.spotlight-copy,
+.dispatch-meta,
+.dispatch-drive,
+.mini-empty,
+.empty-shift,
+.shift-box p {
+  color: var(--text-sub);
+}
+
+.director-header {
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(201, 176, 139, 0.4);
+}
+
+.focus-pill,
+.lane-status,
+.spotlight-status,
+.driver-chip,
+.status-pill {
+  border-radius: 999px;
+}
+
+.focus-pill {
+  min-width: 160px;
+  padding: 12px 14px;
+  background: linear-gradient(180deg, rgba(246, 231, 202, 0.96) 0%, rgba(234, 214, 179, 0.96) 100%);
+  border: 1px solid rgba(160, 120, 66, 0.28);
+  display: grid;
+  gap: 4px;
+}
+
+.director-section {
+  margin-top: 18px;
+}
+
+.lane-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.lane-card {
+  border: 1px solid rgba(191, 158, 117, 0.38);
+  border-radius: 16px;
+  padding: 14px;
+  background:
+    linear-gradient(90deg, rgba(255, 251, 242, 0.96) 0%, rgba(252, 242, 224, 0.98) 100%);
+  text-align: left;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.lane-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 28px rgba(118, 88, 43, 0.1);
+}
+
+.lane-card.active {
+  border-color: rgba(130, 92, 43, 0.75);
+  box-shadow: 0 18px 32px rgba(118, 88, 43, 0.12);
+  background:
+    linear-gradient(90deg, rgba(255, 246, 229, 0.98) 0%, rgba(249, 232, 199, 0.98) 100%);
+}
+
+.lane-card.running {
+  position: relative;
+}
+
+.lane-card.running::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  box-shadow: inset 0 0 0 1px rgba(185, 134, 68, 0.18);
+  pointer-events: none;
+}
+
+.lane-status,
+.spotlight-status {
+  padding: 6px 10px;
+  background: rgba(245, 226, 192, 0.96);
+  color: #724e1f;
+}
+
+.lane-meta,
+.chip-row {
+  margin-top: 8px;
+}
+
+.lane-progress {
+  margin-top: 10px;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(190, 161, 121, 0.18);
+}
+
+.lane-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #cf9d50 0%, #8b693d 100%);
+}
+
+.lane-event {
+  margin-top: 10px;
+  font-weight: 700;
+  color: #533b1b;
+}
+
+.chip-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.driver-chip {
+  padding: 5px 10px;
+  background: rgba(250, 236, 212, 0.92);
+  color: #6e5124;
+}
+
+.driver-chip.active {
+  background: rgba(214, 170, 106, 0.22);
+  color: #5a3d13;
+}
+
+.driver-chip.muted {
+  background: rgba(246, 239, 228, 0.92);
+  color: #8f7c5b;
+}
+
+.narrative-shell {
+  padding: 16px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255, 251, 244, 0.9) 0%, rgba(250, 241, 223, 0.88) 100%);
+  border: 1px solid rgba(194, 159, 118, 0.34);
+}
+
+.narrative-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 12px;
+}
+
+.narrative-card,
+.shift-card {
+  border: 1px solid rgba(199, 173, 133, 0.34);
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.spotlight {
+  grid-column: 1 / -1;
+  background:
+    linear-gradient(135deg, rgba(255, 250, 242, 0.96) 0%, rgba(245, 228, 197, 0.98) 100%);
+}
+
+.story-block + .story-block,
+.pending-grid,
+.relation-list,
+.force-list {
+  margin-top: 12px;
+}
+
+.story-label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.dispatch-list,
+.force-list,
+.shift-feed {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.dispatch-card,
+.force-card,
+.pending-box,
+.relation-card,
+.shift-box {
+  border: 1px solid rgba(211, 190, 156, 0.32);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(255, 251, 245, 0.78);
+}
+
+.dispatch-card.driver {
+  background: linear-gradient(180deg, rgba(255, 244, 223, 0.95) 0%, rgba(252, 236, 207, 0.98) 100%);
+}
+
+.pending-grid,
+.shift-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.relation-list {
+  display: grid;
+  gap: 8px;
+}
+
+.relation-card p,
+.pending-box p {
+  margin: 6px 0 0;
+}
+
+.shift-feed {
+  margin-top: 12px;
+}
+
+.shift-grid {
+  margin-top: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.empty-shift {
+  margin-top: 12px;
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(255, 250, 243, 0.78);
+  border: 1px dashed rgba(200, 177, 144, 0.48);
+}
+
+@media (max-width: 1080px) {
+  .narrative-grid,
+  .pending-grid,
+  .shift-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-pill {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .director-header,
+  .section-head,
+  .lane-head,
+  .lane-meta,
+  .spotlight-head,
+  .block-head,
+  .dispatch-head,
+  .shift-head {
+    flex-direction: column;
+  }
+}

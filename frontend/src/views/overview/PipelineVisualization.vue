@@ -13,14 +13,14 @@
     </div>
 
     <div class="pipeline-flow">
-      <template v-for="(node, index) in nodes" :key="node.stage">
-        <div class="pipeline-node" :class="node.state" :title="node.tooltip">
+      <article v-for="(node, index) in nodes" :key="node.stage" class="pipeline-node" :class="node.state" :title="node.tooltip">
+        <div class="node-top">
           <span class="mono node-code">{{ String(index + 1).padStart(2, "0") }}</span>
-          <strong>{{ node.title }}</strong>
-          <small>{{ node.detail }}</small>
+          <span class="node-state-chip">{{ formatNodeState(node.state) }}</span>
         </div>
-        <div v-if="index < nodes.length - 1" class="flow-arrow" :class="arrowState(index)"></div>
-      </template>
+        <strong>{{ node.title }}</strong>
+        <small>{{ node.detail }}</small>
+      </article>
     </div>
   </section>
 </template>
@@ -93,14 +93,17 @@ function nodeState(index, stage) {
   return "pending";
 }
 
-function arrowState(index) {
-  if (props.taskStatus === "completed" || props.activeStage?.key === "completed") {
-    return "done";
+function formatNodeState(state) {
+  if (state === "done") {
+    return "已完成";
   }
-  if (stageIndex.value > index) {
-    return "done";
+  if (state === "active") {
+    return "当前";
   }
-  return "pending";
+  if (state === "failed") {
+    return "中断";
+  }
+  return "待命";
 }
 </script>
 
@@ -162,16 +165,13 @@ function arrowState(index) {
 
 .pipeline-flow {
   margin-top: 16px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
 }
 
 .pipeline-node {
-  min-width: 170px;
-  flex: 0 0 170px;
+  min-width: 0;
   min-height: 126px;
   border-radius: 16px;
   border: 1px solid var(--line-soft);
@@ -180,11 +180,38 @@ function arrowState(index) {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  position: relative;
+  overflow: hidden;
+}
+
+.pipeline-node::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: rgba(159, 141, 106, 0.22);
+}
+
+.node-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 .node-code {
   font-size: 12px;
   color: var(--text-sub);
+}
+
+.node-state-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-sub);
+  background: rgba(159, 141, 106, 0.1);
 }
 
 .pipeline-node strong {
@@ -204,6 +231,16 @@ function arrowState(index) {
   border-color: rgba(200, 124, 56, 0.42);
   background: linear-gradient(180deg, rgba(255, 242, 210, 0.98), rgba(255, 251, 243, 0.96));
   box-shadow: 0 12px 24px rgba(200, 124, 56, 0.12);
+  transform: translateY(-2px);
+}
+
+.pipeline-node.active::before {
+  background: linear-gradient(90deg, rgba(200, 124, 56, 0.95), rgba(200, 124, 56, 0.25));
+}
+
+.pipeline-node.active .node-state-chip {
+  color: var(--accent-copper-deep);
+  background: rgba(200, 124, 56, 0.14);
 }
 
 .pipeline-node.done {
@@ -211,20 +248,27 @@ function arrowState(index) {
   background: rgba(240, 249, 243, 0.92);
 }
 
+.pipeline-node.done::before {
+  background: linear-gradient(90deg, rgba(56, 106, 79, 0.88), rgba(56, 106, 79, 0.18));
+}
+
+.pipeline-node.done .node-state-chip {
+  color: var(--accent-green);
+  background: rgba(56, 106, 79, 0.12);
+}
+
 .pipeline-node.failed {
   border-color: rgba(155, 67, 38, 0.36);
   background: rgba(255, 241, 235, 0.95);
 }
 
-.flow-arrow {
-  flex: 0 0 28px;
-  height: 2px;
-  border-radius: 999px;
-  background: rgba(159, 141, 106, 0.18);
+.pipeline-node.failed::before {
+  background: linear-gradient(90deg, rgba(155, 67, 38, 0.9), rgba(155, 67, 38, 0.22));
 }
 
-.flow-arrow.done {
-  background: linear-gradient(90deg, rgba(56, 106, 79, 0.65), rgba(56, 106, 79, 0.2));
+.pipeline-node.failed .node-state-chip {
+  color: var(--accent-seal);
+  background: rgba(155, 67, 38, 0.12);
 }
 
 @media (max-width: 980px) {

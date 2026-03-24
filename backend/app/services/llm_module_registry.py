@@ -20,8 +20,10 @@ MODULE_DEFINITIONS = (
     LlmModuleDefinition("anchor_point_summary", "剧情锚点摘要", "在并发提取前生成区间级世界状态锚点。"),
     LlmModuleDefinition("entity_resolution", "实体消歧", "在全局故事记忆上判断相似实体是否应合并。"),
     LlmModuleDefinition("narrative_archives", "角色势力档案生成", "把实体转换为可用于推演的角色与组织档案。"),
-    LlmModuleDefinition("parallel_world_config", "平行世界配置生成", "根据变量与角色网络生成平行世界分支配置。"),
+    LlmModuleDefinition("parallel_world_config", "世界线起始配置生成", "根据变量与角色网络生成当前世界的起始设定草案。"),
     LlmModuleDefinition("worldline_agent_dialogue", "世界线 Agent 对话", "为世界线角色或组织生成显式请求的对话回复。"),
+    LlmModuleDefinition("worldline_agent_action", "世界线 Agent 自动动作", "为世界线自动演化生成每轮优先动作。"),
+    LlmModuleDefinition("worldline_goal_evaluator", "世界线目标判定", "判断当前世界线是否达成创作者设定的自然语言目标。"),
 )
 
 STAGE_TO_MODULE_KEY = {

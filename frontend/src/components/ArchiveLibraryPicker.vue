@@ -1,10 +1,25 @@
 <template>
-  <div class="archive-museum stack">
-    <header class="museum-header workbench-card">
+  <div
+    ref="stageRef"
+    class="archive-museum"
+    :class="[
+      layoutMode,
+      `variant-${pickerLayout.variant}`,
+      {
+        resizing,
+        'compact-toolbar': pickerLayout.compactToolbar,
+        'single-column-list': pickerLayout.singleColumnList,
+        'viewport-bound': pickerLayout.bindViewportHeight,
+      },
+    ]"
+    :style="stageStyle"
+  >
+    <header class="museum-toolbar workbench-card" :class="{ compact: pickerLayout.compactToolbar }">
       <div class="search-box">
         <span class="search-icon">🔍</span>
         <input v-model="searchText" placeholder="搜寻角色、组织、动机、关系..." />
       </div>
+
       <div class="filter-controls">
         <div class="filter-group">
           <label>卷宗</label>
@@ -15,6 +30,7 @@
             </option>
           </select>
         </div>
+
         <div class="filter-group">
           <label>类别</label>
           <select v-model="entityType">
@@ -23,6 +39,7 @@
             <option value="Organization">组织</option>
           </select>
         </div>
+
         <div class="filter-group">
           <label>位阶</label>
           <select v-model="importanceTier">
@@ -35,15 +52,23 @@
       </div>
     </header>
 
-    <main class="museum-grid">
-      <section class="museum-list stack">
-        <div class="list-status">
-          <span v-if="loading" class="mono">载入中...</span>
-          <span v-else class="mono">找到 {{ total }} 条档案</span>
-          <div class="selection-summary" v-if="selectedArchives.length">
-            {{ selectedArchives.length }} 已选
+    <main class="museum-stage" :class="{ 'no-divider': !pickerLayout.enableResize }">
+      <section class="archive-pane list-pane">
+        <div class="pane-head">
+          <div class="pane-copy">
+            <p class="pane-kicker mono">ARCHIVE SHELVES</p>
+            <h3>档案目录</h3>
+            <p>统一检索、筛选并挑选进入会话的角色与组织档案。</p>
+          </div>
+          <div class="list-summary">
+            <span v-if="loading" class="mono">载入中...</span>
+            <span v-else class="mono">找到 {{ total }} 条档案</span>
+            <span v-if="selectedArchives.length" class="selection-summary">
+              {{ selectedArchives.length }} 已选
+            </span>
           </div>
         </div>
+
         <p v-if="error" class="error-text">{{ error }}</p>
 
         <div class="scroll-list">
@@ -56,6 +81,7 @@
             @select="selectActive(item)"
             @toggle="toggleSelected(item)"
           />
+
           <div v-if="!items.length && !loading" class="empty-museum">
             <div class="empty-icon">📜</div>
             <p>未找到符合条件的档案</p>
@@ -63,34 +89,57 @@
         </div>
       </section>
 
-      <aside class="museum-inspector">
-        <ArchiveLibraryDetailCard
-          :archive="activeDetail"
-          :selected="selectedIdSet.has(activeDetail?.archive_id)"
-          @toggle="toggleSelected(activeDetail)"
-        />
+      <button
+        v-if="pickerLayout.enableResize"
+        class="museum-divider"
+        type="button"
+        aria-label="拖拽调整档案列表与详情宽度"
+        aria-orientation="vertical"
+        @pointerdown.prevent="beginResize"
+      >
+        <span></span>
+      </button>
+
+      <aside class="archive-pane detail-pane">
+        <div class="pane-head detail-head">
+          <div class="pane-copy">
+            <p class="pane-kicker mono">DOSSIER VIEW</p>
+            <h3>{{ activeDetail ? activeDetail.entity_name : "档案详情" }}</h3>
+            <p>右侧保留完整档案，便于边筛选边确认人物、势力与关系脉络。</p>
+          </div>
+          <p class="detail-hint">{{ activeDetail ? "当前聚焦卷宗" : "等待选中档案" }}</p>
+        </div>
+
+        <div class="detail-scroll">
+          <ArchiveLibraryDetailCard
+            :archive="activeDetail"
+            :selected="selectedIdSet.has(activeDetail?.archive_id)"
+            @toggle="toggleSelected(activeDetail)"
+          />
+        </div>
       </aside>
     </main>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { getArchiveLibraryDetail, listArchiveLibrary } from "../api/archive.js";
 import { listProjects } from "../api/project.js";
 import ArchiveLibraryDetailCard from "./ArchiveLibraryDetailCard.vue";
 import ArchiveLibraryGridItem from "./ArchiveLibraryGridItem.vue";
+import { useArchiveLibraryLayout } from "../composables/useArchiveLibraryLayout.js";
+import { resolveArchiveLibraryPickerLayoutVariant } from "../views/shared/archiveLibraryPickerLayout.js";
 import { toggleArchiveSelection } from "../views/shared/worldlineSelectorState.js";
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
   projectFilter: { type: String, default: "" },
-  title: { type: String, default: "全局档案库" },
-  description: { type: String, default: "从所有项目档案里统一检索并选择角色、组织档案。" },
+  layoutVariant: { type: String, default: "default" },
 });
 
-const emit = defineEmits(["update:modelValue", "update:projectFilter"]);
+const emit = defineEmits(["update:model-value", "update:project-filter"]);
 
 const searchText = ref("");
 const localProjectFilter = ref(props.projectFilter);
@@ -107,18 +156,45 @@ let reloadTimer = 0;
 
 const selectedArchives = computed(() => props.modelValue || []);
 const selectedIdSet = computed(() => new Set(selectedArchives.value.map((item) => item.archive_id)));
+const pickerLayout = computed(() => resolveArchiveLibraryPickerLayoutVariant(props.layoutVariant));
+const { beginResize, layoutMode, resizing, stageRef, stageStyle } = useArchiveLibraryLayout();
 
-watch(() => props.projectFilter, (v) => { localProjectFilter.value = v || ""; });
-watch(localProjectFilter, (v) => { emit("update:projectFilter", v); });
-
-watch([searchText, localProjectFilter, entityType, importanceTier], () => {
-  clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => { loadItems(); }, 200);
+watch(() => props.projectFilter, (value) => {
+  localProjectFilter.value = value || "";
 });
+
+watch(localProjectFilter, (value) => {
+  emit("update:project-filter", value);
+});
+
+watch([searchText, localProjectFilter, entityType, importanceTier], scheduleReload);
 
 async function loadProjects() {
   const response = await listProjects(100);
   projectOptions.value = response.data || [];
+}
+
+function scheduleReload() {
+  clearTimeout(reloadTimer);
+  reloadTimer = window.setTimeout(() => {
+    loadItems();
+  }, 200);
+}
+
+async function syncActiveArchive(nextItems) {
+  if (!nextItems.length) {
+    activeArchiveId.value = "";
+    activeDetail.value = null;
+    return;
+  }
+  const currentItem = nextItems.find((item) => item.archive_id === activeArchiveId.value);
+  if (currentItem) {
+    if (!activeDetail.value || activeDetail.value.archive_id !== currentItem.archive_id) {
+      activeDetail.value = currentItem;
+    }
+    return;
+  }
+  await selectActive(nextItems[0]);
 }
 
 async function loadItems() {
@@ -134,14 +210,13 @@ async function loadItems() {
     });
     items.value = response.data?.items || [];
     total.value = response.data?.total || 0;
-    if (!activeArchiveId.value && items.value[0]) {
-      await selectActive(items.value[0]);
-    }
+    await syncActiveArchive(items.value);
   } catch (err) {
     items.value = [];
     total.value = 0;
+    activeArchiveId.value = "";
     activeDetail.value = null;
-    error.value = err.message;
+    error.value = err.message || "档案读取失败";
   } finally {
     loading.value = false;
   }
@@ -158,16 +233,25 @@ async function selectActive(item) {
 }
 
 function toggleSelected(item) {
-  if (!item) return;
-  emit("update:modelValue", toggleArchiveSelection(selectedArchives.value, item));
+  if (!item) {
+    return;
+  }
+  emit("update:model-value", toggleArchiveSelection(selectedArchives.value, item));
 }
 
-function reload() { return loadItems(); }
+function reload() {
+  return loadItems();
+}
+
 defineExpose({ reload });
 
 onMounted(async () => {
   await loadProjects();
   await loadItems();
+});
+
+onBeforeUnmount(() => {
+  clearTimeout(reloadTimer);
 });
 </script>
 

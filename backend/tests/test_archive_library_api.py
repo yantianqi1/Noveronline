@@ -1,3 +1,5 @@
+import sqlite3
+
 from app import create_app
 from app.config import Config
 from app.models.project import ProjectManager
@@ -33,7 +35,25 @@ def _make_archive(entity_uuid: str, entity_name: str, entity_type: str, importan
         "entity_uuid": entity_uuid,
         "entity_name": entity_name,
         "entity_type": entity_type,
+        "agent_kind": "organization" if entity_type == "Organization" else "character",
         "importance_tier": importance_tier,
+        "recommended_importance_tier": importance_tier,
+        "selected_importance_tier": importance_tier,
+        "template_key": f"{'organization' if entity_type == 'Organization' else 'character'}.{importance_tier}.v1",
+        "template_version": "v1",
+        "template_sections": ["identity", "motivation", "state"],
+        "template_payload": {
+            "identity": {"label": f"{entity_name} 身份"},
+            "motivation": {"core_drive": core_drive},
+            "state": {"status": "active"},
+        },
+        "template_metadata": {
+            "version": "v1",
+            "recommended_importance_tier": importance_tier,
+            "selected_importance_tier": importance_tier,
+            "user_override": False,
+            "source": "test_fixture",
+        },
         "entity_role": f"{entity_name} 的定位",
         "core_drive": core_drive,
         "surface_mask": f"{entity_name} 的外在形象",
@@ -86,6 +106,37 @@ def _create_app_client(tmp_path, monkeypatch):
     return app.test_client()
 
 
+def _create_legacy_archive_library_db(upload_root):
+    db_dir = upload_root / "system"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_dir / Config.ARCHIVE_LIBRARY_DB_FILENAME)
+    connection.execute(
+        """
+        CREATE TABLE archive_library (
+            archive_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            entity_uuid TEXT NOT NULL,
+            entity_name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            importance_tier TEXT NOT NULL,
+            entity_role TEXT NOT NULL,
+            core_drive TEXT NOT NULL,
+            surface_mask TEXT NOT NULL,
+            hidden_tension TEXT NOT NULL,
+            relationship_summary TEXT NOT NULL,
+            agent_behavior_hint TEXT NOT NULL,
+            human_ai_relation_tag TEXT NOT NULL,
+            can_act_as_agent INTEGER NOT NULL DEFAULT 1,
+            notable_risks TEXT NOT NULL,
+            synced_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+
 def test_archive_library_indexes_existing_project_archives(tmp_path, monkeypatch):
     client = _create_app_client(tmp_path, monkeypatch)
     project_a = _create_project("甲项目", "观察主角命运")
@@ -128,6 +179,23 @@ def test_archive_library_indexes_existing_project_archives(tmp_path, monkeypatch
     assert reindex_response.get_json()["data"]["count"] == 3
 
 
+def test_archive_library_migrates_legacy_notable_risks_column(tmp_path, monkeypatch):
+    upload_root = _configure_storage(tmp_path, monkeypatch)
+    _create_legacy_archive_library_db(upload_root)
+    app = create_app()
+    client = app.test_client()
+    project = _create_project("旧档案库项目", "观察旧库兼容")
+    _save_archives(project, [_make_archive("char_1", "沈夜", "Character", "protagonist", "查清真相")])
+
+    response = client.get(f"/api/archive/library?project_id={project.project_id}")
+
+    assert response.status_code == 200, response.get_json()
+    items = response.get_json()["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["entity_name"] == "沈夜"
+    assert items[0]["notable_risks"] == ["风险A", "风险B"]
+
+
 def test_generate_archives_syncs_global_archive_library(tmp_path, monkeypatch):
     client = _create_app_client(tmp_path, monkeypatch)
     project = _create_project("自动归档项目", "观察角色和组织演化")
@@ -143,7 +211,74 @@ def test_generate_archives_syncs_global_archive_library(tmp_path, monkeypatch):
     library_response = client.get(f"/api/archive/library?project_id={project.project_id}")
     assert library_response.status_code == 200, library_response.get_json()
     library_items = library_response.get_json()["data"]["items"]
-    assert {item["entity_name"] for item in library_items} == {"沈夜", "玄霄宗"}
+    assert {item["entity_name"] for item in library_items} == {"沈夜", "玄霄宗", "沈夜 × 玄霄宗"}
+
+
+def test_archive_candidates_return_template_recommendations_and_relationships(tmp_path, monkeypatch):
+    client = _create_app_client(tmp_path, monkeypatch)
+    project = _create_project("候选档案项目", "观察关系演化")
+    _save_seed_analysis(project)
+
+    response = client.post("/api/novel/archives/candidates", json={"project_id": project.project_id})
+
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()["data"]
+    assert payload["count"] == 3
+    items = payload["candidates"]
+    shenye = next(item for item in items if item["display_name"] == "沈夜")
+    relation = next(item for item in items if item["agent_kind"] == "relationship")
+    assert shenye["recommended_importance_tier"] == "protagonist"
+    assert shenye["selected_importance_tier"] == "protagonist"
+    assert shenye["template_key"] == "character.protagonist.v1"
+    assert "private" in shenye["template_sections"]
+    assert relation["display_name"] == "沈夜 × 玄霄宗"
+    assert relation["template_key"] == "relationship.protagonist.v1"
+    assert "relationship" in relation["template_sections"]
+
+
+def test_generate_archives_persists_template_fields_and_override_metadata(tmp_path, monkeypatch):
+    client = _create_app_client(tmp_path, monkeypatch)
+    project = _create_project("模板归档项目", "观察角色和组织演化")
+    _save_seed_analysis(project)
+
+    response = client.post(
+        "/api/novel/archives/generate",
+        json={
+            "project_id": project.project_id,
+            "use_llm": False,
+            "tier_overrides": [
+                {"entity_uuid": "seed_character_沈夜", "importance_tier": "major"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    archives = response.get_json()["data"]["archives"]
+    shenye = next(item for item in archives if item["entity_name"] == "沈夜")
+    relation = next(item for item in archives if item["agent_kind"] == "relationship")
+    assert shenye["importance_tier"] == "major"
+    assert shenye["recommended_importance_tier"] == "protagonist"
+    assert shenye["selected_importance_tier"] == "major"
+    assert shenye["template_key"] == "character.major.v1"
+    assert shenye["template_sections"] == [
+        "identity",
+        "motivation",
+        "tension",
+        "relationship",
+        "behavior",
+        "state",
+        "risk",
+    ]
+    assert shenye["template_metadata"]["user_override"] is True
+    assert relation["template_payload"]["relationship"]["source"] == "沈夜"
+
+    detail_response = client.get(f"/api/archive/library/{shenye['archive_id']}")
+    assert detail_response.status_code == 200, detail_response.get_json()
+    detail = detail_response.get_json()["data"]
+    assert detail["agent_kind"] == "character"
+    assert detail["template_key"] == "character.major.v1"
+    assert detail["selected_importance_tier"] == "major"
+    assert detail["template_payload"]["motivation"]["core_drive"] == "推动自己在主线中的目标"
 
 
 def test_worldline_session_create_accepts_archive_ids_from_single_project(tmp_path, monkeypatch):

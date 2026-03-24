@@ -107,3 +107,17 @@ def test_llm_facility_rejects_binding_to_disabled_channel(tmp_path, monkeypatch)
 
     assert bind_response.status_code == 400
     assert "渠道已停用" in bind_response.get_json()["error"]
+
+
+def test_llm_facility_lists_worldline_auto_evolution_modules(tmp_path, monkeypatch):
+    monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path / "uploads"))
+    monkeypatch.setattr("app.services.llm_settings_service.OpenAI", DummyOpenAI)
+    app = create_app()
+    client = app.test_client()
+
+    snapshot_response = client.get("/api/llm/settings")
+    assert snapshot_response.status_code == 200
+    module_keys = {item["module_key"] for item in snapshot_response.get_json()["data"]["modules"]}
+
+    assert "worldline_agent_action" in module_keys
+    assert "worldline_goal_evaluator" in module_keys

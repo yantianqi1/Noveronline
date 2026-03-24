@@ -8,14 +8,18 @@ from flask import jsonify, request
 
 from .worldline_support import (
     character_agent_service,
+    current_world_payload,
     error,
     ok,
     project_graph_from_request,
+    requested_branch_id,
     worldline_agent_registry,
     worldline_bp,
     worldline_engine,
+    worldline_memory_service,
     worldline_runtime_service,
 )
+from ..services.worldline_single_world import current_world
 
 
 def _variable_payload(data):
@@ -36,8 +40,8 @@ def _variable_payload(data):
 
 
 def _target_branch(session, branch_id):
-    branch = next((item for item in session.branches if item.branch_id == branch_id), None) if branch_id else None
-    return branch or session.branches[0]
+    requested_branch_id({"branch_id": branch_id})
+    return current_world(session)
 
 
 def _session_context(session_id: str, request_data):
@@ -69,6 +73,17 @@ def _dialogue_context_summary(branch, agent):
     return f"{branch.title} | step={branch.current_step} | agent={agent['display_name']} | core={branch.core_change}"
 
 
+def _memory_bundle(session, container_dir, branch, agent, message, limit):
+    return worldline_memory_service.build_context_bundle(
+        container_dir,
+        session.session_id,
+        branch.branch_id,
+        agent,
+        message,
+        limit,
+    )
+
+
 @worldline_bp.route("/session/<session_id>/agents", methods=["GET"])
 def list_worldline_agents(session_id: str):
     try:
@@ -82,6 +97,8 @@ def list_worldline_agents(session_id: str):
             "counts": worldline_agent_registry.count_by_kind(agents),
             "agents": [_public_agent(item) for item in agents],
         })
+    except ValueError as exc:
+        return error(str(exc), 400)
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500
 
@@ -104,20 +121,7 @@ def step_worldline_session(session_id: str):
             "session_id": session.session_id,
             "updated_at": session.updated_at,
             "message": f"世界线已推进 {data.get('steps', 1)} 步",
-            "branch_summaries": [
-                {
-                    "branch_id": branch.branch_id,
-                    "title": branch.title,
-                    "current_step": branch.current_step,
-                    "latest_event": branch.timeline[-1].to_dict() if branch.timeline else None,
-                    "pending_variables": len(branch.pending_variables),
-                    "pending_actions": len(branch.pending_actions),
-                    "evolution_intensity": branch.evolution_intensity,
-                    "evolution_depth": branch.evolution_depth,
-                }
-                for branch in session.branches
-                if not data.get("branch_id") or branch.branch_id == data.get("branch_id")
-            ],
+            "current_world": current_world_payload(session),
         })
     except ValueError as exc:
         return error(str(exc), 400)
@@ -144,10 +148,7 @@ def inject_variable(session_id: str):
             "session_id": session.session_id,
             "message": "变量注入成功",
             "world_variables": [item.to_dict() for item in session.world_variables],
-            "branches": [
-                {"branch_id": branch.branch_id, "pending_variables": len(branch.pending_variables)}
-                for branch in session.branches
-            ],
+            "current_world": current_world_payload(session),
         })
     except ValueError as exc:
         return error(str(exc), 400)
@@ -188,10 +189,7 @@ def inject_agent_action(session_id: str):
                 "display_name": agent["display_name"],
                 "agent_kind": agent["agent_kind"],
             },
-            "branches": [
-                {"branch_id": branch.branch_id, "pending_actions": len(branch.pending_actions)}
-                for branch in session.branches
-            ],
+            "current_world": current_world_payload(session),
         })
     except ValueError as exc:
         return error(str(exc), 400)
@@ -215,6 +213,14 @@ def agent_dialogue(session_id: str):
         agent_error = None if agent else error(f"世界线中不存在 agent: {actor_name}", 404)
         if agent_error:
             return agent_error
+        memory_bundle = _memory_bundle(
+            session,
+            container_dir,
+            branch,
+            agent,
+            message,
+            data.get("limit", 20),
+        )
         result = character_agent_service.generate_reply(
             actor_name=agent["display_name"],
             actor_state=agent["state"],
@@ -222,6 +228,7 @@ def agent_dialogue(session_id: str):
             recent_events=[item.to_dict() for item in branch.timeline[-4:]],
             branch_summary={"branch_id": branch.branch_id, "title": branch.title, "core_change": branch.core_change},
             mode=mode,
+            memory_bundle=memory_bundle,
         )
         dialogue_id = worldline_runtime_service.record_dialogue(
             container_dir,
@@ -242,6 +249,7 @@ def agent_dialogue(session_id: str):
             "dialogue_id": dialogue_id,
             "generator_mode": result["generator_mode"],
             "model_name": result["model_name"],
+            "memory_context": memory_bundle,
             "result": result,
         })
     except ValueError as exc:
@@ -287,12 +295,75 @@ def list_agent_actions(session_id: str):
         items = worldline_runtime_service.list_actions(
             container_dir,
             session.session_id,
-            request.args.get("branch_id"),
+            requested_branch_id(request.args),
             request.args.get("agent_id"),
             request.args.get("status"),
             request.args.get("limit", default=20, type=int),
         )
         return ok({"session_id": session.session_id, "items": items})
+    except ValueError as exc:
+        return error(str(exc), 400)
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500
+
+
+@worldline_bp.route("/session/<session_id>/agent-memory", methods=["GET"])
+def get_agent_memory(session_id: str):
+    try:
+        session, container_dir, branch = _branch_context(session_id, request.args)
+        if not session:
+            return error(f"世界线会话不存在: {session_id}", 404)
+        agent_ref = (request.args.get("agent_id") or "").strip()
+        if not agent_ref:
+            return error("请提供 agent_id", 400)
+        agent = worldline_runtime_service.resolve_agent(container_dir, session, branch.branch_id, agent_ref)
+        if not agent:
+            return error(f"世界线中不存在 agent: {agent_ref}", 404)
+        payload = worldline_memory_service.agent_memories(
+            container_dir,
+            session.session_id,
+            branch.branch_id,
+            agent,
+            request.args.get("limit", default=20, type=int),
+        )
+        return ok({
+            "session_id": session.session_id,
+            "branch_id": branch.branch_id,
+            "agent_id": agent["agent_id"],
+            **payload,
+        })
+    except ValueError as exc:
+        return error(str(exc), 400)
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc), "traceback": traceback.format_exc()}), 500
+
+
+@worldline_bp.route("/session/<session_id>/agent-memory-context", methods=["GET"])
+def get_agent_memory_context(session_id: str):
+    try:
+        session, container_dir, branch = _branch_context(session_id, request.args)
+        if not session:
+            return error(f"世界线会话不存在: {session_id}", 404)
+        agent_ref = (request.args.get("agent_id") or "").strip()
+        if not agent_ref:
+            return error("请提供 agent_id", 400)
+        agent = worldline_runtime_service.resolve_agent(container_dir, session, branch.branch_id, agent_ref)
+        if not agent:
+            return error(f"世界线中不存在 agent: {agent_ref}", 404)
+        payload = _memory_bundle(
+            session,
+            container_dir,
+            branch,
+            agent,
+            request.args.get("message", ""),
+            request.args.get("limit", default=20, type=int),
+        )
+        return ok({
+            "session_id": session.session_id,
+            "branch_id": branch.branch_id,
+            "agent_id": agent["agent_id"],
+            **payload,
+        })
     except ValueError as exc:
         return error(str(exc), 400)
     except Exception as exc:
@@ -308,7 +379,7 @@ def list_agent_dialogues(session_id: str):
         items = worldline_runtime_service.list_dialogues(
             container_dir,
             session.session_id,
-            request.args.get("branch_id"),
+            requested_branch_id(request.args),
             request.args.get("agent_id"),
             request.args.get("limit", default=20, type=int),
         )
@@ -328,7 +399,7 @@ def list_relation_history(session_id: str):
         items = worldline_runtime_service.list_relation_history(
             container_dir,
             session.session_id,
-            request.args.get("branch_id"),
+            requested_branch_id(request.args),
             request.args.get("agent_id"),
             request.args.get("limit", default=20, type=int),
         )

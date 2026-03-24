@@ -98,8 +98,9 @@ const mainNav = [
   { path: "/", label: "总览", code: "00" },
   { path: "/archive-library", label: "档案库", code: "01" },
   { path: "/story-graph", label: "故事图谱", code: "02" },
-  { path: "/worldline", label: "世界线", code: "03" },
-  { path: "/character-console", label: "角色控制", code: "04" },
+  { path: "/writer", label: "写作台", code: "03" },
+  { path: "/worldline", label: "世界线", code: "04" },
+  { path: "/character-console", label: "角色控制", code: "05" },
 ];
 
 const subNav = [
