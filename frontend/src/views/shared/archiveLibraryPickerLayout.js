@@ -8,6 +8,9 @@ const ARCHIVE_LIBRARY_PICKER_LAYOUTS = Object.freeze({
     bindViewportHeight: true,
     singleColumnList: false,
     compactToolbar: false,
+    showInlineDetail: false,
+    showStandaloneDetailPane: true,
+    stickyFilters: true,
   }),
   [ARCHIVE_LIBRARY_PICKER_VARIANT_WORLDLINE]: Object.freeze({
     variant: ARCHIVE_LIBRARY_PICKER_VARIANT_WORLDLINE,
@@ -15,6 +18,9 @@ const ARCHIVE_LIBRARY_PICKER_LAYOUTS = Object.freeze({
     bindViewportHeight: false,
     singleColumnList: true,
     compactToolbar: true,
+    showInlineDetail: true,
+    showStandaloneDetailPane: false,
+    stickyFilters: true,
   }),
 });
 

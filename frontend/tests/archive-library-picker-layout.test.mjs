@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 async function loadModule() {
   try {
@@ -37,6 +38,9 @@ test("worldline variant disables nested resizing and switches to a compact workb
   assert.equal(config.bindViewportHeight, false);
   assert.equal(config.singleColumnList, true);
   assert.equal(config.compactToolbar, true);
+  assert.equal(config.showInlineDetail, true);
+  assert.equal(config.showStandaloneDetailPane, false);
+  assert.equal(config.stickyFilters, true);
 });
 
 test("unknown picker variant falls back to the default archive-library behavior", async () => {
@@ -50,4 +54,12 @@ test("unknown picker variant falls back to the default archive-library behavior"
   assert.equal(config.variant, ARCHIVE_LIBRARY_PICKER_VARIANT_DEFAULT);
   assert.equal(config.enableResize, true);
   assert.equal(config.bindViewportHeight, true);
+});
+
+test("worldline picker source removes the standalone detail pane and renders inline expansion", async () => {
+  const source = await readFile(new URL("../src/components/ArchiveLibraryPicker.vue", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /<aside class="archive-pane detail-pane">/);
+  assert.match(source, /expandedArchiveId/);
+  assert.match(source, /ArchiveLibraryDetailCard/);
 });

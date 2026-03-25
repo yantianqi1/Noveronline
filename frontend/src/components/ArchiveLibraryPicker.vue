@@ -2,16 +2,13 @@
   <div
     ref="stageRef"
     class="archive-museum"
-    :class="[
-      layoutMode,
-      `variant-${pickerLayout.variant}`,
-      {
-        resizing,
-        'compact-toolbar': pickerLayout.compactToolbar,
-        'single-column-list': pickerLayout.singleColumnList,
-        'viewport-bound': pickerLayout.bindViewportHeight,
-      },
-    ]"
+    :class="[layoutMode, `variant-${pickerLayout.variant}`, {
+      resizing,
+      'compact-toolbar': pickerLayout.compactToolbar,
+      'single-column-list': pickerLayout.singleColumnList,
+      'sticky-filters': pickerLayout.stickyFilters,
+      'viewport-bound': pickerLayout.bindViewportHeight,
+    }]"
     :style="stageStyle"
   >
     <header class="museum-toolbar workbench-card" :class="{ compact: pickerLayout.compactToolbar }">
@@ -52,13 +49,13 @@
       </div>
     </header>
 
-    <main class="museum-stage" :class="{ 'no-divider': !pickerLayout.enableResize }">
+    <main class="museum-stage" :class="{ 'no-divider': !pickerLayout.enableResize, 'inline-detail-stage': pickerLayout.showInlineDetail }">
       <section class="archive-pane list-pane">
         <div class="pane-head">
           <div class="pane-copy">
             <p class="pane-kicker mono">ARCHIVE SHELVES</p>
-            <h3>档案目录</h3>
-            <p>统一检索、筛选并挑选进入会话的角色与组织档案。</p>
+            <h3>{{ pickerLayout.showInlineDetail ? "档案选择工作台" : "档案目录" }}</h3>
+            <p>{{ pickerLayout.showInlineDetail ? "筛选并直接选择档案，按需展开查看详情。" : "统一检索、筛选并挑选进入会话的角色与组织档案。" }}</p>
           </div>
           <div class="list-summary">
             <span v-if="loading" class="mono">载入中...</span>
@@ -72,15 +69,13 @@
         <p v-if="error" class="error-text">{{ error }}</p>
 
         <div class="scroll-list">
-          <ArchiveLibraryGridItem
-            v-for="item in items"
-            :key="item.archive_id"
-            :active="activeArchiveId === item.archive_id"
-            :item="item"
-            :selected="selectedIdSet.has(item.archive_id)"
-            @select="selectActive(item)"
-            @toggle="toggleSelected(item)"
-          />
+          <template v-for="item in items" :key="item.archive_id">
+            <ArchiveLibraryGridItem :active="isArchiveExpanded(expandedArchiveId, item.archive_id) || activeArchiveId === item.archive_id" :item="item" :selected="selectedIdSet.has(item.archive_id)" @expand="handleArchiveExpand(item)" @toggle="toggleSelected(item)" />
+
+            <div v-if="pickerLayout.showInlineDetail && isArchiveExpanded(expandedArchiveId, item.archive_id)" class="inline-detail-slot">
+              <ArchiveLibraryDetailCard :archive="resolveInlineDetail(item)" :selected="selectedIdSet.has(item.archive_id)" @toggle="toggleSelected(resolveInlineDetail(item))" />
+            </div>
+          </template>
 
           <div v-if="!items.length && !loading" class="empty-museum">
             <div class="empty-icon">📜</div>
@@ -100,7 +95,7 @@
         <span></span>
       </button>
 
-      <aside class="archive-pane detail-pane">
+      <section v-if="pickerLayout.showStandaloneDetailPane" class="archive-pane detail-pane">
         <div class="pane-head detail-head">
           <div class="pane-copy">
             <p class="pane-kicker mono">DOSSIER VIEW</p>
@@ -111,13 +106,9 @@
         </div>
 
         <div class="detail-scroll">
-          <ArchiveLibraryDetailCard
-            :archive="activeDetail"
-            :selected="selectedIdSet.has(activeDetail?.archive_id)"
-            @toggle="toggleSelected(activeDetail)"
-          />
+          <ArchiveLibraryDetailCard :archive="activeDetail" :selected="selectedIdSet.has(activeDetail?.archive_id)" @toggle="toggleSelected(activeDetail)" />
         </div>
-      </aside>
+      </section>
     </main>
   </div>
 </template>
@@ -131,7 +122,7 @@ import ArchiveLibraryDetailCard from "./ArchiveLibraryDetailCard.vue";
 import ArchiveLibraryGridItem from "./ArchiveLibraryGridItem.vue";
 import { useArchiveLibraryLayout } from "../composables/useArchiveLibraryLayout.js";
 import { resolveArchiveLibraryPickerLayoutVariant } from "../views/shared/archiveLibraryPickerLayout.js";
-import { toggleArchiveSelection } from "../views/shared/worldlineSelectorState.js";
+import { isArchiveExpanded, toggleArchiveExpansion, toggleArchiveSelection } from "../views/shared/worldlineSelectorState.js";
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
@@ -150,6 +141,8 @@ const items = ref([]);
 const total = ref(0);
 const activeArchiveId = ref("");
 const activeDetail = ref(null);
+const expandedArchiveId = ref("");
+const expandedDetail = ref(null);
 const loading = ref(false);
 const error = ref("");
 let reloadTimer = 0;
@@ -157,15 +150,11 @@ let reloadTimer = 0;
 const selectedArchives = computed(() => props.modelValue || []);
 const selectedIdSet = computed(() => new Set(selectedArchives.value.map((item) => item.archive_id)));
 const pickerLayout = computed(() => resolveArchiveLibraryPickerLayoutVariant(props.layoutVariant));
+const usesInlineDetail = computed(() => pickerLayout.value.showInlineDetail);
 const { beginResize, layoutMode, resizing, stageRef, stageStyle } = useArchiveLibraryLayout();
 
-watch(() => props.projectFilter, (value) => {
-  localProjectFilter.value = value || "";
-});
-
-watch(localProjectFilter, (value) => {
-  emit("update:project-filter", value);
-});
+watch(() => props.projectFilter, (value) => { localProjectFilter.value = value || ""; });
+watch(localProjectFilter, (value) => { emit("update:project-filter", value); });
 
 watch([searchText, localProjectFilter, entityType, importanceTier], scheduleReload);
 
@@ -182,6 +171,10 @@ function scheduleReload() {
 }
 
 async function syncActiveArchive(nextItems) {
+  if (usesInlineDetail.value) {
+    syncExpandedArchive(nextItems);
+    return;
+  }
   if (!nextItems.length) {
     activeArchiveId.value = "";
     activeDetail.value = null;
@@ -195,6 +188,18 @@ async function syncActiveArchive(nextItems) {
     return;
   }
   await selectActive(nextItems[0]);
+}
+
+function syncExpandedArchive(nextItems) {
+  const currentItem = nextItems.find((item) => item.archive_id === expandedArchiveId.value);
+  if (!currentItem) {
+    expandedArchiveId.value = "";
+    expandedDetail.value = null;
+    return;
+  }
+  if (!expandedDetail.value || expandedDetail.value.archive_id !== currentItem.archive_id) {
+    expandedDetail.value = currentItem;
+  }
 }
 
 async function loadItems() {
@@ -232,6 +237,30 @@ async function selectActive(item) {
   }
 }
 
+async function handleArchiveExpand(item) {
+  if (usesInlineDetail.value) {
+    await toggleExpanded(item);
+    return;
+  }
+  await selectActive(item);
+}
+
+async function toggleExpanded(item) {
+  const nextId = toggleArchiveExpansion(expandedArchiveId.value, item?.archive_id);
+  if (!nextId) {
+    expandedArchiveId.value = "";
+    expandedDetail.value = null;
+    return;
+  }
+  expandedArchiveId.value = nextId;
+  try {
+    const response = await getArchiveLibraryDetail(item.archive_id);
+    expandedDetail.value = response.data || item;
+  } catch {
+    expandedDetail.value = item;
+  }
+}
+
 function toggleSelected(item) {
   if (!item) {
     return;
@@ -243,16 +272,17 @@ function reload() {
   return loadItems();
 }
 
+function resolveInlineDetail(item) {
+  return expandedDetail.value?.archive_id === item.archive_id ? expandedDetail.value : item;
+}
+
 defineExpose({ reload });
 
 onMounted(async () => {
   await loadProjects();
   await loadItems();
 });
-
-onBeforeUnmount(() => {
-  clearTimeout(reloadTimer);
-});
+onBeforeUnmount(() => { clearTimeout(reloadTimer); });
 </script>
 
 <style scoped src="./ArchiveLibraryPicker.css"></style>
