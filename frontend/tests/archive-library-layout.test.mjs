@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
   ARCHIVE_LIBRARY_DESKTOP_BREAKPOINT,
@@ -54,4 +55,24 @@ test("restoreArchiveLibrarySplitRatio falls back to the default ratio for invali
     restoreArchiveLibrarySplitRatio("not-a-number", 1440),
     ARCHIVE_LIBRARY_SPLIT_DEFAULT_RATIO,
   );
+});
+
+test("archive card click uses toggle as the primary selection action", async () => {
+  const source = await readFile(new URL("../src/components/ArchiveLibraryGridItem.vue", import.meta.url), "utf8");
+
+  assert.match(source, /<article[\s\S]*@click="\$emit\('toggle'\)"/);
+  assert.doesNotMatch(source, /@click="\$emit\('select'\)"/);
+});
+
+test("archive card keeps a dedicated expand action separate from selection", async () => {
+  const source = await readFile(new URL("../src/components/ArchiveLibraryGridItem.vue", import.meta.url), "utf8");
+
+  assert.match(source, /@click\.stop="\$emit\('expand'\)"/);
+  assert.match(source, /展开详情/);
+});
+
+test("archive card no longer uses join-session copy as the main selection entrance", async () => {
+  const source = await readFile(new URL("../src/components/ArchiveLibraryGridItem.vue", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /加入会话/);
 });
