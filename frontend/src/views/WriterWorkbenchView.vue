@@ -73,6 +73,37 @@
           <input v-model="sceneFocus" type="text" placeholder="例如：废塔残响、顾行舟现身" />
         </div>
 
+        <!-- 任务类型切换 -->
+        <div v-if="useAgentMode" class="field">
+          <label>任务类型</label>
+          <div class="scope-switch">
+            <button
+              v-for="item in taskTypeOptions"
+              :key="item.value"
+              type="button"
+              class="scope-chip"
+              :class="{ active: taskType === item.value }"
+              @click="taskType = item.value"
+            >
+              {{ item.label }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 写作预设选择 -->
+        <div v-if="useAgentMode" class="field">
+          <label>写作风格预设</label>
+          <div class="preset-selector">
+            <select v-model="selectedPresetId">
+              <option v-for="p in presets" :key="p.preset_id" :value="p.preset_id">
+                {{ p.name }}
+              </option>
+            </select>
+            <button class="btn btn-sm" @click="openPresetEditor(presets.find(p => p.preset_id === selectedPresetId))">编辑</button>
+            <button class="btn btn-sm" @click="openPresetEditor(null)">新建</button>
+          </div>
+        </div>
+
         <label class="inline-check">
           <input v-model="includeCandidates" type="checkbox" />
           <span>附带 candidate 设定</span>
@@ -80,8 +111,19 @@
 
         <div class="panel-actions">
           <button class="btn" :disabled="busy || !projectId" @click="refreshProjectData">刷新项目数据</button>
+          <button v-if="useAgentMode" class="btn" :disabled="busy || !projectId" @click="handleMigrate">迁移数据</button>
         </div>
       </div>
+
+      <!-- 场景列表 (Agent Mode) -->
+      <SceneListPanel
+        v-if="useAgentMode && chapterId"
+        :scenes="scenes"
+        :selected-scene-id="selectedSceneId"
+        @select="handleSceneSelect"
+        @add="handleAddScene"
+        @delete="handleDeleteScene"
+      />
 
       <!-- 审校规则编辑区 -->
       <div v-if="projectId" class="reviewer-rules-section">
@@ -182,8 +224,20 @@
         :final-score="finalScore"
       />
 
-      <!-- 生成的正文显示区 -->
-      <section v-if="draftText" class="draft-output">
+      <!-- Agent Mode: 场景编辑器 -->
+      <section v-if="useAgentMode" class="draft-output">
+        <SceneEditor
+          :content="agentSceneContent"
+          :streaming="agentStreaming"
+          :readonly="agentStreaming"
+          @update="handleSceneContentUpdate"
+          @rewrite="handleRewriteFromEditor"
+          @expand="handleExpandFromEditor"
+        />
+      </section>
+
+      <!-- Legacy Mode: 生成的正文显示区 -->
+      <section v-if="!useAgentMode && draftText" class="draft-output">
         <!-- 可编辑模式 -->
         <textarea
           v-if="isEditable"
@@ -318,15 +372,15 @@
           :placeholder="inputPlaceholder"
           rows="3"
           :disabled="draftPhase === 'writing' || draftPhase === 'collecting'"
-          @keydown.ctrl.enter="handleGenerate"
-          @keydown.meta.enter="handleGenerate"
+          @keydown.ctrl.enter="useAgentMode ? handleAgentGenerate() : handleGenerate()"
+          @keydown.meta.enter="useAgentMode ? handleAgentGenerate() : handleGenerate()"
         ></textarea>
         <div class="draft-input-actions">
           <span class="input-hint mono">Ctrl+Enter 发送</span>
           <button
             class="btn primary"
             :disabled="!canGenerate"
-            @click="handleGenerate"
+            @click="useAgentMode ? handleAgentGenerate() : handleGenerate()"
           >
             {{ generateButtonLabel }}
           </button>
@@ -409,11 +463,19 @@
         </section>
       </div>
     </aside>
+
+    <!-- 预设编辑弹窗 -->
+    <PresetEditor
+      :visible="presetEditorVisible"
+      :preset="editingPreset"
+      @save="handlePresetSave"
+      @close="presetEditorVisible = false"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import {
   adoptArchiveMemory,
@@ -423,6 +485,21 @@ import {
 import { buildChapterContext, generateDraft, getChapterContextOptions, getReviewerRules, reviseDraft, saveReviewerRules } from "../api/novel.js";
 import { getWorldlineAgents, listWorldlineSessions } from "../api/worldline.js";
 import AgentProgressPanel from "../components/AgentProgressPanel.vue";
+import SceneListPanel from "./writer/SceneListPanel.vue";
+import PresetEditor from "./writer/PresetEditor.vue";
+import SceneEditor from "./writer/SceneEditor.vue";
+import {
+  runWriterAgent,
+  getScenes,
+  updateScene as updateSceneApi,
+  deleteScene as deleteSceneApi,
+  getPresets,
+  createPreset,
+  updatePreset,
+  deletePreset,
+  getChapters,
+  migrateProject,
+} from "../api/writerAgent.js";
 import { useProjectCatalog } from "../composables/useProjectCatalog.js";
 import { buildWriterWorkbenchColumns, resolveWriterWorkbenchMode } from "./writer/writerWorkbenchLayout.js";
 import {
@@ -496,6 +573,28 @@ const contextPackSnapshot = ref(null);
 const memoryBundleSnapshot = ref(null);
 const styleHintsSnapshot = ref(null);
 
+// ─── Writer Agent 模式 ───
+const useAgentMode = ref(true); // true = new agent mode, false = legacy mode
+const taskType = ref("write_scene"); // write_scene|continue|rewrite|expand|outline|consistency_check
+const scenes = ref([]);
+const selectedSceneId = ref("");
+const presets = ref([]);
+const selectedPresetId = ref("");
+const presetEditorVisible = ref(false);
+const editingPreset = ref(null);
+const agentSceneContent = ref(""); // streaming content for SceneEditor
+const agentStreaming = ref(false);
+const involvedEntityIds = ref([]);
+
+const taskTypeOptions = [
+  { value: "write_scene", label: "写场景" },
+  { value: "continue", label: "续写" },
+  { value: "rewrite", label: "改写" },
+  { value: "expand", label: "扩写" },
+  { value: "outline", label: "大纲" },
+  { value: "consistency_check", label: "一致性检查" },
+];
+
 const gridTemplateColumns = computed(() => buildWriterWorkbenchColumns(workbenchMode.value));
 const povOptions = computed(() => resolveWriterPovOptions(scopeType.value, projectPovs.value, worldlineAgents.value));
 const canSubmit = computed(() => {
@@ -530,6 +629,16 @@ const activeCandidateMemoryId = computed(() => {
 });
 const historyRecentAnchors = computed(() => contextPack.value?.history_recall?.recent_anchors || []);
 const historySelectionTrace = computed(() => contextPack.value?.history_recall?.selection_trace || []);
+
+watch(chapterId, async (newVal) => {
+  if (newVal && useAgentMode.value) {
+    const chapter = chapterOptions.value.find(item => item.chapter_id === newVal);
+    chapterOrder.value = chapter?.order || 0;
+    await loadScenes();
+    selectedSceneId.value = "";
+    agentSceneContent.value = "";
+  }
+});
 
 function handleResize() {
   workbenchMode.value = resolveWriterWorkbenchMode(window.innerWidth);
@@ -599,6 +708,14 @@ async function refreshProjectData() {
 
     // 加载审校规则
     loadReviewerRules();
+
+    // Agent 模式：加载预设和场景
+    if (useAgentMode.value) {
+      await loadPresets();
+      if (chapterId.value) {
+        await loadScenes();
+      }
+    }
   } catch (err) {
     error.value = err.message || "读取项目上下文失败";
   }
@@ -1020,6 +1137,230 @@ async function rejectSelectedMemory() {
     timelineError.value = err.message || "驳回失败";
   } finally {
     reviewBusy.value = false;
+  }
+}
+
+// ─── 场景管理 ───
+async function loadScenes() {
+  if (!projectId.value || !chapterId.value) {
+    scenes.value = [];
+    return;
+  }
+  try {
+    const response = await getScenes(chapterId.value, projectId.value);
+    scenes.value = response.data || [];
+  } catch {
+    scenes.value = [];
+  }
+}
+
+async function handleSceneSelect(sceneId) {
+  selectedSceneId.value = sceneId;
+  const scene = scenes.value.find(s => s.scene_id === sceneId);
+  if (scene) {
+    agentSceneContent.value = scene.content || "";
+  }
+}
+
+async function handleAddScene() {
+  if (!chapterId.value) return;
+  const nextOrder = scenes.value.length > 0
+    ? Math.max(...scenes.value.map(s => s.scene_order)) + 1
+    : 1;
+  // Scene will be created when agent writes to it
+  const newSceneId = `sc_${Date.now().toString(36)}`;
+  scenes.value.push({
+    scene_id: newSceneId,
+    scene_order: nextOrder,
+    title: `场景 ${nextOrder}`,
+    word_count: 0,
+    status: "draft",
+    content: "",
+  });
+  selectedSceneId.value = newSceneId;
+  agentSceneContent.value = "";
+}
+
+async function handleDeleteScene(sceneId) {
+  if (!confirm("确定删除此场景？")) return;
+  try {
+    await deleteSceneApi(sceneId, projectId.value);
+    scenes.value = scenes.value.filter(s => s.scene_id !== sceneId);
+    if (selectedSceneId.value === sceneId) {
+      selectedSceneId.value = "";
+      agentSceneContent.value = "";
+    }
+  } catch (err) {
+    error.value = err.message || "删除场景失败";
+  }
+}
+
+async function handleSceneContentUpdate(newContent) {
+  agentSceneContent.value = newContent;
+  if (selectedSceneId.value && projectId.value) {
+    try {
+      await updateSceneApi(selectedSceneId.value, {
+        project_id: projectId.value,
+        content: newContent,
+      });
+      const scene = scenes.value.find(s => s.scene_id === selectedSceneId.value);
+      if (scene) {
+        scene.word_count = newContent.length;
+      }
+    } catch {
+      // silent save failure
+    }
+  }
+}
+
+// ─── 预设管理 ───
+async function loadPresets() {
+  try {
+    const response = await getPresets(projectId.value);
+    presets.value = response.data || [];
+    if (!selectedPresetId.value && presets.value.length) {
+      const defaultPreset = presets.value.find(p => p.is_default);
+      selectedPresetId.value = (defaultPreset || presets.value[0]).preset_id;
+    }
+  } catch {
+    presets.value = [];
+  }
+}
+
+function openPresetEditor(preset = null) {
+  editingPreset.value = preset;
+  presetEditorVisible.value = true;
+}
+
+async function handlePresetSave(data) {
+  try {
+    if (data.preset_id) {
+      await updatePreset(data.preset_id, {
+        ...data,
+        project_id: projectId.value,
+      });
+    } else {
+      const result = await createPreset({
+        ...data,
+        project_id: projectId.value,
+      });
+      selectedPresetId.value = result.data?.preset_id || selectedPresetId.value;
+    }
+    presetEditorVisible.value = false;
+    await loadPresets();
+  } catch (err) {
+    error.value = err.message || "保存预设失败";
+  }
+}
+
+async function handlePresetDelete(presetId) {
+  if (!confirm("确定删除此预设？")) return;
+  try {
+    await deletePreset(presetId, projectId.value);
+    await loadPresets();
+  } catch (err) {
+    error.value = err.message || "删除预设失败";
+  }
+}
+
+// ─── Writer Agent 生成 ───
+async function handleAgentGenerate() {
+  if (!projectId.value) return;
+
+  error.value = "";
+  agentStreaming.value = true;
+  agentSceneContent.value = "";
+  draftPhase.value = "collecting";
+  agentLog.value = [];
+
+  const chapter = chapterOptions.value.find(item => item.chapter_id === chapterId.value);
+  const currentSceneOrder = scenes.value.find(s => s.scene_id === selectedSceneId.value)?.scene_order || 1;
+
+  const payload = {
+    project_id: projectId.value,
+    task_type: taskType.value,
+    chapter_id: chapterId.value,
+    chapter_order: chapter?.order || chapterOrder.value,
+    scene_order: currentSceneOrder,
+    pov_entity_id: povCharacter.value,
+    involved_entity_ids: involvedEntityIds.value,
+    scene_focus: sceneFocus.value,
+    user_instruction: authorInstruction.value,
+    preset_id: selectedPresetId.value,
+    session_id: sessionId.value,
+    selected_text: taskType.value === "rewrite" || taskType.value === "expand"
+      ? (window.getSelection()?.toString() || agentSceneContent.value)
+      : "",
+    scene_id: selectedSceneId.value,
+  };
+
+  if (draftAbortController.value) {
+    draftAbortController.value.abort();
+  }
+  draftAbortController.value = new AbortController();
+
+  await runWriterAgent(
+    payload,
+    {
+      onEvent(event) {
+        if (event.type === "orchestrator_status") {
+          draftPhase.value = "collecting";
+          agentLog.value.push({
+            agent: "orchestrator",
+            message: event.message || event.phase,
+          });
+          message.value = event.message || "编排中...";
+        } else if (event.type === "writer_token") {
+          draftPhase.value = "writing";
+          agentSceneContent.value += (event.token || "");
+        } else if (event.type === "error") {
+          error.value = event.message || "生成失败";
+          agentStreaming.value = false;
+          draftPhase.value = agentSceneContent.value ? "done" : "idle";
+        }
+      },
+      onDone(event) {
+        agentStreaming.value = false;
+        draftPhase.value = "done";
+        message.value = `创作完成：${event.word_count || agentSceneContent.value.length} 字`;
+        // Refresh scene list
+        loadScenes();
+      },
+      onError(event) {
+        agentStreaming.value = false;
+        draftPhase.value = agentSceneContent.value ? "done" : "idle";
+        error.value = event?.message || event?.toString() || "生成失败";
+      },
+    },
+    draftAbortController.value.signal,
+  );
+}
+
+// ─── 改写/扩写 ───
+function handleRewriteFromEditor(selectedText) {
+  taskType.value = "rewrite";
+  authorInstruction.value = `请改写以下文本：\n${selectedText}`;
+}
+
+function handleExpandFromEditor(selectedText) {
+  taskType.value = "expand";
+  authorInstruction.value = `请扩写以下文本：\n${selectedText}`;
+}
+
+// ─── 数据迁移 ───
+async function handleMigrate() {
+  if (!projectId.value) return;
+  try {
+    busy.value = true;
+    message.value = "正在迁移数据到 novel.sqlite3...";
+    await migrateProject(projectId.value);
+    message.value = "数据迁移完成";
+    await loadScenes();
+    await loadPresets();
+  } catch (err) {
+    error.value = err.message || "迁移失败";
+  } finally {
+    busy.value = false;
   }
 }
 

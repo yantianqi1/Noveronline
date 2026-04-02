@@ -844,3 +844,17 @@ textarea.review-issue-suggestion-text {
 .review-report-inline .review-keep-item {
   break-inside: avoid;
 }
+
+/* ─── Writer Agent Mode ─── */
+.preset-selector {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.preset-selector select {
+  flex: 1;
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
