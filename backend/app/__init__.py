@@ -27,13 +27,14 @@ def create_app(config_class=Config):
         allow_private_network=True,
     )
 
-    from .api import archive_bp, llm_bp, novel_bp, project_bp, worldline_bp
+    from .api import archive_bp, llm_bp, novel_bp, project_bp, worldline_bp, writer_agent_bp
 
     app.register_blueprint(project_bp, url_prefix="/api/project")
     app.register_blueprint(novel_bp, url_prefix="/api/novel")
     app.register_blueprint(worldline_bp, url_prefix="/api/worldline")
     app.register_blueprint(llm_bp, url_prefix="/api/llm")
     app.register_blueprint(archive_bp, url_prefix="/api/archive")
+    app.register_blueprint(writer_agent_bp, url_prefix="/api/writer-agent")
 
     @app.route("/health")
     def health():

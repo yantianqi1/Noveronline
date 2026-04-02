@@ -22,3 +22,4 @@ from . import worldline_prepare  # noqa: E402,F401
 from . import worldline_auto_evolution  # noqa: E402,F401
 from . import worldline_events  # noqa: E402,F401
 from . import worldline_auto_evolution_sse  # noqa: E402,F401
+from .writer_agent import writer_agent_bp  # noqa: E402,F401
