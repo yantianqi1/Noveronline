@@ -159,6 +159,41 @@
           </div>
         </div>
       </div>
+
+      <!-- 审校规则编辑区 -->
+      <div v-if="projectId" class="reviewer-rules-section">
+        <div class="reviewer-rules-header" @click="reviewerRulesCollapsed = !reviewerRulesCollapsed">
+          <span class="reviewer-rules-title">审校规则</span>
+          <div class="reviewer-rules-badges">
+            <span v-if="reviewerRulesIsCustom" class="memory-badge">自定义</span>
+            <span class="collapse-arrow" :class="{ collapsed: reviewerRulesCollapsed }">&#9662;</span>
+          </div>
+        </div>
+        <div v-show="!reviewerRulesCollapsed" class="reviewer-rules-body">
+          <textarea
+            v-model="reviewerRulesText"
+            class="reviewer-rules-textarea"
+            rows="10"
+            placeholder="输入审校规则提示词..."
+          ></textarea>
+          <div class="reviewer-rules-actions">
+            <button
+              class="btn primary"
+              :disabled="reviewerRulesSaving"
+              @click="handleSaveReviewerRules"
+            >
+              {{ reviewerRulesSaving ? '保存中...' : '保存' }}
+            </button>
+            <button
+              class="btn"
+              :disabled="reviewerRulesSaving || !reviewerRulesIsCustom"
+              @click="handleResetReviewerRules"
+            >
+              恢复默认
+            </button>
+          </div>
+        </div>
+      </div>
     </aside>
 
     <main class="writer-panel writer-context workbench-card">
@@ -594,6 +629,7 @@ const taskTypeOptions = [
   { value: "outline", label: "大纲" },
   { value: "consistency_check", label: "一致性检查" },
 ];
+
 
 const gridTemplateColumns = computed(() => buildWriterWorkbenchColumns(workbenchMode.value));
 const povOptions = computed(() => resolveWriterPovOptions(scopeType.value, projectPovs.value, worldlineAgents.value));

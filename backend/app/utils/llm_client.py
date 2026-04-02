@@ -3,14 +3,17 @@ LLM客户端封装
 统一使用OpenAI格式调用
 """
 
+import copy
 import logging
 import re
 import time
+import uuid
 from contextlib import nullcontext
 from typing import Generator, Optional, Dict, Any, List
 from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 
 from ..config import Config
+from ..services.step_trace_context import get_current_step
 from .llm_json import normalize_json_object, parse_json_response
 from .llm_transient import is_transient_llm_error
 from .upstream_error_formatter import format_upstream_service_error
@@ -85,6 +88,10 @@ class LLMClient:
         Returns:
             模型响应文本
         """
+        step_ctx = get_current_step()
+        captured_messages = copy.deepcopy(messages) if step_ctx else None
+        t0 = time.monotonic()
+
         call_id = self._track_register("chat")
         try:
             kwargs = {
@@ -98,10 +105,18 @@ class LLMClient:
                 kwargs["response_format"] = response_format
 
             response = self._chat_with_retry(kwargs, call_id)
-            return self._clean_content(response.choices[0].message.content)
+            content = self._clean_content(response.choices[0].message.content)
+
+            if step_ctx:
+                self._record_trace(step_ctx, captured_messages, content, None, t0, "chat")
+            return content
+        except Exception as exc:
+            if step_ctx:
+                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat")
+            raise
         finally:
             self._track_unregister(call_id)
-    
+
     def chat_with_tools(
         self,
         messages: List[Dict],
@@ -127,6 +142,7 @@ class LLMClient:
         finally:
             self._track_unregister(call_id)
 
+
     def chat_stream(
         self,
         messages: List[Dict[str, str]],
@@ -144,6 +160,10 @@ class LLMClient:
         Yields:
             每个 chunk 的文本片段
         """
+        step_ctx = get_current_step()
+        captured_messages = copy.deepcopy(messages) if step_ctx else None
+        t0 = time.monotonic()
+
         call_id = self._track_register("chat_stream")
         kwargs = {
             "model": self.model,
@@ -161,7 +181,7 @@ class LLMClient:
             slot.__exit__(None, None, None)
             self._track_unregister(call_id)
             raise
-        return self._stream_chunks(stream, slot, call_id)
+        return self._stream_chunks(stream, slot, call_id, step_ctx, captured_messages, t0)
 
     def chat_json(
         self,
@@ -261,17 +281,21 @@ class LLMClient:
         # 部分模型（如 MiniMax M2.5）会在 content 中包裹 think 内容。
         return re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
 
-    def _stream_chunks(self, stream, slot, call_id=None) -> Generator[str, None, None]:
+    def _stream_chunks(self, stream, slot, call_id=None, step_ctx=None, captured_messages=None, t0=None) -> Generator[str, None, None]:
+        collected: list[str] = []
         try:
             for chunk in stream:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
+                    collected.append(delta.content)
                     yield delta.content
         finally:
             slot.__exit__(None, None, None)
             self._track_unregister(call_id)
+            if step_ctx:
+                self._record_trace(step_ctx, captured_messages, "".join(collected), None, t0 or time.monotonic(), "chat_stream")
 
     # ── Activity tracking helpers ──
 
@@ -294,3 +318,30 @@ class LLMClient:
     def _track_unregister(self, call_id: Optional[str]) -> None:
         if call_id and self.activity_tracker:
             self.activity_tracker.unregister(call_id)
+
+    # ── Step trace capture ──
+
+    def _record_trace(
+        self,
+        step_ctx: Any,
+        messages: Optional[List[Dict[str, str]]],
+        response_text: str,
+        error: Optional[str],
+        t0: float,
+        call_type: str,
+    ) -> None:
+        from datetime import datetime
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        step_ctx.record_call({
+            "call_id": uuid.uuid4().hex[:12],
+            "module_key": self.module_key,
+            "module_label": self._module_label,
+            "model": self.model,
+            "channel_key": self.channel_key,
+            "call_type": call_type,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "elapsed_ms": elapsed_ms,
+            "messages": messages or [],
+            "response_text": response_text,
+            "error": error,
+        })

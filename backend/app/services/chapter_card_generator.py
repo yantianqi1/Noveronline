@@ -301,6 +301,7 @@ def _string_list(value: Any) -> List[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+
 def _history_events(story_memory: Dict[str, Any], chapter_order: int) -> List[Dict[str, Any]]:
     events = []
     for item in story_memory.get("event_timeline", []):
@@ -349,6 +350,7 @@ def _order_from_ref(chapter_id: str) -> int:
 
 def _chapter_order(chapter: Dict[str, Any]) -> int:
     return int(chapter.get("chapter_order") or chapter.get("order") or 0)
+
 
 
 def _sentence_catalog(chapter: Dict[str, Any]) -> str:

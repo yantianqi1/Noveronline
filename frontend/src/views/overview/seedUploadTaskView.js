@@ -214,6 +214,7 @@ function normalizeTimelineEvent(item, index) {
   const path = `progress_detail.timeline[${index}]`;
   const value = requireObject(item, path);
   requireKeys(value, TIMELINE_EVENT_KEYS, path);
+  const meta = requireObject(value.meta, `${path}.meta`);
   return {
     id: readString(value.id, `${path}.id`),
     timestamp: readString(value.timestamp, `${path}.timestamp`),
@@ -222,7 +223,16 @@ function normalizeTimelineEvent(item, index) {
     status: readString(value.status, `${path}.status`),
     title: readString(value.title, `${path}.title`),
     detail: readString(value.detail, `${path}.detail`),
-    meta: requireObject(value.meta, `${path}.meta`),
+    meta: {
+      ...meta,
+      step_id: meta.step_id || "",
+      step_kind: meta.step_kind || "",
+      group_key: meta.group_key || "",
+      group_label: meta.group_label || "",
+      has_trace: !!meta.has_trace,
+      elapsed_ms: typeof meta.elapsed_ms === "number" ? meta.elapsed_ms : 0,
+      llm_call_count: typeof meta.llm_call_count === "number" ? meta.llm_call_count : 0,
+    },
   };
 }
 

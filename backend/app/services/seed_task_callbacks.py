@@ -2,6 +2,7 @@
 
 from typing import Any, Dict
 
+from .seed_pipeline_chapters import chapter_for_stage, label_for_chapter
 from .seed_task_progress import SeedTaskProgressTracker
 
 
@@ -10,13 +11,23 @@ def build_block_progress_callback(
     stage: str,
     title_prefix: str,
 ):
+    step_ids: Dict[str, str] = {}
+    group_key = chapter_for_stage(stage)
+    group_label = label_for_chapter(group_key)
+
     def callback(event_type: str, block: Dict[str, Any]) -> None:
+        block_id = block["block_id"]
         meta = _block_meta(block)
         detail = _block_detail(block)
         if event_type == "start":
-            progress.block_started(stage, f"开始{title_prefix} {block['block_id']}", detail, meta)
+            sid = progress.begin_step(stage, "block", f"{title_prefix} {block_id}", group_key, group_label)
+            step_ids[block_id] = sid
+            progress.block_started(stage, f"开始{title_prefix} {block_id}", detail, meta)
             return
-        progress.block_completed(stage, f"完成{title_prefix} {block['block_id']}", detail, meta)
+        sid = step_ids.pop(block_id, "")
+        if sid:
+            progress.end_step(sid)
+        progress.block_completed(stage, f"完成{title_prefix} {block_id}", detail, meta)
 
     return callback
 
@@ -40,19 +51,58 @@ def build_ontology_progress_callback(progress: SeedTaskProgressTracker):
 
 
 def build_anchor_progress_callback(progress: SeedTaskProgressTracker):
+    step_ids: Dict[str, str] = {}
+    group_key = chapter_for_stage("anchor_generation")
+    group_label = label_for_chapter(group_key)
+
     def callback(event_type: str, anchor: Dict[str, Any]) -> None:
+        anchor_id = anchor.get("anchor_id", "")
         meta = {
             "kind": "anchor",
-            "anchor_id": anchor.get("anchor_id", ""),
+            "anchor_id": anchor_id,
             "target_type": "anchor",
-            "target_label": anchor.get("anchor_id", ""),
+            "target_label": anchor_id,
             "chapter_range": anchor.get("chapter_range"),
         }
         detail = _anchor_detail(anchor)
         if event_type == "start":
-            progress.llm_action("正在生成剧情锚点", "anchor", anchor.get("anchor_id", ""), meta)
+            sid = progress.begin_step("anchor_generation", "anchor", f"剧情锚点 {anchor_id}", group_key, group_label)
+            step_ids[anchor_id] = sid
+            progress.llm_action("正在生成剧情锚点", "anchor", anchor_id, meta)
             return
-        progress.note("anchor_generation", f"完成剧情锚点 {anchor.get('anchor_id', '')}", detail, meta=meta)
+        sid = step_ids.pop(anchor_id, "")
+        if sid:
+            progress.end_step(sid)
+        progress.note("anchor_generation", f"完成剧情锚点 {anchor_id}", detail, meta=meta)
+
+    return callback
+
+
+def build_chapter_card_progress_callback(progress: SeedTaskProgressTracker):
+    step_ids: Dict[str, str] = {}
+    group_key = chapter_for_stage("chapter_card_generation")
+    group_label = label_for_chapter(group_key)
+
+    def callback(event_type: str, chapter: Dict[str, Any]) -> None:
+        order = int(chapter.get("chapter_order") or chapter.get("order") or 0)
+        chapter_id = chapter.get("chapter_id", "")
+        meta = {
+            "kind": "chapter",
+            "chapter_id": chapter_id,
+            "chapter_order": order,
+            "target_type": "chapter",
+            "target_label": f"第{order}章",
+        }
+        detail = f"第 {order} 章章节卡"
+        if event_type == "start":
+            sid = progress.begin_step("chapter_card_generation", "chapter_card", f"第{order}章章节卡", group_key, group_label)
+            step_ids[chapter_id] = sid
+            progress.llm_action("正在生成结构化章节卡", "chapter", f"第{order}章", meta)
+            return
+        sid = step_ids.pop(chapter_id, "")
+        if sid:
+            progress.end_step(sid)
+        progress.note("chapter_card_generation", f"完成第{order}章章节卡", detail, meta=meta)
 
     return callback
 

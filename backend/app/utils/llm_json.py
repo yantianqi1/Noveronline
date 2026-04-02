@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 MAX_PAYLOAD_PREVIEW_LENGTH = 240
 logger = logging.getLogger(__name__)
+
+# 管道分隔记录的行头标识
+_PIPE_RECORD_TYPES = ("EVENT", "ENTITY", "RELATION", "THREAD", "REF")
+_PIPE_LINE_RE = re.compile(
+    r"^(" + "|".join(_PIPE_RECORD_TYPES) + r")\|(.+)$",
+)
 
 
 def clean_json_response_text(response: str) -> str:
@@ -52,7 +58,121 @@ def parse_json_response(response: str) -> Any:
                 return payload
             except json.JSONDecodeError:
                 pass
-        raise ValueError(f"LLM返回的JSON格式无效: {cleaned}") from exc
+    # 回退：尝试解析管道分隔格式 (EVENT|key=value|...)
+    pipe_result = _try_parse_pipe_delimited(response)
+    if pipe_result is not None:
+        return pipe_result
+    raise ValueError(f"LLM返回的JSON格式无效: {_preview_payload(cleaned)}")
+
+
+def _try_parse_pipe_delimited(response: str) -> Any:
+    """尝试将管道分隔的记录转换为等价 JSON 结构。
+
+    某些模型（如 Gemini）在 JSON 模式下偶尔返回管道分隔格式:
+        EVENT|summary=事件概要|characters=角色A,角色B|sentence_refs=...
+    此函数将其转换为下游归一化器可以处理的 dict 结构。
+    """
+    lines = response.strip().splitlines()
+    # 过滤掉空行和验证/错误提示行（如 "EVENT 记录缺少字段 organizations: ..."）
+    record_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # 如果是"错误: 原始记录"的格式，提取冒号后面的原始记录
+        if "记录缺少字段" in line or "record missing" in line.lower():
+            colon_pos = line.find(": ")
+            if colon_pos >= 0:
+                line = line[colon_pos + 2:].strip()
+        if _PIPE_LINE_RE.match(line):
+            record_lines.append(line)
+    if not record_lines:
+        return None
+    events: List[Dict[str, Any]] = []
+    entities: List[Dict[str, Any]] = []
+    relations: List[Dict[str, Any]] = []
+    threads: List[Dict[str, Any]] = []
+    for line in record_lines:
+        match = _PIPE_LINE_RE.match(line)
+        if not match:
+            continue
+        record_type, fields_str = match.group(1), match.group(2)
+        fields = _parse_pipe_fields(fields_str)
+        if record_type == "EVENT":
+            events.append(_pipe_event_to_dict(fields))
+        elif record_type == "ENTITY":
+            entities.append(_pipe_entity_to_dict(fields))
+        elif record_type == "RELATION":
+            relations.append(_pipe_relation_to_dict(fields))
+        elif record_type == "THREAD":
+            threads.append(_pipe_thread_to_dict(fields))
+    if not events and not entities and not relations and not threads:
+        return None
+    return {
+        "local_events": events,
+        "local_entities": entities,
+        "local_relationship_changes": relations,
+        "local_threads": threads,
+        "unresolved_refs": [],
+        "local_summary": events[0]["summary"] if events else "",
+        "evidence_spans": [],
+        "world_rules": [],
+    }
+
+
+def _parse_pipe_fields(fields_str: str) -> Dict[str, str]:
+    """解析 key=value|key=value 格式的字段。"""
+    fields: Dict[str, str] = {}
+    for segment in fields_str.split("|"):
+        eq_pos = segment.find("=")
+        if eq_pos < 0:
+            continue
+        key = segment[:eq_pos].strip()
+        value = segment[eq_pos + 1:].strip()
+        fields[key] = value
+    return fields
+
+
+def _split_comma(value: str) -> List[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _pipe_event_to_dict(fields: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "summary": fields.get("summary", ""),
+        "characters": _split_comma(fields.get("characters", "")),
+        "organizations": _split_comma(fields.get("organizations", "")),
+        "evidence": _split_comma(fields.get("evidence", fields.get("sentence_refs", ""))),
+    }
+
+
+def _pipe_entity_to_dict(fields: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "name": fields.get("name", ""),
+        "entity_type": fields.get("entity_type", fields.get("type", "character")),
+        "aliases": _split_comma(fields.get("aliases", "")),
+        "summary": fields.get("summary", ""),
+        "importance_tier": fields.get("importance_tier", "supporting"),
+        "evidence": _split_comma(fields.get("evidence", "")),
+    }
+
+
+def _pipe_relation_to_dict(fields: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "source": fields.get("source", ""),
+        "target": fields.get("target", ""),
+        "change": fields.get("change", fields.get("relation_type", "co_occurrence")),
+        "weight": 1,
+        "evidence": _split_comma(fields.get("evidence", "")),
+    }
+
+
+def _pipe_thread_to_dict(fields: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "thread_key": fields.get("thread_key", fields.get("key", "")),
+        "status": fields.get("status", "open"),
+        "summary": fields.get("summary", ""),
+    }
 
 
 def repair_json_response_text(response: str) -> str:

@@ -73,6 +73,7 @@ import OverviewRecentProjects from "./overview/OverviewRecentProjects.vue";
 import OverviewTaskDrawer from "./overview/OverviewTaskDrawer.vue";
 import OverviewTaskFocusCard from "./overview/OverviewTaskFocusCard.vue";
 import SeedAnalysisPanel from "./overview/SeedAnalysisPanel.vue";
+import SeedTaskDrawer from "./overview/SeedTaskDrawer.vue";
 import SeedUploadPanel from "./overview/SeedUploadPanel.vue";
 
 const upload = useSeedUpload();
@@ -108,6 +109,11 @@ watch(
     }
   },
 );
+
+function statusClass(status) {
+  if (status === "failed") return "danger";
+  return status && status.includes("completed") ? "ok" : "warn";
+}
 
 async function refresh() {
   try {

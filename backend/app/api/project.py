@@ -11,6 +11,7 @@ from ..config import Config
 from ..models.project import ProjectManager, ProjectStatus
 from ..models.task import TaskManager
 from ..services.seed_extract_task_service import SeedExtractTaskService
+from ..services.step_trace_writer import load_step_bundle
 
 SEED_TASK_RECOVERY_ERROR = "种子分析任务已中断，服务可能已重启，请重新上传并重试。"
 GRAPH_TASK_RECOVERY_ERROR = "图谱构建任务已中断，服务可能已重启，请重新发起构建。"
@@ -258,6 +259,31 @@ def get_project_task(task_id: str):
                     break
 
         return no_store_json({"success": True, "data": task_dict})
+    except Exception as e:
+        return no_store_json({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }, 500)
+
+
+@project_bp.route("/task/<task_id>/steps/<step_id>/trace", methods=["GET"])
+def get_step_trace(task_id: str, step_id: str):
+    try:
+        task_manager = TaskManager()
+        task = task_manager.get_task(task_id)
+        if not task:
+            return no_store_json({"success": False, "error": "任务不存在"}, 404)
+
+        project_id = (task.metadata or {}).get("project_id", "")
+        if not project_id:
+            return no_store_json({"success": False, "error": "trace_unavailable"}, 404)
+
+        bundle = load_step_bundle(project_id, task_id, step_id)
+        if bundle is None:
+            return no_store_json({"success": False, "error": "trace_unavailable"}, 404)
+
+        return no_store_json({"success": True, "data": bundle})
     except Exception as e:
         return no_store_json({
             "success": False,

@@ -104,6 +104,7 @@ class TestChapterMetaStorage:
         assert result["summary_text"] == "新摘要"
 
 
+
 class TestChapterMetaServiceWrite:
     def test_save_and_retrieve(self, service):
         """保存摘要后能正确取回。"""

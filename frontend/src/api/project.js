@@ -31,6 +31,10 @@ export function getTask(taskId) {
   return get(`/api/project/task/${taskId}`);
 }
 
+export function getStepTrace(taskId, stepId) {
+  return get(`/api/project/task/${taskId}/steps/${stepId}/trace`);
+}
+
 export function uploadStorySeed({
   projectName,
   analysisGoal,

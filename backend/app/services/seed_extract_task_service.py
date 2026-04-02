@@ -108,7 +108,7 @@ class SeedExtractTaskService:
         additional_context: str,
         use_llm: bool,
     ) -> None:
-        runner = SeedExtractRunner(self, task_id, use_llm)
+        runner = SeedExtractRunner(self, task_id, use_llm, project_id=project_id)
         try:
             runner.run(project_id, project_name, analysis_goal, additional_context)
         except Exception as exc:

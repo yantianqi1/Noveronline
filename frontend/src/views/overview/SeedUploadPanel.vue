@@ -34,7 +34,7 @@ const props = defineProps({
   initiallyExpanded: { type: Boolean, default: true },
 });
 
-const emit = defineEmits(["uploaded"]);
+const emit = defineEmits(["uploaded", "open-drawer"]);
 const upload = useSeedUpload();
 const panelExpanded = ref(props.initiallyExpanded);
 

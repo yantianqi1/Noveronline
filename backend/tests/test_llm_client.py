@@ -205,6 +205,7 @@ def test_llm_client_chat_stream_releases_concurrency_after_normal_exhaustion():
     }
 
 
+
 def test_llm_client_chat_retries_on_transient_gateway_error(monkeypatch):
     monkeypatch.setattr("app.utils.llm_client.time.sleep", lambda _: None)
     request = httpx.Request("POST", "https://example.com/v1/chat/completions")

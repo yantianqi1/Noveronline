@@ -214,5 +214,6 @@ class ChapterMetaStorage:
         ).fetchall()
         return [row["name"] for row in rows]
 
+
     def _ensure_parent_dir(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
