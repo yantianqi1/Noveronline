@@ -154,6 +154,7 @@ test("buildIdleLogPreview returns ordered pipeline preview", () => {
   assert.equal(preview.length >= 5, true);
   assert.equal(preview[0].status, "pending");
   assert.equal(typeof preview[0].title, "string");
+  assert.equal(preview.some((item) => item.stage === "chapter_card_generation"), true);
 });
 
 test("buildUploadingTask produces structured progress detail accepted by normalizeSeedTaskDetail", () => {

@@ -48,7 +48,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   createLlmChannel,
   deleteLlmModuleBinding,
@@ -71,23 +71,32 @@ const syncingChannelKey = ref("");
 const deletingChannelKey = ref("");
 const savingModuleKey = ref("");
 const removingModuleKey = ref("");
+let pollingTimer = null;
 
 const channelBusy = computed(() => !!submittingChannelKey.value);
 const modelCount = computed(() => channels.value.reduce((sum, channel) => sum + (channel.models?.length || 0), 0));
 const boundModuleCount = computed(() => modules.value.filter((item) => item.binding).length);
 
-async function reloadSettings() {
+async function loadSettings({ silent = false } = {}) {
   try {
-    loading.value = true;
-    errorText.value = "";
+    if (!silent) {
+      loading.value = true;
+      errorText.value = "";
+    }
     const response = await getLlmSettings();
     channels.value = response.data.channels || [];
     modules.value = response.data.modules || [];
   } catch (error) {
     errorText.value = error.message || "加载失败";
   } finally {
-    loading.value = false;
+    if (!silent) {
+      loading.value = false;
+    }
   }
+}
+
+async function reloadSettings() {
+  await loadSettings();
 }
 
 async function handleCreateChannel(payload, resetForm) {
@@ -172,7 +181,26 @@ async function handleRemoveBinding(moduleKey) {
   }
 }
 
-onMounted(() => { reloadSettings(); });
+function startPolling() {
+  pollingTimer = window.setInterval(() => {
+    loadSettings({ silent: true });
+  }, 2000);
+}
+
+function stopPolling() {
+  if (!pollingTimer) return;
+  window.clearInterval(pollingTimer);
+  pollingTimer = null;
+}
+
+onMounted(async () => {
+  await reloadSettings();
+  startPolling();
+});
+
+onBeforeUnmount(() => {
+  stopPolling();
+});
 </script>
 
 <style scoped>

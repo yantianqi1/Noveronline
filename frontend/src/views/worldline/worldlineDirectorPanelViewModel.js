@@ -60,12 +60,14 @@ export function buildWorldlineFocusNarrative({
 }
 
 export function buildWorldlineWorldShiftFeed(timeline = []) {
-  if (!timeline.length) {
+  // Only show canon events in the shift feed; candidate events are reviewed separately.
+  const canonEvents = timeline.filter((e) => (e.status || "canon") === "canon");
+  if (!canonEvents.length) {
     return { emptyMessage: WORLD_SHIFT_EMPTY_MESSAGE, items: [] };
   }
   return {
     emptyMessage: "",
-    items: [...timeline].reverse().map((event) => buildShiftItem(normalizeEvent(event))),
+    items: [...canonEvents].reverse().map((event) => buildShiftItem(normalizeEvent(event))),
   };
 }
 

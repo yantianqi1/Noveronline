@@ -70,48 +70,23 @@
       <div v-if="upload.state.error" class="status-error mono">{{ upload.state.error }}</div>
     </div>
 
-    <!-- Active Task Status Section -->
+    <!-- Active Task Compact Status -->
     <Transition name="fade">
-      <aside v-if="hasActiveTask" class="active-task-area stack">
-        <div class="task-progress-card workbench-card stack">
-          <h3 class="title-ancient">实时管线状态</h3>
-          <PipelineVisualization
-            :upload-phase="upload.state.uploadPhase"
-            :task-status="upload.state.taskStatus"
-            :active-stage="upload.state.activeStage"
-          />
-          <div class="progress-details stack">
-            <div class="progress-row">
-              <strong>{{ upload.state.statusText }}</strong>
-              <span class="mono">{{ upload.state.progressPercent }}%</span>
-            </div>
-            <div class="progress-track">
-              <div class="progress-bar" :style="{ width: `${upload.state.progressPercent}%` }"></div>
-            </div>
-            <div class="progress-meta mono">
-              <span>{{ upload.state.activeStage.label || '准备分析' }}</span>
-              <span v-if="upload.state.taskMetrics.totalBlocks">
-                {{ upload.state.taskMetrics.completedBlocks }}/{{ upload.state.taskMetrics.totalBlocks }} 块
-              </span>
-            </div>
+      <aside v-if="hasActiveTask" class="active-task-area">
+        <div class="compact-status workbench-card">
+          <div class="compact-status-row">
+            <span class="compact-stage">{{ upload.state.activeStage.label || '分析中' }}</span>
+            <span class="mono compact-pct">{{ upload.state.progressPercent }}%</span>
           </div>
-        </div>
-
-        <div class="task-logs-card workbench-card">
-          <div class="logs-header">
-            <h3 class="title-ancient">后台日志</h3>
-            <button class="btn subtle small" @click="showLogs = !showLogs">{{ showLogs ? '收起日志' : '展开日志' }}</button>
+          <div class="progress-track">
+            <div class="progress-bar" :style="{ width: `${upload.state.progressPercent}%` }"></div>
           </div>
-          <SeedTaskLogPanel
-            v-if="showLogs"
-            :upload-phase="upload.state.uploadPhase"
-            :task-status="upload.state.taskStatus"
-            :active-stage="upload.state.activeStage"
-            :task-metrics="upload.state.taskMetrics"
-            :llm-activity="upload.state.llmActivity"
-            :timeline="upload.state.timeline"
-            :task-started-at="upload.state.taskStartedAt"
-          />
+          <div class="compact-actions">
+            <span v-if="upload.state.taskMetrics.totalBlocks" class="compact-blocks mono">
+              {{ upload.state.taskMetrics.completedBlocks }}/{{ upload.state.taskMetrics.totalBlocks }} 块
+            </span>
+            <button class="btn subtle small" @click="$emit('open-drawer')">查看分析进度</button>
+          </div>
         </div>
       </aside>
     </Transition>
@@ -122,14 +97,11 @@
 import { computed, ref, watch } from "vue";
 
 import { useSeedUpload } from "../../composables/useSeedUpload";
-import PipelineVisualization from "./PipelineVisualization.vue";
-import SeedTaskLogPanel from "./SeedTaskLogPanel.vue";
 
-const emit = defineEmits(["uploaded"]);
+const emit = defineEmits(["uploaded", "open-drawer"]);
 const upload = useSeedUpload();
 const fileInputRef = ref(null);
 const showAdvanced = ref(false);
-const showLogs = ref(true);
 
 const canSubmit = computed(() => upload.state.projectName.trim() && upload.state.files.length > 0);
 const hasActiveTask = computed(() => upload.state.uploadPhase !== "idle");
@@ -318,14 +290,39 @@ watch(
   min-width: 0;
 }
 
-.task-progress-card, .task-logs-card {
-  padding: var(--space-lg);
-  min-width: 0;
+.compact-status {
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
-.progress-row {
+.compact-status-row {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+}
+
+.compact-stage {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.compact-pct {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.compact-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.compact-blocks {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .progress-track {
@@ -339,20 +336,6 @@ watch(
   height: 100%;
   background: var(--accent-copper);
   transition: width 0.3s ease;
-}
-
-.progress-meta {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.logs-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--space-md);
 }
 
 .status-error {

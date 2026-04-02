@@ -184,10 +184,82 @@
       </div>
     </section>
 
+    <!-- ═══ 03 / 候选事件审核 ═══ -->
+    <section
+      v-if="candidateEvents.length || streamPhase === 'thinking' || streamPhase === 'streaming'"
+      class="director-section candidate-shell"
+    >
+      <div class="section-head">
+        <div>
+          <p class="section-index mono">03 / 候选事件审核</p>
+          <h3 class="section-title">导演决策台</h3>
+        </div>
+        <p class="section-copy">AI 生成的候选事件在这里等待你的审核。可以逐条采纳、编辑后采纳，或拒绝。</p>
+      </div>
+
+      <!-- Thinking indicator -->
+      <article v-if="streamPhase === 'thinking' && thinkingInfo" class="thinking-card">
+        <div class="thinking-pulse"></div>
+        <div class="thinking-body">
+          <p class="mono thinking-label">{{ thinkingInfo.agent }} 正在决策…</p>
+          <p class="spotlight-copy">{{ thinkingInfo.question }}</p>
+          <div class="chip-row">
+            <span v-for="factor in thinkingInfo.factors" :key="factor" class="driver-chip">{{ factor }}</span>
+          </div>
+        </div>
+      </article>
+
+      <!-- Batch actions -->
+      <div v-if="candidateEvents.length > 1" class="candidate-batch">
+        <button class="btn btn-adopt" @click="emit('adopt-all')">全部采纳</button>
+        <button class="btn btn-reject" @click="emit('reject-all')">全部拒绝</button>
+        <span class="mono candidate-count">{{ candidateEvents.length }} 个候选事件</span>
+      </div>
+
+      <!-- Candidate cards -->
+      <div class="candidate-feed">
+        <article
+          v-for="event in candidateEvents"
+          :key="event.event_id"
+          class="candidate-card"
+          :class="[event.confidence]"
+        >
+          <div class="candidate-head">
+            <div>
+              <p class="mono spotlight-step">STEP {{ event.step }}</p>
+              <h4>{{ event.title || "未命名事件" }}</h4>
+            </div>
+            <div class="candidate-badges">
+              <span class="confidence-badge" :class="event.confidence">{{ confidenceLabel(event.confidence) }}</span>
+              <span class="source-badge">{{ sourceLabel(event.event_source) }}</span>
+            </div>
+          </div>
+          <p class="spotlight-copy">{{ event.summary }}</p>
+          <p v-if="event.confidence_reason" class="candidate-reason">{{ event.confidence_reason }}</p>
+          <div class="chip-row">
+            <span v-for="driver in event.driving_entities" :key="driver" class="driver-chip active">{{ driver }}</span>
+          </div>
+          <div v-if="editingEventId !== event.event_id" class="candidate-actions">
+            <button class="btn btn-adopt" @click="emit('adopt-event', { eventId: event.event_id })">采纳</button>
+            <button class="btn btn-edit" @click="startEdit(event)">编辑</button>
+            <button class="btn btn-reject" @click="emit('reject-event', { eventId: event.event_id })">拒绝</button>
+          </div>
+          <div v-else class="candidate-edit-block">
+            <textarea v-model="editText" rows="3" class="candidate-textarea" placeholder="修改事件描述后采纳…"></textarea>
+            <div class="candidate-edit-actions">
+              <button class="btn btn-adopt" @click="submitEdit(event.event_id)">确认并采纳</button>
+              <button class="btn" @click="cancelEdit">取消</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ═══ 04 / 世界状态变更流 ═══ -->
     <section class="director-section">
       <div class="section-head">
         <div>
-          <p class="section-index mono">03 / 世界状态变更流</p>
+          <p class="section-index mono">{{ shiftFeedIndex }} / 世界状态变更流</p>
           <h3 class="section-title">局势如何被改写</h3>
         </div>
         <p class="section-copy">每一步都记录变量影响、关系张力和状态变化，不再只是大段摘要文案。</p>
@@ -245,7 +317,7 @@
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
 import {
   buildWorldlineCurrentWorldSummary,
@@ -258,7 +330,18 @@ const props = defineProps({
   currentWorld: { type: Object, default: null },
   timeline: { type: Array, default: () => [] },
   taskSnapshot: { type: Object, default: null },
+  candidateEvents: { type: Array, default: () => [] },
+  streamPhase: { type: String, default: "idle" },
+  thinkingInfo: { type: Object, default: null },
 });
+
+const emit = defineEmits([
+  "adopt-event",
+  "reject-event",
+  "edit-event",
+  "adopt-all",
+  "reject-all",
+]);
 
 const worldSummary = computed(() => buildWorldlineCurrentWorldSummary({
   currentWorld: props.currentWorld,
@@ -273,6 +356,51 @@ const focusNarrative = computed(() => buildWorldlineFocusNarrative({
 }));
 
 const worldShiftFeed = computed(() => buildWorldlineWorldShiftFeed(props.timeline));
+
+// Dynamic section index for the shift feed: "03" when no candidates, "04" when candidates visible.
+const shiftFeedIndex = computed(() => {
+  const hasCandidateSection = props.candidateEvents.length || props.streamPhase === "thinking" || props.streamPhase === "streaming";
+  return hasCandidateSection ? "04" : "03";
+});
+
+/* ── inline editing state ────────────────────────────────────── */
+const editingEventId = ref("");
+const editText = ref("");
+
+function startEdit(event) {
+  editingEventId.value = event.event_id;
+  editText.value = event.summary || "";
+}
+
+function cancelEdit() {
+  editingEventId.value = "";
+  editText.value = "";
+}
+
+function submitEdit(eventId) {
+  if (editText.value.trim()) {
+    emit("edit-event", { eventId, consequence: editText.value.trim() });
+  }
+  editingEventId.value = "";
+  editText.value = "";
+}
+
+/* ── display helpers ─────────────────────────────────────────── */
+const CONFIDENCE_LABELS = { high: "高置信", medium: "中置信", low: "低置信" };
+const SOURCE_LABELS = {
+  archive_based: "档案驱动",
+  goal_driven: "目标驱动",
+  variable_reaction: "变量触发",
+  agent_initiative: "角色主动",
+  system: "系统生成",
+};
+
+function confidenceLabel(value) {
+  return CONFIDENCE_LABELS[value] || value || "未知";
+}
+function sourceLabel(value) {
+  return SOURCE_LABELS[value] || value || "未知来源";
+}
 
 function joinText(items = [], emptyText) {
   return items.length ? items.join(" / ") : emptyText;

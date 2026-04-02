@@ -10,9 +10,12 @@ MAX_WARNINGS = 5
 MAX_SCENES = 5
 CATEGORY_WEIGHTS = {
     "continuity": 3.0,
+    "history_anchor": 2.7,
     "world_rule": 2.8,
     "pov_state": 2.6,
     "conflict": 2.3,
+    "history_callback": 1.8,
+    "event": 1.6,
     "worldline_state": 2.1,
     "worldline_event": 1.6,
     "relationship": 1.1,

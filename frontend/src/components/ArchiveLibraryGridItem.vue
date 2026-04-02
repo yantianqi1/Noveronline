@@ -99,10 +99,12 @@ const summaryText = computed(() => props.item.core_drive || props.item.entity_ro
 
 .item-name {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.3;
   font-family: "ZCOOL XiaoWei", serif;
-  color: var(--text-main);
+  font-weight: 700;
+  color: #1a1815;
+  letter-spacing: 0.04em;
 }
 
 .project-tag {

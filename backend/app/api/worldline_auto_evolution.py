@@ -19,6 +19,7 @@ worldline_auto_evolution_task_service = WorldlineAutoEvolutionTaskService(
     engine=worldline_engine,
     runtime_service=worldline_runtime_service,
     memory_service=worldline_memory_service,
+    prepare_service=worldline_engine.prepare_service,
 )
 
 

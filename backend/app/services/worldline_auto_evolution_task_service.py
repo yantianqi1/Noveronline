@@ -32,11 +32,13 @@ class WorldlineAutoEvolutionTaskService:
         engine,
         runtime_service,
         memory_service,
+        prepare_service=None,
         auto_action_service: Optional[WorldlineAutoActionService] = None,
     ):
         self.engine = engine
         self.runtime_service = runtime_service
         self.memory_service = memory_service
+        self.prepare_service = prepare_service
         self.auto_action_service = auto_action_service or WorldlineAutoActionService()
         self._lock_guard = threading.Lock()
         self._session_locks: Dict[str, threading.Lock] = {}
@@ -166,8 +168,8 @@ class WorldlineAutoEvolutionTaskService:
         completed_steps = 0
         goal_verdict = self.auto_action_service.empty_goal_verdict(goal_text)
         while completed_steps < max_steps:
-            branch, agents, memory_hints = self._snapshot_branch(session_id, project_id, graph_id, branch_id, goal_text)
-            action_plan = self.auto_action_service.generate_actions(branch, agents, goal_text, memory_hints)
+            branch, agents, memory_hints, action_views = self._snapshot_branch(session_id, project_id, graph_id, branch_id, goal_text)
+            action_plan = self.auto_action_service.generate_actions(branch, agents, goal_text, memory_hints, action_views)
             branch = self._apply_round(
                 session_id,
                 project_id,
@@ -212,7 +214,10 @@ class WorldlineAutoEvolutionTaskService:
                 agents,
                 goal_text,
             )
-        return branch, agents, memory_hints
+            action_views = {}
+            if self.prepare_service is not None:
+                action_views = self.prepare_service.build_action_views(container_dir, session, agents)
+        return branch, agents, memory_hints, action_views
 
     def _apply_round(
         self,
@@ -240,6 +245,7 @@ class WorldlineAutoEvolutionTaskService:
                 graph_id=graph_id,
                 branch_id=branch_id,
                 steps=1,
+                event_status="candidate",
             )
         return require_branch(session, branch_id)
 

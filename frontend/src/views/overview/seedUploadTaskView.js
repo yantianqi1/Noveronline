@@ -8,6 +8,7 @@ export const IDLE_TIMELINE = [
   ["merge_story_memory", "汇总故事记忆", "把各块事实按顺序折叠成可继承的前情记忆。"],
   ["entity_resolution", "实体消歧", "从全局视角合并别名和高置信重复实体。"],
   ["contextual_block_analysis", "分析剧情块", "结合前情快照理解每个块如何推进主线。"],
+  ["chapter_card_generation", "生成章节卡", "逐章调用大模型生成结构化章节卡，供后续历史召回使用。"],
   ["consistency_audit", "连续性审计", "检查冲突、别名歧义与前后文不一致。"],
   ["build_continuity", "章节连续性摘要", "回写兼容旧链路的章节连续性产物。"],
   ["seed_analysis", "聚合种子分析", "汇总角色、组织与关系，生成可用种子。"],
@@ -141,6 +142,7 @@ function normalizeTimelineEvent(item, index) {
   const path = `progress_detail.timeline[${index}]`;
   const value = requireObject(item, path);
   requireKeys(value, TIMELINE_EVENT_KEYS, path);
+  const meta = requireObject(value.meta, `${path}.meta`);
   return {
     id: readString(value.id, `${path}.id`),
     timestamp: readString(value.timestamp, `${path}.timestamp`),
@@ -149,7 +151,16 @@ function normalizeTimelineEvent(item, index) {
     status: readString(value.status, `${path}.status`),
     title: readString(value.title, `${path}.title`),
     detail: readString(value.detail, `${path}.detail`),
-    meta: requireObject(value.meta, `${path}.meta`),
+    meta: {
+      ...meta,
+      step_id: meta.step_id || "",
+      step_kind: meta.step_kind || "",
+      group_key: meta.group_key || "",
+      group_label: meta.group_label || "",
+      has_trace: !!meta.has_trace,
+      elapsed_ms: typeof meta.elapsed_ms === "number" ? meta.elapsed_ms : 0,
+      llm_call_count: typeof meta.llm_call_count === "number" ? meta.llm_call_count : 0,
+    },
   };
 }
 

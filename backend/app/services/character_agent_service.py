@@ -34,6 +34,7 @@ class CharacterAgentService:
         branch_summary: Dict[str, Any],
         mode: str = TEMPLATE_MODE,
         memory_bundle: Optional[Dict[str, Any]] = None,
+        dossier_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if mode not in {TEMPLATE_MODE, LLM_MODE}:
             raise ValueError("mode 必须是 template 或 llm")
@@ -52,6 +53,7 @@ class CharacterAgentService:
             drive,
             tension,
             memory_bundle or {},
+            dossier_context or {},
         )
         return {
             "agent": actor_name,
@@ -78,10 +80,11 @@ class CharacterAgentService:
         drive: str,
         tension: str,
         memory_bundle: Dict[str, Any],
+        dossier_context: Dict[str, Any],
     ) -> tuple[str, str]:
         if mode == TEMPLATE_MODE:
             return self._template_reply(actor_name, message, recent_events, role, drive, tension, memory_bundle), ""
-        return self._llm_reply(actor_name, actor_state, message, recent_events, branch_summary, memory_bundle)
+        return self._llm_reply(actor_name, actor_state, message, recent_events, branch_summary, memory_bundle, dossier_context)
 
     def _template_reply(
         self,
@@ -113,12 +116,13 @@ class CharacterAgentService:
         recent_events: List[Dict[str, Any]],
         branch_summary: Dict[str, Any],
         memory_bundle: Dict[str, Any],
+        dossier_context: Dict[str, Any],
     ) -> tuple[str, str]:
         try:
             client = self.llm_router.build_client(WORLDLINE_DIALOGUE_MODULE)
         except ValueError as exc:
             raise ValueError(f"{WORLDLINE_DIALOGUE_MODULE} 未绑定可用模型: {exc}") from exc
-        prompt = self._llm_prompt(actor_name, actor_state, message, recent_events, branch_summary, memory_bundle)
+        prompt = self._llm_prompt(actor_name, actor_state, message, recent_events, branch_summary, memory_bundle, dossier_context)
         reply = client.chat(
             messages=[
                 {"role": "system", "content": WORLDLINE_AGENT_DIALOGUE_SYSTEM_PROMPT},
@@ -137,13 +141,23 @@ class CharacterAgentService:
         recent_events: List[Dict[str, Any]],
         branch_summary: Dict[str, Any],
         memory_bundle: Dict[str, Any],
+        dossier_context: Dict[str, Any],
     ) -> str:
         event_lines = [f"- {item.get('title', '未命名事件')}: {item.get('summary', '')}" for item in recent_events[:4]]
+        self_dossier = dossier_context.get("self_dossier") or {}
+        peer_lines = [
+            f"- {item.get('display_name', '未命名对象')}: {item.get('public_profile', {})}"
+            for item in (dossier_context.get("visible_peers") or [])[:8]
+        ]
         return (
             f"角色名：{actor_name}\n"
             f"分支标题：{branch_summary.get('title', '')}\n"
             f"分支核心变化：{branch_summary.get('core_change', '')}\n"
             f"当前状态：{actor_state}\n"
+            f"我的公开档案：{self_dossier.get('public_profile', {})}\n"
+            f"我的私密档案：{self_dossier.get('private_profile', {})}\n"
+            f"我对关系的看法：{self_dossier.get('relationship_view', {})}\n"
+            f"其他对象公开信息：\n{chr(10).join(peer_lines) if peer_lines else '- 暂无'}\n"
             f"最近事件：\n{chr(10).join(event_lines) if event_lines else '- 暂无'}\n"
             f"记忆上下文：\n{memory_bundle.get('rendered_context', '- 暂无')}\n"
             f"用户消息：{message}\n"

@@ -21,9 +21,13 @@ MODULE_DEFINITIONS = (
     LlmModuleDefinition("entity_resolution", "实体消歧", "在全局故事记忆上判断相似实体是否应合并。"),
     LlmModuleDefinition("narrative_archives", "角色势力档案生成", "把实体转换为可用于推演的角色与组织档案。"),
     LlmModuleDefinition("parallel_world_config", "世界线起始配置生成", "根据变量与角色网络生成当前世界的起始设定草案。"),
+    LlmModuleDefinition("worldline_agent_prepare", "世界线 Agent 整备", "为推演前的角色、组织与关系生成完整 dossier。"),
     LlmModuleDefinition("worldline_agent_dialogue", "世界线 Agent 对话", "为世界线角色或组织生成显式请求的对话回复。"),
     LlmModuleDefinition("worldline_agent_action", "世界线 Agent 自动动作", "为世界线自动演化生成每轮优先动作。"),
     LlmModuleDefinition("worldline_goal_evaluator", "世界线目标判定", "判断当前世界线是否达成创作者设定的自然语言目标。"),
+    LlmModuleDefinition("novel_draft_writer", "小说正文创作", "基于上下文包和创作者指令，流式生成小说正文。"),
+    LlmModuleDefinition("novel_draft_reviewer", "正文一致性审校", "检查生成的正文是否与已知设定、人物状态一致。"),
+    LlmModuleDefinition("novel_chapter_summarizer", "章节卡生成", "逐章生成结构化章节卡，用于 continuity 派生与全量历史召回。"),
 )
 
 STAGE_TO_MODULE_KEY = {
@@ -31,6 +35,7 @@ STAGE_TO_MODULE_KEY = {
     "extract_local_facts": "local_block_facts",
     "entity_resolution": "entity_resolution",
     "contextual_block_analysis": "contextual_block_analysis",
+    "chapter_card_generation": "novel_chapter_summarizer",
     "ontology": "story_ontology",
 }
 

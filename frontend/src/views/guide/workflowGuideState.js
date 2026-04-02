@@ -19,6 +19,11 @@ export const WORKFLOW_STEPS = Object.freeze([
     label: "世界线推演",
     description: "注入变量，观察当前世界如何继续演化。",
   },
+  {
+    key: "writing",
+    label: "正文创作",
+    description: "用 Agent 协同创作小说正文，可反复修订。",
+  },
 ]);
 
 const WORKFLOW_TARGETS = Object.freeze({
@@ -26,6 +31,7 @@ const WORKFLOW_TARGETS = Object.freeze({
   seed: Object.freeze({ path: "/", hash: "#seed-analysis" }),
   archive: Object.freeze({ path: "/archive-library" }),
   worldline: Object.freeze({ path: "/worldline" }),
+  writing: Object.freeze({ path: "/writer" }),
 });
 
 export function buildWorkflowTargets() {
@@ -73,7 +79,7 @@ export function resolveWorkflowStep({
     return "upload";
   }
   if (latestProject.graph_id || latestProject.status === "graph_completed") {
-    return "worldline";
+    return "writing";
   }
   if (latestProject.ontology || latestProject.status === "ontology_generated") {
     return "archive";

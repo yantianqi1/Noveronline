@@ -84,16 +84,21 @@ def test_async_seed_pipeline_generates_chapter_outputs(tmp_path, monkeypatch):
     project_dir = ProjectManager._get_project_dir(project_id)
     segments_path = f"{project_dir}/chapter_segments.json"
     continuity_path = f"{project_dir}/chapter_continuity.json"
+    chapter_cards_path = f"{project_dir}/chapter_cards.json"
     seed_analysis_path = f"{project_dir}/seed_analysis.json"
 
     with open(segments_path, "r", encoding="utf-8") as file_obj:
         segments = json.load(file_obj)
     with open(continuity_path, "r", encoding="utf-8") as file_obj:
         continuity = json.load(file_obj)
+    with open(chapter_cards_path, "r", encoding="utf-8") as file_obj:
+        chapter_cards = json.load(file_obj)
     with open(seed_analysis_path, "r", encoding="utf-8") as file_obj:
         seed_analysis = json.load(file_obj)
 
     assert len(segments["chapters"]) == 3
+    assert chapter_cards["chapter_count"] == 3
+    assert chapter_cards["chapters"][0]["summary_text"]
     assert segments["chapters"][0]["title"].startswith("第1章")
     assert continuity["chapters"][0]["continuity_summary"]
     assert "tail_hooks" in continuity["chapters"][1]
@@ -194,5 +199,6 @@ def test_task_progress_detail_exposes_structured_seed_logs(tmp_path, monkeypatch
     assert completed_detail["timeline"][-1]["timestamp"]
     assert any(item["stage"] == "skeleton_timeline" for item in completed_detail["timeline"])
     assert any(item["stage"] == "anchor_generation" for item in completed_detail["timeline"])
+    assert any(item["stage"] == "chapter_card_generation" for item in completed_detail["timeline"])
     assert completed_detail["task_metrics"]["chapter_count"] == 3
     assert completed_detail["task_metrics"]["block_count"] >= 1

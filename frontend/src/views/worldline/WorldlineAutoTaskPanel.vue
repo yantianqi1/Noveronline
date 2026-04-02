@@ -5,18 +5,17 @@
         <p class="section-index mono">03 / 自动演化</p>
         <h3 class="section-title">当前世界自动推进</h3>
       </div>
-      <p class="section-copy">任务启动后会轮询后台状态，并同步刷新右侧世界状态。</p>
+      <p class="section-copy">SSE 流式推进后，候选事件会出现在右侧导演台等待审核。</p>
     </div>
 
     <article class="task-card" :class="task.status || 'idle'">
       <div class="task-head">
         <strong>{{ task.branch_title || "当前世界" }}</strong>
-        <span class="mono">{{ resolveStatusLabel(task.status) }}</span>
+        <span class="mono task-status-label">{{ resolveStatusLabel(task.status) }}</span>
       </div>
-      <p class="task-meta">task: {{ task.task_id || "未提交" }}</p>
       <div class="progress-row">
         <div class="progress-track">
-          <div class="progress-fill" :style="{ width: `${task.progress || 0}%` }"></div>
+          <div class="progress-fill" :class="{ pulsing: isStreaming }" :style="{ width: `${task.progress || 0}%` }"></div>
         </div>
         <span class="mono">{{ task.progress || 0 }}%</span>
       </div>
@@ -27,14 +26,21 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from "vue";
+
+const props = defineProps({
   task: { type: Object, default: null },
+});
+
+const isStreaming = computed(() => {
+  const status = props.task?.status;
+  return status === "pending" || status === "processing";
 });
 
 function resolveStatusLabel(status = "") {
   const labels = {
     idle: "待命",
-    pending: "排队中",
+    pending: "连接中",
     processing: "演化中",
     completed: "已完成",
     failed: "失败",
@@ -78,6 +84,14 @@ function resolveStatusLabel(status = "") {
   align-items: center;
 }
 
+.task-status-label {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(245, 230, 200, 0.85);
+  color: #724e1f;
+  font-size: 0.82rem;
+}
+
 .task-meta,
 .task-copy,
 .task-foot {
@@ -96,5 +110,15 @@ function resolveStatusLabel(status = "") {
 .progress-fill {
   height: 100%;
   background: linear-gradient(90deg, #c9954a 0%, #8f6e41 100%);
+  transition: width 0.4s ease;
+}
+
+.progress-fill.pulsing {
+  animation: bar-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes bar-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 </style>

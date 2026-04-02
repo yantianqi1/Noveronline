@@ -1,0 +1,49 @@
+const PREPARE_TASK_POLL_INTERVAL_MS = 1500;
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function buildPrepareTaskSnapshot(task, prepareSnapshot) {
+  return {
+    ...(prepareSnapshot || {}),
+    task_progress: task.progress || 0,
+    task_message: task.message || "",
+  };
+}
+
+export function createWorldlinePrepareTaskPoller({
+  getTask,
+  getPreparedSession,
+  sleep: sleepImpl = sleep,
+} = {}) {
+  if (typeof getTask !== "function") {
+    throw new Error("createWorldlinePrepareTaskPoller requires a getTask function");
+  }
+  if (typeof getPreparedSession !== "function") {
+    throw new Error("createWorldlinePrepareTaskPoller requires a getPreparedSession function");
+  }
+
+  return async function pollPrepareTask(taskId, prepareId, onUpdate = () => {}) {
+    while (true) {
+      const [taskResponse, prepareResponse] = await Promise.all([
+        getTask(taskId),
+        getPreparedSession(prepareId),
+      ]);
+      const task = taskResponse.data || {};
+      const snapshot = buildPrepareTaskSnapshot(task, prepareResponse.data || {});
+      onUpdate(snapshot);
+
+      if (task.status === "completed") {
+        return snapshot;
+      }
+      if (task.status === "failed") {
+        throw new Error(task.error || "世界线 prepare 失败");
+      }
+
+      await sleepImpl(PREPARE_TASK_POLL_INTERVAL_MS);
+    }
+  };
+}

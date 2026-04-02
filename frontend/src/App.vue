@@ -43,7 +43,7 @@
           <span class="title-ancient">{{ currentNavLabel }}</span>
         </div>
         <div class="header-actions">
-          <!-- Add global project indicator or help button here if needed -->
+          <LlmActivityIndicator />
         </div>
       </header>
 
@@ -85,6 +85,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
+import LlmActivityIndicator from "./components/LlmActivityIndicator.vue";
 import { useProjectCatalog } from "./composables/useProjectCatalog";
 import { useSeedUpload } from "./composables/useSeedUpload";
 import { APP_BRAND_NAME, APP_SUBTITLE, formatUploadPhase } from "./utils/chineseDisplay";

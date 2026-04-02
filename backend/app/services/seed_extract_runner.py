@@ -9,6 +9,7 @@ from .llm_router import LlmRouter
 from .seed_task_callbacks import (
     build_anchor_progress_callback,
     build_block_progress_callback,
+    build_chapter_card_progress_callback,
     build_ontology_progress_callback,
 )
 from .seed_task_progress import SeedTaskProgressTracker
@@ -17,10 +18,12 @@ from .seed_task_progress import SeedTaskProgressTracker
 class SeedExtractRunner:
     """执行第一阶段种子提取流水线。"""
 
-    def __init__(self, service: Any, task_id: str, use_llm: bool):
+    def __init__(self, service: Any, task_id: str, use_llm: bool, project_id: str = ""):
         self.service = service
         self.use_llm = use_llm
-        self.progress = SeedTaskProgressTracker(service.task_manager, task_id, use_llm)
+        self.progress = SeedTaskProgressTracker(
+            service.task_manager, task_id, use_llm, project_id=project_id,
+        )
 
     def run(
         self,
@@ -67,13 +70,17 @@ class SeedExtractRunner:
 
     def _extract_and_segment(self, project_id: str) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
         self.progress.enter_stage("extract_text", "正在提取上传文件文本", 5, "读取并清洗上传的原始文稿")
+        step_id = self.progress.begin_step("extract_text", "file_extract", "提取上传文件文本")
         documents, all_text = self.service._extract_documents(project_id)
         self.service._save_text(project_id, documents, all_text)
+        self.progress.end_step(step_id)
         self.progress.note("extract_text", "文本提取完成", f"已提取 {len(documents)} 份文稿，共 {len(all_text)} 字")
 
         self.progress.enter_stage("segment_chapters", "正在切分章节与叙事段", 15)
+        step_id = self.progress.begin_step("segment_chapters", "segment", "切分章节与叙事段")
         chapter_segments = self.service.chapter_segmenter.segment_documents(documents)
         ProjectManager.save_project_json(project_id, "chapter_segments.json", chapter_segments)
+        self.progress.end_step(step_id)
         self.progress.set_counts(chapter_count=chapter_segments["chapter_count"])
         self.progress.note(
             "segment_chapters",
@@ -85,8 +92,10 @@ class SeedExtractRunner:
 
     def _build_skeleton(self, project_id: str, chapter_segments: Dict[str, Any]) -> Dict[str, Any]:
         self.progress.enter_stage("skeleton_timeline", "正在顺序扫描骨架时间线", 22)
+        step_id = self.progress.begin_step("skeleton_timeline", "skeleton", "顺序扫描骨架时间线")
         skeleton = self.service.skeleton_timeline_builder.build(chapter_segments["chapters"])
         ProjectManager.save_project_json(project_id, "skeleton_timeline.json", skeleton)
+        self.progress.end_step(step_id)
         self.progress.note(
             "skeleton_timeline",
             "骨架时间线扫描完成",
@@ -97,8 +106,10 @@ class SeedExtractRunner:
 
     def _build_blocks(self, project_id: str, chapter_segments: Dict[str, Any]) -> Dict[str, Any]:
         self.progress.enter_stage("build_blocks", "正在组装分析块与重叠上下文", 28)
+        step_id = self.progress.begin_step("build_blocks", "build", "组装分析块与重叠上下文")
         analysis_blocks = self.service.block_builder.build(chapter_segments["chapters"])
         ProjectManager.save_project_json(project_id, "analysis_blocks.json", analysis_blocks)
+        self.progress.end_step(step_id)
         self.progress.set_counts(block_count=analysis_blocks["block_count"])
         self.progress.note(
             "build_blocks",
@@ -158,6 +169,7 @@ class SeedExtractRunner:
         )
 
         self.progress.enter_stage("merge_story_memory", "正在顺序汇总故事记忆", 58)
+        step_id = self.progress.begin_step("merge_story_memory", "merge", "顺序汇总故事记忆")
         story_memory_payload = self.service.story_memory_builder.build(
             local_block_facts["packets"],
             blocks=analysis_blocks["blocks"],
@@ -168,6 +180,7 @@ class SeedExtractRunner:
         snapshots = {"snapshots": story_memory_payload["snapshots"]}
         ProjectManager.save_project_json(project_id, "story_memory.json", story_memory)
         ProjectManager.save_project_json(project_id, "story_memory_snapshots.json", snapshots)
+        self.progress.end_step(step_id)
         self.progress.note(
             "merge_story_memory",
             "故事记忆已汇总",
@@ -175,8 +188,10 @@ class SeedExtractRunner:
             meta={"kind": "artifact", "artifact": "story_memory.json"},
         )
         self.progress.enter_stage("entity_resolution", "正在执行全局实体消歧", 62)
+        step_id = self.progress.begin_step("entity_resolution", "resolve", "全局实体消歧")
         story_memory = self.service.entity_resolution_service.resolve(story_memory)
         ProjectManager.save_project_json(project_id, "story_memory.json", story_memory)
+        self.progress.end_step(step_id)
         self.progress.note(
             "entity_resolution",
             "全局实体消歧完成",
@@ -214,27 +229,68 @@ class SeedExtractRunner:
             meta={"kind": "artifact", "artifact": "block_analyses.json"},
         )
 
-        self._build_continuity_artifacts(project_id, chapter_segments, analysis_blocks, local_block_facts, story_memory, block_analyses)
+        chapter_cards = self._generate_chapter_cards(
+            project_id,
+            chapter_segments,
+            story_memory,
+            block_analyses,
+        )
+        self._build_continuity_artifacts(
+            project_id,
+            chapter_cards,
+            local_block_facts,
+            story_memory,
+            block_analyses,
+        )
         continuity = ProjectManager.load_project_json(project_id, "chapter_continuity.json") or {"chapter_count": 0, "chapters": []}
         seed_analysis = self._build_seed_analysis(project_id, project_name, analysis_goal, story_memory, block_analyses)
         return block_analyses, continuity, seed_analysis
 
-    def _build_continuity_artifacts(
+    def _generate_chapter_cards(
         self,
         project_id: str,
         chapter_segments: Dict[str, Any],
-        analysis_blocks: Dict[str, Any],
+        story_memory: Dict[str, Any],
+        block_analyses: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        self.progress.enter_stage("chapter_card_generation", "正在逐章生成结构化章节卡", 78)
+        chapter_cards = self.service.chapter_card_generator.generate_cards(
+            chapter_segments["chapters"],
+            story_memory=story_memory,
+            block_analyses=block_analyses,
+            progress_callback=build_chapter_card_progress_callback(self.progress),
+        )
+        ProjectManager.save_project_json(project_id, "chapter_cards.json", chapter_cards)
+        self.service.chapter_meta_service.replace_project_chapter_cards(
+            project_id,
+            chapter_cards["chapters"],
+            world_rules=story_memory.get("world_rules", []),
+        )
+        self.progress.note(
+            "chapter_card_generation",
+            "章节卡生成完成",
+            f"已生成 {chapter_cards['chapter_count']} 张结构化章节卡",
+            meta={"kind": "artifact", "artifact": "chapter_cards.json"},
+        )
+        return chapter_cards
+
+    def _build_continuity_artifacts(
+        self,
+        project_id: str,
+        chapter_cards: Dict[str, Any],
         local_block_facts: Dict[str, Any],
         story_memory: Dict[str, Any],
         block_analyses: Dict[str, Any],
     ) -> None:
-        self.progress.enter_stage("consistency_audit", "正在审计连续性冲突与歧义", 78)
+        self.progress.enter_stage("consistency_audit", "正在审计连续性冲突与歧义", 82)
+        step_id = self.progress.begin_step("consistency_audit", "audit", "审计连续性冲突与歧义")
         consistency_report = self.service.consistency_auditor.audit(
             story_memory=story_memory,
             block_analyses=block_analyses["blocks"],
             local_block_facts=local_block_facts["packets"],
         )
         ProjectManager.save_project_json(project_id, "consistency_report.json", consistency_report)
+        self.progress.end_step(step_id)
         self.progress.note(
             "consistency_audit",
             "连续性审计完成",
@@ -242,13 +298,11 @@ class SeedExtractRunner:
             meta={"kind": "artifact", "artifact": "consistency_report.json"},
         )
 
-        self.progress.enter_stage("build_continuity", "正在生成兼容章节连续性摘要", 82)
-        continuity = self.service.continuity_service.build_from_block_analyses(
-            chapter_segments["chapters"],
-            analysis_blocks["blocks"],
-            block_analyses["blocks"],
-        )
+        self.progress.enter_stage("build_continuity", "正在从章节卡派生连续性摘要", 86)
+        step_id = self.progress.begin_step("build_continuity", "continuity", "从章节卡派生连续性摘要")
+        continuity = self.service.continuity_service.build_from_chapter_cards(chapter_cards["chapters"])
         ProjectManager.save_project_json(project_id, "chapter_continuity.json", continuity)
+        self.progress.end_step(step_id)
         self.progress.note(
             "build_continuity",
             "章节连续性摘要完成",
@@ -264,7 +318,8 @@ class SeedExtractRunner:
         story_memory: Dict[str, Any],
         block_analyses: Dict[str, Any],
     ) -> Dict[str, Any]:
-        self.progress.enter_stage("seed_analysis", "正在聚合角色、组织与关系种子分析", 88)
+        self.progress.enter_stage("seed_analysis", "正在聚合角色、组织与关系种子分析", 90)
+        step_id = self.progress.begin_step("seed_analysis", "aggregate", "聚合角色、组织与关系种子分析")
         seed_analysis = self.service.seed_analysis_aggregator.aggregate(
             story_memory=story_memory,
             block_analyses=block_analyses["blocks"],
@@ -272,6 +327,7 @@ class SeedExtractRunner:
             project_name=project_name,
         )
         ProjectManager.save_project_json(project_id, "seed_analysis.json", seed_analysis)
+        self.progress.end_step(step_id)
         self.progress.note(
             "seed_analysis",
             "种子分析聚合完成",
@@ -289,8 +345,9 @@ class SeedExtractRunner:
         story_memory: Dict[str, Any],
         block_analyses: Dict[str, Any],
     ) -> Dict[str, Any]:
-        self.progress.enter_stage("ontology", "正在生成小说本体与故事主轴", 94)
-        return self.service.ontology_generator.generate(
+        self.progress.enter_stage("ontology", "正在生成小说本体与故事主轴", 96)
+        step_id = self.progress.begin_step("ontology", "ontology", "生成小说本体与故事主轴")
+        result = self.service.ontology_generator.generate(
             document_texts=[item["text"] for item in documents],
             analysis_goal=analysis_goal,
             additional_context=additional_context or None,
@@ -300,6 +357,8 @@ class SeedExtractRunner:
             block_analyses=block_analyses["blocks"],
             progress_callback=build_ontology_progress_callback(self.progress),
         )
+        self.progress.end_step(step_id)
+        return result
 
     def _result_payload(
         self,
@@ -337,6 +396,7 @@ class SeedExtractRunner:
             "contextual_block_analysis",
             "anchor_point_summary",
             "entity_resolution",
+            "novel_chapter_summarizer",
             "story_ontology",
         ):
             try:

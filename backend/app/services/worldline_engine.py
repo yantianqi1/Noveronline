@@ -101,6 +101,7 @@ class WorldlineEngine:
         steps: int = 1,
         evolution_intensity: str = "medium",
         custom_depth: Optional[int] = None,
+        event_status: str = "canon",
     ) -> WorldlineSession:
         session, container_dir = self._load_for_update(session_id, project_id, graph_id)
         for _ in range(max(1, min(steps, 10))):
@@ -110,6 +111,7 @@ class WorldlineEngine:
                     session,
                     evolution_intensity,
                     custom_depth,
+                    event_status=event_status,
                 )
                 self.runtime_service.record_step(container_dir, session, branch, step_result)
         session.updated_at = datetime.now().isoformat()

@@ -21,6 +21,8 @@ class FakeSeedLlmClient:
             return self._contextual_payload(user_message)
         if self.module_key == "entity_resolution":
             return self._entity_resolution_payload(user_message)
+        if self.module_key == "novel_chapter_summarizer":
+            return self._chapter_card_payload(user_message)
         if self.module_key == "story_ontology":
             return self._ontology_payload()
         raise AssertionError(f"unexpected module: {self.module_key}")
@@ -199,6 +201,34 @@ class FakeSeedLlmClient:
         if "沈夜" in user_message and "夜哥" in user_message:
             return {"merge": True, "canonical_name": "沈夜", "reason": "夜哥是沈夜的明确别名"}
         return {"merge": False, "canonical_name": "", "reason": "证据不足"}
+
+    def _chapter_card_payload(self, user_message):
+        chapter_match = re.search(r"chapter_id:\s*(chapter_\d+)", user_message)
+        chapter_id = chapter_match.group(1) if chapter_match else "chapter_0001"
+        chapter_order = int(chapter_id.rsplit("_", 1)[-1])
+        return {
+            "summary_text": f"第{chapter_order}章摘要：镜湖主线继续推进。",
+            "start_anchor": f"第{chapter_order}章起点：承接前章压力。",
+            "end_anchor": f"第{chapter_order}章尾声：新的冲突即将爆发。",
+            "key_events": [
+                {"summary": f"第{chapter_order}章事件：沈夜继续追查镜湖旧案。"},
+                {"summary": f"第{chapter_order}章事件：玄霄宗的布局进一步收紧。"},
+            ],
+            "open_threads": [
+                {"thread_key": "镜湖旧案", "summary": f"第{chapter_order}章后镜湖旧案仍未终结。"},
+            ],
+            "character_state_updates": [
+                {"name": "沈夜", "state": "active", "summary": "持续推进调查。"},
+            ],
+            "relationship_updates": [
+                {"source": "沈夜", "target": "玄霄宗", "state": "conflict", "summary": "双方矛盾继续升级。"},
+            ],
+            "timeline_note": f"第{chapter_order}章发生在同一夜晚。",
+            "key_entities": [
+                {"name": "沈夜", "entity_type": "character"},
+                {"name": "玄霄宗", "entity_type": "organization"},
+            ],
+        }
 
     def _ontology_payload(self):
         return {

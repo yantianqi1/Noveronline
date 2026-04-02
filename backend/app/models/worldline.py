@@ -91,6 +91,10 @@ class WorldEvent:
     action_effects: List[Dict[str, Any]] = field(default_factory=list)
     relation_changes: List[Dict[str, Any]] = field(default_factory=list)
     state_changes: List[Dict[str, Any]] = field(default_factory=list)
+    status: str = "canon"
+    confidence: str = "high"
+    confidence_reason: str = ""
+    event_source: str = "archive_based"
     created_at: str = field(default_factory=_now_iso)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -105,6 +109,10 @@ class WorldEvent:
             "action_effects": self.action_effects,
             "relation_changes": self.relation_changes,
             "state_changes": self.state_changes,
+            "status": self.status,
+            "confidence": self.confidence,
+            "confidence_reason": self.confidence_reason,
+            "event_source": self.event_source,
             "created_at": self.created_at,
         }
 
@@ -121,6 +129,10 @@ class WorldEvent:
             action_effects=list(data.get("action_effects", [])),
             relation_changes=list(data.get("relation_changes", [])),
             state_changes=list(data.get("state_changes", [])),
+            status=data.get("status", "canon"),
+            confidence=data.get("confidence", "high"),
+            confidence_reason=data.get("confidence_reason", ""),
+            event_source=data.get("event_source", data.get("source", "archive_based")),
             created_at=data.get("created_at", _now_iso()),
         )
 
@@ -200,6 +212,7 @@ class WorldlineSession:
     simulation_goal: str
     focus_question: str
     branch_count: int
+    prepare_id: str = ""
     session_scope: str = "project"
     status: str = "running"
     branches: List[WorldlineBranch] = field(default_factory=list)
@@ -221,6 +234,7 @@ class WorldlineSession:
             "simulation_goal": self.simulation_goal,
             "focus_question": self.focus_question,
             "branch_count": self.branch_count,
+            "prepare_id": self.prepare_id,
             "session_scope": self.session_scope,
             "status": self.status,
             "branches": [branch.to_dict() for branch in self.branches],
@@ -244,6 +258,7 @@ class WorldlineSession:
             simulation_goal=data.get("simulation_goal", ""),
             focus_question=data.get("focus_question", ""),
             branch_count=data.get("branch_count", 0),
+            prepare_id=data.get("prepare_id", ""),
             session_scope=data.get("session_scope", "project"),
             status=data.get("status", "running"),
             branches=[WorldlineBranch.from_dict(item) for item in data.get("branches", [])],

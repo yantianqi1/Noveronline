@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import copy
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from ..models.task import TaskManager, TaskStatus
 from .llm_router import LlmRouter
+from .seed_pipeline_chapters import chapter_for_stage, label_for_chapter
+from .step_trace_context import StepTraceContext, enter_step, new_step_id
+from .step_trace_writer import write_step_bundle
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_METRICS = {
     "chapter_count": 0,
@@ -28,12 +33,16 @@ class SeedTaskProgressTracker:
         task_manager: TaskManager,
         task_id: str,
         use_llm: bool,
+        project_id: str = "",
         llm_router: Optional[LlmRouter] = None,
     ):
         self.task_manager = task_manager
         self.task_id = task_id
+        self.project_id = project_id
         self.use_llm = use_llm
         self.llm_router = llm_router or LlmRouter()
+        self._active_step_cm: Optional[Any] = None
+        self._active_step_ctx: Optional[StepTraceContext] = None
         self._initialize_detail()
 
     def enter_stage(self, stage: str, label: str, progress: int, detail: str = "") -> None:
@@ -48,6 +57,108 @@ class SeedTaskProgressTracker:
             task.status = TaskStatus.PROCESSING
             task.progress = progress
             task.message = label
+            task.progress_detail = progress_detail
+
+        self.task_manager.mutate_task(self.task_id, mutate)
+
+    # ── Step lifecycle ──
+
+    def begin_step(
+        self,
+        stage: str,
+        step_kind: str,
+        title: str,
+        group_key: str = "",
+        group_label: str = "",
+    ) -> str:
+        """进入一个逻辑小步骤，返回 step_id。同时激活 trace 上下文。"""
+        if not group_key:
+            group_key = chapter_for_stage(stage)
+        if not group_label:
+            group_label = label_for_chapter(group_key)
+
+        step_id = new_step_id()
+        cm = enter_step(step_id, step_kind, group_key, group_label, stage, title)
+        ctx = cm.__enter__()
+        self._active_step_cm = cm
+        self._active_step_ctx = ctx
+
+        step_meta = {
+            "kind": step_kind,
+            "step_id": step_id,
+            "step_kind": step_kind,
+            "group_key": group_key,
+            "group_label": group_label,
+            "has_trace": False,
+        }
+
+        def mutate(task) -> None:
+            progress_detail = self._detail_copy(task.progress_detail)
+            progress_detail["timeline"].append(
+                self._event(stage, "info", "active", title, "", step_meta)
+            )
+            task.progress_detail = progress_detail
+
+        self.task_manager.mutate_task(self.task_id, mutate)
+        return step_id
+
+    def end_step(self, step_id: str) -> None:
+        """结束一个逻辑小步骤，写 trace bundle 并发射 complete 事件。"""
+        ctx = self._active_step_ctx
+        if ctx is None or ctx.step_id != step_id:
+            logger.warning("end_step 找不到匹配的 step 上下文: %s", step_id)
+            return
+
+        elapsed_ms = ctx.elapsed_ms
+        call_count = ctx.call_count
+        calls = list(ctx.calls)
+        has_trace = call_count > 0
+
+        # 退出 step context
+        try:
+            self._active_step_cm.__exit__(None, None, None)
+        except Exception:
+            logger.exception("退出 step context 异常: %s", step_id)
+        self._active_step_cm = None
+        self._active_step_ctx = None
+
+        # 写 trace bundle
+        if has_trace and self.project_id:
+            bundle = {
+                "step_id": ctx.step_id,
+                "title": ctx.title,
+                "stage": ctx.stage,
+                "group_key": ctx.group_key,
+                "group_label": ctx.group_label,
+                "started_at": ctx.started_at_wall,
+                "completed_at": datetime.now().isoformat(timespec="seconds"),
+                "elapsed_ms": elapsed_ms,
+                "call_count": call_count,
+                "calls": calls,
+            }
+            write_step_bundle(self.project_id, self.task_id, step_id, bundle)
+
+        step_meta = {
+            "kind": ctx.step_kind,
+            "step_id": step_id,
+            "step_kind": ctx.step_kind,
+            "group_key": ctx.group_key,
+            "group_label": ctx.group_label,
+            "has_trace": has_trace,
+            "elapsed_ms": elapsed_ms,
+            "llm_call_count": call_count,
+        }
+
+        def mutate(task) -> None:
+            progress_detail = self._detail_copy(task.progress_detail)
+            # 关闭匹配的 start 事件
+            for item in reversed(progress_detail["timeline"]):
+                if item.get("status") == "active" and item.get("meta", {}).get("step_id") == step_id:
+                    item["status"] = "completed"
+                    break
+            progress_detail["timeline"].append(
+                self._event(ctx.stage, "success", "completed", f"完成 {ctx.title}", "", step_meta)
+            )
             task.progress_detail = progress_detail
 
         self.task_manager.mutate_task(self.task_id, mutate)
@@ -101,9 +212,18 @@ class SeedTaskProgressTracker:
         self.task_manager.mutate_task(self.task_id, mutate)
 
     def note(self, stage: str, title: str, detail: str = "", level: str = "info", meta: Optional[Dict[str, Any]] = None) -> None:
+        note_meta = dict(meta or {})
+        if "step_id" not in note_meta:
+            note_meta["step_id"] = new_step_id()
+            note_meta.setdefault("step_kind", note_meta.get("kind", "note"))
+            group_key = chapter_for_stage(stage)
+            note_meta.setdefault("group_key", group_key)
+            note_meta.setdefault("group_label", label_for_chapter(group_key))
+            note_meta.setdefault("has_trace", False)
+
         def mutate(task) -> None:
             progress_detail = self._detail_copy(task.progress_detail)
-            progress_detail["timeline"].append(self._event(stage, level, "completed", title, detail, meta or {}))
+            progress_detail["timeline"].append(self._event(stage, level, "completed", title, detail, note_meta))
             task.progress_detail = progress_detail
 
         self.task_manager.mutate_task(self.task_id, mutate)

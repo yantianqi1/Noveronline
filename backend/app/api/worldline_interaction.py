@@ -17,6 +17,7 @@ from .worldline_support import (
     worldline_bp,
     worldline_engine,
     worldline_memory_service,
+    worldline_prepare_service,
     worldline_runtime_service,
 )
 from ..services.worldline_single_world import current_world
@@ -229,6 +230,7 @@ def agent_dialogue(session_id: str):
             branch_summary={"branch_id": branch.branch_id, "title": branch.title, "core_change": branch.core_change},
             mode=mode,
             memory_bundle=memory_bundle,
+            dossier_context=worldline_prepare_service.build_dialogue_bundle(container_dir, session, agent),
         )
         dialogue_id = worldline_runtime_service.record_dialogue(
             container_dir,

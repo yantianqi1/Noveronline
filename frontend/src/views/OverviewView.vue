@@ -41,9 +41,10 @@
       <div v-if="upload.state.uploadPhase !== 'idle'" class="active-task-preview">
         <div class="preview-header">
           <h3 class="title-ancient">当前管线任务进度</h3>
+          <button class="btn subtle small" @click="drawerOpen = true">打开卷宗</button>
         </div>
         <div id="seed-upload" class="task-panel">
-          <SeedUploadPanel @uploaded="handleUploaded" />
+          <SeedUploadPanel @uploaded="handleUploaded" @open-drawer="drawerOpen = true" />
         </div>
       </div>
 
@@ -82,15 +83,25 @@
       </div>
     </section>
 
-    <!-- Hidden upload area for scrolling -->
-    <div v-if="upload.state.uploadPhase === 'idle' && projects.length" id="seed-upload-anchor" class="hidden-upload">
-       <SeedUploadPanel @uploaded="handleUploaded" />
+    <!-- Idle upload area doubles as the CTA scroll target -->
+    <div v-if="upload.state.uploadPhase === 'idle'" id="seed-upload-anchor" class="hidden-upload">
+       <SeedUploadPanel @uploaded="handleUploaded" @open-drawer="drawerOpen = true" />
     </div>
+
+    <!-- Drawer -->
+    <SeedTaskDrawer
+      :open="drawerOpen"
+      :task-id="upload.state.taskId"
+      :timeline="upload.state.timeline"
+      :active-stage-key="upload.state.activeStage.key"
+      :task-status="upload.state.taskStatus"
+      @close="drawerOpen = false"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import { deleteProject } from "../api/project";
 import { useProjectCatalog } from "../composables/useProjectCatalog";
@@ -98,6 +109,7 @@ import { useSeedUpload } from "../composables/useSeedUpload";
 import { formatProjectStatus } from "../utils/chineseDisplay";
 import OverviewHeroPanel from "./overview/OverviewHeroPanel.vue";
 import SeedAnalysisPanel from "./overview/SeedAnalysisPanel.vue";
+import SeedTaskDrawer from "./overview/SeedTaskDrawer.vue";
 import SeedUploadPanel from "./overview/SeedUploadPanel.vue";
 
 const upload = useSeedUpload();
@@ -105,12 +117,23 @@ const { projects, refreshProjects } = useProjectCatalog();
 const seedAnalysisPanel = ref(null);
 const deletingProjectId = ref("");
 const projectActionError = ref("");
+const drawerOpen = ref(false);
 
 const recentProjects = computed(() => projects.value.slice(0, 4));
 
 const latestProjectWithResults = computed(() => {
   return projects.value.find(p => p.status && p.status.includes('completed'));
 });
+
+// Auto-open drawer when task starts processing
+watch(
+  () => upload.state.uploadPhase,
+  (phase) => {
+    if (phase === "processing") {
+      drawerOpen.value = true;
+    }
+  },
+);
 
 function statusClass(status) {
   if (status === "failed") return "danger";

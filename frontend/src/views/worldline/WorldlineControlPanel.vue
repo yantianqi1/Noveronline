@@ -7,15 +7,16 @@
       </div>
       <span class="status-tag" :class="sessionStatus.tone">{{ sessionStatus.label }}</span>
     </header>
-    <p class="description">从全局主档案库选取角色与组织，按步骤创建并推进当前世界线。</p>
+    <p class="description">设定初始变量与推进模式，先完成 LLM 整备，再启动并推进当前世界线。</p>
 
-    <section class="panel-section source-section">
+    <!-- Source section: only rendered in two-col / stacked fallback -->
+    <section v-if="showArchivePicker" class="panel-section source-section">
       <div class="section-head">
         <div>
           <p class="section-index mono">01 / 源档案</p>
           <h3 class="section-title">选择进入世界线的角色与组织</h3>
         </div>
-        <p class="section-copy">左侧聚焦筛选与挑选，右侧即时核对完整档案内容。</p>
+        <p class="section-copy">筛选与挑选档案。</p>
       </div>
       <ArchiveLibraryPicker
         :model-value="selectedArchives"
@@ -29,10 +30,10 @@
     <section class="panel-section launchpad-section">
       <div class="section-head">
         <div>
-          <p class="section-index mono">02 / 创建会话</p>
-          <h3 class="section-title">确认初始变量并启动世界线</h3>
+          <p class="section-index mono">{{ launchpadSectionIndex }}</p>
+          <h3 class="section-title">确认初始变量并启动整备</h3>
         </div>
-        <p class="section-copy">启动栏固定保留在底部，便于一边筛档一边发起当前世界线。</p>
+        <p class="section-copy">设定变量，选择推进模式，先完成 prepare，再进入 inspection 与正式推演。</p>
       </div>
 
       <div class="session-summary">
@@ -92,7 +93,7 @@
             </div>
           </div>
           <p v-else-if="createMode === 'first_round'" class="field-hint mode-note">
-            首轮自动固定执行 1 步，步数输入只在“持续自动”模式下生效。
+            首轮自动固定执行 1 步，步数输入只在"持续自动"模式下生效。
           </p>
           <p v-if="showContinuousSettings" class="field-hint mode-note">
             持续自动会按你填写的步数上限推进；如果提前达成目标或剧情自然收束，会提前停止。
@@ -100,8 +101,8 @@
         </div>
 
         <div class="action-box launchpad-action">
-          <p class="action-box-title">准备完成后启动世界线</p>
-          <p class="section-copy">创建后，右侧当前世界摘要与时空轨迹会自动刷新到当前会话。</p>
+          <p class="action-box-title">先启动 LLM 整备</p>
+          <p class="section-copy">整备完成后会先展示完整 agent 形态，你可以直接开始推演。</p>
           <p class="section-copy">{{ sessionScopeHint }}</p>
           <button class="btn primary create-btn" :disabled="busy || !selectedArchives.length" @click="createSession">
             {{ createActionLabel }}
@@ -152,6 +153,16 @@
         </div>
       </div>
 
+      <WorldlineVariableLockPanel
+        v-if="worldVariables.length"
+        :section-index="lockSectionIndex"
+        :world-variables="worldVariables"
+        :locked-variable-ids="lockedVariableIds"
+        @toggle-lock="emit('toggle-lock', $event)"
+        @lock-all="emit('lock-all')"
+        @unlock-all="emit('unlock-all')"
+      />
+
       <div class="feedback-panel" :class="{ error: !!error }">
         <span class="feedback-label mono">STATUS</span>
         <p class="feedback">{{ error || feedback }}</p>
@@ -166,6 +177,7 @@ import { computed } from "vue";
 import ArchiveLibraryPicker from "../../components/ArchiveLibraryPicker.vue";
 import { formatSessionScope } from "../../utils/chineseDisplay.js";
 import WorldlineAutoTaskPanel from "./WorldlineAutoTaskPanel.vue";
+import WorldlineVariableLockPanel from "./WorldlineVariableLockPanel.vue";
 import {
   buildWorldlineSessionSummary,
   resolveWorldlineSessionStatus,
@@ -180,6 +192,7 @@ const createModeOptions = Object.freeze([
 const props = defineProps({
   selectedArchives: { type: Array, default: () => [] },
   archiveProjectFilter: { type: String, default: "" },
+  showArchivePicker: { type: Boolean, default: false },
   variablesText: { type: String, default: "" },
   singleVariable: { type: String, default: "" },
   createMode: { type: String, default: "manual" },
@@ -191,6 +204,8 @@ const props = defineProps({
   feedback: { type: String, default: "" },
   error: { type: String, default: "" },
   busy: { type: Boolean, default: false },
+  worldVariables: { type: Array, default: () => [] },
+  lockedVariableIds: { type: Set, default: () => new Set() },
 });
 
 const emit = defineEmits([
@@ -205,6 +220,9 @@ const emit = defineEmits([
   "start-auto-evolve",
   "advance-step",
   "inject-variable",
+  "toggle-lock",
+  "lock-all",
+  "unlock-all",
 ]);
 
 const UPDATE_EVENT_MAP = Object.freeze({
@@ -233,14 +251,35 @@ const sessionScopeHint = computed(() => (
 
 const showContinuousSettings = computed(() => props.createMode === "continuous");
 const createActionLabel = computed(() => (
-  props.createMode === "manual" ? "创建世界线会话" : "创建会话并启动自动演化"
+  props.createMode === "manual" ? "启动世界线整备" : "整备完成后进入自动推演"
 ));
-const runtimeSectionIndex = computed(() => (
-  props.task || props.createMode !== "manual" ? "04 / 会话控制" : "03 / 会话控制"
+
+const launchpadSectionIndex = computed(() => (
+  props.showArchivePicker ? "02 / 启动整备" : "01 / 启动整备"
 ));
+
+const runtimeSectionIndex = computed(() => {
+  let base = props.showArchivePicker ? 2 : 1;
+  if (props.task || props.createMode !== "manual") {
+    base += 1;
+  }
+  const label = String(base + 1).padStart(2, "0");
+  return `${label} / 会话控制`;
+});
+
 const runtimeHint = computed(() => (
   props.sessionId ? `当前作用域：${formatSessionScope(props.sessionScope)}` : "创建会话后即可推进剧情或注入新的变量。"
 ));
+
+const lockSectionIndex = computed(() => {
+  let base = props.showArchivePicker ? 2 : 1;
+  if (props.task || props.createMode !== "manual") {
+    base += 1;
+  }
+  base += 1; // after runtime section
+  const label = String(base + 1).padStart(2, "0");
+  return `${label} / 变量锁定`;
+});
 
 function emitUpdate(field, value) {
   emit(UPDATE_EVENT_MAP[field], value);

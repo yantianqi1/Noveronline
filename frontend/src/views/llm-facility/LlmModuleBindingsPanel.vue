@@ -3,7 +3,7 @@
     <div class="panel-head">
       <div>
         <h2 class="card-title">模块绑定</h2>
-        <p>为每个业务模块指定唯一的“渠道 + 模型”组合，保存后对后续调用立即生效。</p>
+        <p>为每个业务模块指定唯一的“渠道 + 模型”组合，保存后对后续调用立即生效，并继承该渠道的并发设置。</p>
       </div>
     </div>
 
@@ -20,7 +20,7 @@
         <div class="binding-grid">
           <div class="field">
             <label>渠道</label>
-            <select v-model="drafts[module.module_key].channelKey" @change="handleChannelChange(module.module_key)">
+            <select :value="drafts[module.module_key].channelKey" @change="handleChannelChange(module.module_key, $event.target.value)">
               <option value="">请选择渠道</option>
               <option
                 v-for="channel in channels"
@@ -34,7 +34,7 @@
           </div>
           <div class="field">
             <label>模型</label>
-            <select v-model="drafts[module.module_key].modelId">
+            <select :value="drafts[module.module_key].modelId" @change="handleModelChange(module.module_key, $event.target.value)">
               <option value="">请选择模型</option>
               <option
                 v-for="model in availableModels(drafts[module.module_key].channelKey)"
@@ -83,7 +83,12 @@
 </template>
 
 <script setup>
-import { reactive, watch } from "vue";
+import { ref, watch } from "vue";
+
+import {
+  syncBindingDrafts,
+  updateBindingDraft,
+} from "./llmModuleBindingDrafts.js";
 
 const props = defineProps({
   modules: { type: Array, required: true },
@@ -94,17 +99,19 @@ const props = defineProps({
 
 const emit = defineEmits(["save-binding", "remove-binding"]);
 
-const drafts = reactive({});
+const drafts = ref({});
+const dirtyKeys = ref(new Set());
 
 watch(
   () => props.modules,
   (modules) => {
-    for (const module of modules) {
-      drafts[module.module_key] = {
-        channelKey: module.binding?.channel_key || "",
-        modelId: module.binding?.model_id || "",
-      };
-    }
+    const nextState = syncBindingDrafts({
+      modules,
+      drafts: drafts.value,
+      dirtyKeys: dirtyKeys.value,
+    });
+    drafts.value = nextState.drafts;
+    dirtyKeys.value = nextState.dirtyKeys;
   },
   { immediate: true, deep: true },
 );
@@ -117,10 +124,18 @@ function channelByKey(channelKey) {
   return props.channels.find((item) => item.channel_key === channelKey);
 }
 
-function handleChannelChange(moduleKey) {
-  const models = availableModels(drafts[moduleKey].channelKey);
-  const hasCurrentModel = models.some((item) => item.model_id === drafts[moduleKey].modelId);
-  drafts[moduleKey].modelId = hasCurrentModel ? drafts[moduleKey].modelId : (models[0]?.model_id || "");
+function handleChannelChange(moduleKey, channelKey) {
+  applyDraftPatch(moduleKey, { channelKey });
+  const models = availableModels(channelKey);
+  const currentModelId = drafts.value[moduleKey]?.modelId || "";
+  const hasCurrentModel = models.some((item) => item.model_id === currentModelId);
+  applyDraftPatch(moduleKey, {
+    modelId: hasCurrentModel ? currentModelId : (models[0]?.model_id || ""),
+  });
+}
+
+function handleModelChange(moduleKey, modelId) {
+  applyDraftPatch(moduleKey, { modelId });
 }
 
 function currentBindingText(module) {
@@ -160,7 +175,7 @@ function bindingWarning(module) {
 }
 
 function saveDisabled(moduleKey) {
-  const draft = drafts[moduleKey];
+  const draft = drafts.value[moduleKey];
   if (!draft?.channelKey || !draft?.modelId) {
     return true;
   }
@@ -173,13 +188,24 @@ function saveBinding(moduleKey) {
     return;
   }
   emit("save-binding", moduleKey, {
-    channel_key: drafts[moduleKey].channelKey,
-    model_id: drafts[moduleKey].modelId,
+    channel_key: drafts.value[moduleKey].channelKey,
+    model_id: drafts.value[moduleKey].modelId,
   });
 }
 
 function removeBinding(moduleKey) {
   emit("remove-binding", moduleKey);
+}
+
+function applyDraftPatch(moduleKey, patch) {
+  const nextState = updateBindingDraft({
+    drafts: drafts.value,
+    dirtyKeys: dirtyKeys.value,
+    moduleKey,
+    patch,
+  });
+  drafts.value = nextState.drafts;
+  dirtyKeys.value = nextState.dirtyKeys;
 }
 </script>
 

@@ -19,3 +19,10 @@ test("pipeline visualization uses a wrapping grid instead of horizontal scrollin
   assert.match(pipelineSource, /\.pipeline-flow\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(/s);
   assert.doesNotMatch(pipelineSource, /\.pipeline-flow\s*\{[^}]*overflow-x:\s*auto;/s);
 });
+
+test("overview keeps an idle upload target even before any project exists", () => {
+  assert.match(
+    overviewViewSource,
+    /<div v-if="upload\.state\.uploadPhase === 'idle'" id="seed-upload-anchor" class="hidden-upload">/s,
+  );
+});
