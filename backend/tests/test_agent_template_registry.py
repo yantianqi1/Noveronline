@@ -1,4 +1,4 @@
-from app.services.agent_template_registry import AgentTemplateRegistry
+from app.services.agents.registry import AgentTemplateRegistry
 
 
 def test_agent_template_registry_returns_kind_and_tier_specific_sections():

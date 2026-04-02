@@ -18,6 +18,22 @@ def build_chaptered_novel() -> str:
     return "\n\n".join(sections)
 
 
+def build_uneven_block_novel() -> str:
+    def section(order: int, body_size: int) -> str:
+        return f"第{order}章 分段测试\n" + ("甲" * body_size)
+
+    return "\n\n".join(
+        [
+            section(1, 1600),
+            section(2, 1600),
+            section(3, 1800),
+            section(4, 5200),
+            section(5, 1000),
+            section(6, 1100),
+        ]
+    )
+
+
 def wait_for_task(client, task_id: str, timeout: float = 15.0):
     deadline = time.time() + timeout
     latest = None
@@ -84,16 +100,21 @@ def test_async_seed_pipeline_generates_chapter_outputs(tmp_path, monkeypatch):
     project_dir = ProjectManager._get_project_dir(project_id)
     segments_path = f"{project_dir}/chapter_segments.json"
     continuity_path = f"{project_dir}/chapter_continuity.json"
+    chapter_cards_path = f"{project_dir}/chapter_cards.json"
     seed_analysis_path = f"{project_dir}/seed_analysis.json"
 
     with open(segments_path, "r", encoding="utf-8") as file_obj:
         segments = json.load(file_obj)
     with open(continuity_path, "r", encoding="utf-8") as file_obj:
         continuity = json.load(file_obj)
+    with open(chapter_cards_path, "r", encoding="utf-8") as file_obj:
+        chapter_cards = json.load(file_obj)
     with open(seed_analysis_path, "r", encoding="utf-8") as file_obj:
         seed_analysis = json.load(file_obj)
 
     assert len(segments["chapters"]) == 3
+    assert chapter_cards["chapter_count"] == 3
+    assert chapter_cards["chapters"][0]["summary_text"]
     assert segments["chapters"][0]["title"].startswith("第1章")
     assert continuity["chapters"][0]["continuity_summary"]
     assert "tail_hooks" in continuity["chapters"][1]
@@ -104,6 +125,42 @@ def test_async_seed_pipeline_generates_chapter_outputs(tmp_path, monkeypatch):
     project = project_resp.get_json()["data"]
     assert project["status"] in {"seed_completed", "ontology_generated"}
     assert project["ontology"]
+
+
+def test_async_seed_pipeline_uses_dynamic_char_based_analysis_blocks(tmp_path, monkeypatch):
+    ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
+    Config.ZEP_API_KEY = None
+    install_fake_seed_llm(monkeypatch)
+
+    app = create_app()
+    client = app.test_client()
+    upload = io.BytesIO(build_uneven_block_novel().encode("utf-8"))
+
+    response = client.post(
+        "/api/project/seed/extract",
+        data={
+            "analysis_goal": "提取角色、组织与关系并用于平行世界推演",
+            "project_name": "动态分块测试",
+            "files": (upload, "uneven_chaptered_novel.txt"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 202, response.get_json()
+    payload = response.get_json()["data"]
+    task = wait_for_task(client, payload["task_id"])
+    assert task["status"] == "completed", task
+
+    project_dir = ProjectManager._get_project_dir(payload["project_id"])
+    analysis_blocks_path = f"{project_dir}/analysis_blocks.json"
+
+    with open(analysis_blocks_path, "r", encoding="utf-8") as file_obj:
+        analysis_blocks = json.load(file_obj)
+
+    assert analysis_blocks["target_owned_char_count"] == 5000
+    assert analysis_blocks["block_count"] == 3
+    assert analysis_blocks["blocks"][0]["owned_chapter_ids"] == ["chapter_0001", "chapter_0002", "chapter_0003"]
+    assert analysis_blocks["blocks"][1]["owned_chapter_ids"] == ["chapter_0004"]
+    assert analysis_blocks["blocks"][2]["owned_chapter_ids"] == ["chapter_0005", "chapter_0006"]
 
 
 def test_seed_extract_returns_task_immediately_in_llm_mode(tmp_path, monkeypatch):
@@ -194,5 +251,6 @@ def test_task_progress_detail_exposes_structured_seed_logs(tmp_path, monkeypatch
     assert completed_detail["timeline"][-1]["timestamp"]
     assert any(item["stage"] == "skeleton_timeline" for item in completed_detail["timeline"])
     assert any(item["stage"] == "anchor_generation" for item in completed_detail["timeline"])
+    assert any(item["stage"] == "chapter_card_generation" for item in completed_detail["timeline"])
     assert completed_detail["task_metrics"]["chapter_count"] == 3
     assert completed_detail["task_metrics"]["block_count"] >= 1

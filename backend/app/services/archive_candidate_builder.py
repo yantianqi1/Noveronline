@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from .agent_template_registry import AgentTemplateRegistry
+from .agents.registry import AgentTemplateRegistry
 from .zep_entity_reader_types import EntityNode
 
 

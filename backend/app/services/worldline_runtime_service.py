@@ -8,8 +8,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .agent_memory_service import AgentMemoryService
-from .worldline_agent_registry import WorldlineAgentRegistry
+from .agents.memory import AgentMemoryService
+from .agents.worldline import WorldlineAgentRegistry
 from .worldline_runtime_storage import WorldlineRuntimeStorage
 from .worldline_single_world import current_world
 

@@ -6,9 +6,9 @@ from collections import Counter
 import hashlib
 from typing import Any, Dict, List, Optional
 
-from .agent_schema_registry import AgentSchemaRegistry
-from .agent_template_registry import AgentTemplateRegistry
-from .genre_plugin import resolve_genre_plugin
+from ..registry import AgentSchemaRegistry
+from ..registry import AgentTemplateRegistry
+from ...genre_plugin import resolve_genre_plugin
 
 CHARACTER_KIND = "character"
 ORGANIZATION_KIND = "organization"

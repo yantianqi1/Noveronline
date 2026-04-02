@@ -8,7 +8,9 @@ from ..models.task import TaskManager
 from ..utils.file_parser import FileParser
 from .analysis_block_builder import AnalysisBlockBuilder
 from .anchor_point_builder import AnchorPointBuilder
+from .chapter_card_generator import ChapterCardGenerator
 from .chapter_continuity_service import ChapterContinuityService
+from .chapter_meta_service import ChapterMetaService
 from .contextual_block_analyzer import ContextualBlockAnalyzer
 from .continuity_consistency_auditor import ContinuityConsistencyAuditor
 from .entity_resolution_service import EntityResolutionService
@@ -21,6 +23,7 @@ from .skeleton_timeline_builder import SkeletonTimelineBuilder
 from .story_memory_builder import StoryMemoryBuilder
 from .story_ontology_generator import StoryOntologyGenerator
 from .text_processor import TextProcessor
+from ..utils.upstream_error_formatter import format_upstream_service_error
 
 
 class SeedExtractTaskService:
@@ -34,6 +37,8 @@ class SeedExtractTaskService:
         contextual_block_analyzer: Optional[ContextualBlockAnalyzer] = None,
         consistency_auditor: Optional[ContinuityConsistencyAuditor] = None,
         continuity_service: Optional[ChapterContinuityService] = None,
+        chapter_card_generator: Optional[ChapterCardGenerator] = None,
+        chapter_meta_service: Optional[ChapterMetaService] = None,
         seed_analysis_aggregator: Optional[SeedAnalysisAggregator] = None,
         ontology_generator: Optional[StoryOntologyGenerator] = None,
         skeleton_timeline_builder: Optional[SkeletonTimelineBuilder] = None,
@@ -49,6 +54,8 @@ class SeedExtractTaskService:
         self.contextual_block_analyzer = contextual_block_analyzer or ContextualBlockAnalyzer()
         self.consistency_auditor = consistency_auditor or ContinuityConsistencyAuditor()
         self.continuity_service = continuity_service or ChapterContinuityService()
+        self.chapter_card_generator = chapter_card_generator or ChapterCardGenerator()
+        self.chapter_meta_service = chapter_meta_service or ChapterMetaService()
         self.seed_analysis_aggregator = seed_analysis_aggregator or SeedAnalysisAggregator()
         self.ontology_generator = ontology_generator or StoryOntologyGenerator()
         self.skeleton_timeline_builder = skeleton_timeline_builder or SkeletonTimelineBuilder(analyzer)
@@ -105,8 +112,9 @@ class SeedExtractTaskService:
         try:
             runner.run(project_id, project_name, analysis_goal, additional_context)
         except Exception as exc:
-            self._fail_project(project_id, str(exc))
-            runner.progress.fail(str(exc))
+            message = format_upstream_service_error(exc)
+            self._fail_project(project_id, message)
+            runner.progress.fail(message)
 
     def _extract_documents(self, project_id: str) -> tuple[List[Dict[str, str]], str]:
         project = ProjectManager.get_project(project_id)

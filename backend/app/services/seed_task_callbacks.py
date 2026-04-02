@@ -57,6 +57,26 @@ def build_anchor_progress_callback(progress: SeedTaskProgressTracker):
     return callback
 
 
+def build_chapter_card_progress_callback(progress: SeedTaskProgressTracker):
+    def callback(event_type: str, chapter: Dict[str, Any]) -> None:
+        order = int(chapter.get("chapter_order") or chapter.get("order") or 0)
+        chapter_id = chapter.get("chapter_id", "")
+        meta = {
+            "kind": "chapter",
+            "chapter_id": chapter_id,
+            "chapter_order": order,
+            "target_type": "chapter",
+            "target_label": f"第{order}章",
+        }
+        detail = f"第 {order} 章章节卡"
+        if event_type == "start":
+            progress.llm_action("正在生成结构化章节卡", "chapter", f"第{order}章", meta)
+            return
+        progress.note("chapter_card_generation", f"完成第{order}章章节卡", detail, meta=meta)
+
+    return callback
+
+
 def _block_meta(block: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "kind": "block",

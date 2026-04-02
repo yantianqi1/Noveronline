@@ -43,7 +43,7 @@
           <span class="title-ancient">{{ currentNavLabel }}</span>
         </div>
         <div class="header-actions">
-          <!-- Add global project indicator or help button here if needed -->
+          <LlmActivityIndicator />
         </div>
       </header>
 
@@ -85,6 +85,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
+import LlmActivityIndicator from "./components/LlmActivityIndicator.vue";
 import { useProjectCatalog } from "./composables/useProjectCatalog";
 import { useSeedUpload } from "./composables/useSeedUpload";
 import { APP_BRAND_NAME, APP_SUBTITLE, formatUploadPhase } from "./utils/chineseDisplay";
@@ -135,8 +136,8 @@ onMounted(() => {
 }
 
 .left-track {
-  width: 240px;
-  background: var(--bg-paper-warm);
+  width: 220px;
+  background: var(--bg-panel);
   border-right: 1px solid var(--line-soft);
   display: flex;
   flex-direction: column;
@@ -149,46 +150,49 @@ onMounted(() => {
 .brand {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: var(--space-sm);
   margin-bottom: var(--space-xl);
 }
 
 .seal {
-  width: 50px;
-  height: 50px;
-  background: var(--accent-seal);
+  width: 40px;
+  height: 40px;
+  background: var(--color-primary);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--shadow-ink);
-  transform: rotate(-3deg);
+  border-radius: var(--radius-sm);
+  transform: rotate(-2deg);
 }
 
 .seal-inner {
   color: #fff;
-  font-family: "JetBrains Mono", monospace;
-  font-weight: 800;
-  font-size: 20px;
-  border: 1px solid rgba(255,255,255,0.4);
-  width: 40px;
-  height: 40px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 14px;
+  border: 1px solid rgba(255,255,255,0.3);
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: var(--radius-sm);
 }
 
 .brand-name {
-  font-family: "ZCOOL XiaoWei", serif;
-  font-size: 24px;
-  letter-spacing: 0.1em;
-  color: var(--bg-ink);
+  font-family: var(--font-heading-cn);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-main);
 }
 
 .brand-sub {
   font-size: 11px;
-  color: var(--text-sub);
+  color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  font-family: var(--font-mono);
 }
 
 .nav-track {
@@ -208,8 +212,10 @@ onMounted(() => {
   font-size: 11px;
   color: var(--text-dim);
   margin-bottom: var(--space-sm);
-  letter-spacing: 0.2em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   padding-left: 12px;
+  font-weight: 500;
 }
 
 .nav-item {
@@ -218,53 +224,54 @@ onMounted(() => {
   padding: 10px 12px;
   text-decoration: none;
   color: var(--text-sub);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   transition: all 0.2s ease;
   position: relative;
   gap: var(--space-sm);
+  font-size: 14px;
 }
 
 .nav-dot {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
   background: transparent;
   border-radius: 50%;
   transition: all 0.2s ease;
 }
 
 .nav-label {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   flex: 1;
 }
 
 .nav-code {
-  font-size: 11px;
-  opacity: 0.3;
+  font-size: 10px;
+  opacity: 0.4;
+  font-family: var(--font-mono);
 }
 
 .nav-item:hover {
-  background: rgba(44, 42, 39, 0.04);
+  background: var(--bg-paper-warm);
   color: var(--text-main);
 }
 
 .nav-item.router-link-active {
-  background: #fff;
-  color: var(--accent-copper-deep);
-  box-shadow: var(--shadow-sm);
+  background: var(--bg-paper-warm);
+  color: var(--color-primary);
 }
 
 .nav-item.router-link-active .nav-dot {
-  background: var(--accent-copper);
-  box-shadow: 0 0 8px var(--accent-copper);
+  background: var(--color-primary);
 }
 
 .nav-item.router-link-active .nav-code {
   opacity: 0.8;
+  color: var(--color-primary);
 }
 
 .nav-item.sub {
-  padding: 6px 12px;
+  padding: 8px 12px;
   font-size: 13px;
 }
 
@@ -277,27 +284,32 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding: 8px 12px;
-  background: rgba(176, 125, 75, 0.08);
-  border: 1px solid rgba(176, 125, 75, 0.2);
-  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: rgba(155, 44, 44, 0.08);
+  border: 1px solid rgba(155, 44, 44, 0.2);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-size: 12px;
-  color: var(--accent-copper-deep);
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+}
+
+.mini-status:hover {
+  background: rgba(155, 44, 44, 0.12);
 }
 
 .status-pulse {
   width: 8px;
   height: 8px;
-  background: var(--accent-copper);
+  background: var(--color-primary);
   border-radius: 50%;
   animation: pulse 2s infinite;
 }
 
 @keyframes pulse {
-  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(176, 125, 75, 0.7); }
-  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(176, 125, 75, 0); }
-  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(176, 125, 75, 0); }
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(155, 44, 44, 0.4); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(155, 44, 44, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(155, 44, 44, 0); }
 }
 
 .main-stage {
@@ -305,17 +317,17 @@ onMounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  background: var(--bg-paper);
 }
 
 .stage-header {
-  height: 64px;
+  height: 60px;
   padding: 0 var(--space-xl);
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(8px);
+  background: var(--bg-panel);
   position: sticky;
   top: 0;
   z-index: 10;
@@ -328,20 +340,29 @@ onMounted(() => {
 }
 
 .breadcrumb .title-ancient {
-  font-size: 20px;
-  color: var(--bg-ink);
+  font-family: var(--font-heading-cn);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
 }
 
 .stage-content {
   padding: var(--space-xl);
   flex: 1;
+  overflow-y: auto;
 }
 
 /* Overlay Styles */
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(44, 42, 39, 0.4);
+  background: rgba(45, 55, 72, 0.4);
   backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
@@ -376,14 +397,14 @@ onMounted(() => {
 
 .progress-track {
   height: 6px;
-  background: var(--bg-paper);
+  background: var(--bg-paper-warm);
   border-radius: 3px;
   overflow: hidden;
 }
 
 .progress-bar {
   height: 100%;
-  background: var(--accent-copper);
+  background: var(--color-primary);
   transition: width 0.3s ease;
 }
 
@@ -392,6 +413,7 @@ onMounted(() => {
   justify-content: space-between;
   font-size: 12px;
   color: var(--text-dim);
+  font-family: var(--font-mono);
 }
 
 @keyframes slideUp {
@@ -405,6 +427,6 @@ onMounted(() => {
 @media (max-width: 980px) {
   .shell { flex-direction: column; }
   .left-track { width: 100%; height: auto; position: static; }
-  .nav-track { display: none; } /* Add mobile menu toggle if needed */
+  .nav-track { display: none; }
 }
 </style>

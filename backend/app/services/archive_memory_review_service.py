@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .agent_memory_stores import LongTermMemoryStore
+from .agents.memory import LongTermMemoryStore
 
 
 class ArchiveMemoryReviewService:

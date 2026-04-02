@@ -17,6 +17,10 @@
         <label>Base URL</label>
         <input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" />
       </div>
+      <div class="field">
+        <label>并发上限</label>
+        <input v-model.number="form.maxConcurrency" min="1" step="1" type="number" />
+      </div>
       <div class="field field-wide">
         <label>API Key</label>
         <input
@@ -68,6 +72,9 @@
           <span class="chip mono">状态：{{ channel.last_sync_status || "idle" }}</span>
           <span class="chip mono">上次同步：{{ channel.last_sync_at || "未同步" }}</span>
           <span class="chip mono">模型：{{ channel.models?.length || 0 }}</span>
+          <span class="chip mono">并发上限：{{ channel.max_concurrency || 4 }}</span>
+          <span class="chip mono">当前占用：{{ channel.runtime?.inflight || 0 }}</span>
+          <span class="chip mono">排队数：{{ channel.runtime?.waiting || 0 }}</span>
         </div>
         <p v-if="channel.last_sync_error" class="channel-error">{{ channel.last_sync_error }}</p>
         <div class="model-cloud">
@@ -103,6 +110,7 @@ const form = reactive({
   name: "",
   baseUrl: "",
   apiKey: "",
+  maxConcurrency: 4,
   isEnabled: true,
 });
 
@@ -118,6 +126,7 @@ function resetForm() {
   form.name = "";
   form.baseUrl = "";
   form.apiKey = "";
+  form.maxConcurrency = 4;
   form.isEnabled = true;
 }
 
@@ -126,6 +135,7 @@ function startEdit(channel) {
   form.name = channel.name;
   form.baseUrl = channel.base_url;
   form.apiKey = "";
+  form.maxConcurrency = channel.max_concurrency || 4;
   form.isEnabled = !!channel.is_enabled;
 }
 
@@ -134,6 +144,7 @@ function submitForm() {
     name: form.name.trim(),
     base_url: form.baseUrl.trim(),
     api_key: form.apiKey.trim(),
+    max_concurrency: Math.max(1, Number(form.maxConcurrency || 4)),
     is_enabled: form.isEnabled,
   };
   if (editingChannelKey.value) {

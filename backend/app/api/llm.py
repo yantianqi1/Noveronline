@@ -5,6 +5,8 @@ import traceback
 from flask import jsonify, request
 
 from . import llm_bp
+from ..services.llm_activity_tracker import llm_activity_tracker
+from ..services.llm_concurrency_service import llm_concurrency_service as _concurrency_svc
 from ..services.llm_settings_service import LlmSettingsService
 
 
@@ -98,5 +100,32 @@ def delete_llm_module_binding(module_key: str):
         return jsonify({"success": True, "data": result})
     except ValueError as error:
         return _error_response(error, 404)
+    except Exception as error:
+        return _error_response(error)
+
+
+@llm_bp.route("/activity", methods=["GET"])
+def get_llm_activity():
+    """返回当前所有活跃 LLM 调用快照和各渠道并发状态。"""
+    try:
+        calls = llm_activity_tracker.snapshot()
+
+        # 收集所有相关渠道的并发信息
+        seen_channels = {c["channel_key"] for c in calls if c["channel_key"]}
+        seen_channels.update(_concurrency_svc.channel_keys())
+
+        channels = {}
+        for ck in seen_channels:
+            if ck:
+                channels[ck] = _concurrency_svc.snapshot(ck)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "calls": calls,
+                "channels": channels,
+                "total_active": len(calls),
+            },
+        })
     except Exception as error:
         return _error_response(error)

@@ -15,8 +15,23 @@ def _chapter(order: int) -> dict:
         "chapter_id": f"chapter_{order:04d}",
         "order": order,
         "title": f"第{order}章",
+        "source_name": "demo.txt",
         "content": f"沈夜在第{order}章与秦昭讨论镜湖真相，玄霄宗与白泽司的冲突持续升级。",
     }
+
+
+def _sized_chapter(order: int, body_size: int) -> dict:
+    return {
+        "chapter_id": f"chapter_{order:04d}",
+        "order": order,
+        "title": f"标题{order}",
+        "source_name": "demo.txt",
+        "content": "甲" * body_size,
+    }
+
+
+def _chapter_char_count(chapter: dict) -> int:
+    return len(chapter["title"]) + len(chapter["content"])
 
 
 def _packet(block_id: str, order: int, summary: str) -> dict:
@@ -72,19 +87,36 @@ def _packet(block_id: str, order: int, summary: str) -> dict:
     }
 
 
-def test_analysis_block_builder_keeps_owned_order_and_context_overlap():
-    chapters = [_chapter(order) for order in range(1, 13)]
+def test_analysis_block_builder_splits_at_chapter_boundary_after_target_threshold():
+    chapters = [
+        _sized_chapter(1, 1600),
+        _sized_chapter(2, 1600),
+        _sized_chapter(3, 1800),
+        _sized_chapter(4, 5200),
+        _sized_chapter(5, 1000),
+        _sized_chapter(6, 1100),
+    ]
 
     payload = AnalysisBlockBuilder().build(chapters)
 
-    assert payload["block_count"] == 2
+    assert payload["block_count"] == 3
+    assert payload["target_owned_char_count"] == 5000
+    assert "owned_chapter_count" not in payload
     first_block = payload["blocks"][0]
     second_block = payload["blocks"][1]
+    third_block = payload["blocks"][2]
 
-    assert first_block["owned_chapter_ids"] == [f"chapter_{order:04d}" for order in range(1, 11)]
-    assert first_block["context_chapter_ids"] == ["chapter_0011", "chapter_0012"]
-    assert second_block["owned_chapter_ids"] == ["chapter_0011", "chapter_0012"]
-    assert second_block["context_chapter_ids"] == ["chapter_0009", "chapter_0010"]
+    assert first_block["owned_chapter_ids"] == ["chapter_0001", "chapter_0002", "chapter_0003"]
+    assert first_block["context_chapter_ids"] == ["chapter_0004", "chapter_0005"]
+    assert first_block["owned_char_count"] == sum(_chapter_char_count(item) for item in chapters[:3])
+
+    assert second_block["owned_chapter_ids"] == ["chapter_0004"]
+    assert second_block["context_chapter_ids"] == ["chapter_0002", "chapter_0003", "chapter_0005", "chapter_0006"]
+    assert second_block["owned_char_count"] == _chapter_char_count(chapters[3])
+
+    assert third_block["owned_chapter_ids"] == ["chapter_0005", "chapter_0006"]
+    assert third_block["context_chapter_ids"] == ["chapter_0003", "chapter_0004"]
+    assert third_block["owned_char_count"] == sum(_chapter_char_count(item) for item in chapters[4:])
 
 
 def test_story_memory_builder_merges_packets_in_block_order():
@@ -150,6 +182,7 @@ def test_consistency_auditor_reports_post_death_activity_and_alias_ambiguity():
 
 def test_seed_llm_stage_defaults_use_twenty_workers():
     assert LocalBlockFactExtractor().max_workers == 20
+    assert LocalBlockFactExtractor().llm_concurrent_limit == 4
     assert ContextualBlockAnalyzer().max_workers == 20
 
 

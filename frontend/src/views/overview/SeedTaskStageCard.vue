@@ -10,15 +10,15 @@
     <div class="stage-metrics">
       <div class="metric-box">
         <span class="metric-label mono">进度</span>
-        <strong>{{ activeStage.progress || 0 }}%</strong>
+        <strong>{{ stageProgress.percent }}%</strong>
       </div>
       <div class="metric-box">
         <span class="metric-label mono">耗时</span>
         <strong>{{ elapsedText }}</strong>
       </div>
       <div class="metric-box">
-        <span class="metric-label mono">分析块</span>
-        <strong>{{ blockSummary }}</strong>
+        <span class="metric-label mono">{{ workMetricLabel }}</span>
+        <strong>{{ workMetricValue }}</strong>
       </div>
       <div class="metric-box">
         <span class="metric-label mono">章节数</span>
@@ -26,7 +26,7 @@
       </div>
     </div>
     <div class="stage-track">
-      <div class="stage-bar" :style="{ width: `${activeStage.progress || 0}%` }"></div>
+      <div class="stage-bar" :style="{ width: `${stageProgress.percent}%` }"></div>
     </div>
   </section>
 </template>
@@ -34,13 +34,14 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { formatElapsedDuration } from "./seedUploadTaskView";
+import { deriveStageProgress, formatElapsedDuration } from "./seedUploadTaskView";
 import { formatTaskStageStatus } from "../../utils/chineseDisplay";
 
 const props = defineProps({
   activeStage: { type: Object, required: true },
   taskStatus: { type: String, default: "" },
   taskMetrics: { type: Object, required: true },
+  timeline: { type: Array, default: () => [] },
   startedAt: { type: String, default: "" },
 });
 
@@ -59,12 +60,25 @@ const statusClass = computed(() => {
   if (resolvedStatus.value === "completed") return "done";
   return resolvedStatus.value;
 });
+const stageProgress = computed(() =>
+  deriveStageProgress(props.activeStage, props.taskMetrics, props.timeline),
+);
 const elapsedText = computed(() => formatElapsedDuration(props.startedAt, now.value));
 const blockSummary = computed(() => {
   if (!props.taskMetrics.totalBlocks) return "-";
   return `${props.taskMetrics.completedBlocks}/${props.taskMetrics.totalBlocks}`;
 });
 const chapterSummary = computed(() => (props.taskMetrics.chapterCount ? String(props.taskMetrics.chapterCount) : "-"));
+const workMetricLabel = computed(() => {
+  if (props.activeStage.key === "chapter_card_generation") return "章节卡";
+  return "分析块";
+});
+const workMetricValue = computed(() => {
+  if (props.activeStage.key === "chapter_card_generation") {
+    return stageProgress.value.detail;
+  }
+  return blockSummary.value;
+});
 
 onMounted(() => {
   timerId = window.setInterval(() => {

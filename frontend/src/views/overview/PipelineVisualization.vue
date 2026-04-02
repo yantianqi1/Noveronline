@@ -1,21 +1,31 @@
 <template>
-  <section class="pipeline-shell">
+  <section class="pipeline-shell" :class="{ compact }">
     <div class="pipeline-head">
       <div>
-        <h3>种子提取管线</h3>
+        <h3>{{ compact ? "当前阶段轨道" : "种子提取管线" }}</h3>
         <p>{{ headline }}</p>
       </div>
-      <div class="pipeline-legend">
+      <div v-if="!compact" class="pipeline-legend">
         <span class="legend-chip pending">待命</span>
         <span class="legend-chip active">进行中</span>
         <span class="legend-chip done">已完成</span>
       </div>
+      <span v-else class="rail-note mono">窗口化轨道</span>
     </div>
 
-    <div class="pipeline-flow">
-      <article v-for="(node, index) in nodes" :key="node.stage" class="pipeline-node" :class="node.state" :title="node.tooltip">
+    <div v-if="compact" class="pipeline-flow compact">
+      <template v-for="item in railItems" :key="railKey(item)">
+        <article v-if="item.kind === 'node'" class="pipeline-node compact" :class="item.state" :title="item.tooltip">
+          <span class="mono node-code">{{ String(item.sequence).padStart(2, "0") }}</span>
+          <strong>{{ item.title }}</strong>
+        </article>
+        <div v-else class="pipeline-summary-pill" :class="item.state">{{ item.label }}</div>
+      </template>
+    </div>
+    <div v-else class="pipeline-flow">
+      <article v-for="node in fullNodes" :key="node.stage" class="pipeline-node" :class="node.state" :title="node.tooltip">
         <div class="node-top">
-          <span class="mono node-code">{{ String(index + 1).padStart(2, "0") }}</span>
+          <span class="mono node-code">{{ String(node.sequence).padStart(2, "0") }}</span>
           <span class="node-state-chip">{{ formatNodeState(node.state) }}</span>
         </div>
         <strong>{{ node.title }}</strong>
@@ -27,22 +37,20 @@
 
 <script setup>
 import { computed } from "vue";
-import { CONCEPT_TOOLTIPS } from "../../utils/chineseDisplay";
-import { IDLE_TIMELINE } from "./seedUploadTaskView";
+import { buildFullPipelineNodes, buildPipelineRailWindow } from "./overviewWorkbenchState.js";
 
 const props = defineProps({
   uploadPhase: { type: String, default: "idle" },
   taskStatus: { type: String, default: "" },
   activeStage: { type: Object, default: () => ({ key: "", label: "" }) },
+  compact: { type: Boolean, default: false },
 });
 
-const stageIndex = computed(() =>
-  IDLE_TIMELINE.findIndex(([stage]) => stage === props.activeStage?.key),
-);
-
+const fullNodes = computed(() => buildFullPipelineNodes(props));
+const railItems = computed(() => buildPipelineRailWindow(props).items);
 const headline = computed(() => {
   if (props.uploadPhase === "uploading") {
-    return "文件正在上传，上传完成后会自动进入下列后台阶段。";
+    return "文件正在上传，上传完成后会自动进入后台分析。";
   }
   if (props.taskStatus === "processing") {
     return props.activeStage?.label
@@ -53,56 +61,17 @@ const headline = computed(() => {
     return "本轮管线已经走完，可继续查看种子分析、档案和世界线。";
   }
   if (props.taskStatus === "failed" || props.uploadPhase === "error") {
-    return "当前轮次中断了，节点会停在最后一个失败阶段。";
+    return "当前轮次中断了，完整卷宗会保留失败阶段。";
   }
-  return "上传后系统会从切章开始，逐步完成骨架扫描、故事记忆和种子聚合。";
+  return "当前没有活跃任务时，只显示当前流程骨架和后续阶段数量。";
 });
 
-const nodes = computed(() =>
-  IDLE_TIMELINE.map(([stage, title, detail], index) => ({
-    stage,
-    title,
-    detail,
-    tooltip: CONCEPT_TOOLTIPS[stage] || detail,
-    state: nodeState(index, stage),
-  })),
-);
-
-function nodeState(index, stage) {
-  if (props.uploadPhase === "idle" || props.uploadPhase === "uploading") {
-    return "pending";
-  }
-  if (props.taskStatus === "completed" || props.activeStage?.key === "completed") {
-    return "done";
-  }
-  if (props.taskStatus === "failed" || props.uploadPhase === "error") {
-    if (stageIndex.value === index) {
-      return "failed";
-    }
-    return index < stageIndex.value ? "done" : "pending";
-  }
-  if (stageIndex.value < 0) {
-    return "pending";
-  }
-  if (index < stageIndex.value) {
-    return "done";
-  }
-  if (index === stageIndex.value) {
-    return "active";
-  }
-  return "pending";
-}
+function railKey(item) { return item.kind === "summary" ? `${item.state}_${item.count}` : item.stage; }
 
 function formatNodeState(state) {
-  if (state === "done") {
-    return "已完成";
-  }
-  if (state === "active") {
-    return "当前";
-  }
-  if (state === "failed") {
-    return "中断";
-  }
+  if (state === "done") return "已完成";
+  if (state === "active") return "当前";
+  if (state === "failed") return "中断";
   return "待命";
 }
 </script>
@@ -111,24 +80,22 @@ function formatNodeState(state) {
 .pipeline-shell {
   margin-top: 16px;
   border: 1px solid var(--line-soft);
-  border-radius: 16px;
-  padding: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 252, 244, 0.95), rgba(255, 248, 235, 0.92)),
+  border-radius: 18px;
+  padding: 16px;
+  background: linear-gradient(180deg, rgba(255, 252, 244, 0.95), rgba(255, 248, 235, 0.92)),
     radial-gradient(circle at 100% 0%, rgba(39, 90, 120, 0.08), transparent 26%);
 }
 
+.pipeline-head, .node-top { display: flex; justify-content: space-between; gap: 12px; }
+
 .pipeline-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 14px;
   align-items: flex-start;
 }
 
 .pipeline-head h3 {
   margin: 0;
-  font-family: "ZCOOL XiaoWei", serif;
   font-size: 22px;
+  font-family: "ZCOOL XiaoWei", serif;
 }
 
 .pipeline-head p {
@@ -142,13 +109,11 @@ function formatNodeState(state) {
   gap: 8px;
 }
 
-.legend-chip {
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 12px;
-}
+.legend-chip, .pipeline-summary-pill, .node-state-chip { border-radius: 999px; padding: 4px 10px; font-size: 12px; }
 
-.legend-chip.pending {
+.legend-chip.pending,
+.pipeline-summary-pill.pending,
+.node-state-chip {
   background: rgba(159, 141, 106, 0.1);
   color: var(--text-sub);
 }
@@ -158,9 +123,15 @@ function formatNodeState(state) {
   color: var(--accent-copper);
 }
 
-.legend-chip.done {
+.legend-chip.done,
+.pipeline-summary-pill.done {
   background: rgba(56, 106, 79, 0.14);
   color: var(--accent-green);
+}
+
+.rail-note {
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 .pipeline-flow {
@@ -168,6 +139,11 @@ function formatNodeState(state) {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 12px;
+}
+
+.pipeline-flow.compact {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: stretch;
 }
 
 .pipeline-node {
@@ -184,6 +160,11 @@ function formatNodeState(state) {
   overflow: hidden;
 }
 
+.pipeline-node.compact {
+  min-height: 92px;
+  justify-content: space-between;
+}
+
 .pipeline-node::before {
   content: "";
   position: absolute;
@@ -193,25 +174,12 @@ function formatNodeState(state) {
 }
 
 .node-top {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 8px;
 }
 
 .node-code {
   font-size: 12px;
   color: var(--text-sub);
-}
-
-.node-state-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--text-sub);
-  background: rgba(159, 141, 106, 0.1);
 }
 
 .pipeline-node strong {
@@ -221,6 +189,20 @@ function formatNodeState(state) {
 .pipeline-node small {
   color: var(--text-sub);
   line-height: 1.55;
+}
+
+.pipeline-summary-pill {
+  min-height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border: 1px dashed rgba(113, 128, 150, 0.22);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.pipeline-summary-pill.pending {
+  color: var(--text-sub);
 }
 
 .pipeline-node.pending {
@@ -266,7 +248,8 @@ function formatNodeState(state) {
   background: linear-gradient(90deg, rgba(155, 67, 38, 0.9), rgba(155, 67, 38, 0.22));
 }
 
-.pipeline-node.failed .node-state-chip {
+.pipeline-node.failed .node-state-chip,
+.pipeline-summary-pill.failed {
   color: var(--accent-seal);
   background: rgba(155, 67, 38, 0.12);
 }
@@ -274,6 +257,10 @@ function formatNodeState(state) {
 @media (max-width: 980px) {
   .pipeline-head {
     flex-direction: column;
+  }
+
+  .pipeline-flow.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>

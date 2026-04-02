@@ -14,7 +14,7 @@ from .worldline_branch_support import (
     record_state_change,
     resolve_evolution_depth,
 )
-from .worldline_agent_registry import WorldlineAgentRegistry
+from .agents.worldline import WorldlineAgentRegistry
 from .worldline_single_world import MAIN_WORLD_BRANCH_ID, MAIN_WORLD_TITLE
 
 MAX_VARIABLES_PER_STEP = 3
@@ -47,6 +47,10 @@ class WorldlineBranchService:
         session: WorldlineSession,
         evolution_intensity: str = "medium",
         custom_depth: Optional[int] = None,
+        event_status: str = "canon",
+        event_confidence: str = "high",
+        event_confidence_reason: str = "",
+        event_source: str = "archive_based",
     ) -> Dict[str, Any]:
         next_step = branch.current_step + 1
         depth = resolve_evolution_depth(branch, evolution_intensity, custom_depth)
@@ -67,20 +71,39 @@ class WorldlineBranchService:
             depth,
         )
         relation_changes = self._relation_changes(branch, drivers, consumed_variables, consumed_actions)
-        branch.timeline.append(
-            WorldEvent(
-                event_id=f"evt_{uuid.uuid4().hex[:10]}",
-                step=next_step,
-                title=f"{branch.title} · 第{next_step}步演化",
-                summary=self._summary(session.focus_question, consumed_variables, consumed_actions),
-                event_type="evolution",
-                driving_entities=drivers,
-                variable_effects=[item.to_dict() for item in consumed_variables],
-                action_effects=[item.to_dict() for item in consumed_actions],
-                relation_changes=relation_changes,
-                state_changes=state_changes,
-            )
+
+        # Determine confidence based on source if not explicitly provided
+        if not event_confidence_reason:
+            if consumed_actions:
+                event_confidence_reason = "基于角色档案中的行为倾向"
+                event_source = "archive_based"
+                event_confidence = "high"
+            elif consumed_variables:
+                event_confidence_reason = "变量触发推演，符合上下文逻辑"
+                event_source = "context_based"
+                event_confidence = "medium"
+            else:
+                event_confidence_reason = "惯性推演，无明确档案或变量支撑"
+                event_source = "creative"
+                event_confidence = "low"
+
+        new_event = WorldEvent(
+            event_id=f"evt_{uuid.uuid4().hex[:10]}",
+            step=next_step,
+            title=f"{branch.title} · 第{next_step}步演化",
+            summary=self._summary(session.focus_question, consumed_variables, consumed_actions),
+            event_type="evolution",
+            driving_entities=drivers,
+            variable_effects=[item.to_dict() for item in consumed_variables],
+            action_effects=[item.to_dict() for item in consumed_actions],
+            relation_changes=relation_changes,
+            state_changes=state_changes,
+            status=event_status,
+            confidence=event_confidence,
+            confidence_reason=event_confidence_reason,
+            event_source=event_source,
         )
+        branch.timeline.append(new_event)
         branch.current_step = next_step
         branch.updated_at = datetime.now().isoformat()
         return {
@@ -88,6 +111,7 @@ class WorldlineBranchService:
             "consumed_actions": consumed_actions,
             "state_changes": state_changes,
             "relation_changes": relation_changes,
+            "new_event": new_event,
         }
 
     def normalize_variables(self, variables: List[Any]) -> List[VariableInjection]:
@@ -161,13 +185,17 @@ class WorldlineBranchService:
         return WorldEvent(
             event_id=f"evt_{uuid.uuid4().hex[:10]}",
             step=0,
-            title=f"{branch.title} 初始化",
-            summary=f"以“{branch.core_change}”为核心偏移创建分支，准备进入推演。",
+            title=f"{branch.title} \u521d\u59cb\u5316",
+            summary=f"\u4ee5\u201c{branch.core_change}\u201d\u4e3a\u6838\u5fc3\u504f\u79fb\u521b\u5efa\u5206\u652f\uff0c\u51c6\u5907\u8fdb\u5165\u63a8\u6f14\u3002",
             event_type="seed",
             driving_entities=key_agents[:5],
             variable_effects=[item.to_dict() for item in world_variables],
             relation_changes=[],
             state_changes=[],
+            status="canon",
+            confidence="high",
+            confidence_reason="\u521d\u59cb\u79cd\u5b50\u4e8b\u4ef6",
+            event_source="archive_based",
         )
 
     def _drivers(self, branch: WorldlineBranch, consumed_actions: List[Any]) -> List[str]:
@@ -254,10 +282,10 @@ class WorldlineBranchService:
         if consumed_variables:
             parts.append("变量触发 " + "；".join(f"{item.name}:{item.description}" for item in consumed_variables))
         if consumed_actions:
-            parts.append("主动行动 " + "；".join(f"{item.actor}执行“{item.action}”" for item in consumed_actions))
+            parts.append("主动行动 " + "；".join(f'{item.actor}执行「{item.action}」' for item in consumed_actions))
         if not parts:
             parts.append("系统按既有动机与关系惯性推进情节")
-        parts.append(f"本轮围绕“{focus_question}”持续收敛。")
+        parts.append(f'本轮围绕「{focus_question}」持续收敛。')
         return "；".join(parts)
 
     def _variable(self, name: str, description: str, impact_axis: str = "") -> VariableInjection:

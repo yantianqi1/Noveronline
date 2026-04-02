@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildIdleLogPreview, normalizeSeedTaskDetail } from "../src/views/overview/seedUploadTaskView.js";
+import {
+  buildIdleLogPreview,
+  deriveStageProgress,
+  normalizeSeedTaskDetail,
+} from "../src/views/overview/seedUploadTaskView.js";
 import { buildFailedTask, buildUploadingTask } from "../src/composables/seedUploadTaskState.js";
 
 test("normalizeSeedTaskDetail preserves structured progress detail", () => {
@@ -154,6 +158,7 @@ test("buildIdleLogPreview returns ordered pipeline preview", () => {
   assert.equal(preview.length >= 5, true);
   assert.equal(preview[0].status, "pending");
   assert.equal(typeof preview[0].title, "string");
+  assert.equal(preview.some((item) => item.stage === "chapter_card_generation"), true);
 });
 
 test("buildUploadingTask produces structured progress detail accepted by normalizeSeedTaskDetail", () => {
@@ -183,4 +188,69 @@ test("buildFailedTask produces structured progress detail accepted by normalizeS
   assert.equal(normalized.activeStage.key, "failed");
   assert.equal(normalized.taskMetrics.activeWorkers, 0);
   assert.equal(normalized.llmActivity.action, "上传失败");
+});
+
+test("deriveStageProgress tracks per-chapter progress during chapter card generation", () => {
+  const progress = deriveStageProgress(
+    {
+      key: "chapter_card_generation",
+      label: "正在逐章生成结构化章节卡",
+      progress: 78,
+      status: "processing",
+    },
+    {
+      chapterCount: 4,
+      blockCount: 0,
+      completedBlocks: 0,
+      totalBlocks: 0,
+      activeWorkers: 0,
+    },
+    [
+      {
+        id: "evt_ch1",
+        timestamp: "2026-03-29T23:10:00",
+        stage: "chapter_card_generation",
+        level: "info",
+        status: "completed",
+        title: "完成第1章章节卡",
+        detail: "第 1 章章节卡",
+        meta: { chapter_order: 1 },
+      },
+      {
+        id: "evt_ch2",
+        timestamp: "2026-03-29T23:11:00",
+        stage: "chapter_card_generation",
+        level: "info",
+        status: "completed",
+        title: "完成第2章章节卡",
+        detail: "第 2 章章节卡",
+        meta: { chapter_order: 2 },
+      },
+    ],
+  );
+
+  assert.equal(progress.detail, "2/4 章");
+  assert.equal(progress.percent, 80);
+});
+
+test("deriveStageProgress reuses block counters for block-based stages", () => {
+  const progress = deriveStageProgress(
+    {
+      key: "extract_local_facts",
+      label: "正在并发提取块内局部事实",
+      progress: 50,
+      status: "processing",
+    },
+    {
+      chapterCount: 12,
+      blockCount: 6,
+      completedBlocks: 3,
+      totalBlocks: 6,
+      activeWorkers: 2,
+    },
+    [],
+  );
+
+  assert.equal(progress.detail, "3/6 块");
+  assert.equal(progress.percent, 54);
 });

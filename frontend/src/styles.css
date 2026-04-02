@@ -1,43 +1,61 @@
 :root {
-  /* Colors - Light Ancient Palette */
-  --bg-paper: #f8f5f0;
-  --bg-paper-warm: #f4efe2;
-  --bg-ink: #2c2a27;
-  --bg-panel: #ffffff;
-  --bg-panel-soft: #faf8f5;
-  
-  --line-soft: #e2dcd0;
-  --line-medium: #d8cdb5;
-  --line-strong: #9f8d6a;
-  
-  --text-main: #2c2a27;
-  --text-sub: #786e60;
-  --text-dim: #a8a095;
-  
-  --accent-copper: #b07d4b;
-  --accent-copper-deep: #8f4f1f;
-  --accent-seal: #9b4326;
-  --accent-green: #4a6d54;
+  /* Colors - Focused Dashboard Palette (New Design System) */
+  --bg-paper: #FAF9F6;
+  --bg-paper-warm: #F4F1EA;
+  --bg-ink: #2D3748;
+  --bg-panel: #FFFFFF;
+  --bg-panel-soft: #FAF9F6;
+
+  --line-soft: #E2E8F0;
+  --line-medium: #E2E8F0;
+  --line-strong: #718096;
+
+  --text-main: #2D3748;
+  --text-sub: #4A5568;
+  --text-dim: #718096;
+
+  /* New Primary: Brick Red */
+  --color-primary: #9B2C2C;
+  --color-primary-light: #C53030;
+  --color-primary-dark: #742A2A;
+
+  /* Legacy accents for compatibility */
+  --accent-copper: #9B2C2C;
+  --accent-copper-deep: #742A2A;
+  --accent-seal: #E53E3E;
+  --accent-green: #38A169;
   --accent-blue: #3d5a80;
-  
+
+  /* Status Colors */
+  --color-success: #38A169;
+  --color-error: #E53E3E;
+  --color-warning: #D69E2E;
+
   /* Spacing */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 16px;
   --space-lg: 24px;
-  --space-xl: 40px;
-  
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
   /* Border Radius */
-  --radius-sm: 6px;
-  --radius-md: 12px;
-  --radius-lg: 20px;
+  --radius-sm: 2px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
   --radius-full: 999px;
-  
-  /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(44, 42, 39, 0.05);
-  --shadow-md: 0 8px 20px rgba(44, 42, 39, 0.08);
-  --shadow-lg: 0 16px 48px rgba(44, 42, 39, 0.12);
-  --shadow-ink: 0 4px 12px rgba(44, 42, 39, 0.2);
+
+  /* Shadows - Soft & Minimal */
+  --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-ink: 0 4px 12px rgba(45, 55, 72, 0.15);
+
+  /* Font Families */
+  --font-heading-en: 'Space Grotesk', sans-serif;
+  --font-heading-cn: 'Noto Sans SC', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
 }
 
 * {

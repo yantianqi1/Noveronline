@@ -9,6 +9,7 @@ from .llm_router import LlmRouter
 from .seed_task_callbacks import (
     build_anchor_progress_callback,
     build_block_progress_callback,
+    build_chapter_card_progress_callback,
     build_ontology_progress_callback,
 )
 from .seed_task_progress import SeedTaskProgressTracker
@@ -214,21 +215,60 @@ class SeedExtractRunner:
             meta={"kind": "artifact", "artifact": "block_analyses.json"},
         )
 
-        self._build_continuity_artifacts(project_id, chapter_segments, analysis_blocks, local_block_facts, story_memory, block_analyses)
+        chapter_cards = self._generate_chapter_cards(
+            project_id,
+            chapter_segments,
+            story_memory,
+            block_analyses,
+        )
+        self._build_continuity_artifacts(
+            project_id,
+            chapter_cards,
+            local_block_facts,
+            story_memory,
+            block_analyses,
+        )
         continuity = ProjectManager.load_project_json(project_id, "chapter_continuity.json") or {"chapter_count": 0, "chapters": []}
         seed_analysis = self._build_seed_analysis(project_id, project_name, analysis_goal, story_memory, block_analyses)
         return block_analyses, continuity, seed_analysis
 
-    def _build_continuity_artifacts(
+    def _generate_chapter_cards(
         self,
         project_id: str,
         chapter_segments: Dict[str, Any],
-        analysis_blocks: Dict[str, Any],
+        story_memory: Dict[str, Any],
+        block_analyses: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        self.progress.enter_stage("chapter_card_generation", "正在逐章生成结构化章节卡", 78)
+        chapter_cards = self.service.chapter_card_generator.generate_cards(
+            chapter_segments["chapters"],
+            story_memory=story_memory,
+            block_analyses=block_analyses,
+            progress_callback=build_chapter_card_progress_callback(self.progress),
+        )
+        ProjectManager.save_project_json(project_id, "chapter_cards.json", chapter_cards)
+        self.service.chapter_meta_service.replace_project_chapter_cards(
+            project_id,
+            chapter_cards["chapters"],
+            world_rules=story_memory.get("world_rules", []),
+        )
+        self.progress.note(
+            "chapter_card_generation",
+            "章节卡生成完成",
+            f"已生成 {chapter_cards['chapter_count']} 张结构化章节卡",
+            meta={"kind": "artifact", "artifact": "chapter_cards.json"},
+        )
+        return chapter_cards
+
+    def _build_continuity_artifacts(
+        self,
+        project_id: str,
+        chapter_cards: Dict[str, Any],
         local_block_facts: Dict[str, Any],
         story_memory: Dict[str, Any],
         block_analyses: Dict[str, Any],
     ) -> None:
-        self.progress.enter_stage("consistency_audit", "正在审计连续性冲突与歧义", 78)
+        self.progress.enter_stage("consistency_audit", "正在审计连续性冲突与歧义", 82)
         consistency_report = self.service.consistency_auditor.audit(
             story_memory=story_memory,
             block_analyses=block_analyses["blocks"],
@@ -242,12 +282,8 @@ class SeedExtractRunner:
             meta={"kind": "artifact", "artifact": "consistency_report.json"},
         )
 
-        self.progress.enter_stage("build_continuity", "正在生成兼容章节连续性摘要", 82)
-        continuity = self.service.continuity_service.build_from_block_analyses(
-            chapter_segments["chapters"],
-            analysis_blocks["blocks"],
-            block_analyses["blocks"],
-        )
+        self.progress.enter_stage("build_continuity", "正在从章节卡派生连续性摘要", 86)
+        continuity = self.service.continuity_service.build_from_chapter_cards(chapter_cards["chapters"])
         ProjectManager.save_project_json(project_id, "chapter_continuity.json", continuity)
         self.progress.note(
             "build_continuity",
@@ -264,7 +300,7 @@ class SeedExtractRunner:
         story_memory: Dict[str, Any],
         block_analyses: Dict[str, Any],
     ) -> Dict[str, Any]:
-        self.progress.enter_stage("seed_analysis", "正在聚合角色、组织与关系种子分析", 88)
+        self.progress.enter_stage("seed_analysis", "正在聚合角色、组织与关系种子分析", 90)
         seed_analysis = self.service.seed_analysis_aggregator.aggregate(
             story_memory=story_memory,
             block_analyses=block_analyses["blocks"],
@@ -289,7 +325,7 @@ class SeedExtractRunner:
         story_memory: Dict[str, Any],
         block_analyses: Dict[str, Any],
     ) -> Dict[str, Any]:
-        self.progress.enter_stage("ontology", "正在生成小说本体与故事主轴", 94)
+        self.progress.enter_stage("ontology", "正在生成小说本体与故事主轴", 96)
         return self.service.ontology_generator.generate(
             document_texts=[item["text"] for item in documents],
             analysis_goal=analysis_goal,
@@ -337,6 +373,7 @@ class SeedExtractRunner:
             "contextual_block_analysis",
             "anchor_point_summary",
             "entity_resolution",
+            "novel_chapter_summarizer",
             "story_ontology",
         ):
             try:

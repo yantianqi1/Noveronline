@@ -1,13 +1,11 @@
 """Agent 持久记忆服务。"""
 
 from __future__ import annotations
-
-import re
 from typing import Any, Dict, List, Optional
 
 from .agent_memory_writer_summary import build_writer_memory_summary
 from .agent_memory_stores import EpisodicMemoryStore, LongTermMemoryStore
-from .memory_subject_utils import memory_tokens, normalize_memory_subject
+from ...memory_subject_utils import memory_tokens, normalize_memory_subject
 
 SESSION_LIMIT = 6
 LONG_TERM_LIMIT = 6

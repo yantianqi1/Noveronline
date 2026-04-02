@@ -39,3 +39,7 @@ export function updateLlmModuleBinding(moduleKey, payload) {
 export function deleteLlmModuleBinding(moduleKey) {
   return del(buildLlmModuleBindingPath(moduleKey));
 }
+
+export function getLlmActivity() {
+  return get("/api/llm/activity");
+}

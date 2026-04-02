@@ -1,4 +1,4 @@
-from app.services.worldline_agent_registry import WorldlineAgentRegistry
+from app.services.agents.worldline import WorldlineAgentRegistry
 
 
 def test_worldline_agent_registry_uses_chinese_default_copy():

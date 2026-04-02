@@ -87,6 +87,7 @@ const STAGE_KEY_TEXT = Object.freeze({
   merge_story_memory: "汇总故事记忆",
   entity_resolution: "实体消歧",
   contextual_block_analysis: "分析剧情块",
+  chapter_card_generation: "生成章节卡",
   consistency_audit: "连续性审计",
   build_continuity: "章节连续性摘要",
   seed_analysis: "聚合种子分析",

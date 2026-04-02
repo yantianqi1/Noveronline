@@ -71,14 +71,22 @@
   background: rgba(255, 255, 255, 0.78);
   color: var(--text-sub);
   font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.filter-group label { color: var(--accent-copper-deep); }
+.filter-group:hover {
+  border-color: rgba(176, 125, 75, 0.42);
+  background: rgba(255, 250, 241, 0.92);
+}
+.filter-label { color: var(--accent-copper-deep); pointer-events: none; }
 .filter-group select {
+  flex: 1;
   min-width: 78px;
   border: none;
   background: transparent;
   color: var(--text-main);
   font-size: 13px;
+  cursor: pointer;
 }
 .museum-stage {
   display: grid;

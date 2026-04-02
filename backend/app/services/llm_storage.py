@@ -17,6 +17,7 @@ CREATE_STATEMENTS = (
         name TEXT NOT NULL,
         base_url TEXT NOT NULL,
         api_key TEXT NOT NULL,
+        max_concurrency INTEGER NOT NULL DEFAULT 4,
         is_enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -68,6 +69,7 @@ class LlmStorage:
         with self.connect() as connection:
             for statement in CREATE_STATEMENTS:
                 connection.execute(statement)
+            self._ensure_llm_channel_columns(connection)
             connection.commit()
 
     @contextmanager
@@ -83,3 +85,16 @@ class LlmStorage:
 
     def _ensure_parent_dir(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+
+    def _ensure_llm_channel_columns(self, connection: sqlite3.Connection) -> None:
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(llm_channels)").fetchall()
+        }
+        if "max_concurrency" not in existing:
+            connection.execute(
+                """
+                ALTER TABLE llm_channels
+                ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 4
+                """
+            )

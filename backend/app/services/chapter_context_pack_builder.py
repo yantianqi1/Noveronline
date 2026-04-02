@@ -6,6 +6,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ..models.project import ProjectManager
+from .canon_history_retriever import CanonHistoryRetriever
 from .chapter_context_ranker import ChapterContextRanker, MAX_MUST_KNOW, MAX_SCENES, MAX_SHOULD_KNOW, MAX_WARNINGS
 from .memory_subject_utils import normalize_memory_subject
 from .worldline_engine_factory import build_worldline_engine
@@ -18,13 +19,16 @@ class ChapterContextPackBuilder:
         self,
         ranker: Optional[ChapterContextRanker] = None,
         formatter: Optional[WriterPromptFormatter] = None,
+        history_retriever: Optional[CanonHistoryRetriever] = None,
     ):
         self.ranker = ranker or ChapterContextRanker()
         self.formatter = formatter or WriterPromptFormatter()
+        self.history_retriever = history_retriever or CanonHistoryRetriever()
 
     def build(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         scope = self._normalize_scope(payload)
         pack = self._build_worldline(scope) if scope["scope_type"] == "worldline_branch" else self._build_project(scope)
+        pack = self._with_history_recall(pack)
         pack["writer_prompt_block"] = self.formatter.format(pack)
         return pack
 
@@ -278,6 +282,7 @@ class ChapterContextPackBuilder:
             "pov_character": pov_character,
             "writing_goal": str(payload.get("writing_goal") or "").strip(),
             "scene_focus": str(payload.get("scene_focus") or "").strip(),
+            "author_instruction": str(payload.get("author_instruction") or "").strip(),
             "include_candidates": bool(payload.get("include_candidates", False)),
         }
 
@@ -314,6 +319,7 @@ class ChapterContextPackBuilder:
             "should_know": [],
             "warnings": [],
             "scene_candidates": [],
+            "history_recall": self._empty_history_recall(),
             "writer_prompt_block": "",
             "debug_trace": [],
         }
@@ -330,6 +336,9 @@ class ChapterContextPackBuilder:
                 "rank_score": item.get("rank_score", 0.0),
             }
             for item in items
+        ] + [
+            {"trace_type": "history_recall", **item}
+            for item in pack.get("history_recall", {}).get("selection_trace", [])
         ]
 
     def _item(self, category: str, summary: str, why: str, source_kind: str, source_ref: str, related_entities: List[str], scope: Dict[str, Any], *, scope_hit: bool = False, pov_hit: bool = False, scene_hit: bool = False, thread_hit: bool = False, chapter_distance: int = 0, salience: float = 0.5, memory_layer: str = "canon", archive_id: str = "", normalized_subject: str = "") -> Dict[str, Any]:
@@ -361,6 +370,148 @@ class ChapterContextPackBuilder:
     def _contains_focus(self, scope: Dict[str, Any], text: str) -> bool:
         focus = scope.get("scene_focus", "")
         return bool(focus and focus in str(text or ""))
+
+    def _with_history_recall(self, pack: Dict[str, Any]) -> Dict[str, Any]:
+        scope = pack["context_scope"]
+        history_recall = self._build_history_recall(scope)
+        pack["history_recall"] = history_recall
+        if not history_recall["recent_anchors"] and not history_recall["callback_memories"]:
+            pack["debug_trace"] = self._debug_trace(pack)
+            return pack
+        must_items, should_items = self._history_context_items(scope, history_recall)
+        if scope.get("scope_type") != "project_chapter":
+            should_items = must_items + should_items
+            must_items = []
+        pack["must_know"] = self.ranker.rank_items(pack["must_know"] + must_items, scope, MAX_MUST_KNOW)
+        pack["should_know"] = self.ranker.rank_items(pack["should_know"] + should_items, scope, MAX_SHOULD_KNOW)
+        pack["debug_trace"] = self._debug_trace(pack)
+        return pack
+
+    def _build_history_recall(self, scope: Dict[str, Any]) -> Dict[str, Any]:
+        if not scope.get("project_id") or int(scope.get("chapter_order") or 0) <= 1:
+            return self._empty_history_recall()
+        return self.history_retriever.recall(
+            project_id=scope["project_id"],
+            current_chapter_order=int(scope["chapter_order"]),
+            pov_character=scope["pov_character"],
+            scene_focus=scope.get("scene_focus", ""),
+            author_instruction=scope.get("author_instruction") or scope.get("writing_goal", ""),
+        )
+
+    def _history_context_items(
+        self,
+        scope: Dict[str, Any],
+        history_recall: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        must_items = self._history_anchor_items(scope, history_recall.get("recent_anchors", []))
+        must_items.extend(self._history_world_rule_items(scope, history_recall.get("world_rules", [])))
+        callbacks = history_recall.get("callback_memories", [])
+        must_items.extend(self._history_callback_items(scope, callbacks[:4], True))
+        should_items = self._history_callback_items(scope, callbacks[4:], False)
+        should_items.extend(self._history_thread_items(scope, history_recall.get("active_threads", [])))
+        return must_items, should_items
+
+    def _history_anchor_items(self, scope: Dict[str, Any], anchors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        items = []
+        for anchor in anchors:
+            summary = f"第{anchor.get('chapter_order', 0)}章《{anchor.get('title', '')}》：{anchor.get('summary_text', '')}"
+            items.append(
+                self._item(
+                    "history_anchor",
+                    summary,
+                    "这是最近章节的 canon 承接，应该优先延续。",
+                    "chapter_meta",
+                    anchor.get("chapter_id", ""),
+                    [scope["pov_character"]],
+                    scope,
+                    scope_hit=True,
+                    chapter_distance=max(0, int(scope["chapter_order"]) - int(anchor.get("chapter_order", 0))),
+                    scene_hit=self._contains_focus(scope, " ".join([anchor.get("summary_text", ""), anchor.get("end_anchor", "")])),
+                    salience=0.9,
+                )
+            )
+        return items
+
+    def _history_world_rule_items(self, scope: Dict[str, Any], world_rules: List[str]) -> List[Dict[str, Any]]:
+        return [
+            self._item(
+                "world_rule",
+                rule,
+                "这是历史召回确认仍生效的 canon 世界规则。",
+                "chapter_history_item",
+                f"world_rule:{index}",
+                [scope["pov_character"]],
+                scope,
+                scope_hit=True,
+                scene_hit=self._contains_focus(scope, rule),
+                salience=0.85,
+            )
+            for index, rule in enumerate(world_rules, start=1)
+        ]
+
+    def _history_callback_items(
+        self,
+        scope: Dict[str, Any],
+        callbacks: List[Dict[str, Any]],
+        is_must: bool,
+    ) -> List[Dict[str, Any]]:
+        items = []
+        for item in callbacks:
+            category = self._history_category(item.get("item_type", "summary"))
+            why = "这是需要在当前章节回调的长线 canon 记忆。" if is_must else "这条长线 canon 记忆可作为补强呼应。"
+            items.append(
+                self._item(
+                    category,
+                    item.get("summary_text", ""),
+                    why,
+                    item.get("source_kind", "chapter_history_item"),
+                    item.get("source_ref", ""),
+                    item.get("related_entities", []),
+                    scope,
+                    pov_hit="pov" in item.get("selected_because", []),
+                    scene_hit="scene_focus" in item.get("selected_because", []),
+                    thread_hit=bool(item.get("thread_key")),
+                    chapter_distance=max(0, int(scope["chapter_order"]) - int(item.get("chapter_order", 0))),
+                    salience=min(1.0, float(item.get("rank_score", 0.0)) / 10.0),
+                    normalized_subject=item.get("subject_key", ""),
+                )
+            )
+        return items
+
+    def _history_thread_items(self, scope: Dict[str, Any], threads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            self._item(
+                "open_thread",
+                item.get("summary_text", ""),
+                "这是仍未回收的 canon 线索，当前章应考虑回应或继续推进。",
+                item.get("source_kind", "chapter_history_item"),
+                item.get("source_ref", ""),
+                item.get("related_entities", []),
+                scope,
+                scene_hit="scene_focus" in item.get("selected_because", []),
+                thread_hit=True,
+                chapter_distance=max(0, int(scope["chapter_order"]) - int(item.get("chapter_order", 0))),
+                salience=min(1.0, float(item.get("rank_score", 0.0)) / 10.0),
+                normalized_subject=item.get("thread_key", ""),
+            )
+            for item in threads
+        ]
+
+    def _history_category(self, item_type: str) -> str:
+        return {
+            "summary": "history_callback",
+            "event": "event",
+            "relationship": "relationship",
+        }.get(item_type, "history_callback")
+
+    def _empty_history_recall(self) -> Dict[str, Any]:
+        return {
+            "recent_anchors": [],
+            "callback_memories": [],
+            "active_threads": [],
+            "world_rules": [],
+            "selection_trace": [],
+        }
 
     def _load_required_json(self, project_id: str, filename: str) -> Dict[str, Any]:
         payload = ProjectManager.load_project_json(project_id, filename)

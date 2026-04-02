@@ -6,7 +6,7 @@ from flask import jsonify
 
 from . import worldline_bp
 from ..config import Config
-from ..services.character_agent_service import CharacterAgentService
+from ..services.agents.worldline import CharacterAgentService
 from ..services.world_state_store import WorldStateStore
 from ..services.worldline_engine_factory import build_worldline_engine
 from ..services.worldline_single_world import MAIN_WORLD_BRANCH_ID, current_world, resolve_branch_id
@@ -17,10 +17,16 @@ character_agent_service = CharacterAgentService()
 
 class _AttributeProxy:
     def __init__(self, resolver):
-        self._resolver = resolver
+        object.__setattr__(self, "_resolver", resolver)
 
     def __getattr__(self, name):
         return getattr(self._resolver(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_resolver":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._resolver(), name, value)
 
 
 class _WorldlineEngineProxy:
@@ -44,6 +50,7 @@ worldline_engine = _WorldlineEngineProxy(worldline_store)
 worldline_runtime_service = _AttributeProxy(lambda: worldline_engine.runtime_service)
 worldline_agent_registry = _AttributeProxy(lambda: worldline_runtime_service.registry)
 worldline_memory_service = _AttributeProxy(lambda: worldline_engine.memory_service)
+worldline_prepare_service = _AttributeProxy(lambda: worldline_engine.prepare_service)
 
 
 def ok(data):

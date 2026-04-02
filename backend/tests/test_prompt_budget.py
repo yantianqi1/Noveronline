@@ -1,8 +1,4 @@
-from app.services.prompt_budget_manager import (
-    MAX_PROMPT_INPUT_CHARS,
-    PromptBudgetManager,
-    SECTION_PRIORITY,
-)
+from app.services.prompt_budget_manager import PromptBudgetManager
 
 
 def test_prompt_budget_manager_keeps_sections_when_under_budget():
@@ -20,9 +16,8 @@ def test_prompt_budget_manager_keeps_sections_when_under_budget():
     assert "C" * 60 in prompt
 
 
-def test_prompt_budget_manager_trims_low_priority_first_without_mutating_constants():
+def test_prompt_budget_manager_keeps_full_content_even_when_over_budget():
     manager = PromptBudgetManager(max_input_chars=200)
-    original_priority = dict(SECTION_PRIORITY)
     sections = {
         "主块正文": "A" * 120,
         "骨架角色列表": "B" * 120,
@@ -33,7 +28,8 @@ def test_prompt_budget_manager_trims_low_priority_first_without_mutating_constan
 
     prompt = manager.build_prompt(sections)
 
-    assert len(prompt) <= MAX_PROMPT_INPUT_CHARS
     assert "A" * 120 in prompt
-    assert SECTION_PRIORITY == original_priority
-    assert "E" * 120 not in prompt
+    assert "B" * 120 in prompt
+    assert "C" * 120 in prompt
+    assert "D" * 120 in prompt
+    assert "E" * 120 in prompt

@@ -256,6 +256,199 @@
   border: 1px dashed rgba(200, 177, 144, 0.48);
 }
 
+/* ── Candidate review section ────────────────────────────────── */
+
+.candidate-shell {
+  padding: 16px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255, 250, 240, 0.92) 0%, rgba(248, 238, 218, 0.9) 100%);
+  border: 1px solid rgba(194, 159, 118, 0.38);
+}
+
+.thinking-card {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  border: 1px solid rgba(176, 125, 75, 0.24);
+  border-radius: 14px;
+  padding: 14px;
+  margin-top: 12px;
+  background: rgba(255, 252, 245, 0.94);
+}
+
+.thinking-pulse {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #c9954a;
+  animation: pulse-ring 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-ring {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.4); }
+}
+
+.thinking-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.thinking-label {
+  color: #8b6a35;
+  letter-spacing: 0.06em;
+}
+
+.candidate-batch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.candidate-count {
+  color: var(--text-sub);
+}
+
+.candidate-feed {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.candidate-card {
+  border: 1px solid rgba(199, 173, 133, 0.38);
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  transition: border-color 0.2s ease;
+}
+
+.candidate-card.high {
+  border-left: 3px solid rgba(61, 128, 90, 0.7);
+}
+
+.candidate-card.medium {
+  border-left: 3px solid rgba(176, 140, 60, 0.7);
+}
+
+.candidate-card.low {
+  border-left: 3px solid rgba(155, 67, 38, 0.6);
+}
+
+.candidate-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.candidate-badges {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.confidence-badge,
+.source-badge {
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.confidence-badge {
+  background: rgba(245, 230, 200, 0.9);
+  color: #6e5124;
+}
+
+.confidence-badge.high {
+  background: rgba(200, 230, 210, 0.85);
+  color: #2a5e3f;
+}
+
+.confidence-badge.low {
+  background: rgba(240, 210, 200, 0.85);
+  color: #8b3a1f;
+}
+
+.source-badge {
+  background: rgba(230, 225, 218, 0.8);
+  color: #5a5040;
+}
+
+.candidate-reason {
+  margin: 6px 0 0;
+  font-size: 0.88rem;
+  color: #7a6942;
+  font-style: italic;
+}
+
+.candidate-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.btn-adopt {
+  background: rgba(61, 128, 90, 0.12);
+  color: #2a5e3f;
+  border: 1px solid rgba(61, 128, 90, 0.3);
+}
+
+.btn-adopt:hover {
+  background: rgba(61, 128, 90, 0.22);
+}
+
+.btn-edit {
+  background: rgba(176, 140, 60, 0.1);
+  color: #6e5124;
+  border: 1px solid rgba(176, 140, 60, 0.28);
+}
+
+.btn-edit:hover {
+  background: rgba(176, 140, 60, 0.2);
+}
+
+.btn-reject {
+  background: rgba(155, 67, 38, 0.08);
+  color: #8b3a1f;
+  border: 1px solid rgba(155, 67, 38, 0.22);
+}
+
+.btn-reject:hover {
+  background: rgba(155, 67, 38, 0.16);
+}
+
+.candidate-edit-block {
+  margin-top: 12px;
+}
+
+.candidate-textarea {
+  width: 100%;
+  border: 1px solid rgba(176, 140, 60, 0.3);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(255, 252, 245, 0.96);
+  resize: vertical;
+  font-family: inherit;
+  font-size: 0.92rem;
+  color: #3a3020;
+}
+
+.candidate-textarea:focus {
+  outline: none;
+  border-color: rgba(130, 92, 43, 0.6);
+}
+
+.candidate-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 @media (max-width: 1080px) {
   .narrative-grid,
   .pending-grid,

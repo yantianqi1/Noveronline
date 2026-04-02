@@ -1,15 +1,22 @@
 """小说分析 API"""
 
+import json
 import traceback
 
-from flask import jsonify, request
+from flask import Response, jsonify, request
 
 from . import novel_bp
 from .novel_graph_defaults import graph_entity_types
 from ..models.project import ProjectManager
 from ..services.archive_candidate_builder import ArchiveCandidateBuilder
 from ..services.archive_library_service import ArchiveLibraryService
+from ..services.chapter_card_generator import ChapterCardGenerator
 from ..services.chapter_context_pack_builder import ChapterContextPackBuilder
+from ..services.chapter_continuity_service import ChapterContinuityService
+from ..services.chapter_meta_service import ChapterMetaService
+from ..services.agents.draft import NovelDraftOrchestrator
+from ..services.llm_router import LlmRouter
+from ..services.agents.draft.reviewer_agent import REVIEWER_SYSTEM_PROMPT
 from ..services.narrative_entity_archivist import NarrativeEntityArchivist
 from ..services.parallel_world_config_generator import ParallelWorldConfigGenerator
 from ..services.plot_inspiration_engine import PlotInspirationEngine
@@ -392,3 +399,213 @@ def build_chapter_context():
             "error": str(e),
             "traceback": traceback.format_exc(),
         }), 500
+
+
+@novel_bp.route("/reviewer-rules", methods=["GET"])
+def get_reviewer_rules():
+    """获取项目的自定义审校规则。"""
+    project_id = request.args.get("project_id", "")
+    if not project_id:
+        return jsonify({"success": False, "error": "需要 project_id"}), 400
+    try:
+        data = ProjectManager.load_project_json(project_id, "reviewer_rules.json")
+        custom_prompt = (data or {}).get("custom_prompt", "")
+        return jsonify({
+            "success": True,
+            "data": {
+                "custom_prompt": custom_prompt,
+                "default_prompt": REVIEWER_SYSTEM_PROMPT,
+                "is_custom": bool(custom_prompt),
+            },
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@novel_bp.route("/reviewer-rules", methods=["PUT"])
+def save_reviewer_rules():
+    """保存项目的自定义审校规则。"""
+    data = request.get_json() or {}
+    project_id = data.get("project_id", "")
+    custom_prompt = data.get("custom_prompt", "")
+    if not project_id:
+        return jsonify({"success": False, "error": "需要 project_id"}), 400
+    try:
+        from datetime import datetime
+        payload = {
+            "custom_prompt": custom_prompt,
+            "updated_at": datetime.now().isoformat(),
+        }
+        ProjectManager.save_project_json(project_id, "reviewer_rules.json", payload)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@novel_bp.route("/draft/generate", methods=["POST"])
+def draft_generate():
+    """SSE 端点：多 Agent 协同生成小说正文。"""
+    data = request.get_json() or {}
+    orchestrator = NovelDraftOrchestrator()
+
+    def event_stream():
+        try:
+            for event in orchestrator.generate_stream(data):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            error_event = json.dumps(
+                {"type": "error", "message": str(exc)},
+                ensure_ascii=False,
+            )
+            yield f"data: {error_event}\n\n"
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@novel_bp.route("/draft/revise", methods=["POST"])
+def draft_revise():
+    """SSE 端点：用户驱动的修订流程（重写 + 重审）。"""
+    data = request.get_json() or {}
+    orchestrator = NovelDraftOrchestrator()
+
+    def event_stream():
+        try:
+            for event in orchestrator.revise_stream(data):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            error_event = json.dumps(
+                {"type": "error", "message": str(exc)},
+                ensure_ascii=False,
+            )
+            yield f"data: {error_event}\n\n"
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@novel_bp.route("/draft/finalize", methods=["POST"])
+def draft_finalize():
+    """定稿端点：回写章节正文，并以结构化章节卡更新历史召回数据。"""
+    try:
+        data = request.get_json() or {}
+        project_id = (data.get("project_id") or "").strip()
+        chapter_order = data.get("chapter_order", data.get("chapter_index"))
+        chapter_text = (data.get("chapter_text") or "").strip()
+        chapter_card_payload = data.get("chapter_card")
+
+        if not project_id:
+            return jsonify({"success": False, "error": "请提供 project_id"}), 400
+        if chapter_order is None:
+            return jsonify({"success": False, "error": "请提供 chapter_order"}), 400
+        if not chapter_text and not isinstance(chapter_card_payload, dict):
+            return jsonify({"success": False, "error": "请提供 chapter_text 或 chapter_card"}), 400
+
+        chapter_order = int(chapter_order)
+        existing_cards = _load_chapter_cards(project_id)
+        chapter = _build_finalize_chapter_input(data, chapter_order, chapter_text, existing_cards)
+        chapter_card = _resolve_finalize_chapter_card(project_id, chapter, chapter_card_payload, existing_cards)
+        cards_payload = _upsert_project_chapter_cards(project_id, chapter_card, existing_cards)
+        continuity = ChapterContinuityService().build_from_chapter_cards(cards_payload["chapters"])
+        ProjectManager.save_project_json(project_id, "chapter_continuity.json", continuity)
+        _upsert_project_chapter_segment(project_id, chapter)
+        story_memory = ProjectManager.load_project_json(project_id, "story_memory.json") or {}
+        ChapterMetaService().replace_project_chapter_cards(
+            project_id,
+            cards_payload["chapters"],
+            world_rules=story_memory.get("world_rules", []),
+        )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "project_id": project_id,
+                "chapter_order": chapter_order,
+                "chapter_id": chapter_card["chapter_id"],
+                "message": "章节卡已回写并同步历史召回",
+            },
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }), 500
+
+
+def _load_chapter_cards(project_id):
+    payload = ProjectManager.load_project_json(project_id, "chapter_cards.json") or {}
+    return sorted(payload.get("chapters", []), key=lambda item: int(item.get("chapter_order") or item.get("order") or 0))
+
+
+def _build_finalize_chapter_input(data, chapter_order, chapter_text, existing_cards):
+    chapter_id = str(data.get("chapter_id") or f"chapter_{chapter_order:04d}").strip()
+    title = str(data.get("title") or _existing_card_title(existing_cards, chapter_order) or f"第{chapter_order}章").strip()
+    return {
+        "chapter_id": chapter_id,
+        "order": chapter_order,
+        "title": title,
+        "content": chapter_text,
+    }
+
+
+def _resolve_finalize_chapter_card(project_id, chapter, explicit_card, existing_cards):
+    generator = ChapterCardGenerator(llm_router=LlmRouter())
+    if isinstance(explicit_card, dict):
+        return generator._normalize_card(chapter, explicit_card)
+    story_memory = ProjectManager.load_project_json(project_id, "story_memory.json") or {}
+    block_analyses = ProjectManager.load_project_json(project_id, "block_analyses.json") or {"blocks": []}
+    previous_cards = [
+        item for item in existing_cards
+        if int(item.get("chapter_order") or item.get("order") or 0) < int(chapter["order"])
+    ]
+    return generator.generate_single_card(chapter, story_memory, block_analyses, previous_cards)
+
+
+def _upsert_project_chapter_cards(project_id, chapter_card, existing_cards):
+    remaining = [
+        item for item in existing_cards
+        if int(item.get("chapter_order") or item.get("order") or 0) != int(chapter_card["chapter_order"])
+    ]
+    remaining.append(chapter_card)
+    chapters = sorted(remaining, key=lambda item: int(item.get("chapter_order") or item.get("order") or 0))
+    payload = {"chapter_count": len(chapters), "chapters": chapters}
+    ProjectManager.save_project_json(project_id, "chapter_cards.json", payload)
+    return payload
+
+
+def _upsert_project_chapter_segment(project_id, chapter):
+    payload = ProjectManager.load_project_json(project_id, "chapter_segments.json") or {"chapter_count": 0, "chapters": []}
+    chapters = []
+    matched = False
+    for item in payload.get("chapters", []):
+        if int(item.get("order") or 0) != int(chapter["order"]):
+            chapters.append(item)
+            continue
+        matched = True
+        chapters.append({**item, "chapter_id": chapter["chapter_id"], "order": chapter["order"], "title": chapter["title"], "content": chapter["content"] or item.get("content") or item.get("text") or ""})
+    if not matched:
+        chapters.append({"chapter_id": chapter["chapter_id"], "order": chapter["order"], "title": chapter["title"], "content": chapter["content"]})
+    chapters = sorted(chapters, key=lambda item: int(item.get("order") or 0))
+    ProjectManager.save_project_json(project_id, "chapter_segments.json", {"chapter_count": len(chapters), "chapters": chapters})
+
+
+def _existing_card_title(existing_cards, chapter_order):
+    for item in existing_cards:
+        if int(item.get("chapter_order") or item.get("order") or 0) == int(chapter_order):
+            return item.get("title", "")
+    return ""

@@ -1,7 +1,7 @@
 from app import create_app
 from app.config import Config
 from app.models.project import ProjectManager
-from app.services.agent_memory_stores import LongTermMemoryStore
+from app.services.agents.memory import LongTermMemoryStore
 
 
 def _configure_storage(tmp_path, monkeypatch):

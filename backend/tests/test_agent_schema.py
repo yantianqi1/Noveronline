@@ -1,5 +1,5 @@
-from app.services.agent_schema_registry import AgentSchemaRegistry
-from app.services.worldline_agent_registry import WorldlineAgentRegistry
+from app.services.agents.registry import AgentSchemaRegistry
+from app.services.agents.worldline import WorldlineAgentRegistry
 
 
 def test_agent_schema_registry_merges_defaults_and_validates_required_fields():

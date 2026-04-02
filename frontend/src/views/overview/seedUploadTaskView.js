@@ -8,11 +8,18 @@ export const IDLE_TIMELINE = [
   ["merge_story_memory", "汇总故事记忆", "把各块事实按顺序折叠成可继承的前情记忆。"],
   ["entity_resolution", "实体消歧", "从全局视角合并别名和高置信重复实体。"],
   ["contextual_block_analysis", "分析剧情块", "结合前情快照理解每个块如何推进主线。"],
+  ["chapter_card_generation", "生成章节卡", "逐章调用大模型生成结构化章节卡，供后续历史召回使用。"],
   ["consistency_audit", "连续性审计", "检查冲突、别名歧义与前后文不一致。"],
   ["build_continuity", "章节连续性摘要", "回写兼容旧链路的章节连续性产物。"],
   ["seed_analysis", "聚合种子分析", "汇总角色、组织与关系，生成可用种子。"],
   ["ontology", "生成小说本体", "归纳实体类型、关系类型与故事主轴。"],
 ];
+
+const STAGE_PROGRESS_RANGE = {
+  extract_local_facts: { start: 50, end: 58 },
+  contextual_block_analysis: { start: 72, end: 78 },
+  chapter_card_generation: { start: 78, end: 82 },
+};
 
 const STRUCTURED_PROGRESS_ERROR = "Expected structured progress_detail";
 const DETAIL_KEYS = ["stage", "stage_label", "active_stage", "task_metrics", "llm_activity", "timeline"];
@@ -94,6 +101,31 @@ export function buildEventChips(event) {
   return chips;
 }
 
+export function deriveStageProgress(activeStage = {}, taskMetrics = {}, timeline = []) {
+  const currentProgress = readSafeNumber(activeStage?.progress);
+  const stageKey = typeof activeStage?.key === "string" ? activeStage.key : "";
+  const counts = resolveStageCounts(stageKey, taskMetrics, timeline);
+  if (!counts.total) {
+    return { percent: currentProgress, detail: "-", completed: 0, total: 0 };
+  }
+  const bounds = STAGE_PROGRESS_RANGE[stageKey];
+  if (!bounds) {
+    return {
+      percent: currentProgress,
+      detail: `${counts.completed}/${counts.total} ${counts.unit}`,
+      completed: counts.completed,
+      total: counts.total,
+    };
+  }
+  const stagePercent = interpolateStageProgress(bounds, counts.completed, counts.total);
+  return {
+    percent: Math.max(currentProgress, stagePercent),
+    detail: `${counts.completed}/${counts.total} ${counts.unit}`,
+    completed: counts.completed,
+    total: counts.total,
+  };
+}
+
 function normalizeActiveStage(activeStage) {
   const value = requireObject(activeStage, "progress_detail.active_stage");
   requireKeys(value, ACTIVE_STAGE_KEYS, "progress_detail.active_stage");
@@ -103,6 +135,47 @@ function normalizeActiveStage(activeStage) {
     progress: readNumber(value.progress, "progress_detail.active_stage.progress"),
     status: readString(value.status, "progress_detail.active_stage.status"),
   };
+}
+
+function resolveStageCounts(stageKey, taskMetrics, timeline) {
+  if (stageKey === "chapter_card_generation") {
+    return resolveChapterCardCounts(taskMetrics, timeline);
+  }
+  if (stageKey === "extract_local_facts" || stageKey === "contextual_block_analysis") {
+    return {
+      completed: readSafeNumber(taskMetrics?.completedBlocks),
+      total: readSafeNumber(taskMetrics?.totalBlocks),
+      unit: "块",
+    };
+  }
+  return { completed: 0, total: 0, unit: "" };
+}
+
+function resolveChapterCardCounts(taskMetrics, timeline) {
+  const completed = new Set();
+  for (const event of Array.isArray(timeline) ? timeline : []) {
+    if (event?.stage !== "chapter_card_generation" || event?.status !== "completed") {
+      continue;
+    }
+    const order = event?.meta?.chapter_order;
+    if (typeof order === "number" && order > 0) {
+      completed.add(order);
+    }
+  }
+  const total = readSafeNumber(taskMetrics?.chapterCount);
+  return {
+    completed: total ? Math.min(completed.size, total) : completed.size,
+    total,
+    unit: "章",
+  };
+}
+
+function interpolateStageProgress(bounds, completed, total) {
+  if (!total) {
+    return readSafeNumber(bounds.start);
+  }
+  const span = Math.max(0, readSafeNumber(bounds.end) - readSafeNumber(bounds.start));
+  return readSafeNumber(bounds.start) + Math.round((completed / total) * span);
 }
 
 function normalizeMetrics(metrics) {
@@ -187,6 +260,10 @@ function readBoolean(value, path) {
     throw new Error(`${STRUCTURED_PROGRESS_ERROR}: invalid ${path}`);
   }
   return value;
+}
+
+function readSafeNumber(value) {
+  return typeof value === "number" && !Number.isNaN(value) ? value : 0;
 }
 
 function pad(value) {

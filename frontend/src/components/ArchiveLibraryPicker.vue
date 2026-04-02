@@ -18,34 +18,34 @@
       </div>
 
       <div class="filter-controls">
-        <div class="filter-group">
-          <label>卷宗</label>
+        <label class="filter-group">
+          <span class="filter-label">卷宗</span>
           <select v-model="localProjectFilter">
             <option value="">全部</option>
             <option v-for="item in projectOptions" :key="item.project_id" :value="item.project_id">
               {{ item.name }}
             </option>
           </select>
-        </div>
+        </label>
 
-        <div class="filter-group">
-          <label>类别</label>
+        <label class="filter-group">
+          <span class="filter-label">类别</span>
           <select v-model="entityType">
             <option value="">全部</option>
             <option value="Character">角色</option>
             <option value="Organization">组织</option>
           </select>
-        </div>
+        </label>
 
-        <div class="filter-group">
-          <label>位阶</label>
+        <label class="filter-group">
+          <span class="filter-label">位阶</span>
           <select v-model="importanceTier">
             <option value="">全部</option>
             <option value="protagonist">主角</option>
             <option value="major">主要</option>
             <option value="supporting">次要</option>
           </select>
-        </div>
+        </label>
       </div>
     </header>
 

@@ -6,8 +6,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..utils.llm_client import LLMClient
 from ..utils.llm_json import normalize_json_object
+from .entity_resolution_line_protocol import EntityResolutionLineProtocolExecutor
 from .entity_resolution_prompts import ENTITY_RESOLUTION_SYSTEM_PROMPT
 from .llm_router import LlmRouter
+from .seed_stage_fallback_support import should_use_rule_fallback
 
 
 class EntityResolutionService:
@@ -79,6 +81,9 @@ class EntityResolutionService:
             decision = self._llm_decision(client, name_a, registry[name_a], name_b, registry[name_b], match_type)
             if not decision.get("merge"):
                 continue
+            confidence = decision.get("confidence", 1 if decision.get("merge") else 0)
+            if confidence < 0.7:
+                continue
             canonical = decision.get("canonical_name") or name_a
             alias = name_b if canonical == name_a else name_a
             self._merge_entities(registry, alias_map, canonical, alias)
@@ -93,15 +98,25 @@ class EntityResolutionService:
         entity_b: Dict[str, Any],
         match_type: str,
     ) -> Dict[str, Any]:
-        payload = client.chat_json_value(
-            messages=[
-                {"role": "system", "content": ENTITY_RESOLUTION_SYSTEM_PROMPT},
-                {"role": "user", "content": self._build_prompt(name_a, entity_a, name_b, entity_b, match_type)},
-            ],
-            temperature=0.1,
-            max_tokens=256,
-        )
-        return normalize_json_object(payload, "实体消歧")
+        try:
+            if hasattr(client, "chat"):
+                return EntityResolutionLineProtocolExecutor(client).decide(
+                    ENTITY_RESOLUTION_SYSTEM_PROMPT,
+                    self._build_prompt(name_a, entity_a, name_b, entity_b, match_type),
+                )
+            payload = client.chat_json_value(
+                messages=[
+                    {"role": "system", "content": ENTITY_RESOLUTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": self._build_prompt(name_a, entity_a, name_b, entity_b, match_type)},
+                ],
+                temperature=0.1,
+                max_tokens=256,
+            )
+            return normalize_json_object(payload, "实体消歧")
+        except Exception as exc:
+            if not should_use_rule_fallback(exc):
+                raise
+            return {"merge": False, "canonical_name": "", "confidence": 0, "reason": str(exc)}
 
     def _build_prompt(
         self,

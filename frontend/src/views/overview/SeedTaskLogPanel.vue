@@ -11,6 +11,7 @@
       :active-stage="activeStage"
       :task-status="taskStatus"
       :task-metrics="taskMetrics"
+      :timeline="timeline"
       :started-at="taskStartedAt"
     />
     <SeedTaskLlmCard :llm-activity="llmActivity" :active-workers="taskMetrics.activeWorkers" />

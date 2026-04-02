@@ -5,6 +5,7 @@
 import re
 from typing import Any, Dict, List, Sequence
 
+from .sentence_atlas_builder import build_sentence_atlas
 
 CHAPTER_TITLE_PATTERNS = [
     re.compile(r"^\s*第[零一二三四五六七八九十百千万\d]+[章节回卷幕部集篇][^\n]{0,30}$"),
@@ -23,9 +24,11 @@ class NovelChapterSegmenter:
             for chapter in self._segment_document(item["text"], item["source_name"], order):
                 chapters.append(chapter)
                 order += 1
+        chapters, sentence_atlas = build_sentence_atlas(chapters)
         return {
             "chapter_count": len(chapters),
             "chapters": chapters,
+            "sentence_atlas": sentence_atlas,
         }
 
     def _segment_document(self, text: str, source_name: str, start_order: int) -> List[Dict[str, Any]]:

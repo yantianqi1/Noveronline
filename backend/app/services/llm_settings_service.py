@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from ..config import Config
+from .llm_concurrency_service import llm_concurrency_service
 from .llm_module_registry import get_llm_module, list_llm_modules
 from .llm_storage import LlmStorage
 
@@ -25,9 +26,11 @@ class LlmSettingsService:
         self,
         storage: Optional[LlmStorage] = None,
         openai_factory: Any = None,
+        concurrency_service=None,
     ):
         self.storage = storage or LlmStorage()
         self.openai_factory = openai_factory or OpenAI
+        self.concurrency_service = concurrency_service or llm_concurrency_service
 
     def get_snapshot(self) -> Dict[str, Any]:
         with self.storage.connect() as connection:
@@ -39,28 +42,35 @@ class LlmSettingsService:
             module["binding"] = bindings.get(module["module_key"])
             modules.append(module)
         for channel in channels:
+            self.concurrency_service.set_limit(
+                channel["channel_key"],
+                channel["max_concurrency"],
+            )
             channel["models"] = models_by_channel.get(channel["channel_key"], [])
+            channel["runtime"] = self._runtime_payload(channel["channel_key"])
         return {"modules": modules, "channels": channels}
 
     def create_channel(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         name = self._require_text(payload, "name")
         base_url = self._require_text(payload, "base_url")
         api_key = self._require_text(payload, "api_key")
+        max_concurrency = self._resolve_max_concurrency(payload)
         channel_key = f"channel_{uuid.uuid4().hex[:12]}"
         timestamp = _now()
         with self.storage.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO llm_channels (
-                    channel_key, name, base_url, api_key, is_enabled,
+                    channel_key, name, base_url, api_key, max_concurrency, is_enabled,
                     created_at, updated_at, last_sync_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     channel_key,
                     name,
                     base_url,
                     api_key,
+                    max_concurrency,
                     self._bool_to_int(payload.get("is_enabled", True)),
                     timestamp,
                     timestamp,
@@ -68,6 +78,7 @@ class LlmSettingsService:
                 ),
             )
             connection.commit()
+            self.concurrency_service.set_limit(channel_key, max_concurrency)
             return self._snapshot_channel(connection, channel_key)
 
     def update_channel(self, channel_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,25 +90,34 @@ class LlmSettingsService:
                 "name": self._optional_text(payload, "name") or row["name"],
                 "base_url": self._optional_text(payload, "base_url") or row["base_url"],
                 "api_key": self._optional_text(payload, "api_key") or row["api_key"],
+                "max_concurrency": self._resolve_max_concurrency(
+                    payload,
+                    current_value=row["max_concurrency"],
+                ),
                 "is_enabled": self._bool_to_int(payload.get("is_enabled", bool(row["is_enabled"]))),
                 "updated_at": _now(),
             }
             connection.execute(
                 """
                 UPDATE llm_channels
-                SET name = ?, base_url = ?, api_key = ?, is_enabled = ?, updated_at = ?
+                SET name = ?, base_url = ?, api_key = ?, max_concurrency = ?, is_enabled = ?, updated_at = ?
                 WHERE channel_key = ?
                 """,
                 (
                     updated["name"],
                     updated["base_url"],
                     updated["api_key"],
+                    updated["max_concurrency"],
                     updated["is_enabled"],
                     updated["updated_at"],
                     channel_key,
                 ),
             )
             connection.commit()
+            self.concurrency_service.set_limit(
+                channel_key,
+                updated["max_concurrency"],
+            )
             return self._snapshot_channel(connection, channel_key)
 
     def delete_channel(self, channel_key: str) -> Dict[str, Any]:
@@ -117,7 +137,15 @@ class LlmSettingsService:
             if not row:
                 raise ValueError(f"渠道不存在: {channel_key}")
         try:
-            models = self._fetch_models_from_upstream(row["base_url"], row["api_key"])
+            self.concurrency_service.set_limit(
+                row["channel_key"],
+                row["max_concurrency"],
+            )
+            with self.concurrency_service.slot(row["channel_key"]):
+                models = self._fetch_models_from_upstream(
+                    row["base_url"],
+                    row["api_key"],
+                )
         except Exception as exc:
             self._mark_sync_failed(channel_key, str(exc))
             raise
@@ -210,6 +238,7 @@ class LlmSettingsService:
             "base_url": channel["base_url"],
             "api_key": channel["api_key"],
             "model_id": binding["model_id"],
+            "max_concurrency": channel["max_concurrency"],
         }
 
     def _fetch_models_from_upstream(self, base_url: str, api_key: str) -> List[Dict[str, Any]]:
@@ -264,7 +293,12 @@ class LlmSettingsService:
         if not row:
             raise ValueError(f"渠道不存在: {channel_key}")
         channel = self._serialize_channel(row)
+        self.concurrency_service.set_limit(
+            channel_key,
+            channel["max_concurrency"],
+        )
         channel["models"] = self._list_models_by_channel(connection).get(channel_key, [])
+        channel["runtime"] = self._runtime_payload(channel_key)
         return channel
 
     def _get_channel_row(self, connection, channel_key: str):
@@ -288,6 +322,7 @@ class LlmSettingsService:
             "channel_key": row["channel_key"],
             "name": row["name"],
             "base_url": row["base_url"],
+            "max_concurrency": int(row["max_concurrency"]),
             "is_enabled": bool(row["is_enabled"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -325,3 +360,24 @@ class LlmSettingsService:
 
     def _bool_to_int(self, value: Any) -> int:
         return 1 if bool(value) else 0
+
+    def _resolve_max_concurrency(
+        self,
+        payload: Dict[str, Any],
+        current_value: int = 4,
+    ) -> int:
+        raw_value = payload.get("max_concurrency", current_value)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_concurrency 必须是整数") from exc
+        if value < 1:
+            raise ValueError("max_concurrency 必须大于等于 1")
+        return value
+
+    def _runtime_payload(self, channel_key: str) -> Dict[str, int]:
+        snapshot = self.concurrency_service.snapshot(channel_key)
+        return {
+            "inflight": snapshot["inflight"],
+            "waiting": snapshot["waiting"],
+        }

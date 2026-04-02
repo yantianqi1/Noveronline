@@ -51,6 +51,31 @@ class StubLlmClient:
                 ],
                 "block_end_state": "沈夜决定继续追查镜湖真相",
             }]
+        if self.module_key == "novel_chapter_summarizer":
+            return [{
+                "summary_text": "本章围绕密信与镜湖线索展开，沈夜开始进入主线调查。",
+                "start_anchor": "沈夜承接前情继续追查白泽司密信。",
+                "end_anchor": "镜湖真相仍未明朗，下一章冲突继续升级。",
+                "key_events": [
+                    {"summary": "沈夜拿到密信。"},
+                    {"summary": "镜湖线索被正式点燃。"},
+                ],
+                "open_threads": [
+                    {"thread_key": "镜湖真相", "summary": "镜湖真相仍待继续追查。"},
+                ],
+                "character_state_updates": [
+                    {"name": "沈夜", "state": "active", "summary": "继续主动推进调查。"},
+                ],
+                "relationship_updates": [
+                    {"source": "沈夜", "target": "苏半夏", "state": "ally", "summary": "二人形成协作。"},
+                ],
+                "timeline_note": "剧情仍发生在同一段连续时序中。",
+                "key_entities": [
+                    {"name": "沈夜", "entity_type": "character"},
+                    {"name": "苏半夏", "entity_type": "character"},
+                    {"name": "白泽司", "entity_type": "organization"},
+                ],
+            }]
         return [{
             "entity_types": [
                 {"name": "Character", "description": "Named story character", "attributes": [], "examples": ["沈夜"]},

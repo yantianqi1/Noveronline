@@ -238,6 +238,7 @@ def normalize_block_end_state(value: Any, packet: Dict[str, Any], plot_summary: 
             "focus_characters": normalize_name_list(value.get("focus_characters"), characters, read_text(plot_summary)),
             "focus_organizations": normalize_name_list(value.get("focus_organizations"), organizations, read_text(plot_summary)),
             "open_threads": normalize_string_list(value.get("open_threads"))[:6],
+            "narrative_momentum": read_text(value.get("narrative_momentum")) or "",
             "summary": read_text(value.get("summary")) or read_text(plot_summary) or packet.get("local_summary", ""),
         }
     summary = read_text(value) or read_text(plot_summary) or packet.get("local_summary", "")
@@ -245,5 +246,6 @@ def normalize_block_end_state(value: Any, packet: Dict[str, Any], plot_summary: 
         "focus_characters": mentioned_names(summary, characters) or characters[:6],
         "focus_organizations": mentioned_names(summary, organizations) or organizations[:4],
         "open_threads": [item.get("thread_key", "") for item in packet.get("local_threads", []) if item.get("thread_key")][:6],
+        "narrative_momentum": "",
         "summary": summary,
     }

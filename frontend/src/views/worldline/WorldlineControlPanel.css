@@ -10,14 +10,12 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
-  min-height: 100%;
 }
 
 .panel.panel-active {
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
-  min-height: 100%;
 }
 
 .panel-header,
@@ -67,22 +65,12 @@
 .source-section {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
+  min-height: 400px;
   overflow: hidden;
 }
 
-.panel-ready .source-section {
-  min-height: 680px;
-}
-
-.panel-active .source-section {
-  min-height: 520px;
-}
-
 .launchpad-section {
-  z-index: 2;
-  box-shadow: 0 -12px 28px rgba(44, 42, 39, 0.06);
-  backdrop-filter: blur(10px);
+  position: relative;
 }
 
 .section-title,
@@ -102,7 +90,7 @@
 }
 
 .session-summary {
-  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.4fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .summary-card,
@@ -119,7 +107,7 @@
   flex-direction: column;
   justify-content: space-between;
   gap: var(--space-xs);
-  min-height: 78px;
+  min-height: 68px;
 }
 
 .summary-label {
@@ -128,19 +116,19 @@
 }
 
 .summary-value {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-main);
 }
 
 .session-code .summary-value {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   word-break: break-all;
 }
 
 .setup-grid {
-  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.85fr);
+  grid-template-columns: 1fr;
   align-items: stretch;
 }
 
@@ -155,7 +143,7 @@
 }
 
 .field textarea {
-  min-height: 126px;
+  min-height: 100px;
   resize: vertical;
 }
 
@@ -178,17 +166,17 @@
   border: 1px solid var(--line-soft);
   background: rgba(255, 250, 241, 0.95);
   border-radius: var(--radius-md);
-  padding: 12px;
+  padding: 10px;
   text-align: left;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   cursor: pointer;
 }
 
 .mode-chip span {
   color: var(--text-sub);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .mode-chip.active {
@@ -217,7 +205,9 @@
 
 .launchpad-action {
   background:
-    linear-gradient(180deg, rgba(255, 247, 234, 0.98), rgba(255, 255, 255, 0.96));
+    linear-gradient(180deg, rgba(255, 247, 234, 0.98), rgba(249, 240, 224, 0.96));
+  border: 1px solid rgba(176, 125, 75, 0.28);
+  box-shadow: 0 4px 16px rgba(176, 125, 75, 0.08);
 }
 
 .create-btn {
@@ -225,7 +215,7 @@
 }
 
 .runtime-grid {
-  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.4fr);
+  grid-template-columns: 1fr;
 }
 
 .runtime-box .btn {
@@ -277,19 +267,6 @@
   min-height: 0;
 }
 
-@media (max-width: 1280px) {
-  .session-summary,
-  .setup-grid,
-  .runtime-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .session-code,
-  .runtime-box:last-child {
-    grid-column: span 2;
-  }
-}
-
 @media (max-width: 960px) {
   .panel.panel-ready {
     height: auto;
@@ -301,21 +278,13 @@
   .section-head,
   .inject-row,
   .session-summary,
-  .setup-grid,
-  .runtime-grid,
   .mode-grid,
   .auto-config-grid {
     flex-direction: column;
     grid-template-columns: 1fr;
   }
 
-  .session-code,
-  .runtime-box:last-child {
-    grid-column: auto;
-  }
-
-  .source-section,
-  .panel-active .source-section {
+  .source-section {
     min-height: 0;
   }
 

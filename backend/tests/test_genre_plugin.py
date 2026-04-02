@@ -1,4 +1,4 @@
-from app.services.agent_schema_registry import AgentSchemaRegistry
+from app.services.agents.registry import AgentSchemaRegistry
 from app.services.genre_plugin import resolve_genre_plugin
 from app.services.novel_seed_analyzer import NovelSeedAnalyzer
 

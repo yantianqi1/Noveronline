@@ -40,7 +40,7 @@ def test_seed_runner_llm_validation_reports_missing_bindings(monkeypatch):
 
     class FakeRouter:
         def build_client(self, module_key):
-            if module_key == "anchor_point_summary":
+            if module_key == "novel_chapter_summarizer":
                 raise ValueError("剧情锚点摘要 未配置 LLM 渠道和模型；请先在全局设施面板完成绑定")
             return object()
 
@@ -48,7 +48,7 @@ def test_seed_runner_llm_validation_reports_missing_bindings(monkeypatch):
 
     runner = SeedExtractRunner(service, task_id, use_llm=True)
 
-    with pytest.raises(ValueError, match="anchor_point_summary"):
+    with pytest.raises(ValueError, match="novel_chapter_summarizer"):
         runner._validate_llm_modules()
 
 

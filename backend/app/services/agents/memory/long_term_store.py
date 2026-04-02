@@ -1,109 +1,13 @@
-"""Agent 持久记忆存储。"""
+"""Agent 长期记忆存储。"""
 
 from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .archive_library_storage import ArchiveLibraryStorage
-from .worldline_runtime_storage import WorldlineRuntimeStorage
-
-
-def _now() -> str:
-    return datetime.now().isoformat()
-
-
-def _memory_row(row, scope: str) -> Dict[str, Any]:
-    payload = dict(row)
-    payload["scope"] = scope
-    payload["salience"] = float(payload.get("salience") or 0.0)
-    payload["detail"] = json.loads(payload.get("detail_json") or "{}")
-    payload["evidence"] = json.loads(payload.get("evidence_json") or "[]")
-    payload["memory_layer"] = payload.get("memory_layer") or "canon"
-    payload["status"] = payload.get("status") or "active"
-    payload["version"] = int(payload.get("version") or 1)
-    return payload
-
-
-def _event_row(row) -> Dict[str, Any]:
-    payload = dict(row)
-    payload["version"] = int(payload.get("version") or 1)
-    payload["evidence"] = json.loads(payload.get("evidence_json") or "[]")
-    return payload
-
-
-class EpisodicMemoryStore:
-    """session / branch 级经验记忆。"""
-
-    def insert(
-        self,
-        container_dir: str,
-        session_id: str,
-        branch_id: str,
-        agent_id: str,
-        archive_id: str,
-        memory_type: str,
-        summary: str,
-        detail: Dict[str, Any],
-        source_kind: str,
-        source_ref_id: str,
-        normalized_subject: str,
-        salience: float,
-    ) -> str:
-        memory_id = f"mem_{uuid.uuid4().hex[:16]}"
-        created_at = _now()
-        storage = WorldlineRuntimeStorage(container_dir)
-        with storage.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO agent_episodic_memory (
-                    memory_id, session_id, branch_id, agent_id, archive_id, memory_type,
-                    summary, detail_json, source_kind, source_ref_id, normalized_subject,
-                    salience, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    memory_id,
-                    session_id,
-                    branch_id,
-                    agent_id,
-                    archive_id or "",
-                    memory_type,
-                    summary,
-                    json.dumps(detail, ensure_ascii=False),
-                    source_kind,
-                    source_ref_id,
-                    normalized_subject,
-                    salience,
-                    created_at,
-                    created_at,
-                ),
-            )
-            connection.commit()
-        return memory_id
-
-    def list_memories(
-        self,
-        container_dir: str,
-        session_id: str,
-        branch_id: str,
-        agent_id: str,
-        limit: int = 20,
-    ) -> List[Dict[str, Any]]:
-        storage = WorldlineRuntimeStorage(container_dir)
-        with storage.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM agent_episodic_memory
-                WHERE session_id = ? AND branch_id = ? AND agent_id = ?
-                ORDER BY updated_at DESC, salience DESC
-                LIMIT ?
-                """,
-                (session_id, branch_id, agent_id, max(1, min(limit, 100))),
-            ).fetchall()
-        return [_memory_row(row, "session") for row in rows]
+from ...archive_library_storage import ArchiveLibraryStorage
+from .store_support import event_row, memory_row, now_iso
 
 
 class LongTermMemoryStore:
@@ -130,7 +34,13 @@ class LongTermMemoryStore:
         if not archive_id:
             raise ValueError("archive_id 不能为空")
         with self.storage.connect() as connection:
-            self._supersede_active_rows(connection, archive_id, memory_type, normalized_subject, ("candidate",))
+            self._supersede_active_rows(
+                connection,
+                archive_id,
+                memory_type,
+                normalized_subject,
+                ("candidate",),
+            )
             memory_id = self._insert_memory(
                 connection,
                 archive_id=archive_id,
@@ -163,8 +73,19 @@ class LongTermMemoryStore:
                 raise ValueError("candidate 记忆已被驳回，不能再次采纳")
             if candidate["status"] != "active":
                 raise ValueError("candidate 记忆已被采纳或替换，不能重复采纳")
-            self._supersede_active_rows(connection, archive_id, candidate["memory_type"], candidate["normalized_subject"], ("canon",))
-            self._update_memory_status(connection, candidate["memory_id"], "superseded", "candidate_adopted")
+            self._supersede_active_rows(
+                connection,
+                archive_id,
+                candidate["memory_type"],
+                candidate["normalized_subject"],
+                ("canon",),
+            )
+            self._update_memory_status(
+                connection,
+                candidate["memory_id"],
+                "superseded",
+                "candidate_adopted",
+            )
             canon_id = self._insert_memory(
                 connection,
                 archive_id=archive_id,
@@ -182,11 +103,11 @@ class LongTermMemoryStore:
                 source_session_id=candidate["source_session_id"],
                 source_branch_id=candidate["source_branch_id"],
                 evidence=json.loads(candidate["evidence_json"] or "[]"),
-                adopted_at=_now(),
+                adopted_at=now_iso(),
                 event_type="promote_to_canon",
             )
             connection.commit()
-            return self.list_memory(archive_id, canon_id)
+        return self.list_memory(archive_id, canon_id)
 
     def reject_candidate(self, archive_id: str, memory_id: str) -> Dict[str, Any]:
         with self.storage.connect() as connection:
@@ -199,7 +120,13 @@ class LongTermMemoryStore:
                 raise ValueError("candidate 记忆已被驳回")
             if candidate["status"] != "active":
                 raise ValueError("candidate 记忆已被采纳或替换，不能再驳回")
-            self._update_memory_status(connection, memory_id, "rejected", "reject_candidate", rejected_at=_now())
+            self._update_memory_status(
+                connection,
+                memory_id,
+                "rejected",
+                "reject_candidate",
+                rejected_at=now_iso(),
+            )
             connection.commit()
         return self.list_memory(archive_id, memory_id)
 
@@ -208,7 +135,12 @@ class LongTermMemoryStore:
             memory = self._fetch_memory(connection, archive_id, memory_id)
             if not memory:
                 raise ValueError(f"长期记忆不存在: {memory_id}")
-            self._update_memory_status(connection, memory_id, "superseded", "supersede_canon")
+            self._update_memory_status(
+                connection,
+                memory_id,
+                "superseded",
+                "supersede_canon",
+            )
             connection.commit()
         return self.list_memory(archive_id, memory_id)
 
@@ -227,7 +159,8 @@ class LongTermMemoryStore:
             rows = connection.execute(
                 f"""
                 SELECT * FROM archive_agent_memory
-                WHERE archive_id = ? AND status IN ({status_placeholders}) AND memory_layer IN ({layer_placeholders})
+                WHERE archive_id = ? AND status IN ({status_placeholders})
+                  AND memory_layer IN ({layer_placeholders})
                 ORDER BY CASE memory_layer
                     WHEN 'canon' THEN 0
                     WHEN 'candidate' THEN 1
@@ -237,12 +170,17 @@ class LongTermMemoryStore:
                 """,
                 (archive_id, *statuses, *layers, max(1, min(limit, 100))),
             ).fetchall()
-        return [_memory_row(row, "long_term") for row in rows]
+        return [memory_row(row, "long_term") for row in rows]
 
     def list_memories(self, archive_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         return self.list_active_memories(archive_id, layers=("canon",), limit=limit)
 
-    def list_memory_timeline(self, archive_id: str, memory_id: str = "", normalized_subject: str = "") -> Dict[str, Any]:
+    def list_memory_timeline(
+        self,
+        archive_id: str,
+        memory_id: str = "",
+        normalized_subject: str = "",
+    ) -> Dict[str, Any]:
         with self.storage.connect() as connection:
             subject = normalized_subject
             if memory_id and not subject:
@@ -268,10 +206,19 @@ class LongTermMemoryStore:
                 """,
                 (archive_id, subject),
             ).fetchall()
-        memory_payloads = [_memory_row(row, "long_term") for row in memories]
-        event_payloads = [_event_row(row) for row in events]
-        active_canon = next((item for item in memory_payloads if item["memory_layer"] == "canon" and item["status"] == "active"), None)
-        active_candidates = [item for item in memory_payloads if item["memory_layer"] == "candidate" and item["status"] == "active"]
+        memory_payloads = [memory_row(row, "long_term") for row in memories]
+        event_payloads = [event_row(row) for row in events]
+        active_canon = next(
+            (
+                item for item in memory_payloads
+                if item["memory_layer"] == "canon" and item["status"] == "active"
+            ),
+            None,
+        )
+        active_candidates = [
+            item for item in memory_payloads
+            if item["memory_layer"] == "candidate" and item["status"] == "active"
+        ]
         return {
             "archive_id": archive_id,
             "subject": subject,
@@ -287,21 +234,27 @@ class LongTermMemoryStore:
             row = self._fetch_memory(connection, archive_id, memory_id)
         if not row:
             raise ValueError(f"长期记忆不存在: {memory_id}")
-        return _memory_row(row, "long_term")
+        return memory_row(row, "long_term")
 
     def _insert_memory(self, connection, **kwargs) -> str:
-        now = _now()
+        now = now_iso()
         memory_id = f"ltm_{uuid.uuid4().hex[:16]}"
-        version = self._next_version(connection, kwargs["archive_id"], kwargs["memory_type"], kwargs["normalized_subject"])
+        version = self._next_version(
+            connection,
+            kwargs["archive_id"],
+            kwargs["memory_type"],
+            kwargs["normalized_subject"],
+        )
         adopted_at = kwargs.get("adopted_at")
         event_type = kwargs.get("event_type", "append_candidate")
         connection.execute(
             """
             INSERT INTO archive_agent_memory (
-                memory_id, archive_id, agent_id, memory_type, normalized_subject, summary,
-                detail_json, source_kind, source_ref_id, salience, created_at, updated_at,
-                memory_layer, status, version, parent_memory_id, source_session_id,
-                source_branch_id, evidence_json, adopted_at, rejected_at
+                memory_id, archive_id, agent_id, memory_type, normalized_subject,
+                summary, detail_json, source_kind, source_ref_id, salience,
+                created_at, updated_at, memory_layer, status, version,
+                parent_memory_id, source_session_id, source_branch_id,
+                evidence_json, adopted_at, rejected_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
@@ -330,13 +283,21 @@ class LongTermMemoryStore:
         self._log_event(connection, memory_id, kwargs, event_type, version, now)
         return memory_id
 
-    def _log_event(self, connection, memory_id: str, payload: Dict[str, Any], event_type: str, version: int, created_at: str) -> None:
+    def _log_event(
+        self,
+        connection,
+        memory_id: str,
+        payload: Dict[str, Any],
+        event_type: str,
+        version: int,
+        created_at: str,
+    ) -> None:
         connection.execute(
             """
             INSERT INTO archive_agent_memory_events (
-                event_id, memory_id, archive_id, normalized_subject, memory_type, event_type,
-                memory_layer, status, version, parent_memory_id, source_session_id,
-                source_branch_id, summary, evidence_json, created_at
+                event_id, memory_id, archive_id, normalized_subject, memory_type,
+                event_type, memory_layer, status, version, parent_memory_id,
+                source_session_id, source_branch_id, summary, evidence_json, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -358,7 +319,13 @@ class LongTermMemoryStore:
             ),
         )
 
-    def _next_version(self, connection, archive_id: str, memory_type: str, normalized_subject: str) -> int:
+    def _next_version(
+        self,
+        connection,
+        archive_id: str,
+        memory_type: str,
+        normalized_subject: str,
+    ) -> int:
         row = connection.execute(
             """
             SELECT MAX(version) AS max_version
@@ -375,7 +342,14 @@ class LongTermMemoryStore:
             (archive_id, memory_id),
         ).fetchone()
 
-    def _supersede_active_rows(self, connection, archive_id: str, memory_type: str, normalized_subject: str, layers: Iterable[str]) -> None:
+    def _supersede_active_rows(
+        self,
+        connection,
+        archive_id: str,
+        memory_type: str,
+        normalized_subject: str,
+        layers: Iterable[str],
+    ) -> None:
         placeholders = ",".join("?" for _ in layers)
         rows = connection.execute(
             f"""
@@ -386,13 +360,28 @@ class LongTermMemoryStore:
             (archive_id, memory_type, normalized_subject, *layers),
         ).fetchall()
         for row in rows:
-            self._update_memory_status(connection, row["memory_id"], "superseded", "supersede_active")
+            self._update_memory_status(
+                connection,
+                row["memory_id"],
+                "superseded",
+                "supersede_active",
+            )
 
-    def _update_memory_status(self, connection, memory_id: str, status: str, event_type: str, rejected_at: Optional[str] = None) -> None:
-        row = connection.execute("SELECT * FROM archive_agent_memory WHERE memory_id = ?", (memory_id,)).fetchone()
+    def _update_memory_status(
+        self,
+        connection,
+        memory_id: str,
+        status: str,
+        event_type: str,
+        rejected_at: Optional[str] = None,
+    ) -> None:
+        row = connection.execute(
+            "SELECT * FROM archive_agent_memory WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchone()
         if not row:
             return
-        now = _now()
+        now = now_iso()
         connection.execute(
             """
             UPDATE archive_agent_memory

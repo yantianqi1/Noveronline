@@ -77,11 +77,12 @@ class WorldlineAutoActionService:
         agents: List[Dict[str, Any]],
         goal_text: str = "",
         memory_hints: Optional[Dict[str, str]] = None,
+        action_views: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         client = self._build_client(WORLDLINE_AGENT_ACTION_MODULE)
         candidates = _sorted_candidates(agents)
         payload = client.chat_json_value(
-            messages=self._action_messages(branch, candidates, goal_text, memory_hints or {}),
+            messages=self._action_messages(branch, candidates, goal_text, memory_hints or {}, action_views or {}),
             temperature=ACTION_TEMPERATURE,
             max_tokens=ACTION_MAX_TOKENS,
         )
@@ -113,10 +114,11 @@ class WorldlineAutoActionService:
         candidates: List[Dict[str, Any]],
         goal_text: str,
         memory_hints: Dict[str, str],
+        action_views: Dict[str, Dict[str, Any]],
     ) -> List[Dict[str, str]]:
         return [
             {"role": "system", "content": ACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": self._action_prompt(branch, candidates, goal_text, memory_hints)},
+            {"role": "user", "content": self._action_prompt(branch, candidates, goal_text, memory_hints, action_views)},
         ]
 
     def _goal_messages(self, branch, goal_text: str) -> List[Dict[str, str]]:
@@ -131,10 +133,11 @@ class WorldlineAutoActionService:
         candidates: List[Dict[str, Any]],
         goal_text: str,
         memory_hints: Dict[str, str],
+        action_views: Dict[str, Dict[str, Any]],
     ) -> str:
         event_lines = self._recent_event_lines(branch)
         variable_lines = self._pending_variable_lines(branch)
-        candidate_lines = self._candidate_lines(candidates, memory_hints)
+        candidate_lines = self._candidate_lines(candidates, memory_hints, action_views)
         goal_line = goal_text.strip() or "未设置最终条件"
         return (
             f"分支标题：{branch.title}\n"
@@ -175,12 +178,14 @@ class WorldlineAutoActionService:
         lines = [f"- {item.name}: {item.description}" for item in variables]
         return "\n".join(lines) if lines else "- 暂无"
 
-    def _candidate_lines(self, candidates: List[Dict[str, Any]], memory_hints: Dict[str, str]) -> str:
+    def _candidate_lines(self, candidates: List[Dict[str, Any]], memory_hints: Dict[str, str], action_views: Dict[str, Dict[str, Any]]) -> str:
         lines = [
             (
                 f"- {item['display_name']} | kind={item['agent_kind']} | drive={item['drive']} | "
                 f"tension={item['tension']} | last_action_at={item.get('last_action_at') or 'never'}"
                 + (f" | 记忆={memory_hints[item['agent_id']]}" if memory_hints.get(item["agent_id"]) else "")
+                + (f" | 公开档案={action_views[item['agent_id']]['public_profile']}" if action_views.get(item["agent_id"], {}).get("public_profile") else "")
+                + (f" | 关系视角={action_views[item['agent_id']]['relationship_view']}" if action_views.get(item["agent_id"], {}).get("relationship_view") else "")
             )
             for item in candidates
         ]

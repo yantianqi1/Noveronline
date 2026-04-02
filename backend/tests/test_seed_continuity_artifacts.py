@@ -11,12 +11,15 @@ from .seed_test_helpers import install_fake_seed_llm
 def build_twelve_chapter_novel() -> str:
     sections = []
     for order in range(1, 13):
+        chapter_body = (
+            f"沈夜在第{order}章继续追查镜湖旧案，秦昭陪他潜入玄霄宗外库。"
+            f"白泽司与回声会都想抢先控制线索，苏半夏负责稳住局势。"
+            f"众人提到沈夜又叫夜哥，但正式身份仍是沈夜。"
+        ) * 12
         sections.append(
             (
                 f"第{order}章 镜湖余波\n"
-                f"沈夜在第{order}章继续追查镜湖旧案，秦昭陪他潜入玄霄宗外库。"
-                f"白泽司与回声会都想抢先控制线索，苏半夏负责稳住局势。"
-                f"众人提到沈夜又叫夜哥，但正式身份仍是沈夜。"
+                f"{chapter_body}"
             )
         )
     return "\n\n".join(sections)
@@ -91,8 +94,9 @@ def test_async_seed_pipeline_generates_story_memory_artifacts(tmp_path, monkeypa
     assert skeleton["chapter_sketches"][0]["fingerprint"]
     assert skeleton["chapter_sketches"][0]["tail_hook"]
     assert anchors["anchor_count"] == 1
-    assert blocks[0]["owned_chapter_ids"] == [f"chapter_{order:04d}" for order in range(1, 11)]
-    assert blocks[1]["context_chapter_ids"] == ["chapter_0009", "chapter_0010"]
+    assert blocks[0]["owned_chapter_ids"][0] == "chapter_0001"
+    assert blocks[1]["owned_chapter_ids"][0] == f"chapter_{len(blocks[0]['owned_chapter_ids']) + 1:04d}"
+    assert blocks[1]["context_chapter_ids"] == blocks[0]["owned_chapter_ids"][-2:]
     assert snapshots[1]["block_id"] == "block_0002"
     assert snapshots[1]["story_so_far"]
     assert "nearest_anchor" in snapshots[1]

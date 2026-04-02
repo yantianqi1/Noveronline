@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..utils.llm_client import LLMClient
 from ..utils.llm_json import normalize_json_object
+from .anchor_point_line_protocol import AnchorPointLineProtocolExecutor
 from .anchor_point_prompts import ANCHOR_POINT_SYSTEM_PROMPT
+from .sentence_atlas_builder import build_sentence_atlas, build_sentence_map
 from .llm_router import LlmRouter
 from .local_block_fact_support import split_sentences
+from .seed_stage_fallback_support import attach_rule_fallback, should_use_rule_fallback, summarize_stage_failure
 from .seed_stage_settings import ANCHOR_INTERVAL
 
 
@@ -19,6 +23,7 @@ WORLD_STATE_FIELDS = (
     "open_plot_threads",
     "recent_events_summary",
 )
+logger = logging.getLogger(__name__)
 
 
 class AnchorPointBuilder:
@@ -40,10 +45,14 @@ class AnchorPointBuilder:
         blocks: Sequence[Dict[str, Any]],
         chapters: Sequence[Dict[str, Any]],
         skeleton: Dict[str, Any],
+        sentence_atlas: Optional[Sequence[Dict[str, Any]]] = None,
         anchor_interval: int = DEFAULT_ANCHOR_INTERVAL,
         progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
+        if sentence_atlas is None:
+            _, sentence_atlas = build_sentence_atlas(chapters)
         chapter_map = {chapter["chapter_id"]: chapter for chapter in chapters}
+        sentence_map = build_sentence_map(sentence_atlas)
         sketch_map = {item["chapter_id"]: item for item in skeleton.get("chapter_sketches", [])}
         anchors = []
         cumulative_state = self._empty_world_state()
@@ -51,7 +60,7 @@ class AnchorPointBuilder:
             anchor_meta = self._anchor_meta(index, anchor_blocks, chapter_map)
             if progress_callback:
                 progress_callback("start", anchor_meta)
-            anchor = self._build_anchor(anchor_meta, anchor_blocks, chapter_map, sketch_map, cumulative_state)
+            anchor = self._build_anchor(anchor_meta, anchor_blocks, chapter_map, sketch_map, cumulative_state, sentence_map)
             cumulative_state = self._merge_world_state(cumulative_state, anchor["world_state"])
             anchor["world_state"] = cumulative_state
             anchors.append(anchor)
@@ -77,20 +86,33 @@ class AnchorPointBuilder:
         chapter_map: Dict[str, Dict[str, Any]],
         sketch_map: Dict[str, Dict[str, Any]],
         previous_state: Dict[str, Any],
+        sentence_map: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
-        client = self.llm_client or self.llm_router.build_client(self.MODULE_KEY)
-        message = self._build_prompt(blocks, chapter_map, sketch_map, previous_state)
-        payload = client.chat_json_value(
-            messages=[
-                {"role": "system", "content": ANCHOR_POINT_SYSTEM_PROMPT},
-                {"role": "user", "content": message},
-            ],
-            temperature=0.15,
-            max_tokens=4096,
-        )
-        value = normalize_json_object(payload, "剧情锚点摘要")
-        world_state = self._merge_world_state(previous_state, value.get("world_state") or value)
-        return {**anchor_meta, "world_state": world_state}
+        try:
+            client = self.llm_client or self.llm_router.build_client(self.MODULE_KEY)
+            message = self._build_prompt(blocks, chapter_map, sketch_map, previous_state, sentence_map)
+            if hasattr(client, "chat"):
+                valid_sentence_ids = [chapter_id for block in blocks for chapter_id in block.get("owned_sentence_ids", [])]
+                payload = AnchorPointLineProtocolExecutor(client, sentence_map, valid_sentence_ids).build(message)
+                world_state = self._merge_world_state(previous_state, payload)
+                return {**anchor_meta, "world_state": world_state}
+            payload = client.chat_json_value(
+                messages=[
+                    {"role": "system", "content": ANCHOR_POINT_SYSTEM_PROMPT},
+                    {"role": "user", "content": message},
+                ],
+                temperature=0.15,
+                max_tokens=4096,
+            )
+            value = normalize_json_object(payload, "剧情锚点摘要")
+            world_state = self._merge_world_state(previous_state, value.get("world_state") or value)
+            return {**anchor_meta, "world_state": world_state}
+        except Exception as exc:
+            if not should_use_rule_fallback(exc):
+                raise
+            logger.warning("剧情锚点生成转为规则回退 (%s): %s", anchor_meta.get("anchor_id", ""), summarize_stage_failure(exc))
+            fallback_state = self._fallback_world_state(blocks, chapter_map, sketch_map, previous_state)
+            return attach_rule_fallback({**anchor_meta, "world_state": fallback_state}, exc)
 
     def _build_prompt(
         self,
@@ -98,15 +120,18 @@ class AnchorPointBuilder:
         chapter_map: Dict[str, Dict[str, Any]],
         sketch_map: Dict[str, Dict[str, Any]],
         previous_state: Dict[str, Any],
+        sentence_map: Dict[str, Dict[str, Any]],
     ) -> str:
         chapter_ids = [chapter_id for block in blocks for chapter_id in block.get("owned_chapter_ids", [])]
         fingerprints = [sketch_map.get(chapter_id, {}) for chapter_id in chapter_ids]
         snippets = [self._chapter_snippet(chapter_map[chapter_id]) for chapter_id in chapter_ids if chapter_id in chapter_map]
         lines = [self._fingerprint_line(item) for item in fingerprints if item]
+        sentence_catalog = self._sentence_catalog([sentence_id for block in blocks for sentence_id in block.get("owned_sentence_ids", [])], sentence_map)
         return (
             f"## 前一个锚点的世界状态\n{previous_state}\n\n"
             f"## 当前区间章节指纹\n" + ("\n".join(lines) or "无") + "\n\n"
-            f"## 当前区间关键段落\n" + ("\n".join(snippets) or "无")
+            f"## 当前区间关键段落\n" + ("\n".join(snippets) or "无") + "\n\n"
+            f"## 当前区间句子编号\n{sentence_catalog or '无'}"
         )
 
     def _anchor_meta(
@@ -145,6 +170,45 @@ class AnchorPointBuilder:
         else:
             text = f"{sentences[0]}；{sentences[-1]}"
         return f"{chapter.get('title', chapter['chapter_id'])}: {text[:180]}"
+
+    def _sentence_catalog(
+        self,
+        sentence_ids: Sequence[str],
+        sentence_map: Dict[str, Dict[str, Any]],
+    ) -> str:
+        return "\n".join(
+            f"[{sentence_id}] {sentence_map[sentence_id].get('text', '')}"
+            for sentence_id in sentence_ids
+            if sentence_id in sentence_map
+        )
+
+    def _fallback_world_state(
+        self,
+        blocks: Sequence[Dict[str, Any]],
+        chapter_map: Dict[str, Dict[str, Any]],
+        sketch_map: Dict[str, Dict[str, Any]],
+        previous_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        chapter_ids = [chapter_id for block in blocks for chapter_id in block.get("owned_chapter_ids", [])]
+        sketches = [sketch_map.get(chapter_id, {}) for chapter_id in chapter_ids]
+        character_names = []
+        organization_names = []
+        for sketch in sketches:
+            for name in sketch.get("characters", [])[:6]:
+                if name not in character_names:
+                    character_names.append(name)
+            for name in sketch.get("organizations", [])[:6]:
+                if name not in organization_names:
+                    organization_names.append(name)
+        snippets = [self._chapter_snippet(chapter_map[chapter_id]) for chapter_id in chapter_ids if chapter_id in chapter_map]
+        world_state = {
+            "active_characters": [{"name": name, "status": "active", "last_action": snippets[0][:50] if snippets else "本区间继续活跃"} for name in character_names[:6]],
+            "active_organizations": [{"name": name, "status": "active", "key_change": "本区间继续活跃"} for name in organization_names[:6]],
+            "key_relationships": [],
+            "open_plot_threads": [sketch.get("tail_hook", "")[:40] for sketch in sketches if sketch.get("tail_hook")][:6],
+            "recent_events_summary": "；".join(snippets[:3])[:150],
+        }
+        return self._merge_world_state(previous_state, world_state)
 
     def _fingerprint_line(self, sketch: Dict[str, Any]) -> str:
         title = sketch.get("title") or sketch.get("chapter_id", "未知章节")

@@ -14,6 +14,6 @@ def _read_positive_int(name: str, default: str) -> int:
 
 SEED_STAGE_MAX_WORKERS = _read_positive_int("SEED_STAGE_MAX_WORKERS", "20")
 BLOCK_BATCH_SIZE = _read_positive_int("BLOCK_BATCH_SIZE", "50")
-LLM_CONCURRENT_LIMIT = _read_positive_int("LLM_CONCURRENT_LIMIT", "10")
+LLM_CONCURRENT_LIMIT = _read_positive_int("LLM_CONCURRENT_LIMIT", "4")
 ANCHOR_INTERVAL = _read_positive_int("ANCHOR_INTERVAL", "5")
 MAX_PROMPT_INPUT_CHARS = _read_positive_int("MAX_PROMPT_INPUT_CHARS", "24000")

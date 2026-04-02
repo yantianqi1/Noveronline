@@ -4,6 +4,7 @@ from app.services.llm_router import LlmRouter
 
 
 BLOCK_ID_PATTERN = re.compile(r"block_id:\s*(block_\d+)")
+OWNED_CHAPTERS_PATTERN = re.compile(r"owned_chapters:\s*\[(.*?)\]")
 
 
 class FakeSeedLlmClient:
@@ -21,6 +22,8 @@ class FakeSeedLlmClient:
             return self._contextual_payload(user_message)
         if self.module_key == "entity_resolution":
             return self._entity_resolution_payload(user_message)
+        if self.module_key == "novel_chapter_summarizer":
+            return self._chapter_card_payload(user_message)
         if self.module_key == "story_ontology":
             return self._ontology_payload()
         raise AssertionError(f"unexpected module: {self.module_key}")
@@ -40,6 +43,7 @@ class FakeSeedLlmClient:
 
     def _local_block_payload(self, user_message):
         block_order = self._block_order(user_message)
+        first_owned_chapter_id = self._first_owned_chapter_id(user_message, block_order)
         base = (block_order - 1) * 3
         local_entities = [
             {
@@ -151,7 +155,7 @@ class FakeSeedLlmClient:
             "local_events": [
                 {
                     "event_id": f"{self._block_id(block_order)}_event_01",
-                    "chapter_id": f"chapter_{((block_order - 1) * 10) + 1:04d}",
+                    "chapter_id": first_owned_chapter_id,
                     "summary": event_summary,
                     "characters": ["沈夜", local_entities[1]["name"]],
                     "organizations": ["玄霄宗"],
@@ -169,7 +173,7 @@ class FakeSeedLlmClient:
             ],
             "unresolved_refs": [],
             "local_summary": event_summary,
-            "evidence_spans": [{"chapter_id": f"chapter_{((block_order - 1) * 10) + 1:04d}", "snippet": event_summary}],
+            "evidence_spans": [{"chapter_id": first_owned_chapter_id, "snippet": event_summary}],
             "world_rules": [],
         }
 
@@ -200,6 +204,34 @@ class FakeSeedLlmClient:
             return {"merge": True, "canonical_name": "沈夜", "reason": "夜哥是沈夜的明确别名"}
         return {"merge": False, "canonical_name": "", "reason": "证据不足"}
 
+    def _chapter_card_payload(self, user_message):
+        chapter_match = re.search(r"chapter_id:\s*(chapter_\d+)", user_message)
+        chapter_id = chapter_match.group(1) if chapter_match else "chapter_0001"
+        chapter_order = int(chapter_id.rsplit("_", 1)[-1])
+        return {
+            "summary_text": f"第{chapter_order}章摘要：镜湖主线继续推进。",
+            "start_anchor": f"第{chapter_order}章起点：承接前章压力。",
+            "end_anchor": f"第{chapter_order}章尾声：新的冲突即将爆发。",
+            "key_events": [
+                {"summary": f"第{chapter_order}章事件：沈夜继续追查镜湖旧案。"},
+                {"summary": f"第{chapter_order}章事件：玄霄宗的布局进一步收紧。"},
+            ],
+            "open_threads": [
+                {"thread_key": "镜湖旧案", "summary": f"第{chapter_order}章后镜湖旧案仍未终结。"},
+            ],
+            "character_state_updates": [
+                {"name": "沈夜", "state": "active", "summary": "持续推进调查。"},
+            ],
+            "relationship_updates": [
+                {"source": "沈夜", "target": "玄霄宗", "state": "conflict", "summary": "双方矛盾继续升级。"},
+            ],
+            "timeline_note": f"第{chapter_order}章发生在同一夜晚。",
+            "key_entities": [
+                {"name": "沈夜", "entity_type": "character"},
+                {"name": "玄霄宗", "entity_type": "organization"},
+            ],
+        }
+
     def _ontology_payload(self):
         return {
             "entity_types": [
@@ -227,6 +259,15 @@ class FakeSeedLlmClient:
         if not match:
             return 1
         return int(match.group(1).rsplit("_", 1)[-1])
+
+    def _first_owned_chapter_id(self, text, block_order):
+        match = OWNED_CHAPTERS_PATTERN.search(text)
+        if not match:
+            return f"chapter_{((block_order - 1) * 10) + 1:04d}"
+        chapter_ids = re.findall(r"chapter_\d+", match.group(1))
+        if not chapter_ids:
+            return f"chapter_{((block_order - 1) * 10) + 1:04d}"
+        return chapter_ids[0]
 
     def _block_id(self, block_order):
         return f"block_{block_order:04d}"

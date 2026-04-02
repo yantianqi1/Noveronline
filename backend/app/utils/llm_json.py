@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict
 
 
 MAX_PAYLOAD_PREVIEW_LENGTH = 240
+logger = logging.getLogger(__name__)
 
 
 def clean_json_response_text(response: str) -> str:
@@ -42,7 +44,19 @@ def parse_json_response(response: str) -> Any:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
+        repaired = repair_json_response_text(cleaned)
+        if repaired != cleaned:
+            try:
+                payload = json.loads(repaired)
+                logger.warning("LLM JSON 已自动修复后解析成功")
+                return payload
+            except json.JSONDecodeError:
+                pass
         raise ValueError(f"LLM返回的JSON格式无效: {cleaned}") from exc
+
+
+def repair_json_response_text(response: str) -> str:
+    return _repair_container_closers(_normalize_string_control_chars(response))
 
 
 def normalize_json_object(payload: Any, label: str) -> Dict[str, Any]:
@@ -76,3 +90,78 @@ def _preview_payload(payload: Any) -> str:
     if len(text) <= MAX_PAYLOAD_PREVIEW_LENGTH:
         return text
     return text[: MAX_PAYLOAD_PREVIEW_LENGTH - 3] + "..."
+
+
+def _normalize_string_control_chars(text: str) -> str:
+    chunks: list[str] = []
+    in_string = False
+    escaping = False
+    for char in text:
+        if in_string:
+            if escaping:
+                chunks.append(char)
+                escaping = False
+                continue
+            if char == "\\":
+                chunks.append(char)
+                escaping = True
+                continue
+            if char == '"':
+                chunks.append(char)
+                in_string = False
+                continue
+            if char in "\r\n\t":
+                chunks.append(" ")
+                continue
+            chunks.append(char)
+            continue
+        chunks.append(char)
+        if char == '"':
+            in_string = True
+    if in_string:
+        chunks.append('"')
+    return "".join(chunks)
+
+
+def _repair_container_closers(text: str) -> str:
+    chunks: list[str] = []
+    closers: list[str] = []
+    in_string = False
+    escaping = False
+    for char in text:
+        if in_string:
+            chunks.append(char)
+            if escaping:
+                escaping = False
+                continue
+            if char == "\\":
+                escaping = True
+                continue
+            if char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            chunks.append(char)
+            in_string = True
+            continue
+        if char == "{":
+            chunks.append(char)
+            closers.append("}")
+            continue
+        if char == "[":
+            chunks.append(char)
+            closers.append("]")
+            continue
+        if char in "}]":
+            while closers and closers[-1] != char:
+                chunks.append(closers.pop())
+            if closers and closers[-1] == char:
+                chunks.append(char)
+                closers.pop()
+            continue
+        chunks.append(char)
+    if in_string:
+        chunks.append('"')
+    while closers:
+        chunks.append(closers.pop())
+    return "".join(chunks)

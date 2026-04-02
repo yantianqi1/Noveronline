@@ -6,7 +6,7 @@
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
-from .agent_template_registry import AgentTemplateRegistry
+from .agents.registry import AgentTemplateRegistry
 from .archive_candidate_builder import ArchiveCandidateBuilder
 from ..utils.llm_client import LLMClient
 from ..utils.llm_json import normalize_json_object
