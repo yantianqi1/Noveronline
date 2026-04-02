@@ -102,6 +102,31 @@ class LLMClient:
         finally:
             self._track_unregister(call_id)
     
+    def chat_with_tools(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+    ) -> Any:
+        """
+        Send a chat request with tool/function definitions.
+        Returns the raw response message object so the caller can inspect tool_calls.
+        """
+        call_id = self._track_register("chat_with_tools")
+        try:
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "tools": tools,
+            }
+            response = self._chat_with_retry(kwargs, call_id)
+            return response.choices[0].message
+        finally:
+            self._track_unregister(call_id)
+
     def chat_stream(
         self,
         messages: List[Dict[str, str]],

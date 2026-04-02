@@ -28,6 +28,9 @@ MODULE_DEFINITIONS = (
     LlmModuleDefinition("novel_draft_writer", "小说正文创作", "基于上下文包和创作者指令，流式生成小说正文。"),
     LlmModuleDefinition("novel_draft_reviewer", "正文一致性审校", "检查生成的正文是否与已知设定、人物状态一致。"),
     LlmModuleDefinition("novel_chapter_summarizer", "章节卡生成", "逐章生成结构化章节卡，用于 continuity 派生与全量历史召回。"),
+    LlmModuleDefinition("writer_orchestrator", "写作编排调度", "编排层：解析写作意图，调用工具收集小说设定数据，组装写作指令。"),
+    LlmModuleDefinition("writer_composer", "写作正文生成", "写作层：基于编排层组装的写作指令，生成高质量小说正文。"),
+    LlmModuleDefinition("writer_reviewer", "写作一致性审校", "后处理：检查生成正文与已知设定的一致性。"),
 )
 
 STAGE_TO_MODULE_KEY = {
