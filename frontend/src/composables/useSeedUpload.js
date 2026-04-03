@@ -17,6 +17,7 @@ const state = reactive({
   projectName: "我的小说项目",
   analysisGoal: DEFAULT_GOAL,
   additionalContext: "",
+  segmentTokenLimit: 50000,
   files: [],
   dragActive: false,
   uploadBusy: false,
@@ -206,6 +207,7 @@ async function submitUpload() {
       projectName: state.projectName.trim() || "我的小说项目",
       analysisGoal: state.analysisGoal.trim(),
       additionalContext: state.additionalContext.trim(),
+      segmentTokenLimit: state.segmentTokenLimit,
       files: state.files,
       onProgress: updateProgress,
       onRequest: (xhr) => {

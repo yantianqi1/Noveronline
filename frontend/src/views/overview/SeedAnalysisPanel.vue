@@ -1,26 +1,11 @@
 <template>
   <article class="workbench-card panel seed-panel">
-    <h2 class="card-title">种子分析</h2>
-    <p>读取项目种子后，快速查看角色、组织、关系抽取结果，可用于后续世界线建模。</p>
-    <div class="field">
-      <label>项目</label>
-      <select v-model="seedProjectId" :disabled="!seedProjectOptions.length || seedBusy">
-        <option value="">{{ seedProjectPlaceholder }}</option>
-        <option v-for="item in seedProjectOptions" :key="item.value" :value="item.value">
-          {{ item.label }}
-        </option>
-      </select>
-      <p class="field-hint" v-if="selectedSeedProject">
-        已从项目档案簿同步当前可选项目，当前选择：
-        <span class="mono">{{ selectedSeedProject.project_id }}</span>
-      </p>
-    </div>
+    <h2 class="card-title">分析结果</h2>
+    <p>查看角色、组织、关系的分析结果。</p>
     <div class="toolbar-row">
-      <button class="btn" :disabled="seedBusy" @click="emitRefresh">刷新项目</button>
       <button class="btn primary" :disabled="seedBusy || !seedProjectId" @click="analyzeSeed()">
-        运行种子分析
+        {{ seedBusy ? "分析中..." : "运行分析" }}
       </button>
-      <span class="mono">{{ seedBusy ? "分析中..." : seedProjectHint }}</span>
     </div>
 
     <div class="kpis seed-kpis" v-if="seedResult">
@@ -33,8 +18,16 @@
       <div class="seed-col">
         <div class="seed-title">角色列表（预览）</div>
         <div class="seed-item" v-for="item in seedCharactersPreview" :key="item.name">
-          <strong>{{ item.name }}</strong>
-          <span class="mono">{{ formatImportanceTier(item.importance_tier) }}</span>
+          <div class="seed-item-main">
+            <strong>{{ item.name }}</strong>
+            <span class="mono">{{ formatImportanceTier(item.importance_tier) }}</span>
+          </div>
+          <div class="seed-item-detail" v-if="item.personality_traits?.length || item.speech_style">
+            <span v-if="item.personality_traits?.length" class="trait-chips">
+              <span class="trait-chip" v-for="trait in item.personality_traits.slice(0, 3)" :key="trait">{{ trait }}</span>
+            </span>
+            <span v-if="item.speech_style" class="speech-hint">{{ item.speech_style }}</span>
+          </div>
         </div>
       </div>
       <div class="seed-col">
@@ -55,9 +48,7 @@ import { computed, ref, watch } from "vue";
 
 import { runSeedAnalysis } from "../../api/novel";
 import {
-  buildSeedProjectOptions,
   resolveSeedProjectId,
-  resolveSeedProjectSelection,
 } from "./seedProjectId";
 import {
   formatImportanceTier,
@@ -66,40 +57,18 @@ import {
 
 const props = defineProps({
   projects: { type: Array, default: () => [] },
+  projectId: { type: String, default: "" },
 });
 
-const emit = defineEmits(["refresh-projects"]);
-
-const seedProjectId = ref("");
+const seedProjectId = ref(props.projectId);
 const seedResult = ref(null);
 const seedError = ref("");
 const seedBusy = ref(false);
-
-const seedProjectOptions = computed(() => buildSeedProjectOptions(props.projects));
-const selectedSeedProject = computed(() =>
-  props.projects.find((item) => item.project_id === seedProjectId.value) || null,
-);
-const seedProjectPlaceholder = computed(() =>
-  seedProjectOptions.value.length ? "请选择要分析的项目" : "暂无可分析项目",
-);
-const seedProjectHint = computed(() => {
-  if (!seedProjectOptions.value.length) {
-    return "请先上传小说种子，系统会自动创建项目";
-  }
-  if (!seedProjectId.value) {
-    return "请先从列表里选择一个项目";
-  }
-  return "项目已从档案簿列表同步，无需手动填写 ID";
-});
 const seedCharacterCount = computed(() => seedResult.value?.characters?.length || 0);
 const seedOrganizationCount = computed(() => seedResult.value?.organizations?.length || 0);
 const seedRelationCount = computed(() => seedResult.value?.relations?.length || 0);
 const seedCharactersPreview = computed(() => (seedResult.value?.characters || []).slice(0, 6));
 const seedOrganizationsPreview = computed(() => (seedResult.value?.organizations || []).slice(0, 6));
-
-function emitRefresh() {
-  emit("refresh-projects", { preferredProjectId: seedProjectId.value });
-}
 
 async function analyzeSeed(projectIdOverride = "") {
   try {
@@ -119,25 +88,20 @@ async function analyzeSeed(projectIdOverride = "") {
 }
 
 async function runForProject(projectId) {
-  seedProjectId.value = resolveSeedProjectSelection(props.projects, projectId);
+  seedProjectId.value = projectId;
   await analyzeSeed(projectId);
 }
 
 watch(
-  () => props.projects,
-  (projects) => {
-    seedProjectId.value = resolveSeedProjectSelection(projects, seedProjectId.value);
+  () => props.projectId,
+  (value) => {
+    if (value && value !== seedProjectId.value) {
+      seedProjectId.value = value;
+      seedResult.value = null;
+      seedError.value = "";
+    }
   },
-  { immediate: true },
 );
-
-watch(seedProjectId, (value, previousValue) => {
-  if (value === previousValue) {
-    return;
-  }
-  seedResult.value = null;
-  seedError.value = "";
-});
 
 defineExpose({ runForProject });
 </script>
@@ -209,8 +173,40 @@ defineExpose({ runForProject });
   border-top: 1px dashed var(--line-soft);
   padding: 7px 0;
   display: flex;
+  flex-direction: column;
+}
+
+.seed-item-main {
+  display: flex;
   justify-content: space-between;
   gap: 10px;
+}
+
+.seed-item-detail {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.trait-chips {
+  display: flex;
+  gap: 3px;
+}
+
+.trait-chip {
+  background: rgba(176, 125, 75, 0.1);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--accent-copper-deep);
+}
+
+.speech-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 .seed-item:first-of-type {
@@ -220,12 +216,6 @@ defineExpose({ runForProject });
 .seed-error {
   margin-top: 10px;
   color: #9b4326;
-}
-
-.field-hint {
-  margin: 8px 0 0;
-  color: var(--text-sub);
-  font-size: 12px;
 }
 
 @media (max-width: 980px) {

@@ -58,12 +58,25 @@
             :disabled="upload.state.uploadBusy"
           ></textarea>
         </div>
+        <div class="field">
+          <label>每段令牌上限</label>
+          <input
+            v-model.number="upload.state.segmentTokenLimit"
+            type="number"
+            min="5000"
+            max="200000"
+            step="5000"
+            placeholder="50000"
+            :disabled="upload.state.uploadBusy"
+          />
+          <span class="field-hint">控制每个阅读段的最大令牌数，影响分析精度和速度。默认 50000。</span>
+        </div>
       </div>
     </Transition>
 
     <div class="upload-actions">
       <button class="btn primary large" :disabled="!canSubmit || upload.state.uploadBusy" @click="submitUpload">
-        {{ upload.state.uploadBusy ? "管线分析中..." : "启动管线分析" }}
+        {{ upload.state.uploadBusy ? "分析进行中..." : "开始分析" }}
       </button>
     </div>
   </div>
@@ -236,5 +249,11 @@ async function submitUpload() {
   opacity: 0;
   max-height: 0;
   overflow: hidden;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
 }
 </style>
