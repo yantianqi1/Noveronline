@@ -1,4 +1,4 @@
-"""种子提取流水线执行器。"""
+"""种子提取流水线执行器（四阶段管线）。"""
 
 from __future__ import annotations
 
@@ -6,17 +6,20 @@ from typing import Any, Dict, List, Tuple
 
 from ..models.project import ProjectManager, ProjectStatus
 from .llm_router import LlmRouter
-from .seed_task_callbacks import (
-    build_anchor_progress_callback,
-    build_block_progress_callback,
-    build_chapter_card_progress_callback,
-    build_ontology_progress_callback,
-)
+from .reading_notes_manager import ReadingNotesManager
+from .seed_task_callbacks import build_ontology_progress_callback
 from .seed_task_progress import SeedTaskProgressTracker
 
 
 class SeedExtractRunner:
-    """执行第一阶段种子提取流水线。"""
+    """执行四阶段种子提取流水线。
+
+    阶段:
+      1. extract_text + smart_segmentation
+      2. sequential_reading
+      3. global_integration + ontology
+      4. agent_profiles
+    """
 
     def __init__(self, service: Any, task_id: str, use_llm: bool, project_id: str = ""):
         self.service = service
@@ -33,350 +36,236 @@ class SeedExtractRunner:
         additional_context: str,
     ) -> None:
         self._validate_llm_modules()
+
+        # Stage 1: extract_text + smart_segmentation
         documents, chapter_segments = self._extract_and_segment(project_id)
-        skeleton = self._build_skeleton(project_id, chapter_segments)
-        analysis_blocks = self._build_blocks(project_id, chapter_segments)
-        anchors = self._build_anchors(project_id, analysis_blocks, chapter_segments, skeleton)
-        local_block_facts, story_memory_payload, story_memory = self._extract_story_memory(
-            project_id,
-            chapter_segments,
-            analysis_blocks,
-            skeleton,
-            anchors,
+
+        # Stage 2: sequential_reading
+        manager = self._sequential_reading(project_id, chapter_segments)
+
+        # Stage 3: global_integration + ontology
+        seed_analysis, ontology = self._global_integration_and_ontology(
+            project_id, project_name, analysis_goal, additional_context,
+            documents, manager,
         )
-        block_analyses, continuity, seed_analysis = self._analyze_story(
-            project_id,
-            project_name,
-            analysis_goal,
-            chapter_segments,
-            analysis_blocks,
-            local_block_facts,
-            story_memory_payload,
-            story_memory,
-        )
-        ontology = self._generate_ontology(
-            documents,
-            analysis_goal,
-            additional_context,
-            continuity,
-            story_memory,
-            block_analyses,
-        )
+
+        # Stage 4: agent_profiles
+        agent_profiles = self._generate_agent_profiles(project_id, manager)
+
+        # Finalize
         self.service._finalize_project(project_id, analysis_goal, ontology, seed_analysis)
         self.progress.complete(
             "上传完成，项目与种子分析已生成。",
-            self._result_payload(project_id, chapter_segments, analysis_blocks, seed_analysis),
+            self._result_payload(project_id, chapter_segments, manager, seed_analysis, agent_profiles),
         )
 
+    # ── Stage 1: extract_text + smart_segmentation ──
+
     def _extract_and_segment(self, project_id: str) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
-        self.progress.enter_stage("extract_text", "正在提取上传文件文本", 5, "读取并清洗上传的原始文稿")
+        # extract_text
+        self.progress.enter_stage("extract_text", "正在提取上传文件文本", 3, "读取并清洗上传的原始文稿")
         step_id = self.progress.begin_step("extract_text", "file_extract", "提取上传文件文本")
         documents, all_text = self.service._extract_documents(project_id)
         self.service._save_text(project_id, documents, all_text)
         self.progress.end_step(step_id)
         self.progress.note("extract_text", "文本提取完成", f"已提取 {len(documents)} 份文稿，共 {len(all_text)} 字")
 
-        self.progress.enter_stage("segment_chapters", "正在切分章节与叙事段", 15)
-        step_id = self.progress.begin_step("segment_chapters", "segment", "切分章节与叙事段")
+        # chapter segmentation (existing)
         chapter_segments = self.service.chapter_segmenter.segment_documents(documents)
         ProjectManager.save_project_json(project_id, "chapter_segments.json", chapter_segments)
-        self.progress.end_step(step_id)
         self.progress.set_counts(chapter_count=chapter_segments["chapter_count"])
-        self.progress.note(
-            "segment_chapters",
-            "章节切分完成",
-            f"已识别 {chapter_segments['chapter_count']} 个章节",
-            meta={"kind": "artifact", "artifact": "chapter_segments.json"},
+
+        # smart_segmentation
+        self.progress.enter_stage("smart_segmentation", "正在智能分段", 8, "将章节分组为阅读段")
+        step_id = self.progress.begin_step("smart_segmentation", "segment", "智能分段")
+        segment_result = self.service.smart_segmenter.segment(chapter_segments["chapters"])
+        ProjectManager.save_project_json(project_id, "smart_segments.json", segment_result)
+        self.progress.end_step(step_id)
+        self.progress.set_counts(
+            chapter_count=chapter_segments["chapter_count"],
+            segment_count=segment_result["segment_count"],
         )
+        self.progress.note(
+            "smart_segmentation",
+            "智能分段完成",
+            f"共生成 {segment_result['segment_count']} 个阅读段",
+            meta={"kind": "artifact", "artifact": "smart_segments.json"},
+        )
+
+        # Attach segments to chapter_segments dict for downstream use
+        chapter_segments["smart_segments"] = segment_result
         return documents, chapter_segments
 
-    def _build_skeleton(self, project_id: str, chapter_segments: Dict[str, Any]) -> Dict[str, Any]:
-        self.progress.enter_stage("skeleton_timeline", "正在顺序扫描骨架时间线", 22)
-        step_id = self.progress.begin_step("skeleton_timeline", "skeleton", "顺序扫描骨架时间线")
-        skeleton = self.service.skeleton_timeline_builder.build(chapter_segments["chapters"])
-        ProjectManager.save_project_json(project_id, "skeleton_timeline.json", skeleton)
-        self.progress.end_step(step_id)
-        self.progress.note(
-            "skeleton_timeline",
-            "骨架时间线扫描完成",
-            f"已记录 {len(skeleton['global_characters'])} 名角色、{len(skeleton['global_organizations'])} 个组织",
-            meta={"kind": "artifact", "artifact": "skeleton_timeline.json"},
-        )
-        return skeleton
+    # ── Stage 2: sequential_reading ──
 
-    def _build_blocks(self, project_id: str, chapter_segments: Dict[str, Any]) -> Dict[str, Any]:
-        self.progress.enter_stage("build_blocks", "正在组装分析块与重叠上下文", 28)
-        step_id = self.progress.begin_step("build_blocks", "build", "组装分析块与重叠上下文")
-        analysis_blocks = self.service.block_builder.build(chapter_segments["chapters"])
-        ProjectManager.save_project_json(project_id, "analysis_blocks.json", analysis_blocks)
-        self.progress.end_step(step_id)
-        self.progress.set_counts(block_count=analysis_blocks["block_count"])
-        self.progress.note(
-            "build_blocks",
-            "分析块组装完成",
-            f"共生成 {analysis_blocks['block_count']} 个块",
-            meta={"kind": "artifact", "artifact": "analysis_blocks.json"},
-        )
-        return analysis_blocks
+    def _sequential_reading(self, project_id: str, chapter_segments: Dict[str, Any]) -> ReadingNotesManager:
+        segment_result = chapter_segments["smart_segments"]
+        segments = segment_result["segments"]
+        total_segments = len(segments)
 
-    def _build_anchors(
-        self,
-        project_id: str,
-        analysis_blocks: Dict[str, Any],
-        chapter_segments: Dict[str, Any],
-        skeleton: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        self.progress.enter_stage("anchor_generation", "正在生成剧情锚点摘要", 38)
-        anchors = self.service.anchor_point_builder.build(
-            blocks=analysis_blocks["blocks"],
-            chapters=chapter_segments["chapters"],
-            skeleton=skeleton,
-            progress_callback=build_anchor_progress_callback(self.progress),
-        )
-        ProjectManager.save_project_json(project_id, "anchor_points.json", anchors)
-        self.progress.note(
-            "anchor_generation",
-            "剧情锚点生成完成",
-            f"共生成 {anchors['anchor_count']} 个锚点",
-            meta={"kind": "artifact", "artifact": "anchor_points.json"},
-        )
-        return anchors
+        self.progress.enter_stage("sequential_reading", "正在顺序阅读小说", 10, "逐段深度阅读并记录笔记")
 
-    def _extract_story_memory(
-        self,
-        project_id: str,
-        chapter_segments: Dict[str, Any],
-        analysis_blocks: Dict[str, Any],
-        skeleton: Dict[str, Any],
-        anchors: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-        self.progress.enter_stage("extract_local_facts", "正在并发提取块内局部事实", 50)
-        self.progress.reset_block_progress()
-        local_block_facts = self.service.local_block_fact_extractor.extract_blocks(
-            blocks=analysis_blocks["blocks"],
-            chapters=chapter_segments["chapters"],
+        def reading_progress_callback(event_type: str, data: Dict[str, Any]) -> None:
+            seg_idx = data.get("segment_index", 0)
+            seg_id = data.get("segment_id", "")
+            total = data.get("total_segments", total_segments)
+            if total < 1:
+                total = 1
+
+            if event_type == "segment_start":
+                progress_pct = 10 + int((seg_idx / total) * 65)
+                self.progress.block_started(
+                    "sequential_reading",
+                    f"开始阅读 {seg_id}",
+                    f"段落 {seg_idx + 1}/{total}",
+                    {"kind": "segment", "block_id": seg_id, "segment_index": seg_idx},
+                )
+                self.progress.enter_stage(
+                    "sequential_reading",
+                    f"正在阅读段落 {seg_idx + 1}/{total}",
+                    progress_pct,
+                )
+            elif event_type == "segment_end":
+                progress_pct = 10 + int(((seg_idx + 1) / total) * 65)
+                self.progress.block_completed(
+                    "sequential_reading",
+                    f"完成阅读 {seg_id}",
+                    f"段落 {seg_idx + 1}/{total}",
+                    {"kind": "segment", "block_id": seg_id, "segment_index": seg_idx},
+                )
+
+        manager = self.service.sequential_reader.read(
+            segments=segments,
             use_llm=self.use_llm,
-            skeleton=skeleton,
-            anchors=anchors,
-            progress_callback=build_block_progress_callback(self.progress, "extract_local_facts", "块内事实"),
-        )
-        ProjectManager.save_project_json(project_id, "local_block_facts.json", local_block_facts)
-        self.progress.note(
-            "extract_local_facts",
-            "局部事实提取完成",
-            f"已完成 {local_block_facts['block_count']} 个块",
-            meta={"kind": "artifact", "artifact": "local_block_facts.json"},
+            progress_callback=reading_progress_callback,
         )
 
-        self.progress.enter_stage("merge_story_memory", "正在顺序汇总故事记忆", 58)
-        step_id = self.progress.begin_step("merge_story_memory", "merge", "顺序汇总故事记忆")
-        story_memory_payload = self.service.story_memory_builder.build(
-            local_block_facts["packets"],
-            blocks=analysis_blocks["blocks"],
-            anchors=anchors.get("anchors", []),
-            skeleton=skeleton,
-        )
-        story_memory = story_memory_payload["story_memory"]
-        snapshots = {"snapshots": story_memory_payload["snapshots"]}
-        ProjectManager.save_project_json(project_id, "story_memory.json", story_memory)
-        ProjectManager.save_project_json(project_id, "story_memory_snapshots.json", snapshots)
-        self.progress.end_step(step_id)
-        self.progress.note(
-            "merge_story_memory",
-            "故事记忆已汇总",
-            f"生成 {len(story_memory_payload['snapshots'])} 份前情快照",
-            meta={"kind": "artifact", "artifact": "story_memory.json"},
-        )
-        self.progress.enter_stage("entity_resolution", "正在执行全局实体消歧", 62)
-        step_id = self.progress.begin_step("entity_resolution", "resolve", "全局实体消歧")
-        story_memory = self.service.entity_resolution_service.resolve(story_memory)
-        ProjectManager.save_project_json(project_id, "story_memory.json", story_memory)
-        self.progress.end_step(step_id)
-        self.progress.note(
-            "entity_resolution",
-            "全局实体消歧完成",
-            f"当前实体数 {len(story_memory.get('entity_registry', {}))}",
-            meta={"kind": "artifact", "artifact": "story_memory.json"},
-        )
-        return local_block_facts, story_memory_payload, story_memory
+        # Save reading notes
+        import os
+        notes_path = os.path.join(ProjectManager._get_project_dir(project_id), "reading_notes.json")
+        manager.save(notes_path)
 
-    def _analyze_story(
+        # Save segment summaries
+        ProjectManager.save_project_json(
+            project_id, "segment_summaries.json",
+            {"summaries": manager.all_segment_summaries},
+        )
+
+        self.progress.note(
+            "sequential_reading",
+            "顺序阅读完成",
+            f"已阅读 {total_segments} 个段落，记录 {len(manager.notes['core_facts']['characters'])} 名角色",
+            meta={"kind": "artifact", "artifact": "reading_notes.json"},
+        )
+        return manager
+
+    # ── Stage 3: global_integration + ontology ──
+
+    def _global_integration_and_ontology(
         self,
         project_id: str,
         project_name: str,
         analysis_goal: str,
-        chapter_segments: Dict[str, Any],
-        analysis_blocks: Dict[str, Any],
-        local_block_facts: Dict[str, Any],
-        story_memory_payload: Dict[str, Any],
-        story_memory: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-        self.progress.enter_stage("contextual_block_analysis", "正在带前情快照分析剧情块", 72)
-        self.progress.reset_block_progress()
-        block_analyses = self.service.contextual_block_analyzer.analyze_blocks(
-            blocks=analysis_blocks["blocks"],
-            local_block_facts=local_block_facts["packets"],
-            snapshots=story_memory_payload["snapshots"],
-            chapters=chapter_segments["chapters"],
-            use_llm=self.use_llm,
-            progress_callback=build_block_progress_callback(self.progress, "contextual_block_analysis", "剧情块分析"),
-        )
-        ProjectManager.save_project_json(project_id, "block_analyses.json", block_analyses)
-        self.progress.note(
-            "contextual_block_analysis",
-            "剧情块分析完成",
-            f"已分析 {block_analyses['block_count']} 个块",
-            meta={"kind": "artifact", "artifact": "block_analyses.json"},
-        )
-
-        chapter_cards = self._generate_chapter_cards(
-            project_id,
-            chapter_segments,
-            story_memory,
-            block_analyses,
-        )
-        self._build_continuity_artifacts(
-            project_id,
-            chapter_cards,
-            local_block_facts,
-            story_memory,
-            block_analyses,
-        )
-        continuity = ProjectManager.load_project_json(project_id, "chapter_continuity.json") or {"chapter_count": 0, "chapters": []}
-        seed_analysis = self._build_seed_analysis(project_id, project_name, analysis_goal, story_memory, block_analyses)
-        return block_analyses, continuity, seed_analysis
-
-    def _generate_chapter_cards(
-        self,
-        project_id: str,
-        chapter_segments: Dict[str, Any],
-        story_memory: Dict[str, Any],
-        block_analyses: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        self.progress.enter_stage("chapter_card_generation", "正在逐章生成结构化章节卡", 78)
-        chapter_cards = self.service.chapter_card_generator.generate_cards(
-            chapter_segments["chapters"],
-            story_memory=story_memory,
-            block_analyses=block_analyses,
-            progress_callback=build_chapter_card_progress_callback(self.progress),
-        )
-        ProjectManager.save_project_json(project_id, "chapter_cards.json", chapter_cards)
-        self.service.chapter_meta_service.replace_project_chapter_cards(
-            project_id,
-            chapter_cards["chapters"],
-            world_rules=story_memory.get("world_rules", []),
-        )
-        self.progress.note(
-            "chapter_card_generation",
-            "章节卡生成完成",
-            f"已生成 {chapter_cards['chapter_count']} 张结构化章节卡",
-            meta={"kind": "artifact", "artifact": "chapter_cards.json"},
-        )
-        return chapter_cards
-
-    def _build_continuity_artifacts(
-        self,
-        project_id: str,
-        chapter_cards: Dict[str, Any],
-        local_block_facts: Dict[str, Any],
-        story_memory: Dict[str, Any],
-        block_analyses: Dict[str, Any],
-    ) -> None:
-        self.progress.enter_stage("consistency_audit", "正在审计连续性冲突与歧义", 82)
-        step_id = self.progress.begin_step("consistency_audit", "audit", "审计连续性冲突与歧义")
-        consistency_report = self.service.consistency_auditor.audit(
-            story_memory=story_memory,
-            block_analyses=block_analyses["blocks"],
-            local_block_facts=local_block_facts["packets"],
-        )
-        ProjectManager.save_project_json(project_id, "consistency_report.json", consistency_report)
-        self.progress.end_step(step_id)
-        self.progress.note(
-            "consistency_audit",
-            "连续性审计完成",
-            f"识别 {len(consistency_report.get('issues', []))} 个关注点",
-            meta={"kind": "artifact", "artifact": "consistency_report.json"},
-        )
-
-        self.progress.enter_stage("build_continuity", "正在从章节卡派生连续性摘要", 86)
-        step_id = self.progress.begin_step("build_continuity", "continuity", "从章节卡派生连续性摘要")
-        continuity = self.service.continuity_service.build_from_chapter_cards(chapter_cards["chapters"])
-        ProjectManager.save_project_json(project_id, "chapter_continuity.json", continuity)
-        self.progress.end_step(step_id)
-        self.progress.note(
-            "build_continuity",
-            "章节连续性摘要完成",
-            f"已生成 {continuity['chapter_count']} 条章节连续性记录",
-            meta={"kind": "artifact", "artifact": "chapter_continuity.json"},
-        )
-
-    def _build_seed_analysis(
-        self,
-        project_id: str,
-        project_name: str,
-        analysis_goal: str,
-        story_memory: Dict[str, Any],
-        block_analyses: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        self.progress.enter_stage("seed_analysis", "正在聚合角色、组织与关系种子分析", 90)
-        step_id = self.progress.begin_step("seed_analysis", "aggregate", "聚合角色、组织与关系种子分析")
-        seed_analysis = self.service.seed_analysis_aggregator.aggregate(
-            story_memory=story_memory,
-            block_analyses=block_analyses["blocks"],
+        additional_context: str,
+        documents: List[Dict[str, str]],
+        manager: ReadingNotesManager,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        # global_integration: aggregate seed analysis from reading notes
+        self.progress.enter_stage("global_integration", "正在聚合种子分析", 78, "从阅读笔记中聚合角色、组织与关系")
+        step_id = self.progress.begin_step("global_integration", "aggregate", "聚合种子分析")
+        seed_analysis = self.service.seed_analysis_aggregator.aggregate_from_reading_notes(
+            manager=manager,
             analysis_goal=analysis_goal,
             project_name=project_name,
         )
         ProjectManager.save_project_json(project_id, "seed_analysis.json", seed_analysis)
         self.progress.end_step(step_id)
         self.progress.note(
-            "seed_analysis",
+            "global_integration",
             "种子分析聚合完成",
             self._seed_counts_text(seed_analysis),
             meta={"kind": "artifact", "artifact": "seed_analysis.json"},
         )
-        return seed_analysis
 
-    def _generate_ontology(
-        self,
-        documents: List[Dict[str, str]],
-        analysis_goal: str,
-        additional_context: str,
-        continuity: Dict[str, Any],
-        story_memory: Dict[str, Any],
-        block_analyses: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        self.progress.enter_stage("ontology", "正在生成小说本体与故事主轴", 96)
+        # ontology
+        self.progress.enter_stage("ontology", "正在生成小说本体与故事主轴", 85)
         step_id = self.progress.begin_step("ontology", "ontology", "生成小说本体与故事主轴")
-        result = self.service.ontology_generator.generate(
+        ontology = self.service.ontology_generator.generate(
             document_texts=[item["text"] for item in documents],
             analysis_goal=analysis_goal,
             additional_context=additional_context or None,
             use_llm=self.use_llm,
-            chapter_continuity=continuity,
-            story_memory=story_memory,
-            block_analyses=block_analyses["blocks"],
+            story_memory={"reading_notes_context": manager.assemble_context()},
             progress_callback=build_ontology_progress_callback(self.progress),
         )
         self.progress.end_step(step_id)
-        return result
+        return seed_analysis, ontology
+
+    # ── Stage 4: agent_profiles ──
+
+    def _generate_agent_profiles(self, project_id: str, manager: ReadingNotesManager) -> Dict[str, Any]:
+        self.progress.enter_stage("agent_profiles", "正在生成角色代理档案", 92, "为重要角色生成结构化代理档案")
+
+        def profile_progress_callback(event_type: str, data: Dict[str, Any]) -> None:
+            if event_type == "profiles_start":
+                total = data.get("total", 0)
+                self.progress.note(
+                    "agent_profiles",
+                    f"开始生成 {total} 个角色档案",
+                    f"共 {total} 名重要角色",
+                )
+            elif event_type == "profile_done":
+                name = data.get("name", "")
+                completed = data.get("completed", 0)
+                total = data.get("total", 1)
+                progress_pct = 92 + int((completed / max(total, 1)) * 8)
+                self.progress.enter_stage(
+                    "agent_profiles",
+                    f"角色档案 {completed}/{total}",
+                    min(progress_pct, 99),
+                )
+                self.progress.note(
+                    "agent_profiles",
+                    f"完成角色档案: {name}",
+                    f"{completed}/{total}",
+                )
+
+        agent_profiles = self.service.character_agent_profile_generator.generate(
+            manager=manager,
+            use_llm=self.use_llm,
+            progress_callback=profile_progress_callback,
+        )
+        ProjectManager.save_project_json(project_id, "agent_profiles.json", agent_profiles)
+        self.progress.note(
+            "agent_profiles",
+            "角色代理档案生成完成",
+            f"已生成 {agent_profiles['profile_count']} 个角色档案",
+            meta={"kind": "artifact", "artifact": "agent_profiles.json"},
+        )
+        return agent_profiles
+
+    # ── Result payload ──
 
     def _result_payload(
         self,
         project_id: str,
         chapter_segments: Dict[str, Any],
-        analysis_blocks: Dict[str, Any],
+        manager: ReadingNotesManager,
         seed_analysis: Dict[str, Any],
+        agent_profiles: Dict[str, Any],
     ) -> Dict[str, Any]:
+        segment_result = chapter_segments.get("smart_segments", {})
         return {
             "project_id": project_id,
             "project_status": ProjectStatus.ONTOLOGY_GENERATED.value,
             "chapter_count": chapter_segments["chapter_count"],
-            "block_count": analysis_blocks["block_count"],
+            "segment_count": segment_result.get("segment_count", 0),
             "seed_analysis": {
                 "character_count": len(seed_analysis.get("characters", [])),
                 "organization_count": len(seed_analysis.get("organizations", [])),
                 "relation_count": len(seed_analysis.get("relations", [])),
             },
+            "agent_profile_count": agent_profiles.get("profile_count", 0),
         }
 
     def _seed_counts_text(self, seed_analysis: Dict[str, Any]) -> str:
@@ -392,11 +281,8 @@ class SeedExtractRunner:
         missing = []
         router = LlmRouter()
         for module_key in (
-            "local_block_facts",
-            "contextual_block_analysis",
-            "anchor_point_summary",
-            "entity_resolution",
-            "novel_chapter_summarizer",
+            "sequential_reading",
+            "character_agent_profile",
             "story_ontology",
         ):
             try:

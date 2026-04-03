@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_METRICS = {
     "chapter_count": 0,
     "block_count": 0,
+    "segment_count": 0,
     "completed_blocks": 0,
     "total_blocks": 0,
     "active_workers": 0,
@@ -163,7 +164,7 @@ class SeedTaskProgressTracker:
 
         self.task_manager.mutate_task(self.task_id, mutate)
 
-    def set_counts(self, chapter_count: Optional[int] = None, block_count: Optional[int] = None) -> None:
+    def set_counts(self, chapter_count: Optional[int] = None, block_count: Optional[int] = None, segment_count: Optional[int] = None) -> None:
         def mutate(task) -> None:
             progress_detail = self._detail_copy(task.progress_detail)
             metrics = progress_detail["task_metrics"]
@@ -174,6 +175,8 @@ class SeedTaskProgressTracker:
                 metrics["total_blocks"] = block_count
                 metrics["completed_blocks"] = 0
                 metrics["active_workers"] = 0
+            if segment_count is not None:
+                metrics["segment_count"] = segment_count
             task.progress_detail = progress_detail
 
         self.task_manager.mutate_task(self.task_id, mutate)

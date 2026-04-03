@@ -1,4 +1,4 @@
-"""异步小说种子提取任务服务。"""
+"""异步小说种子提取任务服务（四阶段管线）。"""
 
 import threading
 from typing import Any, Dict, List, Optional
@@ -6,21 +6,13 @@ from typing import Any, Dict, List, Optional
 from ..models.project import ProjectManager, ProjectStatus
 from ..models.task import TaskManager
 from ..utils.file_parser import FileParser
-from .analysis_block_builder import AnalysisBlockBuilder
-from .anchor_point_builder import AnchorPointBuilder
-from .chapter_card_generator import ChapterCardGenerator
-from .chapter_continuity_service import ChapterContinuityService
-from .chapter_meta_service import ChapterMetaService
-from .contextual_block_analyzer import ContextualBlockAnalyzer
-from .continuity_consistency_auditor import ContinuityConsistencyAuditor
-from .entity_resolution_service import EntityResolutionService
-from .local_block_fact_extractor import LocalBlockFactExtractor
+from .character_agent_profile_generator import CharacterAgentProfileGenerator
+from .llm_router import LlmRouter
 from .novel_chapter_segmenter import NovelChapterSegmenter
-from .novel_seed_analyzer import NovelSeedAnalyzer
-from .seed_extract_runner import SeedExtractRunner
 from .seed_analysis_aggregator import SeedAnalysisAggregator
-from .skeleton_timeline_builder import SkeletonTimelineBuilder
-from .story_memory_builder import StoryMemoryBuilder
+from .seed_extract_runner import SeedExtractRunner
+from .sequential_reader import SequentialReader
+from .smart_novel_segmenter import SmartNovelSegmenter
 from .story_ontology_generator import StoryOntologyGenerator
 from .text_processor import TextProcessor
 from ..utils.upstream_error_formatter import format_upstream_service_error
@@ -31,36 +23,19 @@ class SeedExtractTaskService:
         self,
         task_manager: Optional[TaskManager] = None,
         chapter_segmenter: Optional[NovelChapterSegmenter] = None,
-        block_builder: Optional[AnalysisBlockBuilder] = None,
-        local_block_fact_extractor: Optional[LocalBlockFactExtractor] = None,
-        story_memory_builder: Optional[StoryMemoryBuilder] = None,
-        contextual_block_analyzer: Optional[ContextualBlockAnalyzer] = None,
-        consistency_auditor: Optional[ContinuityConsistencyAuditor] = None,
-        continuity_service: Optional[ChapterContinuityService] = None,
-        chapter_card_generator: Optional[ChapterCardGenerator] = None,
-        chapter_meta_service: Optional[ChapterMetaService] = None,
+        smart_segmenter: Optional[SmartNovelSegmenter] = None,
+        sequential_reader: Optional[SequentialReader] = None,
         seed_analysis_aggregator: Optional[SeedAnalysisAggregator] = None,
         ontology_generator: Optional[StoryOntologyGenerator] = None,
-        skeleton_timeline_builder: Optional[SkeletonTimelineBuilder] = None,
-        anchor_point_builder: Optional[AnchorPointBuilder] = None,
-        entity_resolution_service: Optional[EntityResolutionService] = None,
+        character_agent_profile_generator: Optional[CharacterAgentProfileGenerator] = None,
     ):
-        analyzer = NovelSeedAnalyzer()
         self.task_manager = task_manager or TaskManager()
         self.chapter_segmenter = chapter_segmenter or NovelChapterSegmenter()
-        self.block_builder = block_builder or AnalysisBlockBuilder()
-        self.local_block_fact_extractor = local_block_fact_extractor or LocalBlockFactExtractor(analyzer=analyzer)
-        self.story_memory_builder = story_memory_builder or StoryMemoryBuilder()
-        self.contextual_block_analyzer = contextual_block_analyzer or ContextualBlockAnalyzer()
-        self.consistency_auditor = consistency_auditor or ContinuityConsistencyAuditor()
-        self.continuity_service = continuity_service or ChapterContinuityService()
-        self.chapter_card_generator = chapter_card_generator or ChapterCardGenerator()
-        self.chapter_meta_service = chapter_meta_service or ChapterMetaService()
+        self.smart_segmenter = smart_segmenter or SmartNovelSegmenter()
+        self.sequential_reader = sequential_reader or SequentialReader(llm_router=LlmRouter())
         self.seed_analysis_aggregator = seed_analysis_aggregator or SeedAnalysisAggregator()
         self.ontology_generator = ontology_generator or StoryOntologyGenerator()
-        self.skeleton_timeline_builder = skeleton_timeline_builder or SkeletonTimelineBuilder(analyzer)
-        self.anchor_point_builder = anchor_point_builder or AnchorPointBuilder()
-        self.entity_resolution_service = entity_resolution_service or EntityResolutionService()
+        self.character_agent_profile_generator = character_agent_profile_generator or CharacterAgentProfileGenerator()
 
     def create_task(
         self,
