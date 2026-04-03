@@ -1,4 +1,4 @@
-"""种子管线四大章节定义与 stage→chapter 映射。"""
+"""种子管线章节定义与 stage→chapter 映射（新版四阶段管线）。"""
 
 from __future__ import annotations
 
@@ -8,30 +8,22 @@ PIPELINE_CHAPTERS: List[Dict] = [
     {
         "key": "text_prep",
         "label": "文本准备",
-        "stages": ["uploading", "extract_text", "segment_chapters", "build_blocks"],
+        "stages": ["uploading", "extract_text", "smart_segmentation"],
     },
     {
-        "key": "world_scan",
-        "label": "世界扫描",
-        "stages": ["skeleton_timeline", "anchor_generation"],
+        "key": "deep_reading",
+        "label": "深度阅读",
+        "stages": ["sequential_reading", "arc_summary"],
     },
     {
-        "key": "fact_extract",
-        "label": "事实提取",
-        "stages": [
-            "extract_local_facts",
-            "merge_story_memory",
-            "entity_resolution",
-            "contextual_block_analysis",
-            "chapter_card_generation",
-            "consistency_audit",
-            "build_continuity",
-        ],
+        "key": "integration",
+        "label": "全局整合",
+        "stages": ["global_integration", "ontology"],
     },
     {
-        "key": "output_settle",
-        "label": "成果沉淀",
-        "stages": ["seed_analysis", "ontology", "completed", "failed"],
+        "key": "agent_build",
+        "label": "角色构建",
+        "stages": ["agent_profiles", "completed", "failed"],
     },
 ]
 

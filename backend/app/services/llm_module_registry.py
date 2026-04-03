@@ -11,6 +11,8 @@ class LlmModuleDefinition:
     module_key: str
     label: str
     description: str
+    example_prompt: str = ""
+    example_output: str = ""
 
 
 MODULE_DEFINITIONS = (
@@ -31,6 +33,20 @@ MODULE_DEFINITIONS = (
     LlmModuleDefinition("writer_orchestrator", "写作编排调度", "编排层：解析写作意图，调用工具收集小说设定数据，组装写作指令。"),
     LlmModuleDefinition("writer_composer", "写作正文生成", "写作层：基于编排层组装的写作指令，生成高质量小说正文。"),
     LlmModuleDefinition("writer_reviewer", "写作一致性审校", "后处理：检查生成正文与已知设定的一致性。"),
+    LlmModuleDefinition(
+        module_key="sequential_reading",
+        label="顺序深度阅读",
+        description="顺序精读每个段落，提取角色、关系、剧情线等结构化信息。",
+        example_prompt="阅读当前段并分析角色、关系与剧情发展...",
+        example_output="JSON: character_updates, relationship_changes, plot_threads...",
+    ),
+    LlmModuleDefinition(
+        module_key="character_agent_profile",
+        label="角色 Agent 档案生成",
+        description="为每个重要角色生成可直接用于 Agent 对话的完整档案。",
+        example_prompt="根据阅读笔记为指定角色生成 Agent 档案...",
+        example_output="JSON: personality, speech, relationships, knowledge_boundary...",
+    ),
 )
 
 STAGE_TO_MODULE_KEY = {
@@ -40,6 +56,9 @@ STAGE_TO_MODULE_KEY = {
     "contextual_block_analysis": "contextual_block_analysis",
     "chapter_card_generation": "novel_chapter_summarizer",
     "ontology": "story_ontology",
+    # New pipeline stages
+    "sequential_reading": "sequential_reading",
+    "agent_profiles": "character_agent_profile",
 }
 
 MODULE_BY_KEY: Dict[str, LlmModuleDefinition] = {

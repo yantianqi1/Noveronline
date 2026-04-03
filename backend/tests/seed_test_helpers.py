@@ -26,6 +26,12 @@ class FakeSeedLlmClient:
             return self._chapter_card_payload(user_message)
         if self.module_key == "story_ontology":
             return self._ontology_payload()
+        if self.module_key == "sequential_reading" and "弧线摘要" in (messages[0].get("content", "") if messages else ""):
+            return {"arc_summary": "弧线摘要：前几段的整合剧情发展。"}
+        if self.module_key == "sequential_reading":
+            return self._sequential_reading_payload(user_message)
+        if self.module_key == "character_agent_profile":
+            return self._character_profile_payload(user_message)
         raise AssertionError(f"unexpected module: {self.module_key}")
 
     def _anchor_payload(self):
@@ -252,6 +258,65 @@ class FakeSeedLlmClient:
             ],
             "analysis_summary": "假 LLM 已生成稳定的小说本体。",
             "story_focus": ["镜湖旧案", "宗门博弈"],
+        }
+
+    def _sequential_reading_payload(self, user_message):
+        return {
+            "segment_summary": "段落摘要：沈夜继续追查镜湖旧案。",
+            "character_updates": [
+                {
+                    "name": "沈夜", "aliases": ["夜哥"], "is_new": True, "status": "active",
+                    "identity": "调查者", "personality_traits": ["坚毅"],
+                    "speech_style": "简练犀利", "goals": "追查镜湖旧案",
+                    "key_actions": ["进入镜湖谷"], "knowledge_gained": ["发现密道"],
+                    "quote_examples": ["真相不会自己浮出水面。"],
+                },
+                {
+                    "name": "秦昭", "aliases": [], "is_new": True, "status": "active",
+                    "identity": "同伴", "personality_traits": ["忠诚"],
+                    "speech_style": "温和", "goals": "保护沈夜",
+                    "key_actions": ["掩护撤退"], "knowledge_gained": [],
+                    "quote_examples": [],
+                },
+                {
+                    "name": "苏半夏", "aliases": [], "is_new": True, "status": "active",
+                    "identity": "稳局者", "personality_traits": ["冷静"],
+                    "speech_style": "沉稳", "goals": "稳住局势",
+                    "key_actions": ["安排防线"], "knowledge_gained": [],
+                    "quote_examples": [],
+                },
+            ],
+            "relationship_changes": [
+                {
+                    "source": "沈夜", "target": "玄霄宗",
+                    "previous_state": "紧张", "new_state": "冲突",
+                    "trigger": "宗门施压", "evidence": "对峙升级",
+                },
+            ],
+            "plot_threads": [
+                {"thread": "镜湖旧案", "status": "opened", "detail": "线索浮现"},
+            ],
+            "world_building": [
+                {"fact": "五大宗门体系", "evidence": "开篇设定"},
+            ],
+            "consistency_notes": [],
+            "narrative_phase": "development",
+        }
+
+    def _character_profile_payload(self, user_message):
+        name = "沈夜"
+        if "秦昭" in user_message:
+            name = "秦昭"
+        elif "苏半夏" in user_message:
+            name = "苏半夏"
+        return {
+            "basic_info": {"name": name, "aliases": [], "identity": "角色", "status": "alive"},
+            "personality": {"core_traits": ["坚毅"], "values": [], "fears": [], "decision_pattern": ""},
+            "speech": {"style": "简练", "verbal_habits": [], "tone_range": "", "example_quotes": []},
+            "relationships": [],
+            "capabilities": {"skills": [], "limitations": [], "resources": []},
+            "knowledge_boundary": {"knows": [], "does_not_know": [], "believes_wrongly": []},
+            "motivation": {"ultimate_goal": "", "current_objective": "", "internal_conflict": ""},
         }
 
     def _block_order(self, text):
