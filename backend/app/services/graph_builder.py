@@ -66,10 +66,22 @@ class GraphBuilderService:
         ontology: Dict[str, Any],
         graph_name: str,
     ):
-        local_block_facts = self._required_json(project_id, "local_block_facts.json")
-        block_analyses = self._required_json(project_id, "block_analyses.json")
-        story_memory = self._required_json(project_id, "story_memory.json")
-        chapter_continuity = self._required_json(project_id, "chapter_continuity.json")
+        local_block_facts = self._optional_json(project_id, "local_block_facts.json")
+        block_analyses = self._optional_json(project_id, "block_analyses.json")
+        story_memory = self._optional_json(project_id, "story_memory.json")
+        chapter_continuity = self._optional_json(project_id, "chapter_continuity.json")
+
+        if not all([local_block_facts, block_analyses, story_memory, chapter_continuity]):
+            from .reading_notes_graph_adapter import adapt_reading_notes_for_graph
+
+            reading_notes = self._required_json(project_id, "reading_notes.json")
+            seed_analysis = self._required_json(project_id, "seed_analysis.json")
+            smart_segments = self._optional_json(project_id, "smart_segments.json")
+            chapter_segs = self._optional_json(project_id, "chapter_segments.json")
+            story_memory, local_block_facts, block_analyses, chapter_continuity = (
+                adapt_reading_notes_for_graph(reading_notes, seed_analysis, smart_segments, chapter_segs)
+            )
+
         return self.builder.build_for_project(
             project_id=project_id,
             graph_name=graph_name,
@@ -119,3 +131,6 @@ class GraphBuilderService:
         if payload is None:
             raise ValueError(f"项目缺少构建本地图谱所需工件: {filename}")
         return payload
+
+    def _optional_json(self, project_id: str, filename: str) -> Optional[Dict[str, Any]]:
+        return ProjectManager.load_project_json(project_id, filename)
