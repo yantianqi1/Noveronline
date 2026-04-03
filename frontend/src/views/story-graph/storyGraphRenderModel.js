@@ -169,6 +169,7 @@ function normalizeSelfLoopEdge(edge, pairTotal, loopIndex, index) {
     loopRadius: LOOP_RADIUS + loopIndex * LOOP_RADIUS_STEP,
     arcSweepFlag: 1,
     linkDistance: BASE_LINK_DISTANCE + (pairTotal - 1) * LINK_DISTANCE_STEP,
+    weight: edge.weight || 1,
     raw: edge,
   };
 }
@@ -193,6 +194,7 @@ function normalizeLinkedEdge(edge, pairTotal, pairIndex, index) {
     target: targetId,
     isSelfLoop: false,
     linkDistance: BASE_LINK_DISTANCE + (pairTotal - 1) * LINK_DISTANCE_STEP,
+    weight: edge.weight || 1,
     raw: edge,
   };
 }
@@ -211,6 +213,27 @@ function buildAdjacencyMap(edges = []) {
   }
 
   return adjacency;
+}
+
+export function buildNeighborStrengthMap(edges, selectedNodeId) {
+  if (!selectedNodeId) return new Map();
+
+  const neighborWeights = new Map();
+  for (const edge of edges) {
+    if (edge.isSelfLoop) continue;
+    if (edge.sourceId === selectedNodeId) {
+      neighborWeights.set(edge.targetId, (neighborWeights.get(edge.targetId) || 0) + (edge.weight || 1));
+    } else if (edge.targetId === selectedNodeId) {
+      neighborWeights.set(edge.sourceId, (neighborWeights.get(edge.sourceId) || 0) + (edge.weight || 1));
+    }
+  }
+
+  const maxWeight = Math.max(...neighborWeights.values(), 1);
+  const normalized = new Map();
+  for (const [nodeId, weight] of neighborWeights) {
+    normalized.set(nodeId, weight / maxWeight);
+  }
+  return normalized;
 }
 
 export function buildRenderableGraphData({ nodes = [], edges = [] } = {}) {

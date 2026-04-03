@@ -45,7 +45,7 @@
           </div>
         </div>
       </div>
-      <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" />
+      <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" :project-id="projectId" />
     </div>
   </section>
 </template>
@@ -72,6 +72,7 @@ const props = defineProps({
   nodes: { type: Array, default: () => [] },
   edges: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
+  projectId: { type: String, default: "" },
 });
 
 defineEmits(["refresh"]);

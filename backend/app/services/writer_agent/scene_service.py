@@ -42,7 +42,7 @@ class SceneService:
         self.db.compile_chapter(project_id, chapter_id)
         # Return updated chapter
         # Need to find chapter_order from chapter_id
-        with self.db._connect(project_id) as conn:
+        with self.db.connect(project_id) as conn:
             row = conn.execute(
                 "SELECT chapter_order FROM chapter_content WHERE chapter_id = ?",
                 (chapter_id,)

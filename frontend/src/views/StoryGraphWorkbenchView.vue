@@ -45,6 +45,7 @@
         :nodes="graphNodes"
         :edges="graphEdges"
         :loading="busy"
+        :project-id="projectId"
         @refresh="refreshGraph"
       />
     </main>
@@ -141,7 +142,8 @@ async function refreshGraph() {
       source_name: nodeMap[edge.source_node_uuid]?.name || 'Unknown',
       target_name: nodeMap[edge.target_node_uuid]?.name || 'Unknown',
       name: edge.name,
-      fact: edge.fact
+      fact: edge.fact,
+      weight: edge.weight || 1,
     }));
   } catch (error) {
     graphNodes.value = [];

@@ -4,8 +4,6 @@ export const ARCHIVE_LIBRARY_PICKER_VARIANT_WORLDLINE = "worldline";
 const ARCHIVE_LIBRARY_PICKER_LAYOUTS = Object.freeze({
   [ARCHIVE_LIBRARY_PICKER_VARIANT_DEFAULT]: Object.freeze({
     variant: ARCHIVE_LIBRARY_PICKER_VARIANT_DEFAULT,
-    enableResize: true,
-    bindViewportHeight: true,
     singleColumnList: false,
     compactToolbar: false,
     showInlineDetail: false,
@@ -14,8 +12,6 @@ const ARCHIVE_LIBRARY_PICKER_LAYOUTS = Object.freeze({
   }),
   [ARCHIVE_LIBRARY_PICKER_VARIANT_WORLDLINE]: Object.freeze({
     variant: ARCHIVE_LIBRARY_PICKER_VARIANT_WORLDLINE,
-    enableResize: false,
-    bindViewportHeight: false,
     singleColumnList: true,
     compactToolbar: true,
     showInlineDetail: true,

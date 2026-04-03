@@ -1,6 +1,6 @@
 import * as d3 from "d3";
 
-import { truncateNodeLabel } from "./storyGraphRenderModel.js";
+import { truncateNodeLabel, buildNeighborStrengthMap } from "./storyGraphRenderModel.js";
 
 const DEFAULT_EDGE_COLOR = "#c4b393";
 const DEFAULT_EDGE_WIDTH = 1.6;
@@ -117,12 +117,43 @@ export function applySelectionStyles(state) {
   }
 
   const adjacentEdgeIds = state.model?.adjacencyByNodeId.get(state.selectedNodeId) || new Set();
+  const neighborStrength = buildNeighborStrengthMap(state.model?.edges || [], state.selectedNodeId);
+  const hasNodeSelection = !!state.selectedNodeId;
+
+  const adjacentEdges = hasNodeSelection
+    ? (state.model?.edges || []).filter((e) => adjacentEdgeIds.has(e.id))
+    : [];
+  const maxAdjacentWeight = Math.max(...adjacentEdges.map((e) => e.weight || 1), 1);
 
   state.selections.node
     .attr("stroke", (node) => (node.id === state.selectedNodeId ? NODE_STROKE_SELECTED : NODE_STROKE))
     .attr("stroke-width", (node) =>
       node.id === state.selectedNodeId ? NODE_SELECTED_WIDTH : NODE_STROKE_WIDTH,
-    );
+    )
+    .attr("r", (node) => {
+      if (!hasNodeSelection) return NODE_RADIUS;
+      if (node.id === state.selectedNodeId) return NODE_RADIUS + 4;
+      const strength = neighborStrength.get(node.id);
+      if (strength !== undefined) return NODE_RADIUS + strength * 6;
+      return NODE_RADIUS;
+    })
+    .attr("opacity", (node) => {
+      if (!hasNodeSelection) return 1;
+      if (node.id === state.selectedNodeId) return 1;
+      if (neighborStrength.has(node.id)) return 0.6 + neighborStrength.get(node.id) * 0.4;
+      return 0.2;
+    })
+    .style("filter", (node) => {
+      if (!hasNodeSelection) return null;
+      if (node.id === state.selectedNodeId) return "drop-shadow(0 0 6px #E91E63)";
+      const strength = neighborStrength.get(node.id);
+      if (strength !== undefined && strength > 0.5) {
+        const blur = 2 + strength * 4;
+        return `drop-shadow(0 0 ${blur}px rgba(233, 30, 99, ${(strength * 0.6).toFixed(2)}))`;
+      }
+      return null;
+    });
+
   state.selections.edge
     .attr("stroke", (edge) => {
       if (edge.id === state.selectedEdgeId || adjacentEdgeIds.has(edge.id)) {
@@ -131,17 +162,32 @@ export function applySelectionStyles(state) {
       return DEFAULT_EDGE_COLOR;
     })
     .attr("stroke-width", (edge) => {
-      if (edge.id === state.selectedEdgeId) {
-        return EDGE_SELECTED_WIDTH;
+      if (edge.id === state.selectedEdgeId) return EDGE_SELECTED_WIDTH;
+      if (adjacentEdgeIds.has(edge.id)) {
+        const norm = (edge.weight || 1) / maxAdjacentWeight;
+        return EDGE_HIGHLIGHT_WIDTH + norm * 2.4;
       }
-      return adjacentEdgeIds.has(edge.id) ? EDGE_HIGHLIGHT_WIDTH : DEFAULT_EDGE_WIDTH;
+      return DEFAULT_EDGE_WIDTH;
+    })
+    .attr("opacity", (edge) => {
+      if (!hasNodeSelection) return 1;
+      if (edge.id === state.selectedEdgeId || adjacentEdgeIds.has(edge.id)) return 1;
+      return 0.15;
     });
+
   state.selections.edgeLabelBackground.attr("fill", (edge) =>
     edge.id === state.selectedEdgeId ? EDGE_LABEL_BG_HIGHLIGHT : EDGE_LABEL_BG,
   );
   state.selections.edgeLabelText.attr("fill", (edge) =>
     edge.id === state.selectedEdgeId ? EDGE_LABEL_HIGHLIGHT_COLOR : EDGE_LABEL_COLOR,
   );
+
+  if (hasNodeSelection) {
+    state.selections.nodeLabel.attr("display", (node) => {
+      if (node.id === state.selectedNodeId || neighborStrength.has(node.id)) return null;
+      return state.visibleLabelNodeIds?.has(node.id) ? null : "none";
+    });
+  }
 }
 
 function createNodeDrag(state) {

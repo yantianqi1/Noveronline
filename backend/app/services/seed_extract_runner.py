@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Tuple
 
 from ..models.project import ProjectManager, ProjectStatus
+from .chapter_continuity_service import ChapterContinuityService
 from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
 from .seed_task_callbacks import build_ontology_progress_callback
@@ -161,6 +162,11 @@ class SeedExtractRunner:
         chapter_segments = self.service.chapter_segmenter.segment_documents(documents)
         ProjectManager.save_project_json(project_id, "chapter_segments.json", chapter_segments)
         self.progress.set_counts(chapter_count=chapter_segments["chapter_count"])
+
+        # Generate initial chapter_continuity.json from chapter segments
+        # so the writer workbench can list chapters before any finalization
+        continuity = ChapterContinuityService().build_from_chapter_cards(chapter_segments["chapters"])
+        ProjectManager.save_project_json(project_id, "chapter_continuity.json", continuity)
 
         # smart_segmentation
         self.progress.enter_stage("smart_segmentation", "正在智能分段", 8, "将章节分组为阅读段")

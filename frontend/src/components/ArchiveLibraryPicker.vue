@@ -1,112 +1,93 @@
 <template>
   <div
-    ref="stageRef"
-    class="archive-museum"
-    :class="[layoutMode, `variant-${pickerLayout.variant}`, {
-      resizing,
+    class="archive-picker"
+    :class="[`variant-${pickerLayout.variant}`, {
       'compact-toolbar': pickerLayout.compactToolbar,
       'single-column-list': pickerLayout.singleColumnList,
       'sticky-filters': pickerLayout.stickyFilters,
-      'viewport-bound': pickerLayout.bindViewportHeight,
     }]"
-    :style="stageStyle"
   >
-    <header class="museum-toolbar workbench-card" :class="{ compact: pickerLayout.compactToolbar }">
-      <div class="search-box">
-        <span class="search-icon">🔍</span>
-        <input v-model="searchText" placeholder="搜寻角色、组织、动机、关系..." />
+    <header class="picker-toolbar workbench-card" :class="{ compact: pickerLayout.compactToolbar }">
+      <div class="search-field">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="8.5" cy="8.5" r="5.5" />
+          <line x1="13" y1="13" x2="18" y2="18" />
+        </svg>
+        <input v-model="searchText" placeholder="搜索角色、组织、动机、关系..." />
       </div>
 
-      <div class="filter-controls">
-        <label class="filter-group">
-          <span class="filter-label">卷宗</span>
-          <select v-model="localProjectFilter">
-            <option value="">全部</option>
-            <option v-for="item in projectOptions" :key="item.project_id" :value="item.project_id">
-              {{ item.name }}
-            </option>
-          </select>
-        </label>
+      <div class="picker-filters">
+        <select v-model="localProjectFilter">
+          <option value="">全部项目</option>
+          <option v-for="item in projectOptions" :key="item.project_id" :value="item.project_id">
+            {{ item.name }}
+          </option>
+        </select>
 
-        <label class="filter-group">
-          <span class="filter-label">类别</span>
-          <select v-model="entityType">
-            <option value="">全部</option>
-            <option value="Character">角色</option>
-            <option value="Organization">组织</option>
-          </select>
-        </label>
+        <select v-model="entityType">
+          <option value="">全部类型</option>
+          <option value="Character">角色</option>
+          <option value="Organization">组织</option>
+        </select>
 
-        <label class="filter-group">
-          <span class="filter-label">位阶</span>
-          <select v-model="importanceTier">
-            <option value="">全部</option>
-            <option value="protagonist">主角</option>
-            <option value="major">主要</option>
-            <option value="supporting">次要</option>
-          </select>
-        </label>
+        <select v-model="importanceTier">
+          <option value="">全部位阶</option>
+          <option value="protagonist">主角</option>
+          <option value="major">主要</option>
+          <option value="supporting">次要</option>
+        </select>
       </div>
     </header>
 
-    <main class="museum-stage" :class="{ 'no-divider': !pickerLayout.enableResize, 'inline-detail-stage': pickerLayout.showInlineDetail }">
-      <section class="archive-pane list-pane">
-        <div class="pane-head">
-          <div class="pane-copy">
-            <p class="pane-kicker mono">ARCHIVE SHELVES</p>
-            <h3>{{ pickerLayout.showInlineDetail ? "档案选择工作台" : "档案目录" }}</h3>
-            <p>{{ pickerLayout.showInlineDetail ? "筛选并直接选择档案，按需展开查看详情。" : "统一检索、筛选并挑选进入会话的角色与组织档案。" }}</p>
-          </div>
-          <div class="list-summary">
-            <span v-if="loading" class="mono">载入中...</span>
-            <span v-else class="mono">找到 {{ total }} 条档案</span>
-            <span v-if="selectedArchives.length" class="selection-summary">
-              {{ selectedArchives.length }} 已选
-            </span>
-          </div>
-        </div>
+    <div class="picker-summary">
+      <div class="summary-left">
+        <span v-if="loading">载入中...</span>
+        <span v-else>找到 {{ total }} 条档案</span>
+        <span v-if="selectedArchives.length" class="selection-count">{{ selectedArchives.length }} 已选</span>
+        <span v-if="reindexMessage" class="reindex-msg" :class="{ error: reindexError }">{{ reindexMessage }}</span>
+      </div>
+      <button v-if="$attrs.onReindex" class="btn subtle reindex-btn" :disabled="reindexBusy" @click="$emit('reindex')">
+        {{ reindexBusy ? "刷新中..." : "刷新索引" }}
+      </button>
+    </div>
 
-        <p v-if="error" class="error-text">{{ error }}</p>
+    <p v-if="error" class="picker-error">{{ error }}</p>
 
-        <div class="scroll-list">
+    <main class="picker-body">
+      <section class="picker-list">
+        <div class="list-grid">
           <template v-for="item in items" :key="item.archive_id">
-            <ArchiveLibraryGridItem :active="isArchiveExpanded(expandedArchiveId, item.archive_id) || activeArchiveId === item.archive_id" :item="item" :selected="selectedIdSet.has(item.archive_id)" @expand="handleArchiveExpand(item)" @toggle="toggleSelected(item)" />
+            <ArchiveLibraryGridItem
+              :active="isArchiveExpanded(expandedArchiveId, item.archive_id) || activeArchiveId === item.archive_id"
+              :item="item"
+              :selected="selectedIdSet.has(item.archive_id)"
+              @expand="handleArchiveExpand(item)"
+              @toggle="toggleSelected(item)"
+            />
 
             <div v-if="pickerLayout.showInlineDetail && isArchiveExpanded(expandedArchiveId, item.archive_id)" class="inline-detail-slot">
-              <ArchiveLibraryDetailCard :archive="resolveInlineDetail(item)" :selected="selectedIdSet.has(item.archive_id)" @toggle="toggleSelected(resolveInlineDetail(item))" />
+              <ArchiveLibraryDetailCard
+                :archive="resolveInlineDetail(item)"
+                :selected="selectedIdSet.has(item.archive_id)"
+                @toggle="toggleSelected(resolveInlineDetail(item))"
+              />
             </div>
           </template>
 
-          <div v-if="!items.length && !loading" class="empty-museum">
-            <div class="empty-icon">📜</div>
-            <p>未找到符合条件的档案</p>
+          <div v-if="!items.length && !loading" class="picker-empty">
+            <h4>未找到符合条件的档案</h4>
+            <p>尝试调整搜索关键词或筛选条件</p>
           </div>
         </div>
       </section>
 
-      <button
-        v-if="pickerLayout.enableResize"
-        class="museum-divider"
-        type="button"
-        aria-label="拖拽调整档案列表与详情宽度"
-        aria-orientation="vertical"
-        @pointerdown.prevent="beginResize"
-      >
-        <span></span>
-      </button>
-
-      <section v-if="pickerLayout.showStandaloneDetailPane" class="archive-pane detail-pane">
-        <div class="pane-head detail-head">
-          <div class="pane-copy">
-            <p class="pane-kicker mono">DOSSIER VIEW</p>
-            <h3>{{ activeDetail ? activeDetail.entity_name : "档案详情" }}</h3>
-            <p>右侧保留完整档案，便于边筛选边确认人物、势力与关系脉络。</p>
-          </div>
-          <p class="detail-hint">{{ activeDetail ? "当前聚焦卷宗" : "等待选中档案" }}</p>
-        </div>
-
+      <section v-if="pickerLayout.showStandaloneDetailPane" class="picker-detail">
         <div class="detail-scroll">
-          <ArchiveLibraryDetailCard :archive="activeDetail" :selected="selectedIdSet.has(activeDetail?.archive_id)" @toggle="toggleSelected(activeDetail)" />
+          <ArchiveLibraryDetailCard
+            :archive="activeDetail"
+            :selected="selectedIdSet.has(activeDetail?.archive_id)"
+            @toggle="toggleSelected(activeDetail)"
+          />
         </div>
       </section>
     </main>
@@ -120,7 +101,6 @@ import { getArchiveLibraryDetail, listArchiveLibrary } from "../api/archive.js";
 import { listProjects } from "../api/project.js";
 import ArchiveLibraryDetailCard from "./ArchiveLibraryDetailCard.vue";
 import ArchiveLibraryGridItem from "./ArchiveLibraryGridItem.vue";
-import { useArchiveLibraryLayout } from "../composables/useArchiveLibraryLayout.js";
 import { resolveArchiveLibraryPickerLayoutVariant } from "../views/shared/archiveLibraryPickerLayout.js";
 import { isArchiveExpanded, toggleArchiveExpansion, toggleArchiveSelection } from "../views/shared/worldlineSelectorState.js";
 
@@ -128,9 +108,12 @@ const props = defineProps({
   modelValue: { type: Array, default: () => [] },
   projectFilter: { type: String, default: "" },
   layoutVariant: { type: String, default: "default" },
+  reindexBusy: { type: Boolean, default: false },
+  reindexMessage: { type: String, default: "" },
+  reindexError: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["update:model-value", "update:project-filter"]);
+const emit = defineEmits(["update:model-value", "update:project-filter", "reindex"]);
 
 const searchText = ref("");
 const localProjectFilter = ref(props.projectFilter);
@@ -151,7 +134,6 @@ const selectedArchives = computed(() => props.modelValue || []);
 const selectedIdSet = computed(() => new Set(selectedArchives.value.map((item) => item.archive_id)));
 const pickerLayout = computed(() => resolveArchiveLibraryPickerLayoutVariant(props.layoutVariant));
 const usesInlineDetail = computed(() => pickerLayout.value.showInlineDetail);
-const { beginResize, layoutMode, resizing, stageRef, stageStyle } = useArchiveLibraryLayout();
 
 watch(() => props.projectFilter, (value) => { localProjectFilter.value = value || ""; });
 watch(localProjectFilter, (value) => { emit("update:project-filter", value); });

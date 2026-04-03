@@ -268,6 +268,7 @@ def test_generate_archives_persists_template_fields_and_override_metadata(tmp_pa
         "behavior",
         "state",
         "risk",
+        "private",
     ]
     assert shenye["template_metadata"]["user_override"] is True
     assert relation["template_payload"]["relationship"]["source"] == "沈夜"

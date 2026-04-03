@@ -143,15 +143,18 @@ class NarrativeEntityArchivist:
         use_llm: bool = True,
         tier_overrides: Optional[Dict[str, str]] = None,
         entity_lookup: Optional[Dict[str, EntityNode]] = None,
+        agent_profiles: Optional[Dict[str, Any]] = None,
     ) -> List[NarrativeEntityArchive]:
         archives = []
         overrides = tier_overrides or {}
         entity_lookup = entity_lookup or {}
+        agent_profiles = agent_profiles or {}
         for candidate in candidates:
             selected_tier = overrides.get(candidate["entity_uuid"], candidate.get("selected_importance_tier", "supporting"))
             recommended_tier = candidate.get("recommended_importance_tier", selected_tier)
             agent_kind = candidate.get("agent_kind", "generic")
             entity = entity_lookup.get(candidate["entity_uuid"])
+            profile = agent_profiles.get(candidate.get("display_name", ""))
             if agent_kind == "relationship":
                 archives.append(self._build_relationship_archive(candidate, selected_tier, recommended_tier))
                 continue
@@ -163,10 +166,11 @@ class NarrativeEntityArchivist:
                         selected_importance_tier=selected_tier,
                         recommended_importance_tier=recommended_tier,
                         agent_kind_override=agent_kind,
+                        agent_profile=profile,
                     )
                 )
                 continue
-            archives.append(self._build_candidate_archive(candidate, selected_tier, recommended_tier))
+            archives.append(self._build_candidate_archive(candidate, selected_tier, recommended_tier, agent_profile=profile))
         return archives
 
     def generate_archive(
@@ -176,6 +180,7 @@ class NarrativeEntityArchivist:
         selected_importance_tier: str = "",
         recommended_importance_tier: str = "",
         agent_kind_override: str = "",
+        agent_profile: Optional[Dict[str, Any]] = None,
     ) -> NarrativeEntityArchive:
         entity_type = entity.get_entity_type() or "Unknown"
         agent_kind = agent_kind_override or self.candidate_builder._infer_agent_kind(entity_type)
@@ -186,6 +191,7 @@ class NarrativeEntityArchivist:
                 agent_kind,
                 selected_importance_tier=selected_importance_tier,
                 recommended_importance_tier=recommended_importance_tier,
+                agent_profile=agent_profile,
             )
 
         user_message = f"""## 实体名
@@ -246,9 +252,13 @@ class NarrativeEntityArchivist:
         agent_kind: str,
         selected_importance_tier: str = "",
         recommended_importance_tier: str = "",
+        agent_profile: Optional[Dict[str, Any]] = None,
     ) -> NarrativeEntityArchive:
         selected = selected_importance_tier or entity.attributes.get("importance_tier", "supporting")
         recommended = recommended_importance_tier or entity.attributes.get("importance_tier", selected)
+        pm = self._merge_agent_profile(agent_profile)
+        source_payload = self._entity_source_payload(entity, agent_kind)
+        source_payload.update(pm)
         return self._compose_archive(
             entity_uuid=entity.uuid,
             entity_name=entity.name,
@@ -256,15 +266,15 @@ class NarrativeEntityArchivist:
             agent_kind=agent_kind,
             importance_tier=selected,
             recommended_importance_tier=recommended,
-            entity_role=entity.summary or f"{entity.name} 是故事中的 {entity_type}",
-            core_drive="推动自身目标并回应外部变量",
-            surface_mask="表面立场有待进一步观察",
-            hidden_tension="显式离线模式下未生成更深层隐秘动机",
+            entity_role=pm.get("identity_hint") or entity.summary or f"{entity.name} 是故事中的 {entity_type}",
+            core_drive=pm.get("core_drive", "推动自身目标并回应外部变量"),
+            surface_mask=pm.get("surface_mask", "表面立场有待进一步观察"),
+            hidden_tension=pm.get("hidden_tension", "显式离线模式下未生成更深层隐秘动机"),
             relationship_summary=self._summarize_relationships(entity),
-            agent_behavior_hint="会围绕当前关系网络和目标持续行动",
+            agent_behavior_hint=pm.get("agent_behavior_hint", "会围绕当前关系网络和目标持续行动"),
             human_ai_relation_tag=self._infer_human_ai_tag(entity_type, entity),
             notable_risks=["信息误判", "关系激化"],
-            source_payload=self._entity_source_payload(entity, agent_kind),
+            source_payload=source_payload,
         )
 
     def _build_candidate_archive(
@@ -272,11 +282,15 @@ class NarrativeEntityArchivist:
         candidate: Dict[str, Any],
         selected_importance_tier: str,
         recommended_importance_tier: str,
+        agent_profile: Optional[Dict[str, Any]] = None,
     ) -> NarrativeEntityArchive:
         source_payload = candidate.get("source_payload", {})
         entity_type = candidate.get("entity_type", "Unknown")
         name = candidate.get("display_name", "")
         agent_kind = candidate.get("agent_kind", "generic")
+        pm = self._merge_agent_profile(agent_profile)
+        merged_source = dict(source_payload)
+        merged_source.update(pm)
         return self._compose_archive(
             entity_uuid=candidate["entity_uuid"],
             entity_name=name,
@@ -284,17 +298,78 @@ class NarrativeEntityArchivist:
             agent_kind=agent_kind,
             importance_tier=selected_importance_tier,
             recommended_importance_tier=recommended_importance_tier,
-            entity_role=source_payload.get("identity_hint") or source_payload.get("organization_type") or source_payload.get("role") or entity_type,
-            core_drive="推动自己在主线中的目标" if agent_kind == "character" else "维持当前立场",
-            surface_mask=source_payload.get("identity_hint") or source_payload.get("organization_type") or entity_type,
-            hidden_tension=candidate.get("summary", ""),
+            entity_role=pm.get("identity_hint") or source_payload.get("identity_hint") or source_payload.get("organization_type") or source_payload.get("role") or entity_type,
+            core_drive=pm.get("core_drive", "推动自己在主线中的目标" if agent_kind == "character" else "维持当前立场"),
+            surface_mask=pm.get("surface_mask") or source_payload.get("identity_hint") or source_payload.get("organization_type") or entity_type,
+            hidden_tension=pm.get("hidden_tension") or candidate.get("summary", ""),
             relationship_summary=candidate.get("summary", ""),
-            agent_behavior_hint="会围绕当前关系网络和目标持续行动",
+            agent_behavior_hint=pm.get("agent_behavior_hint", "会围绕当前关系网络和目标持续行动"),
             human_ai_relation_tag="none" if agent_kind == "organization" else "human",
             notable_risks=["信息误判"],
-            source_payload=self._candidate_source_payload(agent_kind, source_payload),
+            source_payload=self._candidate_source_payload(agent_kind, merged_source),
             source_kind=candidate.get("source_kind", "candidate"),
         )
+
+    @staticmethod
+    def _merge_agent_profile(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Map agent_profiles.json fields into archive source_payload fields."""
+        if not profile:
+            return {}
+        basic = profile.get("basic_info", {})
+        personality = profile.get("personality", {})
+        capabilities = profile.get("capabilities", {})
+        knowledge = profile.get("knowledge_boundary", {})
+        motivation = profile.get("motivation", {})
+
+        merged: Dict[str, Any] = {}
+        _no = "暂无记录"
+
+        # identity
+        if basic.get("identity") and basic["identity"] != _no:
+            merged["identity_hint"] = basic["identity"]
+
+        # personality → behavior section fields
+        traits = personality.get("core_traits", [])
+        if traits and traits != [_no]:
+            merged["personality"] = "、".join(traits)
+        if personality.get("values") and personality["values"] != _no:
+            existing = merged.get("personality", "")
+            merged["personality"] = f"{existing}；价值观：{personality['values']}" if existing else personality["values"]
+
+        # skills
+        skills = capabilities.get("skills", [])
+        if skills and skills != [_no]:
+            merged["skills"] = skills
+
+        # goals
+        if motivation.get("ultimate_goal") and motivation["ultimate_goal"] != _no:
+            merged["long_term_goal"] = motivation["ultimate_goal"]
+        if motivation.get("current_objective") and motivation["current_objective"] != _no:
+            merged["short_term_goal"] = motivation["current_objective"]
+
+        # core_drive
+        if motivation.get("internal_conflict") and motivation["internal_conflict"] != _no:
+            merged["core_drive"] = motivation["internal_conflict"]
+        elif motivation.get("ultimate_goal") and motivation["ultimate_goal"] != _no:
+            merged["core_drive"] = motivation["ultimate_goal"]
+
+        # hidden_tension from fears
+        if personality.get("fears") and personality["fears"] != _no:
+            merged["hidden_tension"] = personality["fears"]
+
+        # loyalty from decision_pattern
+        if personality.get("decision_pattern") and personality["decision_pattern"] != _no:
+            merged["loyalty"] = personality["decision_pattern"]
+
+        # secrets from believes_wrongly
+        wrongly = knowledge.get("believes_wrongly", [])
+        if wrongly and wrongly != [_no]:
+            merged["secrets"] = wrongly
+
+        # Store full profile sub-sections for rich frontend display
+        merged["agent_profile"] = profile
+
+        return merged
 
     def _build_relationship_archive(
         self,
@@ -346,6 +421,7 @@ class NarrativeEntityArchivist:
         source_kind: str = "archive_generation",
     ) -> NarrativeEntityArchive:
         template = self.template_registry.describe(agent_kind, importance_tier)
+        source = source_payload or {}
         payload = self._template_payload(
             template["agent_kind"],
             template["template_sections"],
@@ -361,9 +437,15 @@ class NarrativeEntityArchivist:
                 "human_ai_relation_tag": human_ai_relation_tag,
                 "notable_risks": notable_risks,
                 "can_act_as_agent": True,
-                **(source_payload or {}),
+                **source,
             },
         )
+        agent_profile_data = source.get("agent_profile")
+        sections = list(template["template_sections"])
+        if agent_profile_data:
+            payload["agent_profile"] = agent_profile_data
+            if "agent_profile" not in sections:
+                sections.append("agent_profile")
         metadata = {
             "version": template["template_version"],
             "recommended_importance_tier": self.template_registry.normalize_tier(recommended_importance_tier),
@@ -381,7 +463,7 @@ class NarrativeEntityArchivist:
             selected_importance_tier=template["importance_tier"],
             template_key=template["template_key"],
             template_version=template["template_version"],
-            template_sections=list(template["template_sections"]),
+            template_sections=sections,
             template_payload=payload,
             template_metadata=metadata,
             entity_role=entity_role,

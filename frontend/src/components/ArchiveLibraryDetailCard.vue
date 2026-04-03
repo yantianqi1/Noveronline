@@ -1,55 +1,74 @@
 <template>
-  <article class="detail-card" v-if="archive">
-    <header class="archive-head">
-      <div class="archive-summary">
-        <p class="archive-kicker mono">ARCHIVE DOSSIER</p>
-        <h4>{{ archive.entity_name }}</h4>
-        <div class="archive-meta">
-          <span class="archive-chip">{{ archive.project_name }}</span>
-          <span class="archive-chip">{{ formatEntityType(archive.entity_type) }}</span>
-          <span class="archive-chip accent">{{ formatImportanceTier(archive.importance_tier) }}</span>
+  <article class="archive-detail" v-if="archive">
+    <header class="detail-header">
+      <div class="detail-identity">
+        <h3>{{ archive.entity_name }}</h3>
+        <div class="detail-meta">
+          <span class="status-tag" :class="entityTone">{{ formatEntityType(archive.entity_type) }}</span>
+          <span class="status-tag ok">{{ formatImportanceTier(archive.importance_tier) }}</span>
+          <span class="detail-project">{{ archive.project_name }}</span>
         </div>
       </div>
-      <button class="btn primary detail-toggle" @click.stop="$emit('toggle')">
+      <button class="btn primary" @click.stop="$emit('toggle')">
         {{ toggleLabel }}
       </button>
     </header>
 
     <div class="detail-sections">
-      <section class="detail-block" v-for="item in detailSections" :key="item.key">
-        <div class="detail-title">{{ item.label }}</div>
-
-        <p v-if="item.variant === 'text'" class="detail-text">{{ item.text }}</p>
-
-        <dl v-else-if="item.variant === 'entries'" class="detail-entries">
-          <div
-            v-for="entry in item.entries"
-            :key="`${item.key}-${entry.label}`"
-            class="detail-entry"
-          >
-            <dt>{{ entry.label }}</dt>
-            <dd>{{ entry.value }}</dd>
+      <template v-for="item in detailSections" :key="item.key">
+        <!-- Collapsible group (agent profile) -->
+        <section v-if="item.variant === 'collapsible'" class="detail-block collapsible-block">
+          <button class="block-toggle" type="button" @click="toggleCollapse(item.key)">
+            <h4 class="block-title">{{ item.label }}</h4>
+            <span class="block-chevron" :class="{ open: expandedMap[item.key] }">&#9662;</span>
+          </button>
+          <div v-show="expandedMap[item.key]" class="block-body">
+            <div v-for="entry in item.items" :key="entry.label" class="profile-field">
+              <dt class="field-label">{{ entry.label }}</dt>
+              <dd v-if="Array.isArray(entry.value)" class="field-tags">
+                <span v-for="(tag, ti) in entry.value" :key="ti" class="field-tag">{{ tag }}</span>
+              </dd>
+              <dd v-else class="field-value">{{ entry.value }}</dd>
+            </div>
           </div>
-        </dl>
+        </section>
 
-        <ul v-else class="detail-items">
-          <li v-for="entry in item.items" :key="`${item.key}-${entry}`">
-            {{ entry }}
-          </li>
-        </ul>
-      </section>
+        <!-- Text section -->
+        <section v-else-if="item.variant === 'text'" class="detail-block">
+          <h4 class="block-title">{{ item.label }}</h4>
+          <p class="block-text">{{ item.text }}</p>
+        </section>
+
+        <!-- Entries section -->
+        <section v-else-if="item.variant === 'entries'" class="detail-block">
+          <h4 class="block-title">{{ item.label }}</h4>
+          <dl class="block-entries">
+            <div v-for="entry in item.entries" :key="`${item.key}-${entry.label}`" class="block-entry">
+              <dt>{{ entry.label }}</dt>
+              <dd>{{ entry.value }}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <!-- Items section -->
+        <section v-else class="detail-block">
+          <h4 class="block-title">{{ item.label }}</h4>
+          <ul class="block-items">
+            <li v-for="entry in item.items" :key="`${item.key}-${entry}`">{{ entry }}</li>
+          </ul>
+        </section>
+      </template>
     </div>
   </article>
 
-  <article class="detail-card empty" v-else>
-    <p class="archive-kicker mono">DETAIL</p>
-    <h4>等待选中档案</h4>
-    <p class="empty-copy">选择左侧档案后，这里会显示完整详情。</p>
+  <article class="archive-detail archive-detail--empty" v-else>
+    <h4>选择档案查看详情</h4>
+    <p class="empty-hint">点击左侧列表中的任意档案卡片。</p>
   </article>
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, reactive, watch } from "vue";
 
 import { buildArchiveDetailSections } from "./archiveDetailSections.js";
 import { formatEntityType, formatImportanceTier } from "../utils/chineseDisplay.js";
@@ -61,153 +80,260 @@ const props = defineProps({
 
 defineEmits(["toggle"]);
 
+const entityTone = computed(() => String(props.archive?.entity_type || "unknown").toLowerCase());
 const detailSections = computed(() => buildArchiveDetailSections(props.archive));
 const toggleLabel = computed(() => (props.selected ? "移出会话" : "加入会话"));
+
+const expandedMap = reactive({});
+
+function toggleCollapse(key) {
+  expandedMap[key] = !expandedMap[key];
+}
+
+watch(detailSections, (sections) => {
+  for (const section of sections) {
+    if (section.variant === "collapsible" && !(section.key in expandedMap)) {
+      expandedMap[section.key] = section.defaultExpanded ?? false;
+    }
+  }
+}, { immediate: true });
 </script>
 
 <style scoped>
-.detail-card {
+.archive-detail {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-md);
   min-height: 100%;
-  border: 1px solid rgba(176, 125, 75, 0.18);
-  border-radius: 22px;
-  background:
-    linear-gradient(180deg, rgba(244, 239, 226, 0.9), rgba(255, 255, 255, 0.98));
-  padding: 20px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
-.archive-head {
+.detail-header {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-md);
   align-items: flex-start;
 }
 
-.archive-summary {
-  display: grid;
-  gap: 8px;
+.detail-identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
-.archive-kicker {
+.detail-identity h3 {
   margin: 0;
-  color: var(--accent-copper-deep);
-  letter-spacing: 0.14em;
-  font-size: 11px;
+  font-size: 22px;
+  font-family: "ZCOOL XiaoWei", serif;
+  color: var(--text-main);
 }
 
-.archive-summary h4,
-.empty h4 {
-  font-size: 28px;
-}
-
-.archive-meta {
+.detail-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-}
-
-.archive-chip {
-  display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 4px 10px;
-  border-radius: var(--radius-full);
-  background: rgba(255, 255, 255, 0.78);
-  border: 1px solid rgba(159, 141, 106, 0.24);
-  color: var(--text-sub);
+  gap: 6px;
+}
+
+.detail-project {
   font-size: 12px;
-}
-
-.archive-chip.accent {
-  color: var(--accent-copper-deep);
-  background: rgba(176, 125, 75, 0.12);
-}
-
-.detail-toggle {
-  flex-shrink: 0;
-  padding-inline: 16px;
+  color: var(--text-dim);
 }
 
 .detail-sections {
-  display: grid;
-  gap: 14px;
+  display: flex;
+  flex-direction: column;
 }
+
+/* ── Standard sections ── */
 
 .detail-block {
-  display: grid;
-  gap: 10px;
-  border: 1px solid rgba(159, 141, 106, 0.14);
-  border-radius: 16px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(249, 245, 238, 0.68));
-  padding: 15px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md) 0;
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.detail-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--accent-copper-deep);
+.detail-block:last-child {
+  border-bottom: none;
 }
 
-.detail-text,
-.empty-copy,
-.detail-entry dd,
-.detail-items li {
+.block-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary);
+  letter-spacing: 0.02em;
+}
+
+.block-text,
+.empty-hint,
+.block-entry dd,
+.block-items li {
   margin: 0;
   color: var(--text-main);
   white-space: pre-wrap;
-  line-height: 1.75;
+  line-height: 1.7;
+  font-size: 14px;
 }
 
-.detail-entries {
-  display: grid;
-  gap: 10px;
+.block-entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
   margin: 0;
 }
 
-.detail-entry {
-  display: grid;
-  gap: 4px;
+.block-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.detail-entry dt {
+.block-entry dt {
   font-size: 12px;
   color: var(--text-dim);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
 }
 
-.detail-items {
+.block-items {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.detail-items li {
-  padding: 5px 10px;
+.block-items li {
+  padding: 4px 10px;
   border-radius: var(--radius-full);
-  background: rgba(176, 125, 75, 0.1);
-  color: var(--accent-copper-deep);
+  background: rgba(155, 44, 44, 0.06);
+  color: var(--color-primary);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
-.empty {
+/* ── Collapsible sections (agent profile) ── */
+
+.collapsible-block {
+  gap: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.collapsible-block:last-child {
+  border-bottom: none;
+}
+
+.block-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 12px 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.block-toggle:hover {
+  background: var(--bg-paper);
+}
+
+.block-toggle .block-title {
+  margin: 0;
+}
+
+.block-chevron {
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.2s ease;
+}
+
+.block-chevron.open {
+  transform: rotate(180deg);
+}
+
+.block-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 0 14px;
+}
+
+.profile-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.profile-field + .profile-field {
+  border-top: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.field-label {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.field-value {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-main);
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.field-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 2px 0 0;
+}
+
+.field-tag {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: var(--radius-full);
+  background: var(--bg-paper-warm);
+  border: 1px solid var(--line-soft);
+  font-size: 12.5px;
+  color: var(--text-sub);
+  line-height: 1.4;
+}
+
+/* ── Empty state ── */
+
+.archive-detail--empty {
   justify-content: center;
-  min-height: 320px;
+  align-items: center;
+  min-height: 280px;
+  text-align: center;
+  color: var(--text-dim);
 }
 
-@media (max-width: 760px) {
-  .archive-head {
+.archive-detail--empty h4 {
+  margin: 0 0 var(--space-xs);
+  font-size: 15px;
+  color: var(--text-sub);
+}
+
+.empty-hint {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .detail-header {
     flex-direction: column;
   }
 
-  .detail-toggle {
+  .detail-header .btn {
     width: 100%;
   }
 }

@@ -1,25 +1,24 @@
 <template>
-  <article class="museum-item" :class="{ active, selected }" @click="$emit('toggle')">
-    <div class="item-head">
-      <h4 class="item-name">{{ item.entity_name }}</h4>
-      <div class="item-badges">
-        <span class="selection-badge mono" :class="{ selected }">
-          {{ selected ? "已选" : "点击选中" }}
-        </span>
-        <span class="status-tag mono" :class="entityTone">{{ formatEntityType(item.entity_type) }}</span>
+  <article class="archive-card workbench-card" :class="{ active, selected }" @click="$emit('toggle')">
+    <div class="card-top">
+      <div class="card-identity">
+        <h4 class="card-name">{{ item.entity_name }}</h4>
+        <span class="card-tier">{{ formatImportanceTier(item.importance_tier) }}</span>
       </div>
+      <span class="status-tag" :class="entityTone">{{ formatEntityType(item.entity_type) }}</span>
     </div>
 
-    <div class="item-meta">
-      <span class="project-tag">{{ item.project_name }}</span>
-      <span class="tier-tag">{{ formatImportanceTier(item.importance_tier) }}</span>
-    </div>
+    <p v-if="roleText" class="card-role">{{ roleText }}</p>
+    <p class="card-summary">{{ driveText }}</p>
 
-    <p class="item-desc">{{ summaryText }}</p>
-
-    <div class="item-actions">
-      <span class="selection-copy">{{ selected ? "再次点击可移出当前世界线" : "点击卡片即可加入当前世界线" }}</span>
-      <button class="detail-toggle" type="button" @click.stop="$emit('expand')">展开详情</button>
+    <div class="card-footer">
+      <span class="card-project">{{ item.project_name }}</span>
+      <button class="card-detail-btn" type="button" @click.stop="$emit('expand')">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 3l5 5-5 5" />
+        </svg>
+        详情
+      </button>
     </div>
   </article>
 </template>
@@ -38,143 +37,146 @@ const props = defineProps({
 defineEmits(["expand", "toggle"]);
 
 const entityTone = computed(() => String(props.item.entity_type || "unknown").toLowerCase());
-const summaryText = computed(() => props.item.core_drive || props.item.entity_role || "档案尚简。");
+const roleText = computed(() => props.item.entity_role || "");
+const driveText = computed(() => props.item.core_drive || (props.item.entity_role ? "" : "暂无摘要"));
 </script>
 
 <style scoped>
-.museum-item {
-  display: grid;
-  gap: 12px;
-  min-height: 168px;
-  padding: 16px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 243, 234, 0.92));
-  border: 1px solid rgba(159, 141, 106, 0.18);
-  border-radius: 20px;
+.archive-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
   cursor: pointer;
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-  box-shadow: 0 10px 28px rgba(44, 42, 39, 0.04);
+  border-left: 3px solid transparent;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, background 0.15s ease;
 }
 
-.museum-item:hover {
-  transform: translateY(-2px);
-  border-color: rgba(176, 125, 75, 0.48);
-  box-shadow: 0 16px 32px rgba(176, 125, 75, 0.1);
+.archive-card:hover {
+  background: var(--bg-paper);
 }
 
-.museum-item.active {
-  border-color: var(--accent-copper);
-  background:
-    linear-gradient(180deg, rgba(244, 239, 226, 0.95), rgba(255, 255, 255, 0.98));
-  box-shadow: 0 18px 34px rgba(176, 125, 75, 0.14);
+.archive-card.active {
+  border-left-color: var(--color-primary);
+  background: var(--bg-paper-warm);
 }
 
-.museum-item.selected {
-  box-shadow: inset 0 0 0 1px rgba(176, 125, 75, 0.22);
+.archive-card.selected {
+  border-left-color: var(--color-primary);
 }
 
-.item-head,
-.item-meta {
+.archive-card.selected:not(.active) {
+  background: rgba(155, 44, 44, 0.02);
+}
+
+/* ── Top row: name + tier + type badge ── */
+
+.card-top {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
-}
-
-.item-head {
   align-items: flex-start;
+  gap: var(--space-sm);
 }
 
-.item-badges {
+.card-identity {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+  align-items: baseline;
+  gap: var(--space-sm);
+  min-width: 0;
 }
 
-.item-meta {
-  flex-wrap: wrap;
-  font-size: 12px;
-}
-
-.item-name {
+.card-name {
   margin: 0;
-  font-size: 20px;
-  line-height: 1.3;
+  font-size: 15px;
+  line-height: 1.35;
   font-family: "ZCOOL XiaoWei", serif;
   font-weight: 700;
-  color: #1a1815;
-  letter-spacing: 0.04em;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.project-tag {
+.card-tier {
+  flex-shrink: 0;
+  font-size: 11px;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
-.tier-tag {
-  color: var(--accent-copper-deep);
-  font-weight: 600;
-}
+/* ── Role line (entity_role) ── */
 
-.item-desc {
+.card-role {
   margin: 0;
   color: var(--text-sub);
-  font-size: 13px;
-  line-height: 1.72;
+  font-size: 12.5px;
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 1;
   overflow: hidden;
 }
 
-.item-actions {
+/* ── Summary (core_drive) ── */
+
+.card-summary {
+  margin: 0;
+  color: var(--text-sub);
+  font-size: 13px;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.card-summary:empty {
+  display: none;
+}
+
+/* ── Footer: project + detail button ── */
+
+.card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-sm);
   margin-top: auto;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-soft);
 }
 
-.selection-badge,
-.detail-toggle {
+.card-project {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-detail-btn {
   display: inline-flex;
   align-items: center;
-  min-height: 32px;
-  padding: 0 12px;
+  gap: 3px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-soft);
   border-radius: var(--radius-full);
-}
-
-.selection-badge {
-  border: 1px solid rgba(159, 141, 106, 0.22);
-  background: rgba(255, 255, 255, 0.86);
+  background: transparent;
   color: var(--text-sub);
-  letter-spacing: 0.08em;
-}
-
-.selection-badge.selected,
-.museum-item.selected .selection-badge {
-  background: rgba(176, 125, 75, 0.14);
-  border-color: rgba(176, 125, 75, 0.32);
-  color: var(--accent-copper-deep);
-}
-
-.selection-copy {
-  color: var(--text-dim);
   font-size: 12px;
-  line-height: 1.5;
-}
-
-.detail-toggle {
-  border: 1px solid rgba(176, 125, 75, 0.2);
-  background: rgba(176, 125, 75, 0.1);
-  color: var(--text-main);
   cursor: pointer;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
-.detail-toggle:hover,
-.museum-item.active .detail-toggle {
-  background: rgba(176, 125, 75, 0.16);
-  border-color: rgba(176, 125, 75, 0.34);
+.card-detail-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.card-detail-btn:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: rgba(155, 44, 44, 0.04);
 }
 </style>

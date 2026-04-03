@@ -153,11 +153,16 @@ def generate_archives():
         entity_types = graph_entity_types(data.get("entity_types"), graph_id)
         archivist = NarrativeEntityArchivist(candidate_builder=archive_candidate_builder)
         candidates, entity_lookup, payload_entity_types = _archive_candidates(graph_id, project, entity_types)
+        agent_profiles = {}
+        if project:
+            raw = ProjectManager.load_project_json(project.project_id, "agent_profiles.json")
+            agent_profiles = (raw or {}).get("profiles", {})
         archives = archivist.generate_archives_from_candidates(
             candidates,
             use_llm=use_llm,
             tier_overrides=_candidate_override_map(data),
             entity_lookup=entity_lookup,
+            agent_profiles=agent_profiles,
         )
 
         payload = {

@@ -86,9 +86,10 @@ onBeforeUnmount(() => {
 }
 .scene-editor-textarea {
   width: 100%;
+  min-height: 400px;
   border: none;
   outline: none;
-  resize: none;
+  resize: vertical;
   font-family: inherit;
   background: transparent;
   box-sizing: border-box;
