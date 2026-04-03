@@ -1,5 +1,5 @@
 import { reactive } from "vue";
-import { getTask, uploadStorySeed } from "../api/project";
+import { cancelTask, getTask, uploadStorySeed } from "../api/project";
 import {
   applyStructuredView,
   buildFailedTask,
@@ -228,6 +228,25 @@ async function submitUpload() {
   }
 }
 
+async function cancelUpload() {
+  if (!state.taskId || state.taskStatus !== "processing") {
+    return;
+  }
+  try {
+    await cancelTask(state.taskId);
+    state.uploadBusy = false;
+    state.uploadPhase = "error";
+    state.taskStatus = "cancelled";
+    state.error = "分析任务已取消";
+    state.statusText = "分析任务已取消";
+    resetStructuredView(state);
+    activeUploadPromise = null;
+    activeUploadRequest = null;
+  } catch (error) {
+    state.error = error.message || "取消失败";
+  }
+}
+
 function clearNotice() {
   if (state.uploadBusy) {
     return;
@@ -251,6 +270,7 @@ export function useSeedUpload() {
     removeFile,
     formatSize,
     submitUpload,
+    cancelUpload,
     clearNotice,
   };
 }

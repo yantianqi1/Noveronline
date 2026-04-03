@@ -43,6 +43,7 @@ export function uploadStorySeed({
   projectName,
   analysisGoal,
   additionalContext,
+  segmentTokenLimit,
   files = [],
   onProgress,
   onRequest,
@@ -51,6 +52,9 @@ export function uploadStorySeed({
   formData.append("project_name", projectName);
   formData.append("analysis_goal", analysisGoal);
   formData.append("additional_context", additionalContext || "");
+  if (segmentTokenLimit) {
+    formData.append("segment_token_limit", String(segmentTokenLimit));
+  }
   for (const file of files) {
     formData.append("files", file);
   }

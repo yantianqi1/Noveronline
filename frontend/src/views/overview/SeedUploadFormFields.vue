@@ -78,6 +78,13 @@
       <button class="btn primary large" :disabled="!canSubmit || upload.state.uploadBusy" @click="submitUpload">
         {{ upload.state.uploadBusy ? "分析进行中..." : "开始分析" }}
       </button>
+      <button
+        v-if="upload.state.uploadBusy && upload.state.uploadPhase === 'processing'"
+        class="btn cancel-btn"
+        @click="confirmCancel"
+      >
+        取消分析
+      </button>
     </div>
   </div>
 </template>
@@ -118,6 +125,12 @@ async function submitUpload() {
     await upload.submitUpload();
   } catch {
     return;
+  }
+}
+
+function confirmCancel() {
+  if (confirm("确定要取消当前分析任务吗？已完成的分析数据将保留。")) {
+    upload.cancelUpload();
   }
 }
 </script>
@@ -231,7 +244,23 @@ async function submitUpload() {
 .upload-actions {
   display: flex;
   justify-content: center;
+  gap: var(--space-md);
   margin-top: var(--space-md);
+}
+
+.cancel-btn {
+  padding: 14px 32px;
+  font-size: 16px;
+  background: transparent;
+  border: 1px solid var(--accent-seal, #9b4326);
+  color: var(--accent-seal, #9b4326);
+  border-radius: var(--radius-md, 8px);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cancel-btn:hover {
+  background: rgba(155, 67, 38, 0.08);
 }
 
 .large {
