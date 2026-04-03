@@ -34,7 +34,7 @@
         <p class="subtitle">基于图谱生成角色档案；世界线创建与变量注入统一在世界线工作台完成。</p>
 
         <div class="actions stack">
-          <button class="btn" :disabled="!currentGraphId || busy" @click="openArchiveConfigurator">生成全量角色档案</button>
+          <button class="btn" :disabled="!projectId || busy" @click="openArchiveConfigurator">生成全量角色档案</button>
         </div>
       </section>
     </aside>
