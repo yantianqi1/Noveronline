@@ -185,3 +185,24 @@ def test_local_block_facts_with_smart_segments():
     entity_names_2 = [e["name"] for e in seg2_packet["local_entities"]]
     assert "林动" in entity_names_2
     assert "小貂" in entity_names_2
+
+
+def test_handles_notes_wrapped_format():
+    """reading_notes.json from ReadingNotesManager.save() wraps data under 'notes' key."""
+    inner = _sample_reading_notes()
+    wrapped = {
+        "arc_interval": 5,
+        "volume_arc_threshold": 10,
+        "all_segment_summaries": [],
+        "_arc_cursor": 0,
+        "notes": inner,
+    }
+    story_memory, local_block_facts, _, _ = adapt_reading_notes_for_graph(
+        wrapped, _sample_seed_analysis()
+    )
+    registry = story_memory["entity_registry"]
+    assert "林动" in registry
+    assert registry["林动"]["entity_type"] == "character"
+    assert len(story_memory["relationship_ledger"]) >= 1
+    assert len(story_memory["world_rules"]) >= 1
+    assert local_block_facts["block_count"] >= 1

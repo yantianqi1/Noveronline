@@ -13,12 +13,15 @@ def adapt_reading_notes_for_graph(
 
     Returns (story_memory, local_block_facts, block_analyses, chapter_continuity).
     """
-    core = reading_notes.get("core_facts", {})
+    # reading_notes.json serializes ReadingNotesManager state:
+    # the actual notes live under a "notes" key when saved via manager.save()
+    notes = reading_notes.get("notes", reading_notes)
+    core = notes.get("core_facts", {})
     tier_lookup = _build_tier_lookup(seed_analysis)
 
     entity_registry = _build_entity_registry(core, tier_lookup)
-    relationship_ledger = _build_relationship_ledger(reading_notes.get("relationship_graph", []))
-    event_timeline = _build_event_timeline(reading_notes.get("plot_state", {}), entity_registry)
+    relationship_ledger = _build_relationship_ledger(notes.get("relationship_graph", []))
+    event_timeline = _build_event_timeline(notes.get("plot_state", {}), entity_registry)
     world_rules = _build_world_rules(core.get("world_rules", []))
 
     story_memory = {
@@ -29,7 +32,7 @@ def adapt_reading_notes_for_graph(
         "event_timeline": event_timeline,
         "open_threads": [
             {"thread_id": f"thread_{i}", "description": t.get("thread", "")}
-            for i, t in enumerate(reading_notes.get("plot_state", {}).get("open_threads", []))
+            for i, t in enumerate(notes.get("plot_state", {}).get("open_threads", []))
         ],
         "world_rules": world_rules,
         "block_summaries": [],
