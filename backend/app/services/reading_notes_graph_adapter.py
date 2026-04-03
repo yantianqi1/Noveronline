@@ -37,7 +37,7 @@ def adapt_reading_notes_for_graph(
 
     local_block_facts = _build_local_block_facts(core, smart_segments)
     block_analyses = {"block_count": local_block_facts["block_count"]}
-    chapter_count = len(chapter_segments.get("chapters", [])) if chapter_segments else len(core.get("characters", {}))
+    chapter_count = len(chapter_segments.get("chapters", [])) if chapter_segments else 0
     chapter_continuity = {"chapter_count": chapter_count}
 
     return story_memory, local_block_facts, block_analyses, chapter_continuity

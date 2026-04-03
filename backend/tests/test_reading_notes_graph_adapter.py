@@ -160,3 +160,28 @@ def test_block_analyses_and_continuity_shape():
     )
     assert "block_count" in block_analyses
     assert "chapter_count" in chapter_continuity
+    assert chapter_continuity["chapter_count"] == 0  # no chapter_segments provided
+
+
+def test_local_block_facts_with_smart_segments():
+    smart_segments = {
+        "segments": [
+            {"segment_id": "seg_001", "chapters": ["第一章"]},
+            {"segment_id": "seg_002", "chapters": ["第二章"]},
+            {"segment_id": "seg_003", "chapters": ["第三章"]},
+        ]
+    }
+    _, local_block_facts, _, _ = adapt_reading_notes_for_graph(
+        _sample_reading_notes(), _sample_seed_analysis(), smart_segments=smart_segments
+    )
+    assert local_block_facts["block_count"] == 3
+    assert len(local_block_facts["packets"]) == 3
+    # seg_001 should contain 林动 (segments_seen includes seg_001)
+    seg1_packet = next(p for p in local_block_facts["packets"] if p["block_id"] == "seg_001")
+    entity_names = [e["name"] for e in seg1_packet["local_entities"]]
+    assert "林动" in entity_names
+    # seg_002 should contain both 林动 and 小貂
+    seg2_packet = next(p for p in local_block_facts["packets"] if p["block_id"] == "seg_002")
+    entity_names_2 = [e["name"] for e in seg2_packet["local_entities"]]
+    assert "林动" in entity_names_2
+    assert "小貂" in entity_names_2
