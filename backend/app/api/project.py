@@ -109,6 +109,7 @@ def extract_story_seed():
         analysis_goal = request.form.get("analysis_goal", "").strip()
         project_name = request.form.get("project_name", "Untitled Novel Project").strip()
         additional_context = request.form.get("additional_context", "").strip()
+        segment_token_limit = request.form.get("segment_token_limit", 50000, type=int)
         use_llm = form_bool("use_llm", True)
 
         if not analysis_goal:
@@ -136,6 +137,7 @@ def extract_story_seed():
             analysis_goal=analysis_goal,
             additional_context=additional_context,
             use_llm=use_llm,
+            segment_token_limit=segment_token_limit,
         )
         return jsonify({
             "success": True,
@@ -265,6 +267,26 @@ def get_project_task(task_id: str):
             "error": str(e),
             "traceback": traceback.format_exc(),
         }, 500)
+
+
+@project_bp.route("/task/<task_id>/cancel", methods=["POST"])
+def cancel_task(task_id):
+    try:
+        task_manager = TaskManager()
+        success = task_manager.cancel_task(task_id)
+        if not success:
+            task = task_manager.get_task(task_id)
+            status = task.status.value if task else "not_found"
+            return jsonify({
+                "success": False,
+                "error": f"无法取消任务（当前状态: {status}）",
+            }), 400
+        return jsonify({
+            "success": True,
+            "data": {"task_id": task_id, "status": "cancelled"},
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @project_bp.route("/task/<task_id>/steps/<step_id>/trace", methods=["GET"])

@@ -55,6 +55,7 @@ class CharacterAgentProfileGenerator:
         manager: ReadingNotesManager,
         use_llm: bool = True,
         progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Generate agent profiles for all important characters.
 
@@ -116,10 +117,11 @@ class CharacterAgentProfileGenerator:
 
         completed = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_name = {
-                executor.submit(_generate_one, name): name
-                for name in important_names
-            }
+            future_to_name = {}
+            for name in important_names:
+                if cancel_check is not None:
+                    cancel_check()
+                future_to_name[executor.submit(_generate_one, name)] = name
             for future in as_completed(future_to_name):
                 name = future_to_name[future]
                 try:

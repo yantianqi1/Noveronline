@@ -4,6 +4,9 @@ import pytest
 
 from app.models.task import TaskManager, TaskStatus
 from app.services.task_cancelled import TaskCancelledException
+from app.services.sequential_reader import SequentialReader
+from app.services.character_agent_profile_generator import CharacterAgentProfileGenerator
+from app.services.reading_notes_manager import ReadingNotesManager
 
 
 # ---------------------------------------------------------------------------
@@ -121,3 +124,117 @@ def test_is_cancelled_helper():
     mgr.cancel_task(task_id)
 
     assert mgr.is_cancelled(task_id) is True
+
+
+# ---------------------------------------------------------------------------
+# SequentialReader cancel_check tests (Task 4)
+# ---------------------------------------------------------------------------
+
+class FakeCancelReadingClient:
+    def chat_json_value(self, messages, temperature=0.3, max_tokens=8192):
+        return {
+            "segment_summary": "摘要",
+            "character_updates": [],
+            "relationship_changes": [],
+            "plot_threads": [],
+            "world_building": [],
+            "consistency_notes": [],
+            "narrative_phase": "development",
+        }
+
+
+class FakeCancelRouter:
+    def build_client(self, module_key):
+        return FakeCancelReadingClient()
+
+
+def _make_test_segments(count=5):
+    return [
+        {
+            "segment_id": f"seg_{i:03d}",
+            "chapters": [{"chapter_id": f"ch_{i:04d}", "order": i, "title": f"第{i}章", "content": f"内容{i}" * 50}],
+            "chapter_range": str(i),
+            "estimated_tokens": 500,
+        }
+        for i in range(1, count + 1)
+    ]
+
+
+def test_sequential_reader_respects_cancellation():
+    call_count = 0
+
+    def cancel_check():
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            raise TaskCancelledException("test-task", "sequential_reading")
+
+    reader = SequentialReader(llm_router=FakeCancelRouter(), arc_interval=10)
+    segments = _make_test_segments(5)
+
+    with pytest.raises(TaskCancelledException):
+        reader.read(segments, use_llm=True, cancel_check=cancel_check)
+
+    assert call_count == 3
+
+
+def test_sequential_reader_no_cancel_check():
+    reader = SequentialReader(llm_router=FakeCancelRouter(), arc_interval=10)
+    segments = _make_test_segments(3)
+    manager = reader.read(segments, use_llm=True)
+    assert len(manager.all_segment_summaries) == 3
+
+
+# ---------------------------------------------------------------------------
+# CharacterAgentProfileGenerator cancel_check tests (Task 5)
+# ---------------------------------------------------------------------------
+
+class FakeProfileCancelClient:
+    def chat_json_value(self, messages, temperature=0.3, max_tokens=4096):
+        return {
+            "basic_info": {"name": "test", "aliases": [], "identity": "", "status": "alive"},
+            "personality": {"core_traits": [], "values": [], "fears": [], "decision_pattern": ""},
+            "speech": {"style": "", "verbal_habits": [], "tone_range": "", "example_quotes": []},
+            "relationships": [],
+            "capabilities": {"skills": [], "limitations": [], "resources": []},
+            "knowledge_boundary": {"knows": [], "does_not_know": [], "believes_wrongly": []},
+            "motivation": {"ultimate_goal": "", "current_objective": "", "internal_conflict": ""},
+        }
+
+
+class FakeProfileCancelRouter:
+    def build_client(self, module_key):
+        return FakeProfileCancelClient()
+
+
+def _manager_with_many_characters():
+    manager = ReadingNotesManager()
+    for name in ["角色A", "角色B", "角色C", "角色D", "角色E"]:
+        for seg in ["seg_001", "seg_002", "seg_003"]:
+            manager.merge_character_updates([{
+                "name": name, "aliases": [], "is_new": seg == "seg_001",
+                "status": "active", "identity": "测试角色",
+                "personality_traits": [], "speech_style": "", "goals": "",
+                "key_actions": [], "knowledge_gained": [], "quote_examples": [],
+            }], seg)
+    return manager
+
+
+def test_profile_generator_respects_cancellation():
+    call_count = 0
+
+    def cancel_check():
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            raise TaskCancelledException("test-task", "agent_profiles")
+
+    gen = CharacterAgentProfileGenerator(
+        llm_router=FakeProfileCancelRouter(),
+        importance_threshold=2,
+        max_workers=1,
+    )
+    manager = _manager_with_many_characters()
+
+    with pytest.raises(TaskCancelledException):
+        gen.generate(manager, use_llm=True, cancel_check=cancel_check)

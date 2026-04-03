@@ -55,6 +55,7 @@ class SequentialReader:
         segments: Sequence[Dict],
         use_llm: bool = True,
         progress_callback: Optional[Callable[[str, Dict], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
     ) -> ReadingNotesManager:
         """Read all segments sequentially.
 
@@ -88,6 +89,9 @@ class SequentialReader:
 
         for idx, segment in enumerate(segments):
             segment_id = segment.get("segment_id", f"seg_{idx + 1:03d}")
+
+            if cancel_check is not None:
+                cancel_check()
 
             if progress_callback:
                 progress_callback("segment_start", {
