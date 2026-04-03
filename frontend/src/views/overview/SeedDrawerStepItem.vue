@@ -123,14 +123,16 @@ function formatMs(ms) {
   padding: var(--space-md);
 }
 
-/* Expand animation */
+/* 弹性展开/折叠动画 */
 .step-expand-enter-active {
-  transition: all 0.25s ease-out;
+  transition: max-height 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 0.3s cubic-bezier(0.22, 1, 0.36, 1);
   max-height: 600px;
   overflow: hidden;
 }
 .step-expand-leave-active {
-  transition: all 0.25s ease-in;
+  transition: max-height 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 0.25s ease-out;
   max-height: 600px;
   overflow: hidden;
 }
@@ -151,6 +153,10 @@ function formatMs(ms) {
   .step-expand-leave-active {
     transition: opacity 0.15s ease;
     max-height: none !important;
+  }
+  .step-expand-enter-from,
+  .step-expand-leave-to {
+    transform: none;
   }
 }
 </style>

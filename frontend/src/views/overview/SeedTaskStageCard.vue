@@ -70,11 +70,11 @@ const blockSummary = computed(() => {
 });
 const chapterSummary = computed(() => (props.taskMetrics.chapterCount ? String(props.taskMetrics.chapterCount) : "-"));
 const workMetricLabel = computed(() => {
-  if (props.activeStage.key === "chapter_card_generation") return "章节卡";
+  if (props.activeStage.key === "sequential_reading") return "阅读段";
   return "分析块";
 });
 const workMetricValue = computed(() => {
-  if (props.activeStage.key === "chapter_card_generation") {
+  if (props.activeStage.key === "sequential_reading") {
     return stageProgress.value.detail;
   }
   return blockSummary.value;

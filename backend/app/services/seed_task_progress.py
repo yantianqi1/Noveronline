@@ -113,7 +113,8 @@ class SeedTaskProgressTracker:
         elapsed_ms = ctx.elapsed_ms
         call_count = ctx.call_count
         calls = list(ctx.calls)
-        has_trace = call_count > 0
+        artifacts = list(ctx.artifacts)
+        has_trace = ctx.has_content
 
         # 退出 step context
         try:
@@ -136,6 +137,7 @@ class SeedTaskProgressTracker:
                 "elapsed_ms": elapsed_ms,
                 "call_count": call_count,
                 "calls": calls,
+                "artifacts": artifacts,
             }
             write_step_bundle(self.project_id, self.task_id, step_id, bundle)
 

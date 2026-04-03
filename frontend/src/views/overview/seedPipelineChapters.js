@@ -7,30 +7,22 @@ export const PIPELINE_CHAPTERS = [
   {
     key: "text_prep",
     label: "文本准备",
-    stages: ["uploading", "extract_text", "segment_chapters", "build_blocks"],
+    stages: ["uploading", "extract_text", "smart_segmentation"],
   },
   {
-    key: "world_scan",
-    label: "世界扫描",
-    stages: ["skeleton_timeline", "anchor_generation"],
+    key: "deep_reading",
+    label: "深度阅读",
+    stages: ["sequential_reading", "arc_summary"],
   },
   {
-    key: "fact_extract",
-    label: "事实提取",
-    stages: [
-      "extract_local_facts",
-      "merge_story_memory",
-      "entity_resolution",
-      "contextual_block_analysis",
-      "chapter_card_generation",
-      "consistency_audit",
-      "build_continuity",
-    ],
+    key: "integration",
+    label: "全局整合",
+    stages: ["global_integration", "ontology"],
   },
   {
-    key: "output_settle",
-    label: "成果沉淀",
-    stages: ["seed_analysis", "ontology", "completed", "failed"],
+    key: "agent_build",
+    label: "角色构建",
+    stages: ["agent_profiles", "completed", "failed"],
   },
 ];
 
@@ -63,7 +55,8 @@ export function buildChapterViewModel(timeline, activeStageKey = "") {
     });
   }
 
-  // 收集有 step_id 的 complete 事件作为步骤
+  // 收集有 step_id 的事件作为步骤
+  // 跳过 note 类型的伪步骤（没有 trace bundle，只是信息记录）
   for (const event of timeline) {
     const groupKey = event.meta?.group_key;
     const stepId = event.meta?.step_id;
@@ -72,12 +65,25 @@ export function buildChapterViewModel(timeline, activeStageKey = "") {
     const chapter = chapterMap.get(groupKey);
     if (!chapter) continue;
 
+    const stepKind = event.meta?.step_kind || "";
+
     // 只取 complete 事件作为步骤计数来源（start 事件不重复统计）
     if (event.status === "completed") {
+      // note 类型事件：没有 trace，不作为可展开的步骤显示
+      // 只保留有 trace 或有实际执行过程的步骤（非 note/kind=note）
+      const isNote = stepKind === "note" || event.meta?.kind === "note" || event.meta?.kind === "migration";
+      if (isNote) {
+        // 仍然计入章节统计
+        chapter.elapsedMs += event.meta?.elapsed_ms || 0;
+        chapter.llmCallCount += event.meta?.llm_call_count || 0;
+        continue;
+      }
+
       chapter.steps.push({
         stepId,
-        stepKind: event.meta?.step_kind || "",
+        stepKind,
         title: event.title || "",
+        detail: event.detail || "",
         stage: event.stage || "",
         status: "completed",
         elapsedMs: event.meta?.elapsed_ms || 0,
@@ -91,8 +97,9 @@ export function buildChapterViewModel(timeline, activeStageKey = "") {
       // 活动中步骤
       chapter.steps.push({
         stepId,
-        stepKind: event.meta?.step_kind || "",
+        stepKind,
         title: event.title || "",
+        detail: event.detail || "",
         stage: event.stage || "",
         status: "active",
         elapsedMs: 0,

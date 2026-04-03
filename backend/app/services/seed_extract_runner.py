@@ -11,6 +11,7 @@ from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
 from .seed_task_callbacks import build_ontology_progress_callback
 from .seed_task_progress import SeedTaskProgressTracker
+from .step_trace_context import record_artifact
 from .task_cancelled import TaskCancelledException
 from ..utils.task_file_logger import TaskFileLogger
 
@@ -103,6 +104,24 @@ class SeedExtractRunner:
 
             # Finalize
             self.service._finalize_project(project_id, analysis_goal, ontology, seed_analysis)
+
+            # Auto-populate novel.sqlite3 for writer agent
+            try:
+                from .writer_agent.novel_db_migration import migrate_project
+                migrate_counts = migrate_project(project_id)
+                self._log("migration", f"novel.sqlite3 已填充: {migrate_counts}")
+                self.progress.note(
+                    "agent_profiles",
+                    "数据已写入写作数据库",
+                    f"entities={migrate_counts.get('entities', 0)}, "
+                    f"relationships={migrate_counts.get('relationships', 0)}, "
+                    f"evidence={migrate_counts.get('entity_evidence', 0)}",
+                    meta={"kind": "migration"},
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("novel.sqlite3 migration failed for %s", project_id)
+
             self.progress.complete(
                 "上传完成，项目与种子分析已生成。",
                 self._result_payload(project_id, chapter_segments, manager, seed_analysis, agent_profiles),
@@ -128,6 +147,13 @@ class SeedExtractRunner:
         step_id = self.progress.begin_step("extract_text", "file_extract", "提取上传文件文本")
         documents, all_text = self.service._extract_documents(project_id)
         self.service._save_text(project_id, documents, all_text)
+        # 记录产物：文件列表和文本摘要
+        for doc in documents:
+            name = doc.get("name", "未命名文件")
+            text = doc.get("text", "")
+            preview = text[:2000] + ("…" if len(text) > 2000 else "")
+            record_artifact(f"文稿: {name} ({len(text)} 字)", preview)
+        record_artifact("合并全文统计", f"共 {len(documents)} 份文稿，合并后 {len(all_text)} 字", kind="stat")
         self.progress.end_step(step_id)
         self.progress.note("extract_text", "文本提取完成", f"已提取 {len(documents)} 份文稿，共 {len(all_text)} 字")
 
@@ -141,6 +167,27 @@ class SeedExtractRunner:
         step_id = self.progress.begin_step("smart_segmentation", "segment", "智能分段")
         segment_result = self.service.smart_segmenter.segment(chapter_segments["chapters"])
         ProjectManager.save_project_json(project_id, "smart_segments.json", segment_result)
+        # 记录产物：每个段的章节组成
+        for seg in segment_result.get("segments", []):
+            seg_id = seg.get("segment_id", "")
+            chapters = seg.get("chapters", [])
+            est_tokens = seg.get("estimated_tokens", 0)
+            chapter_range = seg.get("chapter_range", "")
+            lines = []
+            for ch in chapters:
+                title = ch.get("title", "无标题")
+                wc = ch.get("word_count", 0)
+                lines.append(f"  {ch.get('order', '?')}. {title} ({wc} 字)")
+            record_artifact(
+                f"段落 {seg_id}（章节 {chapter_range}，{len(chapters)} 章，~{est_tokens} tokens）",
+                "\n".join(lines),
+            )
+        record_artifact(
+            "分段总结",
+            f"共 {segment_result.get('segment_count', 0)} 个阅读段，"
+            f"章节总数 {chapter_segments['chapter_count']}",
+            kind="stat",
+        )
         self.progress.end_step(step_id)
         self.progress.set_counts(
             chapter_count=chapter_segments["chapter_count"],
@@ -166,6 +213,9 @@ class SeedExtractRunner:
 
         self.progress.enter_stage("sequential_reading", "正在顺序阅读小说", 10, "逐段深度阅读并记录笔记")
 
+        # 跟踪每个 segment 的 step_id，用于在 segment_end 时关闭
+        _active_segment_step: Dict[str, str] = {}
+
         def reading_progress_callback(event_type: str, data: Dict[str, Any]) -> None:
             seg_idx = data.get("segment_index", 0)
             seg_id = data.get("segment_id", "")
@@ -175,6 +225,15 @@ class SeedExtractRunner:
 
             if event_type == "segment_start":
                 progress_pct = 10 + int((seg_idx / total) * 65)
+                # 开启 step trace 上下文，让 LLM 调用被记录
+                step_id = self.progress.begin_step(
+                    "sequential_reading",
+                    "segment_reading",
+                    f"阅读段落 {seg_id} ({seg_idx + 1}/{total})",
+                    group_key="deep_reading",
+                    group_label="深度阅读",
+                )
+                _active_segment_step[seg_id] = step_id
                 self.progress.block_started(
                     "sequential_reading",
                     f"开始阅读 {seg_id}",
@@ -188,6 +247,10 @@ class SeedExtractRunner:
                 )
             elif event_type == "segment_end":
                 progress_pct = 10 + int(((seg_idx + 1) / total) * 65)
+                # 关闭 step trace 上下文，写入 trace bundle
+                step_id = _active_segment_step.pop(seg_id, "")
+                if step_id:
+                    self.progress.end_step(step_id)
                 self.progress.block_completed(
                     "sequential_reading",
                     f"完成阅读 {seg_id}",
@@ -241,6 +304,27 @@ class SeedExtractRunner:
             project_name=project_name,
         )
         ProjectManager.save_project_json(project_id, "seed_analysis.json", seed_analysis)
+        # 记录产物：聚合结果摘要
+        chars = seed_analysis.get("characters", [])
+        orgs = seed_analysis.get("organizations", [])
+        rels = seed_analysis.get("relations", [])
+        record_artifact(
+            f"角色 ({len(chars)} 个)",
+            "\n".join(f"  - {c.get('name', '?')}: {c.get('identity', '')}" for c in chars[:30]),
+        )
+        if orgs:
+            record_artifact(
+                f"组织 ({len(orgs)} 个)",
+                "\n".join(f"  - {o.get('name', '?')}: {o.get('description', '')}" for o in orgs[:20]),
+            )
+        if rels:
+            record_artifact(
+                f"关系 ({len(rels)} 条)",
+                "\n".join(
+                    f"  - {r.get('source', '?')} → {r.get('target', '?')}: {r.get('relation_type', '')}"
+                    for r in rels[:30]
+                ),
+            )
         self.progress.end_step(step_id)
         self.progress.note(
             "global_integration",
@@ -292,12 +376,34 @@ class SeedExtractRunner:
                     f"{completed}/{total}",
                 )
 
+        # 整体包裹在 step 中，使并发 LLM 调用的 trace 被主线程上下文捕获
+        step_id = self.progress.begin_step(
+            "agent_profiles",
+            "profile_batch",
+            "批量生成角色Agent档案",
+            group_key="agent_build",
+            group_label="角色构建",
+        )
         agent_profiles = self.service.character_agent_profile_generator.generate(
             manager=manager,
             use_llm=self.use_llm,
             progress_callback=profile_progress_callback,
             cancel_check=self._check_cancelled,
         )
+        # 记录产物：生成的角色档案摘要
+        import json
+        profiles = agent_profiles.get("profiles", {})
+        for name, profile in profiles.items():
+            preview = json.dumps(profile, ensure_ascii=False, indent=2)
+            if len(preview) > 3000:
+                preview = preview[:3000] + "\n…（截断）"
+            record_artifact(f"角色档案: {name}", preview, kind="json")
+        record_artifact(
+            "档案生成总结",
+            f"共生成 {agent_profiles.get('profile_count', 0)} 个角色Agent档案",
+            kind="stat",
+        )
+        self.progress.end_step(step_id)
         ProjectManager.save_project_json(project_id, "agent_profiles.json", agent_profiles)
         self.progress.note(
             "agent_profiles",

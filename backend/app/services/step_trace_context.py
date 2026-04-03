@@ -25,6 +25,7 @@ class StepTraceContext:
     started_at_mono: float = field(default_factory=time.monotonic)
     started_at_wall: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     calls: List[Dict[str, Any]] = field(default_factory=list)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record_call(self, call_data: Dict[str, Any]) -> None:
@@ -32,9 +33,18 @@ class StepTraceContext:
         with self._lock:
             self.calls.append(call_data)
 
+    def record_artifact(self, label: str, content: str, kind: str = "text") -> None:
+        """追加一条非 LLM 产物记录（输入文本、处理结果、统计等）。"""
+        with self._lock:
+            self.artifacts.append({"label": label, "content": content, "kind": kind})
+
     @property
     def call_count(self) -> int:
         return len(self.calls)
+
+    @property
+    def has_content(self) -> bool:
+        return len(self.calls) > 0 or len(self.artifacts) > 0
 
     @property
     def elapsed_ms(self) -> int:
@@ -79,6 +89,13 @@ def record_call(call_data: Dict[str, Any]) -> None:
     ctx = _current_step.get(None)
     if ctx is not None:
         ctx.record_call(call_data)
+
+
+def record_artifact(label: str, content: str, kind: str = "text") -> None:
+    """向当前步骤追加产物记录。若无活动步骤则静默跳过。"""
+    ctx = _current_step.get(None)
+    if ctx is not None:
+        ctx.record_artifact(label, content, kind)
 
 
 def new_step_id() -> str:

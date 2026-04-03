@@ -39,14 +39,17 @@ class TestPipelineChapters:
 
     def test_chapter_for_stage(self):
         assert chapter_for_stage("extract_text") == "text_prep"
-        assert chapter_for_stage("anchor_generation") == "world_scan"
-        assert chapter_for_stage("entity_resolution") == "fact_extract"
-        assert chapter_for_stage("ontology") == "output_settle"
+        assert chapter_for_stage("smart_segmentation") == "text_prep"
+        assert chapter_for_stage("sequential_reading") == "deep_reading"
+        assert chapter_for_stage("ontology") == "integration"
+        assert chapter_for_stage("agent_profiles") == "agent_build"
         assert chapter_for_stage("nonexistent") == ""
 
     def test_label_for_chapter(self):
         assert label_for_chapter("text_prep") == "文本准备"
-        assert label_for_chapter("output_settle") == "成果沉淀"
+        assert label_for_chapter("deep_reading") == "深度阅读"
+        assert label_for_chapter("integration") == "全局整合"
+        assert label_for_chapter("agent_build") == "角色构建"
         assert label_for_chapter("unknown") == ""
 
 

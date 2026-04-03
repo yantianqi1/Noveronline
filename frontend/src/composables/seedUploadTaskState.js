@@ -6,6 +6,7 @@ export const DEFAULT_TASK_METRICS = {
   completedBlocks: 0,
   totalBlocks: 0,
   activeWorkers: 0,
+  segmentCount: 0,
 };
 
 export const DEFAULT_LLM_ACTIVITY = {
@@ -24,6 +25,7 @@ function structuredTaskMetrics() {
     completed_blocks: 0,
     total_blocks: 0,
     active_workers: 0,
+    segment_count: 0,
   };
 }
 

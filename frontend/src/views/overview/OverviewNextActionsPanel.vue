@@ -5,7 +5,6 @@
         <div class="panel-code mono">下一步入口</div>
         <h3 class="title-ancient">接下来去哪里</h3>
       </div>
-      <span class="panel-note">不再用占位插画填空，而是给出可执行入口</span>
     </div>
 
     <div class="action-grid">
@@ -62,8 +61,7 @@ function handleCommand(command) {
   align-items: flex-start;
 }
 
-.panel-code,
-.panel-note {
+.panel-code {
   color: var(--text-dim);
   font-size: 12px;
 }

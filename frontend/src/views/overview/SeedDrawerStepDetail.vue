@@ -3,12 +3,32 @@
     <!-- Loading state -->
     <div v-if="loading" class="detail-loading mono">正在加载 trace...</div>
 
-    <!-- No trace available -->
-    <div v-else-if="!trace" class="detail-empty mono">
-      <template v-if="step.status === 'active'">步骤执行中...</template>
-      <template v-else-if="!step.hasTrace">此步骤无 LLM 调用记录</template>
-      <template v-else>无法加载 trace 数据</template>
+    <!-- Step still running -->
+    <div v-else-if="step.status === 'active'" class="detail-empty mono">步骤执行中...</div>
+
+    <!-- No trace: show step info instead of error -->
+    <div v-else-if="!trace && !step.hasTrace" class="detail-no-trace">
+      <div class="no-trace-title">{{ step.title }}</div>
+      <div v-if="step.detail" class="no-trace-detail mono">{{ step.detail }}</div>
+      <div v-else class="no-trace-detail mono">此步骤无详细记录</div>
     </div>
+
+    <!-- Trace load failed (hasTrace=true but fetch returned null) -->
+    <div v-else-if="!trace" class="detail-empty mono">
+      trace 加载失败（{{ step.stepId }}），请刷新重试
+    </div>
+
+    <!-- Artifacts (non-LLM step outputs) -->
+    <template v-else-if="hasArtifacts && !hasCalls">
+      <div v-for="(artifact, idx) in trace.artifacts" :key="idx" class="artifact-section">
+        <div class="artifact-header">
+          <span class="artifact-label">{{ artifact.label }}</span>
+          <span v-if="artifact.kind === 'stat'" class="artifact-kind-badge stat">统计</span>
+          <span v-else-if="artifact.kind === 'json'" class="artifact-kind-badge json">JSON</span>
+        </div>
+        <pre class="artifact-content mono">{{ artifact.content }}</pre>
+      </div>
+    </template>
 
     <!-- Single call: direct display -->
     <template v-else-if="trace.calls.length === 1">
@@ -63,11 +83,24 @@
         </details>
       </div>
     </template>
+
+    <!-- Artifacts alongside calls (shown below LLM calls if both exist) -->
+    <template v-if="trace && hasArtifacts && hasCalls">
+      <div class="artifacts-divider">处理产物</div>
+      <div v-for="(artifact, idx) in trace.artifacts" :key="'a' + idx" class="artifact-section">
+        <div class="artifact-header">
+          <span class="artifact-label">{{ artifact.label }}</span>
+          <span v-if="artifact.kind === 'stat'" class="artifact-kind-badge stat">统计</span>
+          <span v-else-if="artifact.kind === 'json'" class="artifact-kind-badge json">JSON</span>
+        </div>
+        <pre class="artifact-content mono">{{ artifact.content }}</pre>
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { getStepTrace } from "../../api/project.js";
 
 const props = defineProps({
@@ -78,6 +111,9 @@ const props = defineProps({
 const loading = ref(false);
 const trace = ref(null);
 const cache = new Map();
+
+const hasCalls = computed(() => trace.value?.calls?.length > 0);
+const hasArtifacts = computed(() => trace.value?.artifacts?.length > 0);
 
 async function fetchTrace() {
   if (!props.taskId || !props.step.stepId || !props.step.hasTrace) {
@@ -97,7 +133,8 @@ async function fetchTrace() {
     const data = resp?.data || null;
     if (data) cache.set(cacheKey, data);
     trace.value = data;
-  } catch {
+  } catch (err) {
+    console.warn(`[StepTrace] 加载失败 task=${props.taskId} step=${props.step.stepId}`, err);
     trace.value = null;
   } finally {
     loading.value = false;
@@ -123,6 +160,23 @@ watch(
   font-size: 12px;
   color: var(--text-dim);
   padding: var(--space-sm);
+}
+
+.detail-no-trace {
+  padding: var(--space-sm);
+}
+
+.no-trace-title {
+  font-size: 13px;
+  color: var(--text-sub);
+  font-weight: 600;
+}
+
+.no-trace-detail {
+  margin-top: var(--space-xs);
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
 }
 
 .call-section {
@@ -218,5 +272,65 @@ watch(
   font-size: 12px;
   color: var(--accent-seal);
   background: rgba(155, 67, 38, 0.05);
+}
+
+.artifact-section {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.artifact-section + .artifact-section {
+  margin-top: var(--space-sm);
+}
+
+.artifact-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--bg-paper);
+}
+
+.artifact-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-sub);
+}
+
+.artifact-kind-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+}
+
+.artifact-kind-badge.stat {
+  background: rgba(56, 106, 79, 0.12);
+  color: var(--accent-green);
+}
+
+.artifact-kind-badge.json {
+  background: rgba(61, 90, 128, 0.12);
+  color: var(--accent-blue, #3d5a80);
+}
+
+.artifact-content {
+  margin: 0;
+  padding: var(--space-sm);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.artifacts-divider {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: var(--space-xs) 0;
+  border-top: 1px solid var(--line-soft);
+  margin-top: var(--space-sm);
 }
 </style>

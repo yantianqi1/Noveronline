@@ -22,11 +22,15 @@ class _ChatProxy:
 
 
 class StubbedResponseLLMClient(LLMClient):
-    def __init__(self, response: str):
+    def __init__(self, response: str, finish_reason: str = "stop"):
         self.response = response
+        self.finish_reason = finish_reason
 
     def chat(self, messages, temperature=0.7, max_tokens=4096, response_format=None):
         return self.response
+
+    def _chat_json_call(self, messages, temperature, max_tokens):
+        return self.response, self.finish_reason
 
 
 def _fake_chat_response(content: str):
@@ -262,3 +266,71 @@ def test_llm_client_chat_does_not_retry_on_bad_request(monkeypatch):
         client.chat(messages=[{"role": "user", "content": "hello"}])
 
     assert attempts["count"] == 1
+
+
+# ── chat_json_value 降温重试测试 ──
+
+
+class _MultiAttemptLLMClient(LLMClient):
+    """模拟多次调用返回不同结果的 LLM 客户端。"""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._attempt = 0
+        self._recorded_temps = []
+        self.model = "test-model"
+
+    def _chat_json_call(self, messages, temperature, max_tokens):
+        self._recorded_temps.append(temperature)
+        idx = min(self._attempt, len(self._responses) - 1)
+        self._attempt += 1
+        content, finish_reason = self._responses[idx]
+        return content, finish_reason
+
+
+def test_chat_json_value_retries_with_temperature_reduction():
+    """首次 JSON 无效，第二次成功，温度应降低。"""
+    client = _MultiAttemptLLMClient([
+        ("这不是JSON", "stop"),
+        ('{"ok": true}', "stop"),
+    ])
+    result = client.chat_json_value(messages=[{"role": "user", "content": "test"}], temperature=0.3)
+    assert result == {"ok": True}
+    assert client._attempt == 2
+    assert client._recorded_temps[0] == 0.3
+    assert client._recorded_temps[1] == pytest.approx(0.15)
+
+
+def test_chat_json_value_passes_truncated_flag():
+    """finish_reason='length' 时应传递 truncated=True 到 parse_json_response。"""
+    # 截断的 JSON（缺少闭合括号）只在 truncated=True 时才能修复
+    client = _MultiAttemptLLMClient([
+        ('{"name": "宁毅"', "length"),
+    ])
+    result = client.chat_json_value(messages=[{"role": "user", "content": "test"}])
+    assert result["name"] == "宁毅"
+
+
+def test_chat_json_value_raises_after_three_failures():
+    """3 次全部失败后应抛出 ValueError。"""
+    client = _MultiAttemptLLMClient([
+        ("bad1", "stop"),
+        ("bad2", "stop"),
+        ("bad3", "stop"),
+    ])
+    with pytest.raises(ValueError, match="LLM返回的JSON格式无效"):
+        client.chat_json_value(messages=[{"role": "user", "content": "test"}])
+    assert client._attempt == 3
+
+
+def test_chat_json_value_temperature_floor():
+    """温度不应降到 0.05 以下。"""
+    client = _MultiAttemptLLMClient([
+        ("bad", "stop"),
+        ("bad", "stop"),
+        ('{"ok": true}', "stop"),
+    ])
+    result = client.chat_json_value(messages=[{"role": "user", "content": "test"}], temperature=0.1)
+    assert result == {"ok": True}
+    # temp 0.1, 0.1-0.15=max(-.05, .05)=0.05, 0.1-0.30=max(-.2, .05)=0.05
+    assert client._recorded_temps[2] == pytest.approx(0.05)

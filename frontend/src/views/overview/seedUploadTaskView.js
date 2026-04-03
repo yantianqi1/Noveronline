@@ -1,30 +1,20 @@
 export const IDLE_TIMELINE = [
-  ["extract_text", "提取上传文本", "读取文稿、清洗格式并准备第一阶段输入。"],
-  ["segment_chapters", "切分章节与叙事段", "识别章节边界，建立可追踪的顺序结构。"],
-  ["skeleton_timeline", "骨架时间线扫描", "顺序预扫描全文角色与组织，为并发分析补齐全局上下文。"],
-  ["build_blocks", "组装分析块", "把章节整理成带上下文重叠的分析块。"],
-  ["anchor_generation", "生成剧情锚点", "先按区间生成世界状态锚点，给后续并发提取提供前情。"],
-  ["extract_local_facts", "提取块内事实", "并发抽取角色、事件、组织和局部关系。"],
-  ["merge_story_memory", "汇总故事记忆", "把各块事实按顺序折叠成可继承的前情记忆。"],
-  ["entity_resolution", "实体消歧", "从全局视角合并别名和高置信重复实体。"],
-  ["contextual_block_analysis", "分析剧情块", "结合前情快照理解每个块如何推进主线。"],
-  ["chapter_card_generation", "生成章节卡", "逐章调用大模型生成结构化章节卡，供后续历史召回使用。"],
-  ["consistency_audit", "连续性审计", "检查冲突、别名歧义与前后文不一致。"],
-  ["build_continuity", "章节连续性摘要", "回写兼容旧链路的章节连续性产物。"],
-  ["seed_analysis", "聚合种子分析", "汇总角色、组织与关系，生成可用种子。"],
-  ["ontology", "生成小说本体", "归纳实体类型、关系类型与故事主轴。"],
+  ["extract_text", "提取上传文本", "读取文稿、清洗格式并准备分析输入。"],
+  ["smart_segmentation", "智能分段", "按令牌预算将章节分组为阅读段。"],
+  ["sequential_reading", "顺序深度阅读", "LLM逐段精读小说，提取角色、关系和剧情。"],
+  ["global_integration", "全局整合", "整合阅读笔记，聚合角色、组织与关系。"],
+  ["ontology", "梳理故事结构", "归纳实体类型、关系类型与故事主轴。"],
+  ["agent_profiles", "角色Agent档案", "为重要角色生成可用于对话和模拟的完整档案。"],
 ];
 
 const STAGE_PROGRESS_RANGE = {
-  extract_local_facts: { start: 50, end: 58 },
-  contextual_block_analysis: { start: 72, end: 78 },
-  chapter_card_generation: { start: 78, end: 82 },
+  sequential_reading: { start: 10, end: 75 },
 };
 
 const STRUCTURED_PROGRESS_ERROR = "Expected structured progress_detail";
 const DETAIL_KEYS = ["stage", "stage_label", "active_stage", "task_metrics", "llm_activity", "timeline"];
 const ACTIVE_STAGE_KEYS = ["key", "label", "progress", "status"];
-const METRIC_KEYS = ["chapter_count", "block_count", "completed_blocks", "total_blocks", "active_workers"];
+const METRIC_KEYS = ["chapter_count", "block_count", "completed_blocks", "total_blocks", "active_workers", "segment_count"];
 const LLM_ACTIVITY_KEYS = ["enabled", "mode", "model", "action", "target_type", "target_label"];
 const TIMELINE_EVENT_KEYS = ["id", "timestamp", "stage", "level", "status", "title", "detail", "meta"];
 
@@ -138,36 +128,14 @@ function normalizeActiveStage(activeStage) {
 }
 
 function resolveStageCounts(stageKey, taskMetrics, timeline) {
-  if (stageKey === "chapter_card_generation") {
-    return resolveChapterCardCounts(taskMetrics, timeline);
-  }
-  if (stageKey === "extract_local_facts" || stageKey === "contextual_block_analysis") {
+  if (stageKey === "sequential_reading") {
     return {
       completed: readSafeNumber(taskMetrics?.completedBlocks),
-      total: readSafeNumber(taskMetrics?.totalBlocks),
-      unit: "块",
+      total: readSafeNumber(taskMetrics?.segmentCount || taskMetrics?.totalBlocks),
+      unit: "段",
     };
   }
   return { completed: 0, total: 0, unit: "" };
-}
-
-function resolveChapterCardCounts(taskMetrics, timeline) {
-  const completed = new Set();
-  for (const event of Array.isArray(timeline) ? timeline : []) {
-    if (event?.stage !== "chapter_card_generation" || event?.status !== "completed") {
-      continue;
-    }
-    const order = event?.meta?.chapter_order;
-    if (typeof order === "number" && order > 0) {
-      completed.add(order);
-    }
-  }
-  const total = readSafeNumber(taskMetrics?.chapterCount);
-  return {
-    completed: total ? Math.min(completed.size, total) : completed.size,
-    total,
-    unit: "章",
-  };
 }
 
 function interpolateStageProgress(bounds, completed, total) {
@@ -187,6 +155,7 @@ function normalizeMetrics(metrics) {
     completedBlocks: readNumber(value.completed_blocks, "progress_detail.task_metrics.completed_blocks"),
     totalBlocks: readNumber(value.total_blocks, "progress_detail.task_metrics.total_blocks"),
     activeWorkers: readNumber(value.active_workers, "progress_detail.task_metrics.active_workers"),
+    segmentCount: readNumber(value.segment_count, "progress_detail.task_metrics.segment_count"),
   };
 }
 

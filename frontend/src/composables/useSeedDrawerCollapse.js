@@ -10,16 +10,16 @@
  */
 import { reactive } from "vue";
 
-const STEP_AUTO_COLLAPSE_MS = 800;
+const STEP_AUTO_COLLAPSE_MS = 1000;
+const CHAPTER_AUTO_COLLAPSE_MS = 1200;
 const STEP_LOCK_DURATION_MS = 10_000;
 
-export function useSeedDrawerCollapse() {
-  // step_id → { collapsed, lockedUntil }
-  const stepStates = reactive(new Map());
-  // chapter_key → { collapsed, manuallyExpanded }
-  const chapterStates = reactive(new Map());
+// 模块级单例：跨组件 mount/unmount 保持折叠状态
+const stepStates = reactive(new Map());
+const chapterStates = reactive(new Map());
+const timers = new Map();
 
-  const timers = new Map();
+export function useSeedDrawerCollapse() {
 
   function getStepState(stepId) {
     if (!stepStates.has(stepId)) {
@@ -101,7 +101,7 @@ export function useSeedDrawerCollapse() {
       if (!s.collapsed && now < s.lockedUntil) return; // 有锁定步骤
     }
 
-    // 800ms 后折叠章节
+    // 章节折叠延迟比步骤更长，形成视觉序列感
     const timerKey = `ch:${chapterKey}`;
     clearStepTimer(timerKey);
     const timer = setTimeout(() => {
@@ -109,7 +109,7 @@ export function useSeedDrawerCollapse() {
       if (cc.manuallyExpanded) return;
       cc.collapsed = true;
       timers.delete(timerKey);
-    }, STEP_AUTO_COLLAPSE_MS);
+    }, CHAPTER_AUTO_COLLAPSE_MS);
     timers.set(timerKey, timer);
   }
 
@@ -120,6 +120,15 @@ export function useSeedDrawerCollapse() {
     }
   }
 
+  function reset() {
+    for (const key of timers.keys()) {
+      clearTimeout(timers.get(key));
+    }
+    timers.clear();
+    stepStates.clear();
+    chapterStates.clear();
+  }
+
   return {
     isStepCollapsed,
     isChapterCollapsed,
@@ -128,5 +137,6 @@ export function useSeedDrawerCollapse() {
     expandChapter,
     collapseChapter,
     onStepCompleted,
+    reset,
   };
 }

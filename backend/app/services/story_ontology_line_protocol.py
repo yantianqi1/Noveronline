@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 from .seed_line_protocol import parse_csv_list, parse_kv_line, protocol_lines
 from .story_ontology_protocol_prompts import build_story_ontology_protocol_prompt
@@ -69,7 +72,10 @@ class StoryOntologyLineProtocolExecutor:
             if record_type == "SUMMARY":
                 summary = parse_kv_line(line, record_type="SUMMARY", required_keys=("text",))["text"]
                 continue
-            focus.append(parse_kv_line(line, record_type="FOCUS", required_keys=("text",))["text"])
+            if record_type == "FOCUS":
+                focus.append(parse_kv_line(line, record_type="FOCUS", required_keys=("text",))["text"])
+            else:
+                logger.warning("edge_types 子任务: 忽略未知记录类型 %r: %s", record_type, line[:120])
         return edge_types, summary, focus
 
     def _attributes(self, value: str) -> List[Dict[str, str]]:

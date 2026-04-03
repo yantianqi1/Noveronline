@@ -1,11 +1,8 @@
 <template>
   <section v-if="projects.length" class="recent-projects-card">
     <div class="section-header">
-      <div>
-        <div class="section-code mono">最近卷宗</div>
-        <h3 class="title-ancient">当前卷宗池</h3>
-      </div>
-      <RouterLink to="/archive-library" class="btn subtle">查看全部</RouterLink>
+      <h3 class="section-title">最近卷宗</h3>
+      <RouterLink to="/archive-library" class="btn subtle small">查看全部</RouterLink>
     </div>
 
     <div class="project-strip">
@@ -49,46 +46,47 @@ function statusClass(status) {
   width: 100%;
 }
 
-.section-header,
-.project-top,
-.project-footer {
+.section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: var(--space-md);
-  flex-wrap: wrap;
+  margin-bottom: 10px;
 }
 
-.section-code {
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.section-header {
-  margin-bottom: var(--space-md);
+.section-title {
+  font-size: 16px;
+  font-family: "ZCOOL XiaoWei", serif;
+  margin: 0;
 }
 
 .project-strip {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-md);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .project-mini-card {
-  min-height: 182px;
-  padding: var(--space-md);
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  gap: 6px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 246, 238, 0.96)),
     radial-gradient(circle at 100% 0%, rgba(61, 90, 128, 0.05), transparent 28%);
 }
 
+.project-top,
+.project-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
 .project-info {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  gap: 4px;
   flex: 1;
 }
 
@@ -97,8 +95,8 @@ function statusClass(status) {
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 18px;
-  padding: 4px;
+  font-size: 16px;
+  padding: 2px;
   line-height: 1;
 }
 
@@ -108,28 +106,37 @@ function statusClass(status) {
 
 .project-name {
   font-weight: 700;
-  font-size: 18px;
+  font-size: 14px;
   color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .project-goal {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-sub);
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 .project-footer {
   margin-top: auto;
-  padding-top: var(--space-sm);
+  padding-top: 6px;
   border-top: 1px solid var(--line-soft);
-  font-size: 12px;
+  font-size: 11px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
+  .project-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
   .project-strip {
     grid-template-columns: 1fr;
   }

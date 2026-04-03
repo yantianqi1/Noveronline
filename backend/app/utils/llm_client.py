@@ -213,28 +213,72 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens: int = 4096,
     ) -> Any:
-        response = self.chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
-        try:
-            return parse_json_response(response)
-        except ValueError:
-            logger.warning("LLM 首次返回的 JSON 无效，正在重试 (model=%s)", self.model)
-            # 将首次的错误回复和纠正提示加入上下文，让 LLM 修正
-            retry_messages = list(messages) + [
-                {"role": "assistant", "content": response},
-                {"role": "user", "content": JSON_RETRY_PROMPT},
-            ]
-            retry_response = self.chat(
-                messages=retry_messages,
-                temperature=max(temperature, 0.1),
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},
+        last_response = ""
+        last_finish = "stop"
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            current_temp = max(temperature - attempt * 0.15, 0.05)
+            if attempt == 0:
+                call_messages = messages
+            else:
+                call_messages = list(messages) + [
+                    {"role": "assistant", "content": last_response},
+                    {"role": "user", "content": JSON_RETRY_PROMPT},
+                ]
+            content, finish_reason = self._chat_json_call(
+                call_messages, current_temp, max_tokens,
             )
-            return parse_json_response(retry_response)
+            try:
+                return parse_json_response(content, truncated=(finish_reason == "length"))
+            except ValueError:
+                last_response = content
+                last_finish = finish_reason
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "LLM JSON attempt %d/%d failed (finish=%s, model=%s), retrying",
+                        attempt + 1, max_attempts, finish_reason, self.model,
+                    )
+        # 最终尝试，让 ValueError 传播到上层 should_use_rule_fallback
+        return parse_json_response(last_response, truncated=(last_finish == "length"))
+
+    def _chat_json_call(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple:
+        """执行一次 JSON 模式的 LLM 调用，返回 (content, finish_reason)。"""
+        step_ctx = get_current_step()
+        captured_messages = copy.deepcopy(messages) if step_ctx else None
+        t0 = time.monotonic()
+
+        call_id = self._track_register("chat_json")
+        try:
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            response = self._chat_with_retry(kwargs, call_id)
+            content = self._clean_content(response.choices[0].message.content)
+            finish_reason = response.choices[0].finish_reason or "stop"
+
+            if finish_reason == "length":
+                logger.warning(
+                    "LLM JSON 输出被截断 (finish_reason=length, model=%s)", self.model,
+                )
+
+            if step_ctx:
+                self._record_trace(step_ctx, captured_messages, content, None, t0, "chat_json")
+            return content, finish_reason
+        except Exception as exc:
+            if step_ctx:
+                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat_json")
+            raise
+        finally:
+            self._track_unregister(call_id)
 
     def _slot(self):
         if not self.concurrency_service or not self.channel_key:

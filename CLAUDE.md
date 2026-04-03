@@ -49,31 +49,49 @@ PYTHONPATH=$(pwd) pytest tests/test_some_file.py::test_function_name            
 
 Four-layer structure under `backend/app/`:
 
-- **`api/`** — Flask blueprints exposing REST endpoints. Key blueprints: `project.py` (project CRUD, novel seed upload), `novel.py` (story analysis, archive generation, chapter context, draft generation), `worldline_session.py` + `worldline_interaction.py` (world-line lifecycle), `writer_agent.py` (writer workbench: scenes, chapters, presets, streaming agent runs), `llm.py` (LLM facility panel), `archive.py` (archive library).
+- **`api/`** — Flask blueprints exposing REST endpoints. Key blueprints: `project.py` (project CRUD, novel seed upload, task cancellation, step trace API), `novel.py` (story analysis, archive generation, chapter context, draft generation), `worldline_session.py` + `worldline_interaction.py` (world-line lifecycle), `writer_agent.py` (writer workbench: scenes, chapters, presets, streaming agent runs), `llm.py` (LLM facility panel), `archive.py` (archive library).
 - **`services/`** — Business logic, organized into:
-  - Core analysis: `novel_seed_analyzer.py` (offline character/organization/relationship extraction), `story_ontology_generator.py` (automatic ontology from novels), `narrative_entity_archivist.py` (character/faction archive generation)
+  - **Seed pipeline (4-stage)**: `seed_extract_runner.py` (orchestrator), `smart_novel_segmenter.py` (token-budget segmentation), `sequential_reader.py` (LLM sequential reading with running context), `reading_notes_manager.py` (3-tier notes: core_facts / relationship_graph / plot_state with arc/volume summaries), `character_agent_profile_generator.py` (concurrent profile generation for important characters), `seed_task_progress.py` (structured progress tracking with timeline events), `seed_pipeline_chapters.py` (4-chapter definitions: text_prep / deep_reading / integration / agent_build)
+  - Core analysis: `story_ontology_generator.py` (automatic ontology from novels), `narrative_entity_archivist.py` (character/faction archive generation)
+  - Step tracing: `step_trace_context.py` (contextvars-based trace context), `step_trace_writer.py` (trace bundle file I/O) — captures LLM prompts/responses per step for UI inspection
   - World-line: `worldline_engine.py` (simulation engine with filesystem persistence), `worldline_runtime_service.py` (runtime operations)
   - Writer pipeline: `chapter_context_pack_builder.py` (Chapter Context Pack assembly), `archive_memory_review_service.py` (canon/candidate memory review), `writer_prompt_formatter.py` (prompt formatting from context + memory + style)
   - Draft agents (`services/agents/draft/`): Multi-agent prose generation pipeline — `orchestrator.py` coordinates `context_agent.py` → `memory_agent.py` → `style_agent.py` → `writer_agent.py` → `reviewer_agent.py`
   - Writer agent service (`services/writer_agent/`): Workbench persistence layer — `novel_db.py` (SQLite data layer for chapters/scenes/presets/sessions), `orchestrator.py` + `agent_loop.py` (agent decision loop with tool use), `chapter_service.py` / `scene_service.py` / `preset_service.py` (CRUD), `tools.py` + `tool_executors.py` (agent tool definitions and execution), `prompts.py` (prompt templates)
   - Other: `character_agent_service.py` (character dialogue), `plot_inspiration_engine.py` (plot inspiration), `llm_router.py` + `llm_module_registry.py` (LLM module binding/routing), `local_story_graph_builder.py` (local graph: `story_graph.json` + `story_graph.sqlite3`)
-- **`models/`** — Data models and persistence: `project.py` (ProjectManager), `task.py` (TaskManager), `worldline.py` (session/branch data models).
-- **`utils/`** — `llm_client.py` (OpenAI-compatible wrapper), `file_parser.py` (PDF/TXT/MD parsing), `llm_json.py` (JSON response normalization), `retry.py`.
+- **`models/`** — Data models and persistence: `project.py` (ProjectManager), `task.py` (TaskManager with cancellation support), `worldline.py` (session/branch data models).
+- **`utils/`** — `llm_client.py` (OpenAI-compatible wrapper with 3-attempt JSON retry and step trace capture), `file_parser.py` (PDF/TXT/MD parsing), `llm_json.py` (5-level JSON parsing fallback), `task_file_logger.py` (per-task file logging), `retry.py`.
 
 ### Frontend (Vue 3 + Vite)
 
 Under `frontend/src/`:
 
-- **`views/`** — Page components for Overview, Guide, Archive Library, Story Graph, World-line, Writer Workbench, Character Console, LLM Facility. The Writer Workbench (`WriterWorkbenchView.vue`) is the most complex view with project/chapter/POV selection, SSE streaming output, context inspector, and scene management. Sub-components in `views/writer/` handle scene list, scene editor, preset editor, and layout/state management.
+- **`views/`** — Page components for Overview, Guide, Archive Library, Story Graph, World-line, Writer Workbench, Character Console, LLM Facility. The Overview page (`OverviewView.vue`) has two layout modes: idle (command grid + recent projects + upload/analysis panels) and processing (hero + 2-column grid with workflow stream + sticky focus card sidebar). The Writer Workbench (`WriterWorkbenchView.vue`) is the most complex view with project/chapter/POV selection, SSE streaming output, context inspector, and scene management. Sub-components in `views/writer/` handle scene list, scene editor, preset editor, and layout/state management.
+- **`views/overview/`** — Seed processing UI: `InlineWorkflowStream.vue` (orchestrator), `InlineStreamSummaryBar.vue` (per-chapter progress), `InlineStreamChatContent.vue` (expandable chapter→step hierarchy), `SeedDrawerStepItem.vue` + `SeedDrawerStepDetail.vue` (step trace viewer with full prompt/response), `PipelineVisualization.vue` (6-stage rail with sliding window), `seedPipelineChapters.js` (chapter definitions synced with backend), `seedUploadTaskView.js` (stage progress interpolation and timeline normalization)
 - **`api/`** — Domain-specific API clients (`project.js`, `novel.js`, `worldline.js`, `archive.js`, `llm.js`, `writerAgent.js`) with base HTTP config in `http.js`. Writer agent client (`writerAgent.js`) handles SSE streaming for agent runs.
-- **`composables/`** — Vue composables for shared state
+- **`composables/`** — Vue composables for shared state. `useSeedUpload.js` (task polling at 1200ms), `seedUploadTaskState.js` (state normalization), `useSeedDrawerCollapse.js` (auto-collapse state machine for step/chapter items)
 - **`components/`** — Reusable UI components
 
 Vite dev server proxies `/api` requests to the Flask backend at `http://127.0.0.1:5101`.
 
+### Seed Pipeline (4-Stage Architecture)
+
+The seed extraction pipeline uses a 4-stage LLM-driven sequential reading model:
+
+1. **Text Preparation** (`extract_text` → `smart_segmentation`): Parse uploaded files, segment chapters into reading segments respecting token budgets (default 50k tokens/segment)
+2. **Sequential Deep Reading** (`sequential_reading`): LLM reads segments sequentially maintaining running context. Produces per-segment reading notes (characters, organizations, relationships, world rules, plot threads). Generates arc summaries every 5 segments and volume summaries for long novels.
+3. **Global Integration** (`global_integration` → `ontology`): Aggregates reading notes into `seed_analysis.json`, generates story ontology (entity types, edge types, story focus dimensions)
+4. **Character Agent Profiles** (`agent_profiles`): Generates structured agent profiles for important characters (>= 2 segment appearances) with personality, speech patterns, relationships, capabilities, knowledge boundaries, motivations
+
+The pipeline tracks progress via `SeedTaskProgressTracker` which emits structured timeline events with step-level trace capture. Each step's LLM prompts and responses are recorded in trace bundles on disk (`task_traces/<task_id>/steps/<step_id>.json`) and viewable in the frontend.
+
+Frontend chapter mapping is defined in `frontend/src/views/overview/seedPipelineChapters.js` (must stay in sync with `backend/app/services/seed_pipeline_chapters.py`). Four UI chapters: 文本准备 / 深度阅读 / 全局整合 / 角色构建.
+
 ### Data Flow
 
-**Main pipeline:** Upload novel text → file parsing → project creation → ontology generation + offline seed analysis → entity archive generation → world-line session with variable injection → branch evolution, character dialogue, agent actions → plot inspiration
+**Seed pipeline:** Upload novel text → file parsing → smart segmentation → sequential LLM reading with running notes → global integration (seed_analysis.json) → ontology generation → character agent profile generation
+
+**Post-seed:** Entity archive generation → world-line session with variable injection → branch evolution, character dialogue, agent actions → plot inspiration
 
 **Writer pipeline:** Chapter Context Pack assembly (must_know / should_know / warnings / scene_candidates / writer_prompt_block) → memory review (canon/candidate/experiment tiers) → multi-agent draft generation (context → memory → style → writer → reviewer) via SSE streaming → scene management and compilation
 

@@ -594,6 +594,38 @@ class NovelDB:
             ).fetchone()
             return _row_to_dict(row)
 
+    def ensure_chapter(self, project_id: str, chapter_id: str, chapter_order: int = 0) -> None:
+        """Create a chapter_content row if it doesn't exist yet."""
+        self.ensure_schema(project_id)
+        now = _now()
+        with self.connect(project_id) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM chapter_content WHERE chapter_id = ?", (chapter_id,)
+            ).fetchone()
+            if existing:
+                return
+            # Auto-assign chapter_order if not provided
+            if not chapter_order:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(chapter_order), 0) + 1 FROM chapter_content WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()
+                chapter_order = row[0] if row else 1
+            conn.execute(
+                """
+                INSERT INTO chapter_content
+                    (chapter_id, project_id, chapter_order, title, content,
+                     word_count, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, '', 0, 'draft', ?, ?)
+                """,
+                (chapter_id, project_id, chapter_order, "", now, now),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO chapter_meta (chapter_id, updated_at) VALUES (?, ?)",
+                (chapter_id, now),
+            )
+            conn.commit()
+
     def upsert_scene(
         self,
         project_id: str,

@@ -4,7 +4,7 @@
       <div>
         <div class="panel-code mono">启动新任务</div>
         <h2 class="title-ancient">卷宗投放</h2>
-        <p class="subtitle">上传文本、填写分析目标，然后把新的种子任务送入后台管线。</p>
+        <p class="subtitle">上传小说文本，填写分析目标，开始分析。</p>
       </div>
       <button class="btn subtle small" @click="panelExpanded = !panelExpanded">
         {{ panelExpanded ? "收起面板" : "展开面板" }}
@@ -34,7 +34,7 @@ const props = defineProps({
   initiallyExpanded: { type: Boolean, default: true },
 });
 
-const emit = defineEmits(["uploaded", "open-drawer"]);
+const emit = defineEmits(["uploaded"]);
 const upload = useSeedUpload();
 const panelExpanded = ref(props.initiallyExpanded);
 
@@ -74,7 +74,7 @@ watch(
 <style scoped>
 .upload-panel {
   width: 100%;
-  padding: var(--space-xl);
+  padding: 16px 20px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 246, 238, 0.96)),
     radial-gradient(circle at 100% 0%, rgba(61, 90, 128, 0.05), transparent 26%);

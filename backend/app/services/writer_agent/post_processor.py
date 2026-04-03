@@ -31,6 +31,10 @@ class PostProcessor:
         """
         db = NovelDB()
 
+        # Ensure chapter exists (auto-create if needed)
+        if chapter_id:
+            db.ensure_chapter(project_id, chapter_id)
+
         # Save the scene
         db.upsert_scene(
             project_id=project_id,

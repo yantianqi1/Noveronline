@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .character_agent_prompts import build_character_profile_prompt
 from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
+from .step_trace_context import get_current_step, _current_step
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,13 @@ class CharacterAgentProfileGenerator:
 
         profiles: Dict[str, Any] = {}
         client = self.llm_router.build_client(MODULE_KEY)
+        # 捕获主线程的 step trace 上下文，工作线程需要手动继承
+        _parent_step_ctx = get_current_step()
 
         def _generate_one(name: str) -> tuple[str, Dict[str, Any]]:
+            # 将主线程的 StepTraceContext 传播到工作线程，使 LLM 调用的 trace 被正确记录
+            if _parent_step_ctx is not None:
+                _current_step.set(_parent_step_ctx)
             char_data = characters[name]
             rel_entries = [
                 e for e in relationship_graph

@@ -2,7 +2,7 @@
   <section class="pipeline-shell" :class="{ compact }">
     <div class="pipeline-head">
       <div>
-        <h3>{{ compact ? "当前阶段轨道" : "种子提取管线" }}</h3>
+        <h3>{{ compact ? "当前阶段轨道" : "分析流程" }}</h3>
         <p>{{ headline }}</p>
       </div>
       <div v-if="!compact" class="pipeline-legend">
@@ -10,7 +10,6 @@
         <span class="legend-chip active">进行中</span>
         <span class="legend-chip done">已完成</span>
       </div>
-      <span v-else class="rail-note mono">窗口化轨道</span>
     </div>
 
     <div v-if="compact" class="pipeline-flow compact">
@@ -58,12 +57,12 @@ const headline = computed(() => {
       : "后台正在依次推进骨架扫描、事实提取与种子聚合。";
   }
   if (props.taskStatus === "completed" || props.uploadPhase === "success") {
-    return "本轮管线已经走完，可继续查看种子分析、档案和世界线。";
+    return "分析已完成，可以查看档案和分析结果。";
   }
   if (props.taskStatus === "failed" || props.uploadPhase === "error") {
     return "当前轮次中断了，完整卷宗会保留失败阶段。";
   }
-  return "当前没有活跃任务时，只显示当前流程骨架和后续阶段数量。";
+  return "等待新的分析任务启动。";
 });
 
 function railKey(item) { return item.kind === "summary" ? `${item.state}_${item.count}` : item.stage; }

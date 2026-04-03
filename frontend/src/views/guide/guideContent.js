@@ -2,14 +2,14 @@ import { CONCEPT_TOOLTIPS } from "../../utils/chineseDisplay.js";
 
 export const GUIDE_CONCEPT_ITEMS = Object.freeze([
   {
-    key: "seed_analysis",
-    label: "种子分析",
-    description: CONCEPT_TOOLTIPS.seed_analysis,
+    key: "sequential_reading",
+    label: "顺序深度阅读",
+    description: CONCEPT_TOOLTIPS.sequential_reading,
   },
   {
-    key: "skeleton_timeline",
-    label: "骨架时间线",
-    description: CONCEPT_TOOLTIPS.skeleton_timeline,
+    key: "global_integration",
+    label: "全局整合",
+    description: CONCEPT_TOOLTIPS.global_integration,
   },
   {
     key: "archive",

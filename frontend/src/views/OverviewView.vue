@@ -1,17 +1,15 @@
 <template>
   <div class="overview-stage stack">
-    <section class="overview-command-grid">
-      <div class="command-column stack">
-        <OverviewHeroPanel
-          :projects="projects"
-          :upload-phase="upload.state.uploadPhase"
-          :active-stage-label="upload.state.activeStage.label"
-          :error-message="projectActionError"
-          @refresh="refresh"
-          @start-new="scrollToUpload"
-        />
-        <OverviewNextActionsPanel :project="nextActionProject" @start-new="scrollToUpload" />
-      </div>
+    <!-- Idle: command grid with hero + focus card side by side -->
+    <section v-if="!isProcessing" class="overview-command-grid">
+      <OverviewHeroPanel
+        :projects="projects"
+        :upload-phase="upload.state.uploadPhase"
+        :active-stage-label="upload.state.activeStage.label"
+        :error-message="projectActionError"
+        @refresh="refresh"
+        @start-new="scrollToUpload"
+      />
 
       <OverviewTaskFocusCard
         :project-name="focusProjectName"
@@ -22,14 +20,47 @@
         :timeline="upload.state.timeline"
         :status-text="upload.state.statusText"
         :error-message="focusError"
-        @open-drawer="drawerOpen = true"
-        @start-new="scrollToUpload"
       />
     </section>
 
-    <OverviewRecentProjects :projects="recentProjects" @delete-project="handleDeleteProject" />
+    <!-- Processing: hero full-width, then stream + focus card in 2-col grid -->
+    <template v-if="isProcessing">
+      <OverviewHeroPanel
+        :projects="projects"
+        :upload-phase="upload.state.uploadPhase"
+        :active-stage-label="upload.state.activeStage.label"
+        :error-message="projectActionError"
+        @refresh="refresh"
+        @start-new="scrollToUpload"
+      />
 
-    <section :class="['overview-workbench-grid', { single: !latestProjectWithResults }]">
+      <section class="overview-processing-grid">
+        <InlineWorkflowStream
+          :task-id="upload.state.taskId"
+          :timeline="upload.state.timeline"
+          :active-stage-key="upload.state.activeStage.key"
+          :task-status="upload.state.taskStatus"
+          :upload-phase="upload.state.uploadPhase"
+        />
+
+        <div class="focus-card-wrapper">
+          <OverviewTaskFocusCard
+            :project-name="focusProjectName"
+            :upload-phase="upload.state.uploadPhase"
+            :task-status="upload.state.taskStatus"
+            :active-stage="upload.state.activeStage"
+            :task-metrics="upload.state.taskMetrics"
+            :timeline="upload.state.timeline"
+            :status-text="upload.state.statusText"
+            :error-message="focusError"
+          />
+        </div>
+      </section>
+    </template>
+
+    <OverviewRecentProjects v-if="!isProcessing" :projects="recentProjects" @delete-project="handleDeleteProject" />
+
+    <section v-if="!isProcessing" :class="['overview-workbench-grid', { single: !latestProjectWithResults }]">
       <div id="seed-upload-anchor" class="upload-module">
         <SeedUploadPanel :initially-expanded="uploadModuleExpanded" @uploaded="handleUploaded" />
       </div>
@@ -37,27 +68,15 @@
       <div v-if="latestProjectWithResults" id="seed-analysis" class="analysis-module">
         <div class="module-head">
           <div>
-            <div class="module-code mono">成果速览</div>
-            <h3 class="title-ancient">最新种子分析</h3>
+            <div class="module-code mono">结果</div>
+            <h3 class="title-ancient">最新分析结果</h3>
           </div>
           <span class="mono module-project">{{ latestProjectWithResults.name }}</span>
         </div>
-        <SeedAnalysisPanel ref="seedAnalysisPanel" :projects="projects" @refresh-projects="refresh" />
+        <SeedAnalysisPanel ref="seedAnalysisPanel" :projects="projects" :project-id="latestProjectWithResults?.project_id || ''" />
       </div>
     </section>
 
-    <OverviewTaskDrawer
-      :open="drawerOpen"
-      :project-name="focusProjectName"
-      :upload-phase="upload.state.uploadPhase"
-      :task-status="upload.state.taskStatus"
-      :active-stage="upload.state.activeStage"
-      :task-metrics="upload.state.taskMetrics"
-      :llm-activity="upload.state.llmActivity"
-      :timeline="upload.state.timeline"
-      :task-started-at="upload.state.taskStartedAt"
-      @close="drawerOpen = false"
-    />
   </div>
 </template>
 
@@ -67,19 +86,17 @@ import { computed, ref, watch } from "vue";
 import { deleteProject } from "../api/project";
 import { useProjectCatalog } from "../composables/useProjectCatalog";
 import { useSeedUpload } from "../composables/useSeedUpload";
+import InlineWorkflowStream from "./overview/InlineWorkflowStream.vue";
 import OverviewHeroPanel from "./overview/OverviewHeroPanel.vue";
-import OverviewNextActionsPanel from "./overview/OverviewNextActionsPanel.vue";
 import OverviewRecentProjects from "./overview/OverviewRecentProjects.vue";
-import OverviewTaskDrawer from "./overview/OverviewTaskDrawer.vue";
 import OverviewTaskFocusCard from "./overview/OverviewTaskFocusCard.vue";
 import SeedAnalysisPanel from "./overview/SeedAnalysisPanel.vue";
-import SeedTaskDrawer from "./overview/SeedTaskDrawer.vue";
 import SeedUploadPanel from "./overview/SeedUploadPanel.vue";
 
 const upload = useSeedUpload();
 const { projects, refreshProjects } = useProjectCatalog();
+const isProcessing = computed(() => upload.state.uploadPhase !== "idle");
 const seedAnalysisPanel = ref(null);
-const drawerOpen = ref(false);
 const projectActionError = ref("");
 const uploadModuleExpanded = ref(upload.state.uploadPhase === "idle");
 
@@ -88,7 +105,6 @@ const latestProject = computed(() => projects.value[0] || null);
 const latestProjectWithResults = computed(
   () => projects.value.find((project) => project.status && project.status.includes("completed")),
 );
-const nextActionProject = computed(() => latestProjectWithResults.value || latestProject.value);
 const focusProjectName = computed(() => {
   if (upload.state.uploadPhase !== "idle") {
     return upload.state.projectName.trim() || latestProject.value?.name || "当前卷宗";
@@ -164,12 +180,11 @@ function scrollToUpload() {
 
 .overview-command-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.98fr) minmax(360px, 0.88fr);
-  gap: var(--space-lg);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.7fr);
+  gap: 12px;
   align-items: start;
 }
 
-.command-column,
 .overview-workbench-grid,
 .upload-module,
 .analysis-module {
@@ -178,8 +193,8 @@ function scrollToUpload() {
 
 .overview-workbench-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
-  gap: var(--space-lg);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
   align-items: start;
 }
 
@@ -188,8 +203,8 @@ function scrollToUpload() {
 }
 
 .analysis-module {
-  padding: var(--space-lg);
-  border-radius: 16px;
+  padding: 16px;
+  border-radius: 12px;
   border: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.68);
 }
@@ -208,10 +223,27 @@ function scrollToUpload() {
   font-size: 12px;
 }
 
+.overview-processing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.35fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.focus-card-wrapper {
+  position: sticky;
+  top: var(--space-lg);
+}
+
 @media (max-width: 1180px) {
   .overview-command-grid,
-  .overview-workbench-grid {
+  .overview-workbench-grid,
+  .overview-processing-grid {
     grid-template-columns: 1fr;
+  }
+
+  .focus-card-wrapper {
+    position: static;
   }
 }
 </style>

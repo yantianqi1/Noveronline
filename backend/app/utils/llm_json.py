@@ -45,23 +45,35 @@ def clean_json_response_text(response: str) -> str:
     return cleaned.strip()
 
 
-def parse_json_response(response: str) -> Any:
+def parse_json_response(response: str, *, truncated: bool = False) -> Any:
     cleaned = clean_json_response_text(response)
+    # 若已知截断，先做激进修复
+    if truncated:
+        cleaned = _repair_truncated_json(cleaned)
+    # Level 1: 直接解析
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        repaired = repair_json_response_text(cleaned)
-        if repaired != cleaned:
-            try:
-                payload = json.loads(repaired)
-                logger.warning("LLM JSON 已自动修复后解析成功")
-                return payload
-            except json.JSONDecodeError:
-                pass
-    # 回退：尝试解析管道分隔格式 (EVENT|key=value|...)
+    except json.JSONDecodeError:
+        pass
+    # Level 2: 括号修复 + 控制字符归一化
+    repaired = repair_json_response_text(cleaned)
+    if repaired != cleaned:
+        try:
+            payload = json.loads(repaired)
+            logger.warning("LLM JSON 已自动修复后解析成功")
+            return payload
+        except json.JSONDecodeError:
+            pass
+    # Level 3: 正则提取 JSON + 换行修复 + 控制字符清理
+    regex_result = _try_regex_extract_json(cleaned)
+    if regex_result is not None:
+        logger.warning("LLM JSON 通过正则提取后解析成功")
+        return regex_result
+    # Level 4: 管道分隔格式 (EVENT|key=value|...)
     pipe_result = _try_parse_pipe_delimited(response)
     if pipe_result is not None:
         return pipe_result
+    # Level 5: 放弃
     raise ValueError(f"LLM返回的JSON格式无效: {_preview_payload(cleaned)}")
 
 
@@ -175,6 +187,76 @@ def _pipe_thread_to_dict(fields: Dict[str, str]) -> Dict[str, Any]:
     }
 
 
+def _try_regex_extract_json(text: str) -> Any:
+    """从混合文本中正则提取 JSON 对象并尝试解析。
+
+    处理 LLM 在 JSON 前后混入解释文字、字符串值内包含换行符、
+    或存在控制字符等情况。
+    """
+    # 尝试提取最大的 JSON 对象
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        # 尝试提取 JSON 数组
+        match = re.search(r"\[[\s\S]*\]", text)
+    if not match:
+        return None
+    json_str = match.group()
+    # 修复字符串值内的换行符
+    def _fix_string_newlines(m: re.Match) -> str:
+        s = m.group(0)
+        s = s.replace("\n", " ").replace("\r", " ")
+        s = re.sub(r"\s+", " ", s)
+        return s
+    json_str = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', _fix_string_newlines, json_str)
+    # 移除控制字符
+    json_str = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", " ", json_str)
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+    # 再次尝试括号修复后解析
+    repaired = _repair_container_closers(json_str)
+    if repaired != json_str:
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _repair_truncated_json(text: str) -> str:
+    """激进修复被截断的 JSON（finish_reason='length'时使用）。
+
+    比 _repair_container_closers 更激进：处理未闭合字符串、
+    尾部不完整 key-value、尾部逗号等。
+    """
+    text = text.rstrip()
+    if not text:
+        return text
+    # 检测并闭合未闭合的字符串（奇数个未转义引号）
+    in_string = False
+    escaping = False
+    for char in text:
+        if escaping:
+            escaping = False
+            continue
+        if char == "\\":
+            if in_string:
+                escaping = True
+            continue
+        if char == '"':
+            in_string = not in_string
+    if in_string:
+        text += '"'
+    # 移除尾部不完整的 key-value（如 "key":  或 "key": "val 被截断后已闭合）
+    # 模式: 逗号后跟一个 key 但没有完整 value
+    text = re.sub(r',\s*"[^"]*"\s*:\s*$', "", text)
+    # 移除尾部悬挂逗号（闭合括号前）
+    text = re.sub(r",\s*$", "", text)
+    # 最后用标准括号修复闭合
+    return _repair_container_closers(text)
+
+
 def repair_json_response_text(response: str) -> str:
     return _repair_container_closers(_normalize_string_control_chars(response))
 
@@ -232,6 +314,10 @@ def _normalize_string_control_chars(text: str) -> str:
                 continue
             if char in "\r\n\t":
                 chunks.append(" ")
+                continue
+            # 跳过其他控制字符（\x00-\x08, \x0b-\x0c, \x0e-\x1f, \x7f-\x9f）
+            code = ord(char)
+            if code < 0x20 or 0x7F <= code <= 0x9F:
                 continue
             chunks.append(char)
             continue
