@@ -74,7 +74,7 @@
         </div>
 
         <!-- 任务类型切换 -->
-        <div v-if="useAgentMode" class="field">
+        <div class="field">
           <label>任务类型</label>
           <div class="scope-switch">
             <button
@@ -91,7 +91,7 @@
         </div>
 
         <!-- 写作预设选择 -->
-        <div v-if="useAgentMode" class="field">
+        <div class="field">
           <label>写作风格预设</label>
           <div class="preset-selector">
             <select v-model="selectedPresetId">
@@ -111,13 +111,13 @@
 
         <div class="panel-actions">
           <button class="btn" :disabled="busy || !projectId" @click="refreshProjectData">刷新项目数据</button>
-          <button v-if="useAgentMode" class="btn" :disabled="busy || !projectId" @click="handleMigrate">迁移数据</button>
+          <button class="btn" :disabled="busy || !projectId" @click="handleMigrate">迁移数据</button>
         </div>
       </div>
 
-      <!-- 场景列表 (Agent Mode) -->
+      <!-- 场景列表 -->
       <SceneListPanel
-        v-if="useAgentMode && chapterId"
+        v-if="chapterId"
         :scenes="scenes"
         :selected-scene-id="selectedSceneId"
         @select="handleSceneSelect"
@@ -225,8 +225,8 @@
         :final-score="finalScore"
       />
 
-      <!-- Agent Mode: 场景编辑器 -->
-      <section v-if="useAgentMode" class="draft-output">
+      <!-- 场景编辑器 -->
+      <section class="draft-output">
         <SceneEditor
           :content="agentSceneContent"
           :streaming="agentStreaming"
@@ -237,131 +237,8 @@
         />
       </section>
 
-      <!-- Legacy Mode: 生成的正文显示区 -->
-      <section v-if="!useAgentMode && draftText" class="draft-output">
-        <!-- 可编辑模式 -->
-        <textarea
-          v-if="isEditable"
-          v-model="draftText"
-          class="draft-text draft-text-editable"
-          ref="draftTextRef"
-        ></textarea>
-        <!-- 只读模式（流式接收中） -->
-        <div v-else class="draft-text" ref="draftTextRef">{{ draftText }}</div>
-        <div v-if="draftResult" class="draft-meta mono">
-          {{ draftText.length }} 字 · {{ draftResult.model_name || '模型' }} · {{ draftResult.elapsed_seconds }}s
-          <span v-if="isEditable" class="draft-editable-hint">（可直接编辑正文）</span>
-        </div>
-      </section>
-
-      <!-- 审校暂停态：操作区 -->
-      <section v-if="draftPhase === 'review_paused'" class="review-paused-actions">
-        <div class="review-paused-hint">审校发现问题，请查看下方审校报告后选择操作</div>
-        <div class="review-paused-buttons">
-          <button class="btn primary" @click="handleRevise">继续修订</button>
-          <button class="btn" @click="handleAcceptDraft">接受当前版本</button>
-        </div>
-      </section>
-
-      <!-- 审校报告（内联于中间列，获得更大宽度） -->
-      <section v-if="reviewResult" class="context-block review-report-block review-report-inline">
-        <div class="context-block-header">
-          <h3 class="context-block-title title-ancient">审校报告</h3>
-          <div class="review-header-badges">
-            <span class="memory-badge" :class="{ 'warning-badge': reviewResult.issues?.length }">
-              {{ reviewResult.issues?.length || 0 }} 项
-            </span>
-            <span v-if="reviewResult.score != null" class="memory-badge" :class="reviewResult.pass ? '' : 'warning-badge'">
-              {{ reviewResult.pass ? '通过' : '未通过' }} · {{ reviewResult.score }}分
-            </span>
-          </div>
-        </div>
-
-        <!-- 总体评价 -->
-        <div class="review-overall" v-if="isEditable" @click="$event.target.tagName === 'DIV' && $refs.overallInput?.focus()">
-          <textarea
-            ref="overallInput"
-            v-model="reviewResult.overall_assessment"
-            class="review-inline-edit review-overall-text"
-            rows="2"
-          ></textarea>
-        </div>
-        <div v-else class="review-overall">
-          <div class="review-overall-text">{{ reviewResult.overall_assessment }}</div>
-        </div>
-
-        <!-- 问题列表 -->
-        <div v-if="reviewResult.issues?.length" class="review-issues-list review-issues-grid">
-          <div
-            v-for="(issue, index) in reviewResult.issues"
-            :key="index"
-            class="review-issue-card"
-            :class="'severity-' + (issue.severity || 'medium')"
-          >
-            <!-- 问题头部：维度 + 严重度 + 操作 -->
-            <div class="review-issue-header">
-              <span v-if="!isEditable" class="review-issue-dimension">{{ issue.dimension || '其他' }}</span>
-              <input
-                v-else
-                v-model="issue.dimension"
-                class="review-inline-edit review-issue-dimension-edit"
-                placeholder="维度"
-              />
-              <div class="review-issue-header-right">
-                <span v-if="!isEditable" class="review-issue-severity-tag" :class="'tag-' + issue.severity">
-                  {{ { high: '严重', medium: '建议', low: '轻微' }[issue.severity] || issue.severity }}
-                </span>
-                <select v-else v-model="issue.severity" class="review-severity-select" :class="'tag-' + issue.severity">
-                  <option value="high">严重</option>
-                  <option value="medium">建议</option>
-                  <option value="low">轻微</option>
-                </select>
-                <button
-                  v-if="isEditable"
-                  class="review-issue-delete"
-                  @click="reviewResult.issues.splice(index, 1)"
-                  title="删除"
-                >&times;</button>
-              </div>
-            </div>
-
-            <!-- 问题描述 -->
-            <div class="review-issue-body">
-              <textarea
-                v-if="isEditable"
-                v-model="issue.description"
-                class="review-inline-edit review-issue-desc"
-                rows="1"
-                placeholder="问题描述..."
-              ></textarea>
-              <div v-else class="review-issue-desc">{{ issue.description }}</div>
-            </div>
-
-            <!-- 修改建议 -->
-            <div v-if="issue.suggestion || isEditable" class="review-issue-suggestion">
-              <span class="review-suggestion-label">建议：</span>
-              <textarea
-                v-if="isEditable"
-                v-model="issue.suggestion"
-                class="review-inline-edit review-issue-suggestion-text"
-                rows="1"
-                placeholder="修改建议..."
-              ></textarea>
-              <span v-else class="review-issue-suggestion-text">{{ issue.suggestion }}</span>
-            </div>
-          </div>
-        </div>
-        <div v-else class="review-hint">未发现一致性问题。</div>
-
-        <!-- 保留建议 -->
-        <div v-if="reviewResult.keep?.length" class="review-keep-section">
-          <div class="review-keep-title">值得保留</div>
-          <div v-for="(item, i) in reviewResult.keep" :key="'k' + i" class="review-keep-item">{{ item }}</div>
-        </div>
-      </section>
-
       <!-- 空态提示 -->
-      <p v-if="draftPhase === 'idle' && !draftText" class="panel-empty">
+      <p v-if="draftPhase === 'idle'" class="panel-empty">
         在下方输入框中描述你的创作意图，系统会自动收集上下文、角色记忆和文风，然后生成小说正文。
       </p>
 
@@ -373,24 +250,17 @@
           :placeholder="inputPlaceholder"
           rows="3"
           :disabled="draftPhase === 'writing' || draftPhase === 'collecting'"
-          @keydown.ctrl.enter="useAgentMode ? handleAgentGenerate() : handleGenerate()"
-          @keydown.meta.enter="useAgentMode ? handleAgentGenerate() : handleGenerate()"
+          @keydown.ctrl.enter="handleAgentGenerate()"
+          @keydown.meta.enter="handleAgentGenerate()"
         ></textarea>
         <div class="draft-input-actions">
           <span class="input-hint mono">Ctrl+Enter 发送</span>
           <button
             class="btn primary"
             :disabled="!canGenerate"
-            @click="useAgentMode ? handleAgentGenerate() : handleGenerate()"
+            @click="handleAgentGenerate()"
           >
             {{ generateButtonLabel }}
-          </button>
-          <button
-            v-if="draftText && draftPhase === 'done'"
-            class="btn"
-            @click="copyDraftText"
-          >
-            复制正文
           </button>
         </div>
       </div>
@@ -476,14 +346,14 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import {
   adoptArchiveMemory,
   getArchiveMemoryTimeline,
   rejectArchiveMemory,
 } from "../api/archive.js";
-import { buildChapterContext, generateDraft, getChapterContextOptions, getReviewerRules, reviseDraft, saveReviewerRules } from "../api/novel.js";
+import { getChapterContextOptions, getReviewerRules, saveReviewerRules } from "../api/novel.js";
 import { getWorldlineAgents, listWorldlineSessions } from "../api/worldline.js";
 import AgentProgressPanel from "../components/AgentProgressPanel.vue";
 import SceneListPanel from "./writer/SceneListPanel.vue";
@@ -504,7 +374,6 @@ import {
 import { useProjectCatalog } from "../composables/useProjectCatalog.js";
 import { buildWriterWorkbenchColumns, resolveWriterWorkbenchMode } from "./writer/writerWorkbenchLayout.js";
 import {
-  buildWriterRequestPayload,
   deriveWriterDefaults,
   findContextItem,
   resolveWriterPovOptions,
@@ -556,26 +425,14 @@ const reviewerRulesSaving = ref(false);
 const reviewerRulesIsCustom = ref(false);
 
 // ─── 正文生成状态 ───
-const draftPhase = ref("idle"); // idle | collecting | writing | reviewing | review_paused | done
-const draftText = ref("");
-const draftResult = ref(null);
-const reviewResult = ref(null);
+const draftPhase = ref("idle"); // idle | collecting | writing | done
 const authorInstruction = ref("");
 const agentLog = ref([]);
 const agentPhases = ref([]);
 const draftAbortController = ref(null);
-const draftTextRef = ref(null);
-const previousDraftText = ref(""); // 用于修订模式
 const revisionCount = ref(0);
 const unresolvedIssues = ref([]);
 const finalScore = ref(null);
-// 上下文快照（用于修订时重用）
-const contextPackSnapshot = ref(null);
-const memoryBundleSnapshot = ref(null);
-const styleHintsSnapshot = ref(null);
-
-// ─── Writer Agent 模式 ───
-const useAgentMode = ref(true); // true = new agent mode, false = legacy mode
 const taskType = ref("write_scene"); // write_scene|continue|rewrite|expand|outline|consistency_check
 const scenes = ref([]);
 const selectedSceneId = ref("");
@@ -610,20 +467,13 @@ const canGenerate = computed(() => {
   return draftPhase.value === "idle" || draftPhase.value === "done";
 });
 const inputPlaceholder = computed(() => {
-  if (draftText.value && draftPhase.value === "done") {
-    return '输入修订意见，如"对话不够紧张，加重冲突感"...';
-  }
   return '描述你的创作意图，如"续写第三章开场，主角在废塔中发现暗门"...';
 });
 const generateButtonLabel = computed(() => {
   if (draftPhase.value === "collecting") return "收集中...";
   if (draftPhase.value === "writing") return "创作中...";
-  if (draftPhase.value === "reviewing") return "审校中...";
-  if (draftPhase.value === "review_paused") return "审校中...";
-  if (draftText.value && draftPhase.value === "done") return "修订再生成";
   return "开始创作";
 });
-const isEditable = computed(() => draftPhase.value === "done" || draftPhase.value === "review_paused");
 const canLoadTimeline = computed(() => Boolean(selectedItem.value?.archive_id && (selectedItem.value?.normalized_subject || selectedItem.value?.source_ref)));
 const activeCandidateMemoryId = computed(() => {
   const item = memoryTimeline.value?.memories?.find((entry) => entry.memory_layer === "candidate" && entry.status === "active");
@@ -633,7 +483,7 @@ const historyRecentAnchors = computed(() => contextPack.value?.history_recall?.r
 const historySelectionTrace = computed(() => contextPack.value?.history_recall?.selection_trace || []);
 
 watch(chapterId, async (newVal) => {
-  if (newVal && useAgentMode.value) {
+  if (newVal) {
     const chapter = chapterOptions.value.find(item => item.chapter_id === newVal);
     chapterOrder.value = chapter?.order || 0;
     await loadScenes();
@@ -663,9 +513,6 @@ async function handleProjectChange() {
   selectedItem.value = null;
   memoryTimeline.value = null;
   timelineError.value = "";
-  draftText.value = "";
-  draftResult.value = null;
-  reviewResult.value = null;
   draftPhase.value = "idle";
   agentLog.value = [];
   agentPhases.value = [];
@@ -711,12 +558,10 @@ async function refreshProjectData() {
     // 加载审校规则
     loadReviewerRules();
 
-    // Agent 模式：加载预设和场景
-    if (useAgentMode.value) {
-      await loadPresets();
-      if (chapterId.value) {
-        await loadScenes();
-      }
+    // 加载预设和场景
+    await loadPresets();
+    if (chapterId.value) {
+      await loadScenes();
     }
   } catch (err) {
     error.value = err.message || "读取项目上下文失败";
@@ -825,265 +670,6 @@ function updateAgentStatus(agentId, status, agentMessage = "", detail = null) {
     draftPhase.value = "reviewing";
   } else if (["context_agent", "memory_agent", "style_agent"].includes(agentId) && status === "running") {
     draftPhase.value = "collecting";
-  }
-}
-
-async function handleGenerate() {
-  if (!canGenerate.value) return;
-
-  const isRevision = !!(draftText.value && draftPhase.value === "done");
-
-  // 准备请求
-  const chapter = chapterOptions.value.find((item) => item.chapter_id === chapterId.value);
-  chapterOrder.value = chapter?.order || chapterOrder.value;
-  const payload = {
-    ...buildWriterRequestPayload({
-      scopeType: scopeType.value,
-      projectId: projectId.value,
-      chapterId: chapterId.value,
-      chapterOrder: chapterOrder.value,
-      sessionId: sessionId.value,
-      branchId: branchId.value,
-      povCharacter: povCharacter.value,
-      writingGoal: "",
-      sceneFocus: sceneFocus.value,
-      includeCandidates: includeCandidates.value,
-    }),
-    author_instruction: authorInstruction.value,
-  };
-
-  if (isRevision) {
-    payload.revision_context = {
-      previous_text: draftText.value,
-      revision_instruction: authorInstruction.value,
-    };
-  }
-
-  // 重置状态
-  previousDraftText.value = isRevision ? draftText.value : "";
-  draftText.value = "";
-  draftResult.value = null;
-  reviewResult.value = null;
-  error.value = "";
-  draftPhase.value = "collecting";
-  agentLog.value = [];
-  revisionCount.value = 0;
-  unresolvedIssues.value = [];
-  finalScore.value = null;
-  initAgentPhases();
-
-  // 取消之前的请求
-  if (draftAbortController.value) {
-    draftAbortController.value.abort();
-  }
-  draftAbortController.value = new AbortController();
-
-  await generateDraft(
-    payload,
-    {
-      onEvent(event) {
-        if (event.type === "agent_status") {
-          // 新的标准 Agent 状态事件
-          updateAgentStatus(event.agent, event.status, event.message, event.detail);
-          if (event.status === "done" || event.status === "error") {
-            agentLog.value.push({
-              agent: event.agent,
-              message: event.message,
-            });
-          }
-          // 处理 error 状态作为终止信号
-          if (event.status === "error") {
-            draftPhase.value = draftText.value ? "done" : "idle";
-            error.value = event.message || "Agent 执行失败";
-          }
-        } else if (event.type === "text_clear") {
-          // 审校打回重写时，清空已有文本，避免追加
-          draftText.value = "";
-        } else if (event.type === "context_ready") {
-          contextPack.value = event.context_pack || contextPack.value;
-          contextCollapsed.value = true;
-        } else if (event.type === "text_chunk") {
-          // 兼容新旧格式：新格式 data.chunk, 旧格式 content
-          const chunk = event.data?.chunk || event.content || "";
-          if (chunk) {
-            draftText.value += chunk;
-            nextTick(() => {
-              if (draftTextRef.value) {
-                draftTextRef.value.scrollTop = draftTextRef.value.scrollHeight;
-              }
-            });
-          }
-        } else if (event.type === "phase") {
-          // 向后兼容旧格式
-          if (event.phase === "writing") {
-            draftPhase.value = "writing";
-          } else if (event.phase === "review") {
-            draftPhase.value = "reviewing";
-          } else {
-            draftPhase.value = "collecting";
-          }
-        } else if (event.type === "agent_done") {
-          // 向后兼容旧格式
-          agentLog.value.push({
-            agent: event.agent,
-            message: event.message,
-          });
-        }
-      },
-      onDone(event) {
-        draftResult.value = event;
-        reviewResult.value = event.review || null;
-        revisionCount.value = event.revision_count || 0;
-        unresolvedIssues.value = event.data?.unresolved_issues || [];
-        finalScore.value = event.review?.score ?? null;
-
-        // 保存上下文快照，用于后续修订
-        if (event.context_summary) {
-          contextPackSnapshot.value = contextPack.value;
-        }
-
-        // 审校暂停式逻辑：审校不通过时暂停，等待用户操作
-        const reviewPassed = event.review?.pass !== false;
-        if (reviewPassed) {
-          draftPhase.value = "done";
-        } else {
-          draftPhase.value = "review_paused";
-        }
-
-        // 标记所有 agent 为 done
-        for (const p of agentPhases.value) {
-          if (p.status !== "done" && p.status !== "error") {
-            p.status = "done";
-          }
-        }
-        const revisionNote = revisionCount.value > 0 ? `，修订 ${revisionCount.value} 次` : "";
-        const statusLabel = reviewPassed ? "创作完成" : "审校完成（待修订）";
-        message.value = `${statusLabel}：${event.char_count} 字${revisionNote}`;
-        authorInstruction.value = "";
-      },
-      onError(event) {
-        draftPhase.value = draftText.value ? "done" : "idle";
-        const msg = event?.message || event?.toString() || "生成失败";
-        error.value = msg;
-      },
-    },
-    draftAbortController.value.signal,
-  );
-}
-
-// ─── 审校暂停式修订 ───
-function buildRevisionInstruction() {
-  // 从审校报告构造修订指令
-  if (!reviewResult.value?.issues?.length) return "请优化正文";
-  const lines = ["请根据以下审校意见修改正文：", ""];
-  for (const issue of reviewResult.value.issues) {
-    const severity = { high: "【必须修改】", medium: "【建议修改】", low: "【可选】" }[issue.severity] || "【修改】";
-    lines.push(`${severity}[${issue.dimension || "其他"}] ${issue.description}`);
-    if (issue.suggestion) lines.push(`   建议：${issue.suggestion}`);
-  }
-  if (reviewResult.value.keep?.length) {
-    lines.push("", "以下部分请保留：");
-    for (const item of reviewResult.value.keep) {
-      lines.push(`- ${item}`);
-    }
-  }
-  return lines.join("\n");
-}
-
-async function handleRevise() {
-  if (!draftText.value || draftPhase.value !== "review_paused") return;
-
-  const payload = {
-    project_id: projectId.value,
-    previous_text: draftText.value,
-    revision_instruction: buildRevisionInstruction(),
-    author_instruction: authorInstruction.value || "",
-    context_pack_snapshot: contextPackSnapshot.value || {},
-    memory_bundle_snapshot: memoryBundleSnapshot.value || {},
-    style_hints_snapshot: styleHintsSnapshot.value || {},
-  };
-
-  // 重置进度
-  draftText.value = "";
-  draftResult.value = null;
-  error.value = "";
-  draftPhase.value = "writing";
-  initAgentPhases();
-  // 只保留 writer + reviewer
-  agentPhases.value = agentPhases.value.filter((a) =>
-    ["writer_agent", "reviewer_agent"].includes(a.id),
-  );
-
-  if (draftAbortController.value) {
-    draftAbortController.value.abort();
-  }
-  draftAbortController.value = new AbortController();
-
-  await reviseDraft(
-    payload,
-    {
-      onEvent(event) {
-        if (event.type === "agent_status") {
-          updateAgentStatus(event.agent, event.status, event.message, event.detail);
-          if (event.status === "done" || event.status === "error") {
-            agentLog.value.push({ agent: event.agent, message: event.message });
-          }
-          if (event.status === "error") {
-            draftPhase.value = draftText.value ? "done" : "idle";
-            error.value = event.message || "修订失败";
-          }
-        } else if (event.type === "text_clear") {
-          draftText.value = "";
-        } else if (event.type === "text_chunk") {
-          const chunk = event.data?.chunk || event.content || "";
-          if (chunk) {
-            draftText.value += chunk;
-            nextTick(() => {
-              if (draftTextRef.value) {
-                draftTextRef.value.scrollTop = draftTextRef.value.scrollHeight;
-              }
-            });
-          }
-        }
-      },
-      onDone(event) {
-        draftResult.value = event;
-        reviewResult.value = event.review || null;
-        revisionCount.value += (event.revision_count || 0);
-        unresolvedIssues.value = event.data?.unresolved_issues || [];
-        finalScore.value = event.review?.score ?? null;
-
-        const reviewPassed = event.review?.pass !== false;
-        draftPhase.value = reviewPassed ? "done" : "review_paused";
-
-        for (const p of agentPhases.value) {
-          if (p.status !== "done" && p.status !== "error") {
-            p.status = "done";
-          }
-        }
-        const statusLabel = reviewPassed ? "修订完成" : "修订审校完成（待继续修订）";
-        message.value = `${statusLabel}：${event.char_count} 字`;
-        authorInstruction.value = "";
-      },
-      onError(event) {
-        draftPhase.value = draftText.value ? "done" : "idle";
-        error.value = event?.message || event?.toString() || "修订失败";
-      },
-    },
-    draftAbortController.value.signal,
-  );
-}
-
-function handleAcceptDraft() {
-  draftPhase.value = "done";
-  message.value = `已接受当前版本：${draftText.value.length} 字`;
-}
-
-function copyDraftText() {
-  if (draftText.value) {
-    navigator.clipboard.writeText(draftText.value).then(() => {
-      message.value = "正文已复制到剪贴板";
-    });
   }
 }
 
