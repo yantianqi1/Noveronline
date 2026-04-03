@@ -15,6 +15,7 @@ from .sequential_reader import SequentialReader
 from .smart_novel_segmenter import SmartNovelSegmenter
 from .story_ontology_generator import StoryOntologyGenerator
 from .text_processor import TextProcessor
+from .task_cancelled import TaskCancelledException
 from ..utils.upstream_error_formatter import format_upstream_service_error
 
 
@@ -44,6 +45,7 @@ class SeedExtractTaskService:
         analysis_goal: str,
         additional_context: str,
         use_llm: bool,
+        segment_token_limit: int = 50000,
     ) -> str:
         task_id = self.task_manager.create_task(
             task_type="seed_extract",
@@ -55,7 +57,7 @@ class SeedExtractTaskService:
         project.status = ProjectStatus.SEED_PROCESSING
         project.seed_task_id = task_id
         ProjectManager.save_project(project)
-        self._start_worker(task_id, project_id, project_name, analysis_goal, additional_context, use_llm)
+        self._start_worker(task_id, project_id, project_name, analysis_goal, additional_context, use_llm, segment_token_limit)
         return task_id
 
     def _start_worker(
@@ -66,10 +68,11 @@ class SeedExtractTaskService:
         analysis_goal: str,
         additional_context: str,
         use_llm: bool,
+        segment_token_limit: int = 50000,
     ) -> None:
         thread = threading.Thread(
             target=self._run_worker,
-            args=(task_id, project_id, project_name, analysis_goal, additional_context, use_llm),
+            args=(task_id, project_id, project_name, analysis_goal, additional_context, use_llm, segment_token_limit),
             daemon=True,
         )
         thread.start()
@@ -82,10 +85,14 @@ class SeedExtractTaskService:
         analysis_goal: str,
         additional_context: str,
         use_llm: bool,
+        segment_token_limit: int = 50000,
     ) -> None:
+        self.smart_segmenter = SmartNovelSegmenter(target_token_limit=segment_token_limit)
         runner = SeedExtractRunner(self, task_id, use_llm, project_id=project_id)
         try:
             runner.run(project_id, project_name, analysis_goal, additional_context)
+        except TaskCancelledException:
+            pass  # Already handled inside runner.run()
         except Exception as exc:
             message = format_upstream_service_error(exc)
             self._fail_project(project_id, message)

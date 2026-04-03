@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Any, Dict, List, Tuple
 
 from ..models.project import ProjectManager, ProjectStatus
@@ -9,6 +11,8 @@ from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
 from .seed_task_callbacks import build_ontology_progress_callback
 from .seed_task_progress import SeedTaskProgressTracker
+from .task_cancelled import TaskCancelledException
+from ..utils.task_file_logger import TaskFileLogger
 
 
 class SeedExtractRunner:
@@ -23,10 +27,23 @@ class SeedExtractRunner:
 
     def __init__(self, service: Any, task_id: str, use_llm: bool, project_id: str = ""):
         self.service = service
+        self.task_id = task_id
         self.use_llm = use_llm
         self.progress = SeedTaskProgressTracker(
             service.task_manager, task_id, use_llm, project_id=project_id,
         )
+        self.task_logger = None
+        if project_id:
+            project_dir = ProjectManager._get_project_dir(project_id)
+            self.task_logger = TaskFileLogger(project_dir, task_id)
+
+    def _check_cancelled(self) -> None:
+        if self.service.task_manager.is_cancelled(self.task_id):
+            raise TaskCancelledException(self.task_id, "runner")
+
+    def _log(self, stage: str, message: str, level: str = "info") -> None:
+        if self.task_logger:
+            getattr(self.task_logger, level)(stage, message)
 
     def run(
         self,
@@ -35,29 +52,73 @@ class SeedExtractRunner:
         analysis_goal: str,
         additional_context: str,
     ) -> None:
-        self._validate_llm_modules()
+        pipeline_start = time.time()
+        self._log("pipeline", f"管线启动: project={project_name}, use_llm={self.use_llm}")
 
-        # Stage 1: extract_text + smart_segmentation
-        documents, chapter_segments = self._extract_and_segment(project_id)
+        try:
+            self._validate_llm_modules()
 
-        # Stage 2: sequential_reading
-        manager = self._sequential_reading(project_id, chapter_segments)
+            # Stage 1: extract_text + smart_segmentation
+            t0 = time.time()
+            if self.task_logger:
+                self.task_logger.stage_start("extract_text", "提取文本与智能分段")
+            documents, chapter_segments = self._extract_and_segment(project_id)
+            seg_count = chapter_segments.get("smart_segments", {}).get("segment_count", 0)
+            if self.task_logger:
+                self.task_logger.stage_end("extract_text", time.time() - t0, f"{len(documents)} 份文稿, {seg_count} 个阅读段")
 
-        # Stage 3: global_integration + ontology
-        seed_analysis, ontology = self._global_integration_and_ontology(
-            project_id, project_name, analysis_goal, additional_context,
-            documents, manager,
-        )
+            self._check_cancelled()
 
-        # Stage 4: agent_profiles
-        agent_profiles = self._generate_agent_profiles(project_id, manager)
+            # Stage 2: sequential_reading
+            t0 = time.time()
+            if self.task_logger:
+                self.task_logger.stage_start("sequential_reading", f"共 {seg_count} 个段落")
+            manager = self._sequential_reading(project_id, chapter_segments)
+            char_count = len(manager.notes["core_facts"]["characters"])
+            if self.task_logger:
+                self.task_logger.stage_end("sequential_reading", time.time() - t0, f"记录 {char_count} 名角色")
 
-        # Finalize
-        self.service._finalize_project(project_id, analysis_goal, ontology, seed_analysis)
-        self.progress.complete(
-            "上传完成，项目与种子分析已生成。",
-            self._result_payload(project_id, chapter_segments, manager, seed_analysis, agent_profiles),
-        )
+            self._check_cancelled()
+
+            # Stage 3: global_integration + ontology
+            t0 = time.time()
+            if self.task_logger:
+                self.task_logger.stage_start("global_integration", "聚合分析与本体生成")
+            seed_analysis, ontology = self._global_integration_and_ontology(
+                project_id, project_name, analysis_goal, additional_context,
+                documents, manager,
+            )
+            if self.task_logger:
+                self.task_logger.stage_end("global_integration", time.time() - t0, self._seed_counts_text(seed_analysis))
+
+            self._check_cancelled()
+
+            # Stage 4: agent_profiles
+            t0 = time.time()
+            if self.task_logger:
+                self.task_logger.stage_start("agent_profiles", "角色档案生成")
+            agent_profiles = self._generate_agent_profiles(project_id, manager)
+            if self.task_logger:
+                self.task_logger.stage_end("agent_profiles", time.time() - t0, f"{agent_profiles['profile_count']} 个档案")
+
+            # Finalize
+            self.service._finalize_project(project_id, analysis_goal, ontology, seed_analysis)
+            self.progress.complete(
+                "上传完成，项目与种子分析已生成。",
+                self._result_payload(project_id, chapter_segments, manager, seed_analysis, agent_profiles),
+            )
+            if self.task_logger:
+                total_s = time.time() - pipeline_start
+                self.task_logger.info("pipeline", f"管线完成，总耗时 {total_s:.1f}s")
+
+        except TaskCancelledException as exc:
+            self._log("pipeline", f"任务被用户取消 (stage={exc.stage})", "warning")
+            self.service._fail_project(project_id, "用户取消了分析任务")
+            self.progress.fail("用户取消了分析任务")
+
+        finally:
+            if self.task_logger:
+                self.task_logger.close()
 
     # ── Stage 1: extract_text + smart_segmentation ──
 
@@ -138,6 +199,7 @@ class SeedExtractRunner:
             segments=segments,
             use_llm=self.use_llm,
             progress_callback=reading_progress_callback,
+            cancel_check=self._check_cancelled,
         )
 
         # Save reading notes
@@ -234,6 +296,7 @@ class SeedExtractRunner:
             manager=manager,
             use_llm=self.use_llm,
             progress_callback=profile_progress_callback,
+            cancel_check=self._check_cancelled,
         )
         ProjectManager.save_project_json(project_id, "agent_profiles.json", agent_profiles)
         self.progress.note(
