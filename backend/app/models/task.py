@@ -20,6 +20,7 @@ class TaskStatus(str, Enum):
     PROCESSING = "processing"    # 处理中
     COMPLETED = "completed"      # 已完成
     FAILED = "failed"            # 失败
+    CANCELLED = "cancelled"      # 已取消
 
 
 @dataclass
@@ -246,7 +247,25 @@ class TaskManager:
             message="任务失败",
             error=error
         )
-    
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel a task. Only PROCESSING tasks can be cancelled."""
+        with self._task_lock:
+            task = self._load_task(task_id)
+            if not task or task.status != TaskStatus.PROCESSING:
+                return False
+            task.status = TaskStatus.CANCELLED
+            task.message = "用户取消了分析任务"
+            task.updated_at = datetime.now()
+            self._save_task(task)
+            return True
+
+    def is_cancelled(self, task_id: str) -> bool:
+        """Check if a task has been cancelled."""
+        with self._task_lock:
+            task = self._load_task(task_id)
+            return task is not None and task.status == TaskStatus.CANCELLED
+
     def list_tasks(self, task_type: Optional[str] = None) -> list:
         """列出任务"""
         with self._task_lock:
