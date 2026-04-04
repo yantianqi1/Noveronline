@@ -10,6 +10,20 @@ from ...llm_router import LlmRouter
 TEMPLATE_MODE = "template"
 LLM_MODE = "llm"
 WORLDLINE_DIALOGUE_MODULE = "worldline_agent_dialogue"
+WORLDLINE_PROPOSAL_MODULE = "worldline_character_proposal"
+PROPOSAL_TEMPERATURE = 0.6
+PROPOSAL_MAX_TOKENS = 500
+
+PROPOSAL_SYSTEM_PROMPT = """你是小说世界线中的一个角色。现在轮到你决定下一步行动。
+
+基于你的性格、目标、当前处境和最近发生的事件，你需要独立决定：
+1. 你是否要在本步行动？（不是每步都需要行动，观望也是策略）
+2. 如果行动，具体做什么？对谁？动机是什么？
+
+只输出 JSON，不要输出其他内容：
+行动：{"act": true, "action": "具体动作", "intent": "动机", "target": "目标对象", "reason": "为什么现在做这件事"}
+不行动：{"act": false, "reason": "为什么选择不行动"}
+"""
 
 WORLDLINE_AGENT_DIALOGUE_SYSTEM_PROMPT = """你是一名小说世界线中的角色扮演与关系推进助手。
 
@@ -67,6 +81,95 @@ class CharacterAgentService:
             "model_name": model_name,
             "memory_context": (memory_bundle or {}).get("rendered_context", ""),
         }
+
+    def propose_action(
+        self,
+        actor_name: str,
+        actor_state: Dict[str, Any],
+        recent_events: List[Dict[str, Any]],
+        branch_summary: Dict[str, Any],
+        memory_bundle: Optional[Dict[str, Any]] = None,
+        dossier_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """角色自主决定本步行动。返回结构化提案。"""
+        drive = actor_state.get("drive") or actor_state.get("core_drive") or "维持自己的目标"
+        tension = actor_state.get("tension") or actor_state.get("hidden_tension") or ""
+        status = actor_state.get("status", "active")
+
+        try:
+            client = self.llm_router.build_client(WORLDLINE_PROPOSAL_MODULE)
+        except ValueError:
+            # Fallback to dialogue module
+            try:
+                client = self.llm_router.build_client(WORLDLINE_DIALOGUE_MODULE)
+            except ValueError:
+                return {"agent": actor_name, "act": False, "reason": "LLM 模块未绑定", "model_name": ""}
+
+        prompt = self._proposal_prompt(actor_name, actor_state, recent_events, branch_summary, memory_bundle or {}, dossier_context or {})
+        raw = client.chat_json(
+            messages=[
+                {"role": "system", "content": PROPOSAL_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=PROPOSAL_TEMPERATURE,
+            max_tokens=PROPOSAL_MAX_TOKENS,
+        )
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            "agent": actor_name,
+            "act": bool(raw.get("act", False)),
+            "action": str(raw.get("action", "")).strip(),
+            "intent": str(raw.get("intent", "")).strip(),
+            "target": str(raw.get("target", "")).strip(),
+            "reason": str(raw.get("reason", "")).strip(),
+            "drive": drive,
+            "tension": tension,
+            "status": status,
+            "model_name": client.model,
+        }
+
+    def _proposal_prompt(
+        self,
+        actor_name: str,
+        actor_state: Dict[str, Any],
+        recent_events: List[Dict[str, Any]],
+        branch_summary: Dict[str, Any],
+        memory_bundle: Dict[str, Any],
+        dossier_context: Dict[str, Any],
+    ) -> str:
+        drive = actor_state.get("drive") or actor_state.get("core_drive") or "维持自己的目标"
+        tension = actor_state.get("tension") or actor_state.get("hidden_tension") or "未知"
+        event_lines = [f"- {e.get('title', '事件')}: {e.get('summary', '')[:100]}" for e in recent_events[:4]]
+        self_dossier = dossier_context.get("self_dossier") or {}
+        peer_lines = []
+        for p in (dossier_context.get("visible_peers") or [])[:6]:
+            name = p.get("display_name", "?")
+            pub = p.get("public_profile", {})
+            if isinstance(pub, dict) and pub:
+                identity = pub.get("identity", "")
+                line = f"- {name}: {identity[:80]}" if identity else f"- {name}: {pub}"
+            elif isinstance(pub, str) and pub:
+                line = f"- {name}: {pub[:80]}"
+            else:
+                line = f"- {name}"
+            peer_lines.append(line)
+        memory_ctx = memory_bundle.get("rendered_context", "")
+        return (
+            f"你是：{actor_name}\n"
+            f"当前世界线：{branch_summary.get('title', '')}\n"
+            f"核心变化：{branch_summary.get('core_change', '')}\n"
+            f"你的驱动力：{drive}\n"
+            f"你的张力：{tension}\n"
+            f"你的状态：{actor_state.get('status', 'active')}\n"
+            f"你的公开档案：{self_dossier.get('public_profile', {})}\n"
+            f"你的私密档案：{self_dossier.get('private_profile', {})}\n"
+            f"你对关系的看法：{self_dossier.get('relationship_view', {})}\n"
+            f"同一世界线中的其他角色：\n{chr(10).join(peer_lines) if peer_lines else '- 暂无'}\n"
+            f"最近发生的事件：\n{chr(10).join(event_lines) if event_lines else '- 暂无'}\n"
+            + (f"你的记忆：{memory_ctx}\n" if memory_ctx else "")
+            + "请决定你的下一步行动。"
+        )
 
     def _build_reply(
         self,

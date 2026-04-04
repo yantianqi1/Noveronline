@@ -15,6 +15,7 @@ FIRST_ROUND_STEPS = 1
 DEFAULT_CONTINUOUS_STEPS = 6
 PROCESSING_PROGRESS_BASE = 8
 PROCESSING_PROGRESS_CAP = 92
+SETTLED_EMPTY_THRESHOLD = 3
 
 
 def stop_reason(
@@ -23,12 +24,13 @@ def stop_reason(
     branch,
     generated_actions: List[Dict[str, str]],
     goal_verdict: Dict[str, Any],
+    consecutive_empty: int = 0,
 ) -> Optional[str]:
     if goal_verdict.get("goal_reached"):
         return "goal_reached"
     if completed_steps >= max_steps:
         return "max_steps"
-    if not generated_actions and not branch.pending_variables and not branch.pending_actions:
+    if consecutive_empty >= SETTLED_EMPTY_THRESHOLD and not branch.pending_variables and not branch.pending_actions:
         return "settled"
     return None
 

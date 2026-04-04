@@ -1,8 +1,13 @@
 <template>
-  <div ref="stageRef" class="worldline-stage" :class="[workbenchMode, { resizing }]" :style="stageStyle">
+  <div ref="stageRef" class="worldline-stage" :class="[workbenchMode, { resizing, 'left-collapsed': leftCollapsed }]" :style="stageStyle">
     <!-- ① LEFT COLUMN: Archive selection / Agent roster -->
     <aside class="stage-selection">
+      <div v-if="leftCollapsed" class="collapsed-rail" @click="leftCollapsed = false">
+        <span class="collapsed-rail-label">演员名册</span>
+        <span class="collapsed-rail-count mono">{{ preparedAgents.length || selectedArchives.length }}</span>
+      </div>
       <WorldlineSelectionPanel
+        v-show="!leftCollapsed"
         :selected-archives="selectedArchives"
         :archive-project-filter="archiveProjectFilter"
         :session-id="sessionId"
@@ -16,6 +21,7 @@
 
     <!-- Divider 1: L ↔ M -->
     <button
+      v-show="!leftCollapsed"
       class="stage-divider"
       type="button"
       aria-label="拖拽调整选择栏与控制栏宽度"
@@ -120,26 +126,48 @@
         </header>
         <template v-if="preparedInspector">
           <p class="inspector-copy">{{ preparedInspector.public_profile?.identity || preparedInspector.runtime_seed_state?.drive || "等待选择 agent" }}</p>
-          <div class="inspector-grid">
-            <section class="inspector-block">
-              <span class="inspector-label">公开面</span>
-              <pre>{{ prettyJson(preparedInspector.public_profile || {}) }}</pre>
+          <div class="inspector-sections">
+            <section v-if="preparedInspector.public_profile" class="inspector-section">
+              <h4 class="inspector-section-title">公开面</h4>
+              <dl class="inspector-dl">
+                <template v-for="(val, key) in preparedInspector.public_profile" :key="key">
+                  <dt>{{ key }}</dt>
+                  <dd>{{ val }}</dd>
+                </template>
+              </dl>
             </section>
-            <section class="inspector-block">
-              <span class="inspector-label">私密面</span>
-              <pre>{{ prettyJson(preparedInspector.private_profile || {}) }}</pre>
+            <section v-if="preparedInspector.private_profile" class="inspector-section">
+              <h4 class="inspector-section-title">私密面</h4>
+              <dl class="inspector-dl">
+                <template v-for="(val, key) in preparedInspector.private_profile" :key="key">
+                  <dt>{{ key }}</dt>
+                  <dd>{{ val }}</dd>
+                </template>
+              </dl>
             </section>
-            <section class="inspector-block">
-              <span class="inspector-label">运行态基底</span>
-              <pre>{{ prettyJson(preparedInspector.runtime_seed_state || {}) }}</pre>
+            <section v-if="preparedInspector.runtime_seed_state" class="inspector-section">
+              <h4 class="inspector-section-title">运行态基底</h4>
+              <dl class="inspector-dl">
+                <template v-for="(val, key) in preparedInspector.runtime_seed_state" :key="key">
+                  <dt>{{ key }}</dt>
+                  <dd>{{ typeof val === 'object' ? JSON.stringify(val) : val }}</dd>
+                </template>
+              </dl>
             </section>
-            <section class="inspector-block">
-              <span class="inspector-label">证据与记忆种子</span>
-              <pre>{{ prettyJson({
-                relationship_view: preparedInspector.relationship_view || {},
-                memory_seed_summary: preparedInspector.memory_seed_summary || [],
-                source_evidence_summary: preparedInspector.source_evidence_summary || [],
-              }) }}</pre>
+            <section v-if="preparedInspector.relationship_view || preparedInspector.memory_seed_summary" class="inspector-section">
+              <h4 class="inspector-section-title">关系与记忆</h4>
+              <p v-if="typeof preparedInspector.relationship_view === 'string'" class="inspector-text">{{ preparedInspector.relationship_view }}</p>
+              <dl v-else-if="preparedInspector.relationship_view" class="inspector-dl">
+                <template v-for="(val, key) in preparedInspector.relationship_view" :key="key">
+                  <dt>{{ key }}</dt>
+                  <dd>{{ typeof val === 'object' ? JSON.stringify(val) : val }}</dd>
+                </template>
+              </dl>
+              <ul v-if="Array.isArray(preparedInspector.memory_seed_summary)" class="inspector-list">
+                <li v-for="(item, idx) in preparedInspector.memory_seed_summary" :key="idx">
+                  {{ typeof item === 'string' ? item : item.summary || JSON.stringify(item) }}
+                </li>
+              </ul>
             </section>
           </div>
         </template>
@@ -169,25 +197,53 @@
           <p class="inspector-copy">
             {{ runtimeAgentDetail.current_agent?.summary || runtimeAgentDetail.baseline_dossier?.public_profile?.identity || "当前 agent 的运行态与基线档案对比。" }}
           </p>
-          <div class="inspector-grid">
-            <section class="inspector-block">
-              <span class="inspector-label">准备态 dossier</span>
-              <pre>{{ prettyJson(runtimeAgentDetail.baseline_dossier || {}) }}</pre>
+          <div class="inspector-sections">
+            <section v-if="runtimeAgentDetail.current_agent" class="inspector-section">
+              <h4 class="inspector-section-title">当前运行态</h4>
+              <dl class="inspector-dl">
+                <dt>状态</dt><dd>{{ runtimeAgentDetail.current_agent.status || "—" }}</dd>
+                <dt>驱动力</dt><dd>{{ runtimeAgentDetail.current_agent.drive || runtimeAgentDetail.current_agent.core_drive || "—" }}</dd>
+                <dt>张力</dt><dd>{{ runtimeAgentDetail.current_agent.tension || "—" }}</dd>
+                <template v-if="runtimeAgentDetail.current_agent.role">
+                  <dt>角色</dt><dd>{{ runtimeAgentDetail.current_agent.role }}</dd>
+                </template>
+                <template v-if="runtimeAgentDetail.current_agent.last_action">
+                  <dt>最近行动</dt><dd>{{ runtimeAgentDetail.current_agent.last_action }}</dd>
+                </template>
+              </dl>
             </section>
-            <section class="inspector-block">
-              <span class="inspector-label">当前运行态</span>
-              <pre>{{ prettyJson(runtimeAgentDetail.current_agent || {}) }}</pre>
+            <section v-if="runtimeAgentDetail.baseline_dossier?.public_profile" class="inspector-section">
+              <h4 class="inspector-section-title">准备态档案</h4>
+              <dl class="inspector-dl">
+                <template v-for="(val, key) in runtimeAgentDetail.baseline_dossier.public_profile" :key="key">
+                  <dt>{{ key }}</dt>
+                  <dd>{{ val }}</dd>
+                </template>
+              </dl>
             </section>
-            <section class="inspector-block">
-              <span class="inspector-label">历史与记忆</span>
-              <pre>{{ prettyJson({
-                history: runtimeAgentDetail.history || {},
-                memories: runtimeAgentDetail.memories || {},
-              }) }}</pre>
+            <section v-if="runtimeAgentDetail.history" class="inspector-section">
+              <h4 class="inspector-section-title">历史记录</h4>
+              <ul v-if="Array.isArray(runtimeAgentDetail.history)" class="inspector-list">
+                <li v-for="(item, idx) in runtimeAgentDetail.history.slice(-6)" :key="idx">
+                  {{ typeof item === 'string' ? item : item.summary || item.action || JSON.stringify(item) }}
+                </li>
+              </ul>
+              <dl v-else-if="typeof runtimeAgentDetail.history === 'object'" class="inspector-dl">
+                <template v-for="(val, key) in runtimeAgentDetail.history" :key="key">
+                  <dt>{{ key }}</dt>
+                  <dd>{{ typeof val === 'object' ? JSON.stringify(val) : val }}</dd>
+                </template>
+              </dl>
             </section>
-            <section class="inspector-block">
-              <span class="inspector-label">关系流</span>
-              <pre>{{ prettyJson(runtimeAgentDetail.relation_history || []) }}</pre>
+            <section v-if="runtimeAgentDetail.relation_history?.length" class="inspector-section">
+              <h4 class="inspector-section-title">关系变化</h4>
+              <ul class="inspector-list">
+                <li v-for="(rel, idx) in runtimeAgentDetail.relation_history.slice(-6)" :key="idx">
+                  <strong>{{ rel.source || "" }} → {{ rel.target || "" }}</strong>
+                  <span v-if="rel.change"> · {{ rel.change }}</span>
+                  <span v-if="rel.note"> — {{ rel.note }}</span>
+                </li>
+              </ul>
             </section>
           </div>
         </article>
@@ -197,7 +253,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import {
   adoptWorldlineEvents,
@@ -259,6 +315,15 @@ const pollPrepareTask = createWorldlinePrepareTaskPoller({
   getPreparedSession: getPreparedWorldlineSession,
 });
 
+const leftCollapsed = ref(false);
+
+// Auto-collapse left pane when evolution stream starts
+watch(() => autoEvolution.streamPhase.value, (phase) => {
+  if (phase === "connecting" || phase === "thinking") {
+    leftCollapsed.value = true;
+  }
+});
+
 const showArchivePicker = computed(() => workbenchMode.value !== WORLDLINE_WORKBENCH_MODE_THREE_COL);
 const prepareTaskProgress = computed(() => Number(prepareSnapshot.value?.task_progress || 0));
 const prepareTaskMessage = computed(() => resolvePrepareTaskMessage({
@@ -309,6 +374,7 @@ async function createSession() {
     feedback.value = "已进入 LLM 整备阶段";
     await waitForPreparedSession(res.data.task_id, res.data.prepare_id);
   } catch (err) {
+    console.error("[createSession] failed:", err);
     error.value = err.message;
   } finally {
     busy.value = false;
@@ -407,11 +473,14 @@ async function startAutoEvolve() {
 }
 
 async function waitForPreparedSession(taskId, nextPrepareId) {
+  console.log("[waitForPreparedSession] start", { taskId, nextPrepareId });
   const snapshot = await pollPrepareTask(taskId, nextPrepareId, (value) => {
     prepareSnapshot.value = value;
   });
+  console.log("[waitForPreparedSession] poll done, loading agents");
   prepareSnapshot.value = snapshot;
   await loadPreparedAgents(nextPrepareId);
+  console.log("[waitForPreparedSession] agents loaded, mode:", autoEvolution.createMode.value);
 
   if (autoEvolution.createMode.value === "manual") {
     feedback.value = "LLM 整备已完成，请检查 agent 形态后开始推演。";

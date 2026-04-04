@@ -1,11 +1,11 @@
 <template>
   <div class="shell">
-    <aside class="left-track">
+    <aside class="left-track" :class="{ collapsed: sidebarCollapsed }">
       <div class="brand">
-        <div class="seal">
+        <div class="seal" @click="sidebarCollapsed = !sidebarCollapsed" title="收起/展开侧栏">
           <span class="seal-inner">MF</span>
         </div>
-        <div class="brand-text">
+        <div v-show="!sidebarCollapsed" class="brand-text">
           <div class="brand-name">{{ APP_BRAND_NAME }}</div>
           <div class="brand-sub mono">{{ APP_SUBTITLE }}</div>
         </div>
@@ -13,26 +13,45 @@
 
       <nav class="nav-track">
         <div class="nav-group">
-          <div class="group-label">主要通路</div>
-          <RouterLink v-for="item in mainNav" :key="item.path" :to="item.path" class="nav-item">
-            <span class="nav-dot"></span>
-            <span class="nav-label">{{ item.label }}</span>
-            <span class="nav-code mono">{{ item.code }}</span>
+          <div v-show="!sidebarCollapsed" class="group-label">主要通路</div>
+          <RouterLink
+            v-for="item in mainNav"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :title="sidebarCollapsed ? item.label : ''"
+          >
+            <span v-show="sidebarCollapsed" class="nav-icon">{{ item.icon }}</span>
+            <span v-show="!sidebarCollapsed" class="nav-dot"></span>
+            <span v-show="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
+            <span v-show="!sidebarCollapsed" class="nav-code mono">{{ item.code }}</span>
           </RouterLink>
         </div>
 
         <div class="nav-group">
-          <div class="group-label">辅助与配置</div>
-          <RouterLink v-for="item in subNav" :key="item.path" :to="item.path" class="nav-item sub">
-            <span class="nav-label">{{ item.label }}</span>
+          <div v-show="!sidebarCollapsed" class="group-label">辅助与配置</div>
+          <RouterLink
+            v-for="item in subNav"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item sub"
+            :title="sidebarCollapsed ? item.label : ''"
+          >
+            <span v-show="sidebarCollapsed" class="nav-icon">{{ item.icon }}</span>
+            <span v-show="!sidebarCollapsed" class="nav-dot"></span>
+            <span v-show="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
           </RouterLink>
         </div>
       </nav>
 
       <footer class="track-footer">
+        <button class="collapse-toggle" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'">
+          <span class="collapse-icon" :class="{ flipped: sidebarCollapsed }">&#x276E;</span>
+          <span v-show="!sidebarCollapsed" class="collapse-label">收起</span>
+        </button>
         <div v-if="upload.state.uploadPhase !== 'idle'" class="mini-status" @click="showUploadOverlay = true">
           <div class="status-pulse"></div>
-          <span class="mono">{{ upload.state.statusText }}</span>
+          <span v-show="!sidebarCollapsed" class="mono">{{ upload.state.statusText }}</span>
         </div>
       </footer>
     </aside>
@@ -94,19 +113,20 @@ const route = useRoute();
 const upload = useSeedUpload();
 const { refreshProjects } = useProjectCatalog();
 const showUploadOverlay = ref(false);
+const sidebarCollapsed = ref(false);
 
 const mainNav = [
-  { path: "/", label: "总览", code: "00" },
-  { path: "/archive-library", label: "档案库", code: "01" },
-  { path: "/story-graph", label: "故事图谱", code: "02" },
-  { path: "/writer", label: "写作台", code: "03" },
-  { path: "/worldline", label: "世界线", code: "04" },
-  { path: "/character-console", label: "角色控制", code: "05" },
+  { path: "/", label: "总览", code: "00", icon: "览" },
+  { path: "/story-graph", label: "故事图谱", code: "01", icon: "谱" },
+  { path: "/archive-library", label: "档案库", code: "02", icon: "档" },
+  { path: "/worldline", label: "世界线", code: "03", icon: "线" },
+  { path: "/character-console", label: "角色控制", code: "04", icon: "控" },
+  { path: "/writer", label: "写作台", code: "05", icon: "笔" },
 ];
 
 const subNav = [
-  { path: "/guide", label: "帮助指南" },
-  { path: "/llm-facility", label: "设施面板" },
+  { path: "/guide", label: "帮助指南", icon: "?" },
+  { path: "/llm-facility", label: "设施面板", icon: "AI" },
 ];
 
 const currentNavLabel = computed(() => {
@@ -145,6 +165,13 @@ onMounted(() => {
   position: sticky;
   top: 0;
   height: 100vh;
+  transition: width 0.25s ease, padding 0.25s ease;
+  overflow: hidden;
+}
+
+.left-track.collapsed {
+  width: 64px;
+  padding: var(--space-lg) var(--space-sm);
 }
 
 .brand {
@@ -152,6 +179,10 @@ onMounted(() => {
   flex-direction: column;
   gap: var(--space-sm);
   margin-bottom: var(--space-xl);
+}
+
+.collapsed .brand {
+  align-items: center;
 }
 
 .seal {
@@ -163,6 +194,12 @@ onMounted(() => {
   justify-content: center;
   border-radius: var(--radius-sm);
   transform: rotate(-2deg);
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.seal:hover {
+  transform: rotate(0deg) scale(1.05);
 }
 
 .seal-inner {
@@ -229,6 +266,12 @@ onMounted(() => {
   position: relative;
   gap: var(--space-sm);
   font-size: 14px;
+  white-space: nowrap;
+}
+
+.collapsed .nav-item {
+  justify-content: center;
+  padding: 10px 0;
 }
 
 .nav-dot {
@@ -237,6 +280,33 @@ onMounted(() => {
   background: transparent;
   border-radius: 50%;
   transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.nav-icon {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-sub);
+  background: var(--bg-paper-warm);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-heading-cn);
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.nav-item:hover .nav-icon {
+  color: var(--text-main);
+  background: var(--line-soft);
+}
+
+.nav-item.router-link-active .nav-icon {
+  color: #fff;
+  background: var(--color-primary);
 }
 
 .nav-label {
@@ -275,9 +345,65 @@ onMounted(() => {
   font-size: 13px;
 }
 
+.nav-item.sub .nav-dot {
+  width: 4px;
+  height: 4px;
+}
+
+.nav-item.sub.router-link-active .nav-dot {
+  background: var(--color-primary);
+}
+
+.collapsed .nav-item.sub {
+  padding: 10px 0;
+}
+
 .track-footer {
   margin-top: auto;
   padding-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.collapse-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 8px 12px;
+  background: none;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.collapse-toggle:hover {
+  background: var(--bg-paper-warm);
+  color: var(--text-main);
+}
+
+.collapsed .collapse-toggle {
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.collapse-icon {
+  display: inline-block;
+  transition: transform 0.25s ease;
+  font-size: 12px;
+}
+
+.collapse-icon.flipped {
+  transform: rotate(180deg);
+}
+
+.collapse-label {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
 }
 
 .mini-status {

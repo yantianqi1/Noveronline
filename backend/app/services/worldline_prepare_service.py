@@ -19,6 +19,31 @@ STAGES = ("load_sources", "materialize_agents", "validate_dossiers", "compose_wo
 MODULE_KEY = "worldline_agent_prepare"
 
 
+def _as_dict(value) -> dict:
+    """Coerce LLM output to dict; tolerate list/str/None."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        return value[0]
+    return {}
+
+
+def _as_list(value) -> list:
+    """Coerce LLM output to list; tolerate dict/str/None."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _as_dict_or_list(value):
+    """Accept dict or list from LLM — pass through whichever it is."""
+    if isinstance(value, (dict, list)):
+        return value
+    return {}
+
+
 class WorldlinePrepareService:
     def __init__(self, engine, llm_router: Optional[LlmRouter] = None):
         self.engine = engine
@@ -214,7 +239,8 @@ class WorldlinePrepareService:
             temperature=0.3,
             max_tokens=1400,
         )
-        runtime_seed_state = dict(agent["state"]) | dict(payload.get("runtime_seed_state") or {})
+        raw_seed = payload.get("runtime_seed_state")
+        runtime_seed_state = dict(agent["state"]) | (raw_seed if isinstance(raw_seed, dict) else {})
         runtime_seed_state.update(
             {
                 "agent_kind": agent["agent_kind"],
@@ -226,8 +252,6 @@ class WorldlinePrepareService:
             }
         )
         validation_errors = self.engine.runtime_service.registry.schema_registry.validate_state(agent["agent_kind"], runtime_seed_state)
-        if validation_errors:
-            raise ValueError(f"{agent['display_name']} dossier 校验失败: {'; '.join(validation_errors)}")
         now = self._now()
         return {
             "agent_id": agent["agent_id"],
@@ -241,12 +265,12 @@ class WorldlinePrepareService:
             "template_sections": list(agent.get("template_sections") or []),
             "model_name": getattr(client, "model", ""),
             "validation_errors": validation_errors,
-            "public_profile": dict(payload.get("public_profile") or {}),
-            "private_profile": dict(payload.get("private_profile") or {}),
+            "public_profile": _as_dict(payload.get("public_profile")),
+            "private_profile": _as_dict(payload.get("private_profile")),
             "runtime_seed_state": runtime_seed_state,
-            "relationship_view": dict(payload.get("relationship_view") or {}),
-            "memory_seed_summary": list(payload.get("memory_seed_summary") or []),
-            "source_evidence_summary": list(payload.get("source_evidence_summary") or []),
+            "relationship_view": _as_dict_or_list(payload.get("relationship_view")),
+            "memory_seed_summary": _as_list(payload.get("memory_seed_summary")),
+            "source_evidence_summary": _as_list(payload.get("source_evidence_summary")),
             "created_at": now,
             "updated_at": now,
         }

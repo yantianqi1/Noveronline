@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Any, Dict, Generator, Optional
 
@@ -50,6 +51,14 @@ class WriterOrchestrator:
             yield {"type": "error", "message": "缺少 project_id"}
             return
 
+        t0 = time.monotonic()
+
+        def _stamp():
+            return {
+                "ts": time.strftime("%H:%M:%S"),
+                "elapsed_ms": int((time.monotonic() - t0) * 1000),
+            }
+
         task_type = request.get("task_type", "write_scene")
         chapter_id = request.get("chapter_id", "")
         scene_order = request.get("scene_order", 1)
@@ -59,7 +68,7 @@ class WriterOrchestrator:
         db.ensure_schema(project_id)
 
         # --- Phase 1: Orchestrator Agent ---
-        yield {"type": "orchestrator_status", "phase": "starting", "message": "编排层启动中..."}
+        yield {"type": "orchestrator_status", "phase": "starting", **_stamp(), "message": "编排层启动中..."}
 
         # Build orchestrator context from request
         context = {
@@ -82,33 +91,40 @@ class WriterOrchestrator:
             tools=NOVEL_TOOLS,
             system_prompt=system_prompt,
             project_id=project_id,
+            t0=t0,
         )
 
         # Build the user message for the orchestrator
         user_msg = self._build_orchestrator_user_message(task_type, context)
 
-        # Run agent loop, forwarding events
+        # Run agent loop, forwarding events directly
         brief_content = ""
+        tool_count = 0
         for event in agent_loop.run(user_msg):
             if event["type"] == "brief_ready":
-                brief_content = event["content"]
-                yield {"type": "orchestrator_status", "phase": "brief_ready",
-                       "message": "上下文收集完成，准备写作..."}
-            elif event["type"] == "tool_call":
-                yield {"type": "orchestrator_status", "phase": "tool_call",
-                       "tool": event["name"], "message": f"正在查询：{event['name']}"}
-            elif event["type"] == "tool_result":
-                yield {"type": "orchestrator_status", "phase": "tool_result",
-                       "tool": event["name"], "message": f"已获取：{event['name']}"}
+                brief_content = event.get("content", "")
+            elif event["type"] in ("tool_call", "tool_result", "thinking"):
+                if event["type"] == "tool_call":
+                    tool_count += 1
+                yield event
             elif event["type"] == "error":
                 yield event
                 return
+
+        # Phase summary
+        yield {
+            "type": "phase_summary",
+            **_stamp(),
+            "phase": "collecting",
+            "tool_count": tool_count,
+            "message": f"收集完成：{tool_count}次工具调用，耗时{_stamp()['elapsed_ms'] / 1000:.1f}s",
+        }
 
         # Parse writing_brief
         writing_brief = self._parse_brief(brief_content, context)
 
         # --- Phase 2: Writer Agent ---
-        yield {"type": "orchestrator_status", "phase": "writing", "message": "写作层启动中..."}
+        yield {"type": "orchestrator_status", "phase": "writing", **_stamp(), "message": "写作层启动中..."}
 
         # Load preset prompt
         preset_prompt = self._load_preset(project_id, request.get("preset_id"))
@@ -139,7 +155,7 @@ class WriterOrchestrator:
             ),
         )
 
-        yield {"type": "done", **result}
+        yield {"type": "done", **_stamp(), **result}
 
     def _build_orchestrator_user_message(self, task_type: str, context: dict) -> str:
         """Build the initial user message for the orchestrator agent."""

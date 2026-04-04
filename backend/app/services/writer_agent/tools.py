@@ -192,3 +192,15 @@ NOVEL_TOOLS: list[dict] = [
 ]
 
 TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in NOVEL_TOOLS}
+
+# Human-readable display formatters for timeline log
+TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
+    "query_entity": lambda inp: f"查询角色档案：{inp.get('name', '?')}",
+    "query_relationship": lambda inp: f"查询关系：{inp.get('entity_a', '?')} ↔ {inp.get('entity_b', '?')}",
+    "query_chapter": lambda inp: f"查询章节：第{inp.get('chapter_order', '?')}章",
+    "query_scene": lambda inp: f"查询场景：{inp.get('chapter_id', '?')}" + (f" #{inp['scene_order']}" if inp.get("scene_order") else ""),
+    "search_settings": lambda inp: f"搜索设定：{inp.get('query', '?')}",
+    "get_recent_scenes": lambda inp: f"获取最近 {inp.get('count', 2)} 个场景",
+    "get_world_state": lambda _: "查询世界线状态",
+    "get_open_threads": lambda inp: f"获取未解决伏笔（至第{inp.get('up_to_chapter', '?')}章）",
+}

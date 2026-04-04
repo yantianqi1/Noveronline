@@ -1,22 +1,15 @@
 <template>
   <article class="workbench-card panel" :class="sessionId ? 'panel-active' : 'panel-ready'">
     <header class="panel-header">
-      <div>
-        <p class="panel-kicker mono">WORLDLINE WORKFLOW</p>
-        <h2 class="card-title">世界线控制台</h2>
-      </div>
+      <p class="panel-kicker mono">WORLDLINE</p>
       <span class="status-tag" :class="sessionStatus.tone">{{ sessionStatus.label }}</span>
     </header>
-    <p class="description">设定初始变量与推进模式，先完成 LLM 整备，再启动并推进当前世界线。</p>
 
     <!-- Source section: only rendered in two-col / stacked fallback -->
     <section v-if="showArchivePicker" class="panel-section source-section">
-      <div class="section-head">
-        <div>
-          <p class="section-index mono">01 / 源档案</p>
-          <h3 class="section-title">选择进入世界线的角色与组织</h3>
-        </div>
-        <p class="section-copy">筛选与挑选档案。</p>
+      <div class="section-head section-head--compact">
+        <p class="section-index mono">01 / 源档案</p>
+        <h3 class="section-title">选择角色与组织</h3>
       </div>
       <ArchiveLibraryPicker
         :model-value="selectedArchives"
@@ -28,13 +21,7 @@
     </section>
 
     <section class="panel-section launchpad-section">
-      <div class="section-head">
-        <div>
-          <p class="section-index mono">{{ launchpadSectionIndex }}</p>
-          <h3 class="section-title">确认初始变量并启动整备</h3>
-        </div>
-        <p class="section-copy">设定变量，选择推进模式，先完成 prepare，再进入 inspection 与正式推演。</p>
-      </div>
+      <p class="section-index mono">{{ launchpadSectionIndex }}</p>
 
       <div class="session-summary">
         <div v-for="item in sessionSummary" :key="item.label" class="summary-card">
@@ -50,13 +37,13 @@
       <div class="setup-grid">
         <div class="launchpad-main">
           <div class="field">
-            <label>初始变量（每行一个）</label>
+            <label>初始变量</label>
             <textarea
               :value="variablesText"
-              rows="4"
+              rows="3"
+              placeholder="每行一个，如：主要势力提前结盟"
               @input="emitUpdate('variablesText', $event.target.value)"
             ></textarea>
-            <p class="field-hint">例如让主要势力提前结盟、某位关键角色提前失踪、或情报被错误释放。</p>
           </div>
 
           <div class="mode-grid">
@@ -93,20 +80,15 @@
             </div>
           </div>
           <p v-else-if="createMode === 'first_round'" class="field-hint mode-note">
-            首轮自动固定执行 1 步，步数输入只在"持续自动"模式下生效。
-          </p>
-          <p v-if="showContinuousSettings" class="field-hint mode-note">
-            持续自动会按你填写的步数上限推进；如果提前达成目标或剧情自然收束，会提前停止。
+            首轮固定 1 步，达成目标或收束时自动停止。
           </p>
         </div>
 
         <div class="action-box launchpad-action">
-          <p class="action-box-title">先启动 LLM 整备</p>
-          <p class="section-copy">整备完成后会先展示完整 agent 形态，你可以直接开始推演。</p>
-          <p class="section-copy">{{ sessionScopeHint }}</p>
           <button class="btn primary create-btn" :disabled="busy || !selectedArchives.length" @click="createSession">
             {{ createActionLabel }}
           </button>
+          <p v-if="sessionId" class="scope-hint mono">{{ sessionScopeHint }}</p>
         </div>
       </div>
     </section>
@@ -114,18 +96,10 @@
     <WorldlineAutoTaskPanel v-if="task" :task="task" />
 
     <section v-if="sessionId" class="panel-section runtime-section">
-      <div class="section-head">
-        <div>
-          <p class="section-index mono">{{ runtimeSectionIndex }}</p>
-          <h3 class="section-title">在当前世界线中推进与注入</h3>
-        </div>
-        <p class="section-copy">{{ runtimeHint }}</p>
-      </div>
+      <p class="section-index mono">{{ runtimeSectionIndex }}</p>
 
       <div class="runtime-grid">
         <div class="action-box runtime-box">
-          <p class="action-box-title">推进剧情</p>
-          <p class="section-copy">基于当前世界状态向前演化一步，观察关系与事件如何变化。</p>
           <button class="btn" :disabled="!sessionId || busy" @click="stepForward">推进一步</button>
           <button
             v-if="createMode !== 'manual'"
@@ -148,7 +122,7 @@
               />
               <button class="btn" :disabled="!sessionId || busy" @click="injectVariable">注入变量</button>
             </div>
-            <p class="field-hint">适合在会话中途添加新的扰动条件，测试它如何继续改写当前世界。</p>
+            <p class="field-hint">中途注入新扰动条件</p>
           </div>
         </div>
       </div>
@@ -184,9 +158,9 @@ import {
 } from "./worldlineControlPanelViewModel.js";
 
 const createModeOptions = Object.freeze([
-  { value: "manual", label: "手动", copy: "创建后由你推进与注入。" },
-  { value: "first_round", label: "首轮自动", copy: "创建后固定先跑 1 步，适合先看第一轮反应。" },
-  { value: "continuous", label: "持续自动", copy: "按你填写的步数上限持续推进。" },
+  { value: "manual", label: "手动", copy: "逐步推进" },
+  { value: "first_round", label: "首轮自动", copy: "先跑 1 步" },
+  { value: "continuous", label: "持续自动", copy: "按步数上限推进" },
 ]);
 
 const props = defineProps({
@@ -266,10 +240,6 @@ const runtimeSectionIndex = computed(() => {
   const label = String(base + 1).padStart(2, "0");
   return `${label} / 会话控制`;
 });
-
-const runtimeHint = computed(() => (
-  props.sessionId ? `当前作用域：${formatSessionScope(props.sessionScope)}` : "创建会话后即可推进剧情或注入新的变量。"
-));
 
 const lockSectionIndex = computed(() => {
   let base = props.showArchivePicker ? 2 : 1;

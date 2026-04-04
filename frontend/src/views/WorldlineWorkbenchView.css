@@ -24,6 +24,57 @@
 
 .stage-selection {
   padding-right: var(--space-sm);
+  transition: width 0.3s ease, min-width 0.3s ease, opacity 0.3s ease;
+}
+
+/* ── Left column auto-collapse during evolution ── */
+
+.worldline-stage.left-collapsed {
+  grid-template-columns:
+    44px
+    0px
+    minmax(0, var(--worldline-mid-pane-width))
+    16px
+    minmax(0, 1fr);
+}
+
+.worldline-stage.left-collapsed .stage-selection {
+  overflow: hidden;
+}
+
+.collapsed-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 4px;
+  cursor: pointer;
+  height: 100%;
+  border-radius: 12px;
+  background: rgba(244, 237, 220, 0.72);
+  border: 1px solid rgba(176, 125, 75, 0.18);
+  transition: background 0.2s ease;
+}
+
+.collapsed-rail:hover {
+  background: rgba(237, 225, 198, 0.92);
+}
+
+.collapsed-rail-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-sub, #6e6050);
+  letter-spacing: 0.08em;
+}
+
+.collapsed-rail-count {
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(201, 176, 139, 0.25);
+  color: #724e1f;
 }
 
 .stage-controls {
@@ -184,6 +235,73 @@
 
 .runtime-inspector {
   margin-top: var(--space-md);
+}
+
+/* ── Structured inspector sections ─────────────────── */
+
+.inspector-sections {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.inspector-section {
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 250, 241, 0.86);
+  border: 1px solid rgba(176, 125, 75, 0.14);
+}
+
+.inspector-section-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+}
+
+.inspector-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.inspector-dl dt {
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.inspector-dl dd {
+  margin: 0;
+  color: var(--text-sub);
+  word-break: break-word;
+}
+
+.inspector-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-sub);
+}
+
+.inspector-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-sub);
+}
+
+.inspector-list li {
+  margin-top: 4px;
+}
+
+.inspector-list li strong {
+  color: var(--text-main);
 }
 
 /* ── Two-col mode: hide left column, collapse to 3-track ── */

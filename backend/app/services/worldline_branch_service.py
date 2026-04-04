@@ -51,6 +51,8 @@ class WorldlineBranchService:
         event_confidence: str = "high",
         event_confidence_reason: str = "",
         event_source: str = "archive_based",
+        override_title: str = "",
+        override_summary: str = "",
     ) -> Dict[str, Any]:
         next_step = branch.current_step + 1
         depth = resolve_evolution_depth(branch, evolution_intensity, custom_depth)
@@ -90,8 +92,8 @@ class WorldlineBranchService:
         new_event = WorldEvent(
             event_id=f"evt_{uuid.uuid4().hex[:10]}",
             step=next_step,
-            title=f"{branch.title} · 第{next_step}步演化",
-            summary=self._summary(session.focus_question, consumed_variables, consumed_actions),
+            title=override_title or f"{branch.title} · 第{next_step}步演化",
+            summary=override_summary or self._summary(session.focus_question, consumed_variables, consumed_actions),
             event_type="evolution",
             driving_entities=drivers,
             variable_effects=[item.to_dict() for item in consumed_variables],

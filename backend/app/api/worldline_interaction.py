@@ -106,22 +106,63 @@ def list_worldline_agents(session_id: str):
 
 @worldline_bp.route("/session/<session_id>/step", methods=["POST"])
 def step_worldline_session(session_id: str):
+    """推进一步——使用 LLM 生成 agent 动作后再步进。"""
     try:
         data = request.get_json() or {}
         project_id, graph_id = project_graph_from_request(data)
-        session = worldline_engine.step(
-            session_id=session_id,
-            project_id=project_id,
-            graph_id=graph_id,
-            branch_id=data.get("branch_id"),
-            steps=data.get("steps", 1),
-            evolution_intensity=data.get("evolution_intensity", "medium"),
-            custom_depth=data.get("custom_depth"),
-        )
+        steps = data.get("steps", 1)
+
+        session, container_dir, branch = _branch_context(session_id, data)
+        if not session:
+            return error(f"世界线会话不存在: {session_id}", 404)
+
+        from ..services.worldline_auto_action_service import WorldlineAutoActionService
+        auto_action_service = WorldlineAutoActionService()
+
+        for _ in range(max(1, min(steps, 10))):
+            session = worldline_engine.get_session(session_id, project_id=project_id, graph_id=graph_id)
+            branch = current_world(session)
+            agents = worldline_runtime_service.list_agents(container_dir, session, branch.branch_id)
+
+            memory_hints = worldline_memory_service.build_candidate_hints(
+                container_dir, session.session_id, branch.branch_id, agents, "",
+            )
+
+            prepare_service = getattr(worldline_engine, "prepare_service", None)
+            action_views = {}
+            if prepare_service is not None:
+                action_views = prepare_service.build_action_views(container_dir, session, agents)
+
+            action_plan = auto_action_service.generate_actions(
+                branch, agents, "", memory_hints, action_views,
+            )
+
+            for action in action_plan["actions"]:
+                worldline_engine.queue_action(
+                    session_id=session_id,
+                    actor=action["agent_ref"],
+                    action=action["action"],
+                    intent=action["intent"],
+                    target=action["target"],
+                    project_id=project_id,
+                    graph_id=graph_id,
+                    branch_id=branch.branch_id,
+                )
+
+            session = worldline_engine.step(
+                session_id=session_id,
+                project_id=project_id,
+                graph_id=graph_id,
+                branch_id=branch.branch_id,
+                steps=1,
+                evolution_intensity=data.get("evolution_intensity", "medium"),
+                custom_depth=data.get("custom_depth"),
+            )
+
         return ok({
             "session_id": session.session_id,
             "updated_at": session.updated_at,
-            "message": f"世界线已推进 {data.get('steps', 1)} 步",
+            "message": f"世界线已推进 {steps} 步",
             "current_world": current_world_payload(session),
         })
     except ValueError as exc:

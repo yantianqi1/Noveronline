@@ -271,19 +271,23 @@
       <h2 class="panel-title title-ancient">来源与日志</h2>
 
       <div class="side-stack">
-        <!-- Agent 运行日志 -->
+        <!-- Agent 时间线日志 -->
         <section class="context-block">
           <div class="context-block-header">
-            <h3 class="context-block-title title-ancient">Agent 日志</h3>
+            <h3 class="context-block-title title-ancient">Agent 时间线</h3>
           </div>
-          <div v-if="!agentLog.length" class="review-hint">生成正文后，这里会显示各 Agent 的运行情况。</div>
-          <div v-else class="trace-list">
-            <article v-for="(entry, index) in agentLog" :key="index" class="trace-item">
-              <div class="trace-topline">
-                <span class="category-badge">{{ entry.agent }}</span>
-              </div>
-              <div class="trace-copy">{{ entry.message }}</div>
-            </article>
+          <div v-if="!agentTimeline.length" class="review-hint">生成正文后，这里会显示 Agent 的实时工作流程。</div>
+          <div v-else ref="timelineScrollRef" class="timeline-log">
+            <div
+              v-for="entry in agentTimeline"
+              :key="entry.id"
+              class="tl-line"
+              :class="'tl-' + entry.type"
+            >
+              <span class="tl-ts">{{ entry.ts }}</span>
+              <span class="tl-icon">{{ timelineIcon(entry.type) }}</span>
+              <span class="tl-body">{{ timelineBody(entry) }}</span>
+            </div>
           </div>
         </section>
 
@@ -346,7 +350,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import {
   adoptArchiveMemory,
@@ -427,7 +431,9 @@ const reviewerRulesIsCustom = ref(false);
 // ─── 正文生成状态 ───
 const draftPhase = ref("idle"); // idle | collecting | writing | done
 const authorInstruction = ref("");
-const agentLog = ref([]);
+const agentTimeline = ref([]);
+let timelineIdCounter = 0;
+const timelineScrollRef = ref(null);
 const agentPhases = ref([]);
 const draftAbortController = ref(null);
 const revisionCount = ref(0);
@@ -514,7 +520,8 @@ async function handleProjectChange() {
   memoryTimeline.value = null;
   timelineError.value = "";
   draftPhase.value = "idle";
-  agentLog.value = [];
+  agentTimeline.value = [];
+  timelineIdCounter = 0;
   agentPhases.value = [];
   revisionCount.value = 0;
   unresolvedIssues.value = [];
@@ -859,7 +866,8 @@ async function handleAgentGenerate() {
   agentStreaming.value = true;
   agentSceneContent.value = "";
   draftPhase.value = "collecting";
-  agentLog.value = [];
+  agentTimeline.value = [];
+  timelineIdCounter = 0;
 
   const chapter = chapterOptions.value.find(item => item.chapter_id === chapterId.value);
   const currentSceneOrder = scenes.value.find(s => s.scene_id === selectedSceneId.value)?.scene_order || 1;
@@ -892,26 +900,87 @@ async function handleAgentGenerate() {
     {
       onEvent(event) {
         if (event.type === "orchestrator_status") {
-          draftPhase.value = "collecting";
-          agentLog.value.push({
-            agent: "orchestrator",
-            message: event.message || event.phase,
-          });
+          draftPhase.value = event.phase === "writing" ? "writing" : "collecting";
           message.value = event.message || "编排中...";
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "status",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            message: event.message,
+          });
+        } else if (event.type === "thinking") {
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "thinking",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            content: event.content,
+          });
+        } else if (event.type === "tool_call") {
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "tool_call",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            name: event.name,
+            display: event.display || event.name,
+          });
+        } else if (event.type === "tool_result") {
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "tool_result",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            name: event.name,
+            summary: event.summary,
+          });
+        } else if (event.type === "phase_summary") {
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "summary",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            message: event.message,
+          });
         } else if (event.type === "writer_token") {
           draftPhase.value = "writing";
           agentSceneContent.value += (event.token || "");
+          const last = agentTimeline.value[agentTimeline.value.length - 1];
+          if (last?.type === "writing") {
+            last.wordCount = agentSceneContent.value.length;
+          } else {
+            agentTimeline.value.push({
+              id: timelineIdCounter++,
+              type: "writing",
+              ts: "",
+              wordCount: agentSceneContent.value.length,
+            });
+          }
         } else if (event.type === "error") {
           error.value = event.message || "生成失败";
           agentStreaming.value = false;
           draftPhase.value = agentSceneContent.value ? "done" : "idle";
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "error",
+            ts: event.ts || "",
+            message: event.message,
+          });
         }
       },
       onDone(event) {
         agentStreaming.value = false;
         draftPhase.value = "done";
-        message.value = `创作完成：${event.word_count || agentSceneContent.value.length} 字`;
-        // Refresh scene list
+        const wc = event.word_count || agentSceneContent.value.length;
+        message.value = `创作完成：${wc} 字`;
+        agentTimeline.value.push({
+          id: timelineIdCounter++,
+          type: "done",
+          ts: event.ts || "",
+          elapsedMs: event.elapsed_ms,
+          message: `${wc} 字`,
+        });
         loadScenes();
       },
       onError(event) {
@@ -923,6 +992,45 @@ async function handleAgentGenerate() {
     draftAbortController.value.signal,
   );
 }
+
+// ─── 时间线日志 helpers ───
+const _tlIcons = {
+  status: "●", thinking: "💭", tool_call: "↗", tool_result: "↙",
+  summary: "■", writing: "✍", done: "✓", error: "✗",
+};
+function timelineIcon(type) {
+  return _tlIcons[type] || "·";
+}
+function timelineBody(entry) {
+  switch (entry.type) {
+    case "status": case "summary": case "error":
+      return entry.message || "";
+    case "thinking": {
+      const c = entry.content || "";
+      return c.length > 80 ? c.slice(0, 80) + "..." : c;
+    }
+    case "tool_call":
+      return entry.display || entry.name;
+    case "tool_result": {
+      const s = entry.summary || "";
+      const t = s.length > 60 ? s.slice(0, 60) + "..." : s;
+      return `${entry.name} → ${t}`;
+    }
+    case "writing":
+      return `streaming ${entry.wordCount || 0} 字`;
+    case "done":
+      return `创作完成 (${((entry.elapsedMs || 0) / 1000).toFixed(1)}s, ${entry.message || "?"})`;
+    default:
+      return "";
+  }
+}
+
+watch(() => agentTimeline.value.length, () => {
+  nextTick(() => {
+    const el = timelineScrollRef.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+});
 
 // ─── 改写/扩写 ───
 function handleRewriteFromEditor(selectedText) {

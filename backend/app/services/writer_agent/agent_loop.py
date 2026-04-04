@@ -6,7 +6,10 @@ Ported from the claude-code-from-scratch TypeScript agent loop pattern.
 
 import json
 import logging
+import time
 from typing import Any, Dict, Generator, List
+
+from .tools import TOOL_DISPLAY_FORMATTERS
 
 logger = logging.getLogger(__name__)
 
@@ -20,19 +23,27 @@ class AgentLoop:
     MAX_ROUNDS = 15
     MAX_CONTEXT_CHARS = 200_000  # ~100K tokens for Chinese text
 
-    def __init__(self, llm_client, tools: List[Dict], system_prompt: str, project_id: str):
+    def __init__(self, llm_client, tools: List[Dict], system_prompt: str, project_id: str, t0: float = 0.0):
         """
         Args:
             llm_client: LLMClient instance (with chat_with_tools method)
             tools: List of tool definitions in OpenAI format
             system_prompt: System prompt for the orchestrator
             project_id: Current project ID (passed to tool executors)
+            t0: monotonic start time from orchestrator (for elapsed_ms)
         """
         self.client = llm_client
         self.tools = tools
         self.system_prompt = system_prompt
         self.project_id = project_id
+        self.t0 = t0 or time.monotonic()
         self.messages: List[Dict[str, Any]] = []
+
+    def _stamp(self) -> Dict[str, Any]:
+        return {
+            "ts": time.strftime("%H:%M:%S"),
+            "elapsed_ms": int((time.monotonic() - self.t0) * 1000),
+        }
 
     def run(self, user_message: str) -> Generator[Dict[str, Any], None, None]:
         """
@@ -57,7 +68,7 @@ class AgentLoop:
                     max_tokens=4096,
                 )
             except Exception as exc:
-                yield {"type": "error", "message": f"LLM 调用失败: {str(exc)}"}
+                yield {"type": "error", **self._stamp(), "message": f"LLM 调用失败: {str(exc)}"}
                 return
 
             # Build assistant message for history
@@ -78,8 +89,12 @@ class AgentLoop:
 
             # No tool calls = LLM is done, output is the brief
             if not response.tool_calls:
-                yield {"type": "brief_ready", "content": response.content or ""}
+                yield {"type": "brief_ready", **self._stamp(), "content": response.content or ""}
                 return
+
+            # Yield LLM thinking text if present alongside tool calls
+            if response.content and response.content.strip():
+                yield {"type": "thinking", **self._stamp(), "content": response.content.strip()}
 
             # Execute each tool call
             for tc in response.tool_calls:
@@ -89,7 +104,9 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     tool_input = {}
 
-                yield {"type": "tool_call", "name": tool_name, "input": tool_input}
+                display_fn = TOOL_DISPLAY_FORMATTERS.get(tool_name)
+                display = display_fn(tool_input) if display_fn else tool_name
+                yield {"type": "tool_call", **self._stamp(), "name": tool_name, "input": tool_input, "display": display}
 
                 result = execute_tool(tool_name, tool_input, self.project_id)
 
@@ -102,7 +119,7 @@ class AgentLoop:
 
                 # Yield truncated summary for frontend display
                 summary = result[:200] + "..." if len(result) > 200 else result
-                yield {"type": "tool_result", "name": tool_name, "summary": summary}
+                yield {"type": "tool_result", **self._stamp(), "name": tool_name, "summary": summary}
 
             # Check context size (rough estimate)
             total_chars = sum(
@@ -110,9 +127,9 @@ class AgentLoop:
             )
             if total_chars > self.MAX_CONTEXT_CHARS:
                 logger.warning("Agent loop context overflow at round %d, forcing brief output", round_num)
-                yield {"type": "brief_ready", "content": response.content or "已收集的上下文过长，强制结束收集。"}
+                yield {"type": "brief_ready", **self._stamp(), "content": response.content or "已收集的上下文过长，强制结束收集。"}
                 return
 
         # Max rounds reached
         logger.warning("Agent loop reached MAX_ROUNDS=%d", self.MAX_ROUNDS)
-        yield {"type": "brief_ready", "content": (response.content if response else "") or "达到最大轮次，强制结束收集。"}
+        yield {"type": "brief_ready", **self._stamp(), "content": (response.content if response else "") or "达到最大轮次，强制结束收集。"}

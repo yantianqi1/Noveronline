@@ -27,19 +27,29 @@ export function createWorldlinePrepareTaskPoller({
   }
 
   return async function pollPrepareTask(taskId, prepareId, onUpdate = () => {}) {
+    console.log("[prepare-poller] start polling", { taskId, prepareId });
     while (true) {
-      const [taskResponse, prepareResponse] = await Promise.all([
-        getTask(taskId),
-        getPreparedSession(prepareId),
-      ]);
+      let taskResponse, prepareResponse;
+      try {
+        [taskResponse, prepareResponse] = await Promise.all([
+          getTask(taskId),
+          getPreparedSession(prepareId),
+        ]);
+      } catch (pollErr) {
+        console.error("[prepare-poller] poll request failed", pollErr);
+        throw pollErr;
+      }
       const task = taskResponse.data || {};
+      console.log("[prepare-poller] task status:", task.status, "progress:", task.progress);
       const snapshot = buildPrepareTaskSnapshot(task, prepareResponse.data || {});
       onUpdate(snapshot);
 
       if (task.status === "completed") {
+        console.log("[prepare-poller] task completed");
         return snapshot;
       }
       if (task.status === "failed") {
+        console.error("[prepare-poller] task failed:", task.error);
         throw new Error(task.error || "世界线 prepare 失败");
       }
 

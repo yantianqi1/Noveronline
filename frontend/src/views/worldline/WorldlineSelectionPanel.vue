@@ -1,10 +1,8 @@
 <template>
   <article class="workbench-card selection-panel" :class="sessionId || preparedAgents.length ? 'panel-active' : 'panel-ready'">
     <header class="selection-header">
-      <div>
-        <p class="panel-kicker mono">{{ panelKicker }}</p>
-        <h2 class="card-title">{{ panelTitle }}</h2>
-      </div>
+      <p class="panel-kicker mono">{{ panelKicker }}</p>
+      <h2 class="card-title">{{ panelTitle }}</h2>
       <span v-if="selectedArchives.length" class="selection-badge mono">
         {{ selectedArchives.length }} 已选
       </span>
@@ -102,9 +100,15 @@ function handleAgentFocus(agent) {
 
 .selection-header {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--space-md);
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px var(--space-sm);
+}
+
+.selection-header .card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .panel-kicker {

@@ -260,7 +260,28 @@
 }
 
 .archive-picker.variant-worldline .list-grid {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: var(--space-sm);
+}
+
+/* ── Compact cards in worldline two-column grid ── */
+
+.archive-picker.variant-worldline :deep(.archive-card) {
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.archive-picker.variant-worldline :deep(.card-name) {
+  font-size: 13.5px;
+}
+
+.archive-picker.variant-worldline :deep(.card-summary) {
+  font-size: 12px;
+}
+
+.archive-picker.variant-worldline :deep(.card-footer) {
+  padding-top: 2px;
 }
 
 .archive-picker.variant-worldline .picker-list {

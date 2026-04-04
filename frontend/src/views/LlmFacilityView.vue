@@ -21,7 +21,7 @@
       </div>
     </header>
 
-    <div class="facility-grid container-7-5">
+    <div class="facility-grid">
       <!-- Channel Management -->
       <LlmChannelPanel
         :channels="channels"
@@ -250,6 +250,13 @@ onBeforeUnmount(() => {
 .message-row {
   display: flex;
   gap: var(--space-sm);
+}
+
+.facility-grid {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: var(--space-lg);
+  align-items: start;
 }
 
 @media (max-width: 900px) {
