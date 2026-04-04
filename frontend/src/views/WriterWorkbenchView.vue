@@ -1,9 +1,21 @@
 <template>
-  <div class="writer-stage" :class="workbenchMode" :style="{ gridTemplateColumns: gridTemplateColumns }">
+  <div class="writer-stage" :class="[workbenchMode, { 'manuscript-mode': viewMode === 'manuscript' }]" :style="{ gridTemplateColumns: activeGridColumns }">
     <aside class="writer-panel writer-controls workbench-card">
-      <p class="panel-kicker mono">WRITER CONTEXT</p>
-      <h2 class="panel-title title-ancient">写作工作台</h2>
-      <p class="panel-subtitle">选择范围与 POV，然后在输入框中开始创作。</p>
+      <!-- Manuscript TOC mode -->
+      <ManuscriptTocPanel
+        v-if="viewMode === 'manuscript'"
+        :chapters="manuscriptChapterList"
+        :selected-tag="manuscriptSelectedTag"
+        :total-words="manuscriptTotalWords"
+        :total-blocks="manuscriptBlocks.length"
+        :untagged-count="manuscriptUntaggedCount"
+        @jump="handleManuscriptJump"
+        @create-chapter="handleCreateManuscriptChapter"
+        @rename-chapter="handleRenameManuscriptChapter"
+        @export="handleManuscriptExport"
+      />
+      <!-- Writing controls mode -->
+      <template v-else>
       <p class="panel-status" :class="{ warning: !!error }">{{ error || message }}</p>
 
       <div class="writer-form">
@@ -160,11 +172,41 @@
         </div>
       </div>
 
+      </template>
     </aside>
 
     <main class="writer-panel writer-context workbench-card">
-      <p class="panel-kicker mono">NOVEL DRAFT</p>
-      <h2 class="panel-title title-ancient">创作与正文</h2>
+      <!-- Header bar: title + mode tabs -->
+      <div class="writer-header-bar">
+        <div class="writer-header-left">
+          <span class="panel-kicker mono">WRITER</span>
+          <h2 class="panel-title-inline title-ancient">工作台</h2>
+          <span class="panel-hint">{{ projectId ? '' : '请选择项目' }}</span>
+        </div>
+        <div class="view-mode-tabs">
+          <button
+            class="view-mode-tab"
+            :class="{ active: viewMode === 'writing' }"
+            @click="switchViewMode('writing')"
+          >写作</button>
+          <button
+            class="view-mode-tab"
+            :class="{ active: viewMode === 'manuscript' }"
+            @click="switchViewMode('manuscript')"
+          >稿件</button>
+        </div>
+      </div>
+
+      <!-- ═══ Manuscript prose view ═══ -->
+      <ManuscriptProseView
+        v-if="viewMode === 'manuscript'"
+        ref="manuscriptProseRef"
+        :blocks="manuscriptBlocks"
+        @edit-save="handleManuscriptBlockSave"
+      />
+
+      <!-- ═══ Writing mode content ═══ -->
+      <template v-if="viewMode === 'writing'">
 
       <!-- 上下文包折叠面板 -->
       <section v-if="contextPack" class="context-block collapsible-block">
@@ -216,6 +258,31 @@
         </div>
       </section>
 
+      <!-- 稿件操作栏 -->
+      <div v-if="projectId" class="manuscript-toolbar">
+        <button
+          v-if="agentSceneContent && draftPhase === 'done'"
+          class="btn btn-sm primary"
+          :disabled="commitBusy"
+          @click="handleCommitToManuscript()"
+        >
+          {{ commitBusy ? '提交中...' : '提交到稿件' }}
+        </button>
+        <button
+          v-if="showContinueButton"
+          class="btn btn-sm"
+          @click="handleContinueNext()"
+        >
+          继续写下一段
+        </button>
+      </div>
+
+      <!-- 续写上下文面板 -->
+      <ContinuationContextPanel
+        v-if="continuationContext"
+        :context="continuationContext"
+      />
+
       <!-- Agent 进度面板 -->
       <AgentProgressPanel
         v-if="draftPhase !== 'idle'"
@@ -224,6 +291,12 @@
         :unresolved-issues="unresolvedIssues"
         :final-score="finalScore"
       />
+
+      <!-- 续写模式 banner -->
+      <div v-if="taskType === 'continue' && continuationContext?.tail_text" class="continuation-banner">
+        <span class="continuation-banner-label">续写模式</span>
+        <span class="continuation-banner-excerpt">...{{ continuationContext.tail_text.slice(-80) }}</span>
+      </div>
 
       <!-- 场景编辑器 -->
       <section class="draft-output">
@@ -234,11 +307,12 @@
           @update="handleSceneContentUpdate"
           @rewrite="handleRewriteFromEditor"
           @expand="handleExpandFromEditor"
+          @commit-selection="handleCommitSelection"
         />
       </section>
 
       <!-- 空态提示 -->
-      <p v-if="draftPhase === 'idle'" class="panel-empty">
+      <p v-if="draftPhase === 'idle' && !continuationContext" class="panel-empty">
         在下方输入框中描述你的创作意图，系统会自动收集上下文、角色记忆和文风，然后生成小说正文。
       </p>
 
@@ -264,9 +338,10 @@
           </button>
         </div>
       </div>
+      </template>
     </main>
 
-    <aside class="writer-panel writer-debug workbench-card">
+    <aside v-show="viewMode === 'writing'" class="writer-panel writer-debug workbench-card">
       <p class="panel-kicker mono">TRACE & LOG</p>
       <h2 class="panel-title title-ancient">来源与日志</h2>
 
@@ -278,16 +353,32 @@
           </div>
           <div v-if="!agentTimeline.length" class="review-hint">生成正文后，这里会显示 Agent 的实时工作流程。</div>
           <div v-else ref="timelineScrollRef" class="timeline-log">
-            <div
-              v-for="entry in agentTimeline"
-              :key="entry.id"
-              class="tl-line"
-              :class="'tl-' + entry.type"
-            >
-              <span class="tl-ts">{{ entry.ts }}</span>
-              <span class="tl-icon">{{ timelineIcon(entry.type) }}</span>
-              <span class="tl-body">{{ timelineBody(entry) }}</span>
-            </div>
+            <template v-for="entry in agentTimeline" :key="entry.id">
+              <!-- Prompt snapshot: collapsible -->
+              <div v-if="entry.type === 'prompt_snapshot'" class="tl-prompt-block">
+                <div class="tl-line tl-prompt_snapshot" @click="entry.collapsed = !entry.collapsed">
+                  <span class="tl-ts">{{ entry.ts }}</span>
+                  <span class="tl-icon">{{ entry.collapsed ? '▶' : '▼' }}</span>
+                  <span class="tl-body">{{ promptSnapshotLabel(entry) }}</span>
+                </div>
+                <div v-if="!entry.collapsed" class="tl-prompt-detail">
+                  <div
+                    v-for="(msg, mIdx) in entry.messages"
+                    :key="mIdx"
+                    class="tl-prompt-msg"
+                  >
+                    <div class="tl-prompt-role">{{ msg.role }}</div>
+                    <pre class="tl-prompt-content">{{ msg.content }}</pre>
+                  </div>
+                </div>
+              </div>
+              <!-- Normal timeline entry -->
+              <div v-else class="tl-line" :class="'tl-' + entry.type">
+                <span class="tl-ts">{{ entry.ts }}</span>
+                <span class="tl-icon">{{ timelineIcon(entry.type) }}</span>
+                <span class="tl-body">{{ timelineBody(entry) }}</span>
+              </div>
+            </template>
           </div>
         </section>
 
@@ -346,6 +437,8 @@
       @save="handlePresetSave"
       @close="presetEditorVisible = false"
     />
+
+    <!-- ManuscriptDrawer removed — use the "稿件" tab instead -->
   </div>
 </template>
 
@@ -363,6 +456,10 @@ import AgentProgressPanel from "../components/AgentProgressPanel.vue";
 import SceneListPanel from "./writer/SceneListPanel.vue";
 import PresetEditor from "./writer/PresetEditor.vue";
 import SceneEditor from "./writer/SceneEditor.vue";
+// ManuscriptDrawer removed — unified into "稿件" tab
+import ManuscriptProseView from "./writer/ManuscriptProseView.vue";
+import ManuscriptTocPanel from "./writer/ManuscriptTocPanel.vue";
+import ContinuationContextPanel from "./writer/ContinuationContextPanel.vue";
 import {
   runWriterAgent,
   getScenes,
@@ -374,6 +471,12 @@ import {
   deletePreset,
   getChapters,
   migrateProject,
+  commitToManuscript,
+  getContinuationContext,
+  getManuscript,
+  updateManuscriptBlock,
+  tagManuscriptBlocks,
+  exportManuscript,
 } from "../api/writerAgent.js";
 import { useProjectCatalog } from "../composables/useProjectCatalog.js";
 import { buildWriterWorkbenchColumns, resolveWriterWorkbenchMode } from "./writer/writerWorkbenchLayout.js";
@@ -450,6 +553,18 @@ const agentSceneContent = ref(""); // streaming content for SceneEditor
 const agentStreaming = ref(false);
 const involvedEntityIds = ref([]);
 
+// ─── 稿件 (Manuscript) ───
+const viewMode = ref("writing"); // writing | manuscript
+// manuscriptDrawerVisible removed — unified into "稿件" tab
+const continuationContext = ref(null);
+const showContinueButton = ref(false);
+const lastCommittedBlockId = ref("");
+const commitBusy = ref(false);
+const manuscriptBlocks = ref([]);
+const manuscriptTotalWords = ref(0);
+const manuscriptProseRef = ref(null);
+const manuscriptSelectedTag = ref(null);
+
 const taskTypeOptions = [
   { value: "write_scene", label: "写场景" },
   { value: "continue", label: "续写" },
@@ -461,6 +576,31 @@ const taskTypeOptions = [
 
 
 const gridTemplateColumns = computed(() => buildWriterWorkbenchColumns(workbenchMode.value));
+const activeGridColumns = computed(() => {
+  if (viewMode.value === "manuscript") {
+    return workbenchMode.value === "desktop"
+      ? "minmax(260px, 300px) minmax(0, 1fr)"
+      : "1fr";
+  }
+  return gridTemplateColumns.value;
+});
+
+const manuscriptChapterList = computed(() => {
+  const map = new Map();
+  for (const b of manuscriptBlocks.value) {
+    const tag = b.chapter_tag;
+    if (!tag) continue;
+    if (!map.has(tag)) map.set(tag, { tag, blockCount: 0, wordCount: 0 });
+    const entry = map.get(tag);
+    entry.blockCount++;
+    entry.wordCount += b.word_count || 0;
+  }
+  return Array.from(map.values());
+});
+
+const manuscriptUntaggedCount = computed(() =>
+  manuscriptBlocks.value.filter(b => !b.chapter_tag).length
+);
 const povOptions = computed(() => resolveWriterPovOptions(scopeType.value, projectPovs.value, worldlineAgents.value));
 const canSubmit = computed(() => {
   if (!projectId.value || !povCharacter.value) {
@@ -473,6 +613,9 @@ const canGenerate = computed(() => {
   return draftPhase.value === "idle" || draftPhase.value === "done";
 });
 const inputPlaceholder = computed(() => {
+  if (taskType.value === "continue" && continuationContext.value) {
+    return "描述接下来的走向、情节转折或角色行动...";
+  }
   return '描述你的创作意图，如"续写第三章开场，主角在废塔中发现暗门"...';
 });
 const generateButtonLabel = computed(() => {
@@ -558,7 +701,7 @@ async function refreshProjectData() {
     }
     sessionOptions.value = (sessionsResponse.data?.sessions || []).map((item) => ({
       session_id: item.session_id,
-      label: `${item.session_scope === "global" ? "全局" : "项目"} · ${item.session_id.slice(0, 8)} · ${item.current_world?.title || "当前世界"}`,
+      label: item.label || `${item.session_scope === "global" ? "全局" : "项目"} · ${item.session_id.slice(0, 8)}`,
     }));
     message.value = "项目数据已刷新";
 
@@ -888,6 +1031,7 @@ async function handleAgentGenerate() {
       ? (window.getSelection()?.toString() || agentSceneContent.value)
       : "",
     scene_id: selectedSceneId.value,
+    last_block_id: taskType.value === "continue" ? lastCommittedBlockId.value : "",
   };
 
   if (draftAbortController.value) {
@@ -934,6 +1078,17 @@ async function handleAgentGenerate() {
             elapsedMs: event.elapsed_ms,
             name: event.name,
             summary: event.summary,
+          });
+        } else if (event.type === "prompt_snapshot") {
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "prompt_snapshot",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            phase: event.phase,
+            round: event.round,
+            messages: event.messages,
+            collapsed: true,
           });
         } else if (event.type === "phase_summary") {
           agentTimeline.value.push({
@@ -1001,6 +1156,12 @@ const _tlIcons = {
 function timelineIcon(type) {
   return _tlIcons[type] || "·";
 }
+function promptSnapshotLabel(entry) {
+  const phase = entry.phase === "writer" ? "写作层" : "编排层";
+  const round = entry.round > 0 ? ` (第${entry.round + 1}轮)` : "";
+  const charCount = entry.messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+  return `${phase}完整提示词${round} — ${charCount} 字`;
+}
 function timelineBody(entry) {
   switch (entry.type) {
     case "status": case "summary": case "error":
@@ -1041,6 +1202,153 @@ function handleRewriteFromEditor(selectedText) {
 function handleExpandFromEditor(selectedText) {
   taskType.value = "expand";
   authorInstruction.value = `请扩写以下文本：\n${selectedText}`;
+}
+
+// ─── 稿件操作 ───
+async function handleCommitToManuscript(content = null) {
+  if (!projectId.value) return;
+  const text = content || agentSceneContent.value;
+  if (!text.trim()) return;
+  // Resolve chapter tag from current selection
+  const chapter = chapterOptions.value.find(item => item.chapter_id === chapterId.value);
+  const chapterTag = chapter ? `第${chapter.order}章 · ${chapter.title}` : undefined;
+  try {
+    commitBusy.value = true;
+    const commitResult = await commitToManuscript(projectId.value, {
+      content: text,
+      source_scene_id: selectedSceneId.value || undefined,
+      chapter_tag: chapterTag,
+    });
+    const blockData = commitResult?.data || commitResult;
+    if (blockData?.block_id) {
+      lastCommittedBlockId.value = blockData.block_id;
+    }
+    message.value = chapterTag ? `已提交到稿件 [${chapterTag}]` : "已提交到稿件";
+    showContinueButton.value = true;
+  } catch (err) {
+    error.value = err.message || "提交到稿件失败";
+  } finally {
+    commitBusy.value = false;
+  }
+}
+
+async function handleCommitSelection(selectedText) {
+  await handleCommitToManuscript(selectedText);
+}
+
+async function handleContinueNext() {
+  // Clear workspace and load continuation context
+  agentSceneContent.value = "";
+  draftPhase.value = "idle";
+  showContinueButton.value = false;
+  taskType.value = "continue";
+
+  try {
+    const res = await getContinuationContext(projectId.value, {
+      lastBlockId: lastCommittedBlockId.value,
+    });
+    continuationContext.value = res.data || res;
+  } catch (err) {
+    error.value = err.message || "加载续写上下文失败";
+  }
+}
+
+function handleManuscriptUpdated() {
+  // Refresh continuation context if it's visible
+  if (continuationContext.value) {
+    getContinuationContext(projectId.value, {
+      lastBlockId: lastCommittedBlockId.value,
+    }).then(res => {
+      continuationContext.value = res.data || res;
+    }).catch(() => {});
+  }
+  // Refresh manuscript view if active
+  if (viewMode.value === "manuscript") {
+    loadManuscriptBlocks();
+  }
+}
+
+// ─── 稿件模式 ───
+async function loadManuscriptBlocks() {
+  if (!projectId.value) {
+    manuscriptBlocks.value = [];
+    manuscriptTotalWords.value = 0;
+    return;
+  }
+  try {
+    const res = await getManuscript(projectId.value);
+    const payload = res.data || res;
+    manuscriptBlocks.value = payload.blocks || [];
+    manuscriptTotalWords.value = payload.total_words || 0;
+  } catch (e) {
+    console.error("Failed to load manuscript", e);
+  }
+}
+
+function switchViewMode(mode) {
+  viewMode.value = mode;
+  if (mode === "manuscript") {
+    loadManuscriptBlocks();
+  }
+}
+
+function handleManuscriptJump(tag) {
+  manuscriptSelectedTag.value = tag;
+  if (tag && manuscriptProseRef.value) {
+    manuscriptProseRef.value.scrollToChapter(tag);
+  }
+}
+
+async function handleManuscriptBlockSave(block, newContent) {
+  try {
+    await updateManuscriptBlock(block.block_id, {
+      project_id: projectId.value,
+      content: newContent,
+    });
+  } catch (e) {
+    console.error("Manuscript block save failed", e);
+  }
+}
+
+function handleCreateManuscriptChapter(name) {
+  // Chapter is just a tag — it will appear once a block is tagged with it.
+  // For now, we create a placeholder by tagging the first untagged block,
+  // or just show the name for future use.
+  // Since chapters are just tags on blocks, there's nothing to persist
+  // until blocks are committed. We just note it for the UI.
+  message.value = `章节「${name}」已创建，提交内容时将自动归入此章节`;
+}
+
+async function handleRenameManuscriptChapter(oldTag, newTag) {
+  // Re-tag all blocks with oldTag to newTag
+  const blockIds = manuscriptBlocks.value
+    .filter(b => b.chapter_tag === oldTag)
+    .map(b => b.block_id);
+  if (!blockIds.length) return;
+  try {
+    await tagManuscriptBlocks(projectId.value, {
+      block_ids: blockIds,
+      chapter_tag: newTag,
+    });
+    await loadManuscriptBlocks();
+    message.value = `章节已重命名: ${oldTag} → ${newTag}`;
+  } catch (e) {
+    error.value = e.message || "重命名章节失败";
+  }
+}
+
+async function handleManuscriptExport(fmt) {
+  try {
+    const blob = await exportManuscript(projectId.value, fmt);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `manuscript.${fmt}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    error.value = e.message || "导出失败";
+  }
 }
 
 // ─── 数据迁移 ───

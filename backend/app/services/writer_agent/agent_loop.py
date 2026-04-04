@@ -60,12 +60,20 @@ class AgentLoop:
         response = None
 
         for round_num in range(self.MAX_ROUNDS):
+            full_messages = [{"role": "system", "content": self.system_prompt}] + self.messages
+            yield {
+                "type": "prompt_snapshot",
+                **self._stamp(),
+                "phase": "orchestrator",
+                "round": round_num,
+                "messages": full_messages,
+            }
             try:
                 response = self.client.chat_with_tools(
-                    messages=[{"role": "system", "content": self.system_prompt}] + self.messages,
+                    messages=full_messages,
                     tools=self.tools,
                     temperature=0.3,
-                    max_tokens=4096,
+                    max_tokens=8192,
                 )
             except Exception as exc:
                 yield {"type": "error", **self._stamp(), "message": f"LLM 调用失败: {str(exc)}"}
@@ -117,9 +125,9 @@ class AgentLoop:
                     "content": result,
                 })
 
-                # Yield truncated summary for frontend display
+                # Yield truncated summary for frontend display + full result for orchestrator
                 summary = result[:200] + "..." if len(result) > 200 else result
-                yield {"type": "tool_result", **self._stamp(), "name": tool_name, "summary": summary}
+                yield {"type": "tool_result", **self._stamp(), "name": tool_name, "summary": summary, "full_result": result}
 
             # Check context size (rough estimate)
             total_chars = sum(

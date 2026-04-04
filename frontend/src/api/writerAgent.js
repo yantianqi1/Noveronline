@@ -65,6 +65,43 @@ export function deleteChapter(chapterId, projectId) {
   return del(`/api/writer-agent/chapters/detail/${chapterId}?project_id=${projectId}`);
 }
 
+// Manuscript
+export function commitToManuscript(projectId, payload) {
+  return post(`/api/writer-agent/manuscript/${projectId}/commit`, payload);
+}
+
+export function getManuscript(projectId, includeContent = true) {
+  return get(`/api/writer-agent/manuscript/${projectId}?include_content=${includeContent}`);
+}
+
+export function updateManuscriptBlock(blockId, payload) {
+  return put(`/api/writer-agent/manuscript/block/${blockId}`, payload);
+}
+
+export function deleteManuscriptBlock(blockId, projectId) {
+  return del(`/api/writer-agent/manuscript/block/${blockId}?project_id=${projectId}`);
+}
+
+export function reorderManuscriptBlocks(projectId, blockIds) {
+  return put(`/api/writer-agent/manuscript/${projectId}/reorder`, { block_ids: blockIds });
+}
+
+export function tagManuscriptBlocks(projectId, payload) {
+  return put(`/api/writer-agent/manuscript/${projectId}/tag`, payload);
+}
+
+export async function exportManuscript(projectId, format = "txt") {
+  const response = await fetch(`/api/writer-agent/manuscript/${projectId}/export?format=${format}`);
+  if (!response.ok) throw new Error(`导出失败: ${response.status}`);
+  return response.blob();
+}
+
+export function getContinuationContext(projectId, { tokenBudget = 8000, lastBlockId = "" } = {}) {
+  let url = `/api/writer-agent/manuscript/${projectId}/continuation-context?token_budget=${tokenBudget}`;
+  if (lastBlockId) url += `&last_block_id=${encodeURIComponent(lastBlockId)}`;
+  return get(url);
+}
+
 // Migration
 export function migrateProject(projectId) {
   return post(`/api/writer-agent/migrate/${projectId}`);

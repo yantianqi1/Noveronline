@@ -51,9 +51,17 @@ def _pretty_json(raw: str | None) -> str:
         return ""
     try:
         obj = json.loads(raw)
+        if isinstance(obj, (dict, list)) and not obj:
+            return ""  # Treat empty containers as "no data"
         return json.dumps(obj, ensure_ascii=False, indent=2)
     except (json.JSONDecodeError, TypeError):
         return raw
+
+
+def _append_if(lines: list[str], label: str, value: str | None) -> None:
+    """Append ``label：value`` to *lines* only when *value* is non-empty."""
+    if value and value.strip():
+        lines.append(f"{label}：{value}")
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +83,33 @@ def _query_entity(params: dict, project_id: str) -> str:
         f"核心驱动：{entity.get('core_drive') or '无'}",
         f"表面表现：{entity.get('surface_mask') or '无'}",
         f"内在矛盾：{entity.get('hidden_tension') or '无'}",
-        f"详细设定：{_pretty_json(entity.get('profile_json')) or '无'}",
     ]
+
+    # Structured personality & speech fields
+    _append_if(lines, "说话风格", entity.get("speech_style"))
+    _append_if(lines, "口头禅", _pretty_json(entity.get("verbal_habits_json")))
+    _append_if(lines, "经典台词", _pretty_json(entity.get("example_quotes_json")))
+    _append_if(lines, "性格特征", _pretty_json(entity.get("personality_traits_json")))
+    _append_if(lines, "价值观", entity.get("values_text"))
+    _append_if(lines, "恐惧", entity.get("fears_text"))
+    _append_if(lines, "决策模式", entity.get("decision_pattern"))
+
+    # Capabilities & knowledge
+    _append_if(lines, "能力", _pretty_json(entity.get("skills_json")))
+    _append_if(lines, "局限", _pretty_json(entity.get("limitations_json")))
+    _append_if(lines, "资源", entity.get("resources_text"))
+    _append_if(lines, "知识边界", _pretty_json(entity.get("knowledge_boundary_json")))
+
+    # Goals
+    _append_if(lines, "终极目标", entity.get("ultimate_goal"))
+    _append_if(lines, "当前目标", entity.get("current_objective"))
+
+    # Archive-sourced extras
+    _append_if(lines, "关系概述", entity.get("relationship_summary_text"))
+    _append_if(lines, "行为提示", entity.get("agent_behavior_hint"))
+    _append_if(lines, "风险", _pretty_json(entity.get("notable_risks_json")))
+
+    lines.append(f"详细设定：{_pretty_json(entity.get('profile_json')) or '无'}")
     return "\n".join(lines)
 
 
@@ -118,6 +151,11 @@ def _query_chapter(params: dict, project_id: str) -> str:
         f"时间线：{chapter.get('timeline_note') or '无'}",
         f"未解决线索：{_pretty_json(chapter.get('open_threads_json')) or '无'}",
     ]
+    _append_if(lines, "关键事件", _pretty_json(chapter.get("key_events_json")))
+    _append_if(lines, "角色状态变化", _pretty_json(chapter.get("character_state_updates_json")))
+    _append_if(lines, "关系变化", _pretty_json(chapter.get("relationship_updates_json")))
+    _append_if(lines, "起始锚点", chapter.get("start_anchor"))
+    _append_if(lines, "结束锚点", chapter.get("end_anchor"))
     if include_content:
         content = chapter.get("content", "")
         lines.append(f"正文：\n{content}")
@@ -236,15 +274,324 @@ def _get_world_state(params: dict, project_id: str) -> str:
     return "\n".join(lines)
 
 
+_STATUS_LABELS = {"open": "未解决", "progressed": "进行中", "resolved": "已解决"}
+
+
 def _get_open_threads(params: dict, project_id: str) -> str:
     up_to_chapter = params["up_to_chapter"]
     threads = _db.get_open_threads(project_id, up_to_chapter)
     if not threads:
         return f"截至第 {up_to_chapter} 章，暂无未解决的伏笔线索"
 
-    lines = [f"截至第 {up_to_chapter} 章的未解决伏笔（{len(threads)} 条）："]
+    lines = [f"截至第 {up_to_chapter} 章的伏笔线索（{len(threads)} 条）："]
     for i, t in enumerate(threads, 1):
-        lines.append(f"{i}. {t}")
+        if isinstance(t, dict):
+            status = t.get("status", "open")
+            label = _STATUS_LABELS.get(status, status)
+            key = t.get("thread_key", "")
+            detail = t.get("detail", "")
+            text = f"[{label}] {key}"
+            if detail:
+                text += f" — {detail}"
+            lines.append(f"{i}. {text}")
+        else:
+            lines.append(f"{i}. {t}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Manuscript tool executors
+# ---------------------------------------------------------------------------
+
+
+def _get_manuscript_context(params: dict, project_id: str) -> str:
+    from .manuscript_context_builder import build_continuation_context
+    token_budget = params.get("token_budget", 8000)
+    ctx = build_continuation_context(project_id, token_budget)
+
+    if not ctx.get("recent_summaries") and not ctx.get("tail_text"):
+        return "稿件尚无已提交内容"
+
+    lines: list[str] = []
+    lines.append(f"稿件概况：{ctx['total_blocks']}段，{ctx['total_words']}字")
+
+    if ctx.get("last_pov"):
+        lines.append(f"上一段 POV：{ctx['last_pov']}")
+    if ctx.get("last_location"):
+        lines.append(f"上一段地点：{ctx['last_location']}")
+    if ctx.get("narrative_note"):
+        lines.append(f"叙事状态：{ctx['narrative_note']}")
+
+    if ctx.get("recent_summaries"):
+        lines.append("\n--- 近期段落摘要 ---")
+        for s in ctx["recent_summaries"]:
+            tag = f" [{s['chapter_tag']}]" if s.get("chapter_tag") else ""
+            lines.append(f"第{s['block_order']}段{tag}：{s['summary']}")
+
+    if ctx.get("active_threads"):
+        lines.append("\n--- 活跃伏笔 ---")
+        for i, t in enumerate(ctx["active_threads"], 1):
+            lines.append(f"{i}. {t}")
+
+    if ctx.get("tail_text"):
+        lines.append("\n--- 原文尾部 ---")
+        lines.append(ctx["tail_text"])
+
+    return "\n".join(lines)
+
+
+def _search_manuscript(params: dict, project_id: str) -> str:
+    query = params["query"]
+    limit = params.get("limit", 10)
+    results = _db.search_manuscript_fts(project_id, query, limit)
+    if not results:
+        return f"稿件中未找到与「{query}」相关的内容"
+
+    lines = [f"稿件搜索「{query}」结果（{len(results)}条）："]
+    for i, r in enumerate(results, 1):
+        tag = f" [{r.get('chapter_tag')}]" if r.get("chapter_tag") else ""
+        lines.append(f"{i}. 第{r['block_order']}段{tag}（{r['word_count']}字）")
+        if r.get("snippet"):
+            lines.append(f"   {r['snippet']}")
+    return "\n".join(lines)
+
+
+def _get_manuscript_stats(params: dict, project_id: str) -> str:
+    stats = _db.get_manuscript_stats(project_id)
+    lines = [
+        f"稿件统计：",
+        f"总段落数：{stats['total_blocks']}",
+        f"总字数：{stats['total_words']}",
+    ]
+    if stats.get("chapter_tags"):
+        lines.append(f"章节标签：{', '.join(stats['chapter_tags'])}")
+    else:
+        lines.append("尚未标注章节")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# New tools: voice, timelines, threads, world rules
+# ---------------------------------------------------------------------------
+
+def _get_character_voice(project_id: str, inp: dict) -> str:
+    name = inp.get("name", "")
+    entity = _db.get_entity(project_id, name)
+    if not entity:
+        return f"未找到角色 {name}"
+    lines = [f"【角色语言风格】{entity.get('name', name)}"]
+    if entity.get("speech_style"):
+        lines.append(f"说话风格：{entity['speech_style']}")
+    if entity.get("personality_traits_json"):
+        try:
+            import json
+            traits = json.loads(entity["personality_traits_json"])
+            if traits:
+                lines.append(f"性格特征：{'、'.join(traits)}")
+        except Exception:
+            pass
+    if entity.get("verbal_habits_json"):
+        try:
+            import json
+            habits = json.loads(entity["verbal_habits_json"])
+            if habits:
+                lines.append(f"口头禅/语气：{'、'.join(habits)}")
+        except Exception:
+            pass
+    if entity.get("example_quotes_json"):
+        try:
+            import json
+            quotes = json.loads(entity["example_quotes_json"])
+            if quotes:
+                lines.append("经典台词/内心戏：")
+                for q in quotes[:8]:
+                    lines.append(f"  「{q}」")
+        except Exception:
+            pass
+    if entity.get("core_drive"):
+        lines.append(f"核心驱动：{entity['core_drive']}")
+    if entity.get("hidden_tension"):
+        lines.append(f"内在矛盾：{entity['hidden_tension']}")
+    # Also fetch entity_evidence quotes
+    try:
+        _db.ensure_schema(project_id)
+        with _db.connect(project_id) as conn:
+            evs = conn.execute(
+                "SELECT snippet FROM entity_evidence WHERE owner_id = ? LIMIT 10",
+                (entity.get("entity_id", ""),),
+            ).fetchall()
+            if evs:
+                lines.append("原文引用：")
+                for ev in evs:
+                    lines.append(f"  「{ev['snippet']}」")
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+def _query_relationship_timeline(project_id: str, inp: dict) -> str:
+    a_name = inp.get("entity_a", "")
+    b_name = inp.get("entity_b", "")
+    a = _db.get_entity(project_id, a_name)
+    b = _db.get_entity(project_id, b_name)
+    if not a or not b:
+        missing = a_name if not a else b_name
+        return f"未找到角色 {missing}"
+    a_id = a.get("entity_id", "")
+    b_id = b.get("entity_id", "")
+    _db.ensure_schema(project_id)
+    with _db.connect(project_id) as conn:
+        rows = conn.execute(
+            """SELECT * FROM relationship_events
+               WHERE project_id = ?
+                 AND ((source_entity_id = ? AND target_entity_id = ?)
+                   OR (source_entity_id = ? AND target_entity_id = ?))
+               ORDER BY chapter_order, segment_id""",
+            (project_id, a_id, b_id, b_id, a_id),
+        ).fetchall()
+    if not rows:
+        # Try by name
+        with _db.connect(project_id) as conn:
+            rows = conn.execute(
+                """SELECT * FROM relationship_events
+                   WHERE project_id = ?
+                     AND ((source_entity_id = ? AND target_entity_id = ?)
+                       OR (source_entity_id = ? AND target_entity_id = ?))
+                   ORDER BY chapter_order, segment_id""",
+                (project_id, a_name, b_name, b_name, a_name),
+            ).fetchall()
+    if not rows:
+        return f"未找到 {a_name} 与 {b_name} 之间的关系事件"
+    lines = [f"【关系时间线】{a_name} ↔ {b_name}（共 {len(rows)} 条事件）"]
+    for r in rows:
+        parts = []
+        if r["segment_id"]:
+            parts.append(f"[{r['segment_id']}]")
+        if r["relation_type"]:
+            parts.append(f"关系: {r['relation_type']}")
+        if r["trigger_event"]:
+            parts.append(f"触发: {r['trigger_event']}")
+        if r["evidence"]:
+            parts.append(f"证据: {r['evidence']}")
+        if r["emotional_shift"]:
+            parts.append(f"情感: {r['emotional_shift']}")
+        if r["power_shift"]:
+            parts.append(f"权力: {r['power_shift']}")
+        lines.append("  " + " | ".join(parts))
+    # Append current relationship state
+    rels = _db.get_relationship(project_id, a_name, b_name)
+    if rels:
+        lines.append("当前关系状态：")
+        for rel in rels:
+            lines.append(f"  {rel.get('relation_type', '?')}：{rel.get('description', '')}")
+    return "\n".join(lines)
+
+
+def _query_character_timeline(project_id: str, inp: dict) -> str:
+    name = inp.get("name", "")
+    event_type = inp.get("event_type", "all")
+    limit = inp.get("limit", 20)
+    entity = _db.get_entity(project_id, name)
+    entity_id = entity.get("entity_id", name) if entity else name
+    _db.ensure_schema(project_id)
+    with _db.connect(project_id) as conn:
+        if event_type and event_type != "all":
+            rows = conn.execute(
+                "SELECT * FROM character_events WHERE project_id = ? AND entity_id = ? AND event_type = ? ORDER BY chapter_order, segment_id LIMIT ?",
+                (project_id, entity_id, event_type, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM character_events WHERE project_id = ? AND entity_id = ? ORDER BY chapter_order, segment_id LIMIT ?",
+                (project_id, entity_id, limit),
+            ).fetchall()
+    if not rows:
+        return f"未找到 {name} 的事件记录"
+    lines = [f"【角色时间线】{name}（共 {len(rows)} 条事件）"]
+    for r in rows:
+        prefix = f"[{r['event_type']}]" if r["event_type"] else ""
+        seg = f" ({r['segment_id']})" if r["segment_id"] else ""
+        lines.append(f"  {prefix} {r['summary']}{seg}")
+    return "\n".join(lines)
+
+
+def _query_thread_history(project_id: str, inp: dict) -> str:
+    thread_key = inp.get("thread_key", "")
+    _db.ensure_schema(project_id)
+    with _db.connect(project_id) as conn:
+        rows = conn.execute(
+            "SELECT * FROM thread_lifecycle WHERE project_id = ? AND thread_key LIKE ? ORDER BY chapter_order, segment_id",
+            (project_id, f"%{thread_key}%"),
+        ).fetchall()
+    if not rows:
+        # Also check plot_threads table
+        with _db.connect(project_id) as conn:
+            pt_rows = conn.execute(
+                "SELECT * FROM plot_threads WHERE project_id = ? AND (thread_key LIKE ? OR detail LIKE ?)",
+                (project_id, f"%{thread_key}%", f"%{thread_key}%"),
+            ).fetchall()
+        if not pt_rows:
+            return f"未找到与「{thread_key}」相关的伏笔线索"
+        lines = [f"【伏笔线索】匹配到 {len(pt_rows)} 条"]
+        for r in pt_rows:
+            lines.append(f"  [{r['status']}] {r['thread_key']}：{r['detail']}")
+        return "\n".join(lines)
+    lines = [f"【伏笔生命周期】{thread_key}（共 {len(rows)} 条记录）"]
+    for r in rows:
+        parts = [f"[{r['status']}]", r["detail"] or ""]
+        if r["resolution_detail"]:
+            parts.append(f"解决方式: {r['resolution_detail']}")
+        if r["segment_id"]:
+            parts.append(f"({r['segment_id']})")
+        lines.append("  " + " ".join(p for p in parts if p))
+    return "\n".join(lines)
+
+
+def _search_world_rules(project_id: str, inp: dict) -> str:
+    query = inp.get("query", "")
+    limit = inp.get("limit", 10)
+    _db.ensure_schema(project_id)
+    fts_param = _db._fts_match_param(query)
+    results = []
+    with _db.connect(project_id) as conn:
+        try:
+            rows = conn.execute(
+                """SELECT wre.fact_text, wre.evidence_snippet, wre.segment_id,
+                          snippet(world_rule_evidence_fts, 0, '<b>', '</b>', '...', 48) AS snip
+                   FROM world_rule_evidence_fts
+                   JOIN world_rule_evidence wre ON wre.rowid = world_rule_evidence_fts.rowid
+                   WHERE world_rule_evidence_fts MATCH ?
+                   LIMIT ?""",
+                (fts_param, limit),
+            ).fetchall()
+            for r in rows:
+                results.append(r)
+        except Exception:
+            # Fallback to LIKE
+            rows = conn.execute(
+                "SELECT fact_text, evidence_snippet, segment_id FROM world_rule_evidence WHERE project_id = ? AND (fact_text LIKE ? OR evidence_snippet LIKE ?) LIMIT ?",
+                (project_id, f"%{query}%", f"%{query}%", limit),
+            ).fetchall()
+            for r in rows:
+                results.append(r)
+    if not results:
+        # Also search agent_memory world_rules
+        with _db.connect(project_id) as conn:
+            rows = conn.execute(
+                "SELECT summary, detail_json FROM agent_memory WHERE memory_type = 'world_rule' AND summary LIKE ? LIMIT ?",
+                (f"%{query}%", limit),
+            ).fetchall()
+            if rows:
+                lines = [f"搜索「{query}」世界观规则（{len(rows)} 条）："]
+                for r in rows:
+                    lines.append(f"  规则：{r['summary']}")
+                return "\n".join(lines)
+        return f"未找到与「{query}」相关的世界观规则"
+    lines = [f"搜索「{query}」世界观规则（{len(results)} 条）："]
+    for r in results:
+        lines.append(f"  规则：{r['fact_text']}")
+        if r["evidence_snippet"]:
+            lines.append(f"    证据：{r['evidence_snippet']}")
     return "\n".join(lines)
 
 
@@ -261,4 +608,12 @@ _EXECUTORS: dict[str, Any] = {
     "get_recent_scenes": _get_recent_scenes,
     "get_world_state": _get_world_state,
     "get_open_threads": _get_open_threads,
+    "get_manuscript_context": _get_manuscript_context,
+    "search_manuscript": _search_manuscript,
+    "get_manuscript_stats": _get_manuscript_stats,
+    "get_character_voice": _get_character_voice,
+    "query_relationship_timeline": _query_relationship_timeline,
+    "query_character_timeline": _query_character_timeline,
+    "query_thread_history": _query_thread_history,
+    "search_world_rules": _search_world_rules,
 }

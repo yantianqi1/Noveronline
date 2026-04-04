@@ -222,6 +222,116 @@ def delete_chapter(chapter_id):
         return _error_response(exc)
 
 
+# ---- Manuscript ----
+
+@writer_agent_bp.route("/manuscript/<project_id>/commit", methods=["POST"])
+def commit_to_manuscript(project_id):
+    try:
+        data = request.get_json() or {}
+        content = data.get("content", "")
+        if not content.strip():
+            return jsonify({"success": False, "error": "内容不能为空"}), 400
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        result = ManuscriptService().commit(
+            project_id,
+            content=content,
+            source_scene_id=data.get("source_scene_id"),
+            insert_after_block_id=data.get("insert_after_block_id"),
+            chapter_tag=data.get("chapter_tag"),
+        )
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/<project_id>", methods=["GET"])
+def list_manuscript(project_id):
+    try:
+        include_content = request.args.get("include_content", "true").lower() == "true"
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        result = ManuscriptService().list_blocks(project_id, include_content)
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/block/<block_id>", methods=["PUT"])
+def update_manuscript_block(block_id):
+    try:
+        data = request.get_json() or {}
+        project_id = data.get("project_id", "")
+        kwargs = {k: v for k, v in data.items() if k in ("content", "chapter_tag")}
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        result = ManuscriptService().update_block(project_id, block_id, **kwargs)
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/block/<block_id>", methods=["DELETE"])
+def delete_manuscript_block(block_id):
+    try:
+        project_id = request.args.get("project_id", "")
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        ManuscriptService().delete_block(project_id, block_id)
+        return jsonify({"success": True})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/<project_id>/reorder", methods=["PUT"])
+def reorder_manuscript(project_id):
+    try:
+        data = request.get_json() or {}
+        block_ids = data.get("block_ids", [])
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        ManuscriptService().reorder(project_id, block_ids)
+        return jsonify({"success": True})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/<project_id>/tag", methods=["PUT"])
+def tag_manuscript_blocks(project_id):
+    try:
+        data = request.get_json() or {}
+        block_ids = data.get("block_ids", [])
+        chapter_tag = data.get("chapter_tag", "")
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        count = ManuscriptService().tag_blocks(project_id, block_ids, chapter_tag)
+        return jsonify({"success": True, "data": {"updated_count": count}})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/<project_id>/export", methods=["GET"])
+def export_manuscript(project_id):
+    try:
+        fmt = request.args.get("format", "txt")
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        text = ManuscriptService().export_text(project_id, fmt)
+        filename = f"manuscript.{fmt}"
+        return Response(
+            text,
+            mimetype="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/<project_id>/continuation-context", methods=["GET"])
+def get_continuation_context(project_id):
+    try:
+        token_budget = int(request.args.get("token_budget", "8000"))
+        last_block_id = request.args.get("last_block_id") or None
+        from ..services.writer_agent.manuscript_context_builder import build_continuation_context
+        result = build_continuation_context(project_id, token_budget, last_block_id=last_block_id)
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return _error_response(exc)
+
+
 # ---- Migration ----
 
 @writer_agent_bp.route("/migrate/<project_id>", methods=["POST"])

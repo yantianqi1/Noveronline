@@ -154,11 +154,15 @@ class SequentialReader:
 
         plot_threads = result.get("plot_threads", [])
         if plot_threads:
-            manager.merge_plot_threads(plot_threads)
+            manager.merge_plot_threads(plot_threads, segment_id)
 
         world_building = result.get("world_building", [])
         if world_building:
             manager.merge_world_building(world_building)
+
+        consistency_notes = result.get("consistency_notes", [])
+        if consistency_notes:
+            manager.merge_consistency_notes(consistency_notes, segment_id)
 
         narrative_phase = result.get("narrative_phase", "")
         if narrative_phase:
@@ -186,8 +190,33 @@ class SequentialReader:
         except Exception:
             logger.exception("LLM error generating arc summary %s", arc_id)
             arc_summary_text = f"[弧线摘要生成失败] {arc_id}"
+            result = {}
 
         manager.add_arc_summary(arc_id, arc_summary_text, pending)
+
+        # Merge structured arc data back into notes (new format)
+        for ca in result.get("character_arcs", []):
+            name = ca.get("name", "")
+            change = ca.get("change", "")
+            if name and change:
+                chars = manager.notes["core_facts"]["characters"]
+                if name in chars:
+                    chars[name].setdefault("key_actions", []).append(f"[弧线变化] {change}")
+
+        for rs in result.get("relationship_shifts", []):
+            src = rs.get("source", "")
+            tgt = rs.get("target", "")
+            shift = rs.get("shift", "")
+            if src and tgt and shift:
+                manager.notes["relationship_graph"].append({
+                    "source": src, "target": tgt,
+                    "relation": shift, "trigger": f"弧线 {arc_id}",
+                    "evidence": "", "segment_id": arc_id,
+                })
+
+        for rule in result.get("world_rules_introduced", []):
+            if rule:
+                manager.merge_world_building([{"fact": rule, "evidence": f"弧线 {arc_id}"}])
 
     def _generate_volume_summary(
         self,

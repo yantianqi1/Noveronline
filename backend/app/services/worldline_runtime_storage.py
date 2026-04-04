@@ -124,6 +124,33 @@ CREATE_STATEMENTS = (
     """,
 )
 
+INDEX_STATEMENTS = (
+    # 情景记忆 — 最热查询，每个 agent turn 都调用
+    "CREATE INDEX IF NOT EXISTS idx_episodic_mem_agent "
+    "ON agent_episodic_memory(session_id, branch_id, agent_id, updated_at DESC, salience DESC)",
+    # 状态快照 — agent 回溯历史
+    "CREATE INDEX IF NOT EXISTS idx_state_snap_agent "
+    "ON agent_state_snapshots(session_id, branch_id, agent_id, created_at DESC)",
+    # 行动日志（会话范围）— agent_id 可选时
+    "CREATE INDEX IF NOT EXISTS idx_action_log_session "
+    "ON agent_action_log(session_id, branch_id, created_at DESC)",
+    # 行动日志（agent 范围）
+    "CREATE INDEX IF NOT EXISTS idx_action_log_agent "
+    "ON agent_action_log(session_id, branch_id, agent_id, created_at DESC)",
+    # 对话日志
+    "CREATE INDEX IF NOT EXISTS idx_dialogue_log_agent "
+    "ON agent_dialogue_log(session_id, branch_id, agent_id, created_at DESC)",
+    # 关系状态日志（会话范围）
+    "CREATE INDEX IF NOT EXISTS idx_relation_log_session "
+    "ON relation_state_log(session_id, branch_id, created_at DESC)",
+    # 关系状态日志（agent 范围）
+    "CREATE INDEX IF NOT EXISTS idx_relation_log_agent "
+    "ON relation_state_log(session_id, branch_id, agent_id, created_at DESC)",
+    # 行动状态过滤 — 查 queued/applied 状态
+    "CREATE INDEX IF NOT EXISTS idx_action_log_status "
+    "ON agent_action_log(session_id, branch_id, agent_id, status)",
+)
+
 AGENT_REGISTRY_COLUMNS = (
     ("importance_tier", "TEXT NOT NULL DEFAULT 'supporting'"),
     ("template_key", "TEXT NOT NULL DEFAULT 'generic.supporting.v1'"),
@@ -147,6 +174,8 @@ class WorldlineRuntimeStorage:
             for statement in CREATE_STATEMENTS:
                 connection.execute(statement)
             self._ensure_agent_registry_columns(connection)
+            for statement in INDEX_STATEMENTS:
+                connection.execute(statement)
             connection.commit()
 
     @contextmanager

@@ -22,6 +22,7 @@ def prepare_worldline_session():
     try:
         data = request.get_json() or {}
         result = worldline_prepare_service.start_prepare(
+            label=data.get("label", ""),
             project_id=data.get("project_id"),
             graph_id=data.get("graph_id"),
             variables=data.get("variables"),

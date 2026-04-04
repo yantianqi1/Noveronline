@@ -212,6 +212,7 @@ class WorldlineSession:
     simulation_goal: str
     focus_question: str
     branch_count: int
+    label: str = ""
     prepare_id: str = ""
     session_scope: str = "project"
     status: str = "running"
@@ -234,6 +235,7 @@ class WorldlineSession:
             "simulation_goal": self.simulation_goal,
             "focus_question": self.focus_question,
             "branch_count": self.branch_count,
+            "label": self.label,
             "prepare_id": self.prepare_id,
             "session_scope": self.session_scope,
             "status": self.status,

@@ -73,6 +73,15 @@ CREATE_STATEMENTS = (
     """,
 )
 
+INDEX_STATEMENTS = (
+    # 事件日志排序
+    "CREATE INDEX IF NOT EXISTS idx_event_log_prepare "
+    "ON prepare_event_log(prepare_id, created_at ASC)",
+    # 按 task_id 查找 prepare_runs
+    "CREATE INDEX IF NOT EXISTS idx_prepare_runs_task "
+    "ON prepare_runs(task_id)",
+)
+
 JSON_FIELDS = {
     "source_summary_json": "source_summary",
     "source_json": "source",
@@ -103,6 +112,8 @@ class WorldlinePrepareStorage:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with self.connect() as connection:
             for statement in CREATE_STATEMENTS:
+                connection.execute(statement)
+            for statement in INDEX_STATEMENTS:
                 connection.execute(statement)
             connection.commit()
 

@@ -21,6 +21,7 @@
     >
       <button @click="handleAction('rewrite')">改写</button>
       <button @click="handleAction('expand')">扩写</button>
+      <button @click="handleCommitSelection">提交选中</button>
     </div>
   </div>
 </template>
@@ -34,7 +35,7 @@ defineProps({
   readonly: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["update", "rewrite", "expand"]);
+const emit = defineEmits(["update", "rewrite", "expand", "commit-selection"]);
 
 const showToolbar = ref(false);
 const toolbarPos = ref({ top: 0, left: 0 });
@@ -59,6 +60,13 @@ function handleSelectionChange() {
 function handleAction(action) {
   emit(action, selectedText);
   showToolbar.value = false;
+}
+
+function handleCommitSelection() {
+  if (selectedText.trim()) {
+    emit("commit-selection", selectedText);
+    showToolbar.value = false;
+  }
 }
 
 onMounted(() => {

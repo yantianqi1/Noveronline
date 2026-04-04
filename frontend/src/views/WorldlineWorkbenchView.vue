@@ -37,6 +37,7 @@
         :selected-archives="selectedArchives"
         :archive-project-filter="archiveProjectFilter"
         :show-archive-picker="showArchivePicker"
+        :session-label="sessionLabel"
         :variables-text="variablesText"
         :single-variable="singleVariable"
         :create-mode="autoEvolution.createMode.value"
@@ -52,6 +53,7 @@
         :locked-variable-ids="lockedVariableIds"
         @update:selected-archives="updateSelectedArchives"
         @update:archive-project-filter="updateArchiveProjectFilter"
+        @update:session-label="updateSessionLabel"
         @update:variables-text="updateVariablesText"
         @update:single-variable="updateSingleVariable"
         @update:create-mode="updateCreateMode"
@@ -282,6 +284,7 @@ import { resolvePrepareTaskMessage } from "./worldline/worldlineControlPanelView
 
 const selectedArchives = ref([]);
 const archiveProjectFilter = ref("");
+const sessionLabel = ref("");
 const variablesText = ref("主要势力 A 提前结盟\n主角亲族在第 3 节点失踪");
 const singleVariable = ref("");
 const sessionId = ref("");
@@ -366,6 +369,7 @@ async function createSession() {
     prepareTaskId.value = "";
     preparedAgents.value = [];
     const res = await prepareWorldlineSession({
+      label: sessionLabel.value.trim(),
       archive_ids: selectedArchives.value.map((item) => item.archive_id),
       variables: parseVariables(variablesText.value),
     });
@@ -383,6 +387,7 @@ async function createSession() {
 
 function updateSelectedArchives(value) { selectedArchives.value = value; }
 function updateArchiveProjectFilter(value) { archiveProjectFilter.value = value; }
+function updateSessionLabel(value) { sessionLabel.value = value; }
 function updateVariablesText(value) { variablesText.value = value; }
 function updateSingleVariable(value) { singleVariable.value = value; }
 function updateInspirationPrompt(value) { inspirationPrompt.value = value; }

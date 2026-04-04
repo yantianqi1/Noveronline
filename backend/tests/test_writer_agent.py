@@ -103,7 +103,11 @@ class TestNovelDB:
         with self.db.connect(self.TEST_PROJECT) as conn:
             now = "2026-01-01T00:00:00"
             conn.execute(
-                "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO entities
+                    (entity_id, project_id, name, entity_type, importance_tier,
+                     summary, core_drive, surface_mask, hidden_tension,
+                     profile_json, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 ("e1", self.TEST_PROJECT, "林远", "character", "protagonist",
                  "主角", "守护", "冷静", "内心矛盾", "{}", now, now),
             )
@@ -163,7 +167,8 @@ class TestNovelDB:
 
         threads = self.db.get_open_threads(self.TEST_PROJECT, 2)
         assert len(threads) == 3
-        assert "谁是幕后黑手？" in threads
+        thread_keys = [t["thread_key"] for t in threads]
+        assert "谁是幕后黑手？" in thread_keys
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +220,11 @@ class TestToolExecutors:
         with self.db.connect(self.TEST_PROJECT) as conn:
             now = "2026-01-01T00:00:00"
             conn.execute(
-                "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO entities
+                    (entity_id, project_id, name, entity_type, importance_tier,
+                     summary, core_drive, surface_mask, hidden_tension,
+                     profile_json, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 ("e1", self.TEST_PROJECT, "林远", "character", "protagonist",
                  "主角剑修", "守护", "冷静沉稳", "外冷内热", '{"personality":"坚毅"}', now, now),
             )
@@ -310,7 +319,11 @@ class TestAgentLoop:
         with self.db.connect(self.TEST_PROJECT) as conn:
             now = "2026-01-01T00:00:00"
             conn.execute(
-                "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO entities
+                    (entity_id, project_id, name, entity_type, importance_tier,
+                     summary, core_drive, surface_mask, hidden_tension,
+                     profile_json, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 ("e1", self.TEST_PROJECT, "林远", "character", "protagonist",
                  "主角", "守护", "冷静", "矛盾", "{}", now, now),
             )

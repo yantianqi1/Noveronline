@@ -31,6 +31,7 @@ def create_worldline_session():
         session, _ = worldline_engine.create_session(
             project_id=project_id,
             graph_id=graph_id,
+            label=data.get("label", ""),
             variables=data.get("variables", []),
             focus_question=data.get("focus_question"),
             branch_count=data.get("branch_count"),

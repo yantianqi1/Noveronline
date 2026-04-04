@@ -43,6 +43,7 @@ class ReadingNotesManager:
                 "organizations": {},
                 "world_rules": [],
                 "key_locations": {},
+                "consistency_notes": [],
             },
             "relationship_graph": [],
             "plot_state": {
@@ -50,6 +51,7 @@ class ReadingNotesManager:
                 "volume_summaries": [],
                 "recent_segment_summaries": [],
                 "open_threads": [],
+                "resolved_threads": [],
                 "narrative_phase": "",
             },
         }
@@ -63,6 +65,7 @@ class ReadingNotesManager:
             "first_seen": "",
             "personality_traits": [],
             "speech_style": "",
+            "verbal_habits": [],
             "goals": [],
             "key_actions": [],
             "knowledge_gained": [],
@@ -135,6 +138,7 @@ class ReadingNotesManager:
             self._extend_unique(c["key_actions"], update.get("key_actions", []))
             self._extend_unique(c["knowledge_gained"], update.get("knowledge_gained", []))
             self._extend_unique(c["quote_examples"], update.get("quote_examples", []))
+            self._extend_unique(c.setdefault("verbal_habits", []), update.get("verbal_habits", []))
 
             if segment_id not in c["segments_seen"]:
                 c["segments_seen"].append(segment_id)
@@ -201,13 +205,18 @@ class ReadingNotesManager:
     # Plot threads
     # ------------------------------------------------------------------
 
-    def merge_plot_threads(self, threads: List[Dict]) -> None:
-        """Add opened/progressed threads; remove resolved ones."""
+    def merge_plot_threads(self, threads: List[Dict], segment_id: str = "") -> None:
+        """Add opened/progressed threads; move resolved ones to resolved_threads."""
         open_threads = self.notes["plot_state"]["open_threads"]
+        resolved_threads = self.notes["plot_state"].setdefault("resolved_threads", [])
         for thread in threads:
             t_name = thread.get("thread", "")
             status = thread.get("status", "open")
             if status == "resolved":
+                # Move to resolved_threads instead of deleting
+                resolved_entry = deepcopy(thread)
+                resolved_entry["resolved_segment_id"] = segment_id
+                resolved_threads.append(resolved_entry)
                 self.notes["plot_state"]["open_threads"] = [
                     t for t in open_threads if t.get("thread") != t_name
                 ]
@@ -218,6 +227,13 @@ class ReadingNotesManager:
                     existing.update(thread)
                 else:
                     open_threads.append(deepcopy(thread))
+
+    def merge_consistency_notes(self, notes: List[str], segment_id: str = "") -> None:
+        """Append consistency notes (contradictions/logic issues) found in a segment."""
+        cn_list = self.notes["core_facts"].setdefault("consistency_notes", [])
+        for note_text in notes:
+            if note_text and note_text.strip():
+                cn_list.append({"note": note_text.strip(), "segment_id": segment_id})
 
     # ------------------------------------------------------------------
     # Narrative phase
@@ -302,8 +318,20 @@ class ReadingNotesManager:
                     parts.append(f"[{c['status']}]")
                 if c.get("identity"):
                     parts.append(c["identity"])
-                if total_segs < 10 and c.get("personality_traits"):
-                    parts.append("traits: " + ", ".join(c["personality_traits"][:5]))
+                # Adaptive trait inclusion — always keep some voice fingerprint
+                if total_segs < 10:
+                    if c.get("personality_traits"):
+                        parts.append("traits: " + ", ".join(c["personality_traits"][:5]))
+                    if c.get("speech_style"):
+                        parts.append(f"voice: {c['speech_style']}")
+                elif total_segs < 50:
+                    if c.get("personality_traits"):
+                        parts.append("traits: " + ", ".join(c["personality_traits"][:3]))
+                    if c.get("speech_style"):
+                        parts.append(f"voice: {c['speech_style']}")
+                else:
+                    if c.get("speech_style"):
+                        parts.append(f"voice: {c['speech_style']}")
                 lines.append("  " + " | ".join(parts))
 
         # --- World rules (always include, they're compact) ---

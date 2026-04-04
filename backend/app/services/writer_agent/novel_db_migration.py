@@ -80,6 +80,15 @@ _CLEAR_ORDER = (
     "chapter_meta",
     "chapter_content",
     "entities",
+    "plot_threads",
+    "narrative_arcs",
+    "project_meta",
+    # Timeline tables
+    "character_events",
+    "relationship_events",
+    "thread_lifecycle",
+    "world_rule_evidence",
+    "consistency_notes",
 )
 
 
@@ -130,8 +139,11 @@ def _migrate_archive_library(
                 INSERT OR IGNORE INTO entities
                     (entity_id, project_id, name, entity_type, importance_tier,
                      summary, core_drive, surface_mask, hidden_tension,
-                     profile_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     profile_json,
+                     agent_behavior_hint, relationship_summary_text,
+                     notable_risks_json,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entity_id,
@@ -144,6 +156,9 @@ def _migrate_archive_library(
                     row["surface_mask"],
                     row["hidden_tension"],
                     row["template_payload_json"] or "{}",
+                    row["agent_behavior_hint"] or None,
+                    row["relationship_summary"] or None,
+                    row["notable_risks_json"] or "[]",
                     row["synced_at"] or now,
                     row["synced_at"] or now,
                 ),
@@ -255,6 +270,17 @@ def _migrate_chapter_meta(
             (project_id,),
         ).fetchall()
 
+        # Pre-load chapter_history_items grouped by chapter_order for outline building
+        history_by_chapter: dict[int, list[dict]] = {}
+        if _table_exists(src, "chapter_history_item"):
+            history_rows = src.execute(
+                "SELECT * FROM chapter_history_item WHERE project_id = ? ORDER BY chapter_order, id",
+                (project_id,),
+            ).fetchall()
+            for h in history_rows:
+                ch_order = h["chapter_order"]
+                history_by_chapter.setdefault(ch_order, []).append(dict(h))
+
         for row in rows:
             chapter_id = row["chapter_id"] or f"ch_{project_id}_{row['chapter_order']}"
             conn.execute(
@@ -276,20 +302,83 @@ def _migrate_chapter_meta(
                     row["updated_at"] or now,
                 ),
             )
+
+            # Build outline_json, key_events, character_state_updates,
+            # relationship_updates from chapter_history_items
+            ch_order = row["chapter_order"]
+            items = history_by_chapter.get(ch_order, [])
+            outline_entries = []
+            key_events = []
+            char_state_updates = []
+            rel_updates = []
+            pov_candidates: dict[str, int] = {}
+
+            for item in items:
+                item_type = item.get("item_type", "")
+                subject = item.get("subject_key", "")
+                summary = item.get("summary_text", "")
+                related = item.get("related_entities_json", "[]")
+
+                outline_entries.append({
+                    "type": item_type,
+                    "key": subject,
+                    "summary": summary,
+                })
+
+                if item_type in ("event", "key_event"):
+                    key_events.append({"summary": summary})
+                elif item_type in ("character_state", "character_state_update"):
+                    char_state_updates.append({
+                        "name": subject,
+                        "summary": summary,
+                    })
+                    # Track character mentions for POV inference
+                    if subject:
+                        pov_candidates[subject] = pov_candidates.get(subject, 0) + 1
+                elif item_type in ("relationship", "relationship_update"):
+                    rel_updates.append({
+                        "key": subject,
+                        "summary": summary,
+                    })
+
+                # Also count related entities for POV inference
+                try:
+                    related_list = json.loads(related) if related else []
+                    if isinstance(related_list, list):
+                        for ent in related_list:
+                            ent_name = ent if isinstance(ent, str) else ent.get("name", "")
+                            if ent_name:
+                                pov_candidates[ent_name] = pov_candidates.get(ent_name, 0) + 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Infer POV character: most-mentioned character in this chapter's history
+            pov_character = None
+            if pov_candidates:
+                pov_character = max(pov_candidates, key=pov_candidates.get)
+
             conn.execute(
                 """
                 INSERT OR IGNORE INTO chapter_meta
                     (chapter_id, summary, outline_json, timeline_note,
-                     open_threads_json, pov_character, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     open_threads_json, pov_character,
+                     key_events_json, character_state_updates_json,
+                     relationship_updates_json,
+                     start_anchor, end_anchor, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chapter_id,
                     row["summary_text"] or "",
-                    "[]",
+                    json.dumps(outline_entries, ensure_ascii=False) if outline_entries else "[]",
                     row["timeline_note"] or "",
                     row["open_threads_json"] or "[]",
-                    None,
+                    pov_character,
+                    json.dumps(key_events, ensure_ascii=False) if key_events else "[]",
+                    json.dumps(char_state_updates, ensure_ascii=False) if char_state_updates else "[]",
+                    json.dumps(rel_updates, ensure_ascii=False) if rel_updates else "[]",
+                    row["start_anchor"] or "",
+                    row["end_anchor"] or "",
                     row["updated_at"] or now,
                 ),
             )
@@ -463,12 +552,18 @@ def _migrate_story_graph(
                 target_id = node_uuid_to_entity_id.get(edge["target_node_uuid"])
                 if not source_id or not target_id:
                     continue
+                # Use edge weight as trust_level (interaction frequency)
+                weight = None
+                try:
+                    weight = float(edge["weight"]) if edge["weight"] else None
+                except (TypeError, ValueError):
+                    pass
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO relationships
                         (relation_id, source_id, target_id, relation_type,
-                         description, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                         description, trust_level, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         edge["uuid"],
@@ -476,6 +571,7 @@ def _migrate_story_graph(
                         target_id,
                         edge["name"],
                         edge["fact"] or "",
+                        weight,
                         now,
                     ),
                 )
@@ -878,14 +974,20 @@ def _migrate_agent_profiles(
 
         profile_json = json.dumps(profile, ensure_ascii=False)
 
-        # Extract richer fields from profile
+        # Extract structured fields from profile
         personality = profile.get("personality", {})
         speech = profile.get("speech", {})
         motivation = profile.get("motivation", {})
+        capabilities = profile.get("capabilities", {})
+        knowledge = profile.get("knowledge_boundary", {})
 
         core_drive = motivation.get("ultimate_goal", "")
         hidden_tension = motivation.get("internal_conflict", "")
-        surface_mask = speech.get("style", "")
+
+        # Build speech_style from style + tone_range
+        style = speech.get("style", "")
+        tone_range = speech.get("tone_range", "")
+        speech_style = f"{style}（{tone_range}）" if style and tone_range else style
 
         conn.execute(
             """
@@ -894,10 +996,43 @@ def _migrate_agent_profiles(
                 core_drive = COALESCE(NULLIF(?, ''), core_drive),
                 hidden_tension = COALESCE(NULLIF(?, ''), hidden_tension),
                 surface_mask = COALESCE(NULLIF(?, ''), surface_mask),
+                speech_style = COALESCE(NULLIF(?, ''), speech_style),
+                verbal_habits_json = ?,
+                example_quotes_json = ?,
+                personality_traits_json = ?,
+                values_text = COALESCE(NULLIF(?, ''), values_text),
+                fears_text = COALESCE(NULLIF(?, ''), fears_text),
+                decision_pattern = COALESCE(NULLIF(?, ''), decision_pattern),
+                skills_json = ?,
+                limitations_json = ?,
+                resources_text = COALESCE(NULLIF(?, ''), resources_text),
+                knowledge_boundary_json = ?,
+                ultimate_goal = COALESCE(NULLIF(?, ''), ultimate_goal),
+                current_objective = COALESCE(NULLIF(?, ''), current_objective),
                 updated_at = ?
             WHERE entity_id = ?
             """,
-            (profile_json, core_drive, hidden_tension, surface_mask, now, entity_id),
+            (
+                profile_json,
+                core_drive,
+                hidden_tension,
+                speech.get("style", ""),
+                speech_style,
+                json.dumps(speech.get("verbal_habits", []), ensure_ascii=False),
+                json.dumps(speech.get("example_quotes", []), ensure_ascii=False),
+                json.dumps(personality.get("core_traits", []), ensure_ascii=False),
+                personality.get("values", ""),
+                personality.get("fears", ""),
+                personality.get("decision_pattern", ""),
+                json.dumps(capabilities.get("skills", []), ensure_ascii=False),
+                json.dumps(capabilities.get("limitations", []), ensure_ascii=False),
+                capabilities.get("resources", ""),
+                json.dumps(knowledge, ensure_ascii=False) if knowledge else "{}",
+                motivation.get("ultimate_goal", ""),
+                motivation.get("current_objective", ""),
+                now,
+                entity_id,
+            ),
         )
         counts["agent_profiles_enriched"] = counts.get("agent_profiles_enriched", 0) + 1
 
@@ -982,6 +1117,706 @@ def _migrate_reading_notes(
 
 
 # ---------------------------------------------------------------------------
+# 11. reading_notes.json relationship_graph → enrich relationships
+# ---------------------------------------------------------------------------
+
+def _enrich_relationships_from_reading_notes(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+    name_to_id: dict[str, str],
+) -> None:
+    """Fill conflict_trigger, history, description from reading_notes relationship_graph."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    notes = raw.get("notes", raw)
+    rel_graph = notes.get("relationship_graph", [])
+    if not rel_graph:
+        return
+
+    enriched = 0
+    for entry in rel_graph:
+        source_name = entry.get("source", "")
+        target_name = entry.get("target", "")
+        source_id = name_to_id.get(source_name)
+        target_id = name_to_id.get(target_name)
+        if not source_id or not target_id:
+            continue
+
+        trigger = entry.get("trigger", "")
+        previous_state = entry.get("previous_state", "")
+        evidence = entry.get("evidence", "")
+
+        # Try both directions
+        row = conn.execute(
+            """
+            SELECT relation_id, conflict_trigger, history, description
+            FROM relationships
+            WHERE (source_id = ? AND target_id = ?)
+               OR (source_id = ? AND target_id = ?)
+            LIMIT 1
+            """,
+            (source_id, target_id, target_id, source_id),
+        ).fetchone()
+
+        if row:
+            updates = []
+            params: list = []
+            if trigger and not row["conflict_trigger"]:
+                updates.append("conflict_trigger = ?")
+                params.append(trigger)
+            if previous_state:
+                old_history = row["history"] or ""
+                new_history = f"{old_history}；{previous_state}" if old_history else previous_state
+                updates.append("history = ?")
+                params.append(new_history)
+            if evidence:
+                old_desc = row["description"] or ""
+                new_desc = f"{old_desc}；{evidence}" if old_desc else evidence
+                updates.append("description = ?")
+                params.append(new_desc)
+            if updates:
+                params.append(row["relation_id"])
+                conn.execute(
+                    f"UPDATE relationships SET {', '.join(updates)} WHERE relation_id = ?",
+                    params,
+                )
+                enriched += 1
+
+    if enriched:
+        conn.commit()
+    counts["relationships_enriched_notes"] = enriched
+
+
+# ---------------------------------------------------------------------------
+# 12. agent_profiles.json relationships → enrich power_dynamic / history
+# ---------------------------------------------------------------------------
+
+def _enrich_relationships_from_agent_profiles(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+    name_to_id: dict[str, str],
+) -> None:
+    """Fill power_dynamic and history from agent_profiles relationship entries."""
+    path = os.path.join(_project_dir(project_id), "agent_profiles.json")
+    if not os.path.isfile(path):
+        return
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    profiles = data.get("profiles", {})
+    enriched = 0
+
+    for char_name, profile in profiles.items():
+        char_id = name_to_id.get(char_name)
+        if not char_id:
+            continue
+
+        relationships = profile.get("relationships", [])
+        if not isinstance(relationships, list):
+            continue
+
+        for rel in relationships:
+            target_name = rel.get("target", "")
+            target_id = name_to_id.get(target_name)
+            if not target_id:
+                continue
+
+            attitude = rel.get("attitude", "")
+            evolution = rel.get("evolution", "")
+
+            row = conn.execute(
+                """
+                SELECT relation_id, power_dynamic, history
+                FROM relationships
+                WHERE (source_id = ? AND target_id = ?)
+                   OR (source_id = ? AND target_id = ?)
+                LIMIT 1
+                """,
+                (char_id, target_id, target_id, char_id),
+            ).fetchone()
+
+            if row:
+                updates = []
+                params: list = []
+                if attitude and not row["power_dynamic"]:
+                    updates.append("power_dynamic = ?")
+                    params.append(attitude)
+                if evolution:
+                    old_history = row["history"] or ""
+                    new_history = f"{old_history}；{evolution}" if old_history else evolution
+                    updates.append("history = ?")
+                    params.append(new_history)
+                if updates:
+                    params.append(row["relation_id"])
+                    conn.execute(
+                        f"UPDATE relationships SET {', '.join(updates)} WHERE relation_id = ?",
+                        params,
+                    )
+                    enriched += 1
+
+    if enriched:
+        conn.commit()
+    counts["relationships_enriched_profiles"] = enriched
+
+
+# ---------------------------------------------------------------------------
+# 13. reading_notes.json plot_state → plot_threads + narrative_arcs + project_meta
+# ---------------------------------------------------------------------------
+
+def _migrate_plot_state(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Import plot threads, arc summaries, and narrative phase from reading_notes."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    notes = raw.get("notes", raw)
+    plot_state = notes.get("plot_state", {})
+    if not plot_state:
+        return
+
+    now = _now()
+    import hashlib
+
+    # -- plot_threads --
+    open_threads = plot_state.get("open_threads", [])
+    for idx, entry in enumerate(open_threads):
+        if isinstance(entry, str):
+            thread_key = entry
+            status = "open"
+            detail = ""
+        elif isinstance(entry, dict):
+            thread_key = entry.get("thread", entry.get("thread_key", ""))
+            status = entry.get("status", "open")
+            detail = entry.get("detail", "")
+        else:
+            continue
+        if not thread_key:
+            continue
+        thread_id = f"pt_{hashlib.sha1(f'{project_id}:{idx}:{thread_key[:40]}'.encode()).hexdigest()[:12]}"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO plot_threads
+                (thread_id, project_id, thread_key, status, detail,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (thread_id, project_id, thread_key, status, detail, now, now),
+        )
+        counts["plot_threads"] = counts.get("plot_threads", 0) + 1
+
+    # -- narrative_arcs --
+    arc_summaries = plot_state.get("arc_summaries", [])
+    for idx, arc in enumerate(arc_summaries):
+        if isinstance(arc, str):
+            summary = arc
+            covered = []
+        elif isinstance(arc, dict):
+            summary = arc.get("summary", "")
+            covered = arc.get("covered_segments", [])
+        else:
+            continue
+        if not summary:
+            continue
+        arc_id = f"arc_{hashlib.sha1(f'{project_id}:{idx}:{summary[:40]}'.encode()).hexdigest()[:12]}"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO narrative_arcs
+                (arc_id, project_id, summary, covered_segments_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (arc_id, project_id, summary,
+             json.dumps(covered, ensure_ascii=False) if covered else "[]",
+             now),
+        )
+        counts["narrative_arcs"] = counts.get("narrative_arcs", 0) + 1
+
+    # -- project_meta --
+    narrative_phase = plot_state.get("narrative_phase", "")
+    # Count segments from reading notes
+    segment_summaries = plot_state.get("recent_segment_summaries", [])
+    total_segments = len(segment_summaries)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO project_meta
+            (project_id, narrative_phase, total_segments, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (project_id, narrative_phase or None, total_segments, now),
+    )
+
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 14. segment_summaries.json + reading_notes core_facts -> chapter_meta summary
+# ---------------------------------------------------------------------------
+
+def _migrate_segment_summaries(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Map segment-level summaries to chapters and populate chapter_meta.summary.
+
+    Data sources:
+    - segment_summaries.json: per-segment narrative summaries
+    - reading_notes.json: core_facts (key setting facts)
+    - chapter_segments.json: chapter→segment mapping via sentence_ids
+    - smart_segments.json: segment→sentence_id mapping
+    """
+    proj_dir = _project_dir(project_id)
+    now = _now()
+
+    # --- Load segment summaries ---
+    seg_summaries: dict[str, str] = {}
+    seg_path = os.path.join(proj_dir, "segment_summaries.json")
+    if os.path.exists(seg_path):
+        try:
+            with open(seg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            items = data.get("summaries", data) if isinstance(data, dict) else data
+            if isinstance(items, list):
+                for item in items:
+                    sid = item.get("segment_id", "")
+                    summary = item.get("summary", "")
+                    if sid and summary:
+                        seg_summaries[sid] = summary
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if not seg_summaries:
+        logger.info("No segment summaries found for project %s, skipping step 14", project_id)
+        return
+
+    # --- Load smart_segments to map segment_id -> chapter orders ---
+    seg_to_chapters: dict[str, list[int]] = {}
+    smart_path = os.path.join(proj_dir, "smart_segments.json")
+    if os.path.exists(smart_path):
+        try:
+            with open(smart_path, "r", encoding="utf-8") as f:
+                smart_data = json.load(f)
+            segments = smart_data if isinstance(smart_data, list) else smart_data.get("segments", [])
+            for seg in segments:
+                sid = seg.get("segment_id", "")
+                # smart_segments embeds full chapter objects
+                seg_chapters = seg.get("chapters", [])
+                orders = [int(ch.get("order", 0)) for ch in seg_chapters if isinstance(ch, dict)]
+                if sid and orders:
+                    seg_to_chapters[sid] = orders
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # --- Map chapters to their segment summary ---
+    chapter_to_summary: dict[int, str] = {}
+
+    if seg_to_chapters:
+        for sid, orders in seg_to_chapters.items():
+            if sid in seg_summaries:
+                for ch_order in orders:
+                    chapter_to_summary[int(ch_order)] = seg_summaries[sid]
+    else:
+        # Fallback: load chapter_segments.json and distribute evenly
+        chapters_path = os.path.join(proj_dir, "chapter_segments.json")
+        chapters: list[dict] = []
+        if os.path.exists(chapters_path):
+            try:
+                with open(chapters_path, "r", encoding="utf-8") as f:
+                    cs_data = json.load(f)
+                chapters = cs_data if isinstance(cs_data, list) else cs_data.get("chapters", [])
+            except (json.JSONDecodeError, OSError):
+                pass
+        if chapters:
+            seg_ids_sorted = sorted(seg_summaries.keys())
+            chapters_per_seg = max(1, len(chapters) // len(seg_ids_sorted))
+            for seg_idx, sid in enumerate(seg_ids_sorted):
+                start_ch = seg_idx * chapters_per_seg
+                end_ch = min(len(chapters), (seg_idx + 1) * chapters_per_seg)
+                if seg_idx == len(seg_ids_sorted) - 1:
+                    end_ch = len(chapters)
+                for ch_idx in range(start_ch, end_ch):
+                    ch_order = chapters[ch_idx].get("order", ch_idx)
+                    chapter_to_summary[int(ch_order)] = seg_summaries[sid]
+
+    # --- Load core_facts from reading_notes ---
+    core_facts_text = ""
+    rn_path = os.path.join(proj_dir, "reading_notes.json")
+    if os.path.exists(rn_path):
+        try:
+            with open(rn_path, "r", encoding="utf-8") as f:
+                rn_data = json.load(f)
+            notes = rn_data.get("notes", rn_data) if isinstance(rn_data, dict) else rn_data
+            if isinstance(notes, dict):
+                facts = notes.get("core_facts", [])
+                if isinstance(facts, list):
+                    core_facts_text = "；".join(str(f) for f in facts[:30])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # --- Write to chapter_meta.summary ---
+    updated = 0
+    for ch_order, summary in chapter_to_summary.items():
+        # Check if chapter_content exists for this order
+        row = conn.execute(
+            "SELECT chapter_id FROM chapter_content WHERE project_id = ? AND chapter_order = ?",
+            (project_id, ch_order),
+        ).fetchone()
+        if not row:
+            continue
+        chapter_id = row["chapter_id"]
+
+        # Ensure chapter_meta row exists
+        conn.execute(
+            "INSERT OR IGNORE INTO chapter_meta (chapter_id, updated_at) VALUES (?, ?)",
+            (chapter_id, now),
+        )
+
+        # Update summary (only if currently empty)
+        existing = conn.execute(
+            "SELECT summary FROM chapter_meta WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+        if existing and existing["summary"]:
+            continue
+
+        conn.execute(
+            "UPDATE chapter_meta SET summary = ?, updated_at = ? WHERE chapter_id = ?",
+            (summary, now, chapter_id),
+        )
+        updated += 1
+
+    # --- Store core_facts as a special "chapter 0" context ---
+    if core_facts_text:
+        ctx_chapter_id = f"ctx_core_facts_{project_id}"
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chapter_content
+                (chapter_id, project_id, chapter_order, title, content,
+                 word_count, status, created_at, updated_at)
+            VALUES (?, ?, 0, ?, ?, ?, 'system', ?, ?)
+            """,
+            (ctx_chapter_id, project_id, "核心设定事实",
+             core_facts_text, len(core_facts_text), now, now),
+        )
+        updated += 1
+
+    conn.commit()
+    counts["segment_summaries"] = updated
+    logger.info("Migrated %d chapter summaries for project %s", updated, project_id)
+
+
+# ---------------------------------------------------------------------------
+# 15. reading_notes characters → character_events
+# ---------------------------------------------------------------------------
+
+def _migrate_character_events(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+    name_to_id: dict[str, str],
+) -> None:
+    """Build character event timeline from reading notes character data."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    notes = raw.get("notes", raw)
+    now = _now()
+    inserted = 0
+    import hashlib
+
+    for name, data in notes.get("core_facts", {}).get("characters", {}).items():
+        entity_id = name_to_id.get(name, "")
+        segments_seen = data.get("segments_seen", [])
+
+        # key_actions → action events
+        for idx, action in enumerate(data.get("key_actions", [])):
+            if not action:
+                continue
+            seg = segments_seen[idx] if idx < len(segments_seen) else ""
+            eid = f"ce_{hashlib.sha1(f'{name}:action:{idx}:{action[:30]}'.encode()).hexdigest()[:12]}"
+            conn.execute(
+                "INSERT OR IGNORE INTO character_events (event_id, project_id, entity_id, segment_id, event_type, summary, created_at) VALUES (?,?,?,?,?,?,?)",
+                (eid, project_id, entity_id, seg, "action", action, now),
+            )
+            inserted += 1
+
+        # knowledge_gained → knowledge events
+        for idx, know in enumerate(data.get("knowledge_gained", [])):
+            if not know:
+                continue
+            seg = segments_seen[idx] if idx < len(segments_seen) else ""
+            eid = f"ce_{hashlib.sha1(f'{name}:know:{idx}:{know[:30]}'.encode()).hexdigest()[:12]}"
+            conn.execute(
+                "INSERT OR IGNORE INTO character_events (event_id, project_id, entity_id, segment_id, event_type, summary, created_at) VALUES (?,?,?,?,?,?,?)",
+                (eid, project_id, entity_id, seg, "knowledge", know, now),
+            )
+            inserted += 1
+
+        # status_history → state_change events
+        for sh in data.get("status_history", []):
+            status = sh.get("status", "")
+            seg = sh.get("segment_id", "")
+            if not status:
+                continue
+            eid = f"ce_{hashlib.sha1(f'{name}:status:{seg}:{status}'.encode()).hexdigest()[:12]}"
+            conn.execute(
+                "INSERT OR IGNORE INTO character_events (event_id, project_id, entity_id, segment_id, event_type, summary, created_at) VALUES (?,?,?,?,?,?,?)",
+                (eid, project_id, entity_id, seg, "state_change", f"状态变更: {status}", now),
+            )
+            inserted += 1
+
+    conn.commit()
+    counts["character_events"] = inserted
+    logger.info("Migrated %d character events for project %s", inserted, project_id)
+
+
+# ---------------------------------------------------------------------------
+# 16. reading_notes relationship_graph → relationship_events
+# ---------------------------------------------------------------------------
+
+def _migrate_relationship_events(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+    name_to_id: dict[str, str],
+) -> None:
+    """Build relationship event timeline from reading notes."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    notes = raw.get("notes", raw)
+    now = _now()
+    inserted = 0
+    import hashlib
+
+    for entry in notes.get("relationship_graph", []):
+        source = entry.get("source", "")
+        target = entry.get("target", "")
+        seg = entry.get("segment_id", "")
+        trigger = entry.get("trigger", "")
+        evidence = entry.get("evidence", "")
+        relation = entry.get("relation", "")
+        prev = entry.get("previous_state", "")
+
+        src_id = name_to_id.get(source, source)
+        tgt_id = name_to_id.get(target, target)
+
+        eid = f"re_{hashlib.sha1(f'{source}:{target}:{seg}:{trigger[:30]}'.encode()).hexdigest()[:12]}"
+        conn.execute(
+            """INSERT OR IGNORE INTO relationship_events
+               (event_id, project_id, source_entity_id, target_entity_id,
+                segment_id, relation_type, previous_state, new_state,
+                trigger_event, evidence, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (eid, project_id, src_id, tgt_id, seg, relation, prev, relation, trigger, evidence, now),
+        )
+        inserted += 1
+
+    conn.commit()
+    counts["relationship_events"] = inserted
+    logger.info("Migrated %d relationship events for project %s", inserted, project_id)
+
+
+# ---------------------------------------------------------------------------
+# 17. plot_state → thread_lifecycle
+# ---------------------------------------------------------------------------
+
+def _migrate_thread_lifecycle(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Build thread lifecycle from plot_state open/resolved threads."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    notes = raw.get("notes", raw)
+    now = _now()
+    inserted = 0
+    import hashlib
+
+    plot_state = notes.get("plot_state", {})
+
+    for thread in plot_state.get("open_threads", []):
+        key = thread.get("thread", "")
+        if not key:
+            continue
+        lid = f"tl_{hashlib.sha1(f'{key}:open'.encode()).hexdigest()[:12]}"
+        conn.execute(
+            "INSERT OR IGNORE INTO thread_lifecycle (lifecycle_id, project_id, thread_key, status, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (lid, project_id, key, thread.get("status", "open"), thread.get("detail", ""), now),
+        )
+        inserted += 1
+
+    for thread in plot_state.get("resolved_threads", []):
+        key = thread.get("thread", "")
+        if not key:
+            continue
+        lid = f"tl_{hashlib.sha1(f'{key}:resolved'.encode()).hexdigest()[:12]}"
+        seg = thread.get("resolved_segment_id", "")
+        conn.execute(
+            "INSERT OR IGNORE INTO thread_lifecycle (lifecycle_id, project_id, thread_key, segment_id, status, detail, resolution_detail, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (lid, project_id, key, seg, "resolved", thread.get("detail", ""), thread.get("resolution_detail", ""), now),
+        )
+        inserted += 1
+
+    conn.commit()
+    counts["thread_lifecycle"] = inserted
+    logger.info("Migrated %d thread lifecycle entries for project %s", inserted, project_id)
+
+
+# ---------------------------------------------------------------------------
+# 18. world_rules → world_rule_evidence
+# ---------------------------------------------------------------------------
+
+def _migrate_world_rule_evidence(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Populate world rule evidence chain from reading notes."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    notes = raw.get("notes", raw)
+    now = _now()
+    inserted = 0
+    import hashlib
+
+    for rule in notes.get("core_facts", {}).get("world_rules", []):
+        fact = rule.get("fact", "") if isinstance(rule, dict) else str(rule)
+        evidence = rule.get("evidence", "") if isinstance(rule, dict) else ""
+        if not fact:
+            continue
+        eid = f"wre_{hashlib.sha1(f'{fact[:40]}:{evidence[:20]}'.encode()).hexdigest()[:12]}"
+        conn.execute(
+            "INSERT OR IGNORE INTO world_rule_evidence (evidence_id, project_id, fact_text, evidence_snippet, created_at) VALUES (?,?,?,?,?)",
+            (eid, project_id, fact, evidence, now),
+        )
+        inserted += 1
+
+    conn.commit()
+    counts["world_rule_evidence"] = inserted
+    logger.info("Migrated %d world rule evidence entries for project %s", inserted, project_id)
+
+
+# ---------------------------------------------------------------------------
+# 19. reading_notes characters → enrich entities (bypass agent_profiles)
+# ---------------------------------------------------------------------------
+
+def _enrich_entities_from_reading_notes(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+    name_to_id: dict[str, str],
+) -> None:
+    """Fill empty entity profile fields from reading notes character data."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    notes = raw.get("notes", raw)
+    updated = 0
+
+    for name, data in notes.get("core_facts", {}).get("characters", {}).items():
+        entity_id = name_to_id.get(name)
+        if not entity_id:
+            continue
+
+        # Check what's currently empty
+        row = conn.execute(
+            "SELECT speech_style, personality_traits_json, example_quotes_json FROM entities WHERE entity_id = ?",
+            (entity_id,),
+        ).fetchone()
+        if not row:
+            continue
+
+        updates = {}
+        if not row[0] and data.get("speech_style"):
+            updates["speech_style"] = data["speech_style"]
+        if not row[1] and data.get("personality_traits"):
+            updates["personality_traits_json"] = json.dumps(data["personality_traits"], ensure_ascii=False)
+        if not row[2] and data.get("quote_examples"):
+            updates["example_quotes_json"] = json.dumps(data["quote_examples"][:10], ensure_ascii=False)
+
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(
+                f"UPDATE entities SET {set_clause} WHERE entity_id = ?",
+                (*updates.values(), entity_id),
+            )
+            updated += 1
+
+    conn.commit()
+    counts["entity_enrichment"] = updated
+    logger.info("Enriched %d entities from reading notes for project %s", updated, project_id)
+
+
+# ---------------------------------------------------------------------------
+# 20. consistency_notes → consistency_notes table
+# ---------------------------------------------------------------------------
+
+def _migrate_consistency_notes_data(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Import consistency notes from reading notes."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    notes = raw.get("notes", raw)
+    now = _now()
+    inserted = 0
+    import hashlib
+
+    for entry in notes.get("core_facts", {}).get("consistency_notes", []):
+        if isinstance(entry, dict):
+            text = entry.get("note", "")
+            seg = entry.get("segment_id", "")
+        else:
+            text = str(entry)
+            seg = ""
+        if not text:
+            continue
+        nid = f"cn_{hashlib.sha1(f'{text[:40]}:{seg}'.encode()).hexdigest()[:12]}"
+        conn.execute(
+            "INSERT OR IGNORE INTO consistency_notes (note_id, project_id, segment_id, note_text, created_at) VALUES (?,?,?,?,?)",
+            (nid, project_id, seg, text, now),
+        )
+        inserted += 1
+
+    conn.commit()
+    counts["consistency_notes"] = inserted
+    logger.info("Migrated %d consistency notes for project %s", inserted, project_id)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1033,6 +1868,39 @@ def migrate_project(project_id: str) -> dict[str, int]:
 
         # 10: reading_notes.json -> entity_evidence + agent_memory
         _migrate_reading_notes(project_id, conn, counts, name_to_id)
+
+        # 11: reading_notes.json relationship_graph -> enrich relationships
+        _enrich_relationships_from_reading_notes(project_id, conn, counts, name_to_id)
+
+        # 12: agent_profiles.json relationships -> enrich power_dynamic / history
+        _enrich_relationships_from_agent_profiles(project_id, conn, counts, name_to_id)
+
+        # 13: reading_notes.json plot_state -> plot_threads + narrative_arcs + project_meta
+        _migrate_plot_state(project_id, conn, counts)
+
+        # 14: segment_summaries.json + reading_notes core_facts -> chapter_meta summary
+        _migrate_segment_summaries(project_id, conn, counts)
+
+        # 15: reading_notes characters -> character_events timeline
+        _migrate_character_events(project_id, conn, counts, name_to_id)
+
+        # 16: reading_notes relationship_graph -> relationship_events timeline
+        _migrate_relationship_events(project_id, conn, counts, name_to_id)
+
+        # 17: plot_state -> thread_lifecycle
+        _migrate_thread_lifecycle(project_id, conn, counts)
+
+        # 18: world_rules -> world_rule_evidence
+        _migrate_world_rule_evidence(project_id, conn, counts)
+
+        # 19: reading_notes characters -> enrich entity profile fields
+        _enrich_entities_from_reading_notes(project_id, conn, counts, name_to_id)
+
+        # 20: reading_notes consistency_notes -> consistency_notes table
+        _migrate_consistency_notes_data(project_id, conn, counts)
+
+    # Rebuild all FTS indexes after bulk import
+    db.rebuild_fts(project_id)
 
     logger.info("Migration complete for project %s: %s", project_id, counts)
     return counts

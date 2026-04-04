@@ -161,6 +161,7 @@ class WorldStateStore:
             "session_id": session.session_id,
             "project_id": session.project_id,
             "graph_id": session.graph_id,
+            "label": session.label,
             "simulation_goal": session.simulation_goal,
             "branch_count": session.branch_count,
             "session_scope": session.session_scope,

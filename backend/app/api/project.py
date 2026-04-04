@@ -159,6 +159,42 @@ def extract_story_seed():
         }), 500
 
 
+@project_bp.route("/seed/rerun/<project_id>", methods=["POST"])
+def rerun_seed_pipeline(project_id):
+    """Re-run the seed pipeline on an existing project using its already-uploaded files."""
+    try:
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
+        if not project.files:
+            return jsonify({"success": False, "error": "项目没有已上传的文件"}), 400
+
+        data = request.get_json(silent=True) or {}
+        analysis_goal = data.get("analysis_goal", project.analysis_goal or "提取全部有名角色、组织和关系")
+        additional_context = data.get("additional_context", "")
+        segment_token_limit = data.get("segment_token_limit", 50000)
+
+        task_id = SeedExtractTaskService().create_task(
+            project_id=project.project_id,
+            project_name=project.name,
+            analysis_goal=analysis_goal,
+            additional_context=additional_context,
+            use_llm=True,
+            segment_token_limit=segment_token_limit,
+        )
+        return jsonify({
+            "success": True,
+            "data": {
+                "project_id": project.project_id,
+                "task_id": task_id,
+                "status": "processing",
+                "message": "正在使用已有文件重新运行种子管线。",
+            },
+        }), 202
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
 def _save_project_uploads(project, uploaded_files) -> int:
     saved_count = 0
     for file in uploaded_files:

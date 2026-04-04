@@ -59,6 +59,7 @@ class WorldlinePrepareService:
             {
                 "prepare_id": prepare_id,
                 "task_id": task_id,
+                "label": payload.get("label", ""),
                 "project_id": resolved["project_id"],
                 "graph_id": resolved["graph_id"],
                 "session_scope": resolved["session_scope"],
@@ -121,6 +122,7 @@ class WorldlinePrepareService:
             simulation_goal=run["focus_question"],
             focus_question=run["focus_question"],
             branch_count=len(branches),
+            label=run.get("label", ""),
             prepare_id=prepare_id,
             session_scope=run["session_scope"],
             branches=branches,

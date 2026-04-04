@@ -37,6 +37,15 @@
       <div class="setup-grid">
         <div class="launchpad-main">
           <div class="field">
+            <label>会话名称 <span class="label-hint">（方便后续识别）</span></label>
+            <input
+              :value="sessionLabel"
+              type="text"
+              placeholder="例如：主线剧情推演、第三章分支"
+              @input="emitUpdate('sessionLabel', $event.target.value)"
+            />
+          </div>
+          <div class="field">
             <label>初始变量</label>
             <textarea
               :value="variablesText"
@@ -167,6 +176,7 @@ const props = defineProps({
   selectedArchives: { type: Array, default: () => [] },
   archiveProjectFilter: { type: String, default: "" },
   showArchivePicker: { type: Boolean, default: false },
+  sessionLabel: { type: String, default: "" },
   variablesText: { type: String, default: "" },
   singleVariable: { type: String, default: "" },
   createMode: { type: String, default: "manual" },
@@ -185,6 +195,7 @@ const props = defineProps({
 const emit = defineEmits([
   "update:selected-archives",
   "update:archive-project-filter",
+  "update:session-label",
   "update:variables-text",
   "update:single-variable",
   "update:create-mode",
@@ -200,6 +211,7 @@ const emit = defineEmits([
 ]);
 
 const UPDATE_EVENT_MAP = Object.freeze({
+  sessionLabel: "update:session-label",
   variablesText: "update:variables-text",
   singleVariable: "update:single-variable",
   createMode: "update:create-mode",
