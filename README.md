@@ -1,104 +1,77 @@
 # MiroFish-Novel
 
-面向小说创作、剧情预测、关系演化与单世界世界线推演的多智能体分析平台。
+面向小说创作的多智能体分析与写作平台。上传小说全文，自动构建世界观图谱、角色档案与关系网络，在世界线中推演剧情走向，并通过多 Agent 协作流水线辅助创作。
 
-## 当前目标
+## 功能概览
 
-这个仓库从 `MiroFish` 的多智能体预测底座迁移而来，但产品目标已经改为：
+### 种子分析 — 从小说到结构化知识
 
-- 读取完整小说文本、设定、大纲与角色卡
-- 提取所有有名角色、组织、势力与关系网络
-- 将角色、组织、关系节点转为可演化 Agent
-- 注入变量，持续改写并推进当前世界线
-- 生成剧情走向、关系变化、人机关系演化与创作灵感报告
-- 与角色、组织、分析 Agent 进行对话或控制行动
+上传小说文本（PDF / MD / TXT，最大 100 MB），平台通过四阶段 LLM 驱动管线完成深度解析：
 
-## 当前状态
+| 阶段 | 说明 |
+|------|------|
+| **文本准备** | 智能分段，按 token 预算切分阅读单元 |
+| **深度阅读** | LLM 逐段精读，维持跨段记忆，提取角色、关系、线索、世界观 |
+| **全局整合** | 聚合所有阅读笔记，生成 seed_analysis + 故事本体 (ontology) |
+| **角色构建** | 为重要角色并发生成结构化 Agent 档案（性格、语言、动机、知识边界） |
 
-主流程已具备完整闭环，持续迭代中。
+每个步骤的 LLM 调用（完整 prompt + response）均被记录，前端可逐步展开查看。
 
-### 核心能力
+### 故事图谱
 
-- **四阶段种子分析管线**：上传小说 → 智能分段 → LLM 逐段精读（维持跨段记忆） → 全局整合（角色 / 组织 / 关系） → 故事本体生成 → 角色 Agent 档案生成
-- 实时进度追踪：分段进度、章节折叠、LLM 调用计数、步骤级 trace（可展开查看完整 prompt / response）
-- 任务取消支持：长时间任务可随时中断
-- 本地图谱构建（`story_graph.json` + `story_graph.sqlite3`）
-- 小说专用 ontology 生成器
-- 角色 / 势力档案生成器（`narrative_entity_archivist`）
-- 世界线演化引擎（单世界模型，变量注入 + 推演）
-- 角色对话服务 + 剧情灵感生成
-- 多 Agent 写作管线（context → memory → style → writer → reviewer）
-- 写作工作台（章节/场景/预设管理，SSE 流式输出）
-- 长期记忆分层（canon / candidate / experiment）
+从种子分析数据构建力导向关系图谱（D3.js）。节点按重要性分层（protagonist / major / supporting / minor），边权重反映关系深度。支持实体类型过滤、点击查看角色档案详情。
 
-### 当前可用主链
+### 档案库
 
-1. 上传完整小说文本（PDF / MD / TXT，最大 100MB）
-2. 四阶段种子分析：智能分段 → 顺序深度阅读 → 全局整合 → 角色 Agent 档案
-3. 自动生成 ontology，提取角色、组织、关系并生成档案
-4. 创建世界线会话并注入变量
-5. 推进当前世界、与角色对话、提交角色动作
-6. 在 `/writer` 生成 Chapter Context Pack，拿到写作上下文与 prompt block
-7. 在作者工作台审核长期记忆 candidate / canon
-8. 输入创作灵感，获取后续剧情推进建议
+自动为角色、组织、关系生成结构化档案。按重要性层级使用不同模板深度：
+- **protagonist / major**: 8 个维度（身份、动机、张力、关系、行为、状态、风险、隐私）
+- **supporting**: 5 个维度
+- **minor**: 3 个维度
 
-## 种子分析管线
+档案支持搜索、筛选、重建索引，是世界线推演和写作流水线的核心数据来源。
 
-四阶段 LLM 驱动的顺序阅读管线（替代旧版 14 阶段并发分析）：
+### 世界线推演
 
-| 阶段 | 关键模块 | 进度范围 |
-|------|---------|---------|
-| 文本准备 | `smart_novel_segmenter` — 按 token 预算分段 | 0–10% |
-| 深度阅读 | `sequential_reader` — 逐段精读，维持弧线/卷摘要 | 10–75% |
-| 全局整合 | 聚合 `seed_analysis.json` + 故事本体 | 75–90% |
-| 角色构建 | `character_agent_profile_generator` — 并发生成角色档案 | 90–100% |
+基于单世界模型的剧情推演引擎：
+- 创建世界线会话，注入变量改变剧情走向
+- 角色 Agent 可独立提出动作、参与对话
+- 自动推演（auto-evolution）通过 SSE 实时流式输出
+- 高价值推演结果进入 candidate 记忆层，需作者审核后升级为 canon
 
-每个步骤的 LLM 调用（prompt + response）会被记录到 trace bundle 文件，前端可展开查看。
+### 写作工作台
 
-## 写作上下文与记忆审核
+多 Agent 协作的创作辅助系统：
+- **Agent 工具循环**: 写作 Agent 拥有 write_prose / compile_manuscript / set_scene_status 等工具，自主规划写作步骤
+- **多 Agent 流水线**: Context → Memory → Style → Writer → Reviewer 五阶段生成
+- **章节 / 场景管理**: 创建章节、拆分场景、设置 POV 角色、管理预设
+- **手稿阅读**: TOC 导航 + 散文视图，查看编译后的完整章节内容
+- **记忆系统**: 短期记忆 (episodic) + 长期记忆 (canon / candidate / experiment) 分层管理
 
-围绕单世界创作流程组织能力：
+### LLM 设施面板
 
-- `Chapter Context Pack` 是作者侧的统一写作上下文，固定输出 `must_know / should_know / warnings / scene_candidates / writer_prompt_block / debug_trace`
-- `/writer` 页面同时支持原著章节模式和 worldline 分支模式
-- 长期记忆采用 `canon / candidate / experiment` 分层，其中默认写作链路只注入 active `canon`
-- worldline 自动推演产生的高价值记忆先进入 `candidate`，需要作者审核后才能晋升为 `canon`
-- 记忆 timeline 会保留版本、状态、来源与事件链，方便追溯”这条设定是怎么来的”
+统一管理所有 LLM 渠道、模型与模块绑定。支持多渠道配置、模块级别的模型指定、并发控制与活动追踪。
 
-## 目录结构
+## 快速开始
 
-```text
-backend/
-  app/
-    api/          # Flask blueprints (REST endpoints)
-    models/       # 数据模型与持久化
-    services/     # 业务逻辑（种子管线、世界线、写作管线等）
-    utils/        # LLM client、文件解析、JSON 修复等
-docs/
-  plans/
-  superpowers/    # 设计规格与实现计划
-frontend/
-  src/
-    views/        # 页面组件（Overview、Writer、WorldLine 等）
-    api/          # 后端 API 客户端
-    composables/  # Vue 组合式函数
-    components/   # 复用 UI 组件
-```
+### 环境要求
 
-## 启动
+- Python 3.11+
+- Node.js 18+
+- 至少一个 OpenAI 兼容的 LLM API
 
 ### 后端
 
 ```bash
 cd backend
 uv sync                              # 安装依赖
-FLASK_PORT=3888 uv run python run.py  # 启动（端口可选，默认 5101）
+FLASK_PORT=3888 uv run python run.py  # 启动服务
 ```
 
 如果 `uv` 不可用：
 
 ```bash
 cd backend
+pip install -r requirements.txt      # 或从 pyproject.toml 安装
 FLASK_PORT=3888 python3 run.py
 ```
 
@@ -107,28 +80,88 @@ FLASK_PORT=3888 python3 run.py
 ```bash
 cd frontend
 npm install
-npm run dev -- --port 3999   # 开发服务器（代理 /api 到后端）
-npm run build                # 生产构建
+npm run dev -- --port 3999   # 开发服务器（自动代理 /api 到后端 :3888）
 ```
 
-### 提示
+### 配置
 
-- 图谱构建不依赖 `ZEP_API_KEY`，所有核心功能基于本地图谱运行
-- LLM 模块通过”全局设施面板”统一配置渠道、模型与模块绑定
-- 未绑定模块时直接报错，不做环境变量兜底
+复制 `.env.example` 为 `.env` 并修改：
+
+```bash
+# LLM 配置通过前端"LLM 设施面板"管理，无需在此设置 API key
+LLM_REQUEST_TIMEOUT_SECONDS=120    # LLM 请求超时（秒）
+
+# Flask
+FLASK_HOST=0.0.0.0
+FLASK_PORT=3888
+
+# Zep（可选，仅在线图谱构建需要）
+ZEP_API_KEY=your_zep_api_key_here
+```
+
+启动后访问 `http://localhost:3999`，在 LLM 设施面板中配置至少一个 LLM 渠道即可开始使用。
 
 ## 测试
 
 ```bash
 cd backend
-PYTHONPATH=$(pwd) pytest tests/test_worldline_engine.py tests/test_offline_novel_pipeline.py   # 关键测试
-PYTHONPATH=$(pwd) pytest tests/test_new_seed_pipeline.py tests/test_step_trace.py               # 种子管线测试
-PYTHONPATH=$(pwd) pytest tests/                                                                  # 全部测试
+PYTHONPATH=$(pwd) pytest tests/                            # 全部测试
+PYTHONPATH=$(pwd) pytest tests/test_worldline_engine.py    # 单文件
+PYTHONPATH=$(pwd) pytest tests/test_xxx.py::test_func      # 单测试
 ```
 
-## 关键文档
+## 项目结构
 
-- [Codex 接手指南](./docs/CODEX_HANDOFF_GUIDE.md)
-- [种子管线重新设计规格](./docs/superpowers/specs/2026-04-03-seed-pipeline-redesign.md)
-- [迁移设计文档](./docs/plans/2026-03-19-mirofish-novel-design.md)
-- [迁移执行计划](./docs/plans/2026-03-19-mirofish-novel-migration-plan.md)
+```
+backend/
+  app/
+    api/              # Flask REST 端点
+    models/           # 数据模型（Project, Task, Worldline）
+    services/         # 核心业务逻辑
+      agents/         #   Agent 子系统（draft / memory / registry / worldline）
+      writer_agent/   #   写作工作台服务
+    utils/            # LLM client、文件解析、日志等
+  tests/              # 后端测试
+frontend/
+  src/
+    views/            # 页面组件
+    api/              # 后端 API 客户端
+    composables/      # Vue 组合式函数
+    components/       # 复用 UI 组件
+docs/
+  agent-data-schema-reference.md   # Agent 数据结构与提示词参考
+  plans/              # 历史设计文档
+  superpowers/specs/  # 功能规格文档
+```
+
+## 技术栈
+
+| 层 | 技术 |
+|----|------|
+| 后端 | Python 3.11+ / Flask / SQLite3 |
+| 前端 | Vue 3 / Vite / D3.js v7 |
+| LLM | OpenAI 兼容 API（通过设施面板统一管理） |
+| 持久化 | 文件系统 + SQLite3（项目数据、档案库、LLM 设施、写作工作台） |
+
+## 核心概念
+
+| 概念 | 说明 |
+|------|------|
+| **种子分析 (Seed)** | 上传小说后的四阶段 LLM 深度解析流程 |
+| **故事本体 (Ontology)** | 从小说中提取的实体类型、关系类型与叙事轴定义 |
+| **档案 (Archive)** | 角色/组织/关系的结构化描述，按重要性分层 |
+| **世界线 (Worldline)** | 基于单世界模型的剧情推演空间 |
+| **Agent 档案** | 角色转化为可交互 Agent 所需的性格、语言、动机等数据 |
+| **记忆层级** | canon（已确认）/ candidate（待审核）/ experiment（实验性） |
+| **Chapter Context Pack** | 写作时的统一上下文（must_know / should_know / warnings） |
+
+## 开发参考
+
+- [Agent 数据结构与提示词参考](./docs/agent-data-schema-reference.md) — 所有 Agent 的数据 schema、LLM 提示词、参数配置
+- [种子管线重设计](./docs/superpowers/specs/2026-04-03-seed-pipeline-redesign.md)
+- [写作 Agent 设计](./docs/superpowers/specs/2026-04-02-novel-writer-agent-design.md)
+- [手稿阅读模式设计](./docs/superpowers/specs/2026-04-04-manuscript-reading-mode-design.md)
+
+## License
+
+Private repository.
