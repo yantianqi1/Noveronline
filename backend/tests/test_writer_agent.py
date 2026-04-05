@@ -47,7 +47,7 @@ class TestNovelDB:
             "relationships", "entity_evidence",
             "chapter_content", "chapter_meta", "scenes",
             "sessions", "agent_states", "agent_memory", "world_events",
-            "writer_presets",
+            "writer_presets", "outline_versions",
         }
         assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 
@@ -169,6 +169,81 @@ class TestNovelDB:
         assert len(threads) == 3
         thread_keys = [t["thread_key"] for t in threads]
         assert "谁是幕后黑手？" in thread_keys
+
+
+# ---------------------------------------------------------------------------
+# Outline version history tests
+# ---------------------------------------------------------------------------
+class TestOutlineVersions:
+    """Test outline version history in NovelDB."""
+
+    TEST_PROJECT = f"__test_{uuid.uuid4().hex[:8]}"
+
+    @pytest.fixture(autouse=True)
+    def setup_teardown(self):
+        from app.services.writer_agent.novel_db import NovelDB
+
+        self.db = NovelDB()
+        self.db.ensure_schema(self.TEST_PROJECT)
+        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+        yield
+        db_path = self.db._db_path(self.TEST_PROJECT)
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+    def test_outline_versions_table_exists(self):
+        with self.db.connect(self.TEST_PROJECT) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        assert "outline_versions" in tables
+
+    def test_save_outline_version(self):
+        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]')
+        assert vid.startswith("ov_")
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert len(versions) == 1
+        assert versions[0]["version_id"] == vid
+        assert "outline_json" not in versions[0]  # list should not include body
+
+    def test_save_outline_version_with_label(self):
+        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]', label="初版")
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert versions[0]["label"] == "初版"
+
+    def test_get_outline_version(self):
+        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]')
+        version = self.db.get_outline_version(self.TEST_PROJECT, vid)
+        assert version is not None
+        assert version["outline_json"] == '[{"scene_order":1}]'
+
+    def test_list_versions_ordered_desc(self):
+        import time
+        self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[]', label="v1")
+        time.sleep(0.01)
+        self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]', label="v2")
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert len(versions) == 2
+        assert versions[0]["label"] == "v2"  # newest first
+        assert versions[1]["label"] == "v1"
+
+    def test_max_20_versions(self):
+        for i in range(22):
+            self.db.save_outline_version(self.TEST_PROJECT, "ch_1", f'[{{"n":{i}}}]')
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert len(versions) == 20
+
+    def test_cascade_delete(self):
+        self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[]')
+        assert len(self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")) == 1
+        self.db.delete_chapter(self.TEST_PROJECT, "ch_1")
+        # After chapter deletion, versions should be gone (cascade)
+        with self.db.connect(self.TEST_PROJECT) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM outline_versions").fetchone()[0]
+        assert count == 0
 
 
 # ---------------------------------------------------------------------------

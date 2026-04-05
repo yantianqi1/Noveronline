@@ -327,6 +327,15 @@ TABLE_STATEMENTS = (
         created_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS outline_versions (
+        version_id   TEXT PRIMARY KEY,
+        chapter_id   TEXT NOT NULL REFERENCES chapter_content ON DELETE CASCADE,
+        outline_json TEXT NOT NULL,
+        label        TEXT DEFAULT '',
+        created_at   TEXT NOT NULL
+    )
+    """,
 )
 
 FTS_STATEMENTS = (
@@ -700,6 +709,7 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_thread_lc_key ON thread_lifecycle(project_id, thread_key)",
     "CREATE INDEX IF NOT EXISTS idx_world_rule_ev_project ON world_rule_evidence(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_consistency_project ON consistency_notes(project_id, segment_id)",
+    "CREATE INDEX IF NOT EXISTS idx_outline_versions_chapter ON outline_versions(chapter_id, created_at DESC)",
 )
 
 # ---------------------------------------------------------------------------
@@ -1066,6 +1076,64 @@ class NovelDB:
         with self.connect(project_id) as conn:
             conn.execute("DELETE FROM chapter_content WHERE chapter_id = ?", (chapter_id,))
             conn.commit()
+
+    # -- outline versions ---------------------------------------------------
+
+    def save_outline_version(
+        self, project_id: str, chapter_id: str, outline_json: str, label: str = "",
+    ) -> str:
+        """Snapshot an outline into the version history. Returns version_id."""
+        self.ensure_schema(project_id)
+        version_id = f"ov_{uuid.uuid4().hex[:12]}"
+        now = _now()
+        with self.connect(project_id) as conn:
+            conn.execute(
+                """
+                INSERT INTO outline_versions (version_id, chapter_id, outline_json, label, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (version_id, chapter_id, outline_json, label, now),
+            )
+            # Enforce max 20 versions per chapter
+            conn.execute(
+                """
+                DELETE FROM outline_versions
+                WHERE version_id IN (
+                    SELECT version_id FROM outline_versions
+                    WHERE chapter_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT -1 OFFSET 20
+                )
+                """,
+                (chapter_id,),
+            )
+            conn.commit()
+        return version_id
+
+    def list_outline_versions(self, project_id: str, chapter_id: str) -> list[dict[str, Any]]:
+        """List version metadata (without outline_json body) for a chapter."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT version_id, chapter_id, label, created_at
+                FROM outline_versions
+                WHERE chapter_id = ?
+                ORDER BY created_at DESC
+                """,
+                (chapter_id,),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_outline_version(self, project_id: str, version_id: str) -> dict[str, Any] | None:
+        """Get a single version including its outline_json."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            row = conn.execute(
+                "SELECT * FROM outline_versions WHERE version_id = ?",
+                (version_id,),
+            ).fetchone()
+            return _row_to_dict(row)
 
     # ======================================================================
     # Scene queries
