@@ -11,7 +11,6 @@ def build_orchestrator_prompt(task_type: str, context: dict) -> str:
     involved_entities = context.get("involved_entities", "")
     scene_focus = context.get("scene_focus", "")
     user_instruction = context.get("user_instruction", "")
-    selected_text = context.get("selected_text", "")
     last_block_id = context.get("last_block_id", "")
 
     base = (
@@ -25,10 +24,7 @@ def build_orchestrator_prompt(task_type: str, context: dict) -> str:
     task_prompts = {
         "write_scene": _build_write_scene(chapter_order, chapter_id, pov_character, involved_entities, scene_focus, user_instruction),
         "continue": _build_continue(chapter_order, chapter_id, user_instruction, last_block_id),
-        "rewrite": _build_rewrite(selected_text, user_instruction),
-        "expand": _build_expand(selected_text, user_instruction),
-        "outline": _build_outline(chapter_order, user_instruction),
-        "consistency_check": _build_consistency_check(chapter_order),
+        "outline": _build_outline(chapter_order, chapter_id, pov_character, user_instruction),
     }
 
     task_prompt = task_prompts.get(task_type, task_prompts["write_scene"])
@@ -60,7 +56,8 @@ def _build_write_scene(chapter_order, chapter_id, pov_character, involved_entiti
         "  - 查询前一章的摘要\n"
         "  - 获取当前场景之前最近 2 个场景的正文\n"
         "\n"
-        "第四步：悬念与伏笔（必须）\n"
+        "第四步：全局悬念（必须）\n"
+        "  - 注意：query_entity 已返回每个角色关联的伏笔和世界规则，此步用于获取全局未解决悬念\n"
         "  - 查询截至当前章节的未解决悬念\n"
         "\n"
         "第五步：深度补充（必须）\n"
@@ -143,6 +140,7 @@ def _build_continue(chapter_order, chapter_id, user_instruction, last_block_id="
         "  - 获取最近 2 个场景的正文\n"
         "\n"
         "第四步：悬念与设定补充（必须）\n"
+        "  - 注意：query_entity 已返回每个角色关联的伏笔和世界规则，此步用于获取全局悬念和补充设定\n"
         "  - 查询截至当前章节的未解决悬念\n"
         "  - 用 search_settings 分别搜索续写上下文中涉及的每个关键词（地点名、事件名，每个词单独搜一次）\n"
         "  - 用 search_settings 单独搜索每个角色名，获取该角色在已有内容中的表现\n"
@@ -193,62 +191,110 @@ def _build_continue(chapter_order, chapter_id, user_instruction, last_block_id="
     )
 
 
-def _build_rewrite(selected_text, user_instruction) -> str:
+def _build_outline(chapter_order, chapter_id, pov_character, user_instruction) -> str:
+    pov_line = f"  - 视角角色：{pov_character}\n" if pov_character else ""
+    instruction_line = f"  - 用户指令：{user_instruction}\n" if user_instruction else ""
     return (
-        "任务：改写\n"
+        "任务：为本章生成宏观章节大纲\n"
         "\n"
-        "用户选中了一段文本，希望按指令重写。\n"
-        f"- 选中文本：{selected_text}\n"
-        f"- 用户指令：{user_instruction}\n"
+        "注意：你的最终输出必须是一个 JSON 数组（不是 writing_brief 对象）。\n"
         "\n"
-        "请：\n"
-        "1. 查询选中文本中涉及的角色设定\n"
-        "2. 获取前后上下文\n"
-        '3. 输出 writing_brief，task 设为 "rewrite"，包含 "original_text" 和 "rewrite_instruction" 字段'
+        f"前端已指定的上下文：\n"
+        f"  - 章节：第{chapter_order}章 ({chapter_id})\n"
+        f"{pov_line}"
+        f"{instruction_line}"
+        "\n"
+        "请按以下步骤收集信息：\n"
+        "\n"
+        "第一步：章节上下文（必须）\n"
+        f"  - 查询当前章节（第{chapter_order}章）的摘要和已有大纲\n"
+        "  - 查询前一章的摘要，了解前文发展\n"
+        "  - 查询后一章的摘要（如果存在），了解后续走向\n"
+        "\n"
+        "第二步：悬念与伏笔（必须）\n"
+        "  - 查询截至当前章节的未解决悬念\n"
+        "\n"
+        "第三步：角色状态（必须）\n"
+        "  - 查询本章主要角色的档案（至少视角角色）\n"
+        "  - 用 search_settings 搜索本章涉及的关键设定（地点、事件）\n"
+        "\n"
+        "第四步：生成大纲\n"
+        "  收集完信息后，直接输出一个 JSON 数组，用 ```json 代码块包裹。\n"
+        "  这是宏观叙事大纲，不是逐场景拆分。每个元素代表一个情节段落（beat），格式如下：\n"
+        "\n"
+        '```json\n'
+        '[\n'
+        '  {\n'
+        '    "scene_order": 1,\n'
+        '    "title": "情节段落标题",\n'
+        '    "summary": "本段落要完成什么叙事目标、推动什么主线",\n'
+        '    "pov": "视角角色名",\n'
+        '    "key_events": ["核心转折点或关键决策"]\n'
+        '  }\n'
+        ']\n'
+        '```\n'
+        "\n"
+        "要求：\n"
+        "- 这是宏观大纲，关注情节走向和叙事节奏，不要写具体对话或动作细节\n"
+        "- 每个段落对应一个叙事目标（如：引出矛盾、揭示真相、角色抉择、高潮冲突、余韵收束）\n"
+        "- 一般 2-4 个段落即可，不要拆得太细\n"
+        "- summary 用一两句话概括叙事意图，不要写成场景描述\n"
+        "- key_events 只写关键转折点，不列举琐碎事件\n"
+        "- 确保衔接前一章结尾，呼应未解决悬念\n"
+        "- 不要输出 writing_brief，只输出上述 JSON 数组"
     )
 
 
-def _build_expand(selected_text, user_instruction) -> str:
+def build_world_update_prompt(project_id: str, chapter_order: int = 0) -> str:
+    """Build the system prompt for the world-data-update agent."""
     return (
-        "任务：扩写\n"
+        "你是小说世界数据管理助手。作者刚完成一段创作并确认采用，你需要分析这段散文，将新增或变化的世界数据写入数据库。\n"
         "\n"
-        "用户选中了一段文本，希望展开更多细节。\n"
-        f"- 选中文本：{selected_text}\n"
-        f"- 用户指令：{user_instruction}\n"
+        f"当前项目：{project_id}\n"
+        f"章节序号：{chapter_order}\n"
         "\n"
-        "请：\n"
-        "1. 查询相关设定以便展开细节\n"
-        '2. 输出 writing_brief，task 设为 "expand"，包含 "original_text" 和 "expand_instruction" 字段'
-    )
-
-
-def _build_outline(chapter_order, user_instruction) -> str:
-    return (
-        "任务：生成章节大纲\n"
+        "请严格按以下步骤执行：\n"
         "\n"
-        f"为第{chapter_order}章生成场景拆分大纲。\n"
-        f"- 用户指令：{user_instruction}\n"
+        "第一步：通读散文（必须）\n"
+        "  仔细阅读作者提供的散文���本，识别其中出现的：\n"
+        "  - 新角色、新组织、新物品、新地点、新技能\n"
+        "  - 伏笔��索的新建、推进或解决\n"
+        "  - 世界观规则（魔法体系、物理法则、社会制度等）\n"
+        "  - 角色之间关系的建立或变化\n"
         "\n"
-        "请：\n"
-        "1. 查询前后章节的摘要\n"
-        "2. 查询未解决悬念\n"
-        "3. 查询主要角色的当前状态\n"
-        '4. 输出 writing_brief，task 设为 "outline"，包含 "chapter_context" 和 "suggested_scenes" 字段'
-    )
-
-
-def _build_consistency_check(chapter_order) -> str:
-    return (
-        "任务：一致性检查\n"
+        "第二步：查询现有数据（必须）\n"
+        "  对每个识别到的实体/伏笔/规则，先用读工具查询是否已存在：\n"
+        "  - query_entity — 查角色/组织/物品档案\n"
+        "  - get_open_threads — 查现有未解决伏笔\n"
+        "  - search_world_rules — 查现有世界规则\n"
+        "  - query_relationship — 查现有关系\n"
+        "  只有确认不存在或需要更新时，才进入第三步。\n"
         "\n"
-        "检查当前场景是否与已有设定和前文矛盾。\n"
-        f"- 当前章节：第{chapter_order}章\n"
-        "- 场景序号：由前端指定\n"
+        "第三步：写入数据（按需）\n"
+        "  根据对比结果，调用写入工具：\n"
+        "  - manage_entity(action='create', ...) — ��角色/物品/地点出场\n"
+        "  - manage_entity(action='update', ...) — 已有角色的目标、状态等变化\n"
+        "  - manage_thread(action='create', ...) — 新伏笔\n"
+        "  - manage_thread(action='update', status='progressed'/'resolved') — 伏笔推进或解决\n"
+        "  - manage_world_rule(fact_text=...) — 新世界规则或补充证据\n"
+        "  - manage_relationship(entity_a=..., entity_b=...) — 新关系或关系变化\n"
         "\n"
-        "请：\n"
-        "1. 查询当前场景正文\n"
-        "2. 查询场景中出现的所有角色设定\n"
-        "3. 查询相关关系\n"
-        "4. 搜索前文中的相关描述\n"
-        '5. 输出 writing_brief，task 设为 "consistency_check"，包含 "scene_content" 和 "relevant_settings" 字段'
+        "注意事项：\n"
+        "- 不要重复创建已存在的实体，先查后写\n"
+        "- 只记录散文中明确描写的内容，不要推测或补充散文未提到的设定\n"
+        "- 优先处理重要角色和关键情节，次要背景可忽略\n"
+        "- 每次调用写入工具都会立即生效，请谨慎操作\n"
+        "\n"
+        "第四步：输出变更摘要\n"
+        "  完成所有写入后，输出一份中文摘要，格式如下：\n"
+        "```\n"
+        "世界数据更新完成：\n"
+        "- 新增实体：张三(character)、玄铁剑(item)\n"
+        "- 更新实体：李四 — 当前目标更新\n"
+        "- 新增伏笔：密室之谜\n"
+        "- 推进伏笔：血玉真相 → progressed\n"
+        "- 新增规则：灵力上限为200\n"
+        "- 新建关系：张三 ↔ 李四（师徒）\n"
+        "```\n"
+        "如果散文中没有需要更新的内容，直接输出「无需更新世界数据」。"
     )

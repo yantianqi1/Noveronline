@@ -7,7 +7,7 @@ NOVEL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "query_entity",
-            "description": "查询角色、组织、物品、地点、技能的档案设定。返回实体的完整 profile 包括核心驱动力、隐藏矛盾、详细设定等。",
+            "description": "查询角色/组织/物品/地点/技能的档案设定。返回：完整 profile（核心驱动力、隐藏矛盾、说话风格等）+ 关联伏笔线索 + 适用世界规则 + 近期事件时间线。一次调用即可获得该实体的完整上下文。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -198,6 +198,83 @@ NOVEL_TOOLS: list[dict] = [
     {"type": "function", "function": {"name": "query_character_timeline", "description": "查询角色的事件时间线：行动、状态变化、获得的知识等，按故事顺序排列。", "parameters": {"type": "object", "properties": {"name": {"type": "string", "description": "角色名"}, "event_type": {"type": "string", "enum": ["action", "state_change", "knowledge", "emotional", "all"], "description": "事件类型过滤，默认 all"}, "limit": {"type": "integer", "description": "返回数量上限，默认 20"}}, "required": ["name"]}}},
     {"type": "function", "function": {"name": "query_thread_history", "description": "查询伏笔线索的完整生命周期：开启、推进、解决的全过程。", "parameters": {"type": "object", "properties": {"thread_key": {"type": "string", "description": "伏笔线索名称或关键词"}}, "required": ["thread_key"]}}},
     {"type": "function", "function": {"name": "search_world_rules", "description": "搜索世界观规则及其原文证据链。", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}, "limit": {"type": "integer", "description": "返回数量上限，默认 10"}}, "required": ["query"]}}},
+    # --- Write tools (incremental world data maintenance) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_entity",
+            "description": "创建新实体或更新现有实体（角色/组织/物品/地点/技能）的设定。创建时需提供 name、entity_type、summary；更新时只需 name + 要修改的字段。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "update"], "description": "操作类型"},
+                    "name": {"type": "string", "description": "实体名称"},
+                    "entity_type": {"type": "string", "enum": ["character", "organization", "item", "location", "skill"], "description": "实体类型（创建时必填）"},
+                    "summary": {"type": "string", "description": "实体简介（创建时必填）"},
+                    "core_drive": {"type": "string", "description": "核心驱动力"},
+                    "hidden_tension": {"type": "string", "description": "内在矛盾"},
+                    "current_objective": {"type": "string", "description": "当前目标"},
+                    "aliases": {"type": "array", "items": {"type": "string"}, "description": "别名列表"},
+                },
+                "required": ["action", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_thread",
+            "description": "创建新伏笔线索，或更新/推进/解决已有伏笔。创建时需提供 thread_key + detail；更新时提供 thread_key + 新状态或补充细节。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "update"], "description": "操作类型"},
+                    "thread_key": {"type": "string", "description": "伏笔名称/关键词"},
+                    "status": {"type": "string", "enum": ["open", "progressed", "resolved"], "description": "线索状态"},
+                    "detail": {"type": "string", "description": "线索详情"},
+                    "resolution_detail": {"type": "string", "description": "解决方式（仅 resolved 时使用）"},
+                    "chapter_order": {"type": "integer", "description": "关联章节序号"},
+                },
+                "required": ["action", "thread_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_world_rule",
+            "description": "记录或更新世界观规则/设定事实。如果相同规则已存在则更新其证据，否则新建。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact_text": {"type": "string", "description": "规则/事实描述"},
+                    "evidence_snippet": {"type": "string", "description": "原文证据片段"},
+                    "chapter_order": {"type": "integer", "description": "出处章节序号"},
+                },
+                "required": ["fact_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_relationship",
+            "description": "创建或更新两个实体之间的关系。若关系已存在则更新提供的字段，否则新建。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_a": {"type": "string", "description": "实体A名称"},
+                    "entity_b": {"type": "string", "description": "实体B名称"},
+                    "relation_type": {"type": "string", "description": "关系类型（如 师徒、敌对、同盟）"},
+                    "description": {"type": "string", "description": "关系描述"},
+                    "trust_level": {"type": "number", "description": "信任度（0-1）"},
+                    "power_dynamic": {"type": "string", "description": "权力动态"},
+                    "conflict_trigger": {"type": "string", "description": "冲突触发点"},
+                },
+                "required": ["entity_a", "entity_b", "relation_type"],
+            },
+        },
+    },
 ]
 
 # Manuscript-specific tools (added to agent toolset during continuation tasks)
@@ -278,4 +355,8 @@ TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
     "query_character_timeline": lambda inp: f"查询角色时间线：{inp.get('name', '?')}",
     "query_thread_history": lambda inp: f"查询伏笔历史：{inp.get('thread_key', '?')}",
     "search_world_rules": lambda inp: f"搜索世界观规则：{inp.get('query', '?')}",
+    "manage_entity": lambda inp: f"{'创建' if inp.get('action') == 'create' else '更新'}实体：{inp.get('name', '?')}",
+    "manage_thread": lambda inp: f"{'创建' if inp.get('action') == 'create' else '更新'}伏笔：{inp.get('thread_key', '?')}",
+    "manage_world_rule": lambda inp: f"记录世界规则：{inp.get('fact_text', '?')[:30]}",
+    "manage_relationship": lambda inp: f"管理关系：{inp.get('entity_a', '?')} ↔ {inp.get('entity_b', '?')}",
 }

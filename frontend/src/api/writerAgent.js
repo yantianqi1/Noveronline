@@ -6,6 +6,11 @@ export function runWriterAgent(payload, handlers, signal) {
   return postSSE("/api/writer-agent/run", payload, handlers, signal);
 }
 
+// World data update (after committing prose)
+export function updateWorldData(payload, handlers, signal) {
+  return postSSE("/api/writer-agent/world-update", payload, handlers, signal);
+}
+
 // Scene CRUD
 export function getScenes(chapterId, projectId) {
   return get(`/api/writer-agent/scenes/${chapterId}?project_id=${projectId}`);
@@ -100,6 +105,19 @@ export function getContinuationContext(projectId, { tokenBudget = 8000, lastBloc
   let url = `/api/writer-agent/manuscript/${projectId}/continuation-context?token_budget=${tokenBudget}`;
   if (lastBlockId) url += `&last_block_id=${encodeURIComponent(lastBlockId)}`;
   return get(url);
+}
+
+// Outline versions
+export function getOutlineVersions(chapterId, projectId) {
+  return get(`/api/writer-agent/chapters/detail/${chapterId}/outline-versions?project_id=${projectId}`);
+}
+
+export function getOutlineVersion(chapterId, versionId, projectId) {
+  return get(`/api/writer-agent/chapters/detail/${chapterId}/outline-versions/${versionId}?project_id=${projectId}`);
+}
+
+export function restoreOutlineVersion(chapterId, versionId, projectId) {
+  return post(`/api/writer-agent/chapters/detail/${chapterId}/outline-versions/${versionId}/restore`, { project_id: projectId });
 }
 
 // Migration

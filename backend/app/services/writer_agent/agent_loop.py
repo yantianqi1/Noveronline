@@ -4,6 +4,7 @@ until LLM decides not to call any more tools.
 Ported from the claude-code-from-scratch TypeScript agent loop pattern.
 """
 
+import concurrent.futures
 import json
 import logging
 import time
@@ -22,6 +23,8 @@ class AgentLoop:
 
     MAX_ROUNDS = 15
     MAX_CONTEXT_CHARS = 200_000  # ~100K tokens for Chinese text
+    COMPRESS_THRESHOLD = int(MAX_CONTEXT_CHARS * 0.70)  # 140K — compress old tool results
+    CRITICAL_THRESHOLD = int(MAX_CONTEXT_CHARS * 0.90)  # 180K — force stop
 
     def __init__(self, llm_client, tools: List[Dict], system_prompt: str, project_id: str, t0: float = 0.0):
         """
@@ -44,6 +47,23 @@ class AgentLoop:
             "ts": time.strftime("%H:%M:%S"),
             "elapsed_ms": int((time.monotonic() - self.t0) * 1000),
         }
+
+    def _compress_old_tool_results(self) -> None:
+        """Replace tool results older than the last 4 with truncated summaries."""
+        tool_msg_indices = [
+            i for i, m in enumerate(self.messages) if m.get("role") == "tool"
+        ]
+        if len(tool_msg_indices) <= 4:
+            return
+        for idx in tool_msg_indices[:-4]:
+            content = self.messages[idx]["content"]
+            if len(content) > 300:
+                self.messages[idx]["content"] = (
+                    content[:200] + f"\n... [已压缩，原文 {len(content)} 字]"
+                )
+
+    def _context_chars(self) -> int:
+        return sum(len(str(m.get("content", ""))) for m in self.messages)
 
     def run(self, user_message: str) -> Generator[Dict[str, Any], None, None]:
         """
@@ -104,7 +124,9 @@ class AgentLoop:
             if response.content and response.content.strip():
                 yield {"type": "thinking", **self._stamp(), "content": response.content.strip()}
 
-            # Execute each tool call
+            # --- Parallel tool execution ---
+            # Yield all tool_call events first (frontend shows them immediately)
+            pending = []
             for tc in response.tool_calls:
                 tool_name = tc.function.name
                 try:
@@ -115,26 +137,44 @@ class AgentLoop:
                 display_fn = TOOL_DISPLAY_FORMATTERS.get(tool_name)
                 display = display_fn(tool_input) if display_fn else tool_name
                 yield {"type": "tool_call", **self._stamp(), "name": tool_name, "input": tool_input, "display": display}
+                pending.append((tc, tool_name, tool_input))
 
+            # Execute all tools in parallel (all are read-only SQLite queries)
+            def _run_tool(item):
+                tc, tool_name, tool_input = item
                 result = execute_tool(tool_name, tool_input, self.project_id)
+                return tc, tool_name, result
 
-                # Add tool result to messages
+            results_map: Dict[str, tuple] = {}
+            if len(pending) == 1:
+                # Skip thread pool overhead for single tool call
+                tc, tool_name, result = _run_tool(pending[0])
+                results_map[tc.id] = (tc, tool_name, result)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+                    futures = {pool.submit(_run_tool, item): item[0].id for item in pending}
+                    for future in concurrent.futures.as_completed(futures):
+                        tc, tool_name, result = future.result()
+                        results_map[tc.id] = (tc, tool_name, result)
+
+            # Append results in original order (deterministic message history)
+            for tc, tool_name, tool_input in pending:
+                _, resolved_name, result = results_map[tc.id]
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result,
                 })
-
-                # Yield truncated summary for frontend display + full result for orchestrator
                 summary = result[:200] + "..." if len(result) > 200 else result
-                yield {"type": "tool_result", **self._stamp(), "name": tool_name, "summary": summary, "full_result": result}
+                yield {"type": "tool_result", **self._stamp(), "name": resolved_name, "summary": summary, "full_result": result}
 
-            # Check context size (rough estimate)
-            total_chars = sum(
-                len(str(m.get("content", ""))) for m in self.messages
-            )
-            if total_chars > self.MAX_CONTEXT_CHARS:
-                logger.warning("Agent loop context overflow at round %d, forcing brief output", round_num)
+            # --- Progressive context compression ---
+            total_chars = self._context_chars()
+            if total_chars > self.COMPRESS_THRESHOLD:
+                self._compress_old_tool_results()
+                total_chars = self._context_chars()
+            if total_chars > self.CRITICAL_THRESHOLD:
+                logger.warning("Agent loop context overflow at round %d after compression, forcing brief output", round_num)
                 yield {"type": "brief_ready", **self._stamp(), "content": response.content or "已收集的上下文过长，强制结束收集。"}
                 return
 

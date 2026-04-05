@@ -103,6 +103,15 @@ class WriterComposer:
         if brief.get("setting_details"):
             sections.append(f"\n### 相关设定\n{brief['setting_details']}")
 
+        if brief.get("chapter_outline"):
+            outline_lines = []
+            for beat in brief["chapter_outline"]:
+                order = beat.get("scene_order", "?")
+                title = beat.get("title", "")
+                summary = beat.get("summary", "")
+                outline_lines.append(f"{order}. {title}：{summary}")
+            sections.append(f"\n### 本章大纲\n" + "\n".join(outline_lines))
+
         if brief.get("scene_context"):
             sections.append(f"\n### 场景上下文\n{brief['scene_context']}")
 
@@ -208,28 +217,6 @@ class WriterComposer:
             parts.append("请从上述续写起点继续写作。")
             if brief.get("user_instruction"):
                 parts.append(f"指令：{brief['user_instruction']}")
-
-        elif task == "rewrite":
-            parts.append("请按以下指令改写上述原文。")
-            if brief.get("rewrite_instruction"):
-                parts.append(brief["rewrite_instruction"])
-            elif brief.get("user_instruction"):
-                parts.append(brief["user_instruction"])
-
-        elif task == "expand":
-            parts.append("请扩写上述原文，展开更多细节。")
-            if brief.get("expand_instruction"):
-                parts.append(brief["expand_instruction"])
-            elif brief.get("user_instruction"):
-                parts.append(brief["user_instruction"])
-
-        elif task == "outline":
-            parts.append("请为本章生成场景拆分大纲，以 JSON 数组格式输出。")
-            if brief.get("user_instruction"):
-                parts.append(f"指令：{brief['user_instruction']}")
-
-        elif task == "consistency_check":
-            parts.append("请逐条检查场景正文与设定的一致性，输出矛盾报告（JSON 格式）。")
 
         else:
             parts.append(brief.get("user_instruction", "请开始创作。"))

@@ -336,6 +336,25 @@ TABLE_STATEMENTS = (
         created_at   TEXT NOT NULL
     )
     """,
+    # -- Entity association tables --
+    """
+    CREATE TABLE IF NOT EXISTS thread_entity_links (
+        thread_id  TEXT NOT NULL REFERENCES plot_threads ON DELETE CASCADE,
+        entity_id  TEXT NOT NULL REFERENCES entities ON DELETE CASCADE,
+        role       TEXT DEFAULT 'involved',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (thread_id, entity_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS rule_entity_links (
+        evidence_id TEXT NOT NULL REFERENCES world_rule_evidence ON DELETE CASCADE,
+        entity_id   TEXT NOT NULL REFERENCES entities ON DELETE CASCADE,
+        relevance   TEXT DEFAULT 'constrains',
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (evidence_id, entity_id)
+    )
+    """,
 )
 
 FTS_STATEMENTS = (
@@ -710,6 +729,9 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_world_rule_ev_project ON world_rule_evidence(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_consistency_project ON consistency_notes(project_id, segment_id)",
     "CREATE INDEX IF NOT EXISTS idx_outline_versions_chapter ON outline_versions(chapter_id, created_at DESC)",
+    # -- Entity association indexes --
+    "CREATE INDEX IF NOT EXISTS idx_thread_entity_links_entity ON thread_entity_links(entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rule_entity_links_entity ON rule_entity_links(entity_id)",
 )
 
 # ---------------------------------------------------------------------------
@@ -1356,8 +1378,8 @@ class NovelDB:
         terms = query.split()
         parts = []
         for t in terms:
-            if len(t) < 2:
-                continue  # skip single-char terms
+            if len(t) < 3:
+                continue  # trigram tokenizer needs >= 3 code-points
             safe = t.replace('"', '""')
             parts.append(f'"{safe}"')
         if not parts:
@@ -1374,8 +1396,9 @@ class NovelDB:
     ) -> list[dict[str, Any]]:
         self.ensure_schema(project_id)
         results: list[dict[str, Any]] = []
-        # Use LIKE fallback when no term reaches the trigram minimum (2 chars)
-        has_trigram_term = any(len(t) >= 2 for t in query.split())
+        # Use LIKE fallback when no term reaches the trigram minimum.
+        # SQLite trigram tokenizer requires 3 code-points for CJK text.
+        has_trigram_term = any(len(t) >= 3 for t in query.split())
         use_like = not has_trigram_term
         # Build per-term LIKE params for OR-based matching
         like_terms = [t for t in query.split() if len(t) >= 2]
@@ -1771,7 +1794,7 @@ class NovelDB:
             # Try rich plot_threads table first
             pt_rows = conn.execute(
                 """
-                SELECT thread_key, status, detail
+                SELECT thread_id, thread_key, status, detail
                 FROM plot_threads
                 WHERE project_id = ?
                 ORDER BY updated_at DESC
@@ -1807,6 +1830,129 @@ class NovelDB:
                     except (json.JSONDecodeError, TypeError):
                         pass
             return threads
+
+    # ======================================================================
+    # Entity association queries
+    # ======================================================================
+
+    def get_entity_threads(
+        self, project_id: str, entity_id: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return plot threads linked to *entity_id* via thread_entity_links."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT pt.thread_id, pt.thread_key, pt.status, pt.detail,
+                       pt.source_chapter, tel.role
+                FROM thread_entity_links tel
+                JOIN plot_threads pt ON pt.thread_id = tel.thread_id
+                WHERE tel.entity_id = ? AND pt.project_id = ?
+                ORDER BY pt.updated_at DESC
+                LIMIT ?
+                """,
+                (entity_id, project_id, limit),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_entity_rules(
+        self, project_id: str, entity_id: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return world rules linked to *entity_id* via rule_entity_links."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT wre.evidence_id, wre.fact_text, wre.evidence_snippet,
+                       wre.segment_id, wre.chapter_order, rel.relevance
+                FROM rule_entity_links rel
+                JOIN world_rule_evidence wre ON wre.evidence_id = rel.evidence_id
+                WHERE rel.entity_id = ? AND wre.project_id = ?
+                LIMIT ?
+                """,
+                (entity_id, project_id, limit),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_entity_recent_events(
+        self, project_id: str, entity_id: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return recent character_events for *entity_id*."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT event_id, event_type, summary, chapter_order, segment_id
+                FROM character_events
+                WHERE entity_id = ? AND project_id = ?
+                ORDER BY chapter_order DESC, segment_id DESC
+                LIMIT ?
+                """,
+                (entity_id, project_id, limit),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_thread_entities(
+        self, project_id: str, thread_id: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Reverse lookup: return entities linked to *thread_id* via thread_entity_links."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT e.entity_id, e.name, e.entity_type, e.importance_tier, tel.role
+                FROM thread_entity_links tel
+                JOIN entities e ON e.entity_id = tel.entity_id
+                WHERE tel.thread_id = ? AND e.project_id = ?
+                LIMIT ?
+                """,
+                (thread_id, project_id, limit),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_rule_entities(
+        self, project_id: str, evidence_id: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Reverse lookup: return entities linked to *evidence_id* via rule_entity_links."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT e.entity_id, e.name, e.entity_type, e.importance_tier, rel.relevance
+                FROM rule_entity_links rel
+                JOIN entities e ON e.entity_id = rel.entity_id
+                WHERE rel.evidence_id = ? AND e.project_id = ?
+                LIMIT ?
+                """,
+                (evidence_id, project_id, limit),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def link_thread_to_entity(
+        self, project_id: str, thread_id: str, entity_id: str,
+        role: str = "involved",
+    ) -> None:
+        """Create a thread ↔ entity association."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO thread_entity_links (thread_id, entity_id, role, created_at) VALUES (?,?,?,?)",
+                (thread_id, entity_id, role, _now()),
+            )
+            conn.commit()
+
+    def link_rule_to_entity(
+        self, project_id: str, evidence_id: str, entity_id: str,
+        relevance: str = "constrains",
+    ) -> None:
+        """Create a world-rule ↔ entity association."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO rule_entity_links (evidence_id, entity_id, relevance, created_at) VALUES (?,?,?,?)",
+                (evidence_id, entity_id, relevance, _now()),
+            )
+            conn.commit()
 
     # ======================================================================
     # Preset CRUD
@@ -2137,3 +2283,387 @@ class NovelDB:
                 (project_id, limit),
             ).fetchall()
             return _rows_to_dicts(rows)
+
+    # ======================================================================
+    # Write helpers (shared by write tools)
+    # ======================================================================
+
+    def _resolve_entity_id(
+        self, conn: sqlite3.Connection, project_id: str, name: str,
+    ) -> str | None:
+        """Resolve an entity name or alias to entity_id within an open connection."""
+        row = conn.execute(
+            "SELECT entity_id FROM entities WHERE name = ? AND project_id = ?",
+            (name, project_id),
+        ).fetchone()
+        if row:
+            return row["entity_id"]
+        row = conn.execute(
+            "SELECT e.entity_id FROM entities e "
+            "JOIN entity_aliases a ON a.entity_id = e.entity_id "
+            "WHERE a.alias = ? AND e.project_id = ?",
+            (name, project_id),
+        ).fetchone()
+        return row["entity_id"] if row else None
+
+    def _link_entities_for_text(
+        self, conn: sqlite3.Connection, project_id: str, text: str,
+    ) -> list[str]:
+        """Scan *text* for known entity names/aliases and return matched entity_ids."""
+        matched: list[str] = []
+        seen: set[str] = set()
+        for row in conn.execute(
+            "SELECT entity_id, name FROM entities WHERE project_id = ?",
+            (project_id,),
+        ):
+            name = row["name"]
+            if name and len(name) >= 2 and name in text and row["entity_id"] not in seen:
+                matched.append(row["entity_id"])
+                seen.add(row["entity_id"])
+        for row in conn.execute(
+            "SELECT a.entity_id, a.alias FROM entity_aliases a "
+            "JOIN entities e ON a.entity_id = e.entity_id "
+            "WHERE e.project_id = ?",
+            (project_id,),
+        ):
+            alias = row["alias"]
+            if alias and len(alias) >= 2 and alias in text and row["entity_id"] not in seen:
+                matched.append(row["entity_id"])
+                seen.add(row["entity_id"])
+        return matched
+
+    # ======================================================================
+    # Entity write operations
+    # ======================================================================
+
+    _ENTITY_WRITABLE_COLS = {
+        "summary", "core_drive", "surface_mask", "hidden_tension",
+        "current_objective", "ultimate_goal", "importance_tier",
+        "entity_type", "speech_style", "values_text", "fears_text",
+        "decision_pattern", "agent_behavior_hint",
+    }
+
+    def create_entity(
+        self,
+        project_id: str,
+        name: str,
+        entity_type: str,
+        summary: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Create a new entity. Raises ValueError if name already exists."""
+        self.ensure_schema(project_id)
+        now = _now()
+        entity_id = f"ent_{uuid.uuid4().hex[:12]}"
+        with self.connect(project_id) as conn:
+            existing = self._resolve_entity_id(conn, project_id, name)
+            if existing:
+                raise ValueError(f"实体「{name}」已存在（ID: {existing}）")
+            importance = kwargs.get("importance_tier", "minor")
+            conn.execute(
+                """
+                INSERT INTO entities
+                    (entity_id, project_id, name, entity_type, importance_tier,
+                     summary, core_drive, hidden_tension, current_objective,
+                     profile_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+                """,
+                (
+                    entity_id, project_id, name, entity_type, importance,
+                    summary,
+                    kwargs.get("core_drive", ""),
+                    kwargs.get("hidden_tension", ""),
+                    kwargs.get("current_objective", ""),
+                    now, now,
+                ),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
+                (name, entity_id),
+            )
+            for alias in kwargs.get("aliases", []):
+                if alias and alias != name:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
+                        (alias, entity_id),
+                    )
+            conn.commit()
+        return {"entity_id": entity_id, "name": name}
+
+    def update_entity(self, project_id: str, name: str, **kwargs: Any) -> bool:
+        """Update an existing entity by name. Returns False if not found."""
+        self.ensure_schema(project_id)
+        now = _now()
+        with self.connect(project_id) as conn:
+            entity_id = self._resolve_entity_id(conn, project_id, name)
+            if not entity_id:
+                return False
+            updates = {k: v for k, v in kwargs.items() if k in self._ENTITY_WRITABLE_COLS}
+            if updates:
+                updates["updated_at"] = now
+                set_clause = ", ".join(f"{k} = ?" for k in updates)
+                conn.execute(
+                    f"UPDATE entities SET {set_clause} WHERE entity_id = ?",
+                    (*updates.values(), entity_id),
+                )
+            for alias in kwargs.get("aliases", []):
+                if alias:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
+                        (alias, entity_id),
+                    )
+            conn.commit()
+        return True
+
+    # ======================================================================
+    # Plot thread write operations
+    # ======================================================================
+
+    _THREAD_VALID_TRANSITIONS: dict[str, set[str]] = {
+        "open": {"progressed", "resolved"},
+        "progressed": {"open", "resolved"},
+        "resolved": set(),
+    }
+
+    def create_thread(
+        self,
+        project_id: str,
+        thread_key: str,
+        detail: str,
+        status: str = "open",
+        chapter_order: int = 0,
+    ) -> dict[str, Any]:
+        """Create a new plot thread with an initial lifecycle entry."""
+        self.ensure_schema(project_id)
+        now = _now()
+        thread_id = f"pt_{uuid.uuid4().hex[:12]}"
+        lifecycle_id = f"tl_{uuid.uuid4().hex[:12]}"
+        with self.connect(project_id) as conn:
+            conn.execute(
+                """
+                INSERT INTO plot_threads
+                    (thread_id, project_id, thread_key, status, detail,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (thread_id, project_id, thread_key, status, detail, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO thread_lifecycle
+                    (lifecycle_id, project_id, thread_key, chapter_order,
+                     status, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (lifecycle_id, project_id, thread_key, chapter_order, status, detail, now),
+            )
+            for eid in self._link_entities_for_text(conn, project_id, f"{thread_key} {detail}"):
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_entity_links "
+                    "(thread_id, entity_id, role, created_at) VALUES (?, ?, 'involved', ?)",
+                    (thread_id, eid, now),
+                )
+            conn.commit()
+        return {"thread_id": thread_id, "thread_key": thread_key}
+
+    def update_thread(
+        self,
+        project_id: str,
+        thread_key: str,
+        status: str | None = None,
+        detail: str | None = None,
+        resolution_detail: str | None = None,
+        chapter_order: int = 0,
+    ) -> bool:
+        """Update an existing plot thread. Returns False if not found.
+
+        Raises ValueError on invalid status transition.
+        """
+        self.ensure_schema(project_id)
+        now = _now()
+        with self.connect(project_id) as conn:
+            row = conn.execute(
+                "SELECT thread_id, status FROM plot_threads "
+                "WHERE thread_key = ? AND project_id = ?",
+                (thread_key, project_id),
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT thread_id, status FROM plot_threads "
+                    "WHERE thread_key LIKE ? AND project_id = ? LIMIT 1",
+                    (f"%{thread_key}%", project_id),
+                ).fetchone()
+            if not row:
+                return False
+
+            thread_id = row["thread_id"]
+            current_status = row["status"]
+
+            if status and status != current_status:
+                allowed = self._THREAD_VALID_TRANSITIONS.get(current_status, set())
+                if status not in allowed:
+                    raise ValueError(
+                        f"伏笔「{thread_key}」状态 {current_status}→{status} 不允许"
+                    )
+
+            updates: dict[str, Any] = {"updated_at": now}
+            if status:
+                updates["status"] = status
+            if detail is not None:
+                updates["detail"] = detail
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(
+                f"UPDATE plot_threads SET {set_clause} WHERE thread_id = ?",
+                (*updates.values(), thread_id),
+            )
+
+            lifecycle_id = f"tl_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO thread_lifecycle
+                    (lifecycle_id, project_id, thread_key, chapter_order,
+                     status, detail, resolution_detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lifecycle_id, project_id, thread_key, chapter_order,
+                    status or current_status,
+                    detail or "",
+                    resolution_detail or "",
+                    now,
+                ),
+            )
+
+            if detail:
+                for eid in self._link_entities_for_text(conn, project_id, detail):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO thread_entity_links "
+                        "(thread_id, entity_id, role, created_at) VALUES (?, ?, 'involved', ?)",
+                        (thread_id, eid, now),
+                    )
+            conn.commit()
+        return True
+
+    # ======================================================================
+    # World rule write operations
+    # ======================================================================
+
+    def create_or_update_world_rule(
+        self,
+        project_id: str,
+        fact_text: str,
+        evidence_snippet: str = "",
+        chapter_order: int = 0,
+    ) -> dict[str, Any]:
+        """Create a world rule or update its evidence if fact_text already exists."""
+        self.ensure_schema(project_id)
+        now = _now()
+        with self.connect(project_id) as conn:
+            existing = conn.execute(
+                "SELECT evidence_id FROM world_rule_evidence "
+                "WHERE fact_text = ? AND project_id = ?",
+                (fact_text, project_id),
+            ).fetchone()
+            if existing:
+                eid = existing["evidence_id"]
+                conn.execute(
+                    "UPDATE world_rule_evidence SET evidence_snippet = ?, chapter_order = ? "
+                    "WHERE evidence_id = ?",
+                    (evidence_snippet, chapter_order, eid),
+                )
+                updated = True
+            else:
+                eid = f"wre_{uuid.uuid4().hex[:12]}"
+                conn.execute(
+                    """
+                    INSERT INTO world_rule_evidence
+                        (evidence_id, project_id, fact_text, evidence_snippet,
+                         chapter_order, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (eid, project_id, fact_text, evidence_snippet, chapter_order, now),
+                )
+                updated = False
+            text = f"{fact_text} {evidence_snippet}"
+            for entity_id in self._link_entities_for_text(conn, project_id, text):
+                conn.execute(
+                    "INSERT OR IGNORE INTO rule_entity_links "
+                    "(evidence_id, entity_id, relevance, created_at) VALUES (?, ?, 'constrains', ?)",
+                    (eid, entity_id, now),
+                )
+            conn.commit()
+        return {"evidence_id": eid, "fact_text": fact_text, "updated": updated}
+
+    # ======================================================================
+    # Relationship write operations
+    # ======================================================================
+
+    def create_or_update_relationship(
+        self,
+        project_id: str,
+        source_name: str,
+        target_name: str,
+        relation_type: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Create or update a relationship between two entities (looked up by name).
+
+        Raises ValueError if either entity is not found.
+        """
+        self.ensure_schema(project_id)
+        now = _now()
+        with self.connect(project_id) as conn:
+            source_id = self._resolve_entity_id(conn, project_id, source_name)
+            if not source_id:
+                raise ValueError(f"未找到实体「{source_name}」")
+            target_id = self._resolve_entity_id(conn, project_id, target_name)
+            if not target_id:
+                raise ValueError(f"未找到实体「{target_name}」")
+
+            row = conn.execute(
+                "SELECT relation_id FROM relationships "
+                "WHERE (source_id = ? AND target_id = ?) "
+                "   OR (source_id = ? AND target_id = ?)",
+                (source_id, target_id, target_id, source_id),
+            ).fetchone()
+
+            writable = {"description", "trust_level", "power_dynamic", "history", "conflict_trigger"}
+            extras = {k: v for k, v in kwargs.items() if k in writable and v is not None}
+
+            if row:
+                rid = row["relation_id"]
+                up: dict[str, Any] = {"relation_type": relation_type, "updated_at": now}
+                up.update(extras)
+                set_clause = ", ".join(f"{k} = ?" for k in up)
+                conn.execute(
+                    f"UPDATE relationships SET {set_clause} WHERE relation_id = ?",
+                    (*up.values(), rid),
+                )
+                updated = True
+            else:
+                rid = f"rel_{uuid.uuid4().hex[:12]}"
+                conn.execute(
+                    """
+                    INSERT INTO relationships
+                        (relation_id, source_id, target_id, relation_type,
+                         description, trust_level, power_dynamic, conflict_trigger,
+                         updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rid, source_id, target_id, relation_type,
+                        extras.get("description", ""),
+                        extras.get("trust_level"),
+                        extras.get("power_dynamic", ""),
+                        extras.get("conflict_trigger", ""),
+                        now,
+                    ),
+                )
+                updated = False
+            conn.commit()
+        return {
+            "relation_id": rid,
+            "source": source_name,
+            "target": target_name,
+            "updated": updated,
+        }

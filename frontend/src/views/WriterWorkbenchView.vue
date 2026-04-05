@@ -117,11 +117,6 @@
           </div>
         </div>
 
-        <label class="inline-check">
-          <input v-model="includeCandidates" type="checkbox" />
-          <span>附带 candidate 设定</span>
-        </label>
-
         <div class="panel-actions">
           <button class="btn" :disabled="busy || !projectId" @click="refreshProjectData">刷新项目数据</button>
           <button class="btn" :disabled="busy || !projectId" @click="handleMigrate">迁移数据</button>
@@ -285,14 +280,21 @@
 
       <!-- 稿件操作栏 -->
       <div v-if="projectId" class="manuscript-toolbar">
-        <button
-          v-if="agentSceneContent && draftPhase === 'done' && !outlineData"
-          class="btn btn-sm primary"
-          :disabled="commitBusy"
-          @click="handleCommitToManuscript()"
-        >
-          {{ commitBusy ? '提交中...' : '提交到稿件' }}
-        </button>
+        <template v-if="agentSceneContent && draftPhase === 'done' && !outlineData">
+          <select v-model="commitTargetChapterId" class="commit-chapter-select">
+            <option value="">不归类</option>
+            <option v-for="item in chapterOptions" :key="item.chapter_id" :value="item.chapter_id">
+              第{{ item.order }}章 · {{ item.title }}
+            </option>
+          </select>
+          <button
+            class="btn btn-sm primary"
+            :disabled="commitBusy"
+            @click="handleCommitToManuscript()"
+          >
+            {{ commitBusy ? '提交中...' : '提交到稿件' }}
+          </button>
+        </template>
         <button
           v-if="showContinueButton"
           class="btn btn-sm"
@@ -300,6 +302,23 @@
         >
           继续写下一段
         </button>
+        <button
+          v-if="commitDone && !worldUpdateBusy && !worldUpdateDone"
+          class="btn btn-sm accent"
+          @click="handleWorldUpdate()"
+        >
+          更新世界数据
+        </button>
+        <button
+          v-if="worldUpdateBusy"
+          class="btn btn-sm accent"
+          disabled
+        >
+          世界数据更新中...
+        </button>
+        <span v-if="worldUpdateDone" class="world-update-done">
+          {{ worldUpdateSummary }}
+        </span>
       </div>
 
       <!-- 续写上下文面板 -->
@@ -524,6 +543,7 @@ import {
   getOutlineVersions,
   getOutlineVersion,
   restoreOutlineVersion,
+  updateWorldData,
 } from "../api/writerAgent.js";
 import { useProjectCatalog } from "../composables/useProjectCatalog.js";
 import { buildWriterWorkbenchColumns, resolveWriterWorkbenchMode } from "./writer/writerWorkbenchLayout.js";
@@ -554,7 +574,6 @@ const chapterId = ref("");
 const chapterOrder = ref(0);
 const povCharacter = ref("");
 const sceneFocus = ref("");
-const includeCandidates = ref(false);
 const sessionId = ref("");
 const branchId = ref("main");
 const chapterOptions = ref([]);
@@ -613,6 +632,12 @@ const continuationContext = ref(null);
 const showContinueButton = ref(false);
 const lastCommittedBlockId = ref("");
 const commitBusy = ref(false);
+const commitDone = ref(false);
+const commitTargetChapterId = ref("");
+const worldUpdateBusy = ref(false);
+const worldUpdateDone = ref(false);
+const worldUpdateSummary = ref("");
+const worldUpdateAbortController = ref(null);
 const manuscriptBlocks = ref([]);
 const manuscriptTotalWords = ref(0);
 const manuscriptProseRef = ref(null);
@@ -1065,6 +1090,14 @@ async function handleAgentGenerate() {
   draftPhase.value = "collecting";
   agentTimeline.value = [];
   timelineIdCounter = 0;
+  commitDone.value = false;
+  if (worldUpdateAbortController.value) {
+    worldUpdateAbortController.value.abort();
+    worldUpdateAbortController.value = null;
+  }
+  worldUpdateBusy.value = false;
+  worldUpdateDone.value = false;
+  worldUpdateSummary.value = "";
 
   const chapter = chapterOptions.value.find(item => item.chapter_id === chapterId.value);
   const currentSceneOrder = scenes.value.find(s => s.scene_id === selectedSceneId.value)?.scene_order || 1;
@@ -1195,6 +1228,7 @@ async function handleAgentGenerate() {
         }
         const wc = event.word_count || agentSceneContent.value.length;
         message.value = `创作完成：${wc} 字`;
+        commitTargetChapterId.value = chapterId.value || "";
         agentTimeline.value.push({
           id: timelineIdCounter++,
           type: "done",
@@ -1334,8 +1368,9 @@ async function handleCommitToManuscript(content = null) {
   if (!projectId.value) return;
   const text = content || agentSceneContent.value;
   if (!text.trim()) return;
-  // Resolve chapter tag from current selection
-  const chapter = chapterOptions.value.find(item => item.chapter_id === chapterId.value);
+  // Resolve chapter tag from commit target selector (or current chapter as fallback)
+  const targetId = commitTargetChapterId.value || chapterId.value;
+  const chapter = targetId ? chapterOptions.value.find(item => item.chapter_id === targetId) : null;
   const chapterTag = chapter ? `第${chapter.order}章 · ${chapter.title}` : undefined;
   try {
     commitBusy.value = true;
@@ -1350,6 +1385,7 @@ async function handleCommitToManuscript(content = null) {
     }
     message.value = chapterTag ? `已提交到稿件 [${chapterTag}]` : "已提交到稿件";
     showContinueButton.value = true;
+    commitDone.value = true;
   } catch (err) {
     error.value = err.message || "提交到稿件失败";
   } finally {
@@ -1375,6 +1411,68 @@ async function handleContinueNext() {
     continuationContext.value = res.data || res;
   } catch (err) {
     error.value = err.message || "加载续写上下文失败";
+  }
+}
+
+async function handleWorldUpdate() {
+  if (!projectId.value || !agentSceneContent.value) return;
+  // Abort any previous world update
+  if (worldUpdateAbortController.value) {
+    worldUpdateAbortController.value.abort();
+  }
+  worldUpdateAbortController.value = new AbortController();
+  worldUpdateBusy.value = true;
+  worldUpdateDone.value = false;
+  worldUpdateSummary.value = "";
+  try {
+    await updateWorldData(
+      {
+        project_id: projectId.value,
+        content: agentSceneContent.value,
+        chapter_order: chapterOrder.value || 0,
+      },
+      {
+        onEvent(event) {
+          if (event.type === "tool_call") {
+            agentTimeline.value.push({
+              id: timelineIdCounter++,
+              type: "tool_call",
+              ts: event.ts || "",
+              elapsedMs: event.elapsed_ms,
+              message: event.display || event.name,
+            });
+          } else if (event.type === "tool_result") {
+            agentTimeline.value.push({
+              id: timelineIdCounter++,
+              type: "tool_result",
+              ts: event.ts || "",
+              elapsedMs: event.elapsed_ms,
+              message: `${event.name}: ${event.summary || ""}`,
+            });
+          }
+        },
+        onDone(event) {
+          worldUpdateBusy.value = false;
+          worldUpdateDone.value = true;
+          worldUpdateSummary.value = "世界数据已更新";
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "done",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            message: "世界数据更新完成",
+          });
+        },
+        onError(event) {
+          worldUpdateBusy.value = false;
+          error.value = event.message || "世界数据更新失败";
+        },
+      },
+      worldUpdateAbortController.value.signal,
+    );
+  } catch (err) {
+    worldUpdateBusy.value = false;
+    error.value = err.message || "世界数据更新失败";
   }
 }
 

@@ -1,45 +1,27 @@
 <template>
   <div class="graph-workbench">
-    <!-- Left Sidebar: Controls -->
-    <aside class="workbench-sidebar stack">
-      <section class="control-group workbench-card">
-        <h3 class="title-ancient">卷宗图谱构建</h3>
-        <p class="subtitle">选择项目卷宗并构建其底层实体关系图谱。</p>
-        
-        <div class="field">
-          <label>当前卷宗</label>
-          <select v-model="projectId" @change="refreshGraph">
-            <option value="">-- 请选择卷宗 --</option>
-            <option v-for="item in projects" :key="item.project_id" :value="item.project_id">
-              {{ item.name }}
-            </option>
-          </select>
-        </div>
+    <div class="workbench-toolbar workbench-card">
+      <select v-model="projectId" class="toolbar-select" @change="refreshGraph">
+        <option value="">-- 请选择卷宗 --</option>
+        <option v-for="item in projects" :key="item.project_id" :value="item.project_id">
+          {{ item.name }}
+        </option>
+      </select>
 
-        <div class="actions stack">
-          <button class="btn primary" :disabled="!projectId || busy" @click="startBuildGraph">
-            {{ busy ? "构建中..." : "启动图谱构建" }}
-          </button>
-          <button class="btn subtle small" @click="loadProjects">刷新卷宗列表</button>
-        </div>
+      <button class="btn primary" :disabled="!projectId || busy" @click="startBuildGraph">
+        {{ busy ? "构建中..." : "启动图谱构建" }}
+      </button>
+      <button class="btn subtle" @click="loadProjects">刷新卷宗列表</button>
+      <button class="btn" :disabled="!projectId || busy" @click="openArchiveConfigurator">
+        生成全量角色档案
+      </button>
 
-        <div v-if="taskMessage || taskError" class="status-box" :class="{ error: taskError }">
-          <div class="status-pulse" v-if="busy"></div>
-          <span class="mono">{{ taskError || taskMessage }}</span>
-        </div>
-      </section>
+      <div v-if="taskMessage || taskError" class="status-indicator" :class="{ error: taskError }">
+        <div class="status-pulse" v-if="busy"></div>
+        <span class="mono">{{ taskError || taskMessage }}</span>
+      </div>
+    </div>
 
-      <section class="control-group workbench-card">
-        <h3 class="title-ancient">衍生配置生成</h3>
-        <p class="subtitle">基于图谱生成角色档案；世界线创建与变量注入统一在世界线工作台完成。</p>
-
-        <div class="actions stack">
-          <button class="btn" :disabled="!projectId || busy" @click="openArchiveConfigurator">生成全量角色档案</button>
-        </div>
-      </section>
-    </aside>
-
-    <!-- Main Area: Canvas -->
     <main class="workbench-main">
       <StoryGraphPanel
         :nodes="graphNodes"
@@ -209,49 +191,56 @@ onMounted(async () => {
 
 <style scoped>
 .graph-workbench {
-  display: grid;
-  grid-template-columns: 368px minmax(0, 1fr);
-  gap: var(--space-lg);
-  min-height: calc(100vh - 104px);
-  height: calc(100vh - 104px);
-  align-items: stretch;
-}
-
-.workbench-sidebar {
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: var(--space-xs);
+  gap: 6px;
+  min-height: calc(100vh - 104px);
+  height: calc(100vh - 104px);
 }
 
-.control-group {
-  padding: var(--space-md);
+.workbench-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  flex-shrink: 0;
 }
 
-.subtitle {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: 4px;
-  margin-bottom: var(--space-md);
+.workbench-toolbar:hover {
+  box-shadow: none;
+  border-color: var(--line-soft);
 }
 
-.actions {
-  margin-top: var(--space-md);
-}
-
-.status-box {
-  margin-top: var(--space-md);
-  padding: var(--space-sm);
-  background: var(--bg-paper-warm);
+.toolbar-select {
+  padding: 4px 8px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-panel-soft);
+  font-family: inherit;
+  font-size: 13px;
+  min-width: 180px;
+}
+
+.toolbar-select:focus {
+  outline: none;
+  border-color: var(--accent-copper);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(176, 125, 75, 0.1);
+}
+
+.status-indicator {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
+  padding: 4px var(--space-sm);
+  background: var(--bg-paper-warm);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  margin-left: auto;
 }
 
-.status-box.error {
+.status-indicator.error {
   color: var(--accent-seal);
   background: rgba(155, 67, 38, 0.05);
 }
@@ -272,29 +261,9 @@ onMounted(async () => {
 
 .workbench-main {
   display: flex;
+  flex: 1;
   min-width: 0;
   min-height: 0;
-}
-
-.workbench-sidebar :deep(.control-group:last-child) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.workbench-sidebar :deep(.control-group:last-child .field) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.workbench-sidebar :deep(.control-group:last-child textarea) {
-  flex: 1;
-  min-height: 220px;
-}
-
-.workbench-sidebar :deep(.control-group:last-child .actions) {
-  margin-top: auto;
 }
 
 .workbench-main :deep(.panel) {
@@ -305,7 +274,6 @@ onMounted(async () => {
 
 @media (max-width: 1024px) {
   .graph-workbench {
-    grid-template-columns: 1fr;
     height: auto;
   }
 }

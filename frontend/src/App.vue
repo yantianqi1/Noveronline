@@ -46,8 +46,8 @@
 
       <footer class="track-footer">
         <button class="collapse-toggle" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'">
-          <span class="collapse-icon" :class="{ flipped: sidebarCollapsed }">&#x276E;</span>
-          <span v-show="!sidebarCollapsed" class="collapse-label">收起</span>
+          <span class="collapse-chevron" :class="{ flipped: sidebarCollapsed }"></span>
+          <span v-show="!sidebarCollapsed" class="collapse-label">收起侧栏</span>
         </button>
         <div v-if="upload.state.uploadPhase !== 'idle'" class="mini-status" @click="showUploadOverlay = true">
           <div class="status-pulse"></div>
@@ -142,6 +142,14 @@ const currentNavLabel = computed(() => {
 watch(() => upload.state.uploadPhase, (val) => {
   if (val !== 'idle') {
     // Optionally auto-show overlay on start, or keep it subtle
+  }
+});
+
+// Auto-collapse sidebar when entering workbench/module routes
+const workbenchPaths = new Set(["/story-graph", "/worldline", "/writer", "/character-console"]);
+watch(() => route.path, (newPath, oldPath) => {
+  if (workbenchPaths.has(newPath) && !workbenchPaths.has(oldPath)) {
+    sidebarCollapsed.value = true;
   }
 });
 
@@ -373,41 +381,47 @@ onMounted(() => {
 .collapse-toggle {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: 8px 12px;
-  background: none;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
+  gap: 8px;
+  padding: 9px 14px;
+  background: rgba(176, 125, 75, 0.04);
+  border: 1px solid rgba(176, 125, 75, 0.15);
+  border-radius: 10px;
   cursor: pointer;
   font-size: 12px;
   color: var(--text-dim);
-  transition: all 0.2s ease;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
   white-space: nowrap;
 }
 
 .collapse-toggle:hover {
-  background: var(--bg-paper-warm);
-  color: var(--text-main);
+  background: rgba(176, 125, 75, 0.1);
+  border-color: rgba(176, 125, 75, 0.3);
+  color: var(--accent-copper-deep, #8b6540);
+  box-shadow: 0 1px 4px rgba(176, 125, 75, 0.1);
 }
 
 .collapsed .collapse-toggle {
   justify-content: center;
-  padding: 8px 0;
+  padding: 9px 0;
 }
 
-.collapse-icon {
-  display: inline-block;
-  transition: transform 0.25s ease;
-  font-size: 12px;
+.collapse-chevron {
+  width: 7px;
+  height: 7px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
 }
 
-.collapse-icon.flipped {
-  transform: rotate(180deg);
+.collapse-chevron.flipped {
+  transform: rotate(-135deg);
 }
 
 .collapse-label {
   font-family: var(--font-mono);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
 }
 
 .mini-status {

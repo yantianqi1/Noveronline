@@ -1,7 +1,12 @@
 <template>
   <div class="ms-toc">
-    <p class="panel-kicker mono">MANUSCRIPT</p>
-    <h2 class="panel-title title-ancient">稿件目录</h2>
+    <div class="toc-header">
+      <button class="toc-back-btn" @click="$emit('back')" title="返回写作模式"><span class="toc-back-chevron"></span></button>
+      <div>
+        <p class="panel-kicker mono">MANUSCRIPT</p>
+        <h2 class="panel-title title-ancient">稿件目录</h2>
+      </div>
+    </div>
 
     <div class="toc-list">
       <div
@@ -32,8 +37,9 @@
           />
         </template>
         <template v-else>
-          <span class="toc-label" @dblclick.stop="startRename(ch.tag)">{{ ch.tag }}</span>
+          <span class="toc-label">{{ ch.tag }}</span>
           <span class="toc-meta">{{ ch.blockCount }} 段 · {{ ch.wordCount }} 字</span>
+          <button class="toc-rename-btn" @click.stop="startRename(ch.tag)" title="重命名">✎</button>
         </template>
       </div>
 
@@ -85,7 +91,7 @@ const props = defineProps({
   untaggedCount: { type: Number, default: 0 },
 });
 
-const emit = defineEmits(["jump", "create-chapter", "rename-chapter", "export"]);
+const emit = defineEmits(["jump", "create-chapter", "rename-chapter", "export", "back"]);
 
 const newChapterName = ref("");
 const renamingTag = ref(null);
@@ -135,6 +141,47 @@ function cancelRename() {
   overflow: hidden;
 }
 
+.toc-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toc-back-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(176, 125, 75, 0.15);
+  border-radius: 10px;
+  background: rgba(176, 125, 75, 0.04);
+  color: var(--text-dim, #999);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.toc-back-btn:hover {
+  background: rgba(176, 125, 75, 0.1);
+  border-color: rgba(176, 125, 75, 0.3);
+  color: var(--accent-copper-deep, #8b6540);
+  box-shadow: 0 1px 4px rgba(176, 125, 75, 0.1);
+}
+
+.toc-back-btn:active {
+  transform: scale(0.94);
+}
+
+.toc-back-chevron {
+  width: 7px;
+  height: 7px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  margin-left: 2px;
+}
+
 .toc-list {
   flex: 1;
   overflow-y: auto;
@@ -179,6 +226,30 @@ function cancelRename() {
   color: var(--text-dim, #999);
   white-space: nowrap;
   margin-left: 8px;
+}
+
+.toc-rename-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #999);
+  cursor: pointer;
+  font-size: 13px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toc-entry:hover .toc-rename-btn {
+  opacity: 1;
+}
+
+.toc-rename-btn:hover {
+  color: var(--accent-copper, #c09060);
 }
 
 .toc-rename-input {

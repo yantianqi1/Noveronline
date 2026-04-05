@@ -6,33 +6,10 @@
   flex-direction: column;
 }
 
-.panel-head p {
-  margin: 6px 0 0;
-  color: var(--text-sub);
-}
-
-.filter-row {
-  margin-top: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.btn.active {
-  border-color: var(--line-strong);
-  background: rgba(255, 252, 244, 0.92);
-}
-
-.graph-meta {
-  color: var(--text-sub);
-}
-
 .panel-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 264px;
   gap: 14px;
-  margin-top: 12px;
   flex: 1;
   min-height: 0;
   align-items: stretch;
@@ -40,7 +17,7 @@
 
 .canvas-area {
   position: relative;
-  min-height: 680px;
+  min-height: 0;
   height: 100%;
   overflow: hidden;
   border: 1px solid var(--line-soft);
@@ -117,6 +94,51 @@
   place-items: center;
   color: var(--text-sub);
   background: rgba(255, 252, 244, 0.58);
+}
+
+/* Right column: controls + inspector */
+.right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.panel-head .card-title {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.toolbar-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.btn.active {
+  border-color: var(--line-strong);
+  background: rgba(255, 252, 244, 0.92);
+}
+
+.graph-meta {
+  color: var(--text-sub);
+  font-size: 11px;
 }
 
 @media (max-width: 1180px) {

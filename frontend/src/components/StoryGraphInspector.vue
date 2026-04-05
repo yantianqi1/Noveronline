@@ -241,7 +241,7 @@ watch(
   background: #fffcf4;
   padding: 12px;
   height: 100%;
-  min-height: 680px;
+  min-height: 0;
   overflow-y: auto;
 }
 

@@ -16,6 +16,21 @@ from .novel_db import NovelDB
 logger = logging.getLogger(__name__)
 
 TOOL_RESULT_MAX_CHARS = 8000
+_PRESERVE_HEAD = 3000
+_PRESERVE_TAIL = 1500
+
+
+def _truncate_result(result: str, max_chars: int = TOOL_RESULT_MAX_CHARS) -> str:
+    """Truncate keeping head + tail so trailing context (often most relevant) is preserved."""
+    if len(result) <= max_chars:
+        return result
+    omitted = len(result) - _PRESERVE_HEAD - _PRESERVE_TAIL
+    return (
+        result[:_PRESERVE_HEAD]
+        + f"\n\n... [省略 {omitted} 字] ...\n\n"
+        + result[-_PRESERVE_TAIL:]
+    )
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -25,7 +40,7 @@ TOOL_RESULT_MAX_CHARS = 8000
 def execute_tool(tool_name: str, tool_input: dict, project_id: str) -> str:
     """Execute a named tool.
 
-    Returns a formatted string result, truncated to *TOOL_RESULT_MAX_CHARS*.
+    Returns a formatted string result, truncated with head+tail preservation.
     """
     executor = _EXECUTORS.get(tool_name)
     if executor is None:
@@ -35,7 +50,7 @@ def execute_tool(tool_name: str, tool_input: dict, project_id: str) -> str:
     except Exception:
         logger.error("Tool %s execution failed:\n%s", tool_name, traceback.format_exc())
         result = f"工具 {tool_name} 执行出错：{traceback.format_exc()}"
-    return result[:TOOL_RESULT_MAX_CHARS]
+    return _truncate_result(result)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +125,45 @@ def _query_entity(params: dict, project_id: str) -> str:
     _append_if(lines, "风险", _pretty_json(entity.get("notable_risks_json")))
 
     lines.append(f"详细设定：{_pretty_json(entity.get('profile_json')) or '无'}")
+
+    # --- Associated plot threads ---
+    entity_id = entity.get("entity_id", "")
+    if entity_id:
+        threads = _db.get_entity_threads(project_id, entity_id, limit=5)
+        if threads:
+            lines.append("\n【关联伏笔】")
+            for t in threads:
+                status = t.get("status", "open")
+                label = _STATUS_LABELS.get(status, status)
+                key = t.get("thread_key", "")
+                detail = t.get("detail", "")
+                text = f"  [{label}] {key}"
+                if detail:
+                    text += f"：{detail}"
+                lines.append(text)
+
+        # --- Associated world rules ---
+        rules = _db.get_entity_rules(project_id, entity_id, limit=5)
+        if rules:
+            lines.append("\n【适用世界规则】")
+            for r in rules:
+                lines.append(f"  规则：{r.get('fact_text', '')}")
+                snippet = r.get("evidence_snippet", "")
+                if snippet:
+                    lines.append(f"    证据：{snippet}")
+
+        # --- Recent events ---
+        events = _db.get_entity_recent_events(project_id, entity_id, limit=5)
+        if events:
+            lines.append("\n【近期事件】")
+            for e in events:
+                etype = e.get("event_type", "")
+                prefix = f"[{etype}] " if etype else ""
+                detail = e.get("summary", "")
+                ch = e.get("chapter_order", "")
+                ch_prefix = f"第{ch}章：" if ch else ""
+                lines.append(f"  {prefix}{ch_prefix}{detail}")
+
     return "\n".join(lines)
 
 
@@ -277,6 +331,16 @@ def _get_world_state(params: dict, project_id: str) -> str:
 _STATUS_LABELS = {"open": "未解决", "progressed": "进行中", "resolved": "已解决"}
 
 
+def _format_entity_names(entities: list[dict]) -> str:
+    """Format a list of entity dicts into a compact 'Name(type)' string."""
+    parts = []
+    for e in entities:
+        name = e.get("name", "?")
+        etype = e.get("entity_type", "")
+        parts.append(f"{name}({etype})" if etype else name)
+    return "、".join(parts)
+
+
 def _get_open_threads(params: dict, project_id: str) -> str:
     up_to_chapter = params["up_to_chapter"]
     threads = _db.get_open_threads(project_id, up_to_chapter)
@@ -294,6 +358,12 @@ def _get_open_threads(params: dict, project_id: str) -> str:
             if detail:
                 text += f" — {detail}"
             lines.append(f"{i}. {text}")
+            # Reverse link: show entities involved in this thread
+            thread_id = t.get("thread_id")
+            if thread_id:
+                ents = _db.get_thread_entities(project_id, thread_id, limit=5)
+                if ents:
+                    lines.append(f"   涉及实体：{_format_entity_names(ents)}")
         else:
             lines.append(f"{i}. {t}")
     return "\n".join(lines)
@@ -374,7 +444,7 @@ def _get_manuscript_stats(params: dict, project_id: str) -> str:
 # New tools: voice, timelines, threads, world rules
 # ---------------------------------------------------------------------------
 
-def _get_character_voice(project_id: str, inp: dict) -> str:
+def _get_character_voice(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
     entity = _db.get_entity(project_id, name)
     if not entity:
@@ -384,7 +454,6 @@ def _get_character_voice(project_id: str, inp: dict) -> str:
         lines.append(f"说话风格：{entity['speech_style']}")
     if entity.get("personality_traits_json"):
         try:
-            import json
             traits = json.loads(entity["personality_traits_json"])
             if traits:
                 lines.append(f"性格特征：{'、'.join(traits)}")
@@ -392,7 +461,6 @@ def _get_character_voice(project_id: str, inp: dict) -> str:
             pass
     if entity.get("verbal_habits_json"):
         try:
-            import json
             habits = json.loads(entity["verbal_habits_json"])
             if habits:
                 lines.append(f"口头禅/语气：{'、'.join(habits)}")
@@ -400,7 +468,6 @@ def _get_character_voice(project_id: str, inp: dict) -> str:
             pass
     if entity.get("example_quotes_json"):
         try:
-            import json
             quotes = json.loads(entity["example_quotes_json"])
             if quotes:
                 lines.append("经典台词/内心戏：")
@@ -429,7 +496,7 @@ def _get_character_voice(project_id: str, inp: dict) -> str:
     return "\n".join(lines)
 
 
-def _query_relationship_timeline(project_id: str, inp: dict) -> str:
+def _query_relationship_timeline(inp: dict, project_id: str) -> str:
     a_name = inp.get("entity_a", "")
     b_name = inp.get("entity_b", "")
     a = _db.get_entity(project_id, a_name)
@@ -487,7 +554,7 @@ def _query_relationship_timeline(project_id: str, inp: dict) -> str:
     return "\n".join(lines)
 
 
-def _query_character_timeline(project_id: str, inp: dict) -> str:
+def _query_character_timeline(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
     event_type = inp.get("event_type", "all")
     limit = inp.get("limit", 20)
@@ -515,7 +582,7 @@ def _query_character_timeline(project_id: str, inp: dict) -> str:
     return "\n".join(lines)
 
 
-def _query_thread_history(project_id: str, inp: dict) -> str:
+def _query_thread_history(inp: dict, project_id: str) -> str:
     thread_key = inp.get("thread_key", "")
     _db.ensure_schema(project_id)
     with _db.connect(project_id) as conn:
@@ -535,6 +602,14 @@ def _query_thread_history(project_id: str, inp: dict) -> str:
         lines = [f"【伏笔线索】匹配到 {len(pt_rows)} 条"]
         for r in pt_rows:
             lines.append(f"  [{r['status']}] {r['thread_key']}：{r['detail']}")
+            try:
+                tid = r["thread_id"]
+            except (KeyError, IndexError):
+                tid = None
+            if tid:
+                ents = _db.get_thread_entities(project_id, tid, limit=5)
+                if ents:
+                    lines.append(f"    关联实体：{_format_entity_names(ents)}")
         return "\n".join(lines)
     lines = [f"【伏笔生命周期】{thread_key}（共 {len(rows)} 条记录）"]
     for r in rows:
@@ -547,7 +622,7 @@ def _query_thread_history(project_id: str, inp: dict) -> str:
     return "\n".join(lines)
 
 
-def _search_world_rules(project_id: str, inp: dict) -> str:
+def _search_world_rules(inp: dict, project_id: str) -> str:
     query = inp.get("query", "")
     limit = inp.get("limit", 10)
     _db.ensure_schema(project_id)
@@ -556,7 +631,7 @@ def _search_world_rules(project_id: str, inp: dict) -> str:
     with _db.connect(project_id) as conn:
         try:
             rows = conn.execute(
-                """SELECT wre.fact_text, wre.evidence_snippet, wre.segment_id,
+                """SELECT wre.evidence_id, wre.fact_text, wre.evidence_snippet, wre.segment_id,
                           snippet(world_rule_evidence_fts, 0, '<b>', '</b>', '...', 48) AS snip
                    FROM world_rule_evidence_fts
                    JOIN world_rule_evidence wre ON wre.rowid = world_rule_evidence_fts.rowid
@@ -569,7 +644,7 @@ def _search_world_rules(project_id: str, inp: dict) -> str:
         except Exception:
             # Fallback to LIKE
             rows = conn.execute(
-                "SELECT fact_text, evidence_snippet, segment_id FROM world_rule_evidence WHERE project_id = ? AND (fact_text LIKE ? OR evidence_snippet LIKE ?) LIMIT ?",
+                "SELECT evidence_id, fact_text, evidence_snippet, segment_id FROM world_rule_evidence WHERE project_id = ? AND (fact_text LIKE ? OR evidence_snippet LIKE ?) LIMIT ?",
                 (project_id, f"%{query}%", f"%{query}%", limit),
             ).fetchall()
             for r in rows:
@@ -592,7 +667,127 @@ def _search_world_rules(project_id: str, inp: dict) -> str:
         lines.append(f"  规则：{r['fact_text']}")
         if r["evidence_snippet"]:
             lines.append(f"    证据：{r['evidence_snippet']}")
+        try:
+            eid = r["evidence_id"]
+        except (KeyError, IndexError):
+            eid = None
+        if eid:
+            ents = _db.get_rule_entities(project_id, eid, limit=5)
+            if ents:
+                lines.append(f"    关联实体：{_format_entity_names(ents)}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Write tool executors
+# ---------------------------------------------------------------------------
+
+
+def _manage_entity(params: dict, project_id: str) -> str:
+    action = params.get("action", "")
+    name = params.get("name", "")
+    if not name:
+        return "缺少必填参数 name"
+
+    if action == "create":
+        entity_type = params.get("entity_type")
+        summary = params.get("summary")
+        if not entity_type or not summary:
+            return "创建实体需要提供 entity_type 和 summary"
+        kwargs: dict[str, Any] = {}
+        for key in ("core_drive", "hidden_tension", "current_objective", "importance_tier"):
+            if params.get(key):
+                kwargs[key] = params[key]
+        if params.get("aliases"):
+            kwargs["aliases"] = params["aliases"]
+        try:
+            result = _db.create_entity(project_id, name, entity_type, summary, **kwargs)
+        except ValueError as e:
+            return str(e)
+        return f"已创建实体「{name}」（{entity_type}），ID: {result['entity_id']}"
+
+    elif action == "update":
+        kwargs = {}
+        for key in ("summary", "core_drive", "hidden_tension", "current_objective",
+                     "entity_type", "importance_tier"):
+            if params.get(key) is not None:
+                kwargs[key] = params[key]
+        if params.get("aliases"):
+            kwargs["aliases"] = params["aliases"]
+        if not kwargs:
+            return "未提供任何更新字段"
+        ok = _db.update_entity(project_id, name, **kwargs)
+        if not ok:
+            return f"未找到实体「{name}」，无法更新。如需新建请使用 action='create'"
+        return f"已更���实体「{name}」的设定"
+
+    return f"未知操作：{action}，请使用 create 或 update"
+
+
+def _manage_thread(params: dict, project_id: str) -> str:
+    action = params.get("action", "")
+    thread_key = params.get("thread_key", "")
+    if not thread_key:
+        return "缺少必填参数 thread_key"
+
+    if action == "create":
+        detail = params.get("detail", "")
+        chapter_order = params.get("chapter_order", 0)
+        result = _db.create_thread(project_id, thread_key, detail, chapter_order=chapter_order)
+        return f"已创建伏笔「{thread_key}」，ID: {result['thread_id']}"
+
+    elif action == "update":
+        status = params.get("status")
+        detail = params.get("detail")
+        resolution = params.get("resolution_detail")
+        chapter_order = params.get("chapter_order", 0)
+        try:
+            ok = _db.update_thread(
+                project_id, thread_key, status=status, detail=detail,
+                resolution_detail=resolution, chapter_order=chapter_order,
+            )
+        except ValueError as e:
+            return str(e)
+        if not ok:
+            return f"未找到伏���「{thread_key}」，如需新建请使用 action='create'"
+        status_note = f"，状态→{status}" if status else ""
+        return f"已更新伏笔「{thread_key}」{status_note}"
+
+    return f"未知操作：{action}，请使用 create 或 update"
+
+
+def _manage_world_rule(params: dict, project_id: str) -> str:
+    fact_text = params.get("fact_text", "")
+    if not fact_text:
+        return "缺少必填参数 fact_text"
+    snippet = params.get("evidence_snippet", "")
+    chapter_order = params.get("chapter_order", 0)
+    try:
+        result = _db.create_or_update_world_rule(project_id, fact_text, snippet, chapter_order)
+    except Exception as e:
+        return f"世界规则写入失败：{e}"
+    verb = "更新" if result.get("updated") else "记录"
+    return f"已{verb}世界规则：{fact_text}"
+
+
+def _manage_relationship(params: dict, project_id: str) -> str:
+    a = params.get("entity_a", "")
+    b = params.get("entity_b", "")
+    rel_type = params.get("relation_type", "")
+    if not a or not b or not rel_type:
+        return "缺少必填参数：entity_a、entity_b、relation_type"
+    kwargs: dict[str, Any] = {}
+    for k in ("description", "trust_level", "power_dynamic", "conflict_trigger"):
+        if params.get(k) is not None:
+            kwargs[k] = params[k]
+    try:
+        result = _db.create_or_update_relationship(
+            project_id, a, b, rel_type, **kwargs,
+        )
+    except ValueError as e:
+        return str(e)
+    verb = "更新" if result.get("updated") else "创建"
+    return f"已{verb}关系：{a} ↔ {b}（{rel_type}）"
 
 
 # ---------------------------------------------------------------------------
@@ -616,4 +811,9 @@ _EXECUTORS: dict[str, Any] = {
     "query_character_timeline": _query_character_timeline,
     "query_thread_history": _query_thread_history,
     "search_world_rules": _search_world_rules,
+    # Write tools
+    "manage_entity": _manage_entity,
+    "manage_thread": _manage_thread,
+    "manage_world_rule": _manage_world_rule,
+    "manage_relationship": _manage_relationship,
 }

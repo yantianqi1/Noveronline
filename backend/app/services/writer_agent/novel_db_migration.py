@@ -1899,8 +1899,127 @@ def migrate_project(project_id: str) -> dict[str, int]:
         # 20: reading_notes consistency_notes -> consistency_notes table
         _migrate_consistency_notes_data(project_id, conn, counts)
 
+        # 21: build entity associations (thread_entity_links + rule_entity_links)
+        _build_entity_associations(project_id, conn, counts)
+
     # Rebuild all FTS indexes after bulk import
     db.rebuild_fts(project_id)
 
     logger.info("Migration complete for project %s: %s", project_id, counts)
     return counts
+
+
+# ======================================================================
+# 21. Build entity associations from text matching
+# ======================================================================
+
+
+def _build_entity_associations(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Scan plot_threads and world_rule_evidence text for entity names, create links.
+
+    Uses substring matching — Chinese character names (2-3 chars) are distinctive
+    enough that false positives are rare and harmless (only adds extra context).
+    """
+    # 1. Build name → entity_id lookup from entities + entity_aliases.
+    #    Prefer archive_ IDs (from archive migration) over seed_char_ / node::
+    #    because query_entity returns archive_ IDs to the agent.
+    name_map: dict[str, str] = {}
+
+    def _prefer_archive(current: str | None, candidate: str) -> str:
+        if current is None:
+            return candidate
+        # archive_ IDs take priority
+        if candidate.startswith("archive_") and not current.startswith("archive_"):
+            return candidate
+        return current
+
+    for row in conn.execute(
+        "SELECT entity_id, name FROM entities WHERE project_id = ?",
+        (project_id,),
+    ):
+        name = row[1]
+        if name and len(name) >= 2:
+            name_map[name] = _prefer_archive(name_map.get(name), row[0])
+    for row in conn.execute(
+        "SELECT a.alias, a.entity_id FROM entity_aliases a "
+        "JOIN entities e ON a.entity_id = e.entity_id "
+        "WHERE e.project_id = ?",
+        (project_id,),
+    ):
+        alias = row[0]
+        if alias and len(alias) >= 2:
+            name_map[alias] = _prefer_archive(name_map.get(alias), row[1])
+
+    if not name_map:
+        return
+
+    now = _now()
+    thread_links = 0
+    rule_links = 0
+
+    # 2. Scan plot_threads
+    for row in conn.execute(
+        "SELECT thread_id, thread_key, detail FROM plot_threads WHERE project_id = ?",
+        (project_id,),
+    ):
+        text = (row[1] or "") + " " + (row[2] or "")
+        for name, eid in name_map.items():
+            if name in text:
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_entity_links "
+                    "(thread_id, entity_id, role, created_at) VALUES (?,?,?,?)",
+                    (row[0], eid, "involved", now),
+                )
+                thread_links += 1
+
+    # 3. Scan thread_lifecycle for richer detail text
+    for row in conn.execute(
+        "SELECT tl.thread_key, tl.detail, tl.resolution_detail "
+        "FROM thread_lifecycle tl WHERE tl.project_id = ?",
+        (project_id,),
+    ):
+        text = (row[1] or "") + " " + (row[2] or "")
+        thread_key = row[0] or ""
+        # Find matching plot_thread by key
+        pt_row = conn.execute(
+            "SELECT thread_id FROM plot_threads WHERE project_id = ? AND thread_key = ?",
+            (project_id, thread_key),
+        ).fetchone()
+        if not pt_row:
+            continue
+        for name, eid in name_map.items():
+            if name in text:
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_entity_links "
+                    "(thread_id, entity_id, role, created_at) VALUES (?,?,?,?)",
+                    (pt_row[0], eid, "involved", now),
+                )
+                thread_links += 1
+
+    # 4. Scan world_rule_evidence
+    for row in conn.execute(
+        "SELECT evidence_id, fact_text, evidence_snippet "
+        "FROM world_rule_evidence WHERE project_id = ?",
+        (project_id,),
+    ):
+        text = (row[1] or "") + " " + (row[2] or "")
+        for name, eid in name_map.items():
+            if name in text:
+                conn.execute(
+                    "INSERT OR IGNORE INTO rule_entity_links "
+                    "(evidence_id, entity_id, relevance, created_at) VALUES (?,?,?,?)",
+                    (row[0], eid, "constrains", now),
+                )
+                rule_links += 1
+
+    conn.commit()
+    counts["thread_entity_links"] = thread_links
+    counts["rule_entity_links"] = rule_links
+    logger.info(
+        "Built entity associations for project %s: %d thread links, %d rule links",
+        project_id, thread_links, rule_links,
+    )

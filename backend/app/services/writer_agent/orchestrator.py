@@ -38,7 +38,7 @@ class WriterOrchestrator:
 
         request keys:
             project_id (required)
-            task_type: write_scene|continue|rewrite|expand|outline|consistency_check
+            task_type: write_scene|continue|outline
             chapter_id, chapter_order, scene_order
             pov_entity_id, involved_entity_ids
             scene_focus, user_instruction
@@ -145,6 +145,40 @@ class WriterOrchestrator:
             len(brief_content),
             len(tool_results_raw),
         )
+
+        # Force-inject chapter outline into writing_brief so the writer
+        # composer always has it, regardless of orchestrator tool calls.
+        if chapter_id and task_type in ("write_scene", "continue"):
+            chapter = db.get_chapter_by_id(project_id, chapter_id)
+            if not chapter:
+                logger.warning("Chapter %s not found for project %s, skipping outline injection", chapter_id, project_id)
+            elif chapter.get("outline_json"):
+                try:
+                    outline_data = json.loads(chapter["outline_json"])
+                    if outline_data:
+                        writing_brief["chapter_outline"] = outline_data
+                        logger.info("Injected chapter outline: %d beats", len(outline_data))
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to parse outline_json for chapter %s", chapter_id)
+
+        # --- Outline branch: skip Phase 2/3, save directly ---
+        if task_type == "outline":
+            outline = self._parse_outline(brief_content)
+            if chapter_id:
+                db.ensure_chapter(project_id, chapter_id)
+                db.update_chapter(
+                    project_id, chapter_id,
+                    outline_json=json.dumps(outline, ensure_ascii=False),
+                )
+            logger.info("Outline saved: chapter_id=%s, scenes=%d", chapter_id, len(outline))
+            yield {
+                "type": "outline_ready",
+                "outline": outline,
+                "chapter_id": chapter_id,
+                **_stamp(),
+            }
+            yield {"type": "done", **_stamp(), "outline_saved": True, "scene_count": len(outline)}
+            return
 
         # --- Phase 2: Writer Agent ---
         yield {"type": "orchestrator_status", "phase": "writing", **_stamp(), "message": "写作层启动中..."}
@@ -296,6 +330,55 @@ class WriterOrchestrator:
             "open_threads": [],
             "constraints": [],
         }
+
+    def _parse_outline(self, content: str) -> list:
+        """Parse a JSON array outline from the agent loop output."""
+        if not content:
+            return []
+
+        # Strategy 1: markdown ```json code block containing an array
+        arr_match = re.search(r"```(?:json)?\s*(\[[\s\S]+?\])\s*```", content)
+        if arr_match:
+            try:
+                result = json.loads(arr_match.group(1))
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # Strategy 2: find outermost [...] using bracket counting
+        start = content.find("[")
+        if start >= 0:
+            depth = 0
+            in_string = False
+            escape = False
+            for i in range(start, len(content)):
+                ch = content[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            result = json.loads(content[start : i + 1])
+                            if isinstance(result, list):
+                                return result
+                        except json.JSONDecodeError:
+                            break
+
+        logger.warning("Failed to parse outline JSON array (len=%d)", len(content))
+        return []
 
     def _load_preset(self, project_id: str, preset_id: Optional[str]) -> str:
         """Load writing preset prompt. Falls back to default if not found."""

@@ -287,17 +287,95 @@ class TestOutlineVersions:
 
 
 # ---------------------------------------------------------------------------
+# Outline version API tests
+# ---------------------------------------------------------------------------
+class TestOutlineVersionAPI:
+    """Test outline version API endpoints."""
+
+    TEST_PROJECT = f"__test_{uuid.uuid4().hex[:8]}"
+
+    @pytest.fixture(autouse=True)
+    def setup_teardown(self):
+        from app.services.writer_agent.novel_db import NovelDB
+
+        self.db = NovelDB()
+        self.db.ensure_schema(self.TEST_PROJECT)
+        self.db.create_chapter(self.TEST_PROJECT, "ch_api", 1, "API章")
+        self.db.update_chapter(self.TEST_PROJECT, "ch_api", outline_json='[{"scene_order":1}]')
+
+        os.environ["FLASK_PORT"] = "3888"
+        from app import create_app
+        app = create_app()
+        self.client = app.test_client()
+        yield
+        db_path = self.db._db_path(self.TEST_PROJECT)
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+    def test_list_versions_empty(self):
+        resp = self.client.get(
+            f"/api/writer-agent/chapters/detail/ch_api/outline-versions?project_id={self.TEST_PROJECT}"
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["data"] == []
+
+    def test_save_then_list(self):
+        # Save triggers version creation
+        self.client.put(
+            "/api/writer-agent/chapters/detail/ch_api",
+            json={"project_id": self.TEST_PROJECT, "outline_json": '[{"scene_order":2}]', "outline_label": "v1标注"},
+        )
+        resp = self.client.get(
+            f"/api/writer-agent/chapters/detail/ch_api/outline-versions?project_id={self.TEST_PROJECT}"
+        )
+        data = resp.get_json()
+        assert len(data["data"]) == 1
+        assert data["data"][0]["label"] == "v1标注"
+
+    def test_restore_version(self):
+        # Create a version by saving
+        self.client.put(
+            "/api/writer-agent/chapters/detail/ch_api",
+            json={"project_id": self.TEST_PROJECT, "outline_json": '[{"scene_order":99}]'},
+        )
+        versions = self.client.get(
+            f"/api/writer-agent/chapters/detail/ch_api/outline-versions?project_id={self.TEST_PROJECT}"
+        ).get_json()["data"]
+        vid = versions[0]["version_id"]
+        # Restore
+        resp = self.client.post(
+            f"/api/writer-agent/chapters/detail/ch_api/outline-versions/{vid}/restore",
+            json={"project_id": self.TEST_PROJECT},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["success"] is True
+        # Verify current outline is restored
+        chapters = self.client.get(
+            f"/api/writer-agent/chapters/{self.TEST_PROJECT}"
+        ).get_json()["data"]
+        ch = [c for c in chapters if c["chapter_id"] == "ch_api"][0]
+        assert ch["outline_json"] == '[{"scene_order":1}]'
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions tests
 # ---------------------------------------------------------------------------
 class TestToolDefinitions:
     def test_all_tools_defined(self):
         from app.services.writer_agent.tools import NOVEL_TOOLS, TOOL_NAME_SET
 
-        assert len(NOVEL_TOOLS) == 8
+        assert len(NOVEL_TOOLS) == 17
         expected_names = {
             "query_entity", "query_relationship", "query_chapter",
             "query_scene", "search_settings", "get_recent_scenes",
             "get_world_state", "get_open_threads",
+            "get_character_voice", "query_character_timeline",
+            "query_relationship_timeline", "query_thread_history",
+            "search_world_rules",
+            "manage_entity", "manage_thread",
+            "manage_world_rule", "manage_relationship",
         }
         assert TOOL_NAME_SET == expected_names
 
@@ -490,8 +568,9 @@ class TestAgentLoop:
         loop = AgentLoop(mock_client, NOVEL_TOOLS, "你是编排助手", self.TEST_PROJECT)
         events = list(loop.run("生成大纲"))
 
-        assert len(events) == 1
-        assert events[0]["type"] == "brief_ready"
+        assert len(events) == 2
+        assert events[0]["type"] == "prompt_snapshot"
+        assert events[1]["type"] == "brief_ready"
 
     def test_loop_max_rounds(self):
         from app.services.writer_agent.agent_loop import AgentLoop
@@ -525,14 +604,12 @@ class TestModuleRegistry:
 
         assert "writer_orchestrator" in MODULE_BY_KEY
         assert "writer_composer" in MODULE_BY_KEY
-        assert "writer_reviewer" in MODULE_BY_KEY
 
     def test_writer_module_labels(self):
         from app.services.llm_module_registry import MODULE_BY_KEY
 
         assert MODULE_BY_KEY["writer_orchestrator"].label == "写作编排调度"
         assert MODULE_BY_KEY["writer_composer"].label == "写作正文生成"
-        assert MODULE_BY_KEY["writer_reviewer"].label == "写作一致性审校"
 
 
 # ---------------------------------------------------------------------------

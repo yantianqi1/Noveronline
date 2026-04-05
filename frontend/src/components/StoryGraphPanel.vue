@@ -1,35 +1,5 @@
 <template>
   <section class="workbench-card panel">
-    <div class="panel-head">
-      <div>
-        <h2 class="card-title">故事图谱面板</h2>
-        <p>可视化展示角色、势力与关系，支持节点和边的细节侧栏。</p>
-      </div>
-      <div class="toolbar-row">
-        <button class="btn" :disabled="loading" @click="$emit('refresh')">
-          {{ loading ? "刷新中..." : "刷新图谱" }}
-        </button>
-        <button class="btn" type="button" @click="resetVisibleTypes">核心视图</button>
-        <button class="btn" type="button" @click="showEdgeLabels = !showEdgeLabels">
-          {{ showEdgeLabels ? "隐藏关系标签" : "显示关系标签" }}
-        </button>
-      </div>
-    </div>
-
-    <div class="filter-row">
-      <button
-        v-for="item in typeOptions"
-        :key="item.key"
-        class="btn subtle"
-        :class="{ active: visibleTypes[item.key] }"
-        type="button"
-        @click="toggleType(item.key)"
-      >
-        {{ item.label }} {{ countsByType[item.key] || 0 }}
-      </button>
-      <span class="graph-meta mono">当前显示 {{ visibleNodeCount }} / {{ props.nodes.length }} 个节点</span>
-    </div>
-
     <div class="panel-body">
       <div ref="canvasRef" class="canvas-area">
         <svg ref="svgRef" class="graph-svg" aria-label="故事图谱" />
@@ -45,7 +15,37 @@
           </div>
         </div>
       </div>
-      <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" :project-id="projectId" />
+
+      <div class="right-col">
+        <div class="panel-head">
+          <h2 class="card-title">故事图谱面板</h2>
+          <div class="toolbar-row">
+            <button class="btn subtle small" :disabled="loading" @click="$emit('refresh')">
+              {{ loading ? "刷新中..." : "刷新图谱" }}
+            </button>
+            <button class="btn subtle small" type="button" @click="resetVisibleTypes">核心视图</button>
+            <button class="btn subtle small" type="button" @click="showEdgeLabels = !showEdgeLabels">
+              {{ showEdgeLabels ? "隐藏标签" : "显示标签" }}
+            </button>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <button
+            v-for="item in typeOptions"
+            :key="item.key"
+            class="btn subtle small"
+            :class="{ active: visibleTypes[item.key] }"
+            type="button"
+            @click="toggleType(item.key)"
+          >
+            {{ item.label }} {{ countsByType[item.key] || 0 }}
+          </button>
+          <span class="graph-meta mono">显示 {{ visibleNodeCount }} / {{ props.nodes.length }}</span>
+        </div>
+
+        <StoryGraphInspector :selected-node="selectedNode" :selected-edge="selectedEdge" :project-id="projectId" />
+      </div>
     </div>
   </section>
 </template>

@@ -17,16 +17,83 @@ def _error_response(exc, status_code=500):
 
 # ---- Core Writing (SSE) ----
 
+_ALLOWED_TASK_TYPES = {"write_scene", "continue", "outline"}
+
+
 @writer_agent_bp.route("/run", methods=["POST"])
 def run_writer_agent():
     """Execute a writing task. Returns SSE stream."""
     data = request.get_json() or {}
+
+    if not data.get("project_id"):
+        return jsonify({"success": False, "error": "缺少 project_id"}), 400
+
+    task_type = data.get("task_type", "write_scene")
+    if task_type not in _ALLOWED_TASK_TYPES:
+        return jsonify({
+            "success": False,
+            "error": f"不支持的 task_type: {task_type}，支持: {', '.join(sorted(_ALLOWED_TASK_TYPES))}",
+        }), 400
+
     from ..services.writer_agent.orchestrator import WriterOrchestrator
     orchestrator = WriterOrchestrator()
 
     def event_stream():
         try:
             for event in orchestrator.run(data):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+# ---- World Data Update (SSE) ----
+
+
+@writer_agent_bp.route("/world-update", methods=["POST"])
+def run_world_update():
+    """Analyze committed prose and incrementally update world data. Returns SSE stream."""
+    data = request.get_json() or {}
+
+    project_id = data.get("project_id")
+    content = (data.get("content") or "").strip()
+    if not project_id or not content:
+        return jsonify({"success": False, "error": "缺少 project_id 或 content"}), 400
+
+    import time
+    from ..services.writer_agent.agent_loop import AgentLoop
+    from ..services.writer_agent.prompts import build_world_update_prompt
+    from ..services.writer_agent.tools import NOVEL_TOOLS
+    from ..services.llm_router import LlmRouter
+
+    try:
+        chapter_order = int(data.get("chapter_order", 0))
+    except (TypeError, ValueError):
+        chapter_order = 0
+    system_prompt = build_world_update_prompt(project_id, chapter_order)
+
+    router = LlmRouter()
+    llm_client = router.build_client("writer_orchestrator")
+    t0 = time.monotonic()
+
+    agent_loop = AgentLoop(
+        llm_client=llm_client,
+        tools=NOVEL_TOOLS,
+        system_prompt=system_prompt,
+        project_id=project_id,
+        t0=t0,
+    )
+
+    user_msg = f"以下是作者刚确认采用的散文（第{chapter_order}章）：\n\n{content}"
+
+    def event_stream():
+        try:
+            for event in agent_loop.run(user_msg):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
@@ -204,8 +271,45 @@ def update_chapter(chapter_id):
         from ..services.writer_agent.chapter_service import ChapterService
         result = ChapterService().update_chapter(project_id, chapter_id, **{
             k: v for k, v in data.items()
-            if k in ("title", "summary", "outline_json", "timeline_note", "open_threads_json", "pov_character")
+            if k in ("title", "summary", "outline_json", "timeline_note", "open_threads_json", "pov_character", "outline_label")
         })
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/chapters/detail/<chapter_id>/outline-versions", methods=["GET"])
+def list_outline_versions(chapter_id):
+    try:
+        project_id = request.args.get("project_id", "")
+        from ..services.writer_agent.chapter_service import ChapterService
+        versions = ChapterService().list_outline_versions(project_id, chapter_id)
+        return jsonify({"success": True, "data": versions})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/chapters/detail/<chapter_id>/outline-versions/<version_id>", methods=["GET"])
+def get_outline_version(chapter_id, version_id):
+    try:
+        project_id = request.args.get("project_id", "")
+        from ..services.writer_agent.chapter_service import ChapterService
+        svc = ChapterService()
+        version = svc.db.get_outline_version(project_id, version_id)
+        if not version:
+            return jsonify({"success": False, "error": "版本不存在"}), 404
+        return jsonify({"success": True, "data": version})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/chapters/detail/<chapter_id>/outline-versions/<version_id>/restore", methods=["POST"])
+def restore_outline_version(chapter_id, version_id):
+    try:
+        data = request.get_json() or {}
+        project_id = data.get("project_id", "")
+        from ..services.writer_agent.chapter_service import ChapterService
+        result = ChapterService().restore_outline_version(project_id, chapter_id, version_id)
         return jsonify({"success": True, "data": result})
     except Exception as exc:
         return _error_response(exc)

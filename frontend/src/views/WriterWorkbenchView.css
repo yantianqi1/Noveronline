@@ -1061,12 +1061,25 @@ textarea.review-issue-suggestion-text {
 }
 
 /* ─── Manuscript mode layout ─── */
+/* ─── Grid transition for debug panel collapse ─── */
+.writer-stage {
+  transition: grid-template-columns 0.3s ease;
+}
+
 .writer-stage.manuscript-mode.desktop {
   grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  height: calc(100vh - 100px);
+}
+
+.writer-stage.manuscript-mode .writer-controls {
+  overflow-y: auto;
 }
 
 .writer-stage.manuscript-mode .writer-context {
   padding: 18px 0;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ─── Manuscript toolbar ─── */
@@ -1076,4 +1089,103 @@ textarea.review-issue-suggestion-text {
   align-items: center;
   margin-bottom: 10px;
   flex-wrap: wrap;
+}
+.commit-chapter-select {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--line-medium, #d0ccc4);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text-main, #1a1a1a);
+  outline: none;
+  max-width: 200px;
+}
+.commit-chapter-select:focus {
+  border-color: var(--accent-copper, #c09060);
+}
+.manuscript-toolbar .btn.accent {
+  background: #6366f1;
+  color: #fff;
+  border-color: #6366f1;
+}
+.manuscript-toolbar .btn.accent:hover:not(:disabled) {
+  background: #4f46e5;
+}
+.manuscript-toolbar .btn.accent:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.world-update-done {
+  font-size: 12px;
+  color: #22c55e;
+}
+
+/* ─── Debug panel collapse ─── */
+.writer-debug {
+  transition: width 0.3s ease, min-width 0.3s ease, padding 0.3s ease;
+  position: relative;
+}
+
+.writer-debug.debug-collapsed {
+  padding: 8px 4px;
+  min-width: 44px;
+  width: 44px;
+  overflow: hidden;
+}
+
+.debug-panel-content {
+  transition: opacity 0.2s ease;
+}
+
+.debug-collapsed .debug-panel-content {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.debug-collapse-toggle {
+  position: absolute;
+  top: 14px;
+  left: 8px;
+  width: 28px;
+  border: 1px solid rgba(176, 125, 75, 0.15);
+  border-radius: 8px;
+  background: rgba(176, 125, 75, 0.04);
+  color: var(--text-dim, #999);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  z-index: 2;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.debug-collapse-toggle:hover {
+  background: rgba(176, 125, 75, 0.1);
+  border-color: rgba(176, 125, 75, 0.3);
+  color: var(--accent-copper-deep, #8b6540);
+  box-shadow: 0 1px 4px rgba(176, 125, 75, 0.1);
+}
+
+.debug-collapse-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
+}
+
+.debug-collapse-chevron.flipped {
+  transform: rotate(135deg);
+}
+
+.debug-collapse-label-vertical {
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  letter-spacing: 3px;
+  color: var(--text-dim, #999);
+  font-weight: 500;
 }
