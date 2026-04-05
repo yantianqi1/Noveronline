@@ -1,5 +1,5 @@
 <template>
-  <div class="writer-stage" :class="[workbenchMode, { 'manuscript-mode': viewMode === 'manuscript' }]" :style="{ gridTemplateColumns: activeGridColumns }">
+  <div class="writer-stage" :class="[workbenchMode, { 'manuscript-mode': viewMode === 'manuscript' || viewMode === 'outline' }]" :style="{ gridTemplateColumns: activeGridColumns }">
     <aside class="writer-panel writer-controls workbench-card">
       <!-- Manuscript TOC mode -->
       <ManuscriptTocPanel
@@ -13,6 +13,7 @@
         @create-chapter="handleCreateManuscriptChapter"
         @rename-chapter="handleRenameManuscriptChapter"
         @export="handleManuscriptExport"
+        @back="switchViewMode('writing')"
       />
       <!-- Writing controls mode -->
       <template v-else>
@@ -191,6 +192,11 @@
           >写作</button>
           <button
             class="view-mode-tab"
+            :class="{ active: viewMode === 'outline' }"
+            @click="switchViewMode('outline')"
+          >大纲</button>
+          <button
+            class="view-mode-tab"
             :class="{ active: viewMode === 'manuscript' }"
             @click="switchViewMode('manuscript')"
           >稿件</button>
@@ -204,6 +210,25 @@
         :blocks="manuscriptBlocks"
         @edit-save="handleManuscriptBlockSave"
       />
+
+      <!-- ═══ Outline mode ═══ -->
+      <div v-if="viewMode === 'outline'" class="outline-tab-container">
+        <OutlineView
+          v-if="chapterOutlineData && chapterOutlineData.length"
+          :outline="chapterOutlineData"
+          :chapter-id="chapterId"
+          :project-id="projectId"
+          :versions="outlineVersions"
+          :preview-outline="outlinePreview"
+          @save="handleOutlineSave"
+          @load-versions="handleLoadVersions"
+          @restore="handleOutlineRestore"
+          @cancel-preview="outlinePreview = null; outlinePreviewVersionId = ''"
+        />
+        <p v-else class="panel-empty">
+          当前章节暂无大纲。请在「写作」页签中选择「大纲」任务类型生成。
+        </p>
+      </div>
 
       <!-- ═══ Writing mode content ═══ -->
       <template v-if="viewMode === 'writing'">
@@ -261,7 +286,7 @@
       <!-- 稿件操作栏 -->
       <div v-if="projectId" class="manuscript-toolbar">
         <button
-          v-if="agentSceneContent && draftPhase === 'done'"
+          v-if="agentSceneContent && draftPhase === 'done' && !outlineData"
           class="btn btn-sm primary"
           :disabled="commitBusy"
           @click="handleCommitToManuscript()"
@@ -298,15 +323,26 @@
         <span class="continuation-banner-excerpt">...{{ continuationContext.tail_text.slice(-80) }}</span>
       </div>
 
-      <!-- 场景编辑器 -->
+      <!-- 大纲视图 OR 场景编辑器 -->
       <section class="draft-output">
+        <OutlineView
+          v-if="outlineData"
+          :outline="outlineData"
+          :chapter-id="chapterId"
+          :project-id="projectId"
+          :versions="outlineVersions"
+          :preview-outline="outlinePreview"
+          @save="handleOutlineSave"
+          @load-versions="handleLoadVersions"
+          @restore="handleOutlineRestore"
+          @cancel-preview="outlinePreview = null; outlinePreviewVersionId = ''"
+        />
         <SceneEditor
+          v-else
           :content="agentSceneContent"
           :streaming="agentStreaming"
           :readonly="agentStreaming"
           @update="handleSceneContentUpdate"
-          @rewrite="handleRewriteFromEditor"
-          @expand="handleExpandFromEditor"
           @commit-selection="handleCommitSelection"
         />
       </section>
@@ -341,7 +377,12 @@
       </template>
     </main>
 
-    <aside v-show="viewMode === 'writing'" class="writer-panel writer-debug workbench-card">
+    <aside v-show="viewMode === 'writing'" class="writer-panel writer-debug workbench-card" :class="{ 'debug-collapsed': debugCollapsed }">
+      <button class="debug-collapse-toggle" @click="debugCollapsed = !debugCollapsed" :title="debugCollapsed ? '展开日志面板' : '收起日志面板'">
+        <span class="debug-collapse-chevron" :class="{ flipped: debugCollapsed }"></span>
+        <span v-if="debugCollapsed" class="debug-collapse-label-vertical">日志</span>
+      </button>
+      <div v-show="!debugCollapsed" class="debug-panel-content">
       <p class="panel-kicker mono">TRACE & LOG</p>
       <h2 class="panel-title title-ancient">来源与日志</h2>
 
@@ -428,6 +469,7 @@
           </template>
         </section>
       </div>
+      </div>
     </aside>
 
     <!-- 预设编辑弹窗 -->
@@ -460,6 +502,7 @@ import SceneEditor from "./writer/SceneEditor.vue";
 import ManuscriptProseView from "./writer/ManuscriptProseView.vue";
 import ManuscriptTocPanel from "./writer/ManuscriptTocPanel.vue";
 import ContinuationContextPanel from "./writer/ContinuationContextPanel.vue";
+import OutlineView from "./writer/OutlineView.vue";
 import {
   runWriterAgent,
   getScenes,
@@ -473,10 +516,14 @@ import {
   migrateProject,
   commitToManuscript,
   getContinuationContext,
+  updateChapter,
   getManuscript,
   updateManuscriptBlock,
   tagManuscriptBlocks,
   exportManuscript,
+  getOutlineVersions,
+  getOutlineVersion,
+  restoreOutlineVersion,
 } from "../api/writerAgent.js";
 import { useProjectCatalog } from "../composables/useProjectCatalog.js";
 import { buildWriterWorkbenchColumns, resolveWriterWorkbenchMode } from "./writer/writerWorkbenchLayout.js";
@@ -542,7 +589,7 @@ const draftAbortController = ref(null);
 const revisionCount = ref(0);
 const unresolvedIssues = ref([]);
 const finalScore = ref(null);
-const taskType = ref("write_scene"); // write_scene|continue|rewrite|expand|outline|consistency_check
+const taskType = ref("write_scene"); // write_scene|continue|outline
 const scenes = ref([]);
 const selectedSceneId = ref("");
 const presets = ref([]);
@@ -551,10 +598,16 @@ const presetEditorVisible = ref(false);
 const editingPreset = ref(null);
 const agentSceneContent = ref(""); // streaming content for SceneEditor
 const agentStreaming = ref(false);
+const debugCollapsed = ref(false); // right panel collapse state
+const outlineData = ref(null); // structured outline from outline task (writing mode, generated)
+const chapterOutlineData = ref(null); // outline loaded from DB (outline tab)
+const outlineVersions = ref([]);
+const outlinePreview = ref(null);
+const outlinePreviewVersionId = ref("");
 const involvedEntityIds = ref([]);
 
 // ─── 稿件 (Manuscript) ───
-const viewMode = ref("writing"); // writing | manuscript
+const viewMode = ref("writing"); // writing | outline | manuscript
 // manuscriptDrawerVisible removed — unified into "稿件" tab
 const continuationContext = ref(null);
 const showContinueButton = ref(false);
@@ -568,19 +621,19 @@ const manuscriptSelectedTag = ref(null);
 const taskTypeOptions = [
   { value: "write_scene", label: "写场景" },
   { value: "continue", label: "续写" },
-  { value: "rewrite", label: "改写" },
-  { value: "expand", label: "扩写" },
   { value: "outline", label: "大纲" },
-  { value: "consistency_check", label: "一致性检查" },
 ];
 
 
 const gridTemplateColumns = computed(() => buildWriterWorkbenchColumns(workbenchMode.value));
 const activeGridColumns = computed(() => {
-  if (viewMode.value === "manuscript") {
+  if (viewMode.value === "manuscript" || viewMode.value === "outline") {
     return workbenchMode.value === "desktop"
       ? "minmax(260px, 300px) minmax(0, 1fr)"
       : "1fr";
+  }
+  if (debugCollapsed.value && workbenchMode.value === "desktop") {
+    return "minmax(280px, 340px) minmax(0, 1fr) 44px";
   }
   return gridTemplateColumns.value;
 });
@@ -1008,6 +1061,7 @@ async function handleAgentGenerate() {
   error.value = "";
   agentStreaming.value = true;
   agentSceneContent.value = "";
+  outlineData.value = null;
   draftPhase.value = "collecting";
   agentTimeline.value = [];
   timelineIdCounter = 0;
@@ -1027,9 +1081,7 @@ async function handleAgentGenerate() {
     user_instruction: authorInstruction.value,
     preset_id: selectedPresetId.value,
     session_id: sessionId.value,
-    selected_text: taskType.value === "rewrite" || taskType.value === "expand"
-      ? (window.getSelection()?.toString() || agentSceneContent.value)
-      : "",
+    selected_text: "",
     scene_id: selectedSceneId.value,
     last_block_id: taskType.value === "continue" ? lastCommittedBlockId.value : "",
   };
@@ -1112,6 +1164,16 @@ async function handleAgentGenerate() {
               wordCount: agentSceneContent.value.length,
             });
           }
+        } else if (event.type === "outline_ready") {
+          draftPhase.value = "done";
+          outlineData.value = event.outline;
+          agentTimeline.value.push({
+            id: timelineIdCounter++,
+            type: "done",
+            ts: event.ts || "",
+            elapsedMs: event.elapsed_ms,
+            message: `大纲：${(event.outline || []).length} 个场景`,
+          });
         } else if (event.type === "error") {
           error.value = event.message || "生成失败";
           agentStreaming.value = false;
@@ -1127,6 +1189,10 @@ async function handleAgentGenerate() {
       onDone(event) {
         agentStreaming.value = false;
         draftPhase.value = "done";
+        if (event.outline_saved) {
+          message.value = `大纲已保存：${event.scene_count} 个场景`;
+          return;
+        }
         const wc = event.word_count || agentSceneContent.value.length;
         message.value = `创作完成：${wc} 字`;
         agentTimeline.value.push({
@@ -1193,15 +1259,74 @@ watch(() => agentTimeline.value.length, () => {
   });
 });
 
-// ─── 改写/扩写 ───
-function handleRewriteFromEditor(selectedText) {
-  taskType.value = "rewrite";
-  authorInstruction.value = `请改写以下文本：\n${selectedText}`;
+// ─── 大纲保存 ───
+async function handleOutlineSave(outline, label = "") {
+  if (!projectId.value || !chapterId.value) {
+    error.value = "请先选择项目和章节";
+    return;
+  }
+  try {
+    await updateChapter(chapterId.value, {
+      project_id: projectId.value,
+      outline_json: JSON.stringify(outline),
+      outline_label: label,
+    });
+    if (viewMode.value === "outline") {
+      chapterOutlineData.value = outline;
+    } else {
+      outlineData.value = outline;
+    }
+    message.value = "大纲已保存";
+    error.value = "";
+  } catch (err) {
+    error.value = err.message || "保存大纲失败";
+  }
 }
 
-function handleExpandFromEditor(selectedText) {
-  taskType.value = "expand";
-  authorInstruction.value = `请扩写以下文本：\n${selectedText}`;
+async function handleLoadVersions(versionId) {
+  if (!projectId.value || !chapterId.value) return;
+  try {
+    if (!versionId) {
+      const resp = await getOutlineVersions(chapterId.value, projectId.value);
+      outlineVersions.value = resp.data || [];
+      return;
+    }
+    const resp = await getOutlineVersion(chapterId.value, versionId, projectId.value);
+    const ver = resp.data;
+    if (ver?.outline_json) {
+      const parsed = typeof ver.outline_json === "string" ? JSON.parse(ver.outline_json) : ver.outline_json;
+      outlinePreview.value = Array.isArray(parsed) ? parsed : null;
+      outlinePreviewVersionId.value = versionId;
+    }
+    error.value = "";
+  } catch (err) {
+    error.value = err.message || "加载版本失败";
+  }
+}
+
+async function handleOutlineRestore() {
+  if (!outlinePreviewVersionId.value || !projectId.value || !chapterId.value) return;
+  try {
+    await restoreOutlineVersion(chapterId.value, outlinePreviewVersionId.value, projectId.value);
+    outlinePreview.value = null;
+    outlinePreviewVersionId.value = "";
+    if (viewMode.value === "outline") {
+      await loadChapterOutline();
+    } else {
+      const chapters = await getChapters(projectId.value);
+      const list = chapters.data || chapters;
+      const ch = list.find(c => c.chapter_id === chapterId.value);
+      if (ch?.outline_json) {
+        outlineData.value = typeof ch.outline_json === "string" ? JSON.parse(ch.outline_json) : ch.outline_json;
+      }
+    }
+    const resp = await getOutlineVersions(chapterId.value, projectId.value);
+    outlineVersions.value = resp.data || [];
+    message.value = "已回退到历史版本";
+    error.value = "";
+  } catch (err) {
+    error.value = err.message || "回退失败";
+  }
 }
 
 // ─── 稿件操作 ───
@@ -1289,6 +1414,29 @@ function switchViewMode(mode) {
   viewMode.value = mode;
   if (mode === "manuscript") {
     loadManuscriptBlocks();
+  } else if (mode === "outline") {
+    loadChapterOutline();
+  }
+}
+
+async function loadChapterOutline() {
+  if (!projectId.value || !chapterId.value) {
+    chapterOutlineData.value = null;
+    return;
+  }
+  try {
+    const chapters = await getChapters(projectId.value);
+    const list = chapters.data || chapters;
+    const ch = list.find(c => c.chapter_id === chapterId.value);
+    if (ch && ch.outline_json) {
+      const parsed = typeof ch.outline_json === "string" ? JSON.parse(ch.outline_json) : ch.outline_json;
+      chapterOutlineData.value = Array.isArray(parsed) ? parsed : null;
+    } else {
+      chapterOutlineData.value = null;
+    }
+  } catch (e) {
+    console.error("Failed to load chapter outline", e);
+    chapterOutlineData.value = null;
   }
 }
 
