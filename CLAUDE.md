@@ -72,7 +72,7 @@ Upload → `smart_novel_segmenter` → `sequential_reader` (LLM sequential readi
 `worldline_engine` (filesystem persistence, single-world model) → `worldline_prepare_service` (session setup) → `worldline_agent_registry` (agent roster) → `character_agent_service` (dialogue/action) → auto-evolution with SSE.
 
 **Writer Agent Service** (`services/writer_agent/`):
-`novel_db.py` (SQLite: chapters/scenes/presets/sessions/manuscripts) → `orchestrator.py` + `agent_loop.py` (agent decision loop with tools) → `tools.py` + `tool_executors.py` (write_prose, compile_manuscript, etc.) → `manuscript_service.py` + `manuscript_context_builder.py`.
+`novel_db.py` (SQLite: chapters/scenes/presets/sessions/manuscripts/outline_versions + entity association tables) → `orchestrator.py` + `agent_loop.py` (agent decision loop with tools) → `tools.py` + `tool_executors.py` (write_prose, compile_manuscript, query_entity, manage_entity, manage_thread, manage_world_rule, manage_relationship, etc.) → `manuscript_service.py` + `manuscript_context_builder.py`. Task types: `write_scene`, `continue`, `outline`. World data update endpoint (`/api/writer-agent/world-update`) runs agent loop to incrementally update entities/threads/rules after prose is committed. Entity association tables (`thread_entity_links`, `rule_entity_links`) link plot threads and world rules to entities; `query_entity` returns enriched context including associated threads and applicable rules. Outline versioning: `outline_versions` table stores snapshots on save with optional labels; supports preview and restore.
 
 **Draft Agents** (`services/agents/draft/`):
 Multi-agent prose pipeline: `context_agent` → `memory_agent` → `style_agent` → `writer_agent` → `reviewer_agent`, orchestrated by `orchestrator.py`. Max 2 revision rounds.
@@ -90,7 +90,7 @@ Under `frontend/src/`:
 - **`views/`** — Pages: Overview (seed upload + processing), Writer Workbench, Worldline Workbench, Archive Library, Story Graph, Character Console, LLM Facility.
 - **`views/writer/`** — Writer sub-components: SceneEditor, ManuscriptDrawer, ManuscriptReadingPane, ManuscriptTocPanel, ContinuationContextPanel.
 - **`views/overview/`** — Seed processing UI: InlineWorkflowStream, PipelineVisualization, step trace viewer.
-- **`views/story-graph/`** — D3.js force-directed graph with type filtering, graduated highlighting, node inspector with async archive loading.
+- **`views/story-graph/`** — D3.js force-directed graph with type filtering, graduated highlighting, node inspector with async archive loading. Toolbar-based layout (no sidebar).
 - **`api/`** — Domain API clients (project, novel, worldline, archive, llm, writerAgent). SSE client in `sse.js`.
 - **`composables/`** — Shared state composables (seed upload, project catalog, LLM activity, layout state).
 
@@ -108,6 +108,7 @@ Vite dev server proxies `/api` to Flask backend at `http://127.0.0.1:3888`.
 ## Reference Documentation
 
 - [Agent Data Schema Reference](./docs/agent-data-schema-reference.md) — All agent data structures, LLM prompts, and parameter configurations.
+- [Outline Versioning Design](./docs/superpowers/specs/2026-04-05-outline-versioning-design.md) — Outline snapshot and version history feature spec.
 
 ## Environment Variables
 

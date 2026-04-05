@@ -19,7 +19,7 @@
 
 ### 故事图谱
 
-从种子分析数据构建力导向关系图谱（D3.js）。节点按重要性分层（protagonist / major / supporting / minor），边权重反映关系深度。支持实体类型过滤、点击查看角色档案详情。
+从种子分析数据构建力导向关系图谱（D3.js）。节点按重要性分层（protagonist / major / supporting / minor），边权重反映关系深度。工具栏式布局，图谱画布最大化；支持实体类型过滤、点击查看角色档案详情。
 
 ### 档案库
 
@@ -42,10 +42,15 @@
 
 多 Agent 协作的创作辅助系统：
 - **Agent 工具循环**: 写作 Agent 拥有 write_prose / compile_manuscript / set_scene_status 等工具，自主规划写作步骤
+- **世界数据写入工具**: Agent 可通过 manage_entity / manage_thread / manage_world_rule / manage_relationship 增量维护世界设定
+- **世界数据更新**: 散文提交后，可一键触发 Agent 分析并更新实体、伏笔、规则等世界数据
+- **实体关联查询**: query_entity 返回角色关联伏笔线索 + 适用世界规则，一次调用获取完整上下文
+- **大纲版本管理**: 大纲保存时自动快照，支持版本历史浏览、预览对比、标签标注、一键恢复
 - **多 Agent 流水线**: Context → Memory → Style → Writer → Reviewer 五阶段生成
 - **章节 / 场景管理**: 创建章节、拆分场景、设置 POV 角色、管理预设
 - **手稿阅读**: TOC 导航 + 散文视图，查看编译后的完整章节内容
 - **记忆系统**: 短期记忆 (episodic) + 长期记忆 (canon / candidate / experiment) 分层管理
+- **任务类型**: write_scene（场景写作）、continue（续写）、outline（章节大纲生成）
 
 ### LLM 设施面板
 
@@ -130,7 +135,7 @@ frontend/
     components/       # 复用 UI 组件
 docs/
   agent-data-schema-reference.md   # Agent 数据结构与提示词参考
-  plans/              # 历史设计文档
+  superpowers/plans/  # 设计方案文档
   superpowers/specs/  # 功能规格文档
 ```
 
@@ -153,6 +158,8 @@ docs/
 | **世界线 (Worldline)** | 基于单世界模型的剧情推演空间 |
 | **Agent 档案** | 角色转化为可交互 Agent 所需的性格、语言、动机等数据 |
 | **记忆层级** | canon（已确认）/ candidate（待审核）/ experiment（实验性） |
+| **实体关联 (Entity Associations)** | 伏笔线索与世界规则自动关联到实体，查询时一并返回 |
+| **大纲版本 (Outline Versions)** | 大纲保存时自动快照，支持历史浏览、预览、恢复 |
 | **Chapter Context Pack** | 写作时的统一上下文（must_know / should_know / warnings） |
 
 ## 开发参考
@@ -161,6 +168,7 @@ docs/
 - [种子管线重设计](./docs/superpowers/specs/2026-04-03-seed-pipeline-redesign.md)
 - [写作 Agent 设计](./docs/superpowers/specs/2026-04-02-novel-writer-agent-design.md)
 - [手稿阅读模式设计](./docs/superpowers/specs/2026-04-04-manuscript-reading-mode-design.md)
+- [大纲版本管理设计](./docs/superpowers/specs/2026-04-05-outline-versioning-design.md)
 
 ## License
 
