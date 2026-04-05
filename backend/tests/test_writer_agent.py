@@ -245,6 +245,46 @@ class TestOutlineVersions:
             count = conn.execute("SELECT COUNT(*) FROM outline_versions").fetchone()[0]
         assert count == 0
 
+    def test_chapter_service_update_creates_version(self):
+        from app.services.writer_agent.chapter_service import ChapterService
+        svc = ChapterService()
+        # Set initial outline
+        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"scene_order":1}]')
+        # Update via service — should snapshot old value
+        svc.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"scene_order":1},{"scene_order":2}]')
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert len(versions) == 1
+        full = self.db.get_outline_version(self.TEST_PROJECT, versions[0]["version_id"])
+        assert full["outline_json"] == '[{"scene_order":1}]'  # old value snapshotted
+
+    def test_chapter_service_update_passes_label(self):
+        from app.services.writer_agent.chapter_service import ChapterService
+        svc = ChapterService()
+        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[]')
+        svc.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"x":1}]', outline_label="手动标注")
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert versions[0]["label"] == "手动标注"
+
+    def test_chapter_service_update_no_version_without_outline(self):
+        from app.services.writer_agent.chapter_service import ChapterService
+        svc = ChapterService()
+        svc.update_chapter(self.TEST_PROJECT, "ch_1", title="改标题")
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert len(versions) == 0  # no version created when outline not changed
+
+    def test_chapter_service_restore(self):
+        from app.services.writer_agent.chapter_service import ChapterService
+        svc = ChapterService()
+        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"v":"old"}]')
+        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"v":"old"}]')
+        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"v":"new"}]')
+        svc.restore_outline_version(self.TEST_PROJECT, "ch_1", vid)
+        ch = self.db.get_chapter(self.TEST_PROJECT, 1)
+        assert ch["outline_json"] == '[{"v":"old"}]'
+        # Current value before restore should be snapshotted
+        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        assert len(versions) == 2
+
 
 # ---------------------------------------------------------------------------
 # Tool definitions tests

@@ -997,6 +997,33 @@ class NovelDB:
             ).fetchone()
             return _row_to_dict(row)
 
+    def get_chapter_by_id(
+        self,
+        project_id: str,
+        chapter_id: str,
+        include_content: bool = False,
+    ) -> dict[str, Any] | None:
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            if include_content:
+                cols = f"cc.*, {self._CHAPTER_META_COLS}"
+            else:
+                cols = (
+                    "cc.chapter_id, cc.project_id, cc.chapter_order, cc.title, "
+                    f"cc.word_count, cc.status, cc.created_at, cc.updated_at, "
+                    f"{self._CHAPTER_META_COLS}"
+                )
+            row = conn.execute(
+                f"""
+                SELECT {cols}
+                FROM chapter_content cc
+                LEFT JOIN chapter_meta cm ON cm.chapter_id = cc.chapter_id
+                WHERE cc.project_id = ? AND cc.chapter_id = ?
+                """,
+                (project_id, chapter_id),
+            ).fetchone()
+            return _row_to_dict(row)
+
     def list_chapters(self, project_id: str) -> list[dict[str, Any]]:
         self.ensure_schema(project_id)
         with self.connect(project_id) as conn:
