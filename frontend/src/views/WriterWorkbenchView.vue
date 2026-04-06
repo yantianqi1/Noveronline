@@ -458,8 +458,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useDialog, NSelect, NInput, NInputNumber, NRadioGroup, NRadioButton, NButton, NTag, NCheckbox } from "naive-ui";
-import { Icon } from "@iconify/vue";
-
 import {
   adoptArchiveMemory,
   getArchiveMemoryTimeline,
