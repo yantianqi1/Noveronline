@@ -8,24 +8,13 @@ from typing import Any, Dict, Generator, List, Optional
 
 from ...llm_router import LlmRouter
 from ...writer_prompt_formatter import WriterPromptFormatter
+from .prompts import assemble_writer_prompt
 
 logger = logging.getLogger(__name__)
 
 NOVEL_DRAFT_WRITER_MODULE = "novel_draft_writer"
 WRITER_TEMPERATURE = 0.8
 WRITER_MAX_TOKENS = 8192
-
-WRITER_SYSTEM_PROMPT = """你是一名资深小说家。你将基于提供的上下文设定、角色记忆和创作者指令，创作小说正文。
-
-要求：
-1. 只输出小说正文本身，不要输出任何元信息、注释、标题编号或大纲。
-2. 保持与原文一致的叙事风格、句式节奏和人称视角。
-3. 场景描写要有画面感，对话要贴合角色性格和当前处境。
-4. 严格遵守"必须延续的事实"中的设定，不要与之矛盾。
-5. 注意"风险提示"中标记的问题，在写作中主动规避。
-6. 推进剧情时，让角色的选择和行动有因果逻辑，避免突兀转折。
-7. 如果提供了修订意见，请在保留上一版核心情节的基础上针对性修改。
-"""
 
 
 class WriterAgent:
@@ -115,7 +104,7 @@ class WriterAgent:
         memory_context = memory_bundle.get("rendered_context", "")
         style_text = style_hints.get("rendered_hints", "")
 
-        sections = [WRITER_SYSTEM_PROMPT.strip()]
+        sections = [assemble_writer_prompt()]
 
         if style_text:
             sections.append(f"\n## 原文风格参考\n{style_text}")

@@ -3,58 +3,17 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
 PASS_SCORE_THRESHOLD = 70
 
-REVIEWER_SYSTEM_PROMPT = """你是一名专业的小说连续性审校编辑。
+from .prompts import assemble_reviewer_prompt
 
-你的工作是检查一段新生成的小说正文，从以下四个维度做结构化审核，并给出整体判断。
-
-## 审核维度
-
-### 1. 连续性（continuity）
-- 本章开头与上章结尾是否自然衔接（场景、情绪、时间）
-- 角色在上章末尾的状态与本章描述是否矛盾
-
-### 2. 角色一致性（character_consistency）
-- POV 角色的行为动机是否符合当前设定中的性格
-- 非 POV 角色的行为是否合理
-
-### 3. 悬念与伏笔（thread_management）
-- 未解决线索是否有被推进或呼应
-- 是否意外"提前解决"了不该解决的悬念
-
-### 4. 风格一致性（style_consistency）
-- 叙事视角是否稳定（不在第三人称中混入第一人称感受）
-- 节奏是否与前文风格相符
-
-## 输出要求
-只输出 JSON 对象，格式如下：
-{
-  "pass": true 或 false,
-  "score": 0-100 的整数，
-  "issues": [
-    {
-      "dimension": "连续性 | 角色一致性 | 悬念与伏笔 | 风格一致性",
-      "severity": "high | medium | low",
-      "description": "问题描述",
-      "suggestion": "修改建议"
-    }
-  ],
-  "keep": ["值得保留的段落或特点描述"],
-  "overall_assessment": "一句话总评"
-}
-
-评判标准：
-- 如果没有 high 级别问题且 score >= 70，pass 为 true
-- severity 为 high 的问题必须修改
-- severity 为 medium 的问题建议修改
-- severity 为 low 的问题可忽略
-- keep 列表中应标注写得好的、不应在修改中丢失的部分
-"""
+REVIEWER_SYSTEM_PROMPT = assemble_reviewer_prompt()
 
 
 def build_review_prompt(
@@ -69,7 +28,7 @@ def build_review_prompt(
     continuity_section = _continuity_section(context_pack)
     if continuity_section:
         sections.append(continuity_section)
-    sections.append(f"## 待审校正文\n{generated_text[:6000]}")
+    sections.append(f"## 待审校正文\n{generated_text[:12000]}")
     sections.append("请检查正文是否符合上述设定和连续性要求，输出 JSON 审校报告。")
     return "\n\n".join(sections)
 
@@ -100,6 +59,66 @@ def rule_based_review(
                     "suggestion": "检查正文是否规避了该风险",
                 }
             )
+
+    # --- 人称混乱检测 ---
+    # 去除引号内的对话文本，只检查叙述部分
+    narration = re.sub(r'[""「」『』].*?[""「」『』]', '', generated_text)
+    first_person_count = len(re.findall(r'我(?:的|们|自己)?', narration))
+    # 如果叙述部分出现大量"我"且不是第一人称小说，可能存在人称混乱
+    if first_person_count > 10:
+        third_markers = len(re.findall(r'[他她它](?:的|们)?', narration))
+        if third_markers > first_person_count * 2:
+            issues.append(
+                {
+                    "dimension": "风格一致性",
+                    "severity": "medium",
+                    "description": f"第三人称叙述中出现了 {first_person_count} 次第一人称代词（排除对话），可能存在人称混乱",
+                    "suggestion": "检查叙述部分是否意外混入了第一人称视角",
+                }
+            )
+
+    # --- 重复用词检测 ---
+    # 提取非常用修饰词（2-4字的形容/副词性片段），检查短距离内是否过度重复
+    modifier_pattern = re.compile(r'(?:地|得)\s*(\S{2,4})')
+    modifiers = modifier_pattern.findall(generated_text)
+    if modifiers:
+        modifier_counts = Counter(modifiers)
+        repeated = [w for w, c in modifier_counts.items() if c >= 4]
+        if repeated:
+            issues.append(
+                {
+                    "dimension": "描写质量",
+                    "severity": "low",
+                    "description": f"以下修饰词在正文中多次重复：{'、'.join(repeated[:5])}",
+                    "suggestion": "尝试使用更丰富的词汇替换重复的修饰词",
+                }
+            )
+
+    # --- 段落单调检测 ---
+    paragraphs = [p.strip() for p in generated_text.split('\n') if p.strip()]
+    if len(paragraphs) >= 6:
+        lengths = [len(p) for p in paragraphs]
+        avg_len = sum(lengths) / len(lengths) if lengths else 1
+        # 计算连续段落长度差异是否过小
+        monotone_streak = 0
+        max_streak = 0
+        for i in range(1, len(lengths)):
+            diff_ratio = abs(lengths[i] - lengths[i - 1]) / max(avg_len, 1)
+            if diff_ratio < 0.2:
+                monotone_streak += 1
+                max_streak = max(max_streak, monotone_streak)
+            else:
+                monotone_streak = 0
+        if max_streak >= 5:
+            issues.append(
+                {
+                    "dimension": "叙事节奏",
+                    "severity": "low",
+                    "description": f"连续 {max_streak + 1} 个段落长度过于接近，节奏感单调",
+                    "suggestion": "尝试交替使用长短段落，紧张处用短句，舒缓处用长句",
+                }
+            )
+
     has_high = any(item.get("severity") == "high" for item in issues)
     score = max(0, 100 - len(issues) * 15) if issues else 100
     passed = not has_high and score >= PASS_SCORE_THRESHOLD
@@ -130,6 +149,7 @@ def normalize_review_result(
             "dimension": issue.get("dimension", issue.get("category", "其他")),
             "severity": issue.get("severity", "medium"),
             "description": issue.get("description", ""),
+            "quote": issue.get("quote", ""),
             "suggestion": issue.get("suggestion", ""),
         }
         for issue in issues

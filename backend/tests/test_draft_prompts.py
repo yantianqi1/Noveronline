@@ -105,3 +105,15 @@ class TestReviewerPrompt:
         result = assemble_reviewer_prompt()
         assert result == REVIEWER_PROMPT
         assert len(result) > 500
+
+
+class TestIntegration:
+    def test_review_support_exports_reviewer_prompt(self):
+        from app.services.agents.draft.review_support import REVIEWER_SYSTEM_PROMPT
+        assert "描写质量" in REVIEWER_SYSTEM_PROMPT
+        assert "死令级" in REVIEWER_SYSTEM_PROMPT
+
+    def test_reviewer_agent_can_import(self):
+        from app.services.agents.draft.reviewer_agent import ReviewerAgent
+        agent = ReviewerAgent()
+        assert "描写质量" in agent.system_prompt
