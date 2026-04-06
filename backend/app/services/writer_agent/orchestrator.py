@@ -68,7 +68,6 @@ class WriterOrchestrator:
         db.ensure_schema(project_id)
 
         # --- Phase 1: Orchestrator Agent ---
-        yield {"type": "orchestrator_status", "phase": "starting", **_stamp(), "message": "编排层启动中..."}
 
         # Build orchestrator context from request
         context = {
@@ -85,7 +84,14 @@ class WriterOrchestrator:
         }
 
         system_prompt = build_orchestrator_prompt(task_type, context)
-        orchestrator_client = self.router.build_client("writer_orchestrator")
+        try:
+            orchestrator_client = self.router.build_client("writer_orchestrator")
+        except ValueError as exc:
+            yield {"type": "error", **_stamp(), "message": f"LLM 模块未绑定 (writer_orchestrator): {exc}"}
+            return
+
+        orchestrator_model = orchestrator_client.model
+        yield {"type": "orchestrator_status", "phase": "starting", **_stamp(), "message": "编排层启动中...", "model": orchestrator_model}
 
         # Include manuscript tools for continuation tasks
         tools = NOVEL_TOOLS
@@ -130,6 +136,7 @@ class WriterOrchestrator:
             "phase": "collecting",
             "tool_count": tool_count,
             "message": f"收集完成：{tool_count}次工具调用，耗时{_stamp()['elapsed_ms'] / 1000:.1f}s",
+            "token_usage": agent_loop.total_usage,
         }
 
         # Parse writing_brief
@@ -181,7 +188,11 @@ class WriterOrchestrator:
             return
 
         # --- Phase 2: Writer Agent ---
-        yield {"type": "orchestrator_status", "phase": "writing", **_stamp(), "message": "写作层启动中..."}
+        try:
+            writer_model = self.router.build_client("writer_composer").model
+        except Exception:
+            writer_model = "unknown"
+        yield {"type": "orchestrator_status", "phase": "writing", **_stamp(), "message": "写作层启动中...", "model": writer_model}
 
         # Load preset prompt
         preset_prompt = self._load_preset(project_id, request.get("preset_id"))
@@ -204,7 +215,13 @@ class WriterOrchestrator:
 
         full_text = ""
 
-        for chunk in composer.compose_stream(writing_brief, preset_prompt):
+        try:
+            stream = composer.compose_stream(writing_brief, preset_prompt)
+        except ValueError as exc:
+            yield {"type": "error", **_stamp(), "message": f"LLM 模块未绑定 (writer_composer): {exc}"}
+            return
+
+        for chunk in stream:
             full_text += chunk
             yield {"type": "writer_token", "token": chunk}
 
