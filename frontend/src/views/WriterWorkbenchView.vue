@@ -22,104 +22,92 @@
       <div class="writer-form">
         <div class="field">
           <label>项目</label>
-          <select v-model="projectId" @change="handleProjectChange">
-            <option value="">请选择项目</option>
-            <option v-for="item in projects" :key="item.project_id" :value="item.project_id">
-              {{ item.name }} · {{ item.project_id }}
-            </option>
-          </select>
+          <n-select
+            v-model:value="projectId"
+            :options="projectSelectOptions"
+            placeholder="请选择项目"
+            clearable
+            @update:value="handleProjectChange"
+          />
         </div>
 
-        <div class="scope-switch">
-          <button
-            v-for="item in scopeOptions"
-            :key="item.value"
-            type="button"
-            class="scope-chip"
-            :class="{ active: scopeType === item.value }"
-            @click="updateScopeType(item.value)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
+        <n-radio-group v-model:value="scopeType" @update:value="updateScopeType">
+          <n-radio-button v-for="item in scopeOptions" :key="item.value" :value="item.value" :label="item.label" />
+        </n-radio-group>
 
         <div v-if="scopeType === 'project_chapter'" class="inline-grid">
           <div class="field">
             <label>章节</label>
-            <select v-model="chapterId">
-              <option value="">请选择章节</option>
-              <option v-for="item in chapterOptions" :key="item.chapter_id" :value="item.chapter_id">
-                第{{ item.order }}章 · {{ item.title }}
-              </option>
-            </select>
+            <n-select
+              v-model:value="chapterId"
+              :options="chapterSelectOptions"
+              placeholder="请选择章节"
+              clearable
+            />
           </div>
           <div class="field">
             <label>POV</label>
-            <select v-model="povCharacter">
-              <option value="">请选择 POV</option>
-              <option v-for="item in povOptions" :key="item" :value="item">{{ item }}</option>
-            </select>
+            <n-select
+              v-model:value="povCharacter"
+              :options="povSelectOptions"
+              placeholder="请选择 POV"
+              clearable
+            />
           </div>
         </div>
 
         <div v-else class="inline-grid">
           <div class="field">
             <label>世界线会话</label>
-            <select v-model="sessionId" @change="handleSessionChange">
-              <option value="">请选择会话</option>
-              <option v-for="item in sessionOptions" :key="item.session_id" :value="item.session_id">
-                {{ item.label }}
-              </option>
-            </select>
+            <n-select
+              v-model:value="sessionId"
+              :options="sessionSelectOptions"
+              placeholder="请选择会话"
+              clearable
+              @update:value="handleSessionChange"
+            />
           </div>
           <div class="field">
             <label>POV</label>
-            <select v-model="povCharacter">
-              <option value="">请选择 POV</option>
-              <option v-for="item in povOptions" :key="item" :value="item">{{ item }}</option>
-            </select>
+            <n-select
+              v-model:value="povCharacter"
+              :options="povSelectOptions"
+              placeholder="请选择 POV"
+              clearable
+            />
           </div>
         </div>
 
         <div class="field">
           <label>场景焦点 <span class="label-hint">（可选）</span></label>
-          <input v-model="sceneFocus" type="text" placeholder="例如：废塔残响、顾行舟现身" />
+          <n-input v-model:value="sceneFocus" placeholder="例如：废塔残响、顾行舟现身" />
         </div>
 
         <!-- 任务类型切换 -->
         <div class="field">
           <label>任务类型</label>
-          <div class="scope-switch">
-            <button
-              v-for="item in taskTypeOptions"
-              :key="item.value"
-              type="button"
-              class="scope-chip"
-              :class="{ active: taskType === item.value }"
-              @click="taskType = item.value"
-            >
-              {{ item.label }}
-            </button>
-          </div>
+          <n-radio-group v-model:value="taskType">
+            <n-radio-button v-for="item in taskTypeOptions" :key="item.value" :value="item.value" :label="item.label" />
+          </n-radio-group>
         </div>
 
         <!-- 写作预设选择 -->
         <div class="field">
           <label>写作风格预设</label>
           <div class="preset-selector">
-            <select v-model="selectedPresetId">
-              <option v-for="p in presets" :key="p.preset_id" :value="p.preset_id">
-                {{ p.name }}
-              </option>
-            </select>
-            <button class="btn btn-sm" @click="openPresetEditor(presets.find(p => p.preset_id === selectedPresetId))">编辑</button>
-            <button class="btn btn-sm" @click="openPresetEditor(null)">新建</button>
+            <n-select
+              v-model:value="selectedPresetId"
+              :options="presetSelectOptions"
+              placeholder="选择预设"
+            />
+            <n-button size="small" @click="openPresetEditor(presets.find(p => p.preset_id === selectedPresetId))">编辑</n-button>
+            <n-button size="small" @click="openPresetEditor(null)">新建</n-button>
           </div>
         </div>
 
         <div class="panel-actions">
-          <button class="btn" :disabled="busy || !projectId" @click="refreshProjectData">刷新项目数据</button>
-          <button class="btn" :disabled="busy || !projectId" @click="handleMigrate">迁移数据</button>
+          <n-button :disabled="busy || !projectId" :loading="busy" @click="refreshProjectData">刷新项目数据</n-button>
+          <n-button :disabled="busy || !projectId" :loading="busy" @click="handleMigrate">迁移数据</n-button>
         </div>
       </div>
 
@@ -143,27 +131,27 @@
           </div>
         </div>
         <div v-show="!reviewerRulesCollapsed" class="reviewer-rules-body">
-          <textarea
-            v-model="reviewerRulesText"
-            class="reviewer-rules-textarea"
-            rows="10"
+          <n-input
+            v-model:value="reviewerRulesText"
+            type="textarea"
+            :rows="10"
             placeholder="输入审校规则提示词..."
-          ></textarea>
+          />
           <div class="reviewer-rules-actions">
-            <button
-              class="btn primary"
+            <n-button
+              type="primary"
               :disabled="reviewerRulesSaving"
+              :loading="reviewerRulesSaving"
               @click="handleSaveReviewerRules"
             >
-              {{ reviewerRulesSaving ? '保存中...' : '保存' }}
-            </button>
-            <button
-              class="btn"
+              保存
+            </n-button>
+            <n-button
               :disabled="reviewerRulesSaving || !reviewerRulesIsCustom"
               @click="handleResetReviewerRules"
             >
               恢复默认
-            </button>
+            </n-button>
           </div>
         </div>
       </div>
@@ -179,23 +167,11 @@
           <h2 class="panel-title-inline title-ancient">工作台</h2>
           <span class="panel-hint">{{ projectId ? '' : '请选择项目' }}</span>
         </div>
-        <div class="view-mode-tabs">
-          <button
-            class="view-mode-tab"
-            :class="{ active: viewMode === 'writing' }"
-            @click="switchViewMode('writing')"
-          >写作</button>
-          <button
-            class="view-mode-tab"
-            :class="{ active: viewMode === 'outline' }"
-            @click="switchViewMode('outline')"
-          >大纲</button>
-          <button
-            class="view-mode-tab"
-            :class="{ active: viewMode === 'manuscript' }"
-            @click="switchViewMode('manuscript')"
-          >稿件</button>
-        </div>
+        <n-radio-group :value="viewMode" @update:value="switchViewMode" size="small">
+          <n-radio-button value="writing" label="写作" />
+          <n-radio-button value="outline" label="大纲" />
+          <n-radio-button value="manuscript" label="稿件" />
+        </n-radio-group>
       </div>
 
       <!-- ═══ Manuscript prose view ═══ -->
@@ -204,6 +180,7 @@
         ref="manuscriptProseRef"
         :blocks="manuscriptBlocks"
         @edit-save="handleManuscriptBlockSave"
+        @delete="handleManuscriptBlockDelete"
       />
 
       <!-- ═══ Outline mode ═══ -->
@@ -281,41 +258,48 @@
       <!-- 稿件操作栏 -->
       <div v-if="projectId" class="manuscript-toolbar">
         <template v-if="agentSceneContent && draftPhase === 'done' && !outlineData">
-          <select v-model="commitTargetChapterId" class="commit-chapter-select">
-            <option value="">不归类</option>
-            <option v-for="item in chapterOptions" :key="item.chapter_id" :value="item.chapter_id">
-              第{{ item.order }}章 · {{ item.title }}
-            </option>
-          </select>
-          <button
-            class="btn btn-sm primary"
+          <n-select
+            v-model:value="commitTargetChapterId"
+            :options="commitChapterSelectOptions"
+            placeholder="不归类"
+            clearable
+            style="max-width: 200px"
+            size="small"
+          />
+          <n-button
+            type="primary"
+            size="small"
             :disabled="commitBusy"
+            :loading="commitBusy"
             @click="handleCommitToManuscript()"
           >
-            {{ commitBusy ? '提交中...' : '提交到稿件' }}
-          </button>
+            提交到稿件
+          </n-button>
         </template>
-        <button
+        <n-button
           v-if="showContinueButton"
-          class="btn btn-sm"
+          size="small"
           @click="handleContinueNext()"
         >
           继续写下一段
-        </button>
-        <button
+        </n-button>
+        <n-button
           v-if="commitDone && !worldUpdateBusy && !worldUpdateDone"
-          class="btn btn-sm accent"
+          size="small"
+          type="info"
           @click="handleWorldUpdate()"
         >
           更新世界数据
-        </button>
-        <button
+        </n-button>
+        <n-button
           v-if="worldUpdateBusy"
-          class="btn btn-sm accent"
+          size="small"
+          type="info"
+          :loading="true"
           disabled
         >
           世界数据更新中...
-        </button>
+        </n-button>
         <span v-if="worldUpdateDone" class="world-update-done">
           {{ worldUpdateSummary }}
         </span>
@@ -325,15 +309,6 @@
       <ContinuationContextPanel
         v-if="continuationContext"
         :context="continuationContext"
-      />
-
-      <!-- Agent 进度面板 -->
-      <AgentProgressPanel
-        v-if="draftPhase !== 'idle'"
-        :agents="agentPhases"
-        :revision-count="revisionCount"
-        :unresolved-issues="unresolvedIssues"
-        :final-score="finalScore"
       />
 
       <!-- 续写模式 banner -->
@@ -373,34 +348,36 @@
 
       <!-- 创作者输入区 -->
       <div class="draft-input-area">
-        <textarea
-          v-model="authorInstruction"
+        <n-input
+          v-model:value="authorInstruction"
+          type="textarea"
           class="draft-input"
           :placeholder="inputPlaceholder"
-          rows="3"
+          :rows="3"
           :disabled="draftPhase === 'writing' || draftPhase === 'collecting'"
           @keydown.ctrl.enter="handleAgentGenerate()"
           @keydown.meta.enter="handleAgentGenerate()"
-        ></textarea>
+        />
         <div class="draft-input-actions">
           <span class="input-hint mono">Ctrl+Enter 发送</span>
-          <button
-            class="btn primary"
+          <n-button
+            type="primary"
             :disabled="!canGenerate"
+            :loading="draftPhase === 'collecting' || draftPhase === 'writing'"
             @click="handleAgentGenerate()"
           >
             {{ generateButtonLabel }}
-          </button>
+          </n-button>
         </div>
       </div>
       </template>
     </main>
 
     <aside v-show="viewMode === 'writing'" class="writer-panel writer-debug workbench-card" :class="{ 'debug-collapsed': debugCollapsed }">
-      <button class="debug-collapse-toggle" @click="debugCollapsed = !debugCollapsed" :title="debugCollapsed ? '展开日志面板' : '收起日志面板'">
+      <n-button class="debug-collapse-toggle" quaternary @click="debugCollapsed = !debugCollapsed" :title="debugCollapsed ? '展开日志面板' : '收起日志面板'">
         <span class="debug-collapse-chevron" :class="{ flipped: debugCollapsed }"></span>
         <span v-if="debugCollapsed" class="debug-collapse-label-vertical">日志</span>
-      </button>
+      </n-button>
       <div v-show="!debugCollapsed" class="debug-panel-content">
       <p class="panel-kicker mono">TRACE & LOG</p>
       <h2 class="panel-title title-ancient">来源与日志</h2>
@@ -411,34 +388,9 @@
           <div class="context-block-header">
             <h3 class="context-block-title title-ancient">Agent 时间线</h3>
           </div>
-          <div v-if="!agentTimeline.length" class="review-hint">生成正文后，这里会显示 Agent 的实时工作流程。</div>
-          <div v-else ref="timelineScrollRef" class="timeline-log">
-            <template v-for="entry in agentTimeline" :key="entry.id">
-              <!-- Prompt snapshot: collapsible -->
-              <div v-if="entry.type === 'prompt_snapshot'" class="tl-prompt-block">
-                <div class="tl-line tl-prompt_snapshot" @click="entry.collapsed = !entry.collapsed">
-                  <span class="tl-ts">{{ entry.ts }}</span>
-                  <span class="tl-icon">{{ entry.collapsed ? '▶' : '▼' }}</span>
-                  <span class="tl-body">{{ promptSnapshotLabel(entry) }}</span>
-                </div>
-                <div v-if="!entry.collapsed" class="tl-prompt-detail">
-                  <div
-                    v-for="(msg, mIdx) in entry.messages"
-                    :key="mIdx"
-                    class="tl-prompt-msg"
-                  >
-                    <div class="tl-prompt-role">{{ msg.role }}</div>
-                    <pre class="tl-prompt-content">{{ msg.content }}</pre>
-                  </div>
-                </div>
-              </div>
-              <!-- Normal timeline entry -->
-              <div v-else class="tl-line" :class="'tl-' + entry.type">
-                <span class="tl-ts">{{ entry.ts }}</span>
-                <span class="tl-icon">{{ timelineIcon(entry.type) }}</span>
-                <span class="tl-body">{{ timelineBody(entry) }}</span>
-              </div>
-            </template>
+          <div v-if="agentTrace.orchestrator.status === 'idle' && !agentTrace.error" class="review-hint">生成正文后，这里会显示 Agent 的实时工作流程。</div>
+          <div v-else ref="traceScrollRef" class="trace-scroll-container">
+            <AgentTracePanel :state="agentTrace" />
           </div>
         </section>
 
@@ -458,15 +410,15 @@
               <div class="timeline-copy">{{ selectedItem.why_it_matters }}</div>
             </div>
             <div class="review-actions">
-              <button class="btn" :disabled="reviewBusy || !canLoadTimeline" @click="loadSelectedTimeline">
-                {{ reviewBusy ? "读取中..." : "查看记忆时间线" }}
-              </button>
-              <button class="btn primary" :disabled="reviewBusy || !activeCandidateMemoryId" @click="adoptSelectedMemory">
+              <n-button :disabled="reviewBusy || !canLoadTimeline" :loading="reviewBusy" @click="loadSelectedTimeline">
+                查看记忆时间线
+              </n-button>
+              <n-button type="primary" :disabled="reviewBusy || !activeCandidateMemoryId" :loading="reviewBusy" @click="adoptSelectedMemory">
                 采纳为 Canon
-              </button>
-              <button class="btn" :disabled="reviewBusy || !activeCandidateMemoryId" @click="rejectSelectedMemory">
+              </n-button>
+              <n-button :disabled="reviewBusy || !activeCandidateMemoryId" :loading="reviewBusy" @click="rejectSelectedMemory">
                 驳回 Candidate
-              </button>
+              </n-button>
             </div>
             <div v-if="timelineError" class="review-hint">{{ timelineError }}</div>
             <div v-if="memoryTimeline" class="side-stack">
@@ -504,7 +456,9 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { useDialog, NSelect, NInput, NInputNumber, NRadioGroup, NRadioButton, NButton, NTag, NCheckbox } from "naive-ui";
+import { Icon } from "@iconify/vue";
 
 import {
   adoptArchiveMemory,
@@ -513,7 +467,7 @@ import {
 } from "../api/archive.js";
 import { getChapterContextOptions, getReviewerRules, saveReviewerRules } from "../api/novel.js";
 import { getWorldlineAgents, listWorldlineSessions } from "../api/worldline.js";
-import AgentProgressPanel from "../components/AgentProgressPanel.vue";
+import AgentTracePanel from "../components/AgentTracePanel.vue";
 import SceneListPanel from "./writer/SceneListPanel.vue";
 import PresetEditor from "./writer/PresetEditor.vue";
 import SceneEditor from "./writer/SceneEditor.vue";
@@ -538,6 +492,7 @@ import {
   updateChapter,
   getManuscript,
   updateManuscriptBlock,
+  deleteManuscriptBlock,
   tagManuscriptBlocks,
   exportManuscript,
   getOutlineVersions,
@@ -553,17 +508,11 @@ import {
   resolveWriterPovOptions,
 } from "./writer/writerWorkbenchState.js";
 
+const writerDialog = useDialog();
+
 const scopeOptions = [
   { value: "project_chapter", label: "原著章节" },
   { value: "worldline_branch", label: "世界线分支" },
-];
-
-const AGENT_DEFS = [
-  { id: "context_agent", label: "上下文收集" },
-  { id: "memory_agent", label: "记忆检索" },
-  { id: "style_agent", label: "风格分析" },
-  { id: "writer_agent", label: "正文创作" },
-  { id: "reviewer_agent", label: "一致性审校" },
 ];
 
 const { projects, refreshProjects } = useProjectCatalog();
@@ -600,14 +549,36 @@ const reviewerRulesIsCustom = ref(false);
 // ─── 正文生成状态 ───
 const draftPhase = ref("idle"); // idle | collecting | writing | done
 const authorInstruction = ref("");
-const agentTimeline = ref([]);
-let timelineIdCounter = 0;
-const timelineScrollRef = ref(null);
-const agentPhases = ref([]);
+const traceScrollRef = ref(null);
 const draftAbortController = ref(null);
-const revisionCount = ref(0);
-const unresolvedIssues = ref([]);
-const finalScore = ref(null);
+
+const agentTrace = reactive({
+  orchestrator: { model: "", status: "idle", rounds: [], summary: null },
+  writer: { model: "", status: "idle", wordCount: 0, elapsedMs: 0 },
+  error: "",
+});
+
+function resetAgentTrace() {
+  agentTrace.orchestrator = { model: "", status: "idle", rounds: [], summary: null };
+  agentTrace.writer = { model: "", status: "idle", wordCount: 0, elapsedMs: 0 };
+  agentTrace.error = "";
+}
+
+function ensureRound(roundNum) {
+  while (agentTrace.orchestrator.rounds.length <= roundNum) {
+    agentTrace.orchestrator.rounds.push({
+      roundNum: agentTrace.orchestrator.rounds.length,
+      thinking: null,
+      toolCalls: [],
+      promptSnapshot: null,
+      elapsedMs: 0,
+      status: "running",
+      _thinkingExpanded: false,
+      _promptExpanded: false,
+    });
+  }
+  return agentTrace.orchestrator.rounds[roundNum];
+}
 const taskType = ref("write_scene"); // write_scene|continue|outline
 const scenes = ref([]);
 const selectedSceneId = ref("");
@@ -709,6 +680,26 @@ const activeCandidateMemoryId = computed(() => {
 const historyRecentAnchors = computed(() => contextPack.value?.history_recall?.recent_anchors || []);
 const historySelectionTrace = computed(() => contextPack.value?.history_recall?.selection_trace || []);
 
+// ─── NSelect options arrays ───
+const projectSelectOptions = computed(() =>
+  projects.value.map(item => ({ label: `${item.name} · ${item.project_id}`, value: item.project_id }))
+);
+const chapterSelectOptions = computed(() =>
+  chapterOptions.value.map(item => ({ label: `第${item.order}章 · ${item.title}`, value: item.chapter_id }))
+);
+const povSelectOptions = computed(() =>
+  povOptions.value.map(item => ({ label: item, value: item }))
+);
+const sessionSelectOptions = computed(() =>
+  sessionOptions.value.map(item => ({ label: item.label, value: item.session_id }))
+);
+const presetSelectOptions = computed(() =>
+  presets.value.map(p => ({ label: p.name, value: p.preset_id }))
+);
+const commitChapterSelectOptions = computed(() =>
+  chapterOptions.value.map(item => ({ label: `第${item.order}章 · ${item.title}`, value: item.chapter_id }))
+);
+
 watch(chapterId, async (newVal) => {
   if (newVal) {
     const chapter = chapterOptions.value.find(item => item.chapter_id === newVal);
@@ -741,12 +732,7 @@ async function handleProjectChange() {
   memoryTimeline.value = null;
   timelineError.value = "";
   draftPhase.value = "idle";
-  agentTimeline.value = [];
-  timelineIdCounter = 0;
-  agentPhases.value = [];
-  revisionCount.value = 0;
-  unresolvedIssues.value = [];
-  finalScore.value = null;
+  resetAgentTrace();
   if (!projectId.value) {
     chapterOptions.value = [];
     projectPovs.value = [];
@@ -867,40 +853,6 @@ function updateScopeType(value) {
 }
 
 // ─── 正文生成 ───
-function initAgentPhases() {
-  agentPhases.value = AGENT_DEFS.map((def) => ({
-    ...def,
-    status: "pending",
-    message: "",
-    issues: null,
-    issuesExpanded: false,
-    detail: null,
-    detailExpanded: false,
-  }));
-}
-
-function updateAgentStatus(agentId, status, agentMessage = "", detail = null) {
-  const agent = agentPhases.value.find((a) => a.id === agentId);
-  if (agent) {
-    agent.status = status;
-    agent.message = agentMessage;
-    if (detail?.issues?.length) {
-      agent.issues = detail.issues;
-    }
-    if (detail) {
-      agent.detail = detail;
-    }
-  }
-  // 更新 draftPhase based on agent status
-  if (agentId === "writer_agent" && status === "running") {
-    draftPhase.value = "writing";
-  } else if (agentId === "reviewer_agent" && status === "running") {
-    draftPhase.value = "reviewing";
-  } else if (["context_agent", "memory_agent", "style_agent"].includes(agentId) && status === "running") {
-    draftPhase.value = "collecting";
-  }
-}
-
 function selectContextItem(item) {
   selectedItem.value = item;
   memoryTimeline.value = null;
@@ -997,18 +949,25 @@ async function handleAddScene() {
   agentSceneContent.value = "";
 }
 
-async function handleDeleteScene(sceneId) {
-  if (!confirm("确定删除此场景？")) return;
-  try {
-    await deleteSceneApi(sceneId, projectId.value);
-    scenes.value = scenes.value.filter(s => s.scene_id !== sceneId);
-    if (selectedSceneId.value === sceneId) {
-      selectedSceneId.value = "";
-      agentSceneContent.value = "";
-    }
-  } catch (err) {
-    error.value = err.message || "删除场景失败";
-  }
+function handleDeleteScene(sceneId) {
+  writerDialog.warning({
+    title: "确认删除",
+    content: "确定删除此场景？",
+    positiveText: "删除",
+    negativeText: "取消",
+    async onPositiveClick() {
+      try {
+        await deleteSceneApi(sceneId, projectId.value);
+        scenes.value = scenes.value.filter(s => s.scene_id !== sceneId);
+        if (selectedSceneId.value === sceneId) {
+          selectedSceneId.value = "";
+          agentSceneContent.value = "";
+        }
+      } catch (err) {
+        error.value = err.message || "删除场景失败";
+      }
+    },
+  });
 }
 
 async function handleSceneContentUpdate(newContent) {
@@ -1069,14 +1028,106 @@ async function handlePresetSave(data) {
   }
 }
 
-async function handlePresetDelete(presetId) {
-  if (!confirm("确定删除此预设？")) return;
-  try {
-    await deletePreset(presetId, projectId.value);
-    await loadPresets();
-  } catch (err) {
-    error.value = err.message || "删除预设失败";
+function handlePresetDelete(presetId) {
+  writerDialog.warning({
+    title: "确认删除",
+    content: "确定删除此预设？",
+    positiveText: "删除",
+    negativeText: "取消",
+    async onPositiveClick() {
+      try {
+        await deletePreset(presetId, projectId.value);
+        await loadPresets();
+      } catch (err) {
+        error.value = err.message || "删除预设失败";
+      }
+    },
+  });
+}
+
+// ─── Shared trace event handlers ───
+function handleTraceEvent(event) {
+  if (event.type === "orchestrator_status") {
+    agentTrace.orchestrator.status = "running";
+    if (event.model) {
+      if (event.phase === "writing") {
+        agentTrace.writer.model = event.model;
+        agentTrace.writer.status = "running";
+      } else {
+        agentTrace.orchestrator.model = event.model;
+      }
+    }
+    draftPhase.value = event.phase === "writing" ? "writing" : "collecting";
+    message.value = event.message || "编排中...";
+  } else if (event.type === "thinking") {
+    const round = ensureRound(event.round ?? Math.max(0, agentTrace.orchestrator.rounds.length - 1));
+    round.thinking = event.content;
+  } else if (event.type === "tool_call") {
+    const round = ensureRound(event.round ?? Math.max(0, agentTrace.orchestrator.rounds.length - 1));
+    round.toolCalls.push({
+      name: event.name,
+      display: event.display || event.name,
+      input: event.input,
+      summary: null,
+      fullResult: null,
+      status: "pending",
+      toolElapsedMs: 0,
+      _expanded: false,
+    });
+  } else if (event.type === "tool_result") {
+    const round = ensureRound(event.round ?? Math.max(0, agentTrace.orchestrator.rounds.length - 1));
+    const tc = round.toolCalls.find(t => t.name === event.name && t.status === "pending");
+    if (tc) {
+      tc.summary = event.summary;
+      tc.fullResult = event.full_result || event.summary;
+      tc.status = event.status === "error" ? "error" : "done";
+      tc.toolElapsedMs = event.tool_elapsed_ms || 0;
+    }
+  } else if (event.type === "prompt_snapshot") {
+    const roundNum = event.round ?? 0;
+    const round = ensureRound(roundNum);
+    const charCount = (event.messages || []).reduce((sum, m) => sum + (m.content?.length || 0), 0);
+    round.promptSnapshot = { messages: event.messages, charCount };
+    round.elapsedMs = event.elapsed_ms || 0;
+  } else if (event.type === "phase_summary") {
+    agentTrace.orchestrator.rounds.forEach(r => { r.status = "done"; });
+    agentTrace.orchestrator.status = "done";
+    agentTrace.orchestrator.summary = {
+      toolCount: event.tool_count || 0,
+      roundCount: agentTrace.orchestrator.rounds.length,
+      elapsedMs: event.elapsed_ms || 0,
+      tokenUsage: event.token_usage || null,
+    };
+  } else if (event.type === "writer_token") {
+    draftPhase.value = "writing";
+    agentTrace.writer.status = "running";
+    agentSceneContent.value += (event.token || "");
+    agentTrace.writer.wordCount = agentSceneContent.value.length;
+  } else if (event.type === "outline_ready") {
+    draftPhase.value = "done";
+    outlineData.value = event.outline;
+  } else if (event.type === "error") {
+    error.value = event.message || "生成失败";
+    agentStreaming.value = false;
+    draftPhase.value = agentSceneContent.value ? "done" : "idle";
+    agentTrace.error = event.message || "生成失败";
   }
+}
+
+function handleTraceDone(event) {
+  agentStreaming.value = false;
+  draftPhase.value = "done";
+  agentTrace.writer.status = "done";
+  agentTrace.writer.elapsedMs = event.elapsed_ms || 0;
+  if (event.outline_saved) {
+    message.value = `大纲已保存：${event.scene_count} 个场景`;
+    return;
+  }
+  const wc = event.word_count || agentSceneContent.value.length;
+  message.value = `创作完成：${wc} 字`;
+  agentTrace.writer.wordCount = wc;
+  commitTargetChapterId.value = chapterId.value || "";
+  loadScenes();
 }
 
 // ─── Writer Agent 生成 ───
@@ -1088,8 +1139,7 @@ async function handleAgentGenerate() {
   agentSceneContent.value = "";
   outlineData.value = null;
   draftPhase.value = "collecting";
-  agentTimeline.value = [];
-  timelineIdCounter = 0;
+  resetAgentTrace();
   commitDone.value = false;
   if (worldUpdateAbortController.value) {
     worldUpdateAbortController.value.abort();
@@ -1127,117 +1177,8 @@ async function handleAgentGenerate() {
   await runWriterAgent(
     payload,
     {
-      onEvent(event) {
-        if (event.type === "orchestrator_status") {
-          draftPhase.value = event.phase === "writing" ? "writing" : "collecting";
-          message.value = event.message || "编排中...";
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "status",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            message: event.message,
-          });
-        } else if (event.type === "thinking") {
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "thinking",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            content: event.content,
-          });
-        } else if (event.type === "tool_call") {
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "tool_call",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            name: event.name,
-            display: event.display || event.name,
-          });
-        } else if (event.type === "tool_result") {
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "tool_result",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            name: event.name,
-            summary: event.summary,
-          });
-        } else if (event.type === "prompt_snapshot") {
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "prompt_snapshot",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            phase: event.phase,
-            round: event.round,
-            messages: event.messages,
-            collapsed: true,
-          });
-        } else if (event.type === "phase_summary") {
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "summary",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            message: event.message,
-          });
-        } else if (event.type === "writer_token") {
-          draftPhase.value = "writing";
-          agentSceneContent.value += (event.token || "");
-          const last = agentTimeline.value[agentTimeline.value.length - 1];
-          if (last?.type === "writing") {
-            last.wordCount = agentSceneContent.value.length;
-          } else {
-            agentTimeline.value.push({
-              id: timelineIdCounter++,
-              type: "writing",
-              ts: "",
-              wordCount: agentSceneContent.value.length,
-            });
-          }
-        } else if (event.type === "outline_ready") {
-          draftPhase.value = "done";
-          outlineData.value = event.outline;
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "done",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            message: `大纲：${(event.outline || []).length} 个场景`,
-          });
-        } else if (event.type === "error") {
-          error.value = event.message || "生成失败";
-          agentStreaming.value = false;
-          draftPhase.value = agentSceneContent.value ? "done" : "idle";
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "error",
-            ts: event.ts || "",
-            message: event.message,
-          });
-        }
-      },
-      onDone(event) {
-        agentStreaming.value = false;
-        draftPhase.value = "done";
-        if (event.outline_saved) {
-          message.value = `大纲已保存：${event.scene_count} 个场景`;
-          return;
-        }
-        const wc = event.word_count || agentSceneContent.value.length;
-        message.value = `创作完成：${wc} 字`;
-        commitTargetChapterId.value = chapterId.value || "";
-        agentTimeline.value.push({
-          id: timelineIdCounter++,
-          type: "done",
-          ts: event.ts || "",
-          elapsedMs: event.elapsed_ms,
-          message: `${wc} 字`,
-        });
-        loadScenes();
-      },
+      onEvent: handleTraceEvent,
+      onDone: handleTraceDone,
       onError(event) {
         agentStreaming.value = false;
         draftPhase.value = agentSceneContent.value ? "done" : "idle";
@@ -1248,50 +1189,15 @@ async function handleAgentGenerate() {
   );
 }
 
-// ─── 时间线日志 helpers ───
-const _tlIcons = {
-  status: "●", thinking: "💭", tool_call: "↗", tool_result: "↙",
-  summary: "■", writing: "✍", done: "✓", error: "✗",
-};
-function timelineIcon(type) {
-  return _tlIcons[type] || "·";
-}
-function promptSnapshotLabel(entry) {
-  const phase = entry.phase === "writer" ? "写作层" : "编排层";
-  const round = entry.round > 0 ? ` (第${entry.round + 1}轮)` : "";
-  const charCount = entry.messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-  return `${phase}完整提示词${round} — ${charCount} 字`;
-}
-function timelineBody(entry) {
-  switch (entry.type) {
-    case "status": case "summary": case "error":
-      return entry.message || "";
-    case "thinking": {
-      const c = entry.content || "";
-      return c.length > 80 ? c.slice(0, 80) + "..." : c;
-    }
-    case "tool_call":
-      return entry.display || entry.name;
-    case "tool_result": {
-      const s = entry.summary || "";
-      const t = s.length > 60 ? s.slice(0, 60) + "..." : s;
-      return `${entry.name} → ${t}`;
-    }
-    case "writing":
-      return `streaming ${entry.wordCount || 0} 字`;
-    case "done":
-      return `创作完成 (${((entry.elapsedMs || 0) / 1000).toFixed(1)}s, ${entry.message || "?"})`;
-    default:
-      return "";
-  }
-}
-
-watch(() => agentTimeline.value.length, () => {
-  nextTick(() => {
-    const el = timelineScrollRef.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
-});
+watch(
+  () => agentTrace.orchestrator.rounds.length + agentTrace.writer.wordCount,
+  () => {
+    nextTick(() => {
+      const el = traceScrollRef.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  },
+);
 
 // ─── 大纲保存 ───
 async function handleOutlineSave(outline, label = "") {
@@ -1421,6 +1327,7 @@ async function handleWorldUpdate() {
     worldUpdateAbortController.value.abort();
   }
   worldUpdateAbortController.value = new AbortController();
+  resetAgentTrace();
   worldUpdateBusy.value = true;
   worldUpdateDone.value = false;
   worldUpdateSummary.value = "";
@@ -1432,36 +1339,12 @@ async function handleWorldUpdate() {
         chapter_order: chapterOrder.value || 0,
       },
       {
-        onEvent(event) {
-          if (event.type === "tool_call") {
-            agentTimeline.value.push({
-              id: timelineIdCounter++,
-              type: "tool_call",
-              ts: event.ts || "",
-              elapsedMs: event.elapsed_ms,
-              message: event.display || event.name,
-            });
-          } else if (event.type === "tool_result") {
-            agentTimeline.value.push({
-              id: timelineIdCounter++,
-              type: "tool_result",
-              ts: event.ts || "",
-              elapsedMs: event.elapsed_ms,
-              message: `${event.name}: ${event.summary || ""}`,
-            });
-          }
-        },
+        onEvent: handleTraceEvent,
         onDone(event) {
           worldUpdateBusy.value = false;
           worldUpdateDone.value = true;
           worldUpdateSummary.value = "世界数据已更新";
-          agentTimeline.value.push({
-            id: timelineIdCounter++,
-            type: "done",
-            ts: event.ts || "",
-            elapsedMs: event.elapsed_ms,
-            message: "世界数据更新完成",
-          });
+          agentTrace.orchestrator.status = "done";
         },
         onError(event) {
           worldUpdateBusy.value = false;
@@ -1554,6 +1437,24 @@ async function handleManuscriptBlockSave(block, newContent) {
   } catch (e) {
     console.error("Manuscript block save failed", e);
   }
+}
+
+function handleManuscriptBlockDelete(blockId) {
+  writerDialog.warning({
+    title: "确认删除",
+    content: "确定要删除这段稿件内容吗？此操作不可撤销。",
+    positiveText: "删除",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      try {
+        await deleteManuscriptBlock(blockId, projectId.value);
+        await loadManuscriptBlocks();
+        message.value = "稿件段落已删除";
+      } catch (e) {
+        error.value = e.message || "删除稿件失败";
+      }
+    },
+  });
 }
 
 function handleCreateManuscriptChapter(name) {
