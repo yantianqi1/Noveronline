@@ -183,27 +183,12 @@ class LLMClient:
         slot = self._slot()
         slot.__enter__()
         self._track_running(call_id, status="streaming")
-        # Retry transient errors during stream *creation* only (not mid-stream).
-        stream = None
-        delay = LLM_RETRY_INITIAL_DELAY_SECONDS
-        for attempt in range(LLM_TRANSIENT_MAX_RETRIES + 1):
-            try:
-                stream = self.client.chat.completions.create(**kwargs)
-                break
-            except Exception as exc:
-                if not self._should_retry(exc, attempt):
-                    slot.__exit__(None, None, None)
-                    self._track_unregister(call_id)
-                    if self._is_transient_error(exc):
-                        raise RuntimeError(format_upstream_service_error(exc)) from exc
-                    raise
-                self._log_retry(exc, attempt + 1, delay)
-                time.sleep(delay)
-                delay = min(delay * 2, LLM_RETRY_MAX_DELAY_SECONDS)
-        if stream is None:
+        try:
+            stream = self.client.chat.completions.create(**kwargs)
+        except Exception:
             slot.__exit__(None, None, None)
             self._track_unregister(call_id)
-            raise RuntimeError("LLM 流式请求重试流程意外结束")
+            raise
         return self._stream_chunks(stream, slot, call_id, step_ctx, captured_messages, t0)
 
     def chat_json(

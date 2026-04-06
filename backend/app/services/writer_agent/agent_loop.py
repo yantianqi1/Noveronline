@@ -158,6 +158,7 @@ class AgentLoop:
                     elapsed = int((time.monotonic() - t_start) * 1000)
                     return tc, tool_name, result, "ok", elapsed
                 except Exception as exc:
+                    logger.exception("Tool %s failed", tool_name)
                     elapsed = int((time.monotonic() - t_start) * 1000)
                     return tc, tool_name, f"工具执行失败: {exc}", "error", elapsed
 
