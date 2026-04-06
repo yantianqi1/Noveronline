@@ -106,13 +106,14 @@ class LLMClient:
 
             response = self._chat_with_retry(kwargs, call_id)
             content = self._clean_content(response.choices[0].message.content)
+            usage = self._extract_usage(response)
 
             if step_ctx:
-                self._record_trace(step_ctx, captured_messages, content, None, t0, "chat")
+                self._record_trace(step_ctx, captured_messages, content, None, t0, "chat", usage=usage)
             return content
         except Exception as exc:
             if step_ctx:
-                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat")
+                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat", usage=None)
             raise
         finally:
             self._track_unregister(call_id)
@@ -128,6 +129,8 @@ class LLMClient:
         Send a chat request with tool/function definitions.
         Returns the raw response message object so the caller can inspect tool_calls.
         """
+        step_ctx = get_current_step()
+        t0 = time.monotonic()
         call_id = self._track_register("chat_with_tools")
         try:
             kwargs = {
@@ -138,7 +141,12 @@ class LLMClient:
                 "tools": tools,
             }
             response = self._chat_with_retry(kwargs, call_id)
-            return response.choices[0].message
+            usage = self._extract_usage(response)
+            if step_ctx:
+                self._record_trace(step_ctx, None, response.choices[0].message.content or "", None, t0, "chat_with_tools", usage=usage)
+            msg = response.choices[0].message
+            msg._usage = usage  # Attach for caller access
+            return msg
         finally:
             self._track_unregister(call_id)
 
@@ -175,12 +183,27 @@ class LLMClient:
         slot = self._slot()
         slot.__enter__()
         self._track_running(call_id, status="streaming")
-        try:
-            stream = self.client.chat.completions.create(**kwargs)
-        except Exception:
+        # Retry transient errors during stream *creation* only (not mid-stream).
+        stream = None
+        delay = LLM_RETRY_INITIAL_DELAY_SECONDS
+        for attempt in range(LLM_TRANSIENT_MAX_RETRIES + 1):
+            try:
+                stream = self.client.chat.completions.create(**kwargs)
+                break
+            except Exception as exc:
+                if not self._should_retry(exc, attempt):
+                    slot.__exit__(None, None, None)
+                    self._track_unregister(call_id)
+                    if self._is_transient_error(exc):
+                        raise RuntimeError(format_upstream_service_error(exc)) from exc
+                    raise
+                self._log_retry(exc, attempt + 1, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, LLM_RETRY_MAX_DELAY_SECONDS)
+        if stream is None:
             slot.__exit__(None, None, None)
             self._track_unregister(call_id)
-            raise
+            raise RuntimeError("LLM 流式请求重试流程意外结束")
         return self._stream_chunks(stream, slot, call_id, step_ctx, captured_messages, t0)
 
     def chat_json(
@@ -264,6 +287,7 @@ class LLMClient:
             response = self._chat_with_retry(kwargs, call_id)
             content = self._clean_content(response.choices[0].message.content)
             finish_reason = response.choices[0].finish_reason or "stop"
+            usage = self._extract_usage(response)
 
             if finish_reason == "length":
                 logger.warning(
@@ -271,11 +295,11 @@ class LLMClient:
                 )
 
             if step_ctx:
-                self._record_trace(step_ctx, captured_messages, content, None, t0, "chat_json")
+                self._record_trace(step_ctx, captured_messages, content, None, t0, "chat_json", usage=usage)
             return content, finish_reason
         except Exception as exc:
             if step_ctx:
-                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat_json")
+                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat_json", usage=None)
             raise
         finally:
             self._track_unregister(call_id)
@@ -363,6 +387,20 @@ class LLMClient:
         if call_id and self.activity_tracker:
             self.activity_tracker.unregister(call_id)
 
+    # ── Token usage extraction ──
+
+    @staticmethod
+    def _extract_usage(response) -> Optional[Dict[str, int]]:
+        """Extract token usage from an OpenAI-compatible response."""
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return None
+        return {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+        }
+
     # ── Step trace capture ──
 
     def _record_trace(
@@ -373,10 +411,11 @@ class LLMClient:
         error: Optional[str],
         t0: float,
         call_type: str,
+        usage: Optional[Dict[str, int]] = None,
     ) -> None:
         from datetime import datetime
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        step_ctx.record_call({
+        record = {
             "call_id": uuid.uuid4().hex[:12],
             "module_key": self.module_key,
             "module_label": self._module_label,
@@ -388,4 +427,7 @@ class LLMClient:
             "messages": messages or [],
             "response_text": response_text,
             "error": error,
-        })
+        }
+        if usage:
+            record["usage"] = usage
+        step_ctx.record_call(record)

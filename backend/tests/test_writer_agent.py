@@ -366,7 +366,7 @@ class TestToolDefinitions:
     def test_all_tools_defined(self):
         from app.services.writer_agent.tools import NOVEL_TOOLS, TOOL_NAME_SET
 
-        assert len(NOVEL_TOOLS) == 17
+        assert len(NOVEL_TOOLS) == 20
         expected_names = {
             "query_entity", "query_relationship", "query_chapter",
             "query_scene", "search_settings", "get_recent_scenes",
@@ -374,6 +374,8 @@ class TestToolDefinitions:
             "get_character_voice", "query_character_timeline",
             "query_relationship_timeline", "query_thread_history",
             "search_world_rules",
+            "list_worldline_branches", "get_branch_timeline",
+            "get_branch_agent_state",
             "manage_entity", "manage_thread",
             "manage_world_rule", "manage_relationship",
         }
@@ -491,9 +493,12 @@ class MockLLMClient:
 
     def chat_with_tools(self, messages, tools, temperature=0.3, max_tokens=4096):
         if self.call_count >= len(self.responses):
-            return MockMessage(content="No more responses", tool_calls=None)
+            msg = MockMessage(content="No more responses", tool_calls=None)
+            msg._usage = None
+            return msg
         response = self.responses[self.call_count]
         self.call_count += 1
+        response._usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
         return response
 
 
@@ -593,6 +598,38 @@ class TestAgentLoop:
         # Should not exceed MAX_ROUNDS tool calls
         tool_calls = [e for e in events if e["type"] == "tool_call"]
         assert len(tool_calls) <= AgentLoop.MAX_ROUNDS
+
+    def test_loop_events_include_round_and_usage(self):
+        from app.services.writer_agent.agent_loop import AgentLoop
+        from app.services.writer_agent.tools import NOVEL_TOOLS
+
+        mock_client = MockLLMClient([
+            MockMessage(
+                content=None,
+                tool_calls=[MockToolCall("query_entity", {"name": "林远"})],
+            ),
+            MockMessage(
+                content='{"task": "write_scene"}',
+                tool_calls=None,
+            ),
+        ])
+
+        loop = AgentLoop(mock_client, NOVEL_TOOLS, "你是编排助手", self.TEST_PROJECT)
+        events = list(loop.run("写第一章"))
+
+        # tool_call and tool_result should carry round number
+        tool_call_evt = next(e for e in events if e["type"] == "tool_call")
+        assert tool_call_evt["round"] == 0
+
+        tool_result_evt = next(e for e in events if e["type"] == "tool_result")
+        assert tool_result_evt["round"] == 0
+        assert "status" in tool_result_evt
+        assert tool_result_evt["status"] == "ok"
+        assert "tool_elapsed_ms" in tool_result_evt
+        assert "full_result" in tool_result_evt
+
+        # total_usage should be accumulated
+        assert loop.total_usage["total_tokens"] > 0
 
 
 # ---------------------------------------------------------------------------

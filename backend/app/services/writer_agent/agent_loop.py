@@ -14,6 +14,9 @@ from .tools import TOOL_DISPLAY_FORMATTERS
 
 logger = logging.getLogger(__name__)
 
+# Write tools modify DB state — must execute serially to avoid SQLite WAL contention.
+_WRITE_TOOL_NAMES = {"manage_entity", "manage_thread", "manage_world_rule", "manage_relationship"}
+
 
 class AgentLoop:
     """
@@ -41,6 +44,7 @@ class AgentLoop:
         self.project_id = project_id
         self.t0 = t0 or time.monotonic()
         self.messages: List[Dict[str, Any]] = []
+        self.total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def _stamp(self) -> Dict[str, Any]:
         return {
@@ -99,6 +103,12 @@ class AgentLoop:
                 yield {"type": "error", **self._stamp(), "message": f"LLM 调用失败: {str(exc)}"}
                 return
 
+            # Accumulate token usage
+            usage = getattr(response, "_usage", None)
+            if usage:
+                for k in self.total_usage:
+                    self.total_usage[k] += usage.get(k, 0)
+
             # Build assistant message for history
             assistant_msg: Dict[str, Any] = {"role": "assistant", "content": response.content or ""}
             if response.tool_calls:
@@ -122,7 +132,7 @@ class AgentLoop:
 
             # Yield LLM thinking text if present alongside tool calls
             if response.content and response.content.strip():
-                yield {"type": "thinking", **self._stamp(), "content": response.content.strip()}
+                yield {"type": "thinking", **self._stamp(), "round": round_num, "content": response.content.strip()}
 
             # --- Parallel tool execution ---
             # Yield all tool_call events first (frontend shows them immediately)
@@ -136,37 +146,61 @@ class AgentLoop:
 
                 display_fn = TOOL_DISPLAY_FORMATTERS.get(tool_name)
                 display = display_fn(tool_input) if display_fn else tool_name
-                yield {"type": "tool_call", **self._stamp(), "name": tool_name, "input": tool_input, "display": display}
+                yield {"type": "tool_call", **self._stamp(), "round": round_num, "name": tool_name, "input": tool_input, "display": display}
                 pending.append((tc, tool_name, tool_input))
 
-            # Execute all tools in parallel (all are read-only SQLite queries)
+            # Execute tools: read-only tools run in parallel, write tools run serially.
             def _run_tool(item):
                 tc, tool_name, tool_input = item
-                result = execute_tool(tool_name, tool_input, self.project_id)
-                return tc, tool_name, result
+                t_start = time.monotonic()
+                try:
+                    result = execute_tool(tool_name, tool_input, self.project_id)
+                    elapsed = int((time.monotonic() - t_start) * 1000)
+                    return tc, tool_name, result, "ok", elapsed
+                except Exception as exc:
+                    elapsed = int((time.monotonic() - t_start) * 1000)
+                    return tc, tool_name, f"工具执行失败: {exc}", "error", elapsed
+
+            read_pending = [p for p in pending if p[1] not in _WRITE_TOOL_NAMES]
+            write_pending = [p for p in pending if p[1] in _WRITE_TOOL_NAMES]
 
             results_map: Dict[str, tuple] = {}
-            if len(pending) == 1:
-                # Skip thread pool overhead for single tool call
-                tc, tool_name, result = _run_tool(pending[0])
-                results_map[tc.id] = (tc, tool_name, result)
-            else:
+
+            # Phase A: read tools in parallel
+            if len(read_pending) == 1:
+                tc, tool_name, result, status, tool_ms = _run_tool(read_pending[0])
+                results_map[tc.id] = (tc, tool_name, result, status, tool_ms)
+            elif read_pending:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-                    futures = {pool.submit(_run_tool, item): item[0].id for item in pending}
+                    futures = {pool.submit(_run_tool, item): item[0].id for item in read_pending}
                     for future in concurrent.futures.as_completed(futures):
-                        tc, tool_name, result = future.result()
-                        results_map[tc.id] = (tc, tool_name, result)
+                        tc, tool_name, result, status, tool_ms = future.result()
+                        results_map[tc.id] = (tc, tool_name, result, status, tool_ms)
+
+            # Phase B: write tools serially (SQLite WAL safety)
+            for item in write_pending:
+                tc, tool_name, result, status, tool_ms = _run_tool(item)
+                results_map[tc.id] = (tc, tool_name, result, status, tool_ms)
 
             # Append results in original order (deterministic message history)
             for tc, tool_name, tool_input in pending:
-                _, resolved_name, result = results_map[tc.id]
+                _, resolved_name, result, status, tool_ms = results_map[tc.id]
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result,
                 })
                 summary = result[:200] + "..." if len(result) > 200 else result
-                yield {"type": "tool_result", **self._stamp(), "name": resolved_name, "summary": summary, "full_result": result}
+                yield {
+                    "type": "tool_result",
+                    **self._stamp(),
+                    "round": round_num,
+                    "name": resolved_name,
+                    "summary": summary,
+                    "full_result": result,
+                    "status": status,
+                    "tool_elapsed_ms": tool_ms,
+                }
 
             # --- Progressive context compression ---
             total_chars = self._context_chars()
