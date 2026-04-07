@@ -10,6 +10,7 @@ worldline_bp = Blueprint("worldline", __name__)
 llm_bp = Blueprint("llm", __name__)
 archive_bp = Blueprint("archive", __name__)
 assets_bp = Blueprint("assets", __name__)
+unified_assets_bp = Blueprint("unified_assets", __name__)
 
 from . import project  # noqa: E402,F401
 from . import project_graph  # noqa: E402,F401
@@ -17,6 +18,7 @@ from . import novel  # noqa: E402,F401
 from . import llm  # noqa: E402,F401
 from . import archive  # noqa: E402,F401
 from . import assets  # noqa: E402,F401
+from . import unified_assets  # noqa: E402,F401
 from . import worldline_support  # noqa: E402,F401
 from . import worldline_session  # noqa: E402,F401
 from . import worldline_interaction  # noqa: E402,F401

@@ -583,9 +583,71 @@ ASSET_TOOLS: list[dict] = [
     },
 ]
 
+UNIFIED_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "global_search",
+            "description": (
+                "跨所有数据源（资产库 / 档案库 / 故事图谱 / 写作工坊 / 世界线 / 总览种子）"
+                "做一次全局 FTS5 搜索。当你不确定该查哪个具体工具、或想用一段模糊描述命中相关素材时使用。"
+                "返回每条命中的 source / source_ref / title / 摘要片段。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "关键词或短语，≥2 字符"},
+                    "source": {
+                        "type": "string",
+                        "description": "可选：限定数据源，逗号分隔。可选 assets,archive,story_graph,novel_db,worldline,seed",
+                    },
+                    "limit": {"type": "integer", "description": "默认 20，上限 100"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_graph_neighbors",
+            "description": (
+                "查询故事图谱中某个节点（角色/地点/物件）的图邻居：返回该节点信息 + 所有相连边 + 对端节点摘要。"
+                "用于挖掘『这个角色身边都有谁、有什么羁绊』。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "节点名称（精确或别名）"},
+                    "limit": {"type": "integer", "description": "邻居数量上限，默认 20"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_worldline_session",
+            "description": (
+                "查询本项目最近一次（或指定）世界线推演会话的摘要：题目、变量、参与角色、最近事件流。"
+                "用于让写作 agent 知道『推演了哪些可能性』，作为续写参考。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "可选：指定 session id；留空则取最近一次"},
+                },
+            },
+        },
+    },
+]
+
+
 TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in NOVEL_TOOLS}
 MANUSCRIPT_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in MANUSCRIPT_TOOLS}
 ASSET_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in ASSET_TOOLS}
+UNIFIED_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in UNIFIED_TOOLS}
 
 # Human-readable display formatters for timeline log
 TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {

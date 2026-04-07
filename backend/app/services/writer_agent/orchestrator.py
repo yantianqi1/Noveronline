@@ -9,7 +9,8 @@ from typing import Any, Dict, Generator, Optional
 
 from .agent_loop import AgentLoop
 from .prompts import build_orchestrator_prompt
-from .tools import NOVEL_TOOLS, MANUSCRIPT_TOOLS, ASSET_TOOLS
+from .retrieval_planner import RetrievalPlanner
+from .tools import NOVEL_TOOLS, MANUSCRIPT_TOOLS, ASSET_TOOLS, UNIFIED_TOOLS
 from .writer import WriterComposer
 from .post_processor import PostProcessor
 from .novel_db import NovelDB
@@ -93,8 +94,42 @@ class WriterOrchestrator:
         orchestrator_model = orchestrator_client.model
         yield {"type": "orchestrator_status", "phase": "starting", **_stamp(), "message": "编排层启动中...", "model": orchestrator_model}
 
+        # --- Phase 0: Retrieval Planner ---
+        # 让一个轻量 LLM 先想清楚『正式写作前必须先调用哪些工具』，输出 JSON 计划，
+        # 注入 user message 顶端作为最低检索基线。失败显式抛错，不静默兜底。
+        retrieval_plan_text = ""
+        try:
+            yield {
+                "type": "orchestrator_status",
+                "phase": "retrieval_planning",
+                **_stamp(),
+                "message": "检索规划员分析中...",
+            }
+            planner = RetrievalPlanner(self.router)
+            plan_dict = planner.plan(task_type, context)
+            retrieval_plan_text = RetrievalPlanner.render_for_user_message(plan_dict)
+            yield {
+                "type": "retrieval_plan",
+                **_stamp(),
+                "plan": plan_dict,
+            }
+        except ValueError as exc:
+            yield {
+                "type": "error",
+                **_stamp(),
+                "message": f"LLM 模块未绑定 (writer_retrieval_planner): {exc}。请在 LLM 设施面板绑定通道。",
+            }
+            return
+        except Exception as exc:  # noqa: BLE001
+            yield {
+                "type": "error",
+                **_stamp(),
+                "message": f"检索规划员失败: {exc}",
+            }
+            return
+
         # Asset tools always available; manuscript tools for continuation tasks.
-        tools = NOVEL_TOOLS + ASSET_TOOLS
+        tools = NOVEL_TOOLS + ASSET_TOOLS + UNIFIED_TOOLS
         if task_type == "continue":
             tools = tools + MANUSCRIPT_TOOLS
 
@@ -108,6 +143,8 @@ class WriterOrchestrator:
 
         # Build the user message for the orchestrator
         user_msg = self._build_orchestrator_user_message(task_type, context)
+        if retrieval_plan_text:
+            user_msg = retrieval_plan_text + "\n\n" + user_msg
 
         # Run agent loop, forwarding events directly
         brief_content = ""

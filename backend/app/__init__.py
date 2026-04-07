@@ -29,7 +29,7 @@ def create_app(config_class=Config):
 
     from .api import (
         archive_bp, assets_bp, llm_bp, novel_bp, project_bp,
-        worldline_bp, writer_agent_bp,
+        unified_assets_bp, worldline_bp, writer_agent_bp,
     )
 
     app.register_blueprint(project_bp, url_prefix="/api/project")
@@ -38,6 +38,7 @@ def create_app(config_class=Config):
     app.register_blueprint(llm_bp, url_prefix="/api/llm")
     app.register_blueprint(archive_bp, url_prefix="/api/archive")
     app.register_blueprint(assets_bp, url_prefix="/api/assets")
+    app.register_blueprint(unified_assets_bp, url_prefix="/api/unified-assets")
     app.register_blueprint(writer_agent_bp, url_prefix="/api/writer-agent")
 
     @app.route("/health")

@@ -10,6 +10,7 @@ from . import assets_bp
 from ..models.task import TaskManager
 from ..services.assets.assets_service import AssetsService
 from ..services.assets.assets_storage import GLOBAL_SCOPE, PROJECT_SCOPE
+from ..services.assets.ingestion_agent import IngestionAgent
 from ..services.assets.style_extractor import StyleExtractor
 
 
@@ -203,6 +204,37 @@ def batch_categorize():
 # ----------------------------------------------------------------------
 # Style extraction
 # ----------------------------------------------------------------------
+
+
+@assets_bp.route("/ingest", methods=["POST"])
+def ingest_asset():
+    try:
+        body = request.get_json() or {}
+        raw_text = body.get("raw_text") or body.get("text") or ""
+        if not raw_text.strip():
+            return jsonify({"success": False, "error": "raw_text 必填"}), 400
+        scope = body.get("scope", GLOBAL_SCOPE)
+        _validate_scope(scope)
+        task_id = IngestionAgent().run_background(
+            raw_text,
+            scope=scope,
+            project_id=body.get("project_id"),
+            hint_type=body.get("hint_type"),
+        )
+        return jsonify({"success": True, "data": {"task_id": task_id}})
+    except Exception as exc:
+        return _err(exc)
+
+
+@assets_bp.route("/ingest/<task_id>", methods=["GET"])
+def ingest_status(task_id: str):
+    try:
+        task = TaskManager().get_task(task_id)
+        if not task:
+            return jsonify({"success": False, "error": "任务不存在"}), 404
+        return jsonify({"success": True, "data": task.to_dict()})
+    except Exception as exc:
+        return _err(exc)
 
 
 @assets_bp.route("/style-extract", methods=["POST"])

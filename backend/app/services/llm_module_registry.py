@@ -47,6 +47,20 @@ MODULE_DEFINITIONS = (
         example_output="JSON: character_updates, relationship_changes, plot_threads...",
     ),
     LlmModuleDefinition(
+        module_key="writer_retrieval_planner",
+        label="写作检索规划员",
+        description="在写作 agent 启动前规划必要的工具检索清单，不调用工具，仅输出 JSON 计划。",
+        example_prompt="给定 task_type 和 context，列出该调用哪些工具",
+        example_output="JSON: {rationale, calls: [{tool, arguments, reason}]}",
+    ),
+    LlmModuleDefinition(
+        module_key="asset_ingestion",
+        label="资产入库 Agent",
+        description="对用户粘贴的原始素材做类型识别、结构化抽取与摘要分类，形成可被检索的资产条目。",
+        example_prompt="判定下列文本属于哪类资产并抽取关键字段...",
+        example_output="JSON: asset_type, title, summary, category, tags, payload",
+    ),
+    LlmModuleDefinition(
         module_key="character_agent_profile",
         label="角色 Agent 档案生成",
         description="为每个重要角色生成可直接用于 Agent 对话的完整档案。",

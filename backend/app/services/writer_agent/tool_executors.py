@@ -1067,6 +1067,161 @@ def _list_assets(params: dict, project_id: str) -> str:
     return f"共 {len(rows)} 条 {asset_type}：\n\n" + "\n\n".join(_format_asset_brief(a) for a in rows)
 
 
+# ----------------------------------------------------------------------
+# Unified / cross-silo tools
+# ----------------------------------------------------------------------
+
+
+def _global_search(params: dict, project_id: str) -> str:
+    from ..assets.global_search_indexer import GlobalSearchIndexer
+    query = (params.get("query") or "").strip()
+    if not query:
+        return "global_search 需要 query"
+    sources = None
+    if params.get("source"):
+        sources = [s.strip() for s in str(params["source"]).split(",") if s.strip()]
+    limit = min(int(params.get("limit") or 20), 100)
+    indexer = GlobalSearchIndexer()
+    # 懒重建：项目索引为空时先同步一次
+    with indexer._connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM global_index WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    if row and row["n"] == 0:
+        indexer.reindex_project(project_id)
+    hits = indexer.search(query, project_id=project_id, sources=sources, limit=limit)
+    if not hits:
+        return f"未在全局索引中找到与“{query}”相关的条目"
+    lines = [f"找到 {len(hits)} 条："]
+    for h in hits:
+        lines.append(
+            f"- [{h['source']}] {h['title']}  ({h['entity_type']})\n"
+            f"    ref: {h['source_ref']}\n"
+            f"    {h.get('snippet') or h.get('summary') or ''}"
+        )
+    return "\n".join(lines)
+
+
+def _query_graph_neighbors(params: dict, project_id: str) -> str:
+    import sqlite3 as _sql
+    from ..local_story_graph_storage import LocalStoryGraphStorage
+    name = (params.get("name") or "").strip()
+    if not name:
+        return "query_graph_neighbors 需要 name"
+    limit = int(params.get("limit") or 20)
+    storage = LocalStoryGraphStorage()
+    if not storage.has_graph(project_id):
+        return f"项目 {project_id} 暂无故事图谱"
+    db_path = storage.graph_db_path(project_id)
+    conn = _sql.connect(db_path)
+    conn.row_factory = _sql.Row
+    try:
+        # 1) find node by exact name or alias
+        node_row = conn.execute(
+            "SELECT * FROM graph_nodes WHERE name = ? LIMIT 1", (name,)
+        ).fetchone()
+        if not node_row:
+            alias_row = conn.execute(
+                "SELECT node_uuid FROM graph_aliases WHERE alias = ? LIMIT 1", (name,)
+            ).fetchone()
+            if alias_row:
+                node_row = conn.execute(
+                    "SELECT * FROM graph_nodes WHERE uuid = ?", (alias_row["node_uuid"],)
+                ).fetchone()
+        if not node_row:
+            return f"故事图谱中未找到节点：{name}"
+
+        node_uuid = node_row["uuid"]
+        edges = conn.execute(
+            "SELECT * FROM graph_edges WHERE source_node_uuid = ? OR target_node_uuid = ? "
+            "ORDER BY weight DESC LIMIT ?",
+            (node_uuid, node_uuid, limit),
+        ).fetchall()
+        # gather neighbor info
+        neighbor_uuids = set()
+        for e in edges:
+            other = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
+            neighbor_uuids.add(other)
+        neighbor_map = {}
+        if neighbor_uuids:
+            placeholders = ",".join("?" * len(neighbor_uuids))
+            for n in conn.execute(
+                f"SELECT uuid, name, summary FROM graph_nodes WHERE uuid IN ({placeholders})",
+                list(neighbor_uuids),
+            ).fetchall():
+                neighbor_map[n["uuid"]] = (n["name"], n["summary"])
+    finally:
+        conn.close()
+
+    lines = [f"# 节点：{node_row['name']}", f"摘要：{node_row['summary'] or '(无)'}", "", f"## 邻居 / 关系（{len(edges)} 条）"]
+    for e in edges:
+        other_uuid = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
+        other_name, other_summary = neighbor_map.get(other_uuid, ("?", ""))
+        direction = "→" if e["source_node_uuid"] == node_uuid else "←"
+        lines.append(
+            f"- {direction} {other_name} ({e['name']}, weight={e['weight']})\n"
+            f"    fact: {e['fact']}\n"
+            f"    对端摘要: {other_summary[:120] if other_summary else ''}"
+        )
+    return "\n".join(lines)
+
+
+def _query_worldline_session(params: dict, project_id: str) -> str:
+    import os as _os
+    import json as _json
+    from ...config import Config
+    sid = (params.get("session_id") or "").strip()
+    sessions_dir = _os.path.join(
+        Config.UPLOAD_FOLDER, "projects", project_id, "worldlines", "sessions"
+    )
+    if not _os.path.isdir(sessions_dir):
+        return f"项目 {project_id} 暂无世界线推演记录"
+    files = [f for f in _os.listdir(sessions_dir) if f.endswith(".json")]
+    if not files:
+        return "暂无世界线 session"
+    if sid:
+        target = sid + ".json"
+        if target not in files:
+            return f"未找到 session: {sid}"
+        chosen = target
+    else:
+        # 取最近修改
+        files.sort(key=lambda f: _os.path.getmtime(_os.path.join(sessions_dir, f)), reverse=True)
+        chosen = files[0]
+    path = _os.path.join(sessions_dir, chosen)
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = _json.load(fp)
+    except (OSError, _json.JSONDecodeError) as exc:
+        return f"读取 session 失败: {exc}"
+
+    chosen_id = chosen.removesuffix(".json")
+    lines = [
+        f"# 世界线 Session: {chosen_id}",
+        f"标题: {data.get('title') or '(无)'}",
+        f"描述: {data.get('description') or data.get('summary') or '(无)'}",
+        f"更新时间: {data.get('updated_at') or '(未知)'}",
+    ]
+    variables = data.get("variables") or data.get("world_variables") or {}
+    if variables:
+        lines.append("\n## 世界变量")
+        lines.append(_json.dumps(variables, ensure_ascii=False, indent=2)[:1200])
+    agents = data.get("agents") or data.get("participants") or []
+    if agents:
+        lines.append(f"\n## 参与角色（{len(agents)}）")
+        for a in agents[:20]:
+            if isinstance(a, dict):
+                lines.append(f"- {a.get('name') or a.get('id') or '?'}")
+    events = data.get("events") or data.get("event_log") or []
+    if events:
+        lines.append(f"\n## 最近事件（共 {len(events)}，截取最新 10 条）")
+        for ev in events[-10:]:
+            if isinstance(ev, dict):
+                lines.append(f"- [{ev.get('step') or ev.get('time') or '?'}] {ev.get('summary') or ev.get('text') or ev.get('description') or ''}")
+    return "\n".join(lines)
+
+
 _EXECUTORS: dict[str, Any] = {
     "query_entity": _query_entity,
     "query_relationship": _query_relationship,
@@ -1100,4 +1255,8 @@ _EXECUTORS: dict[str, Any] = {
     "search_assets": _search_assets,
     "get_asset": _get_asset,
     "list_assets": _list_assets,
+    # Unified / cross-silo
+    "global_search": _global_search,
+    "query_graph_neighbors": _query_graph_neighbors,
+    "query_worldline_session": _query_worldline_session,
 }

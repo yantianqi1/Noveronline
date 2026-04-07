@@ -147,6 +147,20 @@ function handleNodeSelect(node) {
   selectedNode.value = node;
 }
 
+function focusNode(nodeId) {
+  if (!nodeId) return;
+  const node = props.nodes.find((n) => (n.id || n.uuid) === nodeId);
+  if (!node) return;
+  const typeKey = String(node.entity_type || "unknown").toLowerCase();
+  if (typeKey in visibleTypes && !visibleTypes[typeKey]) {
+    visibleTypes[typeKey] = true;
+  }
+  selectedEdge.value = null;
+  selectedNode.value = node;
+}
+
+defineExpose({ focusNode });
+
 function handleEdgeSelect(edge) {
   selectedNode.value = null;
   selectedEdge.value = edge;

@@ -17,14 +17,44 @@
         生成全量角色档案
       </n-button>
 
-      <div v-if="taskMessage || taskError" class="status-indicator" :class="{ error: taskError }">
-        <div class="status-pulse" v-if="busy"></div>
-        <span class="mono">{{ taskError || taskMessage }}</span>
+      <div class="view-tabs">
+        <button
+          class="view-tab"
+          :class="{ active: activeTab === 'overview' }"
+          :disabled="!hasGraphData"
+          @click="activeTab = 'overview'"
+        >📊 世界速览</button>
+        <button
+          class="view-tab"
+          :class="{ active: activeTab === 'graph' }"
+          :disabled="!hasGraphData"
+          @click="activeTab = 'graph'"
+        >🕸 关系图谱</button>
+      </div>
+
+      <div v-if="taskError && !busy" class="status-indicator error">
+        <span class="mono">{{ taskError }}</span>
       </div>
     </div>
 
-    <main class="workbench-main">
+    <GraphBuildConsole
+      v-if="busy || hasFailed"
+      :task="latestTask"
+      @retry="startBuildGraph"
+    />
+
+    <main class="workbench-main" v-show="!busy">
+      <WorldOverviewDashboard
+        v-if="activeTab === 'overview' && hasGraphData"
+        :nodes="graphNodes"
+        :edges="graphEdges"
+        :project-name="currentProjectName"
+        @focus-node="handleFocusNodeFromDashboard"
+        @focus-edge="handleFocusEdgeFromDashboard"
+      />
       <StoryGraphPanel
+        v-show="activeTab === 'graph' || !hasGraphData"
+        ref="graphPanelRef"
         :nodes="graphNodes"
         :edges="graphEdges"
         :loading="busy"
@@ -44,25 +74,35 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { NButton, NSelect } from "naive-ui";
 import StoryGraphPanel from "../components/StoryGraphPanel.vue";
 import { buildGraph, getProject, getProjectGraph, getTask, listProjects } from "../api/project";
 import { generateArchiveCandidates, generateArchives } from "../api/novel";
 import AgentTemplateConfigurator from "./story-graph/AgentTemplateConfigurator.vue";
+import GraphBuildConsole from "./story-graph/GraphBuildConsole.vue";
+import WorldOverviewDashboard from "./story-graph/WorldOverviewDashboard.vue";
 import { createGraphBuildTaskPoller } from "./story-graph/graphBuildTaskPoller.js";
 
 const projects = ref([]);
 const projectId = ref("");
 const busy = ref(false);
-const taskMessage = ref("");
 const taskError = ref("");
 const currentGraphId = ref("");
 const graphNodes = ref([]);
 const graphEdges = ref([]);
 const configuratorVisible = ref(false);
 const archiveCandidates = ref([]);
+const latestTask = ref(null);
+const activeTab = ref("overview");
+const graphPanelRef = ref(null);
 const pollGraphTask = createGraphBuildTaskPoller({ getTask });
+
+const hasGraphData = computed(() => graphNodes.value.length > 0);
+const hasFailed = computed(() => latestTask.value?.status === "failed");
+const currentProjectName = computed(
+  () => projects.value.find((p) => p.project_id === projectId.value)?.name || ""
+);
 
 const projectOptions = computed(() =>
   projects.value.map((item) => ({ label: item.name, value: item.project_id }))
@@ -74,25 +114,35 @@ async function loadProjects() {
 }
 
 async function startBuildGraph() {
+  if (!projectId.value) return;
   try {
     busy.value = true;
     taskError.value = "";
-    taskMessage.value = "图谱构建任务已提交...";
+    latestTask.value = { status: "processing", progress: 0, metadata: { stages: [] } };
     const res = await buildGraph(projectId.value, "Novel Story Graph");
     const taskId = res.data.task_id;
-    const task = await pollGraphTask(taskId, updateTaskMessage);
+    const task = await pollGraphTask(taskId, (t) => { latestTask.value = t; });
+    latestTask.value = task;
     currentGraphId.value = task.result?.graph_id || "";
-    taskMessage.value = `图谱构建完成`;
     await refreshGraph();
+    activeTab.value = "overview";
   } catch (error) {
     taskError.value = error.message;
+    if (latestTask.value) {
+      latestTask.value = { ...latestTask.value, status: "failed", error: error.message };
+    }
   } finally {
     busy.value = false;
   }
 }
 
-function updateTaskMessage(task) {
-  taskMessage.value = `${task.message || "处理中"} (${task.progress || 0}%)`;
+function handleFocusNodeFromDashboard(nodeId) {
+  activeTab.value = "graph";
+  nextTick(() => graphPanelRef.value?.focusNode?.(nodeId));
+}
+
+function handleFocusEdgeFromDashboard(edge) {
+  if (edge?.source_id) handleFocusNodeFromDashboard(edge.source_id);
 }
 
 async function refreshGraph() {
@@ -218,6 +268,43 @@ onMounted(async () => {
   border-color: var(--line-soft);
 }
 
+.view-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px;
+  background: rgba(120, 90, 50, 0.08);
+  border-radius: 6px;
+}
+
+.view-tab {
+  border: none;
+  background: transparent;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  color: #6b5a3c;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.view-tab:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.view-tab.active {
+  background: #fffdf6;
+  color: #4a3a22;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.view-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .status-indicator {
   display: flex;
   align-items: center;
@@ -226,7 +313,6 @@ onMounted(async () => {
   background: var(--bg-paper-warm);
   border-radius: var(--radius-sm);
   font-size: 12px;
-  margin-left: auto;
 }
 
 .status-indicator.error {

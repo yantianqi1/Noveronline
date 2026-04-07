@@ -1,7 +1,7 @@
 """本地图谱构建服务。"""
 
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ..models.project import ProjectManager
 from ..models.task import TaskManager
@@ -65,6 +65,7 @@ class GraphBuilderService:
         text: str,
         ontology: Dict[str, Any],
         graph_name: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         local_block_facts = self._optional_json(project_id, "local_block_facts.json")
         block_analyses = self._optional_json(project_id, "block_analyses.json")
@@ -91,21 +92,7 @@ class GraphBuilderService:
             block_analyses=block_analyses,
             story_memory=story_memory,
             chapter_continuity=chapter_continuity,
-        )
-
-    def _wait_for_episodes(
-        self,
-        chunk_size: int,
-        chunk_overlap: int,
-        task_id: str,
-    ) -> None:
-        self.task_manager.update_task(
-            task_id,
-            progress=85,
-            message=(
-                "本地图谱已落盘 "
-                f"(chunk_size={chunk_size}, chunk_overlap={chunk_overlap})，正在汇总图谱信息..."
-            ),
+            progress_callback=progress_callback,
         )
 
     def get_graph_data(self, graph_id: str) -> Dict[str, Any]:

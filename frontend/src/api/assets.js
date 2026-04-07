@@ -58,3 +58,51 @@ export function startStyleExtraction(payload) {
 export function getStyleExtractionStatus(taskId) {
   return get(`/api/assets/style-extract/${taskId}`);
 }
+
+// ---- 入库 Agent ----
+export function startAssetIngestion(payload) {
+  return post(`/api/assets/ingest`, payload);
+}
+
+export function getAssetIngestionStatus(taskId) {
+  return get(`/api/assets/ingest/${taskId}`);
+}
+
+// ---- 统一聚合视图（跨 silo） ----
+export function listUnifiedAssets({
+  projectId = "",
+  sources = [],
+  entityTypes = [],
+  scope = "",
+  q = "",
+  page = 1,
+  pageSize = 50,
+} = {}) {
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  if (sources.length) params.set("source", sources.join(","));
+  if (entityTypes.length) params.set("entity_type", entityTypes.join(","));
+  if (scope) params.set("scope", scope);
+  if (q) params.set("q", q);
+  params.set("page", String(page));
+  params.set("page_size", String(pageSize));
+  return get(`/api/unified-assets?${params.toString()}`);
+}
+
+export function getUnifiedFacets(projectId = "") {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return get(`/api/unified-assets/facets${qs}`);
+}
+
+export function searchGlobalAssets({ q, projectId = "", sources = [], entityTypes = [], limit = 50 } = {}) {
+  const params = new URLSearchParams({ q });
+  if (projectId) params.set("project_id", projectId);
+  if (sources.length) params.set("source", sources.join(","));
+  if (entityTypes.length) params.set("entity_type", entityTypes.join(","));
+  params.set("limit", String(limit));
+  return get(`/api/unified-assets/search?${params.toString()}`);
+}
+
+export function reindexUnifiedAssets(projectId) {
+  return post(`/api/unified-assets/reindex`, { project_id: projectId });
+}

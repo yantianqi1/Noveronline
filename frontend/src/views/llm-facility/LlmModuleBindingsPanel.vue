@@ -29,6 +29,10 @@
             :value="drafts[module.module_key]?.modelId || null"
             :options="modelOptions(drafts[module.module_key]?.channelKey)"
             placeholder="模型"
+            filterable
+            :consistent-menu-width="false"
+            :virtual-scroll="false"
+            :menu-props="{ style: 'max-height: 360px; min-width: 320px;' }"
             @update:value="(val) => handleModelChange(module.module_key, val || '')"
           />
 
@@ -242,7 +246,7 @@ function applyDraftPatch(moduleKey, patch) {
 
 .binding-row {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr auto;
+  grid-template-columns: 1.2fr 1fr 2fr auto;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;

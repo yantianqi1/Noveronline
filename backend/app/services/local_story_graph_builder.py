@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+ProgressCallback = Optional[Callable[[Dict[str, Any]], None]]
 
 from .local_story_graph_models import EvidenceRef, GraphEdge, GraphNode, GraphSnapshot
 from .local_story_graph_storage import LocalStoryGraphStorage
@@ -44,9 +47,29 @@ class LocalStoryGraphBuilder:
         block_analyses: Dict[str, Any],
         story_memory: Dict[str, Any],
         chapter_continuity: Dict[str, Any],
+        progress_callback: ProgressCallback = None,
     ) -> GraphSnapshot:
-        nodes = self._build_nodes(project_id, ontology, extracted_text, local_block_facts, story_memory)
-        edges = self._build_edges(project_id, ontology, nodes, extracted_text, local_block_facts, story_memory)
+        started = time.monotonic()
+
+        def emit(stage: str, progress: int, counts: Optional[Dict[str, Any]] = None, sample: Optional[List[Any]] = None) -> None:
+            if progress_callback is None:
+                return
+            progress_callback({
+                "stage": stage,
+                "progress": progress,
+                "counts": counts or {},
+                "sample": sample or [],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            })
+
+        emit("load_artifacts", 10, counts={
+            "artifacts_loaded": sum(1 for x in (local_block_facts, block_analyses, story_memory, chapter_continuity) if x),
+            "block_count": int(local_block_facts.get("block_count", 0) or 0),
+            "entities": len(story_memory.get("entity_registry", {})),
+        }, sample=["local_block_facts", "block_analyses", "story_memory", "chapter_continuity"])
+
+        nodes = self._build_nodes(project_id, ontology, extracted_text, local_block_facts, story_memory, emit)
+        edges = self._build_edges(project_id, ontology, nodes, extracted_text, local_block_facts, story_memory, emit)
         built_at = datetime.now().isoformat()
         snapshot = GraphSnapshot(
             graph_id=local_graph_id(project_id),
@@ -66,7 +89,14 @@ class LocalStoryGraphBuilder:
             nodes=nodes,
             edges=edges,
         )
+        emit("persist", 92, counts={"nodes": len(nodes), "edges": len(edges)})
         self.storage.save_snapshot(project_id, snapshot)
+        entity_types = sorted({label for node in nodes for label in node.labels if label not in {"Entity", "Node"}})
+        emit("finalize", 100, counts={
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "entity_types": len(entity_types),
+        }, sample=entity_types[:8])
         return snapshot
 
     def _build_nodes(
@@ -76,7 +106,9 @@ class LocalStoryGraphBuilder:
         extracted_text: str,
         local_block_facts: Dict[str, Any],
         story_memory: Dict[str, Any],
+        emit: Optional[Callable[..., None]] = None,
     ) -> List[GraphNode]:
+        emit = emit or (lambda *args, **kwargs: None)
         candidates = []
         packets = list(local_block_facts.get("packets", []))
         registry = story_memory.get("entity_registry", {})
@@ -87,7 +119,15 @@ class LocalStoryGraphBuilder:
         for rule_text in story_memory.get("world_rules", []):
             candidates.append(self._rule_candidate(ontology, rule_text))
         candidates.extend(self._raw_candidates(ontology, extracted_text, registry))
-        return self._merge_node_candidates(project_id, candidates)
+        emit("collect_entities", 28, counts={"candidates": len(candidates)},
+             sample=[c.get("name", "") for c in candidates[-3:]])
+
+        merged = self._merge_node_candidates(project_id, candidates)
+        emit("merge_nodes", 45, counts={
+            "nodes": len(merged),
+            "merged_aliases": sum(len(n.attributes.get("aliases", []) or []) for n in merged),
+        }, sample=[{"name": n.name, "aliases": list(n.attributes.get("aliases", []) or [])[:3]} for n in merged[:3]])
+        return merged
 
     def _build_edges(
         self,
@@ -97,13 +137,32 @@ class LocalStoryGraphBuilder:
         extracted_text: str,
         local_block_facts: Dict[str, Any],
         story_memory: Dict[str, Any],
+        emit: Optional[Callable[..., None]] = None,
     ) -> List[GraphEdge]:
+        emit = emit or (lambda *args, **kwargs: None)
         lookup = self._node_lookup(nodes)
         candidates = []
-        candidates.extend(self._relationship_edges(ontology, story_memory, lookup))
-        candidates.extend(self._event_edges(ontology, story_memory, lookup))
-        candidates.extend(self._artifact_edges(ontology, extracted_text, lookup))
-        candidates.extend(self._rule_edges(ontology, story_memory, lookup))
+
+        rels = self._relationship_edges(ontology, story_memory, lookup)
+        candidates.extend(rels)
+        emit("build_relationships", 60, counts={"relationships": len(rels), "edges": len(candidates)},
+             sample=[{"name": e.get("name", ""), "fact": e.get("fact", "")} for e in rels[-3:]])
+
+        events = self._event_edges(ontology, story_memory, lookup)
+        candidates.extend(events)
+        emit("build_events", 72, counts={"events": len(events), "edges": len(candidates)},
+             sample=[{"name": e.get("name", ""), "fact": e.get("fact", "")} for e in events[-3:]])
+
+        artifacts = self._artifact_edges(ontology, extracted_text, lookup)
+        rules = self._rule_edges(ontology, story_memory, lookup)
+        candidates.extend(artifacts)
+        candidates.extend(rules)
+        emit("build_artifacts_rules", 85, counts={
+            "artifacts": len(artifacts),
+            "rules": len(rules),
+            "edges": len(candidates),
+        }, sample=[{"name": e.get("name", ""), "fact": e.get("fact", "")} for e in (artifacts + rules)[-3:]])
+
         return self._merge_edge_candidates(project_id, candidates)
 
     def _registry_candidates(self, ontology: Dict[str, Any], name: str, item: Dict[str, Any], packets: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
