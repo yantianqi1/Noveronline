@@ -9,7 +9,7 @@ from typing import Any, Dict, Generator, Optional
 
 from .agent_loop import AgentLoop
 from .prompts import build_orchestrator_prompt
-from .tools import NOVEL_TOOLS, MANUSCRIPT_TOOLS
+from .tools import NOVEL_TOOLS, MANUSCRIPT_TOOLS, ASSET_TOOLS
 from .writer import WriterComposer
 from .post_processor import PostProcessor
 from .novel_db import NovelDB
@@ -93,10 +93,10 @@ class WriterOrchestrator:
         orchestrator_model = orchestrator_client.model
         yield {"type": "orchestrator_status", "phase": "starting", **_stamp(), "message": "编排层启动中...", "model": orchestrator_model}
 
-        # Include manuscript tools for continuation tasks
-        tools = NOVEL_TOOLS
+        # Asset tools always available; manuscript tools for continuation tasks.
+        tools = NOVEL_TOOLS + ASSET_TOOLS
         if task_type == "continue":
-            tools = NOVEL_TOOLS + MANUSCRIPT_TOOLS
+            tools = tools + MANUSCRIPT_TOOLS
 
         agent_loop = AgentLoop(
             llm_client=orchestrator_client,
@@ -167,6 +167,39 @@ class WriterOrchestrator:
                         logger.info("Injected chapter outline: %d beats", len(outline_data))
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to parse outline_json for chapter %s", chapter_id)
+
+        # Force-inject continuation context for continue tasks so the writer
+        # composer always has it, even if the orchestrator brief missed these keys.
+        if task_type == "continue":
+            from .manuscript_context_builder import build_continuation_context
+            cont_ctx = build_continuation_context(
+                project_id, last_block_id=context.get("last_block_id") or None,
+            )
+            if cont_ctx.get("tail_text"):
+                # Only inject if the brief doesn't already have it (orchestrator may have set it)
+                if not writing_brief.get("continuation_context"):
+                    writing_brief["continuation_context"] = {
+                        "tail_text": cont_ctx["tail_text"],
+                        "narrative_note": cont_ctx.get("narrative_note", ""),
+                        "last_location": cont_ctx.get("last_location", ""),
+                    }
+                if not writing_brief.get("continue_from"):
+                    writing_brief["continue_from"] = cont_ctx["tail_text"][-500:]
+                # Inject summaries and threads into brief if missing
+                if not writing_brief.get("recent_narrative") and cont_ctx.get("recent_summaries"):
+                    writing_brief["recent_narrative"] = "\n".join(
+                        f"第{s['block_order']}段：{s['summary']}"
+                        for s in cont_ctx["recent_summaries"]
+                        if s.get("summary")
+                    )
+                if not writing_brief.get("open_threads") and cont_ctx.get("active_threads"):
+                    writing_brief["open_threads"] = cont_ctx["active_threads"]
+                logger.info(
+                    "Injected continuation context: tail=%d chars, summaries=%d, threads=%d",
+                    len(cont_ctx.get("tail_text", "")),
+                    len(cont_ctx.get("recent_summaries", [])),
+                    len(cont_ctx.get("active_threads", [])),
+                )
 
         # --- Outline branch: skip Phase 2/3, save directly ---
         if task_type == "outline":

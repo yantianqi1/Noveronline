@@ -63,7 +63,7 @@ const hasUntagged = computed(() => props.untaggedCount > 0);
 }
 
 .toc-header {
-  padding: 16px 16px 12px;
+  padding: 10px 12px 8px;
   border-bottom: 1px solid var(--border-subtle, #2d2d44);
 }
 

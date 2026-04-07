@@ -6,8 +6,8 @@
         <span class="candidate-count mono">{{ candidateEvents.length }} 个候选事件等待审核</span>
       </div>
       <div v-if="candidateEvents.length > 1" class="candidate-bar-actions">
-        <button class="btn btn-adopt" @click="emit('adopt-all')">全部采纳</button>
-        <button class="btn btn-reject" @click="emit('reject-all')">全部拒绝</button>
+        <n-button type="primary" size="small" @click="emit('adopt-all')">全部采纳</n-button>
+        <n-button size="small" @click="emit('reject-all')">全部拒绝</n-button>
       </div>
     </div>
 
@@ -30,7 +30,7 @@
                 status="candidate"
                 :confidence="event.confidence"
               />
-              <span class="source-badge">{{ sourceLabel(event.event_source) }}</span>
+              <n-tag size="small" round>{{ sourceLabel(event.event_source) }}</n-tag>
             </div>
           </div>
 
@@ -38,11 +38,12 @@
             class="candidate-summary"
             :class="{ clamped: !expandedIds.has(event.event_id) }"
           >{{ event.summary }}</p>
-          <button
+          <n-button
             v-if="event.summary?.length > 80"
-            class="btn-expand"
+            quaternary
+            size="tiny"
             @click="toggleExpand(event.event_id)"
-          >{{ expandedIds.has(event.event_id) ? "收起" : "展开全文" }}</button>
+          >{{ expandedIds.has(event.event_id) ? "收起" : "展开全文" }}</n-button>
           <p v-if="event.confidence_reason" class="candidate-reason">{{ event.confidence_reason }}</p>
 
           <div v-if="event.driving_entities?.length" class="actor-chip-row">
@@ -57,23 +58,23 @@
 
           <!-- Normal actions -->
           <div v-if="editingEventId !== event.event_id" class="candidate-actions">
-            <button class="btn btn-adopt" @click="emit('adopt-event', { eventId: event.event_id })">采纳</button>
-            <button class="btn btn-edit" @click="startEdit(event)">编辑</button>
-            <button class="btn btn-reject" @click="emit('reject-event', { eventId: event.event_id })">拒绝</button>
+            <n-button type="primary" size="small" @click="emit('adopt-event', { eventId: event.event_id })">采纳</n-button>
+            <n-button size="small" @click="startEdit(event)">编辑</n-button>
+            <n-button size="small" @click="emit('reject-event', { eventId: event.event_id })">拒绝</n-button>
           </div>
 
           <!-- Inline edit -->
           <div v-else class="candidate-edit">
-            <textarea
-              v-model="editText"
-              rows="3"
-              class="candidate-textarea"
+            <n-input
+              v-model:value="editText"
+              type="textarea"
+              :rows="3"
               placeholder="修改事件描述后采纳…"
               @click.stop
-            ></textarea>
+            />
             <div class="candidate-edit-actions">
-              <button class="btn btn-adopt" @click.stop="submitEdit(event.event_id)">确认并采纳</button>
-              <button class="btn" @click.stop="cancelEdit">取消</button>
+              <n-button type="primary" size="small" @click.stop="submitEdit(event.event_id)">确认并采纳</n-button>
+              <n-button size="small" @click.stop="cancelEdit">取消</n-button>
             </div>
           </div>
         </article>
@@ -84,6 +85,7 @@
 
 <script setup>
 import { ref } from "vue";
+import { NButton, NInput, NTag } from "naive-ui";
 
 import DirectorStatusRibbon from "./DirectorStatusRibbon.vue";
 

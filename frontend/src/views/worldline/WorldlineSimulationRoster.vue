@@ -5,21 +5,19 @@
         <p class="roster-kicker mono">AGENTS</p>
         <p v-if="agents.length" class="roster-count mono">{{ agents.length }} 对象</p>
       </div>
-      <button
-        class="roster-refresh"
-        type="button"
+      <n-button
+        size="small"
+        circle
         :disabled="busy"
         title="刷新名册"
         @click="loadRoster"
       >
         ↻
-      </button>
+      </n-button>
     </div>
 
     <p v-if="error" class="roster-error">{{ error }}</p>
-    <div v-else-if="!agents.length && !busy" class="roster-empty">
-      <p>当前世界还没有可用对象，推进后会自动加载。</p>
-    </div>
+    <n-empty v-else-if="!agents.length && !busy" description="当前世界还没有可用对象，推进后会自动加载。" size="small" />
 
     <div v-for="group in groups" :key="group.kind" class="agent-group">
       <div class="group-label mono">{{ group.label }} · {{ group.items.length }}</div>
@@ -51,6 +49,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { NButton, NEmpty } from "naive-ui";
 
 import { getWorldlineAgents } from "../../api/worldline";
 import { formatAgentKind, formatAgentStatus, formatRoleText } from "../../utils/chineseDisplay";
@@ -176,42 +175,10 @@ function resolveSummary(agent) {
   font-size: 12px;
 }
 
-.roster-refresh {
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-full);
-  background: rgba(255, 250, 241, 0.92);
-  color: var(--text-sub);
-  cursor: pointer;
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.roster-refresh:hover {
-  border-color: var(--accent-copper);
-  color: var(--accent-copper);
-}
-
 .roster-error {
   margin: 0;
   color: var(--accent-seal);
   font-size: 13px;
-}
-
-.roster-empty {
-  padding: var(--space-md);
-  border-radius: var(--radius-md);
-  background: rgba(255, 250, 243, 0.78);
-  border: 1px dashed var(--line-soft);
-  color: var(--text-sub);
-  font-size: 13px;
-}
-
-.roster-empty p {
-  margin: 0;
 }
 
 .agent-group + .agent-group {

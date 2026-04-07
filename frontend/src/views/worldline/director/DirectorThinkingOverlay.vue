@@ -10,7 +10,7 @@
         <p class="thinking-agent">{{ thinkingInfo.agent || "system" }} 正在决策</p>
         <p v-if="thinkingInfo.question" class="thinking-question">{{ thinkingInfo.question }}</p>
         <div v-if="thinkingInfo.factors?.length" class="chip-row">
-          <span v-for="factor in thinkingInfo.factors" :key="factor" class="factor-chip">{{ factor }}</span>
+          <n-tag v-for="factor in thinkingInfo.factors" :key="factor" size="small" round>{{ factor }}</n-tag>
         </div>
       </div>
     </div>
@@ -18,6 +18,8 @@
 </template>
 
 <script setup>
+import { NTag } from "naive-ui";
+
 defineProps({
   visible: { type: Boolean, default: false },
   thinkingInfo: { type: Object, default: null },
@@ -27,15 +29,15 @@ defineProps({
 <style scoped>
 .thinking-overlay {
   display: flex;
-  gap: 16px;
+  gap: 10px;
   align-items: flex-start;
-  padding: 18px 20px;
-  border-radius: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
   background: rgba(255, 252, 245, 0.92);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(201, 149, 74, 0.35);
   box-shadow: 0 8px 24px rgba(118, 88, 43, 0.08);
-  margin-top: 14px;
+  margin-top: 10px;
   max-height: 360px;
   overflow-y: auto;
   scrollbar-width: thin;
@@ -94,13 +96,4 @@ defineProps({
   margin-top: 10px;
 }
 
-.factor-chip {
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  background: rgba(250, 236, 212, 0.92);
-  color: #6e5124;
-  word-break: break-word;
-  max-width: 100%;
-}
 </style>

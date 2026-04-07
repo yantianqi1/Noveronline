@@ -3,9 +3,9 @@
   display: grid;
   grid-template-columns:
     minmax(0, var(--worldline-left-pane-width))
-    16px
+    10px
     minmax(0, var(--worldline-mid-pane-width))
-    16px
+    10px
     minmax(0, 1fr);
   gap: 0;
   min-height: 0;
@@ -31,10 +31,10 @@
 
 .worldline-stage.left-collapsed {
   grid-template-columns:
-    44px
+    40px
     0px
     minmax(0, var(--worldline-mid-pane-width))
-    16px
+    10px
     minmax(0, 1fr);
 }
 
@@ -46,11 +46,11 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 14px 4px;
+  gap: 6px;
+  padding: 10px 4px;
   cursor: pointer;
   height: 100%;
-  border-radius: 12px;
+  border-radius: 8px;
   background: rgba(244, 237, 220, 0.72);
   border: 1px solid rgba(176, 125, 75, 0.18);
   transition: background 0.2s ease;
@@ -139,8 +139,8 @@
 }
 
 .empty-icon {
-  font-size: 64px;
-  margin-bottom: var(--space-md);
+  font-size: 48px;
+  margin-bottom: var(--space-sm);
 }
 
 /* ── Performance (right column) ── */
@@ -155,7 +155,7 @@
 
 .prepare-status-panel,
 .agent-inspector {
-  padding: 18px;
+  padding: 10px;
 }
 
 .prepare-status-head,
@@ -175,12 +175,12 @@
 
 .prepare-copy,
 .inspector-copy {
-  margin: 12px 0 0;
+  margin: 8px 0 0;
   color: var(--text-sub);
 }
 
 .prepare-progress-shell {
-  margin-top: 14px;
+  margin-top: 10px;
   height: 10px;
   border-radius: 999px;
   background: rgba(201, 176, 139, 0.2);
@@ -195,22 +195,22 @@
 .prepare-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 14px;
-  margin-top: 12px;
+  gap: 6px 10px;
+  margin-top: 8px;
   color: var(--text-dim);
   font-size: 12px;
 }
 
 .inspector-grid {
-  margin-top: 14px;
+  margin-top: 10px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .inspector-block {
   min-width: 0;
-  padding: 12px;
+  padding: 8px;
   border-radius: var(--radius-md);
   background: rgba(255, 250, 241, 0.86);
   border: 1px solid rgba(176, 125, 75, 0.16);
@@ -218,7 +218,7 @@
 
 .inspector-label {
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   color: var(--text-dim);
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -241,19 +241,19 @@
 
 .inspector-sections {
   display: grid;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .inspector-section {
-  padding: 12px 14px;
+  padding: 8px 10px;
   border-radius: var(--radius-md);
   background: rgba(255, 250, 241, 0.86);
   border: 1px solid rgba(176, 125, 75, 0.14);
 }
 
 .inspector-section-title {
-  margin: 0 0 8px;
+  margin: 0 0 4px;
   font-size: 13px;
   font-weight: 700;
   color: var(--text-dim);
@@ -263,7 +263,7 @@
 .inspector-dl {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 4px 12px;
+  gap: 4px 8px;
   margin: 0;
   font-size: 13px;
   line-height: 1.6;
@@ -308,7 +308,7 @@
 .worldline-stage.two-col {
   grid-template-columns:
     minmax(0, var(--worldline-mid-pane-width))
-    16px
+    10px
     minmax(0, 1fr);
 }
 

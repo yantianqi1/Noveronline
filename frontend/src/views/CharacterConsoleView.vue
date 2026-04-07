@@ -28,9 +28,14 @@
 
     <main class="stage-interaction stack">
       <div v-if="!selectedAgent" class="empty-interaction workbench-card">
-        <div class="empty-icon">🎭</div>
-        <h3 class="title-ancient">请选择交互对象</h3>
-        <p>在左侧名录中点选一个角色或组织，开始对话或下达指令。</p>
+        <n-empty description="在左侧名录中点选一个角色或组织，开始对话或下达指令。">
+          <template #icon>
+            <Icon icon="icon-park-outline:masks" width="48" />
+          </template>
+          <template #extra>
+            <span class="title-ancient">请选择交互对象</span>
+          </template>
+        </n-empty>
       </div>
 
       <template v-else>
@@ -70,6 +75,8 @@
 
 <script setup>
 import { computed, onMounted, ref } from "vue";
+import { NEmpty } from "naive-ui";
+import { Icon } from "@iconify/vue";
 
 import {
   chatWithWorldlineAgent,

@@ -2,7 +2,7 @@
   <div class="upload-body stack">
     <div class="field">
       <label>项目/卷宗名称</label>
-      <input v-model="upload.state.projectName" placeholder="例如：天穹秘约" :disabled="upload.state.uploadBusy" />
+      <n-input v-model:value="upload.state.projectName" placeholder="例如：天穹秘约" :disabled="upload.state.uploadBusy" />
     </div>
 
     <div
@@ -22,7 +22,7 @@
         accept=".txt,.md,.markdown,.pdf"
         @change="handleChange"
       />
-      <div class="drop-icon">📤</div>
+      <div class="drop-icon"><Icon icon="icon-park-outline:upload-one" width="40" /></div>
       <div v-if="!upload.state.files.length" class="drop-text">
         <strong>拖拽文件到这里</strong>
         <span>或点击选择 (txt, md, pdf)</span>
@@ -30,7 +30,7 @@
       <div v-else class="selected-files">
         <div v-for="item in upload.state.files" :key="upload.fileKey(item)" class="file-chip">
           <span class="file-name">{{ item.name }}</span>
-          <button class="remove-btn" @click.stop="upload.removeFile(item)">×</button>
+          <button class="remove-btn" @click.stop="upload.removeFile(item)"><Icon icon="icon-park-outline:close-small" width="14" /></button>
         </div>
       </div>
     </div>
@@ -44,30 +44,34 @@
       <div v-if="showAdvanced" class="advanced-fields stack">
         <div class="field">
           <label>分析目标</label>
-          <textarea
-            v-model="upload.state.analysisGoal"
+          <n-input
+            v-model:value="upload.state.analysisGoal"
+            type="textarea"
             placeholder="明确您的分析重点，如：重点提取支线剧情与隐藏关系。"
             :disabled="upload.state.uploadBusy"
-          ></textarea>
+            :autosize="{ minRows: 2, maxRows: 5 }"
+          />
         </div>
         <div class="field">
           <label>补充背景</label>
-          <textarea
-            v-model="upload.state.additionalContext"
+          <n-input
+            v-model:value="upload.state.additionalContext"
+            type="textarea"
             placeholder="提供世界观、术语表或既定设定，有助于提升分析精度。"
             :disabled="upload.state.uploadBusy"
-          ></textarea>
+            :autosize="{ minRows: 2, maxRows: 5 }"
+          />
         </div>
         <div class="field">
           <label>每段令牌上限</label>
-          <input
-            v-model.number="upload.state.segmentTokenLimit"
-            type="number"
-            min="5000"
-            max="200000"
-            step="5000"
+          <n-input-number
+            v-model:value="upload.state.segmentTokenLimit"
+            :min="5000"
+            :max="200000"
+            :step="5000"
             placeholder="50000"
             :disabled="upload.state.uploadBusy"
+            style="width: 100%;"
           />
           <span class="field-hint">控制每个阅读段的最大令牌数，影响分析精度和速度。默认 50000。</span>
         </div>
@@ -75,22 +79,24 @@
     </Transition>
 
     <div class="upload-actions">
-      <button class="btn primary large" :disabled="!canSubmit || upload.state.uploadBusy" @click="submitUpload">
+      <n-button type="primary" size="large" :disabled="!canSubmit || upload.state.uploadBusy" :loading="upload.state.uploadBusy" @click="submitUpload">
         {{ upload.state.uploadBusy ? "分析进行中..." : "开始分析" }}
-      </button>
-      <button
+      </n-button>
+      <n-button
         v-if="upload.state.uploadBusy && upload.state.uploadPhase === 'processing'"
-        class="btn cancel-btn"
+        size="large"
         @click="confirmCancel"
       >
         取消分析
-      </button>
+      </n-button>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from "vue";
+import { useDialog, NButton, NInput, NInputNumber } from "naive-ui";
+import { Icon } from "@iconify/vue";
 
 import { useSeedUpload } from "../../composables/useSeedUpload";
 
@@ -98,6 +104,7 @@ const upload = useSeedUpload();
 const fileInputRef = ref(null);
 const showAdvanced = ref(false);
 
+const dialog = useDialog();
 const canSubmit = computed(() => upload.state.projectName.trim() && upload.state.files.length > 0);
 
 function openPicker() {
@@ -129,9 +136,13 @@ async function submitUpload() {
 }
 
 function confirmCancel() {
-  if (confirm("确定要取消当前分析任务吗？已完成的分析数据将保留。")) {
-    upload.cancelUpload();
-  }
+  dialog.warning({
+    title: "取消分析",
+    content: "确定要取消当前分析任务吗？已完成的分析数据将保留。",
+    positiveText: "确认取消",
+    negativeText: "继续分析",
+    onPositiveClick: () => { upload.cancelUpload(); },
+  });
 }
 </script>
 
@@ -248,25 +259,6 @@ function confirmCancel() {
   margin-top: var(--space-md);
 }
 
-.cancel-btn {
-  padding: 14px 32px;
-  font-size: 16px;
-  background: transparent;
-  border: 1px solid var(--accent-seal, #9b4326);
-  color: var(--accent-seal, #9b4326);
-  border-radius: var(--radius-md, 8px);
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.cancel-btn:hover {
-  background: rgba(155, 67, 38, 0.08);
-}
-
-.large {
-  padding: 14px 48px;
-  font-size: 16px;
-}
 
 .slide-enter-active,
 .slide-leave-active {

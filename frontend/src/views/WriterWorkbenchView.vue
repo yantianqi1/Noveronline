@@ -5,13 +5,16 @@
       <ManuscriptTocPanel
         v-if="viewMode === 'manuscript'"
         :chapters="manuscriptChapterList"
-        :selected-tag="manuscriptSelectedTag"
+        :blocks="manuscriptBlocks"
+        :selected-chapter-id="manuscriptSelectedChapterId"
         :total-words="manuscriptTotalWords"
         :total-blocks="manuscriptBlocks.length"
         :untagged-count="manuscriptUntaggedCount"
         @jump="handleManuscriptJump"
         @create-chapter="handleCreateManuscriptChapter"
         @rename-chapter="handleRenameManuscriptChapter"
+        @delete-chapter="handleDeleteManuscriptChapter"
+        @move-block="handleMoveManuscriptBlock"
         @export="handleManuscriptExport"
         @back="switchViewMode('writing')"
       />
@@ -39,10 +42,11 @@
           <div class="field">
             <label>章节</label>
             <n-select
-              v-model:value="chapterId"
+              :value="chapterId"
               :options="chapterSelectOptions"
               placeholder="请选择章节"
               clearable
+              @update:value="handleChapterSelectUpdate"
             />
           </div>
           <div class="field">
@@ -179,8 +183,10 @@
         v-if="viewMode === 'manuscript'"
         ref="manuscriptProseRef"
         :blocks="manuscriptBlocks"
+        :chapters="manuscriptChapterList"
         @edit-save="handleManuscriptBlockSave"
         @delete="handleManuscriptBlockDelete"
+        @move-block="handleMoveManuscriptBlock"
       />
 
       <!-- ═══ Outline mode ═══ -->
@@ -259,12 +265,13 @@
       <div v-if="projectId" class="manuscript-toolbar">
         <template v-if="agentSceneContent && draftPhase === 'done' && !outlineData">
           <n-select
-            v-model:value="commitTargetChapterId"
+            :value="commitTargetChapterId"
             :options="commitChapterSelectOptions"
             placeholder="不归类"
             clearable
             style="max-width: 200px"
             size="small"
+            @update:value="handleCommitChapterSelectUpdate"
           />
           <n-button
             type="primary"
@@ -456,7 +463,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useDialog, NSelect, NInput, NInputNumber, NRadioGroup, NRadioButton, NButton, NTag, NCheckbox } from "naive-ui";
 import {
   adoptArchiveMemory,
@@ -488,10 +495,12 @@ import {
   commitToManuscript,
   getContinuationContext,
   updateChapter,
+  createChapter,
   getManuscript,
   updateManuscriptBlock,
   deleteManuscriptBlock,
   tagManuscriptBlocks,
+  moveManuscriptBlock,
   exportManuscript,
   getOutlineVersions,
   getOutlineVersion,
@@ -611,6 +620,7 @@ const manuscriptBlocks = ref([]);
 const manuscriptTotalWords = ref(0);
 const manuscriptProseRef = ref(null);
 const manuscriptSelectedTag = ref(null);
+const manuscriptSelectedChapterId = ref(null);
 
 const taskTypeOptions = [
   { value: "write_scene", label: "写场景" },
@@ -633,20 +643,29 @@ const activeGridColumns = computed(() => {
 });
 
 const manuscriptChapterList = computed(() => {
+  // Build from real chapter_content rows, augmented with block counts
   const map = new Map();
-  for (const b of manuscriptBlocks.value) {
-    const tag = b.chapter_tag;
-    if (!tag) continue;
-    if (!map.has(tag)) map.set(tag, { tag, blockCount: 0, wordCount: 0 });
-    const entry = map.get(tag);
-    entry.blockCount++;
-    entry.wordCount += b.word_count || 0;
+  for (const ch of chapterOptions.value) {
+    map.set(ch.chapter_id, {
+      chapter_id: ch.chapter_id,
+      title: ch.title,
+      order: ch.order,
+      blockCount: 0,
+      wordCount: 0,
+    });
   }
-  return Array.from(map.values());
+  for (const b of manuscriptBlocks.value) {
+    if (b.chapter_id && map.has(b.chapter_id)) {
+      const ch = map.get(b.chapter_id);
+      ch.blockCount++;
+      ch.wordCount += b.word_count || 0;
+    }
+  }
+  return [...map.values()].sort((a, b) => a.order - b.order);
 });
 
 const manuscriptUntaggedCount = computed(() =>
-  manuscriptBlocks.value.filter(b => !b.chapter_tag).length
+  manuscriptBlocks.value.filter(b => !b.chapter_id).length
 );
 const povOptions = computed(() => resolveWriterPovOptions(scopeType.value, projectPovs.value, worldlineAgents.value));
 const canSubmit = computed(() => {
@@ -682,9 +701,13 @@ const historySelectionTrace = computed(() => contextPack.value?.history_recall?.
 const projectSelectOptions = computed(() =>
   projects.value.map(item => ({ label: `${item.name} · ${item.project_id}`, value: item.project_id }))
 );
-const chapterSelectOptions = computed(() =>
-  chapterOptions.value.map(item => ({ label: `第${item.order}章 · ${item.title}`, value: item.chapter_id }))
-);
+const chapterSelectOptions = computed(() => {
+  const opts = chapterOptions.value.map(item => ({ label: `第${item.order}章 · ${item.title}`, value: item.chapter_id }));
+  if (projectId.value) {
+    opts.push({ label: '+ 新建章节...', value: '__create_new__', style: { color: '#c09060', fontWeight: 500 } });
+  }
+  return opts;
+});
 const povSelectOptions = computed(() =>
   povOptions.value.map(item => ({ label: item, value: item }))
 );
@@ -694,9 +717,11 @@ const sessionSelectOptions = computed(() =>
 const presetSelectOptions = computed(() =>
   presets.value.map(p => ({ label: p.name, value: p.preset_id }))
 );
-const commitChapterSelectOptions = computed(() =>
-  chapterOptions.value.map(item => ({ label: `第${item.order}章 · ${item.title}`, value: item.chapter_id }))
-);
+const commitChapterSelectOptions = computed(() => {
+  const opts = chapterOptions.value.map(item => ({ label: `第${item.order}章 · ${item.title}`, value: item.chapter_id }));
+  opts.push({ label: '+ 新建章节...', value: '__create_new__', style: { color: '#c09060', fontWeight: 500 } });
+  return opts;
+});
 
 watch(chapterId, async (newVal) => {
   if (newVal) {
@@ -1272,22 +1297,26 @@ async function handleCommitToManuscript(content = null) {
   if (!projectId.value) return;
   const text = content || agentSceneContent.value;
   if (!text.trim()) return;
-  // Resolve chapter tag from commit target selector (or current chapter as fallback)
+  // Resolve target chapter from commit target selector (or current chapter as fallback)
   const targetId = commitTargetChapterId.value || chapterId.value;
   const chapter = targetId ? chapterOptions.value.find(item => item.chapter_id === targetId) : null;
-  const chapterTag = chapter ? `第${chapter.order}章 · ${chapter.title}` : undefined;
+  const chapterLabel = chapter ? `第${chapter.order}章 · ${chapter.title}` : undefined;
   try {
     commitBusy.value = true;
     const commitResult = await commitToManuscript(projectId.value, {
       content: text,
       source_scene_id: selectedSceneId.value || undefined,
-      chapter_tag: chapterTag,
+      chapter_id: targetId || undefined,
+      pov_entity_id: povCharacter.value || undefined,
+      involved_entities_json: involvedEntityIds.value.length
+        ? JSON.stringify(involvedEntityIds.value)
+        : undefined,
     });
     const blockData = commitResult?.data || commitResult;
     if (blockData?.block_id) {
       lastCommittedBlockId.value = blockData.block_id;
     }
-    message.value = chapterTag ? `已提交到稿件 [${chapterTag}]` : "已提交到稿件";
+    message.value = chapterLabel ? `已提交到稿件 [${chapterLabel}]` : "已提交到稿件";
     showContinueButton.value = true;
     commitDone.value = true;
   } catch (err) {
@@ -1419,10 +1448,11 @@ async function loadChapterOutline() {
   }
 }
 
-function handleManuscriptJump(tag) {
-  manuscriptSelectedTag.value = tag;
-  if (tag && manuscriptProseRef.value) {
-    manuscriptProseRef.value.scrollToChapter(tag);
+function handleManuscriptJump(chapterId) {
+  manuscriptSelectedChapterId.value = chapterId;
+  manuscriptSelectedTag.value = chapterId; // backward compat
+  if (chapterId && manuscriptProseRef.value) {
+    manuscriptProseRef.value.scrollToChapter(chapterId);
   }
 }
 
@@ -1455,30 +1485,112 @@ function handleManuscriptBlockDelete(blockId) {
   });
 }
 
-function handleCreateManuscriptChapter(name) {
-  // Chapter is just a tag — it will appear once a block is tagged with it.
-  // For now, we create a placeholder by tagging the first untagged block,
-  // or just show the name for future use.
-  // Since chapters are just tags on blocks, there's nothing to persist
-  // until blocks are committed. We just note it for the UI.
-  message.value = `章节「${name}」已创建，提交内容时将自动归入此章节`;
+function promptCreateChapter(onCreated) {
+  const inputVal = ref('');
+  writerDialog.create({
+    title: '新建章节',
+    content: () => h(NInput, {
+      value: inputVal.value,
+      'onUpdate:value': v => { inputVal.value = v; },
+      placeholder: '输入章节名称...',
+      autofocus: true,
+    }),
+    positiveText: '创建',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      const name = inputVal.value.trim();
+      if (!name) return false;
+      const resp = await createChapter(projectId.value, { title: name });
+      const newChapter = resp.data;
+      const chaptersResp = await getChapters(projectId.value);
+      chapterOptions.value = chaptersResp.data?.chapters || [];
+      message.value = `章节「${name}」已创建`;
+      if (onCreated) onCreated(newChapter.chapter_id);
+    },
+  });
 }
 
-async function handleRenameManuscriptChapter(oldTag, newTag) {
-  // Re-tag all blocks with oldTag to newTag
-  const blockIds = manuscriptBlocks.value
-    .filter(b => b.chapter_tag === oldTag)
-    .map(b => b.block_id);
-  if (!blockIds.length) return;
+function handleChapterSelectUpdate(val) {
+  if (val === '__create_new__') {
+    promptCreateChapter((newId) => { chapterId.value = newId; });
+    return;
+  }
+  chapterId.value = val;
+}
+
+function handleCommitChapterSelectUpdate(val) {
+  if (val === '__create_new__') {
+    promptCreateChapter((newId) => { commitTargetChapterId.value = newId; });
+    return;
+  }
+  commitTargetChapterId.value = val;
+}
+
+async function handleCreateManuscriptChapter(name) {
+  if (!projectId.value || !name.trim()) return;
   try {
-    await tagManuscriptBlocks(projectId.value, {
-      block_ids: blockIds,
-      chapter_tag: newTag,
+    await createChapter(projectId.value, { title: name.trim() });
+    // Refresh chapter list so the new chapter appears everywhere
+    const optionsResponse = await getChapters(projectId.value);
+    chapterOptions.value = optionsResponse.data?.chapters || [];
+    message.value = `章节「${name}」已创建`;
+  } catch (err) {
+    error.value = err.message || "创建章节失败";
+  }
+}
+
+async function handleRenameManuscriptChapter(chapterIdToRename, newTitle) {
+  if (!projectId.value || !chapterIdToRename || !newTitle.trim()) return;
+  try {
+    await updateChapter(chapterIdToRename, {
+      title: newTitle.trim(),
+      project_id: projectId.value,
     });
+    // Refresh chapter list and manuscript blocks
+    const optionsResponse = await getChapters(projectId.value);
+    chapterOptions.value = optionsResponse.data?.chapters || [];
     await loadManuscriptBlocks();
-    message.value = `章节已重命名: ${oldTag} → ${newTag}`;
+    message.value = `章节已重命名为「${newTitle}」`;
   } catch (e) {
     error.value = e.message || "重命名章节失败";
+  }
+}
+
+async function handleMoveManuscriptBlock(blockId, targetChapterId) {
+  if (!projectId.value || !blockId) return;
+  try {
+    await moveManuscriptBlock(blockId, {
+      project_id: projectId.value,
+      chapter_id: targetChapterId || null,
+    });
+    await loadManuscriptBlocks();
+    message.value = targetChapterId ? "已移动到目标章节" : "已移出章节";
+  } catch (e) {
+    error.value = e.message || "移动稿件段落失败";
+  }
+}
+
+async function handleDeleteManuscriptChapter(chapterIdToDelete) {
+  if (!projectId.value || !chapterIdToDelete) return;
+  // First unassign all blocks in this chapter
+  const blocksInChapter = manuscriptBlocks.value.filter(b => b.chapter_id === chapterIdToDelete);
+  try {
+    for (const b of blocksInChapter) {
+      await moveManuscriptBlock(b.block_id, {
+        project_id: projectId.value,
+        chapter_id: null,
+      });
+    }
+    // Delete the chapter itself
+    const { deleteChapter } = await import("../api/writerAgent.js");
+    await deleteChapter(chapterIdToDelete, projectId.value);
+    // Refresh
+    const optionsResponse = await getChapters(projectId.value);
+    chapterOptions.value = optionsResponse.data?.chapters || [];
+    await loadManuscriptBlocks();
+    message.value = "章节已删除，段落已移至未归类";
+  } catch (e) {
+    error.value = e.message || "删除章节失败";
   }
 }
 

@@ -5,12 +5,12 @@
         <h2 class="card-title">对象名册</h2>
         <p>从当前世界线自动读取角色、组织和关系对象。</p>
       </div>
-      <button class="btn" :disabled="!sessionId || busy" @click="loadRoster">刷新</button>
+      <n-button :disabled="!sessionId || busy" @click="loadRoster" size="small">刷新</n-button>
     </div>
 
-    <div v-if="!sessionId" class="empty">先在左侧选择世界线会话，再读取当前世界的对象名册。</div>
-    <p v-else-if="error" class="status-text error">{{ error }}</p>
-    <div v-else-if="!agents.length && !busy" class="empty">当前世界还没有可用对象。</div>
+    <n-empty v-if="!sessionId" description="先在左侧选择世界线会话，再读取当前世界的对象名册。" />
+    <n-tag v-else-if="error" type="error">{{ error }}</n-tag>
+    <n-empty v-else-if="!agents.length && !busy" description="当前世界还没有可用对象。" />
 
     <div v-for="group in groups" :key="group.kind" class="agent-group">
       <div class="seed-title">{{ group.label }} · {{ group.items.length }}</div>
@@ -45,6 +45,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { NButton, NEmpty, NTag } from "naive-ui";
 
 import { getWorldlineAgents } from "../../api/worldline";
 import { formatAgentKind, formatAgentStatus, formatRoleText } from "../../utils/chineseDisplay";
@@ -112,20 +113,20 @@ function formatTime(value) {
 
 <style scoped>
 .roster-card {
-  padding: 16px;
+  padding: 10px;
 }
 
 .agent-group + .agent-group {
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .agent-card {
   width: 100%;
-  margin-top: 8px;
+  margin-top: 6px;
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #fffaf1;
-  padding: 11px;
+  padding: 8px;
   text-align: left;
 }
 
@@ -157,7 +158,4 @@ function formatTime(value) {
   color: var(--text-main);
 }
 
-.status-text.error {
-  color: #9b4326;
-}
 </style>

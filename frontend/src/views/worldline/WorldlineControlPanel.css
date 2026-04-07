@@ -119,7 +119,7 @@
 .summary-card,
 .action-box,
 .launchpad-main {
-  padding: 14px 16px;
+  padding: 10px 12px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.94);
@@ -263,7 +263,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 14px 16px;
+  padding: 10px 12px;
   border-radius: var(--radius-md);
   border: 1px solid rgba(61, 90, 128, 0.14);
   background: rgba(61, 90, 128, 0.05);

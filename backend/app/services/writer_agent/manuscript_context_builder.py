@@ -35,6 +35,55 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
 
+_EVENTS_BUDGET_RATIO = 0.10
+
+
+def _collect_recent_events(
+    db: NovelDB,
+    project_id: str,
+    pov_entity_id: str,
+    last_block: dict,
+    token_budget: int,
+) -> list[dict[str, Any]]:
+    """Collect recent character events for POV and involved entities."""
+    budget = int(token_budget * _EVENTS_BUDGET_RATIO)
+    tokens_used = 0
+    results: list[dict[str, Any]] = []
+
+    # Gather entity IDs to query: POV first, then involved entities
+    entity_ids: list[str] = []
+    if pov_entity_id:
+        entity_ids.append(pov_entity_id)
+    try:
+        involved = json.loads(last_block.get("involved_entities_json") or "[]")
+        if isinstance(involved, list):
+            for eid in involved:
+                if eid and eid not in entity_ids:
+                    entity_ids.append(str(eid))
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    for eid in entity_ids[:5]:  # cap to avoid excessive queries
+        try:
+            events = db.get_entity_recent_events(project_id, eid, limit=3)
+        except Exception:
+            continue
+        for ev in events:
+            text = f"[{ev.get('event_type', '')}] {ev.get('summary', '')}"
+            tokens = _estimate_tokens(text)
+            if tokens_used + tokens > budget:
+                return results
+            results.append({
+                "entity_id": eid,
+                "event_type": ev.get("event_type", ""),
+                "summary": ev.get("summary", ""),
+                "chapter_order": ev.get("chapter_order", 0),
+            })
+            tokens_used += tokens
+
+    return results
+
+
 def build_continuation_context(
     project_id: str,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
@@ -58,6 +107,7 @@ def build_continuation_context(
         stats = db.get_manuscript_stats(project_id)
         return {
             "recent_summaries": [],
+            "writing_styles": [],
             "active_threads": [],
             "last_pov": "",
             "last_location": "",
@@ -105,6 +155,7 @@ def build_continuation_context(
             break
         summaries.append({
             "block_order": block["block_order"],
+            "chapter_id": block.get("chapter_id", ""),
             "chapter_tag": block.get("chapter_tag", ""),
             "summary": summary,
         })
@@ -143,18 +194,47 @@ def build_continuation_context(
     last_location = last_block.get("location") or ""
     narrative_note = last_block.get("narrative_note") or ""
 
+    # --- Recent character events (use reserved 10% budget) ---
+    recent_character_events = _collect_recent_events(
+        db, project_id, last_pov, last_block, token_budget,
+    )
+
     stats = db.get_manuscript_stats(project_id)
+
+    # --- Enabled writing_style assets (global + project), if any ---
+    writing_styles: list[dict[str, Any]] = []
+    try:
+        from ..assets.assets_service import AssetsService
+        assets_svc = AssetsService()
+        for s in assets_svc.list_merged(
+            project_id=project_id,
+            asset_type="writing_style",
+            enabled_only=True,
+            limit=10,
+        ):
+            writing_styles.append({
+                "asset_id": s["asset_id"],
+                "title": s.get("title", ""),
+                "category": s.get("category", ""),
+                "summary": s.get("summary", ""),
+                "content": s.get("content", ""),
+            })
+    except Exception:
+        logger.warning("failed to load writing_style assets", exc_info=True)
 
     return {
         "recent_summaries": summaries,
+        "writing_styles": writing_styles,
         "active_threads": active_threads,
         "last_pov": last_pov,
         "last_location": last_location,
         "narrative_note": narrative_note,
         "tail_text": tail_text,
+        "recent_character_events": recent_character_events,
         "total_words": stats["total_words"],
         "total_blocks": stats["total_blocks"],
         "last_block_id": last_block.get("block_id", ""),
         "last_block_order": last_block.get("block_order", 0),
+        "last_chapter_id": last_block.get("chapter_id", ""),
         "last_chapter_tag": last_block.get("chapter_tag", ""),
     }

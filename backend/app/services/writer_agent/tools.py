@@ -117,9 +117,13 @@ NOVEL_TOOLS: list[dict] = [
                             "threads",
                             "evidence",
                             "timeline",
+                            "arcs",
+                            "segments",
+                            "volumes",
+                            "consistency",
                             "all",
                         ],
-                        "description": "搜索范围：entities/chapters/scenes/memory/relationships/threads/evidence/timeline/all，默认 all",
+                        "description": "搜索范围：entities/chapters/scenes/memory/relationships/threads/evidence/timeline/arcs/segments/volumes/consistency/all，默认 all",
                     },
                     "limit": {
                         "type": "integer",
@@ -159,7 +163,7 @@ NOVEL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_world_state",
-            "description": "获取世界线会话的当前状态，包括 Agent 状态和近期事件。",
+            "description": "获取世界线会话的当前状态，包括 Agent 状态和近期事件。可选按分支过滤。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -167,12 +171,83 @@ NOVEL_TOOLS: list[dict] = [
                         "type": "string",
                         "description": "世界线会话 ID",
                     },
+                    "branch_id": {
+                        "type": "string",
+                        "description": "可选，分支 ID。不提供则返回所有分支数据",
+                    },
                     "entity_id": {
                         "type": "string",
                         "description": "可选，限定查询某个实体的状态",
                     },
                 },
                 "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_worldline_branches",
+            "description": "列出世界线会话的所有分支及其基本信息（标题、核心变化、当前步数、状态）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "世界线会话 ID",
+                    },
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_branch_timeline",
+            "description": "获取指定分支的事件时间线，按步骤顺序排列。可用于了解该分支的世界演化历史。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "世界线会话 ID",
+                    },
+                    "branch_id": {
+                        "type": "string",
+                        "description": "分支 ID",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回事件数量上限，默认 20",
+                    },
+                },
+                "required": ["session_id", "branch_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_branch_agent_state",
+            "description": "获取指定分支中 Agent 的当前状态。可选限定到某个实体。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "世界线会话 ID",
+                    },
+                    "branch_id": {
+                        "type": "string",
+                        "description": "分支 ID",
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "description": "可选，限定查询某个实体",
+                    },
+                },
+                "required": ["session_id", "branch_id"],
             },
         },
     },
@@ -198,6 +273,75 @@ NOVEL_TOOLS: list[dict] = [
     {"type": "function", "function": {"name": "query_character_timeline", "description": "查询角色的事件时间线：行动、状态变化、获得的知识等，按故事顺序排列。", "parameters": {"type": "object", "properties": {"name": {"type": "string", "description": "角色名"}, "event_type": {"type": "string", "enum": ["action", "state_change", "knowledge", "emotional", "all"], "description": "事件类型过滤，默认 all"}, "limit": {"type": "integer", "description": "返回数量上限，默认 20"}}, "required": ["name"]}}},
     {"type": "function", "function": {"name": "query_thread_history", "description": "查询伏笔线索的完整生命周期：开启、推进、解决的全过程。", "parameters": {"type": "object", "properties": {"thread_key": {"type": "string", "description": "伏笔线索名称或关键词"}}, "required": ["thread_key"]}}},
     {"type": "function", "function": {"name": "search_world_rules", "description": "搜索世界观规则及其原文证据链。", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}, "limit": {"type": "integer", "description": "返回数量上限，默认 10"}}, "required": ["query"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "get_story_overview",
+            "description": "获取故事全局概览：当前叙事阶段、总段数、叙事弧线摘要、卷册摘要。用于了解故事的宏观结构和进展。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_arcs": {
+                        "type": "boolean",
+                        "description": "是否包含叙事弧线摘要，默认 true",
+                    },
+                    "include_volumes": {
+                        "type": "boolean",
+                        "description": "是否包含卷册摘要，默认 true",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_segment_summaries",
+            "description": "查询逐段精读摘要：每个阅读段落的详细叙事摘要，以及精读过程中发现的设定一致性注释（矛盾/逻辑问题）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "segment_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，指定段落ID列表（如 ['seg_001', 'seg_005']）。不提供则按顺序返回",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始偏移量，默认 0",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回数量上限，默认 30",
+                    },
+                    "include_consistency_notes": {
+                        "type": "boolean",
+                        "description": "是否包含一致性注释，默认 true",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_story_ontology",
+            "description": "获取故事本体论定义：该故事世界的实体类型（角色、组织、地点等）和关系类型的结构化分类。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["entity_type", "edge_type", "all"],
+                        "description": "查询类型：entity_type/edge_type/all，默认 all",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
     # --- Write tools (incremental world data maintenance) ---
     {
         "type": "function",
@@ -215,6 +359,12 @@ NOVEL_TOOLS: list[dict] = [
                     "hidden_tension": {"type": "string", "description": "内在矛盾"},
                     "current_objective": {"type": "string", "description": "当前目标"},
                     "aliases": {"type": "array", "items": {"type": "string"}, "description": "别名列表"},
+                    "ultimate_goal": {"type": "string", "description": "终极目标"},
+                    "surface_mask": {"type": "string", "description": "表面伪装/外在形象"},
+                    "values_text": {"type": "string", "description": "价值观"},
+                    "fears_text": {"type": "string", "description": "恐惧/弱点"},
+                    "decision_pattern": {"type": "string", "description": "决策模式"},
+                    "agent_behavior_hint": {"type": "string", "description": "行为提示（供 agent 参考）"},
                 },
                 "required": ["action", "name"],
             },
@@ -275,6 +425,23 @@ NOVEL_TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_character_event",
+            "description": "记录角色事件（行动、状态变化、获得知识、情感转变），用于构建角色时间线。写作过程中应主动记录关键角色事件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "角色名称"},
+                    "event_type": {"type": "string", "enum": ["action", "state_change", "knowledge", "emotional"], "description": "事件类型"},
+                    "summary": {"type": "string", "description": "事件摘要"},
+                    "chapter_order": {"type": "integer", "description": "关联章节序号（可选）"},
+                },
+                "required": ["name", "event_type", "summary"],
+            },
+        },
+    },
 ]
 
 # Manuscript-specific tools (added to agent toolset during continuation tasks)
@@ -293,6 +460,10 @@ MANUSCRIPT_TOOLS: list[dict] = [
                     "token_budget": {
                         "type": "integer",
                         "description": "token 预算上限，默认 8000",
+                    },
+                    "last_block_id": {
+                        "type": "string",
+                        "description": "从此稿件块末尾续写，如不提供则使用最新块",
                     },
                 },
                 "required": [],
@@ -334,8 +505,87 @@ MANUSCRIPT_TOOLS: list[dict] = [
     },
 ]
 
+# ----------------------------------------------------------------------
+# Asset library tools (cross-project knowledge: writing styles, world-views,
+# character archetypes, prompt templates, etc.)
+# ----------------------------------------------------------------------
+ASSET_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_assets",
+            "description": (
+                "在资产库（全局 + 当前项目）中按关键词全文搜索可被 agent 调用的资产，"
+                "如写作风格(writing_style)、作家风格(author_style)、世界观(worldview)、"
+                "角色原型(character_archetype)、提示词模板(prompt_template)、稿件块(manuscript_block) 等。"
+                "只返回已启用 (enabled) 的资产。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "关键词，至少 3 个字符"},
+                    "asset_type": {
+                        "type": "string",
+                        "description": "可选：限定资产类型，例如 writing_style / worldview / character_archetype",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "可选：限定创作者自定义分类",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "project", "all"],
+                        "description": "搜索范围，默认 all（项目+全局合并）",
+                    },
+                    "limit": {"type": "integer", "description": "返回数量上限，默认 10"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_asset",
+            "description": "按 asset_id 取出完整资产内容（content + payload），用于把已搜索到的资产展开到上下文。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "资产 ID"},
+                },
+                "required": ["asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_assets",
+            "description": (
+                "列出某一类资产的简表（标题/分类/摘要），便于 agent 先看清单再决定取用哪一条。"
+                "默认只列已启用的资产。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_type": {"type": "string", "description": "资产类型"},
+                    "category": {"type": "string", "description": "可选：分类过滤"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "project", "all"],
+                        "description": "默认 all",
+                    },
+                    "limit": {"type": "integer", "description": "默认 30"},
+                },
+                "required": ["asset_type"],
+            },
+        },
+    },
+]
+
 TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in NOVEL_TOOLS}
 MANUSCRIPT_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in MANUSCRIPT_TOOLS}
+ASSET_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in ASSET_TOOLS}
 
 # Human-readable display formatters for timeline log
 TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
@@ -345,9 +595,12 @@ TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
     "query_scene": lambda inp: f"查询场景：{inp.get('chapter_id', '?')}" + (f" #{inp['scene_order']}" if inp.get("scene_order") else ""),
     "search_settings": lambda inp: f"搜索设定：{inp.get('query', '?')}",
     "get_recent_scenes": lambda inp: f"获取最近 {inp.get('count', 2)} 个场景",
-    "get_world_state": lambda _: "查询世界线状态",
+    "get_world_state": lambda inp: f"查询世界线状态" + (f"（分支 {inp['branch_id']}）" if inp.get("branch_id") else ""),
+    "list_worldline_branches": lambda inp: f"列出分支：{inp.get('session_id', '?')}",
+    "get_branch_timeline": lambda inp: f"查询分支时间线：{inp.get('branch_id', '?')}",
+    "get_branch_agent_state": lambda inp: f"查询分支 Agent 状态：{inp.get('branch_id', '?')}",
     "get_open_threads": lambda inp: f"获取未解决伏笔（至第{inp.get('up_to_chapter', '?')}章）",
-    "get_manuscript_context": lambda inp: f"获取稿件续写上下文（预算{inp.get('token_budget', 8000)}）",
+    "get_manuscript_context": lambda inp: f"获取稿件续写上下文（预算{inp.get('token_budget', 8000)}" + (f"，锚定{inp['last_block_id']}" if inp.get("last_block_id") else "") + "）",
     "search_manuscript": lambda inp: f"搜索稿件：{inp.get('query', '?')}",
     "get_manuscript_stats": lambda _: "获取稿件概况",
     "get_character_voice": lambda inp: f"获取角色语言风格：{inp.get('name', '?')}",
@@ -355,8 +608,14 @@ TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
     "query_character_timeline": lambda inp: f"查询角色时间线：{inp.get('name', '?')}",
     "query_thread_history": lambda inp: f"查询伏笔历史：{inp.get('thread_key', '?')}",
     "search_world_rules": lambda inp: f"搜索世界观规则：{inp.get('query', '?')}",
+    "get_story_overview": lambda inp: "故事全局概览",
+    "query_segment_summaries": lambda inp: f"逐段摘要 (offset={inp.get('offset', 0)})",
+    "get_story_ontology": lambda inp: f"故事本体论 ({inp.get('kind', 'all')})",
     "manage_entity": lambda inp: f"{'创建' if inp.get('action') == 'create' else '更新'}实体：{inp.get('name', '?')}",
     "manage_thread": lambda inp: f"{'创建' if inp.get('action') == 'create' else '更新'}伏笔：{inp.get('thread_key', '?')}",
     "manage_world_rule": lambda inp: f"记录世界规则：{inp.get('fact_text', '?')[:30]}",
     "manage_relationship": lambda inp: f"管理关系：{inp.get('entity_a', '?')} ↔ {inp.get('entity_b', '?')}",
+    "search_assets": lambda inp: f"搜索资产：{inp.get('query', '?')}" + (f" [{inp.get('asset_type')}]" if inp.get("asset_type") else ""),
+    "get_asset": lambda inp: f"取资产：{inp.get('asset_id', '?')}",
+    "list_assets": lambda inp: f"列资产：{inp.get('asset_type', '?')}",
 }

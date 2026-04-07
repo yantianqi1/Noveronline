@@ -73,10 +73,23 @@ class WorldlineAgentRegistry:
         text = (agent_ref or "").strip()
         if not text:
             return None
+        # Use cached index to avoid O(N) rebuild per call
+        index = self._agent_index(branch)
+        return index.get(text)
+
+    def _agent_index(self, branch) -> Dict[str, Dict[str, Any]]:
+        """Build a lookup dict keyed on agent_id, display_name, and source_ref."""
+        cache_key = id(branch)
+        if hasattr(self, "_cached_index_key") and self._cached_index_key == cache_key:
+            return self._cached_index
+        index: Dict[str, Dict[str, Any]] = {}
         for agent in self.list_agents(branch):
-            if text in {agent["agent_id"], agent["display_name"], agent["source_ref"]}:
-                return agent
-        return None
+            for key in (agent["agent_id"], agent["display_name"], agent["source_ref"]):
+                if key:
+                    index[key] = agent
+        self._cached_index = index
+        self._cached_index_key = cache_key
+        return index
 
     def find_relation_state(self, relationship_states: List[Dict[str, Any]], agent_name: str) -> Optional[Dict[str, Any]]:
         for item in reversed(relationship_states):

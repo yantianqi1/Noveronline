@@ -1,9 +1,6 @@
 <template>
-  <article class="workbench-card panel bindings-panel">
-    <div class="panel-head">
-      <h2 class="card-title">模块绑定</h2>
-      <p class="panel-desc">为每个业务模块指定"渠道 + 模型"组合。</p>
-    </div>
+  <n-card title="模块绑定" class="bindings-panel">
+    <p class="panel-desc">为每个业务模块指定"渠道 + 模型"组合。</p>
 
     <div v-for="group in groupedModules" :key="group.label" class="binding-group">
       <h3 class="group-label">{{ group.label }}</h3>
@@ -19,55 +16,58 @@
             <span class="status-dot" :class="bindingStatusClass(module)"></span>
           </div>
 
-          <select
-            class="row-select"
-            :value="drafts[module.module_key]?.channelKey || ''"
-            @change="handleChannelChange(module.module_key, $event.target.value)"
-          >
-            <option value="">渠道</option>
-            <option
-              v-for="channel in channels"
-              :key="channel.channel_key"
-              :value="channel.channel_key"
-              :disabled="!channel.is_enabled"
-            >{{ channel.name }}</option>
-          </select>
+          <n-select
+            size="small"
+            :value="drafts[module.module_key]?.channelKey || null"
+            :options="channelOptions"
+            placeholder="渠道"
+            @update:value="(val) => handleChannelChange(module.module_key, val || '')"
+          />
 
-          <select
-            class="row-select"
-            :value="drafts[module.module_key]?.modelId || ''"
-            @change="handleModelChange(module.module_key, $event.target.value)"
-          >
-            <option value="">模型</option>
-            <option
-              v-for="model in availableModels(drafts[module.module_key]?.channelKey)"
-              :key="model.model_id"
-              :value="model.model_id"
-            >{{ model.model_id }}</option>
-          </select>
+          <n-select
+            size="small"
+            :value="drafts[module.module_key]?.modelId || null"
+            :options="modelOptions(drafts[module.module_key]?.channelKey)"
+            placeholder="模型"
+            @update:value="(val) => handleModelChange(module.module_key, val || '')"
+          />
 
           <div class="row-actions">
-            <button
-              class="btn-mini primary"
-              :disabled="saveDisabled(module.module_key) || savingKey === module.module_key"
-              @click="saveBinding(module.module_key)"
-            >{{ savingKey === module.module_key ? "..." : "保存" }}</button>
-            <button
-              class="btn-mini"
-              :disabled="!module.binding || removingKey === module.module_key"
-              @click="removeBinding(module.module_key)"
-            >解绑</button>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  size="tiny"
+                  type="primary"
+                  :disabled="saveDisabled(module.module_key) || savingKey === module.module_key"
+                  :loading="savingKey === module.module_key"
+                  @click="saveBinding(module.module_key)"
+                >保存</n-button>
+              </template>
+              保存当前绑定
+            </n-tooltip>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  size="tiny"
+                  :disabled="!module.binding || removingKey === module.module_key"
+                  :loading="removingKey === module.module_key"
+                  @click="removeBinding(module.module_key)"
+                >解绑</n-button>
+              </template>
+              解除模块绑定
+            </n-tooltip>
           </div>
         </div>
       </div>
     </div>
 
-    <div v-if="!modules.length" class="empty">模块注册表为空。</div>
-  </article>
+    <n-empty v-if="!modules.length" description="模块注册表为空。" />
+  </n-card>
 </template>
 
 <script setup>
 import { ref, computed, watch } from "vue";
+import { NButton, NCard, NEmpty, NSelect, NTooltip } from "naive-ui";
 
 import {
   syncBindingDrafts,
@@ -78,7 +78,7 @@ const MODULE_GROUPS = [
   { label: "种子分析", prefixes: ["story_ontology", "local_block_facts", "contextual_block_analysis", "anchor_point_summary", "entity_resolution", "sequential_reading", "character_agent_profile"] },
   { label: "档案与图谱", prefixes: ["narrative_archives", "novel_chapter_summarizer"] },
   { label: "世界线推演", prefixes: ["worldline_", "parallel_world_config"] },
-  { label: "写作", prefixes: ["novel_draft_", "writer_"] },
+  { label: "写作", prefixes: ["writer_"] },
 ];
 
 const props = defineProps({
@@ -106,6 +106,22 @@ watch(
   },
   { immediate: true, deep: true },
 );
+
+const channelOptions = computed(() =>
+  props.channels.map((ch) => ({
+    label: ch.name,
+    value: ch.channel_key,
+    disabled: !ch.is_enabled,
+  })),
+);
+
+function modelOptions(channelKey) {
+  const models = availableModels(channelKey);
+  return models.map((m) => ({
+    label: m.model_id,
+    value: m.model_id,
+  }));
+}
 
 const groupedModules = computed(() => {
   const assigned = new Set();
@@ -194,22 +210,13 @@ function applyDraftPatch(moduleKey, patch) {
 </script>
 
 <style scoped>
-.bindings-panel {
-  padding: 16px;
-}
-
-.panel-head {
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
 .panel-desc {
-  margin: 4px 0 0;
+  margin: 0 0 12px;
   color: var(--text-sub);
   font-size: 13px;
 }
 
-/* ── Groups ──────────────────────────────────────── */
+/* -- Groups -- */
 
 .binding-group {
   margin-top: 14px;
@@ -226,7 +233,7 @@ function applyDraftPatch(moduleKey, patch) {
   border-bottom: 1px solid rgba(176, 125, 75, 0.12);
 }
 
-/* ── Compact rows ────────────────────────────────── */
+/* -- Compact rows -- */
 
 .binding-rows {
   display: grid;
@@ -267,7 +274,7 @@ function applyDraftPatch(moduleKey, patch) {
   text-overflow: ellipsis;
 }
 
-/* ── Status dot ──────────────────────────────────── */
+/* -- Status dot -- */
 
 .status-dot {
   width: 7px;
@@ -288,25 +295,7 @@ function applyDraftPatch(moduleKey, patch) {
   background: rgba(160, 150, 140, 0.35);
 }
 
-/* ── Selects ─────────────────────────────────────── */
-
-.row-select {
-  width: 100%;
-  padding: 5px 8px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.9);
-  font-size: 12px;
-  color: var(--text-main);
-  cursor: pointer;
-}
-
-.row-select:focus {
-  outline: none;
-  border-color: rgba(130, 92, 43, 0.5);
-}
-
-/* ── Action buttons ──────────────────────────────── */
+/* -- Action buttons -- */
 
 .row-actions {
   display: flex;
@@ -314,49 +303,7 @@ function applyDraftPatch(moduleKey, patch) {
   flex-shrink: 0;
 }
 
-.btn-mini {
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 11px;
-  cursor: pointer;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 250, 240, 0.8);
-  color: var(--text-sub);
-  transition: background 0.15s ease;
-  white-space: nowrap;
-}
-
-.btn-mini:hover:not(:disabled) {
-  background: rgba(245, 235, 215, 0.9);
-}
-
-.btn-mini.primary {
-  background: rgba(201, 149, 74, 0.12);
-  color: #6e5124;
-  border-color: rgba(201, 149, 74, 0.3);
-}
-
-.btn-mini.primary:hover:not(:disabled) {
-  background: rgba(201, 149, 74, 0.22);
-}
-
-.btn-mini:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* ── Empty ───────────────────────────────────────── */
-
-.empty {
-  margin-top: 16px;
-  padding: 16px;
-  border: 1px dashed var(--line-soft);
-  border-radius: 10px;
-  color: var(--text-sub);
-  text-align: center;
-}
-
-/* ── Responsive ──────────────────────────────────── */
+/* -- Responsive -- */
 
 @media (max-width: 900px) {
   .binding-row {

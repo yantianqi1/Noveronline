@@ -1,22 +1,21 @@
 <template>
-  <div v-if="activity.state.totalActive > 0" class="llm-indicator" ref="rootRef">
-    <!-- Compact pill -->
-    <button class="indicator-pill" @click="togglePanel" :class="{ active: panelOpen }">
-      <span class="pulse-dot"></span>
-      <span class="pill-count mono">{{ activity.state.totalActive }}</span>
-      <span class="pill-label">模型运行中</span>
-      <span class="pill-chevron" :class="{ rotated: panelOpen }">▾</span>
-    </button>
+  <div v-if="activity.state.totalActive > 0" class="llm-indicator">
+    <n-popover trigger="click" placement="bottom-end" :width="400" raw :show-arrow="false">
+      <template #trigger>
+        <button class="indicator-pill">
+          <span class="pulse-dot"></span>
+          <span class="pill-count mono">{{ activity.state.totalActive }}</span>
+          <span class="pill-label">模型运行中</span>
+          <Icon icon="icon-park-outline:down" width="12" class="pill-chevron" />
+        </button>
+      </template>
 
-    <!-- Dropdown detail panel -->
-    <Transition name="panel-drop">
-      <div v-if="panelOpen" class="activity-panel workbench-card">
+      <div class="activity-panel">
         <div class="panel-header">
           <span class="title-ancient panel-title">LLM 活动监控</span>
           <span class="mono panel-meta">{{ activity.state.totalActive }} 个请求</span>
         </div>
 
-        <!-- Per-call rows -->
         <div class="call-list">
           <div
             v-for="call in activity.state.calls"
@@ -28,16 +27,15 @@
               <span class="call-elapsed mono">{{ formatElapsed(call.elapsed_ms) }}</span>
             </div>
             <div class="call-bottom">
-              <span class="call-status-badge" :class="call.status">
+              <n-tag size="small" :bordered="false" :type="statusTagType(call.status)">
                 {{ statusLabel(call.status) }}
-              </span>
+              </n-tag>
               <span class="call-model mono">{{ call.model }}</span>
               <span class="call-channel mono">{{ call.channel_key }}</span>
             </div>
           </div>
         </div>
 
-        <!-- Per-channel concurrency summary -->
         <div class="channel-section" v-if="hasChannels">
           <div class="channel-header">渠道并发</div>
           <div
@@ -60,41 +58,28 @@
           </div>
         </div>
       </div>
-    </Transition>
+    </n-popover>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
+import { NPopover, NTag } from "naive-ui";
+import { Icon } from "@iconify/vue";
 import { useLlmActivity } from "../composables/useLlmActivity.js";
 
 const activity = useLlmActivity();
-const panelOpen = ref(false);
-const rootRef = ref(null);
 
-onMounted(() => {
-  activity.mount();
-  document.addEventListener("click", handleOutsideClick);
-});
-
-onUnmounted(() => {
-  activity.unmount();
-  document.removeEventListener("click", handleOutsideClick);
-});
-
-function handleOutsideClick(e) {
-  if (rootRef.value && !rootRef.value.contains(e.target)) {
-    panelOpen.value = false;
-  }
-}
-
-function togglePanel() {
-  panelOpen.value = !panelOpen.value;
-}
+onMounted(() => { activity.mount(); });
+onUnmounted(() => { activity.unmount(); });
 
 const hasChannels = computed(() =>
   Object.keys(activity.state.channels).length > 0
 );
+
+function statusTagType(status) {
+  return { waiting: "warning", running: "success", streaming: "info" }[status] ?? "default";
+}
 
 function formatElapsed(ms) {
   if (ms < 1000) return `${ms}ms`;
@@ -120,8 +105,8 @@ function concurrencyPct(snap) {
 .indicator-pill {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
+  gap: 5px;
+  padding: 4px 10px;
   background: rgba(176, 125, 75, 0.08);
   border: 1px solid rgba(176, 125, 75, 0.25);
   border-radius: var(--radius-sm);
@@ -164,25 +149,16 @@ function concurrencyPct(snap) {
 }
 
 .pill-chevron {
-  font-size: 11px;
-  transition: transform 0.2s ease;
   color: var(--text-dim);
-}
-
-.pill-chevron.rotated {
-  transform: rotate(180deg);
 }
 
 /* ── Dropdown Panel ── */
 .activity-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  width: 400px;
-  max-height: 480px;
+  max-height: 420px;
   overflow-y: auto;
-  z-index: 200;
-  padding: var(--space-md);
+  padding: 10px;
+  background: var(--bg-panel, #fff);
+  border-radius: 8px;
   box-shadow: var(--shadow-ink);
 }
 
@@ -190,13 +166,13 @@ function concurrencyPct(snap) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--space-md);
-  padding-bottom: var(--space-sm);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--line-soft);
 }
 
 .panel-title {
-  font-size: 15px;
+  font-size: 13px;
   color: var(--bg-ink);
 }
 
@@ -244,27 +220,6 @@ function concurrencyPct(snap) {
   align-items: center;
 }
 
-.call-status-badge {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-weight: 500;
-}
-
-.call-status-badge.waiting {
-  background: rgba(176, 125, 75, 0.1);
-  color: var(--accent-copper-deep);
-}
-
-.call-status-badge.running {
-  background: rgba(74, 109, 84, 0.1);
-  color: var(--accent-green);
-}
-
-.call-status-badge.streaming {
-  background: rgba(61, 90, 128, 0.1);
-  color: var(--accent-blue);
-}
 
 .call-model {
   font-size: 11px;
@@ -334,15 +289,4 @@ function concurrencyPct(snap) {
   font-weight: 500;
 }
 
-/* ── Panel transition ── */
-.panel-drop-enter-active,
-.panel-drop-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-
-.panel-drop-enter-from,
-.panel-drop-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
-}
 </style>

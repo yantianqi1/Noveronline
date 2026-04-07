@@ -1,43 +1,39 @@
 <template>
-  <article class="workbench-card panel">
-    <div class="panel-head">
-      <div>
-        <h2 class="card-title">渠道管理</h2>
-        <p>维护 OpenAI 兼容渠道，保存 `base_url`、密钥与同步状态。</p>
-      </div>
-      <button class="btn" :disabled="submitting" @click="resetForm">新建渠道</button>
-    </div>
+  <n-card title="渠道管理" class="panel">
+    <template #header-extra>
+      <n-button :disabled="submitting" @click="resetForm">新建渠道</n-button>
+    </template>
 
-    <form class="editor" @submit.prevent="submitForm">
-      <div class="field">
-        <label>渠道名称</label>
-        <input v-model="form.name" placeholder="例如：OpenAI Main" />
+    <p class="panel-desc">维护 OpenAI 兼容渠道，保存 `base_url`、密钥与同步状态。</p>
+
+    <n-form class="editor" @submit.prevent="submitForm">
+      <div class="editor-grid">
+        <n-form-item label="渠道名称">
+          <n-input v-model:value="form.name" placeholder="例如：OpenAI Main" />
+        </n-form-item>
+        <n-form-item label="Base URL">
+          <n-input v-model:value="form.baseUrl" placeholder="https://api.openai.com/v1" />
+        </n-form-item>
+        <n-form-item label="并发上限">
+          <n-input v-model:value="form.maxConcurrency" placeholder="4" />
+        </n-form-item>
+        <n-form-item label="API Key" class="field-wide">
+          <n-input
+            v-model:value="form.apiKey"
+            :placeholder="editingChannelKey ? '留空表示保留现有密钥' : '请输入渠道密钥'"
+            type="password"
+            show-password-on="click"
+          />
+        </n-form-item>
       </div>
-      <div class="field">
-        <label>Base URL</label>
-        <input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" />
+      <div class="form-footer">
+        <n-checkbox v-model:checked="form.isEnabled">启用该渠道</n-checkbox>
+        <div class="toolbar-row">
+          <n-button type="primary" attr-type="submit" :disabled="submitting" :loading="submitting">{{ submitLabel }}</n-button>
+          <n-button v-if="editingChannelKey" :disabled="submitting" @click="resetForm">取消编辑</n-button>
+        </div>
       </div>
-      <div class="field">
-        <label>并发上限</label>
-        <input v-model.number="form.maxConcurrency" min="1" step="1" type="number" />
-      </div>
-      <div class="field field-wide">
-        <label>API Key</label>
-        <input
-          v-model="form.apiKey"
-          :placeholder="editingChannelKey ? '留空表示保留现有密钥' : '请输入渠道密钥'"
-          type="password"
-        />
-      </div>
-      <label class="checkbox-row">
-        <input v-model="form.isEnabled" type="checkbox" />
-        <span>启用该渠道</span>
-      </label>
-      <div class="toolbar-row">
-        <button class="btn primary" :disabled="submitting">{{ submitLabel }}</button>
-        <button v-if="editingChannelKey" class="btn" type="button" :disabled="submitting" @click="resetForm">取消编辑</button>
-      </div>
-    </form>
+    </n-form>
 
     <div class="channel-list">
       <section v-for="channel in channels" :key="channel.channel_key" class="channel-card">
@@ -47,52 +43,56 @@
             <div class="meta mono">{{ channel.base_url }}</div>
           </div>
           <div class="channel-actions">
-            <span class="status" :class="channel.is_enabled ? 'ok' : 'warn'">
+            <n-tag :type="channel.is_enabled ? 'success' : 'warning'" size="small">
               {{ channel.is_enabled ? "启用中" : "已停用" }}
-            </span>
-            <button class="btn" :disabled="submitting" @click="startEdit(channel)">编辑</button>
-            <button
-              class="btn"
+            </n-tag>
+            <n-button size="small" :disabled="submitting" @click="startEdit(channel)">编辑</n-button>
+            <n-button
+              size="small"
               :disabled="syncingKey === channel.channel_key || submitting"
+              :loading="syncingKey === channel.channel_key"
               @click="$emit('sync-channel', channel.channel_key)"
             >
               {{ syncingKey === channel.channel_key ? "同步中..." : "同步模型" }}
-            </button>
-            <button
-              class="btn danger"
+            </n-button>
+            <n-button
+              size="small"
+              type="error"
               :disabled="deletingKey === channel.channel_key || submitting"
+              :loading="deletingKey === channel.channel_key"
               @click="$emit('delete-channel', channel.channel_key)"
             >
               {{ deletingKey === channel.channel_key ? "删除中..." : "删除" }}
-            </button>
+            </n-button>
           </div>
         </div>
         <div class="channel-meta">
-          <span class="chip mono">{{ channel.api_key_masked }}</span>
-          <span class="chip mono">状态：{{ channel.last_sync_status || "idle" }}</span>
-          <span class="chip mono">上次同步：{{ channel.last_sync_at || "未同步" }}</span>
-          <span class="chip mono">模型：{{ channel.models?.length || 0 }}</span>
-          <span class="chip mono">并发上限：{{ channel.max_concurrency || 4 }}</span>
-          <span class="chip mono">当前占用：{{ channel.runtime?.inflight || 0 }}</span>
-          <span class="chip mono">排队数：{{ channel.runtime?.waiting || 0 }}</span>
+          <n-tag size="small" :bordered="false">{{ channel.api_key_masked }}</n-tag>
+          <n-tag size="small" :bordered="false">状态：{{ channel.last_sync_status || "idle" }}</n-tag>
+          <n-tag size="small" :bordered="false">上次同步：{{ channel.last_sync_at || "未同步" }}</n-tag>
+          <n-tag size="small" :bordered="false">模型：{{ channel.models?.length || 0 }}</n-tag>
+          <n-tag size="small" :bordered="false">并发上限：{{ channel.max_concurrency || 4 }}</n-tag>
+          <n-tag size="small" :bordered="false">当前占用：{{ channel.runtime?.inflight || 0 }}</n-tag>
+          <n-tag size="small" :bordered="false">排队数：{{ channel.runtime?.waiting || 0 }}</n-tag>
         </div>
         <p v-if="channel.last_sync_error" class="channel-error">{{ channel.last_sync_error }}</p>
         <div class="model-cloud">
-          <span v-for="model in previewModels(channel.models)" :key="model.model_id" class="model-pill mono">
+          <n-tag v-for="model in previewModels(channel.models)" :key="model.model_id" size="small" round :bordered="false" type="info">
             {{ model.model_id }}
-          </span>
-          <span v-if="(channel.models?.length || 0) > MAX_PREVIEW_MODELS" class="chip mono">
+          </n-tag>
+          <n-tag v-if="(channel.models?.length || 0) > MAX_PREVIEW_MODELS" size="small" :bordered="false">
             +{{ channel.models.length - MAX_PREVIEW_MODELS }}
-          </span>
+          </n-tag>
         </div>
       </section>
-      <div v-if="!channels.length" class="empty">还没有配置任何渠道，可先新增一条 OpenAI 兼容渠道。</div>
+      <n-empty v-if="!channels.length" description="还没有配置任何渠道，可先新增一条 OpenAI 兼容渠道。" />
     </div>
-  </article>
+  </n-card>
 </template>
 
 <script setup>
 import { computed, reactive, ref } from "vue";
+import { NButton, NCard, NCheckbox, NEmpty, NForm, NFormItem, NInput, NTag } from "naive-ui";
 
 const MAX_PREVIEW_MODELS = 8;
 
@@ -110,7 +110,7 @@ const form = reactive({
   name: "",
   baseUrl: "",
   apiKey: "",
-  maxConcurrency: 4,
+  maxConcurrency: "4",
   isEnabled: true,
 });
 
@@ -126,7 +126,7 @@ function resetForm() {
   form.name = "";
   form.baseUrl = "";
   form.apiKey = "";
-  form.maxConcurrency = 4;
+  form.maxConcurrency = "4";
   form.isEnabled = true;
 }
 
@@ -135,7 +135,7 @@ function startEdit(channel) {
   form.name = channel.name;
   form.baseUrl = channel.base_url;
   form.apiKey = "";
-  form.maxConcurrency = channel.max_concurrency || 4;
+  form.maxConcurrency = String(channel.max_concurrency || 4);
   form.isEnabled = !!channel.is_enabled;
 }
 
@@ -160,54 +160,51 @@ function previewModels(models = []) {
 </script>
 
 <style scoped>
-.panel {
-  padding: 18px;
-}
-
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: start;
-}
-
-.panel-head p {
-  margin: 8px 0 0;
+.panel-desc {
+  margin: 0 0 8px;
   color: var(--text-sub);
+  font-size: 13px;
 }
 
 .editor {
-  margin-top: 16px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  padding: 14px;
-  border-radius: 14px;
+  padding: 10px;
+  border-radius: 10px;
   border: 1px solid var(--line-soft);
   background: #fffaf1;
+}
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .field-wide {
   grid-column: 1 / -1;
 }
 
-.checkbox-row {
+.form-footer {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  color: var(--text-sub);
+  margin-top: 6px;
+}
+
+.toolbar-row {
+  display: flex;
+  gap: 8px;
 }
 
 .channel-list {
-  margin-top: 16px;
+  margin-top: 10px;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .channel-card {
   border: 1px solid var(--line-soft);
-  border-radius: 14px;
-  padding: 14px;
+  border-radius: 10px;
+  padding: 10px;
   background: #fffdf7;
 }
 
@@ -217,12 +214,16 @@ function previewModels(models = []) {
 .model-cloud {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
 }
 
 .channel-top {
   justify-content: space-between;
   align-items: start;
+}
+
+.channel-actions {
+  align-items: center;
 }
 
 .meta {
@@ -233,15 +234,7 @@ function previewModels(models = []) {
 
 .channel-meta,
 .model-cloud {
-  margin-top: 10px;
-}
-
-.model-pill {
-  border-radius: 999px;
-  padding: 4px 10px;
-  background: rgba(39, 90, 120, 0.08);
-  color: var(--accent-blue);
-  font-size: 12px;
+  margin-top: 6px;
 }
 
 .channel-error {
@@ -249,21 +242,8 @@ function previewModels(models = []) {
   color: #b1452f;
 }
 
-.btn.danger {
-  border-color: #b1452f;
-  color: #b1452f;
-}
-
-.empty {
-  border: 1px dashed var(--line-soft);
-  border-radius: 14px;
-  padding: 20px;
-  color: var(--text-sub);
-  background: rgba(255, 251, 241, 0.78);
-}
-
 @media (max-width: 900px) {
-  .editor {
+  .editor-grid {
     grid-template-columns: 1fr;
   }
 }

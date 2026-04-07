@@ -1,5 +1,5 @@
 .timeline-zone {
-  margin-top: 18px;
+  margin-top: 12px;
   container-type: inline-size;
 }
 
@@ -7,7 +7,7 @@
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 12px;
+  gap: 8px;
 }
 
 .section-index {
@@ -32,11 +32,11 @@
 /* ── Track with left border ────────────────────────────────── */
 
 .timeline-track {
-  margin-top: 16px;
-  padding-left: 20px;
+  margin-top: 12px;
+  padding-left: 16px;
   border-left: 2px solid rgba(201, 149, 74, 0.25);
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .timeline-entry {
@@ -62,9 +62,9 @@
 /* ── Empty state ───────────────────────────────────────────── */
 
 .timeline-empty {
-  margin-top: 14px;
-  padding: 18px;
-  border-radius: 14px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 8px;
   background: rgba(255, 250, 243, 0.78);
   border: 1px dashed rgba(200, 177, 144, 0.48);
   color: var(--text-sub, #8a7a60);
@@ -75,9 +75,9 @@
 /* ── Footer note ───────────────────────────────────────────── */
 
 .timeline-footer {
-  margin-top: 16px;
-  padding: 10px 14px;
-  border-radius: 10px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
   background: rgba(246, 239, 228, 0.6);
   font-size: 0.8rem;
   color: #8f7c5b;

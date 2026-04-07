@@ -5,7 +5,7 @@
         <h4 class="card-name">{{ item.entity_name }}</h4>
         <span class="card-tier">{{ formatImportanceTier(item.importance_tier) }}</span>
       </div>
-      <span class="status-tag" :class="entityTone">{{ formatEntityType(item.entity_type) }}</span>
+      <n-tag size="small" :bordered="false" type="info">{{ formatEntityType(item.entity_type) }}</n-tag>
     </div>
 
     <p v-if="roleText" class="card-role">{{ roleText }}</p>
@@ -25,6 +25,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NTag } from "naive-ui";
 
 import { formatEntityType, formatImportanceTier } from "../utils/chineseDisplay.js";
 
@@ -45,8 +46,8 @@ const driveText = computed(() => props.item.core_drive || (props.item.entity_rol
 .archive-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 6px;
+  padding: 10px 12px;
   cursor: pointer;
   border-left: 3px solid transparent;
   transition: box-shadow 0.2s ease, border-color 0.2s ease, background 0.15s ease;
@@ -87,7 +88,7 @@ const driveText = computed(() => props.item.core_drive || (props.item.entity_rol
 
 .card-name {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.35;
   font-family: "ZCOOL XiaoWei", serif;
   font-weight: 700;
@@ -122,8 +123,8 @@ const driveText = computed(() => props.item.core_drive || (props.item.entity_rol
 .card-summary {
   margin: 0;
   color: var(--text-sub);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 12.5px;
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;

@@ -29,11 +29,16 @@ MODULE_DEFINITIONS = (
     LlmModuleDefinition("worldline_director", "世界线导演（天道裁决）", "裁决角色提案：检查冲突和合理性，维持因果律，输出客观叙事。绑定后启用天道模式。"),
     LlmModuleDefinition("worldline_agent_action", "世界线 Agent 自动动作（传统）", "传统模式：单次 LLM 调用生成动作。绑定导演 Agent 后不再使用。"),
     LlmModuleDefinition("worldline_goal_evaluator", "世界线目标判定", "判断当前世界线是否达成创作者设定的自然语言目标。"),
-    LlmModuleDefinition("novel_draft_writer", "小说正文创作", "基于上下文包和创作者指令，流式生成小说正文。"),
-    LlmModuleDefinition("novel_draft_reviewer", "正文一致性审校", "检查生成的正文是否与已知设定、人物状态一致。"),
     LlmModuleDefinition("novel_chapter_summarizer", "章节卡生成", "逐章生成结构化章节卡，用于 continuity 派生与全量历史召回。"),
     LlmModuleDefinition("writer_orchestrator", "写作编排调度", "编排层：解析写作意图，调用工具收集小说设定数据，组装写作指令。"),
     LlmModuleDefinition("writer_composer", "写作正文生成", "写作层：基于编排层组装的写作指令，生成高质量小说正文。"),
+    LlmModuleDefinition(
+        module_key="style_extractor",
+        label="文风提取",
+        description="从整本小说全文中提炼写作风格、作家风格特征，写入资产库以供写作 agent 调用。",
+        example_prompt="阅读以下文本片段，提炼其写作风格特征 (叙事视角/句式/修辞/节奏/词汇偏好/对白风格)...",
+        example_output="JSON: pov, sentence, rhetoric, pacing, vocabulary, dialogue, examples...",
+    ),
     LlmModuleDefinition(
         module_key="sequential_reading",
         label="顺序深度阅读",

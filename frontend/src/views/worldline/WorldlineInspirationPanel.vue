@@ -4,16 +4,18 @@
     <p class="hint-text">输入创作者灵感，结合当前世界线返回下一步剧情推进建议。</p>
     <div class="field">
       <label>创作灵感</label>
-      <textarea
+      <n-input
+        type="textarea"
         :value="inspirationPrompt"
         placeholder="例如：我希望主角在两难之间选择一条看似错误但更具戏剧性的道路。"
-        @input="emit('update:inspirationPrompt', $event.target.value)"
-      ></textarea>
+        :rows="4"
+        @update:value="emit('update:inspirationPrompt', $event)"
+      />
     </div>
     <div class="toolbar-row">
-      <button class="btn primary" :disabled="!sessionId || inspirationBusy" @click="emit('generate-inspiration')">
-        {{ inspirationBusy ? "生成中..." : "生成剧情灵感" }}
-      </button>
+      <n-button type="primary" :disabled="!sessionId || inspirationBusy" :loading="inspirationBusy" @click="emit('generate-inspiration')">
+        生成剧情灵感
+      </n-button>
     </div>
 
     <div v-if="inspirationResult" class="inspiration-board">
@@ -35,6 +37,8 @@
 </template>
 
 <script setup>
+import { NButton, NInput } from "naive-ui";
+
 const props = defineProps({
   sessionId: String,
   inspirationPrompt: String,
@@ -48,12 +52,12 @@ const emit = defineEmits(["update:inspirationPrompt", "generate-inspiration"]);
 
 <style scoped>
 .field {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .field label {
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .field textarea {
@@ -67,21 +71,21 @@ const emit = defineEmits(["update:inspirationPrompt", "generate-inspiration"]);
 }
 
 .toolbar-row {
-  margin-top: 12px;
+  margin-top: 8px;
   display: flex;
 }
 
 .inspiration-board {
-  margin-top: 12px;
+  margin-top: 8px;
   border: 1px solid var(--line-soft);
   background: #fffaf1;
-  border-radius: 12px;
-  padding: 12px;
+  border-radius: 8px;
+  padding: 10px;
 }
 
 .seed-title {
   font-weight: 700;
-  margin: 10px 0 6px;
+  margin: 8px 0 4px;
 }
 
 .suggestion-item {

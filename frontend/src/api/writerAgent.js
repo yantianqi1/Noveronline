@@ -95,6 +95,10 @@ export function tagManuscriptBlocks(projectId, payload) {
   return put(`/api/writer-agent/manuscript/${projectId}/tag`, payload);
 }
 
+export function moveManuscriptBlock(blockId, payload) {
+  return put(`/api/writer-agent/manuscript/block/${blockId}/move`, payload);
+}
+
 export async function exportManuscript(projectId, format = "txt") {
   const response = await fetch(`/api/writer-agent/manuscript/${projectId}/export?format=${format}`);
   if (!response.ok) throw new Error(`导出失败: ${response.status}`);

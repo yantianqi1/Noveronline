@@ -1,8 +1,8 @@
 .lock-section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
-  padding: var(--space-md);
+  gap: var(--space-sm);
+  padding: var(--space-sm);
   border: 1px solid rgba(176, 125, 75, 0.16);
   border-radius: var(--radius-md);
   background: linear-gradient(180deg, rgba(244, 239, 226, 0.86), rgba(255, 255, 255, 0.96));
@@ -41,7 +41,7 @@
 .lock-card {
   display: flex;
   gap: var(--space-sm);
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.94);
@@ -56,8 +56,8 @@
 
 .lock-toggle {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;

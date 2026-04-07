@@ -1,6 +1,6 @@
-"""Reviewer 审校 prompt — 6 维度结构化审核。"""
+"""默认审校 prompt — 供 reviewer-rules API 返回默认值。"""
 
-REVIEWER_PROMPT = """你是一名专业的小说审校编辑。
+REVIEWER_SYSTEM_PROMPT = """你是一名专业的小说审校编辑。
 
 你的工作是检查一段新生成的小说正文，从以下六个维度做结构化审核，并给出整体判断。
 

@@ -4,13 +4,14 @@
       <div class="inspector-header">
         <h3>{{ selectedNode.name }}</h3>
         <div class="badge-row">
-          <span class="type-badge">{{ typeLabel }}</span>
-          <span v-if="tierLabel" class="tier-badge">{{ tierLabel }}</span>
+          <n-tag size="small" :bordered="false" type="info">{{ typeLabel }}</n-tag>
+          <n-tag v-if="tierLabel" size="small" :bordered="false" type="warning">{{ tierLabel }}</n-tag>
         </div>
       </div>
 
       <div v-if="archiveLoading" class="archive-loading">
-        <span class="loading-dot"></span>档案加载中...
+        <n-spin size="small" />
+        <span>档案加载中...</span>
       </div>
 
       <template v-if="archiveData">
@@ -41,14 +42,14 @@
     </template>
 
     <template v-else>
-      <h3>档案侧栏</h3>
-      <p>点击图中的节点或关系线，查看详细信息。</p>
+      <n-empty description="点击图中的节点或关系线，查看详细信息。" />
     </template>
   </aside>
 </template>
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { NTag, NSpin, NEmpty } from "naive-ui";
 import InspectorSection from "./InspectorSection.vue";
 import { listArchiveLibrary, getArchiveLibraryDetail } from "../api/archive.js";
 
@@ -237,9 +238,9 @@ watch(
 <style scoped>
 .detail {
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #fffcf4;
-  padding: 12px;
+  padding: 10px;
   height: 100%;
   min-height: 0;
   overflow-y: auto;
@@ -257,7 +258,7 @@ watch(
 }
 
 .inspector-header {
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .inspector-header h3 {

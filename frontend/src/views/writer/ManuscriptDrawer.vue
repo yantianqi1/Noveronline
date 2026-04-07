@@ -9,11 +9,11 @@
             <div class="reader-stats">{{ totalWords }} 字 · {{ blocks.length }} 段</div>
             <div class="reader-toolbar-spacer"></div>
             <div class="reader-toolbar-actions">
-              <button class="toolbar-btn" @click="handleBatchTag">批量标注</button>
-              <button class="toolbar-btn" @click="handleExport('txt')">导出 TXT</button>
-              <button class="toolbar-btn" @click="handleExport('md')">导出 MD</button>
+              <n-button size="small" quaternary @click="handleBatchTag">批量标注</n-button>
+              <n-button size="small" quaternary @click="handleExport('txt')">导出 TXT</n-button>
+              <n-button size="small" quaternary @click="handleExport('md')">导出 MD</n-button>
             </div>
-            <button class="reader-close" @click="$emit('close')">&times;</button>
+            <n-button quaternary class="reader-close" @click="$emit('close')">&times;</n-button>
           </div>
 
           <!-- Two-panel body -->
@@ -37,44 +37,53 @@
           </div>
 
           <!-- Batch tag modal -->
-          <div v-if="showTagModal" class="modal-overlay" @click.self="showTagModal = false">
-            <div class="modal-box">
-              <div class="modal-title">批量标注章节</div>
-              <div class="modal-body">
-                <div class="tag-select-list">
-                  <label
-                    v-for="block in blocks"
-                    :key="block.block_id"
-                    class="tag-select-item"
-                  >
-                    <input type="checkbox" v-model="tagSelection" :value="block.block_id" />
-                    <span>#{{ block.block_order }} ({{ block.word_count }}字)</span>
-                  </label>
-                </div>
-                <input
-                  v-model="tagInput"
-                  class="tag-input"
-                  placeholder="输入章节标签，如：第一章"
-                />
-              </div>
-              <div class="modal-actions">
-                <button class="toolbar-btn toolbar-btn--primary" @click="applyTag">应用</button>
-                <button class="toolbar-btn" @click="showTagModal = false">取消</button>
-              </div>
+          <n-modal
+            :show="showTagModal"
+            preset="card"
+            title="批量标注章节"
+            style="width: 400px; max-width: 90vw"
+            :mask-closable="true"
+            @update:show="val => { if (!val) showTagModal = false }"
+          >
+            <div class="tag-select-list">
+              <label
+                v-for="block in blocks"
+                :key="block.block_id"
+                class="tag-select-item"
+              >
+                <input type="checkbox" v-model="tagSelection" :value="block.block_id" />
+                <span>#{{ block.block_order }} ({{ block.word_count }}字)</span>
+              </label>
             </div>
-          </div>
+            <n-input
+              v-model:value="tagInput"
+              placeholder="输入章节标签，如：第一章"
+            />
+            <template #footer>
+              <div class="modal-actions">
+                <n-button type="primary" @click="applyTag">应用</n-button>
+                <n-button @click="showTagModal = false">取消</n-button>
+              </div>
+            </template>
+          </n-modal>
 
           <!-- Delete confirm -->
-          <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null">
-            <div class="modal-box">
-              <div class="modal-title">确认删除</div>
-              <div class="modal-body">确定要删除这段稿件内容吗？此操作不可撤销。</div>
+          <n-modal
+            :show="!!deleteTarget"
+            preset="card"
+            title="确认删除"
+            style="width: 400px; max-width: 90vw"
+            :mask-closable="true"
+            @update:show="val => { if (!val) deleteTarget = null }"
+          >
+            <p>确定要删除这段稿件内容吗？此操作不可撤销。</p>
+            <template #footer>
               <div class="modal-actions">
-                <button class="toolbar-btn toolbar-btn--danger" @click="doDelete">删除</button>
-                <button class="toolbar-btn" @click="deleteTarget = null">取消</button>
+                <n-button type="error" @click="doDelete">删除</n-button>
+                <n-button @click="deleteTarget = null">取消</n-button>
               </div>
-            </div>
-          </div>
+            </template>
+          </n-modal>
         </div>
       </div>
     </Transition>
@@ -83,6 +92,7 @@
 
 <script setup>
 import { ref, computed, watch } from "vue";
+import { NButton, NInput, NModal } from "naive-ui";
 import ManuscriptTocSidebar from "./ManuscriptTocSidebar.vue";
 import ManuscriptReadingPane from "./ManuscriptReadingPane.vue";
 import {
@@ -293,15 +303,9 @@ async function handleExport(fmt) {
 }
 
 .reader-close {
-  background: none;
-  border: none;
-  color: var(--text-tertiary, #888);
   font-size: 22px;
-  cursor: pointer;
-  padding: 0 4px;
   margin-left: 8px;
 }
-.reader-close:hover { color: var(--text-primary, #e0e0e0); }
 
 /* Two-panel body */
 .reader-body {
@@ -312,64 +316,7 @@ async function handleExport(fmt) {
   overflow: hidden;
 }
 
-/* Toolbar buttons */
-.toolbar-btn {
-  background: var(--surface-tertiary, #252540);
-  border: 1px solid var(--border-subtle, #2d2d44);
-  border-radius: 4px;
-  padding: 5px 12px;
-  font-size: 12px;
-  color: var(--text-secondary, #aaa);
-  cursor: pointer;
-}
-.toolbar-btn:hover {
-  color: var(--text-primary, #e0e0e0);
-  background: var(--surface-hover, #303050);
-}
-.toolbar-btn--primary {
-  background: var(--accent-copper, #c09060);
-  border-color: var(--accent-copper, #c09060);
-  color: #fff;
-}
-.toolbar-btn--primary:hover {
-  background: #d0a070;
-}
-.toolbar-btn--danger { color: #e05050; }
-.toolbar-btn--danger:hover { color: #ff6060; background: rgba(224, 80, 80, 0.1); }
-
-/* Modals */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 210;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.modal-box {
-  background: var(--surface-primary, #12121e);
-  border: 1px solid var(--border-subtle, #2d2d44);
-  border-radius: 8px;
-  padding: 20px;
-  width: 400px;
-  max-height: 440px;
-}
-
-.modal-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-primary, #e0e0e0);
-  margin-bottom: 12px;
-}
-
-.modal-body {
-  margin-bottom: 12px;
-  color: var(--text-primary, #e0e0e0);
-  font-size: 13px;
-}
-
+/* Modal actions */
 .modal-actions {
   display: flex;
   gap: 8px;
@@ -390,16 +337,6 @@ async function handleExport(fmt) {
   font-size: 12px;
   color: var(--text-secondary, #aaa);
   cursor: pointer;
-}
-
-.tag-input {
-  width: 100%;
-  background: var(--surface-tertiary, #252540);
-  border: 1px solid var(--border-subtle, #2d2d44);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 13px;
-  color: var(--text-primary, #e0e0e0);
 }
 
 /* Transition */

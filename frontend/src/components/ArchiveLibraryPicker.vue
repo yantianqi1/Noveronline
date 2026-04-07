@@ -9,33 +9,33 @@
   >
     <header class="picker-toolbar workbench-card" :class="{ compact: pickerLayout.compactToolbar }">
       <div class="search-field">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <circle cx="8.5" cy="8.5" r="5.5" />
-          <line x1="13" y1="13" x2="18" y2="18" />
-        </svg>
-        <input v-model="searchText" placeholder="搜索角色、组织、动机、关系..." />
+        <n-input v-model:value="searchText" placeholder="搜索角色、组织、动机、关系..." clearable />
       </div>
 
       <div class="picker-filters">
-        <select v-model="localProjectFilter">
-          <option value="">全部项目</option>
-          <option v-for="item in projectOptions" :key="item.project_id" :value="item.project_id">
-            {{ item.name }}
-          </option>
-        </select>
+        <n-select
+          v-model:value="localProjectFilter"
+          :options="projectSelectOptions"
+          placeholder="全部项目"
+          clearable
+          style="min-width: 140px"
+        />
 
-        <select v-model="entityType">
-          <option value="">全部类型</option>
-          <option value="Character">角色</option>
-          <option value="Organization">组织</option>
-        </select>
+        <n-select
+          v-model:value="entityType"
+          :options="entityTypeOptions"
+          placeholder="全部类型"
+          clearable
+          style="min-width: 120px"
+        />
 
-        <select v-model="importanceTier">
-          <option value="">全部位阶</option>
-          <option value="protagonist">主角</option>
-          <option value="major">主要</option>
-          <option value="supporting">次要</option>
-        </select>
+        <n-select
+          v-model:value="importanceTier"
+          :options="importanceTierOptions"
+          placeholder="全部位阶"
+          clearable
+          style="min-width: 120px"
+        />
       </div>
     </header>
 
@@ -46,9 +46,9 @@
         <span v-if="selectedArchives.length" class="selection-count">{{ selectedArchives.length }} 已选</span>
         <span v-if="reindexMessage" class="reindex-msg" :class="{ error: reindexError }">{{ reindexMessage }}</span>
       </div>
-      <button v-if="$attrs.onReindex" class="btn subtle reindex-btn" :disabled="reindexBusy" @click="$emit('reindex')">
+      <n-button v-if="$attrs.onReindex" quaternary :loading="reindexBusy" @click="$emit('reindex')">
         {{ reindexBusy ? "刷新中..." : "刷新索引" }}
-      </button>
+      </n-button>
     </div>
 
     <p v-if="error" class="picker-error">{{ error }}</p>
@@ -74,10 +74,9 @@
             </div>
           </template>
 
-          <div v-if="!items.length && !loading" class="picker-empty">
-            <h4>未找到符合条件的档案</h4>
-            <p>尝试调整搜索关键词或筛选条件</p>
-          </div>
+          <n-empty v-if="!items.length && !loading" description="尝试调整搜索关键词或筛选条件">
+            <template #extra><span>未找到符合条件的档案</span></template>
+          </n-empty>
         </div>
       </section>
 
@@ -96,6 +95,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { NButton, NEmpty, NInput, NSelect } from "naive-ui";
 
 import { getArchiveLibraryDetail, listArchiveLibrary } from "../api/archive.js";
 import { listProjects } from "../api/project.js";
@@ -134,6 +134,23 @@ const selectedArchives = computed(() => props.modelValue || []);
 const selectedIdSet = computed(() => new Set(selectedArchives.value.map((item) => item.archive_id)));
 const pickerLayout = computed(() => resolveArchiveLibraryPickerLayoutVariant(props.layoutVariant));
 const usesInlineDetail = computed(() => pickerLayout.value.showInlineDetail);
+
+const projectSelectOptions = computed(() =>
+  projectOptions.value.map((p) => ({ label: p.name || p.project_id, value: p.project_id })),
+);
+
+const entityTypeOptions = [
+  { label: "角色", value: "character" },
+  { label: "组织", value: "organization" },
+  { label: "关系", value: "relationship" },
+];
+
+const importanceTierOptions = [
+  { label: "主角", value: "protagonist" },
+  { label: "主要", value: "major" },
+  { label: "次要", value: "supporting" },
+  { label: "配角", value: "minor" },
+];
 
 watch(() => props.projectFilter, (value) => { localProjectFilter.value = value || ""; });
 watch(localProjectFilter, (value) => { emit("update:project-filter", value); });

@@ -32,9 +32,9 @@
 
         <!-- 通用 detail 展开按钮 -->
         <div v-if="hasDetail(agent)" class="agent-detail-section">
-          <button class="detail-toggle" @click="agent.detailExpanded = !agent.detailExpanded">
+          <n-button text size="tiny" @click="agent.detailExpanded = !agent.detailExpanded">
             {{ agent.detailExpanded ? '收起详情' : '查看详情' }}
-          </button>
+          </n-button>
           <div v-if="agent.detailExpanded" class="detail-content">
             <!-- context_agent detail -->
             <template v-if="agent.id === 'context_agent' && agent.detail">
@@ -67,12 +67,12 @@
 
         <!-- reviewer issues 折叠列表 -->
         <div v-if="agent.issues?.length" class="agent-issues">
-          <button class="issues-toggle" @click="agent.issuesExpanded = !agent.issuesExpanded">
+          <n-button text size="tiny" @click="agent.issuesExpanded = !agent.issuesExpanded">
             {{ agent.issuesExpanded ? '收起' : '展开' }} {{ agent.issues.length }} 个问题
-          </button>
+          </n-button>
           <div v-if="agent.issuesExpanded" class="issues-list">
             <div v-for="(issue, idx) in agent.issues" :key="idx" class="issue-item">
-              <span class="issue-severity" :class="issue.severity">{{ issue.severity }}</span>
+              <n-tag size="small" :type="issue.severity === 'high' ? 'error' : issue.severity === 'medium' ? 'warning' : 'default'">{{ issue.severity }}</n-tag>
               <span class="issue-dimension">[{{ issue.dimension }}]</span>
               <span class="issue-desc">{{ issue.description }}</span>
               <div v-if="issue.suggestion" class="issue-suggestion">{{ issue.suggestion }}</div>
@@ -83,14 +83,14 @@
 
       <!-- 修订信息 -->
       <div v-if="revisionCount > 0" class="revision-info">
-        <span class="revision-badge">修订 {{ revisionCount }} 次</span>
+        <n-tag size="small" type="warning">修订 {{ revisionCount }} 次</n-tag>
       </div>
 
       <!-- 未解决问题 -->
       <div v-if="unresolvedIssues.length" class="unresolved-section">
         <div class="unresolved-header">未解决问题（{{ unresolvedIssues.length }}）</div>
         <div v-for="(issue, idx) in unresolvedIssues" :key="'u' + idx" class="issue-item">
-          <span class="issue-severity" :class="issue.severity">{{ issue.severity }}</span>
+          <n-tag size="small" :type="issue.severity === 'high' ? 'error' : issue.severity === 'medium' ? 'warning' : 'default'">{{ issue.severity }}</n-tag>
           <span class="issue-dimension">[{{ issue.dimension }}]</span>
           <span class="issue-desc">{{ issue.description }}</span>
         </div>
@@ -112,7 +112,8 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { NButton, NTag } from "naive-ui";
 
 const props = defineProps({
   agents: { type: Array, default: () => [] },
@@ -162,6 +163,13 @@ watch(allDone, (isDone) => {
       clearTimeout(collapseTimer);
       collapseTimer = null;
     }
+  }
+});
+
+onBeforeUnmount(() => {
+  if (collapseTimer) {
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
   }
 });
 

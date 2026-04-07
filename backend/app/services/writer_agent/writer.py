@@ -133,6 +133,18 @@ class WriterComposer:
         # For continue, include continuation context and tail text
         if brief.get("continuation_context"):
             cc = brief["continuation_context"]
+            styles = cc.get("writing_styles") or []
+            if styles:
+                style_blocks = []
+                for s in styles:
+                    head = f"【{s.get('title', '')}】"
+                    if s.get("category"):
+                        head += f"（{s['category']}）"
+                    style_blocks.append(head + "\n" + (s.get("content") or s.get("summary") or ""))
+                sections.append(
+                    "\n### 写作风格指引（资产库已启用的 writing_style）\n"
+                    + "\n\n".join(style_blocks)
+                )
             if cc.get("narrative_note"):
                 sections.append(f"\n### 叙事状态\n{cc['narrative_note']}")
             if cc.get("last_location"):

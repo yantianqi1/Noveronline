@@ -5,12 +5,13 @@
         <div class="focus-code mono">任务焦点</div>
         <h2 class="focus-title">{{ focusTitle }}</h2>
       </div>
-      <span class="focus-status" :class="statusClass">{{ focusStatus }}</span>
+      <n-tag :type="hasActiveTask ? 'warning' : 'default'" size="small" round>{{ focusStatus }}</n-tag>
     </div>
 
     <div v-if="hasActiveTask" class="focus-metrics">
       <div class="metric-box">
         <span class="mono">进度</span>
+        <n-progress type="line" :percentage="stageProgress.percent" :show-indicator="false" style="margin-top: 4px;" />
         <strong>{{ stageProgress.percent }}%</strong>
       </div>
       <div class="metric-box">
@@ -34,6 +35,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NTag, NProgress } from "naive-ui";
 
 import PipelineVisualization from "./PipelineVisualization.vue";
 import { deriveStageProgress } from "./seedUploadTaskView.js";
@@ -72,7 +74,7 @@ const stageLabel = computed(() => props.activeStage?.label || "等待启动");
 
 <style scoped>
 .focus-card {
-  padding: 16px 20px;
+  padding: 12px 14px;
   background:
     linear-gradient(180deg, rgba(255, 251, 245, 0.98), rgba(247, 241, 231, 0.98)),
     radial-gradient(circle at 100% 0%, rgba(155, 44, 44, 0.09), transparent 34%);
@@ -94,23 +96,11 @@ const stageLabel = computed(() => props.activeStage?.label || "等待启动");
 
 .focus-title {
   margin-top: 2px;
-  font-size: 20px;
+  font-size: 17px;
   font-family: "ZCOOL XiaoWei", serif;
   line-height: 1.3;
 }
 
-.focus-status {
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 11px;
-  background: rgba(113, 128, 150, 0.12);
-  color: var(--text-sub);
-}
-
-.focus-status.running {
-  background: rgba(155, 44, 44, 0.12);
-  color: var(--accent-copper-deep);
-}
 
 .focus-idle {
   margin: 8px 0 0;
@@ -119,17 +109,17 @@ const stageLabel = computed(() => props.activeStage?.label || "等待启动");
 }
 
 .focus-metrics {
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .metric-box {
   flex: 1;
   border: 1px solid rgba(113, 128, 150, 0.16);
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.72);
-  padding: 8px 12px;
+  padding: 6px 10px;
 }
 
 .metric-box span {

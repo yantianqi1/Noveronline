@@ -82,6 +82,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { useDialog } from "naive-ui";
 
 import { deleteProject } from "../api/project";
 import { useProjectCatalog } from "../composables/useProjectCatalog";
@@ -95,6 +96,7 @@ import SeedUploadPanel from "./overview/SeedUploadPanel.vue";
 
 const upload = useSeedUpload();
 const { projects, refreshProjects } = useProjectCatalog();
+const dialog = useDialog();
 const isProcessing = computed(() => upload.state.uploadPhase !== "idle");
 const seedAnalysisPanel = ref(null);
 const projectActionError = ref("");
@@ -126,11 +128,6 @@ watch(
   },
 );
 
-function statusClass(status) {
-  if (status === "failed") return "danger";
-  return status && status.includes("completed") ? "ok" : "warn";
-}
-
 async function refresh() {
   try {
     projectActionError.value = "";
@@ -149,20 +146,23 @@ async function handleUploaded(payload) {
   await seedAnalysisPanel.value?.runForProject(payload.project_id);
 }
 
-async function handleDeleteProject(project) {
-  if (!project?.project_id) {
-    return;
-  }
-  if (!window.confirm(`确认删除项目「${project.name}」吗？`)) {
-    return;
-  }
-  try {
-    projectActionError.value = "";
-    await deleteProject(project.project_id);
-    await refresh();
-  } catch (error) {
-    projectActionError.value = error.message || "删除项目失败";
-  }
+function handleDeleteProject(project) {
+  if (!project?.project_id) return;
+  dialog.warning({
+    title: "确认删除",
+    content: `确认删除项目「${project.name}」吗？`,
+    positiveText: "删除",
+    negativeText: "取消",
+    async onPositiveClick() {
+      try {
+        projectActionError.value = "";
+        await deleteProject(project.project_id);
+        await refresh();
+      } catch (error) {
+        projectActionError.value = error.message || "删除项目失败";
+      }
+    },
+  });
 }
 
 function scrollToUpload() {
@@ -181,7 +181,7 @@ function scrollToUpload() {
 .overview-command-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 0.7fr);
-  gap: 12px;
+  gap: 10px;
   align-items: start;
 }
 
@@ -194,7 +194,7 @@ function scrollToUpload() {
 .overview-workbench-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   align-items: start;
 }
 
@@ -203,8 +203,8 @@ function scrollToUpload() {
 }
 
 .analysis-module {
-  padding: 16px;
-  border-radius: 12px;
+  padding: 12px;
+  border-radius: 10px;
   border: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.68);
 }
@@ -226,7 +226,7 @@ function scrollToUpload() {
 .overview-processing-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 0.35fr);
-  gap: 12px;
+  gap: 10px;
   align-items: start;
 }
 
@@ -246,4 +246,5 @@ function scrollToUpload() {
     position: static;
   }
 }
+
 </style>

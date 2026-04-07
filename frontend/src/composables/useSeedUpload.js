@@ -13,6 +13,41 @@ const DEFAULT_GOAL = "提取全部有名角色、组织和关系，用于世界�
 let activeUploadPromise = null;
 let activeUploadRequest = null;
 const TASK_POLL_INTERVAL_MS = 1200;
+const ACTIVE_TASK_STORAGE_KEY = "novelwork.seedUpload.activeTask";
+
+function loadPersistedActiveTask() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_TASK_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.taskId) return null;
+    return parsed;
+  } catch (error) {
+    console.warn("[seedUpload] failed to parse persisted active task", error);
+    return null;
+  }
+}
+
+function persistActiveTask(payload) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("[seedUpload] failed to persist active task", error);
+  }
+}
+
+function clearPersistedActiveTask() {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
+  } catch (error) {
+    console.warn("[seedUpload] failed to clear persisted active task", error);
+  }
+}
 const state = reactive({
   projectName: "我的小说项目",
   analysisGoal: DEFAULT_GOAL,
@@ -127,6 +162,14 @@ function beginTaskProcessing(data) {
   state.progressPercent = 0;
   state.stageLabel = "后台分析";
   state.statusText = "文件已上传，后台正在分析小说...";
+  if (state.taskId) {
+    persistActiveTask({
+      taskId: state.taskId,
+      projectId: state.completedProjectId,
+      projectName: state.projectName,
+      taskStartedAt: state.taskStartedAt,
+    });
+  }
 }
 
 function sleep(ms) {
@@ -144,8 +187,10 @@ function updateTaskProgress(task) {
   state.statusText = task.message || view.activeStage.label;
 }
 
+const MAX_POLL_ATTEMPTS = 300; // ~6 minutes at 1.2s interval
+
 async function waitForTaskCompletion(taskId) {
-  while (true) {
+  for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
     const response = await getTask(taskId);
     const task = response.data || {};
     if (task.status === "completed") {
@@ -157,6 +202,7 @@ async function waitForTaskCompletion(taskId) {
     updateTaskProgress(task);
     await sleep(TASK_POLL_INTERVAL_MS);
   }
+  throw new Error("任务轮询超时，请检查后台服务状态后重试");
 }
 
 function finishUpload(projectData, taskData) {
@@ -177,6 +223,7 @@ function finishUpload(projectData, taskData) {
   state.statusText = taskData?.message || view.activeStage.label;
   activeUploadPromise = null;
   activeUploadRequest = null;
+  clearPersistedActiveTask();
 }
 
 function failUpload(message) {
@@ -189,6 +236,7 @@ function failUpload(message) {
   state.statusText = message;
   activeUploadPromise = null;
   activeUploadRequest = null;
+  clearPersistedActiveTask();
 }
 
 async function submitUpload() {
@@ -242,6 +290,7 @@ async function cancelUpload() {
     resetStructuredView(state);
     activeUploadPromise = null;
     activeUploadRequest = null;
+    clearPersistedActiveTask();
   } catch (error) {
     state.error = error.message || "取消失败";
   }
@@ -260,9 +309,64 @@ function clearNotice() {
   state.result = null;
   state.error = "";
   resetStructuredView(state);
+  clearPersistedActiveTask();
+}
+
+let resumePromise = null;
+
+async function resumeActiveTaskIfAny() {
+  if (state.uploadBusy || state.taskId) {
+    return;
+  }
+  const persisted = loadPersistedActiveTask();
+  if (!persisted?.taskId) {
+    return;
+  }
+  // Probe backend before flipping UI into processing — task may already be done/failed/gone.
+  let task;
+  try {
+    const response = await getTask(persisted.taskId);
+    task = response.data || {};
+  } catch (error) {
+    console.warn("[seedUpload] failed to resume task, clearing persistence", error);
+    clearPersistedActiveTask();
+    return;
+  }
+  if (!task || !task.status) {
+    clearPersistedActiveTask();
+    return;
+  }
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    clearPersistedActiveTask();
+    return;
+  }
+  state.uploadBusy = true;
+  state.uploadPhase = "processing";
+  state.taskId = persisted.taskId;
+  state.taskStatus = task.status || "processing";
+  state.completedProjectId = persisted.projectId || "";
+  state.projectName = persisted.projectName || state.projectName;
+  state.taskStartedAt = persisted.taskStartedAt || state.taskStartedAt;
+  state.stageLabel = "后台分析";
+  state.statusText = task.message || "正在恢复后台分析进度...";
+  updateTaskProgress(task);
+  try {
+    const finalTask = await waitForTaskCompletion(persisted.taskId);
+    finishUpload(
+      { project_id: persisted.projectId, project_name: persisted.projectName, task_id: persisted.taskId },
+      finalTask,
+    );
+  } catch (error) {
+    failUpload(error.message || "恢复任务失败");
+  }
 }
 
 export function useSeedUpload() {
+  if (!resumePromise) {
+    resumePromise = resumeActiveTaskIfAny().catch((error) => {
+      console.warn("[seedUpload] resume error", error);
+    });
+  }
   return {
     state,
     fileKey,

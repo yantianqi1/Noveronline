@@ -28,7 +28,9 @@ CHARACTER_PROFILE_SYSTEM_PROMPT = """你是一名专业的小说角色 Agent 设
     "core_traits": ["中文，核心性格特质1", "中文，核心性格特质2"],
     "values": "中文，角色最优先坚守的价值观或底线",
     "fears": "中文，角色最深的恐惧或禁忌",
-    "decision_pattern": "中文，描述该角色在关键抉择时的典型行为倾向"
+    "decision_pattern": "中文，描述该角色在关键抉择时的典型行为倾向",
+    "mask_behavior": "中文，角色的社交面具策略——在不同人面前如何伪装，真实情感通过哪些生理细节泄露",
+    "emotional_baseline": "中文，角色的情绪基准线——日常状态下的情绪表现，情绪波动的幅度和恢复速度"
   },
   "speech": {
     "style": "中文，语言风格，如简洁/迂回/强硬/温柔等",
@@ -52,7 +54,8 @@ CHARACTER_PROFILE_SYSTEM_PROMPT = """你是一名专业的小说角色 Agent 设
   "knowledge_boundary": {
     "knows": ["中文，角色确认知晓的关键信息1"],
     "does_not_know": ["中文，角色明确不知道的重要信息1"],
-    "believes_wrongly": ["中文，角色持有的错误认知1（若无则填暂无记录）"]
+    "believes_wrongly": ["中文，角色持有的错误认知1（若无则填暂无记录）"],
+    "cognitive_biases": ["中文，角色的认知偏差1——如何系统性地误读他人行为或局势（若无则填暂无记录）"]
   },
   "motivation": {
     "ultimate_goal": "中文，角色的终极目标或深层欲望",

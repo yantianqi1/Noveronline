@@ -19,8 +19,8 @@
           </div>
           <p v-if="event.detail" class="timeline-detail">{{ event.detail }}</p>
           <div class="chip-row">
-            <span class="chip mono">{{ formatStageKey(event.stage) }}</span>
-            <span v-for="chip in buildEventChips(event)" :key="`${event.id}_${chip}`" class="chip mono">{{ chip }}</span>
+            <n-tag size="small" :bordered="false">{{ formatStageKey(event.stage) }}</n-tag>
+            <n-tag v-for="chip in buildEventChips(event)" :key="`${event.id}_${chip}`" size="small" :bordered="false">{{ chip }}</n-tag>
           </div>
         </div>
       </article>
@@ -30,6 +30,7 @@
 
 <script setup>
 import { nextTick, ref, watch } from "vue";
+import { NTag } from "naive-ui";
 
 import { buildEventChips, formatTimelineTimestamp } from "./seedUploadTaskView";
 import { formatStageKey } from "../../utils/chineseDisplay";
@@ -71,9 +72,9 @@ function scrollToBottom() {
 <style scoped>
 .log-card {
   border: 1px solid var(--line-soft);
-  border-radius: 16px;
+  border-radius: 10px;
   background: linear-gradient(180deg, rgba(255, 252, 246, 0.98), rgba(248, 242, 229, 0.98));
-  padding: 14px;
+  padding: 10px;
 }
 
 .timeline-head,
@@ -90,7 +91,7 @@ function scrollToBottom() {
 
 .timeline-head h3 {
   margin: 4px 0 0;
-  font-size: 18px;
+  font-size: 16px;
   font-family: "ZCOOL XiaoWei", serif;
 }
 
@@ -109,7 +110,7 @@ function scrollToBottom() {
 }
 
 .timeline-list {
-  margin-top: 14px;
+  margin-top: 10px;
   max-height: 420px;
   overflow: auto;
   padding-right: 4px;
@@ -118,11 +119,11 @@ function scrollToBottom() {
 .timeline-item {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
-  gap: 12px;
+  gap: 8px;
 }
 
 .timeline-item + .timeline-item {
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .timeline-rail {
@@ -156,9 +157,9 @@ function scrollToBottom() {
 
 .timeline-body {
   border: 1px solid rgba(159, 141, 106, 0.28);
-  border-radius: 14px;
+  border-radius: 8px;
   background: rgba(255, 251, 243, 0.86);
-  padding: 12px;
+  padding: 10px;
 }
 
 .timeline-item.active .timeline-body {
@@ -182,14 +183,6 @@ function scrollToBottom() {
 .chip-row {
   flex-wrap: wrap;
   margin-top: 10px;
-}
-
-.chip {
-  border: 1px solid rgba(159, 141, 106, 0.34);
-  border-radius: 999px;
-  padding: 4px 9px;
-  font-size: 11px;
-  background: rgba(255, 255, 255, 0.6);
 }
 
 @media (max-width: 768px) {

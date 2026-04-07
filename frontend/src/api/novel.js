@@ -1,5 +1,4 @@
 import { get, post, put } from "./http.js";
-import { postSSE } from "./sse.js";
 
 export function generateArchiveCandidates({ projectId, graphId, entityTypes }) {
   return post("/api/novel/archives/candidates", {
@@ -72,17 +71,6 @@ export function buildChapterContext(payload) {
   return post("/api/novel/chapter-context", payload);
 }
 
-/**
- * 多 Agent 协同生成小说正文（SSE 流式）。
- *
- * @param {object} payload - 请求体
- * @param {object} handlers - SSE 事件回调 { onEvent, onDone, onError }
- * @param {AbortSignal} [signal] - 可选取消信号
- */
-export function generateDraft(payload, handlers, signal) {
-  return postSSE("/api/novel/draft/generate", payload, handlers, signal);
-}
-
 export function getReviewerRules(projectId) {
   return get(`/api/novel/reviewer-rules?project_id=${encodeURIComponent(projectId)}`);
 }
@@ -94,13 +82,4 @@ export function saveReviewerRules(projectId, customPrompt) {
   });
 }
 
-/**
- * 用户驱动的修订流程（SSE 流式）。
- *
- * @param {object} payload - 请求体
- * @param {object} handlers - SSE 事件回调 { onEvent, onDone, onError }
- * @param {AbortSignal} [signal] - 可选取消信号
- */
-export function reviseDraft(payload, handlers, signal) {
-  return postSSE("/api/novel/draft/revise", payload, handlers, signal);
-}
+

@@ -6,7 +6,7 @@
           <h3 class="title-ancient">档案模板确认</h3>
           <p class="subtitle">系统已按叙事重要度推荐档位，你只需调整少量对象。</p>
         </div>
-        <button class="btn" type="button" @click="$emit('close')">关闭</button>
+        <n-button @click="$emit('close')">关闭</n-button>
       </header>
 
       <p v-if="error" class="status-box error">{{ error }}</p>
@@ -21,27 +21,29 @@
                   推荐 {{ formatArchiveTierLabel(item.recommended_importance_tier) }} · 当前 {{ formatArchiveTierLabel(resolvedTier(item.entity_uuid)) }}
                 </div>
               </div>
-              <select :value="resolvedTier(item.entity_uuid)" @change="updateTier(item.entity_uuid, $event.target.value)">
-                <option v-for="option in tierSelectOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
+              <n-select
+                :value="resolvedTier(item.entity_uuid)"
+                :options="tierSelectOptions"
+                style="width: 140px"
+                size="small"
+                @update:value="(val) => updateTier(item.entity_uuid, val)"
+              />
             </div>
             <p class="candidate-summary">{{ item.summary }}</p>
             <div class="candidate-sections">
-              <span v-for="section in previewSections(item)" :key="section" class="section-chip">
+              <n-tag v-for="section in previewSections(item)" :key="section" size="small" :bordered="false" round>
                 {{ formatArchiveSectionLabel(section) }}
-              </span>
+              </n-tag>
             </div>
           </div>
         </section>
       </div>
 
       <footer class="configurator-footer">
-        <button class="btn" type="button" @click="$emit('close')">取消</button>
-        <button class="btn primary" type="button" :disabled="busy" @click="confirm">
-          {{ busy ? "生成中..." : "确认并生成档案" }}
-        </button>
+        <n-button @click="$emit('close')">取消</n-button>
+        <n-button type="primary" :disabled="busy" :loading="busy" @click="confirm">
+          确认并生成档案
+        </n-button>
       </footer>
     </article>
   </div>
@@ -49,6 +51,7 @@
 
 <script setup>
 import { computed, reactive, watch } from "vue";
+import { NButton, NSelect, NTag } from "naive-ui";
 import {
   formatArchiveKindLabel,
   formatArchiveSectionLabel,

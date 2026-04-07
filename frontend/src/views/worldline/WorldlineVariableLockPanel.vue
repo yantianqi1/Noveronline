@@ -11,22 +11,12 @@
     <div class="lock-summary">
       <span class="lock-count mono">{{ lockedCount }} / {{ worldVariables.length }} 已锁定</span>
       <div class="lock-batch">
-        <button
-          class="btn btn-sm"
-          type="button"
-          :disabled="lockedCount === worldVariables.length"
-          @click="emit('lock-all')"
-        >
+        <n-button size="small" :disabled="lockedCount === worldVariables.length" @click="emit('lock-all')">
           全部锁定
-        </button>
-        <button
-          class="btn btn-sm"
-          type="button"
-          :disabled="lockedCount === 0"
-          @click="emit('unlock-all')"
-        >
+        </n-button>
+        <n-button size="small" :disabled="lockedCount === 0" @click="emit('unlock-all')">
           全部解锁
-        </button>
+        </n-button>
       </div>
     </div>
 
@@ -62,6 +52,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NButton } from "naive-ui";
 
 const SOURCE_LABELS = {
   user: "用户注入",

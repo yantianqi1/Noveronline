@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -122,6 +123,7 @@ class WorldlineEngine:
                 self.runtime_service.record_step(container_dir, session, branch, step_result)
         session.updated_at = datetime.now().isoformat()
         self.store.save_session(container_dir, session)
+        self._sync_to_novel_db(session)
         return session
 
     def inject_variable(
@@ -203,6 +205,7 @@ class WorldlineEngine:
             action_event_ids.append(action_item.action_id)
         session.updated_at = datetime.now().isoformat()
         self.store.save_session(container_dir, session)
+        self._sync_to_novel_db(session)
         return session, action_event_ids
 
     def get_session(self, session_id: str, project_id: Optional[str] = None, graph_id: Optional[str] = None):
@@ -345,7 +348,28 @@ class WorldlineEngine:
                 branch.updated_at = datetime.now().isoformat()
         session.updated_at = datetime.now().isoformat()
         self.store.save_session(container_dir, session)
+        self._sync_to_novel_db(session)
         return session
+
+    # ------------------------------------------------------------------
+    # Sync worldline data to novel.sqlite3 for writer agent access
+    # ------------------------------------------------------------------
+
+    def _sync_to_novel_db(self, session: WorldlineSession) -> None:
+        """Push branch metadata and timeline events to novel.sqlite3."""
+        project_id = session.project_id
+        if not project_id:
+            return
+        try:
+            from .writer_agent.novel_db import NovelDB
+            db = NovelDB()
+            db.sync_worldline_session(project_id, session)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to sync worldline session %s to novel.sqlite3",
+                session.session_id,
+                exc_info=True,
+            )
 
     def _load_for_update(
         self,

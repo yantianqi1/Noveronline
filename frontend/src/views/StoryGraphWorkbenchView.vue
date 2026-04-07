@@ -1,20 +1,21 @@
 <template>
   <div class="graph-workbench">
     <div class="workbench-toolbar workbench-card">
-      <select v-model="projectId" class="toolbar-select" @change="refreshGraph">
-        <option value="">-- 请选择卷宗 --</option>
-        <option v-for="item in projects" :key="item.project_id" :value="item.project_id">
-          {{ item.name }}
-        </option>
-      </select>
+      <n-select
+        v-model:value="projectId"
+        :options="projectOptions"
+        placeholder="-- 请选择卷宗 --"
+        style="min-width: 180px"
+        @update:value="refreshGraph"
+      />
 
-      <button class="btn primary" :disabled="!projectId || busy" @click="startBuildGraph">
+      <n-button type="primary" :disabled="!projectId" :loading="busy" @click="startBuildGraph">
         {{ busy ? "构建中..." : "启动图谱构建" }}
-      </button>
-      <button class="btn subtle" @click="loadProjects">刷新卷宗列表</button>
-      <button class="btn" :disabled="!projectId || busy" @click="openArchiveConfigurator">
+      </n-button>
+      <n-button quaternary @click="loadProjects">刷新卷宗列表</n-button>
+      <n-button :disabled="!projectId || busy" @click="openArchiveConfigurator">
         生成全量角色档案
-      </button>
+      </n-button>
 
       <div v-if="taskMessage || taskError" class="status-indicator" :class="{ error: taskError }">
         <div class="status-pulse" v-if="busy"></div>
@@ -43,7 +44,8 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
+import { NButton, NSelect } from "naive-ui";
 import StoryGraphPanel from "../components/StoryGraphPanel.vue";
 import { buildGraph, getProject, getProjectGraph, getTask, listProjects } from "../api/project";
 import { generateArchiveCandidates, generateArchives } from "../api/novel";
@@ -61,6 +63,10 @@ const graphEdges = ref([]);
 const configuratorVisible = ref(false);
 const archiveCandidates = ref([]);
 const pollGraphTask = createGraphBuildTaskPoller({ getTask });
+
+const projectOptions = computed(() =>
+  projects.value.map((item) => ({ label: item.name, value: item.project_id }))
+);
 
 async function loadProjects() {
   const res = await listProjects(50);
@@ -210,23 +216,6 @@ onMounted(async () => {
 .workbench-toolbar:hover {
   box-shadow: none;
   border-color: var(--line-soft);
-}
-
-.toolbar-select {
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line-soft);
-  background: var(--bg-panel-soft);
-  font-family: inherit;
-  font-size: 13px;
-  min-width: 180px;
-}
-
-.toolbar-select:focus {
-  outline: none;
-  border-color: var(--accent-copper);
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(176, 125, 75, 0.1);
 }
 
 .status-indicator {

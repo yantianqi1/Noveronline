@@ -4,31 +4,34 @@
       <h3 class="outline-title title-ancient">章节大纲</h3>
       <span class="outline-count">{{ displayOutline.length }} 个场景</span>
       <div class="outline-header-actions">
-        <input
+        <n-input
           v-if="!previewOutline"
-          v-model="labelInput"
+          v-model:value="labelInput"
           class="outline-label-input"
           placeholder="版本标注（可选）"
+          size="small"
         />
-        <button
+        <n-button
           v-if="!previewOutline"
-          class="btn btn-sm outline-save-btn"
+          size="small"
+          type="primary"
           :disabled="!dirty"
           @click="handleSave"
-        >保存大纲</button>
-        <button
-          class="btn btn-sm outline-history-btn"
-          :class="{ active: showHistory }"
+        >保存大纲</n-button>
+        <n-button
+          size="small"
+          :type="showHistory ? 'primary' : 'default'"
+          :quaternary="!showHistory"
           @click="toggleHistory"
-        >历史版本</button>
+        >历史版本</n-button>
       </div>
     </div>
 
     <!-- Preview banner -->
     <div v-if="previewOutline" class="outline-preview-banner">
       <span>正在预览历史版本</span>
-      <button class="btn btn-sm" @click="emit('restore')">回退到此版本</button>
-      <button class="btn btn-sm" @click="emit('cancel-preview')">取消预览</button>
+      <n-button size="small" @click="emit('restore')">回退到此版本</n-button>
+      <n-button size="small" @click="emit('cancel-preview')">取消预览</n-button>
     </div>
 
     <!-- Version history panel -->
@@ -55,36 +58,38 @@
       >
         <div class="outline-item-header">
           <span class="outline-order">{{ scene.scene_order }}</span>
-          <input
+          <n-input
             v-if="!previewOutline"
-            v-model="scene.title"
-            class="outline-item-title"
+            v-model:value="scene.title"
+            class="outline-item-title-input"
             placeholder="场景标题"
             @input="dirty = true"
           />
           <span v-else class="outline-item-title outline-item-title--readonly">{{ scene.title }}</span>
           <div v-if="!previewOutline" class="outline-item-actions">
-            <button class="outline-move-btn" :disabled="idx === 0" @click="moveUp(idx)" title="上移">↑</button>
-            <button class="outline-move-btn" :disabled="idx === displayOutline.length - 1" @click="moveDown(idx)" title="下移">↓</button>
-            <button class="outline-delete-btn" @click="removeScene(idx)" title="删除">×</button>
+            <n-button size="tiny" quaternary :disabled="idx === 0" @click="moveUp(idx)" title="上移"><Icon icon="icon-park-outline:up" width="14" /></n-button>
+            <n-button size="tiny" quaternary :disabled="idx === displayOutline.length - 1" @click="moveDown(idx)" title="下移"><Icon icon="icon-park-outline:down" width="14" /></n-button>
+            <n-button size="tiny" quaternary @click="removeScene(idx)" title="删除"><Icon icon="icon-park-outline:close-small" width="14" /></n-button>
           </div>
         </div>
 
         <div class="outline-item-fields">
           <div class="outline-field">
             <label>POV</label>
-            <input v-if="!previewOutline" v-model="scene.pov" placeholder="视角角色" @input="dirty = true" />
+            <n-input v-if="!previewOutline" v-model:value="scene.pov" placeholder="视角角色" size="small" @input="dirty = true" />
             <span v-else class="outline-field-readonly">{{ scene.pov || '—' }}</span>
           </div>
           <div class="outline-field outline-field--wide">
             <label>概述</label>
-            <textarea
+            <n-input
               v-if="!previewOutline"
-              v-model="scene.summary"
-              rows="2"
+              v-model:value="scene.summary"
+              type="textarea"
+              :rows="2"
               placeholder="场景概述..."
+              size="small"
               @input="dirty = true"
-            ></textarea>
+            />
             <p v-else class="outline-field-readonly">{{ scene.summary || '—' }}</p>
           </div>
           <div class="outline-field outline-field--wide">
@@ -92,14 +97,15 @@
             <div class="outline-events">
               <template v-if="!previewOutline">
                 <div v-for="(ev, ei) in scene.key_events" :key="ei" class="outline-event-row">
-                  <input
+                  <n-input
                     :value="ev"
-                    @input="updateEvent(idx, ei, $event.target.value)"
                     placeholder="事件描述"
+                    size="small"
+                    @update:value="val => updateEvent(idx, ei, val)"
                   />
-                  <button class="outline-event-del" @click="removeEvent(idx, ei)">×</button>
+                  <n-button size="tiny" quaternary @click="removeEvent(idx, ei)"><Icon icon="icon-park-outline:close-small" width="12" /></n-button>
                 </div>
-                <button class="outline-event-add" @click="addEvent(idx)">+ 事件</button>
+                <n-button size="tiny" dashed @click="addEvent(idx)">+ 事件</n-button>
               </template>
               <template v-else>
                 <div v-for="(ev, ei) in scene.key_events" :key="ei" class="outline-event-row">
@@ -112,12 +118,14 @@
       </div>
     </div>
 
-    <button v-if="!previewOutline" class="outline-add-scene" @click="addScene">+ 添加场景</button>
+    <n-button v-if="!previewOutline" class="outline-add-scene" dashed block @click="addScene">+ 添加场景</n-button>
   </div>
 </template>
 
 <script setup>
 import { ref, watch, computed } from "vue";
+import { NButton, NInput } from "naive-ui";
+import { Icon } from "@iconify/vue";
 
 const props = defineProps({
   outline: { type: Array, default: () => [] },
@@ -224,20 +232,20 @@ function formatTime(iso) {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 20px;
+  padding: 14px;
   overflow-y: auto;
 }
 
 .outline-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .outline-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
 }
 
 .outline-count {
@@ -254,48 +262,6 @@ function formatTime(iso) {
 
 .outline-label-input {
   width: 140px;
-  padding: 5px 10px;
-  font-size: 12px;
-  border: 1px solid var(--line-medium, #d0ccc4);
-  border-radius: 6px;
-  outline: none;
-  background: #faf9f7;
-  color: var(--text-main, #1a1a1a);
-}
-
-.outline-label-input:focus {
-  border-color: var(--accent-copper, #c09060);
-}
-
-.outline-save-btn {
-  padding: 6px 16px;
-  font-size: 12px;
-  background: var(--accent-copper, #c09060);
-  border: none;
-  border-radius: 6px;
-  color: #fff;
-  cursor: pointer;
-}
-
-.outline-save-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.outline-history-btn {
-  padding: 6px 12px;
-  font-size: 12px;
-  background: transparent;
-  border: 1px solid var(--line-medium, #d0ccc4);
-  border-radius: 6px;
-  color: var(--text-dim, #999);
-  cursor: pointer;
-}
-
-.outline-history-btn.active,
-.outline-history-btn:hover {
-  border-color: var(--accent-copper, #c09060);
-  color: var(--accent-copper, #c09060);
 }
 
 .outline-preview-banner {
@@ -372,13 +338,13 @@ function formatTime(iso) {
 .outline-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .outline-item {
   border: 1px solid var(--line-soft, #e0dcd4);
-  border-radius: 10px;
-  padding: 14px 16px;
+  border-radius: 8px;
+  padding: 10px 12px;
   background: #fff;
 }
 
@@ -403,21 +369,8 @@ function formatTime(iso) {
   flex-shrink: 0;
 }
 
-.outline-item-title {
+.outline-item-title-input {
   flex: 1;
-  padding: 4px 8px;
-  font-size: 15px;
-  font-weight: 500;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-main, #1a1a1a);
-  outline: none;
-}
-
-.outline-item-title:focus {
-  border-color: var(--accent-copper, #c09060);
-  background: #fff;
 }
 
 .outline-item-title--readonly {
@@ -432,39 +385,6 @@ function formatTime(iso) {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
-}
-
-.outline-move-btn,
-.outline-delete-btn {
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--line-medium, #d0ccc4);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-dim, #999);
-  font-size: 14px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.outline-move-btn:hover,
-.outline-delete-btn:hover {
-  background: rgba(176, 125, 75, 0.1);
-  border-color: var(--accent-copper, #c09060);
-  color: var(--text-main, #1a1a1a);
-}
-
-.outline-move-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.outline-delete-btn:hover {
-  border-color: #d44;
-  color: #d44;
-  background: rgba(221, 68, 68, 0.06);
 }
 
 .outline-item-fields {
@@ -486,23 +406,6 @@ function formatTime(iso) {
   letter-spacing: 0.5px;
 }
 
-.outline-field input,
-.outline-field textarea {
-  padding: 6px 8px;
-  font-size: 13px;
-  border: 1px solid var(--line-medium, #d0ccc4);
-  border-radius: 6px;
-  outline: none;
-  background: #faf9f7;
-  color: var(--text-main, #1a1a1a);
-  font-family: inherit;
-}
-
-.outline-field input:focus,
-.outline-field textarea:focus {
-  border-color: var(--accent-copper, #c09060);
-}
-
 .outline-field--wide {
   flex: 1 1 100%;
 }
@@ -522,68 +425,10 @@ function formatTime(iso) {
 .outline-event-row {
   display: flex;
   gap: 4px;
-}
-
-.outline-event-row input {
-  flex: 1;
-  padding: 4px 8px;
-  font-size: 13px;
-  border: 1px solid var(--line-medium, #d0ccc4);
-  border-radius: 4px;
-  outline: none;
-  background: #faf9f7;
-  color: var(--text-main, #1a1a1a);
-}
-
-.outline-event-row input:focus {
-  border-color: var(--accent-copper, #c09060);
-}
-
-.outline-event-del {
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim, #999);
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.outline-event-del:hover {
-  color: #d44;
-}
-
-.outline-event-add {
-  align-self: flex-start;
-  padding: 2px 10px;
-  font-size: 12px;
-  border: 1px dashed var(--line-medium, #d0ccc4);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim, #999);
-  cursor: pointer;
-}
-
-.outline-event-add:hover {
-  border-color: var(--accent-copper, #c09060);
-  color: var(--accent-copper, #c09060);
+  align-items: center;
 }
 
 .outline-add-scene {
   margin-top: 12px;
-  padding: 10px;
-  border: 1px dashed var(--line-medium, #d0ccc4);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text-dim, #999);
-  font-size: 14px;
-  cursor: pointer;
-  text-align: center;
-}
-
-.outline-add-scene:hover {
-  border-color: var(--accent-copper, #c09060);
-  color: var(--accent-copper, #c09060);
-  background: rgba(176, 125, 75, 0.04);
 }
 </style>

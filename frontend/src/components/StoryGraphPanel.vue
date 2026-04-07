@@ -4,7 +4,7 @@
       <div ref="canvasRef" class="canvas-area">
         <svg ref="svgRef" class="graph-svg" aria-label="故事图谱" />
         <div class="canvas-mask" aria-hidden="true"></div>
-        <div v-if="!visibleNodeCount" class="empty-box">暂无图谱数据。可先选择项目并构建图谱。</div>
+        <n-empty v-if="!visibleNodeCount" description="暂无图谱数据。可先选择项目并构建图谱。" class="empty-box" />
         <div v-if="legendItems.length" class="legend-card">
           <p class="legend-title">图例</p>
           <div class="legend-list">
@@ -20,27 +20,27 @@
         <div class="panel-head">
           <h2 class="card-title">故事图谱面板</h2>
           <div class="toolbar-row">
-            <button class="btn subtle small" :disabled="loading" @click="$emit('refresh')">
-              {{ loading ? "刷新中..." : "刷新图谱" }}
-            </button>
-            <button class="btn subtle small" type="button" @click="resetVisibleTypes">核心视图</button>
-            <button class="btn subtle small" type="button" @click="showEdgeLabels = !showEdgeLabels">
+            <n-button size="small" quaternary :disabled="loading" :loading="loading" @click="$emit('refresh')">
+              刷新图谱
+            </n-button>
+            <n-button size="small" quaternary @click="resetVisibleTypes">核心视图</n-button>
+            <n-button size="small" quaternary @click="showEdgeLabels = !showEdgeLabels">
               {{ showEdgeLabels ? "隐藏标签" : "显示标签" }}
-            </button>
+            </n-button>
           </div>
         </div>
 
         <div class="filter-row">
-          <button
+          <n-button
             v-for="item in typeOptions"
             :key="item.key"
-            class="btn subtle small"
-            :class="{ active: visibleTypes[item.key] }"
-            type="button"
+            size="small"
+            :quaternary="!visibleTypes[item.key]"
+            :type="visibleTypes[item.key] ? 'primary' : 'default'"
             @click="toggleType(item.key)"
           >
             {{ item.label }} {{ countsByType[item.key] || 0 }}
-          </button>
+          </n-button>
           <span class="graph-meta mono">显示 {{ visibleNodeCount }} / {{ props.nodes.length }}</span>
         </div>
 
@@ -52,6 +52,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { NButton, NEmpty } from "naive-ui";
 
 import StoryGraphInspector from "./StoryGraphInspector.vue";
 import { createStoryGraphRenderer } from "../views/story-graph/storyGraphRenderer.js";

@@ -1,7 +1,7 @@
 .candidate-zone {
-  margin-top: 16px;
-  padding: 16px;
-  border-radius: 18px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
   background: linear-gradient(180deg, rgba(255, 248, 232, 0.94) 0%, rgba(248, 238, 218, 0.92) 100%);
   border: 1px solid rgba(218, 180, 100, 0.35);
   border-top: 3px solid rgba(201, 149, 74, 0.5);
@@ -14,7 +14,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -48,7 +48,7 @@
 /* ── Card row ──────────────────────────────────────────────── */
 
 .candidate-scroll {
-  margin-top: 14px;
+  margin-top: 10px;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
@@ -58,7 +58,7 @@
 
 .candidate-row {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   padding-bottom: 4px;
 }
 
@@ -67,8 +67,8 @@
   min-width: 260px;
   max-width: 360px;
   border: 1px solid rgba(199, 173, 133, 0.38);
-  border-radius: 14px;
-  padding: 14px;
+  border-radius: 8px;
+  padding: 10px;
   background: rgba(255, 255, 255, 0.88);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }

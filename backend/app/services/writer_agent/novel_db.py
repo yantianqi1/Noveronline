@@ -50,6 +50,10 @@ TABLE_STATEMENTS = (
         knowledge_boundary_json TEXT DEFAULT '{}',
         ultimate_goal TEXT,
         current_objective TEXT,
+        -- Character psychology fields from agent_profiles
+        mask_behavior TEXT,
+        emotional_baseline TEXT,
+        cognitive_biases_json TEXT DEFAULT '[]',
         -- Fields from archive_library
         agent_behavior_hint TEXT,
         relationship_summary_text TEXT,
@@ -160,9 +164,31 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS worldline_branches (
+        branch_id TEXT NOT NULL,
+        session_id TEXT NOT NULL REFERENCES sessions ON DELETE CASCADE,
+        title TEXT NOT NULL DEFAULT '',
+        core_change TEXT NOT NULL DEFAULT '',
+        narrative_value TEXT DEFAULT '',
+        current_step INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'running',
+        evolution_intensity TEXT DEFAULT 'medium',
+        evolution_depth INTEGER DEFAULT 3,
+        key_agents_json TEXT DEFAULT '[]',
+        expected_conflicts_json TEXT DEFAULT '[]',
+        actor_states_json TEXT DEFAULT '{}',
+        organization_states_json TEXT DEFAULT '{}',
+        relationship_states_json TEXT DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, branch_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS agent_states (
         state_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions ON DELETE CASCADE,
+        branch_id TEXT NOT NULL DEFAULT 'main',
         entity_id TEXT NOT NULL,
         state_json TEXT NOT NULL,
         status TEXT DEFAULT 'active',
@@ -174,6 +200,7 @@ TABLE_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS agent_memory (
         memory_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions ON DELETE CASCADE,
+        branch_id TEXT NOT NULL DEFAULT 'main',
         entity_id TEXT NOT NULL,
         memory_type TEXT NOT NULL,
         summary TEXT NOT NULL,
@@ -187,6 +214,7 @@ TABLE_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS world_events (
         event_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions ON DELETE CASCADE,
+        branch_id TEXT NOT NULL DEFAULT 'main',
         step INTEGER NOT NULL,
         title TEXT NOT NULL,
         summary TEXT NOT NULL,
@@ -241,26 +269,8 @@ TABLE_STATEMENTS = (
         updated_at TEXT NOT NULL
     )
     """,
-    # -- Manuscript layer --
-    """
-    CREATE TABLE IF NOT EXISTS manuscript_blocks (
-        block_id              TEXT PRIMARY KEY,
-        project_id            TEXT NOT NULL,
-        block_order           INTEGER NOT NULL,
-        content               TEXT NOT NULL,
-        word_count            INTEGER DEFAULT 0,
-        chapter_tag           TEXT,
-        source_scene_id       TEXT,
-        summary               TEXT,
-        open_threads_json     TEXT,
-        pov_entity_id         TEXT,
-        involved_entities_json TEXT,
-        location              TEXT,
-        narrative_note        TEXT,
-        committed_at          TEXT NOT NULL,
-        UNIQUE(project_id, block_order)
-    )
-    """,
+    # -- Manuscript layer moved to assets library (project assets DB).
+    #    See app/services/assets/manuscript_adapter.py
     # -- Timeline tables --
     """
     CREATE TABLE IF NOT EXISTS character_events (
@@ -328,6 +338,26 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS volume_summaries (
+        volume_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        volume_order INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        covered_arcs_json TEXT DEFAULT '[]',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS segment_summaries (
+        segment_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        segment_order INTEGER NOT NULL DEFAULT 0,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, segment_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS outline_versions (
         version_id   TEXT PRIMARY KEY,
         chapter_id   TEXT NOT NULL REFERENCES chapter_content ON DELETE CASCADE,
@@ -384,12 +414,8 @@ FTS_STATEMENTS = (
         content=agent_memory, tokenize='trigram'
     )
     """,
-    """
-    CREATE VIRTUAL TABLE IF NOT EXISTS manuscript_fts USING fts5(
-        content, summary,
-        content=manuscript_blocks, tokenize='trigram'
-    )
-    """,
+    # manuscript_fts removed: manuscript blocks now live in the assets library
+    # (assets_fts in project_assets.sqlite3).
     # -- New FTS tables --
     """
     CREATE VIRTUAL TABLE IF NOT EXISTS relationships_fts USING fts5(
@@ -443,6 +469,16 @@ FTS_STATEMENTS = (
     CREATE VIRTUAL TABLE IF NOT EXISTS consistency_notes_fts USING fts5(
         note_text,
         content=consistency_notes, tokenize='trigram'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS volume_summaries_fts USING fts5(
+        summary, content=volume_summaries, tokenize='trigram'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS segment_summaries_fts USING fts5(
+        summary, content=segment_summaries, tokenize='trigram'
     )
     """,
 )
@@ -520,23 +556,7 @@ TRIGGER_STATEMENTS = (
         INSERT INTO agent_memory_fts(agent_memory_fts, rowid, summary, detail_json) VALUES ('delete', old.rowid, old.summary, old.detail_json);
     END
     """,
-    # -- manuscript_blocks FTS triggers --
-    """
-    CREATE TRIGGER IF NOT EXISTS manuscript_ai AFTER INSERT ON manuscript_blocks BEGIN
-        INSERT INTO manuscript_fts(rowid, content, summary) VALUES (new.rowid, new.content, new.summary);
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS manuscript_au AFTER UPDATE ON manuscript_blocks BEGIN
-        INSERT INTO manuscript_fts(manuscript_fts, rowid, content, summary) VALUES ('delete', old.rowid, old.content, old.summary);
-        INSERT INTO manuscript_fts(rowid, content, summary) VALUES (new.rowid, new.content, new.summary);
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS manuscript_ad AFTER DELETE ON manuscript_blocks BEGIN
-        INSERT INTO manuscript_fts(manuscript_fts, rowid, content, summary) VALUES ('delete', old.rowid, old.content, old.summary);
-    END
-    """,
+    # manuscript triggers removed (manuscript moved to assets library)
     # -- relationships FTS triggers --
     """
     CREATE TRIGGER IF NOT EXISTS relationships_ai AFTER INSERT ON relationships BEGIN
@@ -694,6 +714,40 @@ TRIGGER_STATEMENTS = (
         INSERT INTO consistency_notes_fts(consistency_notes_fts, rowid, note_text) VALUES ('delete', old.rowid, old.note_text);
     END
     """,
+    # -- volume_summaries FTS triggers --
+    """
+    CREATE TRIGGER IF NOT EXISTS volume_summaries_ai AFTER INSERT ON volume_summaries BEGIN
+        INSERT INTO volume_summaries_fts(rowid, summary) VALUES (new.rowid, new.summary);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS volume_summaries_au AFTER UPDATE ON volume_summaries BEGIN
+        INSERT INTO volume_summaries_fts(volume_summaries_fts, rowid, summary) VALUES ('delete', old.rowid, old.summary);
+        INSERT INTO volume_summaries_fts(rowid, summary) VALUES (new.rowid, new.summary);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS volume_summaries_ad AFTER DELETE ON volume_summaries BEGIN
+        INSERT INTO volume_summaries_fts(volume_summaries_fts, rowid, summary) VALUES ('delete', old.rowid, old.summary);
+    END
+    """,
+    # -- segment_summaries FTS triggers --
+    """
+    CREATE TRIGGER IF NOT EXISTS segment_summaries_ai AFTER INSERT ON segment_summaries BEGIN
+        INSERT INTO segment_summaries_fts(rowid, summary) VALUES (new.rowid, new.summary);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS segment_summaries_au AFTER UPDATE ON segment_summaries BEGIN
+        INSERT INTO segment_summaries_fts(segment_summaries_fts, rowid, summary) VALUES ('delete', old.rowid, old.summary);
+        INSERT INTO segment_summaries_fts(rowid, summary) VALUES (new.rowid, new.summary);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS segment_summaries_ad AFTER DELETE ON segment_summaries BEGIN
+        INSERT INTO segment_summaries_fts(segment_summaries_fts, rowid, summary) VALUES ('delete', old.rowid, old.summary);
+    END
+    """,
 )
 
 INDEX_STATEMENTS = (
@@ -709,7 +763,7 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_agent_memory_session ON agent_memory(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_world_events_session ON world_events(session_id, step)",
     "CREATE INDEX IF NOT EXISTS idx_writer_presets_project ON writer_presets(project_id)",
-    "CREATE INDEX IF NOT EXISTS idx_mb_project ON manuscript_blocks(project_id, block_order)",
+    # manuscript_blocks indexes removed (table moved to assets library)
     # 关系复合索引：get_relationship() 的 OR 双向查询
     "CREATE INDEX IF NOT EXISTS idx_relationships_src_tgt ON relationships(source_id, target_id)",
     # Agent 状态复合索引：get_world_state() 按 session+entity 过滤
@@ -718,8 +772,6 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_agent_memory_session_entity ON agent_memory(session_id, entity_id)",
     # 实体证据索引：按 owner 查证据
     "CREATE INDEX IF NOT EXISTS idx_entity_evidence_owner ON entity_evidence(owner_id, owner_type)",
-    # 稿件章标签索引：get_manuscript_stats() 的 DISTINCT chapter_tag 查询
-    "CREATE INDEX IF NOT EXISTS idx_mb_chapter_tag ON manuscript_blocks(project_id, chapter_tag)",
     # -- Timeline table indexes --
     "CREATE INDEX IF NOT EXISTS idx_char_events_entity ON character_events(entity_id, segment_id)",
     "CREATE INDEX IF NOT EXISTS idx_char_events_project ON character_events(project_id, chapter_order)",
@@ -732,6 +784,14 @@ INDEX_STATEMENTS = (
     # -- Entity association indexes --
     "CREATE INDEX IF NOT EXISTS idx_thread_entity_links_entity ON thread_entity_links(entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_rule_entity_links_entity ON rule_entity_links(entity_id)",
+    # -- Worldline branch indexes --
+    "CREATE INDEX IF NOT EXISTS idx_worldline_branches_session ON worldline_branches(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_states_session_branch ON agent_states(session_id, branch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_states_session_branch_entity ON agent_states(session_id, branch_id, entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_session_branch ON agent_memory(session_id, branch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_world_events_session_branch ON world_events(session_id, branch_id, step)",
+    "CREATE INDEX IF NOT EXISTS idx_volume_summaries_project ON volume_summaries(project_id, volume_order)",
+    "CREATE INDEX IF NOT EXISTS idx_segment_summaries_project ON segment_summaries(project_id, segment_order)",
 )
 
 # ---------------------------------------------------------------------------
@@ -794,19 +854,19 @@ class NovelDB:
 
     _FTS_TABLE_NAMES = (
         "entities_fts", "chapter_content_fts", "scenes_fts",
-        "agent_memory_fts", "manuscript_fts",
+        "agent_memory_fts",
         "relationships_fts", "plot_threads_fts", "narrative_arcs_fts",
         "entity_evidence_fts",
         "character_events_fts", "relationship_events_fts",
         "thread_lifecycle_fts", "world_rule_evidence_fts",
         "consistency_notes_fts",
+        "volume_summaries_fts", "segment_summaries_fts",
     )
     _FTS_TRIGGER_NAMES = (
         "entities_ai", "entities_au", "entities_ad",
         "chapter_content_ai", "chapter_content_au", "chapter_content_ad",
         "scenes_ai", "scenes_au", "scenes_ad",
         "agent_memory_ai", "agent_memory_au", "agent_memory_ad",
-        "manuscript_ai", "manuscript_au", "manuscript_ad",
         "relationships_ai", "relationships_au", "relationships_ad",
         "plot_threads_ai", "plot_threads_au", "plot_threads_ad",
         "narrative_arcs_ai", "narrative_arcs_au", "narrative_arcs_ad",
@@ -816,6 +876,8 @@ class NovelDB:
         "thread_lifecycle_ai", "thread_lifecycle_au", "thread_lifecycle_ad",
         "world_rule_evidence_ai", "world_rule_evidence_au", "world_rule_evidence_ad",
         "consistency_notes_ai", "consistency_notes_au", "consistency_notes_ad",
+        "volume_summaries_ai", "volume_summaries_au", "volume_summaries_ad",
+        "segment_summaries_ai", "segment_summaries_au", "segment_summaries_ad",
     )
 
     # Columns that may not exist in older databases.  Each entry is
@@ -845,6 +907,14 @@ class NovelDB:
         ("chapter_meta", "relationship_updates_json", "TEXT DEFAULT '[]'"),
         ("chapter_meta", "start_anchor", "TEXT DEFAULT ''"),
         ("chapter_meta", "end_anchor", "TEXT DEFAULT ''"),
+        # worldline branch_id columns
+        ("agent_states", "branch_id", "TEXT NOT NULL DEFAULT 'main'"),
+        ("agent_memory", "branch_id", "TEXT NOT NULL DEFAULT 'main'"),
+        ("world_events", "branch_id", "TEXT NOT NULL DEFAULT 'main'"),
+        # Character psychology fields
+        ("entities", "mask_behavior", "TEXT"),
+        ("entities", "emotional_baseline", "TEXT"),
+        ("entities", "cognitive_biases_json", "TEXT DEFAULT '[]'"),
     ]
 
     def ensure_schema(self, project_id: str) -> None:
@@ -1731,7 +1801,187 @@ class NovelDB:
                 except Exception:
                     pass
 
+            if scope in ("arcs", "all"):
+                try:
+                    if use_like:
+                        rows = conn.execute(
+                            "SELECT arc_id, SUBSTR(summary, MAX(1, INSTR(summary, ?) - 40), 120) AS snippet "
+                            "FROM narrative_arcs WHERE project_id = ? AND summary LIKE ? LIMIT ?",
+                            (query, project_id, like_param, limit),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT na.arc_id, "
+                            "snippet(narrative_arcs_fts, 0, '<b>', '</b>', '...', 48) AS snippet "
+                            "FROM narrative_arcs_fts "
+                            "JOIN narrative_arcs na ON na.rowid = narrative_arcs_fts.rowid "
+                            "WHERE narrative_arcs_fts MATCH ? LIMIT ?",
+                            (fts_param, limit),
+                        ).fetchall()
+                    for r in rows:
+                        results.append({
+                            "source": "arcs",
+                            "name": r["arc_id"],
+                            "snippet": r["snippet"] or "",
+                        })
+                except Exception:
+                    pass
+
+            if scope in ("volumes", "all"):
+                try:
+                    if use_like:
+                        rows = conn.execute(
+                            "SELECT volume_id, volume_order, "
+                            "SUBSTR(summary, MAX(1, INSTR(summary, ?) - 40), 120) AS snippet "
+                            "FROM volume_summaries WHERE project_id = ? AND summary LIKE ? LIMIT ?",
+                            (query, project_id, like_param, limit),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT vs.volume_id, vs.volume_order, "
+                            "snippet(volume_summaries_fts, 0, '<b>', '</b>', '...', 48) AS snippet "
+                            "FROM volume_summaries_fts "
+                            "JOIN volume_summaries vs ON vs.rowid = volume_summaries_fts.rowid "
+                            "WHERE volume_summaries_fts MATCH ? LIMIT ?",
+                            (fts_param, limit),
+                        ).fetchall()
+                    for r in rows:
+                        results.append({
+                            "source": "volumes",
+                            "name": f"第{r['volume_order'] + 1}卷" if "volume_order" in r.keys() else r["volume_id"],
+                            "snippet": r["snippet"] or "",
+                        })
+                except Exception:
+                    pass
+
+            if scope in ("segments", "all"):
+                try:
+                    if use_like:
+                        rows = conn.execute(
+                            "SELECT segment_id, segment_order, "
+                            "SUBSTR(summary, MAX(1, INSTR(summary, ?) - 40), 120) AS snippet "
+                            "FROM segment_summaries WHERE project_id = ? AND summary LIKE ? LIMIT ?",
+                            (query, project_id, like_param, limit),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT ss.segment_id, ss.segment_order, "
+                            "snippet(segment_summaries_fts, 0, '<b>', '</b>', '...', 48) AS snippet "
+                            "FROM segment_summaries_fts "
+                            "JOIN segment_summaries ss ON ss.rowid = segment_summaries_fts.rowid "
+                            "WHERE segment_summaries_fts MATCH ? LIMIT ?",
+                            (fts_param, limit),
+                        ).fetchall()
+                    for r in rows:
+                        results.append({
+                            "source": "segments",
+                            "name": f"{r['segment_id']} (#{r['segment_order']})",
+                            "snippet": r["snippet"] or "",
+                        })
+                except Exception:
+                    pass
+
+            if scope in ("consistency", "all"):
+                try:
+                    if use_like:
+                        rows = conn.execute(
+                            "SELECT note_id, segment_id, "
+                            "SUBSTR(note_text, MAX(1, INSTR(note_text, ?) - 40), 120) AS snippet "
+                            "FROM consistency_notes WHERE project_id = ? AND note_text LIKE ? LIMIT ?",
+                            (query, project_id, like_param, limit),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT cn.note_id, cn.segment_id, "
+                            "snippet(consistency_notes_fts, 0, '<b>', '</b>', '...', 48) AS snippet "
+                            "FROM consistency_notes_fts "
+                            "JOIN consistency_notes cn ON cn.rowid = consistency_notes_fts.rowid "
+                            "WHERE consistency_notes_fts MATCH ? LIMIT ?",
+                            (fts_param, limit),
+                        ).fetchall()
+                    for r in rows:
+                        results.append({
+                            "source": "consistency",
+                            "name": f"[{r['segment_id']}] {r['note_id']}",
+                            "snippet": r["snippet"] or "",
+                        })
+                except Exception:
+                    pass
+
         return results
+
+    # ======================================================================
+    # Story overview / narrative context
+    # ======================================================================
+
+    def get_narrative_arcs(self, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Return narrative arc summaries in order."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                "SELECT arc_id, summary, covered_segments_json FROM narrative_arcs "
+                "WHERE project_id = ? ORDER BY arc_id LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
+
+    def get_volume_summaries(self, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Return volume summaries in order."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                "SELECT volume_id, volume_order, summary, covered_arcs_json "
+                "FROM volume_summaries WHERE project_id = ? ORDER BY volume_order LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
+
+    def get_project_meta(self, project_id: str) -> dict[str, Any] | None:
+        """Return project-level narrative metadata."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            row = conn.execute(
+                "SELECT narrative_phase, total_segments FROM project_meta WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            return _row_to_dict(row) if row else None
+
+    def get_segment_summaries(
+        self,
+        project_id: str,
+        segment_ids: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Return per-segment reading summaries. Optionally filter by segment IDs."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            if segment_ids:
+                placeholders = ",".join("?" * len(segment_ids))
+                rows = conn.execute(
+                    f"SELECT segment_id, segment_order, summary FROM segment_summaries "
+                    f"WHERE project_id = ? AND segment_id IN ({placeholders}) "
+                    f"ORDER BY segment_order",
+                    (project_id, *segment_ids),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT segment_id, segment_order, summary FROM segment_summaries "
+                    "WHERE project_id = ? ORDER BY segment_order LIMIT ? OFFSET ?",
+                    (project_id, limit, offset),
+                ).fetchall()
+            return [_row_to_dict(r) for r in rows]
+
+    def get_consistency_notes(self, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Return consistency notes (contradictions/logic issues found during reading)."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                "SELECT note_id, segment_id, note_text FROM consistency_notes "
+                "WHERE project_id = ? ORDER BY segment_id LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
 
     # ======================================================================
     # World state
@@ -1742,6 +1992,7 @@ class NovelDB:
         project_id: str,
         session_id: str,
         entity_id: str | None = None,
+        branch_id: str | None = None,
     ) -> dict[str, Any]:
         self.ensure_schema(project_id)
         with self.connect(project_id) as conn:
@@ -1750,25 +2001,30 @@ class NovelDB:
             ).fetchone()
             session = _row_to_dict(session_row)
 
-            if entity_id is not None:
-                state_rows = conn.execute(
-                    "SELECT * FROM agent_states WHERE session_id = ? AND entity_id = ?",
-                    (session_id, entity_id),
-                ).fetchall()
-            else:
-                state_rows = conn.execute(
-                    "SELECT * FROM agent_states WHERE session_id = ?",
-                    (session_id,),
-                ).fetchall()
+            # Build agent_states query with optional branch/entity filters
+            where = ["session_id = ?"]
+            params: list[Any] = [session_id]
+            if branch_id:
+                where.append("branch_id = ?")
+                params.append(branch_id)
+            if entity_id:
+                where.append("entity_id = ?")
+                params.append(entity_id)
+            state_rows = conn.execute(
+                f"SELECT * FROM agent_states WHERE {' AND '.join(where)}",
+                params,
+            ).fetchall()
 
+            # Build events query with optional branch filter
+            ev_where = ["session_id = ?"]
+            ev_params: list[Any] = [session_id]
+            if branch_id:
+                ev_where.append("branch_id = ?")
+                ev_params.append(branch_id)
             events = conn.execute(
-                """
-                SELECT * FROM world_events
-                WHERE session_id = ?
-                ORDER BY step DESC
-                LIMIT 10
-                """,
-                (session_id,),
+                f"SELECT * FROM world_events WHERE {' AND '.join(ev_where)}"
+                " ORDER BY step DESC LIMIT 10",
+                ev_params,
             ).fetchall()
 
             return {
@@ -1776,6 +2032,157 @@ class NovelDB:
                 "agent_states": _rows_to_dicts(state_rows),
                 "recent_events": _rows_to_dicts(events),
             }
+
+    # ======================================================================
+    # Worldline branch queries
+    # ======================================================================
+
+    def list_worldline_branches(
+        self, project_id: str, session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return all branches for a worldline session."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """SELECT branch_id, session_id, title, core_change,
+                          narrative_value, current_step, status,
+                          evolution_intensity, key_agents_json,
+                          expected_conflicts_json, created_at, updated_at
+                   FROM worldline_branches
+                   WHERE session_id = ?
+                   ORDER BY created_at""",
+                (session_id,),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_branch_timeline(
+        self,
+        project_id: str,
+        session_id: str,
+        branch_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return timeline events for a specific branch, ordered by step."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            rows = conn.execute(
+                """SELECT * FROM world_events
+                   WHERE session_id = ? AND branch_id = ?
+                   ORDER BY step ASC
+                   LIMIT ? OFFSET ?""",
+                (session_id, branch_id, limit, offset),
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+    def get_branch_agent_state(
+        self,
+        project_id: str,
+        session_id: str,
+        branch_id: str,
+        entity_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return agent states for a specific branch."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            if entity_id:
+                rows = conn.execute(
+                    "SELECT * FROM agent_states WHERE session_id = ? AND branch_id = ? AND entity_id = ?",
+                    (session_id, branch_id, entity_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM agent_states WHERE session_id = ? AND branch_id = ?",
+                    (session_id, branch_id),
+                ).fetchall()
+            return _rows_to_dicts(rows)
+
+    # ======================================================================
+    # Worldline sync (called by worldline_engine after mutations)
+    # ======================================================================
+
+    def sync_worldline_session(self, project_id: str, session: Any) -> None:
+        """Upsert branch metadata and timeline events from a WorldlineSession.
+
+        Uses INSERT OR REPLACE for branches and agent states so the latest
+        snapshot always wins, and INSERT OR IGNORE for events (immutable).
+        """
+        import json as _json
+        self.ensure_schema(project_id)
+        now = _now()
+        with self.connect(project_id) as conn:
+            # Ensure session row
+            conn.execute(
+                """INSERT OR REPLACE INTO sessions
+                   (session_id, project_id, session_type, title,
+                    focus_question, status, config_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session.session_id, project_id, "worldline",
+                    getattr(session, "label", "") or getattr(session, "simulation_goal", ""),
+                    getattr(session, "focus_question", ""),
+                    getattr(session, "status", "running"),
+                    "{}",
+                    getattr(session, "created_at", now),
+                    getattr(session, "updated_at", now),
+                ),
+            )
+
+            for branch in session.branches:
+                # Upsert branch metadata
+                conn.execute(
+                    """INSERT OR REPLACE INTO worldline_branches
+                       (branch_id, session_id, title, core_change, narrative_value,
+                        current_step, status, evolution_intensity, evolution_depth,
+                        key_agents_json, expected_conflicts_json,
+                        actor_states_json, organization_states_json,
+                        relationship_states_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        branch.branch_id, session.session_id,
+                        branch.title, branch.core_change,
+                        getattr(branch, "narrative_value", ""),
+                        branch.current_step, branch.status,
+                        getattr(branch, "evolution_intensity", "medium"),
+                        getattr(branch, "evolution_depth", 3),
+                        _json.dumps(branch.key_agents, ensure_ascii=False),
+                        _json.dumps(branch.expected_conflicts, ensure_ascii=False),
+                        _json.dumps(branch.actor_states, ensure_ascii=False),
+                        _json.dumps(branch.organization_states, ensure_ascii=False),
+                        _json.dumps(
+                            [rs if isinstance(rs, dict) else {} for rs in branch.relationship_states],
+                            ensure_ascii=False,
+                        ),
+                        getattr(branch, "created_at", now),
+                        getattr(branch, "updated_at", now),
+                    ),
+                )
+
+                # Append timeline events (immutable, INSERT OR IGNORE)
+                for event in branch.timeline:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO world_events
+                           (event_id, session_id, branch_id, step, title, summary,
+                            event_type, driving_entities_json, state_changes_json,
+                            status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            event.event_id, session.session_id, branch.branch_id,
+                            event.step, event.title, event.summary,
+                            getattr(event, "event_type", "") or "",
+                            _json.dumps(
+                                getattr(event, "driving_entities", []) or [],
+                                ensure_ascii=False,
+                            ),
+                            _json.dumps(
+                                getattr(event, "state_changes", []) or [],
+                                ensure_ascii=False,
+                            ),
+                            getattr(event, "status", "canon") or "canon",
+                            getattr(event, "created_at", now),
+                        ),
+                    )
+            conn.commit()
 
     # ======================================================================
     # Open threads
@@ -2035,10 +2442,26 @@ class NovelDB:
             conn.commit()
 
     # ======================================================================
-    # Manuscript blocks
+    # Manuscript blocks (delegated to assets-library project store)
     # ======================================================================
 
     _BLOCK_ORDER_GAP = 10
+
+    def _manuscript_adapter(self, project_id: str):
+        """Return a ManuscriptAssetAdapter wired to this project's chapter lookup."""
+        from ..assets.manuscript_adapter import ManuscriptAssetAdapter
+
+        def chapter_lookup(chapter_id: str) -> dict | None:
+            if not chapter_id:
+                return None
+            with self.connect(project_id) as conn:
+                row = conn.execute(
+                    "SELECT title, chapter_order FROM chapter_content WHERE chapter_id = ?",
+                    (chapter_id,),
+                ).fetchone()
+            return dict(row) if row else None
+
+        return ManuscriptAssetAdapter(project_id, chapter_lookup=chapter_lookup)
 
     def commit_manuscript_block(
         self,
@@ -2046,243 +2469,72 @@ class NovelDB:
         content: str,
         source_scene_id: str | None = None,
         insert_after_block_id: str | None = None,
+        chapter_id: str | None = None,
+        pov_entity_id: str | None = None,
+        location: str | None = None,
+        involved_entities_json: str | None = None,
     ) -> dict[str, Any]:
-        """Append (or insert) a new manuscript block and return it."""
-        self.ensure_schema(project_id)
-        block_id = f"mb_{uuid.uuid4().hex[:12]}"
-        now = _now()
-        word_count = len(content)
-
-        with self.connect(project_id) as conn:
-            if insert_after_block_id:
-                # Insert after a specific block
-                ref = conn.execute(
-                    "SELECT block_order FROM manuscript_blocks WHERE block_id = ?",
-                    (insert_after_block_id,),
-                ).fetchone()
-                if ref is None:
-                    # Fallback to append
-                    block_order = self._next_block_order(conn, project_id)
-                else:
-                    ref_order = ref["block_order"]
-                    nxt = conn.execute(
-                        "SELECT MIN(block_order) AS nxt FROM manuscript_blocks "
-                        "WHERE project_id = ? AND block_order > ?",
-                        (project_id, ref_order),
-                    ).fetchone()
-                    if nxt and nxt["nxt"] is not None:
-                        gap = nxt["nxt"] - ref_order
-                        if gap > 1:
-                            block_order = ref_order + gap // 2
-                        else:
-                            # No gap — renumber all blocks after ref
-                            self._renumber_blocks(conn, project_id)
-                            ref2 = conn.execute(
-                                "SELECT block_order FROM manuscript_blocks WHERE block_id = ?",
-                                (insert_after_block_id,),
-                            ).fetchone()
-                            block_order = ref2["block_order"] + self._BLOCK_ORDER_GAP // 2
-                    else:
-                        block_order = ref_order + self._BLOCK_ORDER_GAP
-            else:
-                block_order = self._next_block_order(conn, project_id)
-
-            conn.execute(
-                """
-                INSERT INTO manuscript_blocks
-                    (block_id, project_id, block_order, content, word_count,
-                     source_scene_id, committed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (block_id, project_id, block_order, content, word_count,
-                 source_scene_id, now),
-            )
-            conn.commit()
-
-        return {
-            "block_id": block_id,
-            "block_order": block_order,
-            "word_count": word_count,
-            "committed_at": now,
-        }
-
-    def _next_block_order(self, conn: sqlite3.Connection, project_id: str) -> int:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(block_order), 0) AS mx FROM manuscript_blocks WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
-        return (row["mx"] if row else 0) + self._BLOCK_ORDER_GAP
-
-    def _renumber_blocks(self, conn: sqlite3.Connection, project_id: str) -> None:
-        rows = conn.execute(
-            "SELECT block_id FROM manuscript_blocks WHERE project_id = ? ORDER BY block_order",
-            (project_id,),
-        ).fetchall()
-        for idx, r in enumerate(rows):
-            conn.execute(
-                "UPDATE manuscript_blocks SET block_order = ? WHERE block_id = ?",
-                ((idx + 1) * self._BLOCK_ORDER_GAP, r["block_id"]),
-            )
+        return self._manuscript_adapter(project_id).commit(
+            content,
+            source_scene_id=source_scene_id,
+            insert_after_block_id=insert_after_block_id,
+            chapter_id=chapter_id,
+            pov_entity_id=pov_entity_id,
+            location=location,
+            involved_entities_json=involved_entities_json,
+        )
 
     def list_manuscript_blocks(
-        self, project_id: str, include_content: bool = True
+        self, project_id: str, include_content: bool = True,
+        chapter_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        self.ensure_schema(project_id)
-        cols = "*" if include_content else (
-            "block_id, project_id, block_order, word_count, chapter_tag, "
-            "source_scene_id, summary, open_threads_json, pov_entity_id, "
-            "involved_entities_json, location, narrative_note, committed_at"
+        return self._manuscript_adapter(project_id).list_blocks(
+            include_content=include_content, chapter_id=chapter_id,
         )
-        with self.connect(project_id) as conn:
-            rows = conn.execute(
-                f"SELECT {cols} FROM manuscript_blocks WHERE project_id = ? ORDER BY block_order",
-                (project_id,),
-            ).fetchall()
-            return _rows_to_dicts(rows)
 
     def get_manuscript_block(self, project_id: str, block_id: str) -> dict[str, Any] | None:
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            row = conn.execute(
-                "SELECT * FROM manuscript_blocks WHERE block_id = ?", (block_id,)
-            ).fetchone()
-            return _row_to_dict(row)
+        return self._manuscript_adapter(project_id).get_block(block_id)
 
     def update_manuscript_block(
         self, project_id: str, block_id: str, **kwargs: Any
     ) -> None:
-        self.ensure_schema(project_id)
-        allowed = {
-            "content", "chapter_tag", "summary", "open_threads_json",
-            "pov_entity_id", "involved_entities_json", "location", "narrative_note",
-        }
-        updates = {k: v for k, v in kwargs.items() if k in allowed}
-        if not updates:
-            return
-        if "content" in updates:
-            updates["word_count"] = len(updates["content"])
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        with self.connect(project_id) as conn:
-            conn.execute(
-                f"UPDATE manuscript_blocks SET {set_clause} WHERE block_id = ?",
-                (*updates.values(), block_id),
-            )
-            conn.commit()
+        self._manuscript_adapter(project_id).update_block(block_id, **kwargs)
 
     def delete_manuscript_block(self, project_id: str, block_id: str) -> None:
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            conn.execute(
-                "DELETE FROM manuscript_blocks WHERE block_id = ?", (block_id,)
-            )
-            conn.commit()
+        self._manuscript_adapter(project_id).delete_block(block_id)
 
     def reorder_manuscript_blocks(
         self, project_id: str, block_ids: list[str]
     ) -> None:
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            # Shift to negative temporaries to avoid UNIQUE conflicts
-            for idx, bid in enumerate(block_ids):
-                conn.execute(
-                    "UPDATE manuscript_blocks SET block_order = ? WHERE block_id = ? AND project_id = ?",
-                    (-(idx + 1), bid, project_id),
-                )
-            # Now assign final positions
-            for idx, bid in enumerate(block_ids):
-                conn.execute(
-                    "UPDATE manuscript_blocks SET block_order = ? WHERE block_id = ? AND project_id = ?",
-                    ((idx + 1) * self._BLOCK_ORDER_GAP, bid, project_id),
-                )
-            conn.commit()
+        self._manuscript_adapter(project_id).reorder(block_ids)
 
     def tag_manuscript_blocks(
         self, project_id: str, block_ids: list[str], chapter_tag: str
     ) -> int:
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            placeholders = ", ".join("?" for _ in block_ids)
-            conn.execute(
-                f"UPDATE manuscript_blocks SET chapter_tag = ? WHERE block_id IN ({placeholders}) AND project_id = ?",
-                (chapter_tag, *block_ids, project_id),
-            )
-            conn.commit()
-            return len(block_ids)
+        return self._manuscript_adapter(project_id).tag_blocks(block_ids, chapter_tag)
+
+    def move_manuscript_block_to_chapter(
+        self, project_id: str, block_id: str,
+        chapter_id: str | None,
+        insert_after_block_id: str | None = None,
+    ) -> None:
+        self._manuscript_adapter(project_id).move_to_chapter(block_id, chapter_id)
 
     def get_manuscript_stats(self, project_id: str) -> dict[str, Any]:
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS total_blocks, COALESCE(SUM(word_count), 0) AS total_words "
-                "FROM manuscript_blocks WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()
-            tags_rows = conn.execute(
-                "SELECT DISTINCT chapter_tag FROM manuscript_blocks "
-                "WHERE project_id = ? AND chapter_tag IS NOT NULL ORDER BY block_order",
-                (project_id,),
-            ).fetchall()
-            return {
-                "total_blocks": row["total_blocks"],
-                "total_words": row["total_words"],
-                "chapter_tags": [r["chapter_tag"] for r in tags_rows],
-            }
+        return self._manuscript_adapter(project_id).stats()
 
     def search_manuscript_fts(
         self, project_id: str, query: str, limit: int = 10
     ) -> list[dict[str, Any]]:
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            has_trigram_term = any(len(t) >= 2 for t in query.split())
-            if not has_trigram_term:
-                like_param = f"%{query}%"
-                rows = conn.execute(
-                    """
-                    SELECT block_id, block_order, chapter_tag, word_count,
-                           SUBSTR(content, MAX(1, INSTR(content, ?) - 30), 96) AS snippet
-                    FROM manuscript_blocks
-                    WHERE project_id = ? AND (content LIKE ? OR summary LIKE ?)
-                    ORDER BY block_order
-                    LIMIT ?
-                    """,
-                    (query, project_id, like_param, like_param, limit),
-                ).fetchall()
-            else:
-                fts_param = self._fts_match_param(query)
-                rows = conn.execute(
-                    """
-                    SELECT mb.block_id, mb.block_order, mb.chapter_tag, mb.word_count,
-                           snippet(manuscript_fts, 0, '<b>', '</b>', '...', 48) AS snippet
-                    FROM manuscript_fts
-                    JOIN manuscript_blocks mb ON mb.rowid = manuscript_fts.rowid
-                    WHERE manuscript_fts MATCH ? AND mb.project_id = ?
-                    LIMIT ?
-                    """,
-                    (fts_param, project_id, limit),
-                ).fetchall()
-            return _rows_to_dicts(rows)
+        return self._manuscript_adapter(project_id).search_fts(query, limit=limit)
 
     def export_manuscript(self, project_id: str) -> str:
-        """Return full manuscript text, blocks joined by double newlines."""
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            rows = conn.execute(
-                "SELECT content FROM manuscript_blocks WHERE project_id = ? ORDER BY block_order",
-                (project_id,),
-            ).fetchall()
-            return "\n\n".join(r["content"] for r in rows)
+        return self._manuscript_adapter(project_id).export_text()
 
     def get_manuscript_continuation_blocks(
         self, project_id: str, limit: int = 50
     ) -> list[dict[str, Any]]:
-        """Return recent manuscript blocks (newest first) for continuation context building."""
-        self.ensure_schema(project_id)
-        with self.connect(project_id) as conn:
-            rows = conn.execute(
-                "SELECT * FROM manuscript_blocks WHERE project_id = ? ORDER BY block_order DESC LIMIT ?",
-                (project_id, limit),
-            ).fetchall()
-            return _rows_to_dicts(rows)
+        return self._manuscript_adapter(project_id).get_continuation_blocks(limit=limit)
 
     # ======================================================================
     # Write helpers (shared by write tools)
@@ -2341,6 +2593,7 @@ class NovelDB:
         "current_objective", "ultimate_goal", "importance_tier",
         "entity_type", "speech_style", "values_text", "fears_text",
         "decision_pattern", "agent_behavior_hint",
+        "mask_behavior", "emotional_baseline", "cognitive_biases_json",
     }
 
     def create_entity(
@@ -2364,16 +2617,25 @@ class NovelDB:
                 """
                 INSERT INTO entities
                     (entity_id, project_id, name, entity_type, importance_tier,
-                     summary, core_drive, hidden_tension, current_objective,
+                     summary, core_drive, surface_mask, hidden_tension,
+                     current_objective, ultimate_goal,
+                     values_text, fears_text, decision_pattern,
+                     agent_behavior_hint,
                      profile_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
                 """,
                 (
                     entity_id, project_id, name, entity_type, importance,
                     summary,
                     kwargs.get("core_drive", ""),
+                    kwargs.get("surface_mask", ""),
                     kwargs.get("hidden_tension", ""),
                     kwargs.get("current_objective", ""),
+                    kwargs.get("ultimate_goal", ""),
+                    kwargs.get("values_text", ""),
+                    kwargs.get("fears_text", ""),
+                    kwargs.get("decision_pattern", ""),
+                    kwargs.get("agent_behavior_hint", ""),
                     now, now,
                 ),
             )
@@ -2621,7 +2883,7 @@ class NovelDB:
                 raise ValueError(f"未找到实体「{target_name}」")
 
             row = conn.execute(
-                "SELECT relation_id FROM relationships "
+                "SELECT relation_id, relation_type FROM relationships "
                 "WHERE (source_id = ? AND target_id = ?) "
                 "   OR (source_id = ? AND target_id = ?)",
                 (source_id, target_id, target_id, source_id),
@@ -2629,9 +2891,11 @@ class NovelDB:
 
             writable = {"description", "trust_level", "power_dynamic", "history", "conflict_trigger"}
             extras = {k: v for k, v in kwargs.items() if k in writable and v is not None}
+            prev_relation_type = ""
 
             if row:
                 rid = row["relation_id"]
+                prev_relation_type = row["relation_type"] or ""
                 up: dict[str, Any] = {"relation_type": relation_type, "updated_at": now}
                 up.update(extras)
                 set_clause = ", ".join(f"{k} = ?" for k in up)
@@ -2661,9 +2925,111 @@ class NovelDB:
                 )
                 updated = False
             conn.commit()
+            # Auto-record a relationship_event for timeline tracking
+            self._insert_relationship_event(
+                conn, project_id,
+                source_id=source_id, target_id=target_id,
+                relation_type=relation_type,
+                previous_state=prev_relation_type if updated else "",
+                new_state=relation_type,
+                trigger_event=extras.get("description", ""),
+                emotional_shift="",
+                power_shift=extras.get("power_dynamic", ""),
+                evidence=extras.get("conflict_trigger", ""),
+                segment_id="", chapter_order=0,
+            )
+            conn.commit()
         return {
             "relation_id": rid,
             "source": source_name,
             "target": target_name,
             "updated": updated,
         }
+
+    # ======================================================================
+    # Timeline event write operations
+    # ======================================================================
+
+    @staticmethod
+    def _insert_relationship_event(
+        conn: Any,
+        project_id: str,
+        *,
+        source_id: str,
+        target_id: str,
+        relation_type: str = "",
+        previous_state: str = "",
+        new_state: str = "",
+        trigger_event: str = "",
+        emotional_shift: str = "",
+        power_shift: str = "",
+        evidence: str = "",
+        segment_id: str = "",
+        chapter_order: int = 0,
+    ) -> str:
+        event_id = f"re_{uuid.uuid4().hex[:12]}"
+        conn.execute(
+            """
+            INSERT INTO relationship_events
+                (event_id, project_id, source_entity_id, target_entity_id,
+                 segment_id, chapter_order, relation_type,
+                 previous_state, new_state, trigger_event,
+                 emotional_shift, power_shift, evidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id, project_id, source_id, target_id,
+                segment_id, chapter_order, relation_type,
+                previous_state, new_state, trigger_event,
+                emotional_shift, power_shift, evidence, _now(),
+            ),
+        )
+        return event_id
+
+    def record_relationship_event(
+        self,
+        project_id: str,
+        source_id: str,
+        target_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Record a standalone relationship event."""
+        self.ensure_schema(project_id)
+        with self.connect(project_id) as conn:
+            event_id = self._insert_relationship_event(
+                conn, project_id,
+                source_id=source_id, target_id=target_id, **kwargs,
+            )
+            conn.commit()
+        return {"event_id": event_id}
+
+    def record_character_event(
+        self,
+        project_id: str,
+        entity_id: str,
+        event_type: str,
+        summary: str,
+        segment_id: str = "",
+        chapter_order: int = 0,
+        detail_json: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a character event (action, state_change, knowledge, emotional)."""
+        self.ensure_schema(project_id)
+        event_id = f"ce_{uuid.uuid4().hex[:12]}"
+        with self.connect(project_id) as conn:
+            conn.execute(
+                """
+                INSERT INTO character_events
+                    (event_id, project_id, entity_id, segment_id,
+                     chapter_order, event_type, summary, detail_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id, project_id, entity_id, segment_id,
+                    chapter_order, event_type, summary,
+                    detail_json or "{}",
+                    _now(),
+                ),
+            )
+            conn.commit()
+        return {"event_id": event_id, "entity_id": entity_id}

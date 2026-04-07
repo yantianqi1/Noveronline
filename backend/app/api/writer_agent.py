@@ -341,7 +341,11 @@ def commit_to_manuscript(project_id):
             content=content,
             source_scene_id=data.get("source_scene_id"),
             insert_after_block_id=data.get("insert_after_block_id"),
+            chapter_id=data.get("chapter_id"),
             chapter_tag=data.get("chapter_tag"),
+            pov_entity_id=data.get("pov_entity_id"),
+            location=data.get("location"),
+            involved_entities_json=data.get("involved_entities_json"),
         )
         return jsonify({"success": True, "data": result})
     except Exception as exc:
@@ -352,8 +356,11 @@ def commit_to_manuscript(project_id):
 def list_manuscript(project_id):
     try:
         include_content = request.args.get("include_content", "true").lower() == "true"
+        chapter_id = request.args.get("chapter_id") or None
         from ..services.writer_agent.manuscript_service import ManuscriptService
-        result = ManuscriptService().list_blocks(project_id, include_content)
+        result = ManuscriptService().list_blocks(
+            project_id, include_content, chapter_id=chapter_id,
+        )
         return jsonify({"success": True, "data": result})
     except Exception as exc:
         return _error_response(exc)
@@ -364,7 +371,7 @@ def update_manuscript_block(block_id):
     try:
         data = request.get_json() or {}
         project_id = data.get("project_id", "")
-        kwargs = {k: v for k, v in data.items() if k in ("content", "chapter_tag")}
+        kwargs = {k: v for k, v in data.items() if k in ("content", "chapter_id", "chapter_tag")}
         from ..services.writer_agent.manuscript_service import ManuscriptService
         result = ManuscriptService().update_block(project_id, block_id, **kwargs)
         return jsonify({"success": True, "data": result})
@@ -404,6 +411,19 @@ def tag_manuscript_blocks(project_id):
         from ..services.writer_agent.manuscript_service import ManuscriptService
         count = ManuscriptService().tag_blocks(project_id, block_ids, chapter_tag)
         return jsonify({"success": True, "data": {"updated_count": count}})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@writer_agent_bp.route("/manuscript/block/<block_id>/move", methods=["PUT"])
+def move_manuscript_block(block_id):
+    try:
+        data = request.get_json() or {}
+        project_id = data.get("project_id", "")
+        target_chapter_id = data.get("chapter_id")  # None = unassign
+        from ..services.writer_agent.manuscript_service import ManuscriptService
+        result = ManuscriptService().move_block(project_id, block_id, target_chapter_id)
+        return jsonify({"success": True, "data": result})
     except Exception as exc:
         return _error_response(exc)
 

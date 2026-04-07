@@ -73,14 +73,12 @@
             <p class="mono panel-kicker">PREPARE / AGENT 整备</p>
             <h3 class="card-title">LLM 整备进度</h3>
           </div>
-          <span class="prepare-status-chip mono">{{ prepareSnapshot?.status || "preparing" }}</span>
+          <n-tag :type="prepareSnapshot?.status === 'ready' ? 'success' : 'warning'" size="small">{{ prepareSnapshot?.status || "preparing" }}</n-tag>
         </header>
         <p class="prepare-copy">
           {{ prepareTaskMessage }}
         </p>
-        <div class="prepare-progress-shell" aria-hidden="true">
-          <div class="prepare-progress-fill" :style="{ width: `${prepareTaskProgress}%` }"></div>
-        </div>
+        <n-progress type="line" :percentage="prepareTaskProgress" :show-indicator="false" />
         <div class="prepare-meta">
           <span class="mono">prepare_id: {{ prepareId }}</span>
           <span v-if="prepareTaskId" class="mono">task: {{ prepareTaskId }}</span>
@@ -112,9 +110,14 @@
     <!-- ③ RIGHT COLUMN: Director panel -->
     <main class="stage-performance stack">
       <div v-if="!sessionId && !preparedAgents.length" class="empty-stage workbench-card">
-        <div class="empty-icon">⏳</div>
-        <h3 class="title-ancient">等待开启世界线</h3>
-        <p>请在左侧选择角色档案，在中栏设定初始变量，以启动当前世界线会话。</p>
+        <n-empty description="请在左侧选择角色档案，在中栏设定初始变量，以启动当前世界线会话。">
+          <template #icon>
+            <Icon icon="icon-park-outline:hourglass-full" width="48" />
+          </template>
+          <template #extra>
+            <span class="title-ancient">等待开启世界线</span>
+          </template>
+        </n-empty>
       </div>
       <article v-else-if="!sessionId" class="workbench-card agent-inspector">
         <header class="inspector-head">
@@ -122,9 +125,9 @@
             <p class="mono panel-kicker">INSPECTION / PREPARED AGENT</p>
             <h3 class="card-title">{{ inspectorTitle }}</h3>
           </div>
-          <button class="btn primary" :disabled="busy || !canStartPreparedSession" @click="startPreparedSession">
+          <n-button type="primary" :disabled="busy || !canStartPreparedSession" @click="startPreparedSession">
             开始推演
-          </button>
+          </n-button>
         </header>
         <template v-if="preparedInspector">
           <p class="inspector-copy">{{ preparedInspector.public_profile?.identity || preparedInspector.runtime_seed_state?.drive || "等待选择 agent" }}</p>
@@ -256,6 +259,8 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { NButton, NEmpty, NProgress, NTag } from "naive-ui";
+import { Icon } from "@iconify/vue";
 
 import {
   adoptWorldlineEvents,
@@ -478,14 +483,11 @@ async function startAutoEvolve() {
 }
 
 async function waitForPreparedSession(taskId, nextPrepareId) {
-  console.log("[waitForPreparedSession] start", { taskId, nextPrepareId });
   const snapshot = await pollPrepareTask(taskId, nextPrepareId, (value) => {
     prepareSnapshot.value = value;
   });
-  console.log("[waitForPreparedSession] poll done, loading agents");
   prepareSnapshot.value = snapshot;
   await loadPreparedAgents(nextPrepareId);
-  console.log("[waitForPreparedSession] agents loaded, mode:", autoEvolution.createMode.value);
 
   if (autoEvolution.createMode.value === "manual") {
     feedback.value = "LLM 整备已完成，请检查 agent 形态后开始推演。";

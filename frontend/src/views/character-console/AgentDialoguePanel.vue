@@ -10,19 +10,25 @@
       </div>
       <div class="field">
         <label>生成模式</label>
-        <select :value="chatMode" @change="emitMode($event.target.value)">
-          <option value="template">template</option>
-          <option value="llm">llm</option>
-        </select>
+        <n-select
+          :value="chatMode"
+          :options="chatModeOptions"
+          @update:value="emitMode"
+        />
       </div>
       <div class="field">
         <label>你要说的话</label>
-        <textarea :value="chatMessage" placeholder="例如：你是否愿意在今晚之前公开证据？" @input="emitUpdate($event.target.value)"></textarea>
+        <n-input
+          type="textarea"
+          :value="chatMessage"
+          placeholder="例如：你是否愿意在今晚之前公开证据？"
+          @update:value="emitUpdate"
+        />
       </div>
     </div>
 
     <div class="toolbar-row">
-      <button class="btn primary" :disabled="busy || !sessionId || !selectedAgent" @click="$emit('submit')">发送对话</button>
+      <n-button type="primary" :disabled="busy || !sessionId || !selectedAgent" @click="$emit('submit')">发送对话</n-button>
     </div>
 
     <div v-if="chatReply" class="chat-reply">
@@ -43,11 +49,18 @@
         <div>A: {{ item.reply }}</div>
       </div>
     </div>
-    <p class="status-text error" v-if="chatError">{{ chatError }}</p>
+    <n-tag v-if="chatError" type="error" style="margin-top: 8px">{{ chatError }}</n-tag>
   </article>
 </template>
 
 <script setup>
+import { NButton, NInput, NSelect, NTag } from "naive-ui";
+
+const chatModeOptions = [
+  { label: "template", value: "template" },
+  { label: "llm", value: "llm" },
+];
+
 defineProps({
   sessionId: { type: String, default: "" },
   selectedAgent: { type: Object, default: null },
@@ -84,7 +97,7 @@ function formatTime(value) {
 }
 
 .panel {
-  padding: 16px;
+  padding: 10px;
 }
 
 .panel p {
@@ -100,25 +113,17 @@ function formatTime(value) {
 .chat-reply,
 .chat-chip {
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #fffaf1;
 }
 
 .chat-reply {
-  margin-top: 12px;
-  padding: 12px;
+  margin-top: 8px;
+  padding: 10px;
 }
 
 .chat-chip {
   padding: 10px 12px;
-}
-
-select {
-  width: 100%;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  padding: 8px 10px;
-  background: #fffaf1;
 }
 
 .seed-title {
@@ -137,10 +142,6 @@ select {
 
 .suggestion-item:first-of-type {
   border-top: none;
-}
-
-.status-text.error {
-  color: #9b4326;
 }
 
 @media (max-width: 1200px) {

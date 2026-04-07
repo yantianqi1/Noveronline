@@ -366,7 +366,7 @@ class TestToolDefinitions:
     def test_all_tools_defined(self):
         from app.services.writer_agent.tools import NOVEL_TOOLS, TOOL_NAME_SET
 
-        assert len(NOVEL_TOOLS) == 20
+        assert len(NOVEL_TOOLS) == 24
         expected_names = {
             "query_entity", "query_relationship", "query_chapter",
             "query_scene", "search_settings", "get_recent_scenes",
@@ -376,8 +376,11 @@ class TestToolDefinitions:
             "search_world_rules",
             "list_worldline_branches", "get_branch_timeline",
             "get_branch_agent_state",
+            "get_story_overview", "query_segment_summaries",
+            "get_story_ontology",
             "manage_entity", "manage_thread",
             "manage_world_rule", "manage_relationship",
+            "record_character_event",
         }
         assert TOOL_NAME_SET == expected_names
 

@@ -22,6 +22,8 @@ class Config:
     LLM_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
     LLM_FACILITY_DB_FILENAME = "llm_facility.sqlite3"
     ARCHIVE_LIBRARY_DB_FILENAME = "archive_library.sqlite3"
+    ASSETS_GLOBAL_DB_FILENAME = "assets_library.sqlite3"
+    ASSETS_PROJECT_DB_FILENAME = "project_assets.sqlite3"
 
     ZEP_API_KEY = os.environ.get("ZEP_API_KEY")
 
@@ -34,6 +36,8 @@ class Config:
 
     NARRATIVE_DEFAULT_BRANCH_COUNT = int(os.environ.get("NARRATIVE_DEFAULT_BRANCH_COUNT", "1"))
     NARRATIVE_DEFAULT_TIMELINE_STEPS = int(os.environ.get("NARRATIVE_DEFAULT_TIMELINE_STEPS", "12"))
+
+    ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 
     @classmethod
     def validate(cls):

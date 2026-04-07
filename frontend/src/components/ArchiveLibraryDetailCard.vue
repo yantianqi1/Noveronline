@@ -4,14 +4,14 @@
       <div class="detail-identity">
         <h3>{{ archive.entity_name }}</h3>
         <div class="detail-meta">
-          <span class="status-tag" :class="entityTone">{{ formatEntityType(archive.entity_type) }}</span>
-          <span class="status-tag ok">{{ formatImportanceTier(archive.importance_tier) }}</span>
+          <n-tag size="small" :bordered="false" type="info">{{ formatEntityType(archive.entity_type) }}</n-tag>
+          <n-tag size="small" :bordered="false" type="success">{{ formatImportanceTier(archive.importance_tier) }}</n-tag>
           <span class="detail-project">{{ archive.project_name }}</span>
         </div>
       </div>
-      <button class="btn primary" @click.stop="$emit('toggle')">
+      <n-button type="primary" size="small" @click.stop="$emit('toggle')">
         {{ toggleLabel }}
-      </button>
+      </n-button>
     </header>
 
     <div class="detail-sections">
@@ -62,13 +62,13 @@
   </article>
 
   <article class="archive-detail archive-detail--empty" v-else>
-    <h4>选择档案查看详情</h4>
-    <p class="empty-hint">点击左侧列表中的任意档案卡片。</p>
+    <n-empty description="点击左侧列表中的任意档案卡片查看详情。" />
   </article>
 </template>
 
 <script setup>
 import { computed, reactive, watch } from "vue";
+import { NButton, NTag, NEmpty } from "naive-ui";
 
 import { buildArchiveDetailSections } from "./archiveDetailSections.js";
 import { formatEntityType, formatImportanceTier } from "../utils/chineseDisplay.js";
@@ -103,7 +103,7 @@ watch(detailSections, (sections) => {
 .archive-detail {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: var(--space-sm);
   min-height: 100%;
 }
 
@@ -122,7 +122,7 @@ watch(detailSections, (sections) => {
 
 .detail-identity h3 {
   margin: 0;
-  font-size: 22px;
+  font-size: 18px;
   font-family: "ZCOOL XiaoWei", serif;
   color: var(--text-main);
 }
@@ -149,8 +149,8 @@ watch(detailSections, (sections) => {
 .detail-block {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-md) 0;
+  gap: 4px;
+  padding: var(--space-sm) 0;
   border-bottom: 1px solid var(--line-soft);
 }
 

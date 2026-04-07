@@ -1,7 +1,7 @@
 .spotlight-zone {
-  margin-top: 18px;
-  padding: 18px;
-  border-radius: 18px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
   background: linear-gradient(135deg, rgba(255, 250, 242, 0.96) 0%, rgba(245, 228, 197, 0.96) 100%);
   border: 1px solid rgba(194, 159, 118, 0.38);
   box-shadow: 0 6px 20px rgba(118, 88, 43, 0.06);
@@ -14,8 +14,8 @@
 .spotlight-header-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding-bottom: 12px;
+  gap: 8px;
+  padding-bottom: 8px;
   border-bottom: 1px solid rgba(199, 173, 133, 0.22);
 }
 
@@ -45,9 +45,9 @@
 }
 
 .spotlight-empty {
-  margin-top: 14px;
-  padding: 18px;
-  border-radius: 12px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 8px;
   background: rgba(255, 250, 243, 0.78);
   border: 1px dashed rgba(200, 177, 144, 0.48);
   color: var(--text-sub, #8a7a60);
@@ -58,7 +58,7 @@
 /* ── Actor Flow ───────────────────────────────────── */
 
 .actor-flow {
-  margin-top: 16px;
+  margin-top: 10px;
 }
 
 .actor-flow-list {
@@ -68,8 +68,8 @@
 
 .actor-action-card {
   border: 1px solid rgba(211, 190, 156, 0.28);
-  border-radius: 12px;
-  padding: 14px 16px;
+  border-radius: 8px;
+  padding: 10px 12px;
   background: rgba(255, 251, 245, 0.82);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
@@ -259,13 +259,13 @@
 /* ── Side Effects Bar ─────────────────────────────── */
 
 .side-effects-bar {
-  margin-top: 14px;
-  padding: 10px 14px;
-  border-radius: 10px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.55);
   border: 1px solid rgba(211, 190, 156, 0.18);
   display: flex;
-  gap: 20px;
+  gap: 10px;
   flex-wrap: wrap;
   align-items: center;
 }

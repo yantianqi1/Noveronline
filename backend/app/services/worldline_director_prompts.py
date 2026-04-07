@@ -5,6 +5,8 @@
 - 天道裁决模式（角色自主提案后导演裁决，通过 adjudicate 调用）
 """
 
+from .writing_quality_constants import EVENT_SUMMARY_WRITING_GUIDE
+
 # ══════════════════════════════════════════════════════════════
 # 天道裁决模式 — 角色提案后的导演裁决
 # ══════════════════════════════════════════════════════════════
@@ -21,10 +23,12 @@ ADJUDICATE_SYSTEM_PROMPT = """\
 
 你不决定剧情走向。角色的意志就是剧情。你只维持因果律和世界一致性。
 
+""" + EVENT_SUMMARY_WRITING_GUIDE + """
+
 只输出 JSON：
 {"actions": [{"agent_ref": "角色名", "action": "动作", "intent": "动机", "target": "目标"}],
  "event_title": "事件标题（8字内）",
- "event_summary": "客观叙述（200字内，写实风格，只描写行为和后果）",
+ "event_summary": "按上述写作要求撰写（200字内）",
  "adjudication_notes": [{"agent": "角色名", "decision": "adopt/adjust/reject", "reason": "简述"}]}
 """
 
@@ -80,7 +84,8 @@ DIRECTOR_SYSTEM_PROMPT = """\
 - 不要替角色说话，通过 interview_character 工具听他们的声音。
 - 叙事节奏：不要每步都是高潮，注意铺垫、蓄力、爆发的交替。
 - 如果局势确实不需要新动作推进，可以返回空 actions 但仍需写事件叙述。
-- event_summary 应当是文学性的叙事段落，不要写成数据罗列。
+
+""" + EVENT_SUMMARY_WRITING_GUIDE + """
 """
 
 DIRECTOR_STEP_PROMPT = """\

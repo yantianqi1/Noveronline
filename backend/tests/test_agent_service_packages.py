@@ -1,12 +1,9 @@
-from app.services.agents.draft import NovelDraftOrchestrator, ReviewerAgent
 from app.services.agents.memory import AgentMemoryService, LongTermMemoryStore
 from app.services.agents.registry import AgentSchemaRegistry, AgentTemplateRegistry
 from app.services.agents.worldline import CharacterAgentService, WorldlineAgentRegistry
 
 
 def test_agent_service_packages_export_primary_entrypoints():
-    assert NovelDraftOrchestrator is not None
-    assert ReviewerAgent is not None
     assert AgentMemoryService is not None
     assert LongTermMemoryStore is not None
     assert AgentSchemaRegistry is not None

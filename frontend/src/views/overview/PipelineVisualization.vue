@@ -77,15 +77,15 @@ function formatNodeState(state) {
 
 <style scoped>
 .pipeline-shell {
-  margin-top: 16px;
+  margin-top: 12px;
   border: 1px solid var(--line-soft);
-  border-radius: 18px;
-  padding: 16px;
+  border-radius: 10px;
+  padding: 12px;
   background: linear-gradient(180deg, rgba(255, 252, 244, 0.95), rgba(255, 248, 235, 0.92)),
     radial-gradient(circle at 100% 0%, rgba(39, 90, 120, 0.08), transparent 26%);
 }
 
-.pipeline-head, .node-top { display: flex; justify-content: space-between; gap: 12px; }
+.pipeline-head, .node-top { display: flex; justify-content: space-between; gap: 8px; }
 
 .pipeline-head {
   align-items: flex-start;
@@ -93,7 +93,7 @@ function formatNodeState(state) {
 
 .pipeline-head h3 {
   margin: 0;
-  font-size: 22px;
+  font-size: 19px;
   font-family: "ZCOOL XiaoWei", serif;
 }
 
@@ -134,10 +134,10 @@ function formatNodeState(state) {
 }
 
 .pipeline-flow {
-  margin-top: 16px;
+  margin-top: 12px;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .pipeline-flow.compact {
@@ -147,10 +147,10 @@ function formatNodeState(state) {
 
 .pipeline-node {
   min-width: 0;
-  min-height: 126px;
-  border-radius: 16px;
+  min-height: 110px;
+  border-radius: 8px;
   border: 1px solid var(--line-soft);
-  padding: 12px;
+  padding: 10px;
   background: rgba(255, 255, 255, 0.58);
   display: flex;
   flex-direction: column;

@@ -3,9 +3,9 @@
     <h2 class="card-title">分析结果</h2>
     <p>查看角色、组织、关系的分析结果。</p>
     <div class="toolbar-row">
-      <button class="btn primary" :disabled="seedBusy || !seedProjectId" @click="analyzeSeed()">
+      <n-button type="primary" :disabled="seedBusy || !seedProjectId" :loading="seedBusy" @click="analyzeSeed()">
         {{ seedBusy ? "分析中..." : "运行分析" }}
-      </button>
+      </n-button>
     </div>
 
     <div class="kpis seed-kpis" v-if="seedResult">
@@ -24,7 +24,7 @@
           </div>
           <div class="seed-item-detail" v-if="item.personality_traits?.length || item.speech_style">
             <span v-if="item.personality_traits?.length" class="trait-chips">
-              <span class="trait-chip" v-for="trait in item.personality_traits.slice(0, 3)" :key="trait">{{ trait }}</span>
+              <n-tag v-for="trait in item.personality_traits.slice(0, 3)" :key="trait" size="small" :bordered="false">{{ trait }}</n-tag>
             </span>
             <span v-if="item.speech_style" class="speech-hint">{{ item.speech_style }}</span>
           </div>
@@ -45,6 +45,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { NButton, NTag } from "naive-ui";
 
 import { runSeedAnalysis } from "../../api/novel";
 import {
@@ -108,7 +109,7 @@ defineExpose({ runForProject });
 
 <style scoped>
 .panel {
-  padding: 18px;
+  padding: 12px;
 }
 
 .panel p {
@@ -123,15 +124,15 @@ defineExpose({ runForProject });
 .kpis {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 14px;
+  gap: 6px;
+  margin-top: 10px;
 }
 
 .kpi {
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #fffbf0;
-  padding: 10px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -159,9 +160,9 @@ defineExpose({ runForProject });
 
 .seed-col {
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #fffaf0;
-  padding: 10px;
+  padding: 8px;
 }
 
 .seed-title {
@@ -195,13 +196,6 @@ defineExpose({ runForProject });
   gap: 3px;
 }
 
-.trait-chip {
-  background: rgba(176, 125, 75, 0.1);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 11px;
-  color: var(--accent-copper-deep);
-}
 
 .speech-hint {
   font-size: 11px;

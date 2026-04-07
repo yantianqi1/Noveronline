@@ -12,8 +12,8 @@
 .picker-toolbar {
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: 12px var(--space-md);
+  gap: var(--space-sm);
+  padding: 8px var(--space-md);
 }
 
 .archive-picker.sticky-filters .picker-toolbar {
@@ -25,38 +25,6 @@
 .search-field {
   flex: 1 1 420px;
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 0 14px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--line-soft);
-  background: var(--bg-panel-soft);
-}
-
-.search-field svg {
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  color: var(--text-dim);
-}
-
-.search-field input {
-  width: 100%;
-  border: none;
-  background: transparent;
-  padding: 10px 0;
-  font-size: 14px;
-  color: var(--text-main);
-}
-
-.search-field:focus-within {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px rgba(155, 44, 44, 0.1);
-}
-
-.search-field input:focus {
-  outline: none;
 }
 
 .picker-filters {
@@ -65,26 +33,6 @@
   gap: var(--space-sm);
 }
 
-.picker-filters select {
-  min-width: 80px;
-  padding: 8px 12px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--line-soft);
-  background: var(--bg-panel);
-  color: var(--text-main);
-  font-size: 13px;
-  cursor: pointer;
-  transition: border-color 0.15s ease;
-}
-
-.picker-filters select:hover {
-  border-color: var(--line-medium);
-}
-
-.picker-filters select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-}
 
 /* ── Summary bar ── */
 
@@ -125,12 +73,6 @@
   color: var(--color-error);
 }
 
-.reindex-btn {
-  flex-shrink: 0;
-  padding: 4px 12px;
-  font-size: 12px;
-  min-height: auto;
-}
 
 /* ── Body: list + detail split ── */
 
@@ -167,14 +109,14 @@
   overflow-x: hidden;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
   align-content: start;
-  padding: var(--space-md);
+  padding: var(--space-sm);
 }
 
 .picker-empty {
   grid-column: 1 / -1;
-  padding: 48px var(--space-lg);
+  padding: 20px var(--space-md);
   text-align: center;
   color: var(--text-dim);
   border: 1px dashed var(--line-soft);
@@ -250,10 +192,6 @@
   gap: var(--space-sm);
 }
 
-.archive-picker.variant-worldline .picker-filters select {
-  flex: 1 1 0;
-  min-width: 0;
-}
 
 .archive-picker.variant-worldline .picker-body {
   grid-template-columns: minmax(0, 1fr);
@@ -315,9 +253,5 @@
 @media (max-width: 640px) {
   .picker-filters {
     flex-direction: column;
-  }
-
-  .picker-filters select {
-    width: 100%;
   }
 }

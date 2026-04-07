@@ -4,14 +4,16 @@
       <div class="streaming-text" v-text="content"></div>
       <span class="streaming-cursor">▊</span>
     </div>
-    <textarea
+    <n-input
       v-else
-      class="scene-editor-content scene-editor-textarea"
+      type="textarea"
+      class="scene-editor-textarea"
       :value="content"
-      @input="$emit('update', $event.target.value)"
+      @update:value="$emit('update', $event)"
       :readonly="readonly"
       placeholder="场景内容将在此处显示..."
-    ></textarea>
+      :autosize="{ minRows: 16 }"
+    />
 
     <!-- Floating toolbar on text selection -->
     <div
@@ -19,13 +21,14 @@
       class="scene-floating-toolbar"
       :style="{ top: toolbarPos.top + 'px', left: toolbarPos.left + 'px' }"
     >
-      <button @click="handleCommitSelection">提交选中</button>
+      <n-button size="tiny" quaternary class="scene-floating-btn" @click="handleCommitSelection">提交选中</n-button>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from "vue";
+import { NInput, NButton } from "naive-ui";
 
 defineProps({
   content: { type: String, default: "" },
@@ -80,20 +83,19 @@ onBeforeUnmount(() => {
 }
 .scene-editor-content {
   flex: 1;
-  padding: 20px;
-  font-size: 15px;
-  line-height: 1.8;
+  padding: 14px;
+  font-size: 14px;
+  line-height: 1.7;
   color: #333;
 }
 .scene-editor-textarea {
-  width: 100%;
+  flex: 1;
+}
+.scene-editor-textarea :deep(.n-input__textarea-el) {
+  padding: 14px;
+  font-size: 14px;
+  line-height: 1.7;
   min-height: 400px;
-  border: none;
-  outline: none;
-  resize: vertical;
-  font-family: inherit;
-  background: transparent;
-  box-sizing: border-box;
 }
 .scene-editor-content--streaming {
   overflow-y: auto;
@@ -117,16 +119,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   z-index: 100;
 }
-.scene-floating-toolbar button {
-  background: none;
-  border: none;
-  color: #fff;
-  font-size: 12px;
-  padding: 4px 10px;
-  cursor: pointer;
-  border-radius: 3px;
-}
-.scene-floating-toolbar button:hover {
-  background: rgba(255, 255, 255, 0.15);
+.scene-floating-btn {
+  color: #fff !important;
 }
 </style>

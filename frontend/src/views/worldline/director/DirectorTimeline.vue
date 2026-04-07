@@ -37,9 +37,7 @@
       </article>
     </div>
 
-    <div v-else class="timeline-empty">
-      {{ timelineData.emptyMessage }}
-    </div>
+    <n-empty v-else :description="timelineData.emptyMessage" size="small" />
 
     <p v-if="timelineData.items.length" class="timeline-footer">
       所有演化数据已归档，可供写手 Agent 参考
@@ -49,6 +47,7 @@
 
 <script setup>
 import { computed, reactive } from "vue";
+import { NEmpty } from "naive-ui";
 
 import { buildTimelineEntries } from "./directorTimelineViewModel.js";
 import DirectorStepCard from "./DirectorStepCard.vue";

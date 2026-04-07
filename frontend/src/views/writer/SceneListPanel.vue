@@ -2,7 +2,7 @@
   <div class="scene-list-panel">
     <div class="scene-list-header">
       <span class="scene-list-title">场景列表</span>
-      <button class="scene-add-btn" @click="$emit('add')" title="添加场景">+</button>
+      <n-button size="tiny" quaternary @click="$emit('add')" title="添加场景"><Icon icon="icon-park-outline:plus" width="16" /></n-button>
     </div>
     <div class="scene-list-body">
       <div
@@ -13,17 +13,17 @@
       >
         <div class="scene-item-header">
           <span class="scene-order">{{ scene.scene_order }}</span>
-          <span class="scene-status" :class="'status-' + scene.status">
-            {{ statusLabel(scene.status) }}
-          </span>
+          <n-tag :type="statusType(scene.status)" size="small">{{ statusLabel(scene.status) }}</n-tag>
         </div>
         <div class="scene-item-title">{{ scene.title || `场景 ${scene.scene_order}` }}</div>
         <div class="scene-item-meta">{{ scene.word_count || 0 }} 字</div>
-        <button
+        <n-button
           class="scene-delete-btn"
+          size="tiny"
+          quaternary
           @click.stop="$emit('delete', scene.scene_id)"
           title="删除"
-        >×</button>
+        ><Icon icon="icon-park-outline:close-small" width="14" /></n-button>
       </div>
       <div v-if="!scenes.length" class="scene-list-empty">
         暂无场景，点击 + 添加
@@ -33,6 +33,9 @@
 </template>
 
 <script setup>
+import { NButton, NTag } from "naive-ui";
+import { Icon } from "@iconify/vue";
+
 defineProps({
   scenes: { type: Array, default: () => [] },
   selectedSceneId: { type: String, default: "" },
@@ -43,6 +46,11 @@ defineEmits(["select", "add", "delete"]);
 function statusLabel(status) {
   const map = { draft: "草稿", review: "审阅中", final: "定稿" };
   return map[status] || status;
+}
+
+function statusType(status) {
+  const map = { draft: "warning", review: "info", final: "success" };
+  return map[status] || "default";
 }
 </script>
 
@@ -62,18 +70,6 @@ function statusLabel(status) {
   border-bottom: 1px solid #e0e0e0;
   font-weight: 600;
 }
-.scene-add-btn {
-  background: none;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  width: 28px;
-  height: 28px;
-  cursor: pointer;
-  font-size: 18px;
-  line-height: 1;
-  color: #666;
-}
-.scene-add-btn:hover { background: #e8e8e8; }
 .scene-list-body {
   flex: 1;
   overflow-y: auto;
@@ -105,14 +101,6 @@ function statusLabel(status) {
   color: #999;
   font-weight: 600;
 }
-.scene-status {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 3px;
-}
-.status-draft { background: #fdf6ec; color: #e6a23c; }
-.status-review { background: #ecf5ff; color: #409eff; }
-.status-final { background: #f0f9eb; color: #67c23a; }
 .scene-item-title {
   font-size: 13px;
   color: #333;
@@ -129,15 +117,9 @@ function statusLabel(status) {
   position: absolute;
   top: 8px;
   right: 8px;
-  background: none;
-  border: none;
-  color: #ccc;
-  cursor: pointer;
-  font-size: 16px;
   display: none;
 }
 .scene-item:hover .scene-delete-btn { display: block; }
-.scene-delete-btn:hover { color: #f56c6c; }
 .scene-list-empty {
   text-align: center;
   color: #ccc;

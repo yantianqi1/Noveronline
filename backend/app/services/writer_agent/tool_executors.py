@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import traceback
 from typing import Any
 
+from ...config import Config
 from .novel_db import NovelDB
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,13 @@ def execute_tool(tool_name: str, tool_input: dict, project_id: str) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_db = NovelDB()
+def _get_db() -> NovelDB:
+    """Return a fresh NovelDB instance so each call gets its own connection.
+
+    A module-level singleton is unsafe when tools execute concurrently via
+    ThreadPoolExecutor — SQLite connections are not thread-safe.
+    """
+    return NovelDB()
 
 
 def _pretty_json(raw: str | None) -> str:
@@ -87,7 +95,7 @@ def _append_if(lines: list[str], label: str, value: str | None) -> None:
 def _query_entity(params: dict, project_id: str) -> str:
     name = params["name"]
     entity_type = params.get("entity_type")
-    entity = _db.get_entity(project_id, name, entity_type)
+    entity = _get_db().get_entity(project_id, name, entity_type)
     if entity is None:
         return f"未找到实体：{name}"
 
@@ -109,6 +117,11 @@ def _query_entity(params: dict, project_id: str) -> str:
     _append_if(lines, "恐惧", entity.get("fears_text"))
     _append_if(lines, "决策模式", entity.get("decision_pattern"))
 
+    # Character psychology
+    _append_if(lines, "社交面具", entity.get("mask_behavior"))
+    _append_if(lines, "情绪基线", entity.get("emotional_baseline"))
+    _append_if(lines, "认知偏差", _pretty_json(entity.get("cognitive_biases_json")))
+
     # Capabilities & knowledge
     _append_if(lines, "能力", _pretty_json(entity.get("skills_json")))
     _append_if(lines, "局限", _pretty_json(entity.get("limitations_json")))
@@ -129,7 +142,7 @@ def _query_entity(params: dict, project_id: str) -> str:
     # --- Associated plot threads ---
     entity_id = entity.get("entity_id", "")
     if entity_id:
-        threads = _db.get_entity_threads(project_id, entity_id, limit=5)
+        threads = _get_db().get_entity_threads(project_id, entity_id, limit=5)
         if threads:
             lines.append("\n【关联伏笔】")
             for t in threads:
@@ -143,7 +156,7 @@ def _query_entity(params: dict, project_id: str) -> str:
                 lines.append(text)
 
         # --- Associated world rules ---
-        rules = _db.get_entity_rules(project_id, entity_id, limit=5)
+        rules = _get_db().get_entity_rules(project_id, entity_id, limit=5)
         if rules:
             lines.append("\n【适用世界规则】")
             for r in rules:
@@ -153,7 +166,7 @@ def _query_entity(params: dict, project_id: str) -> str:
                     lines.append(f"    证据：{snippet}")
 
         # --- Recent events ---
-        events = _db.get_entity_recent_events(project_id, entity_id, limit=5)
+        events = _get_db().get_entity_recent_events(project_id, entity_id, limit=5)
         if events:
             lines.append("\n【近期事件】")
             for e in events:
@@ -170,7 +183,7 @@ def _query_entity(params: dict, project_id: str) -> str:
 def _query_relationship(params: dict, project_id: str) -> str:
     entity_a = params["entity_a"]
     entity_b = params["entity_b"]
-    rels = _db.get_relationship(project_id, entity_a, entity_b)
+    rels = _get_db().get_relationship(project_id, entity_a, entity_b)
     if not rels:
         return f"未找到 {entity_a} 与 {entity_b} 之间的关系记录"
 
@@ -191,7 +204,7 @@ def _query_relationship(params: dict, project_id: str) -> str:
 def _query_chapter(params: dict, project_id: str) -> str:
     chapter_order = params["chapter_order"]
     include_content = params.get("include_content", False)
-    chapter = _db.get_chapter(project_id, chapter_order, include_content)
+    chapter = _get_db().get_chapter(project_id, chapter_order, include_content)
     if chapter is None:
         return f"未找到第 {chapter_order} 章"
 
@@ -222,11 +235,11 @@ def _query_scene(params: dict, project_id: str) -> str:
 
     if scene_order is not None:
         # Find the specific scene by chapter_id + scene_order
-        scenes = _db.list_scenes(project_id, chapter_id)
+        scenes = _get_db().list_scenes(project_id, chapter_id)
         scene = None
         for s in scenes:
             if s.get("scene_order") == scene_order:
-                scene = _db.get_scene(project_id, s["scene_id"])
+                scene = _get_db().get_scene(project_id, s["scene_id"])
                 break
         if scene is None:
             return f"未找到章节 {chapter_id} 的第 {scene_order} 个场景"
@@ -243,7 +256,7 @@ def _query_scene(params: dict, project_id: str) -> str:
         return "\n".join(lines)
     else:
         # List all scenes for the chapter
-        scenes = _db.list_scenes(project_id, chapter_id)
+        scenes = _get_db().list_scenes(project_id, chapter_id)
         if not scenes:
             return f"章节 {chapter_id} 暂无场景"
         lines = [f"章节 {chapter_id} 场景列表："]
@@ -259,7 +272,7 @@ def _search_settings(params: dict, project_id: str) -> str:
     query = params["query"]
     scope = params.get("scope", "all")
     limit = params.get("limit", 10)
-    results = _db.search_fts(project_id, query, scope, limit)
+    results = _get_db().search_fts(project_id, query, scope, limit)
     if not results:
         return f"未找到与「{query}」相关的设定"
 
@@ -278,7 +291,7 @@ def _get_recent_scenes(params: dict, project_id: str) -> str:
     chapter_id = params["chapter_id"]
     scene_order = params["scene_order"]
     count = params.get("count", 2)
-    scenes = _db.get_recent_scenes(project_id, chapter_id, scene_order, count)
+    scenes = _get_db().get_recent_scenes(project_id, chapter_id, scene_order, count)
     if not scenes:
         return "没有找到前序场景"
 
@@ -295,7 +308,8 @@ def _get_recent_scenes(params: dict, project_id: str) -> str:
 def _get_world_state(params: dict, project_id: str) -> str:
     session_id = params["session_id"]
     entity_id = params.get("entity_id")
-    state = _db.get_world_state(project_id, session_id, entity_id)
+    branch_id = params.get("branch_id")
+    state = _get_db().get_world_state(project_id, session_id, entity_id, branch_id)
 
     lines: list[str] = []
 
@@ -307,6 +321,8 @@ def _get_world_state(params: dict, project_id: str) -> str:
         focus = session.get("focus_question")
         if focus:
             lines.append(f"焦点问题：{focus}")
+        if branch_id:
+            lines.append(f"分支过滤：{branch_id}")
     else:
         lines.append(f"未找到会话：{session_id}")
 
@@ -314,17 +330,75 @@ def _get_world_state(params: dict, project_id: str) -> str:
     if agent_states:
         lines.append(f"\nAgent 状态（{len(agent_states)} 个）：")
         for a in agent_states:
-            lines.append(f"  实体 {a.get('entity_id', '?')}：{_pretty_json(a.get('state_json'))}")
+            branch_tag = f"[{a.get('branch_id', 'main')}] " if not branch_id else ""
+            lines.append(f"  {branch_tag}实体 {a.get('entity_id', '?')}：{_pretty_json(a.get('state_json'))}")
 
     events = state.get("recent_events", [])
     if events:
         lines.append(f"\n近期事件（{len(events)} 条）：")
         for e in events:
+            branch_tag = f"[{e.get('branch_id', 'main')}] " if not branch_id else ""
             lines.append(
-                f"  步骤 {e.get('step', '?')}：{e.get('title', '无标题')}"
+                f"  {branch_tag}步骤 {e.get('step', '?')}：{e.get('title', '无标题')}"
                 f" — {e.get('summary', '')}"
             )
 
+    return "\n".join(lines)
+
+
+def _list_worldline_branches(params: dict, project_id: str) -> str:
+    session_id = params["session_id"]
+    branches = _get_db().list_worldline_branches(project_id, session_id)
+    if not branches:
+        return f"会话 {session_id} 暂无分支数据"
+    lines = [f"会话 {session_id} 共有 {len(branches)} 个分支："]
+    for b in branches:
+        lines.append(
+            f"  [{b.get('branch_id')}] {b.get('title', '无标题')}"
+            f" — 核心变化：{b.get('core_change', '无')}"
+            f" | 步数：{b.get('current_step', 0)}"
+            f" | 状态：{b.get('status', '未知')}"
+        )
+        agents_json = b.get("key_agents_json", "[]")
+        try:
+            agents = json.loads(agents_json) if isinstance(agents_json, str) else agents_json
+            if agents:
+                lines.append(f"    关键角色：{'、'.join(str(a) for a in agents)}")
+        except Exception:
+            pass
+    return "\n".join(lines)
+
+
+def _get_branch_timeline(params: dict, project_id: str) -> str:
+    session_id = params["session_id"]
+    branch_id = params["branch_id"]
+    limit = params.get("limit", 20)
+    events = _get_db().get_branch_timeline(project_id, session_id, branch_id, limit)
+    if not events:
+        return f"分支 {branch_id} 暂无事件"
+    lines = [f"分支 {branch_id} 时间线（{len(events)} 条事件）："]
+    for e in events:
+        lines.append(
+            f"  步骤 {e.get('step', '?')}：{e.get('title', '无标题')}"
+            f" — {e.get('summary', '')}"
+        )
+        etype = e.get("event_type", "")
+        if etype:
+            lines.append(f"    类型：{etype} | 状态：{e.get('status', '未知')}")
+    return "\n".join(lines)
+
+
+def _get_branch_agent_state(params: dict, project_id: str) -> str:
+    session_id = params["session_id"]
+    branch_id = params["branch_id"]
+    entity_id = params.get("entity_id")
+    states = _get_db().get_branch_agent_state(project_id, session_id, branch_id, entity_id)
+    if not states:
+        target = f"实体 {entity_id}" if entity_id else "所有实体"
+        return f"分支 {branch_id} 中 {target} 暂无状态数据"
+    lines = [f"分支 {branch_id} Agent 状态（{len(states)} 个）："]
+    for a in states:
+        lines.append(f"  实体 {a.get('entity_id', '?')}：{_pretty_json(a.get('state_json'))}")
     return "\n".join(lines)
 
 
@@ -343,7 +417,7 @@ def _format_entity_names(entities: list[dict]) -> str:
 
 def _get_open_threads(params: dict, project_id: str) -> str:
     up_to_chapter = params["up_to_chapter"]
-    threads = _db.get_open_threads(project_id, up_to_chapter)
+    threads = _get_db().get_open_threads(project_id, up_to_chapter)
     if not threads:
         return f"截至第 {up_to_chapter} 章，暂无未解决的伏笔线索"
 
@@ -361,7 +435,7 @@ def _get_open_threads(params: dict, project_id: str) -> str:
             # Reverse link: show entities involved in this thread
             thread_id = t.get("thread_id")
             if thread_id:
-                ents = _db.get_thread_entities(project_id, thread_id, limit=5)
+                ents = _get_db().get_thread_entities(project_id, thread_id, limit=5)
                 if ents:
                     lines.append(f"   涉及实体：{_format_entity_names(ents)}")
         else:
@@ -377,7 +451,8 @@ def _get_open_threads(params: dict, project_id: str) -> str:
 def _get_manuscript_context(params: dict, project_id: str) -> str:
     from .manuscript_context_builder import build_continuation_context
     token_budget = params.get("token_budget", 8000)
-    ctx = build_continuation_context(project_id, token_budget)
+    last_block_id = params.get("last_block_id") or None
+    ctx = build_continuation_context(project_id, token_budget, last_block_id=last_block_id)
 
     if not ctx.get("recent_summaries") and not ctx.get("tail_text"):
         return "稿件尚无已提交内容"
@@ -395,7 +470,8 @@ def _get_manuscript_context(params: dict, project_id: str) -> str:
     if ctx.get("recent_summaries"):
         lines.append("\n--- 近期段落摘要 ---")
         for s in ctx["recent_summaries"]:
-            tag = f" [{s['chapter_tag']}]" if s.get("chapter_tag") else ""
+            label = s.get("chapter_tag") or ""
+            tag = f" [{label}]" if label else ""
             lines.append(f"第{s['block_order']}段{tag}：{s['summary']}")
 
     if ctx.get("active_threads"):
@@ -413,13 +489,14 @@ def _get_manuscript_context(params: dict, project_id: str) -> str:
 def _search_manuscript(params: dict, project_id: str) -> str:
     query = params["query"]
     limit = params.get("limit", 10)
-    results = _db.search_manuscript_fts(project_id, query, limit)
+    results = _get_db().search_manuscript_fts(project_id, query, limit)
     if not results:
         return f"稿件中未找到与「{query}」相关的内容"
 
     lines = [f"稿件搜索「{query}」结果（{len(results)}条）："]
     for i, r in enumerate(results, 1):
-        tag = f" [{r.get('chapter_tag')}]" if r.get("chapter_tag") else ""
+        label = r.get("chapter_title") or r.get("chapter_tag") or ""
+        tag = f" [{label}]" if label else ""
         lines.append(f"{i}. 第{r['block_order']}段{tag}（{r['word_count']}字）")
         if r.get("snippet"):
             lines.append(f"   {r['snippet']}")
@@ -427,13 +504,16 @@ def _search_manuscript(params: dict, project_id: str) -> str:
 
 
 def _get_manuscript_stats(params: dict, project_id: str) -> str:
-    stats = _db.get_manuscript_stats(project_id)
+    stats = _get_db().get_manuscript_stats(project_id)
     lines = [
         f"稿件统计：",
         f"总段落数：{stats['total_blocks']}",
         f"总字数：{stats['total_words']}",
     ]
-    if stats.get("chapter_tags"):
+    if stats.get("chapters"):
+        ch_labels = [f"第{ch['chapter_order']}章·{ch['title']}({ch['block_count']}段)" for ch in stats["chapters"]]
+        lines.append(f"章节：{', '.join(ch_labels)}")
+    elif stats.get("chapter_tags"):
         lines.append(f"章节标签：{', '.join(stats['chapter_tags'])}")
     else:
         lines.append("尚未标注章节")
@@ -446,7 +526,7 @@ def _get_manuscript_stats(params: dict, project_id: str) -> str:
 
 def _get_character_voice(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
-    entity = _db.get_entity(project_id, name)
+    entity = _get_db().get_entity(project_id, name)
     if not entity:
         return f"未找到角色 {name}"
     lines = [f"【角色语言风格】{entity.get('name', name)}"]
@@ -481,8 +561,8 @@ def _get_character_voice(inp: dict, project_id: str) -> str:
         lines.append(f"内在矛盾：{entity['hidden_tension']}")
     # Also fetch entity_evidence quotes
     try:
-        _db.ensure_schema(project_id)
-        with _db.connect(project_id) as conn:
+        _get_db().ensure_schema(project_id)
+        with _get_db().connect(project_id) as conn:
             evs = conn.execute(
                 "SELECT snippet FROM entity_evidence WHERE owner_id = ? LIMIT 10",
                 (entity.get("entity_id", ""),),
@@ -499,34 +579,28 @@ def _get_character_voice(inp: dict, project_id: str) -> str:
 def _query_relationship_timeline(inp: dict, project_id: str) -> str:
     a_name = inp.get("entity_a", "")
     b_name = inp.get("entity_b", "")
-    a = _db.get_entity(project_id, a_name)
-    b = _db.get_entity(project_id, b_name)
+    a = _get_db().get_entity(project_id, a_name)
+    b = _get_db().get_entity(project_id, b_name)
     if not a or not b:
         missing = a_name if not a else b_name
         return f"未找到角色 {missing}"
     a_id = a.get("entity_id", "")
     b_id = b.get("entity_id", "")
-    _db.ensure_schema(project_id)
-    with _db.connect(project_id) as conn:
+    db = _get_db()
+    db.ensure_schema(project_id)
+    # Query by entity_id first; also try by name since some legacy data
+    # stores names directly in the entity_id columns.
+    with db.connect(project_id) as conn:
         rows = conn.execute(
             """SELECT * FROM relationship_events
                WHERE project_id = ?
                  AND ((source_entity_id = ? AND target_entity_id = ?)
+                   OR (source_entity_id = ? AND target_entity_id = ?)
+                   OR (source_entity_id = ? AND target_entity_id = ?)
                    OR (source_entity_id = ? AND target_entity_id = ?))
                ORDER BY chapter_order, segment_id""",
-            (project_id, a_id, b_id, b_id, a_id),
+            (project_id, a_id, b_id, b_id, a_id, a_name, b_name, b_name, a_name),
         ).fetchall()
-    if not rows:
-        # Try by name
-        with _db.connect(project_id) as conn:
-            rows = conn.execute(
-                """SELECT * FROM relationship_events
-                   WHERE project_id = ?
-                     AND ((source_entity_id = ? AND target_entity_id = ?)
-                       OR (source_entity_id = ? AND target_entity_id = ?))
-                   ORDER BY chapter_order, segment_id""",
-                (project_id, a_name, b_name, b_name, a_name),
-            ).fetchall()
     if not rows:
         return f"未找到 {a_name} 与 {b_name} 之间的关系事件"
     lines = [f"【关系时间线】{a_name} ↔ {b_name}（共 {len(rows)} 条事件）"]
@@ -546,7 +620,7 @@ def _query_relationship_timeline(inp: dict, project_id: str) -> str:
             parts.append(f"权力: {r['power_shift']}")
         lines.append("  " + " | ".join(parts))
     # Append current relationship state
-    rels = _db.get_relationship(project_id, a_name, b_name)
+    rels = _get_db().get_relationship(project_id, a_name, b_name)
     if rels:
         lines.append("当前关系状态：")
         for rel in rels:
@@ -558,10 +632,10 @@ def _query_character_timeline(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
     event_type = inp.get("event_type", "all")
     limit = inp.get("limit", 20)
-    entity = _db.get_entity(project_id, name)
+    entity = _get_db().get_entity(project_id, name)
     entity_id = entity.get("entity_id", name) if entity else name
-    _db.ensure_schema(project_id)
-    with _db.connect(project_id) as conn:
+    _get_db().ensure_schema(project_id)
+    with _get_db().connect(project_id) as conn:
         if event_type and event_type != "all":
             rows = conn.execute(
                 "SELECT * FROM character_events WHERE project_id = ? AND entity_id = ? AND event_type = ? ORDER BY chapter_order, segment_id LIMIT ?",
@@ -584,15 +658,15 @@ def _query_character_timeline(inp: dict, project_id: str) -> str:
 
 def _query_thread_history(inp: dict, project_id: str) -> str:
     thread_key = inp.get("thread_key", "")
-    _db.ensure_schema(project_id)
-    with _db.connect(project_id) as conn:
+    _get_db().ensure_schema(project_id)
+    with _get_db().connect(project_id) as conn:
         rows = conn.execute(
             "SELECT * FROM thread_lifecycle WHERE project_id = ? AND thread_key LIKE ? ORDER BY chapter_order, segment_id",
             (project_id, f"%{thread_key}%"),
         ).fetchall()
     if not rows:
         # Also check plot_threads table
-        with _db.connect(project_id) as conn:
+        with _get_db().connect(project_id) as conn:
             pt_rows = conn.execute(
                 "SELECT * FROM plot_threads WHERE project_id = ? AND (thread_key LIKE ? OR detail LIKE ?)",
                 (project_id, f"%{thread_key}%", f"%{thread_key}%"),
@@ -607,7 +681,7 @@ def _query_thread_history(inp: dict, project_id: str) -> str:
             except (KeyError, IndexError):
                 tid = None
             if tid:
-                ents = _db.get_thread_entities(project_id, tid, limit=5)
+                ents = _get_db().get_thread_entities(project_id, tid, limit=5)
                 if ents:
                     lines.append(f"    关联实体：{_format_entity_names(ents)}")
         return "\n".join(lines)
@@ -625,10 +699,10 @@ def _query_thread_history(inp: dict, project_id: str) -> str:
 def _search_world_rules(inp: dict, project_id: str) -> str:
     query = inp.get("query", "")
     limit = inp.get("limit", 10)
-    _db.ensure_schema(project_id)
-    fts_param = _db._fts_match_param(query)
+    _get_db().ensure_schema(project_id)
+    fts_param = _get_db()._fts_match_param(query)
     results = []
-    with _db.connect(project_id) as conn:
+    with _get_db().connect(project_id) as conn:
         try:
             rows = conn.execute(
                 """SELECT wre.evidence_id, wre.fact_text, wre.evidence_snippet, wre.segment_id,
@@ -651,7 +725,7 @@ def _search_world_rules(inp: dict, project_id: str) -> str:
                 results.append(r)
     if not results:
         # Also search agent_memory world_rules
-        with _db.connect(project_id) as conn:
+        with _get_db().connect(project_id) as conn:
             rows = conn.execute(
                 "SELECT summary, detail_json FROM agent_memory WHERE memory_type = 'world_rule' AND summary LIKE ? LIMIT ?",
                 (f"%{query}%", limit),
@@ -672,7 +746,7 @@ def _search_world_rules(inp: dict, project_id: str) -> str:
         except (KeyError, IndexError):
             eid = None
         if eid:
-            ents = _db.get_rule_entities(project_id, eid, limit=5)
+            ents = _get_db().get_rule_entities(project_id, eid, limit=5)
             if ents:
                 lines.append(f"    关联实体：{_format_entity_names(ents)}")
     return "\n".join(lines)
@@ -695,13 +769,15 @@ def _manage_entity(params: dict, project_id: str) -> str:
         if not entity_type or not summary:
             return "创建实体需要提供 entity_type 和 summary"
         kwargs: dict[str, Any] = {}
-        for key in ("core_drive", "hidden_tension", "current_objective", "importance_tier"):
+        for key in ("core_drive", "hidden_tension", "current_objective", "importance_tier",
+                    "ultimate_goal", "surface_mask", "values_text", "fears_text",
+                    "decision_pattern", "agent_behavior_hint"):
             if params.get(key):
                 kwargs[key] = params[key]
         if params.get("aliases"):
             kwargs["aliases"] = params["aliases"]
         try:
-            result = _db.create_entity(project_id, name, entity_type, summary, **kwargs)
+            result = _get_db().create_entity(project_id, name, entity_type, summary, **kwargs)
         except ValueError as e:
             return str(e)
         return f"已创建实体「{name}」（{entity_type}），ID: {result['entity_id']}"
@@ -709,14 +785,16 @@ def _manage_entity(params: dict, project_id: str) -> str:
     elif action == "update":
         kwargs = {}
         for key in ("summary", "core_drive", "hidden_tension", "current_objective",
-                     "entity_type", "importance_tier"):
+                     "entity_type", "importance_tier",
+                     "ultimate_goal", "surface_mask", "values_text", "fears_text",
+                     "decision_pattern", "agent_behavior_hint"):
             if params.get(key) is not None:
                 kwargs[key] = params[key]
         if params.get("aliases"):
             kwargs["aliases"] = params["aliases"]
         if not kwargs:
             return "未提供任何更新字段"
-        ok = _db.update_entity(project_id, name, **kwargs)
+        ok = _get_db().update_entity(project_id, name, **kwargs)
         if not ok:
             return f"未找到实体「{name}」，无法更新。如需新建请使用 action='create'"
         return f"已更���实体「{name}」的设定"
@@ -733,7 +811,7 @@ def _manage_thread(params: dict, project_id: str) -> str:
     if action == "create":
         detail = params.get("detail", "")
         chapter_order = params.get("chapter_order", 0)
-        result = _db.create_thread(project_id, thread_key, detail, chapter_order=chapter_order)
+        result = _get_db().create_thread(project_id, thread_key, detail, chapter_order=chapter_order)
         return f"已创建伏笔「{thread_key}」，ID: {result['thread_id']}"
 
     elif action == "update":
@@ -742,7 +820,7 @@ def _manage_thread(params: dict, project_id: str) -> str:
         resolution = params.get("resolution_detail")
         chapter_order = params.get("chapter_order", 0)
         try:
-            ok = _db.update_thread(
+            ok = _get_db().update_thread(
                 project_id, thread_key, status=status, detail=detail,
                 resolution_detail=resolution, chapter_order=chapter_order,
             )
@@ -763,7 +841,7 @@ def _manage_world_rule(params: dict, project_id: str) -> str:
     snippet = params.get("evidence_snippet", "")
     chapter_order = params.get("chapter_order", 0)
     try:
-        result = _db.create_or_update_world_rule(project_id, fact_text, snippet, chapter_order)
+        result = _get_db().create_or_update_world_rule(project_id, fact_text, snippet, chapter_order)
     except Exception as e:
         return f"世界规则写入失败：{e}"
     verb = "更新" if result.get("updated") else "记录"
@@ -781,7 +859,7 @@ def _manage_relationship(params: dict, project_id: str) -> str:
         if params.get(k) is not None:
             kwargs[k] = params[k]
     try:
-        result = _db.create_or_update_relationship(
+        result = _get_db().create_or_update_relationship(
             project_id, a, b, rel_type, **kwargs,
         )
     except ValueError as e:
@@ -790,9 +868,204 @@ def _manage_relationship(params: dict, project_id: str) -> str:
     return f"已{verb}关系：{a} ↔ {b}（{rel_type}）"
 
 
+def _record_character_event(params: dict, project_id: str) -> str:
+    name = params.get("name", "")
+    if not name:
+        return "缺少必填参数 name"
+    event_type = params.get("event_type", "action")
+    summary = params.get("summary", "")
+    if not summary:
+        return "缺少必填参数 summary"
+    chapter_order = params.get("chapter_order", 0)
+
+    entity = _get_db().get_entity(project_id, name)
+    if not entity:
+        return f"未找到角色「{name}」"
+    entity_id = entity.get("entity_id", name)
+
+    result = _get_db().record_character_event(
+        project_id, entity_id, event_type, summary,
+        chapter_order=chapter_order,
+    )
+    return f"已记录角色事件：{name} [{event_type}] {summary}（ID: {result['event_id']}）"
+
+
+def _get_story_overview(params: dict, project_id: str) -> str:
+    db = _get_db()
+    lines: list[str] = []
+
+    meta = db.get_project_meta(project_id)
+    if meta:
+        lines.append(f"【叙事阶段】{meta.get('narrative_phase') or '未知'}")
+        lines.append(f"【总段落数】{meta.get('total_segments', 0)}")
+
+    if params.get("include_arcs", True):
+        arcs = db.get_narrative_arcs(project_id)
+        if arcs:
+            lines.append(f"\n【叙事弧线】共 {len(arcs)} 条")
+            for a in arcs:
+                segs = json.loads(a.get("covered_segments_json", "[]"))
+                seg_info = f"（覆盖 {len(segs)} 段）" if segs else ""
+                lines.append(f"  - {a['arc_id']}: {a['summary']}{seg_info}")
+
+    if params.get("include_volumes", True):
+        vols = db.get_volume_summaries(project_id)
+        if vols:
+            lines.append(f"\n【卷册摘要】共 {len(vols)} 卷")
+            for v in vols:
+                lines.append(f"  - 第{v['volume_order'] + 1}卷: {v['summary']}")
+
+    return "\n".join(lines) if lines else "未找到故事概览数据"
+
+
+def _query_segment_summaries(params: dict, project_id: str) -> str:
+    db = _get_db()
+    segment_ids = params.get("segment_ids")
+    offset = params.get("offset", 0)
+    limit = params.get("limit", 30)
+
+    summaries = db.get_segment_summaries(project_id, segment_ids, offset, limit)
+    lines: list[str] = [f"【逐段摘要】共返回 {len(summaries)} 条"]
+    for s in summaries:
+        lines.append(f"\n[{s['segment_id']}] (序号 {s['segment_order']})")
+        lines.append(s["summary"])
+
+    if params.get("include_consistency_notes", True):
+        notes = db.get_consistency_notes(project_id)
+        if notes:
+            lines.append(f"\n【一致性注释】共 {len(notes)} 条")
+            for n in notes:
+                lines.append(f"  - [{n['segment_id']}] {n['note_text']}")
+
+    return "\n".join(lines) if summaries else "未找到段落摘要数据"
+
+
+def _get_story_ontology(params: dict, project_id: str) -> str:
+    proj_dir = os.path.join(Config.UPLOAD_FOLDER, "projects", project_id)
+    proj_path = os.path.join(proj_dir, "project.json")
+    if not os.path.isfile(proj_path):
+        return "未找到项目本体论数据"
+    with open(proj_path, encoding="utf-8") as f:
+        project = json.load(f)
+    ontology = project.get("ontology", {})
+    if not ontology:
+        return "未找到本体论定义"
+    kind = params.get("kind", "all")
+    lines: list[str] = []
+
+    if kind in ("entity_type", "all"):
+        for et in ontology.get("entity_types", []):
+            attrs = ", ".join(a.get("name", "") for a in et.get("attributes", []))
+            lines.append(f"【实体类型】{et.get('name', '')}: {et.get('description', '')}")
+            if attrs:
+                lines.append(f"  属性: {attrs}")
+
+    if kind in ("edge_type", "all"):
+        for et in ontology.get("edge_types", []):
+            attrs = ", ".join(a.get("name", "") for a in et.get("attributes", []))
+            lines.append(f"【关系类型】{et.get('name', '')}: {et.get('description', '')}")
+            if attrs:
+                lines.append(f"  属性: {attrs}")
+
+    return "\n".join(lines) if lines else "未找到本体论定义"
+
+
 # ---------------------------------------------------------------------------
 # Executor registry
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Asset library executors
+# ---------------------------------------------------------------------------
+
+
+def _get_assets_service():
+    from ..assets.assets_service import AssetsService
+    return AssetsService()
+
+
+def _format_asset_brief(a: dict) -> str:
+    parts = [
+        f"[{a['asset_id']}] {a.get('title', '')}",
+        f"  类型：{a.get('asset_type', '')}",
+    ]
+    if a.get("category"):
+        parts.append(f"  分类：{a['category']}")
+    if a.get("summary"):
+        parts.append(f"  摘要：{a['summary']}")
+    if a.get("snippet"):
+        parts.append(f"  片段：{a['snippet']}")
+    parts.append(f"  scope：{a.get('scope', '')}  enabled：{a.get('enabled')}")
+    return "\n".join(parts)
+
+
+def _search_assets(params: dict, project_id: str) -> str:
+    query = (params.get("query") or "").strip()
+    if not query:
+        return "search_assets 需要 query 参数"
+    asset_type = params.get("asset_type") or None
+    category = params.get("category")
+    scope = params.get("scope") or "all"
+    limit = int(params.get("limit") or 10)
+    svc = _get_assets_service()
+    if scope == "global":
+        hits = svc.search(query, scope="global", asset_type=asset_type, category=category, limit=limit)
+    elif scope == "project":
+        hits = svc.search(query, scope="project", project_id=project_id, asset_type=asset_type, category=category, limit=limit)
+    else:
+        hits = svc.search_merged(query, project_id=project_id, asset_type=asset_type, category=category, limit=limit)
+    if not hits:
+        return f"未在资产库中找到与“{query}”相关的已启用资产"
+    return f"找到 {len(hits)} 条资产：\n\n" + "\n\n".join(_format_asset_brief(a) for a in hits)
+
+
+def _get_asset(params: dict, project_id: str) -> str:
+    aid = params.get("asset_id") or ""
+    if not aid:
+        return "get_asset 需要 asset_id"
+    svc = _get_assets_service()
+    asset = svc.find(aid, project_id=project_id)
+    if not asset:
+        return f"未找到资产：{aid}"
+    if not asset.get("enabled"):
+        return f"资产 {aid} 处于禁用状态，请创作者先在资产库中启用后再调用"
+    lines = [
+        f"# {asset.get('title', '')}",
+        f"asset_id: {asset['asset_id']}",
+        f"类型：{asset.get('asset_type', '')}  分类：{asset.get('category', '') or '无'}",
+        f"scope：{asset.get('scope', '')}",
+    ]
+    if asset.get("summary"):
+        lines.append(f"\n摘要：{asset['summary']}")
+    if asset.get("content"):
+        lines.append(f"\n正文：\n{asset['content']}")
+    payload = asset.get("payload") or {}
+    if payload:
+        lines.append("\n结构化数据：\n" + json.dumps(payload, ensure_ascii=False, indent=2))
+    tags = asset.get("tags") or []
+    if tags:
+        lines.append(f"\n标签：{', '.join(tags)}")
+    return "\n".join(lines)
+
+
+def _list_assets(params: dict, project_id: str) -> str:
+    asset_type = params.get("asset_type") or ""
+    if not asset_type:
+        return "list_assets 需要 asset_type"
+    category = params.get("category")
+    scope = params.get("scope") or "all"
+    limit = int(params.get("limit") or 30)
+    svc = _get_assets_service()
+    if scope == "global":
+        rows = svc.list(scope="global", asset_type=asset_type, category=category, enabled_only=True, limit=limit)
+    elif scope == "project":
+        rows = svc.list(scope="project", project_id=project_id, asset_type=asset_type, category=category, enabled_only=True, limit=limit)
+    else:
+        rows = svc.list_merged(project_id=project_id, asset_type=asset_type, category=category, enabled_only=True, limit=limit)
+    if not rows:
+        return f"暂无 {asset_type} 类型的已启用资产"
+    return f"共 {len(rows)} 条 {asset_type}：\n\n" + "\n\n".join(_format_asset_brief(a) for a in rows)
+
 
 _EXECUTORS: dict[str, Any] = {
     "query_entity": _query_entity,
@@ -802,6 +1075,9 @@ _EXECUTORS: dict[str, Any] = {
     "search_settings": _search_settings,
     "get_recent_scenes": _get_recent_scenes,
     "get_world_state": _get_world_state,
+    "list_worldline_branches": _list_worldline_branches,
+    "get_branch_timeline": _get_branch_timeline,
+    "get_branch_agent_state": _get_branch_agent_state,
     "get_open_threads": _get_open_threads,
     "get_manuscript_context": _get_manuscript_context,
     "search_manuscript": _search_manuscript,
@@ -811,9 +1087,17 @@ _EXECUTORS: dict[str, Any] = {
     "query_character_timeline": _query_character_timeline,
     "query_thread_history": _query_thread_history,
     "search_world_rules": _search_world_rules,
+    "get_story_overview": _get_story_overview,
+    "query_segment_summaries": _query_segment_summaries,
+    "get_story_ontology": _get_story_ontology,
     # Write tools
     "manage_entity": _manage_entity,
     "manage_thread": _manage_thread,
     "manage_world_rule": _manage_world_rule,
     "manage_relationship": _manage_relationship,
+    "record_character_event": _record_character_event,
+    # Asset library
+    "search_assets": _search_assets,
+    "get_asset": _get_asset,
+    "list_assets": _list_assets,
 }

@@ -75,9 +75,7 @@
     </div>
 
     <!-- Empty state -->
-    <div v-else-if="spotlight.isEmpty" class="spotlight-empty">
-      等待推演开始，角色行动会在这里以卡片形式展示。
-    </div>
+    <n-empty v-else-if="spotlight.isEmpty" description="等待推演开始，角色行动会在这里以卡片形式展示。" size="small" />
 
     <!-- Side effects bar -->
     <div class="side-effects-bar">
@@ -107,6 +105,7 @@
 
 <script setup>
 import { computed, shallowRef, watch } from "vue";
+import { NEmpty } from "naive-ui";
 
 import { buildSpotlightData } from "./directorSpotlightViewModel.js";
 import DirectorStatusRibbon from "./DirectorStatusRibbon.vue";

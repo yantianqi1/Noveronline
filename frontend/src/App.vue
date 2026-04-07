@@ -1,10 +1,14 @@
 <template>
+  <n-config-provider :theme-overrides="themeOverrides" :locale="locale" :date-locale="dateLocale">
+  <n-notification-provider>
+  <n-dialog-provider>
+  <n-message-provider>
   <div class="shell">
     <aside class="left-track" :class="{ collapsed: sidebarCollapsed }">
       <div class="brand">
-        <div class="seal" @click="sidebarCollapsed = !sidebarCollapsed" title="收起/展开侧栏">
+        <button class="seal" @click="sidebarCollapsed = !sidebarCollapsed" title="收起/展开侧栏" aria-label="收起/展开侧栏">
           <span class="seal-inner">MF</span>
-        </div>
+        </button>
         <div v-show="!sidebarCollapsed" class="brand-text">
           <div class="brand-name">{{ APP_BRAND_NAME }}</div>
           <div class="brand-sub mono">{{ APP_SUBTITLE }}</div>
@@ -21,7 +25,7 @@
             class="nav-item"
             :title="sidebarCollapsed ? item.label : ''"
           >
-            <span v-show="sidebarCollapsed" class="nav-icon">{{ item.icon }}</span>
+            <span v-show="sidebarCollapsed" class="nav-icon"><Icon :icon="item.icon" width="16" /></span>
             <span v-show="!sidebarCollapsed" class="nav-dot"></span>
             <span v-show="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
             <span v-show="!sidebarCollapsed" class="nav-code mono">{{ item.code }}</span>
@@ -37,7 +41,7 @@
             class="nav-item sub"
             :title="sidebarCollapsed ? item.label : ''"
           >
-            <span v-show="sidebarCollapsed" class="nav-icon">{{ item.icon }}</span>
+            <span v-show="sidebarCollapsed" class="nav-icon"><Icon :icon="item.icon" width="16" /></span>
             <span v-show="!sidebarCollapsed" class="nav-dot"></span>
             <span v-show="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
           </RouterLink>
@@ -49,10 +53,10 @@
           <span class="collapse-chevron" :class="{ flipped: sidebarCollapsed }"></span>
           <span v-show="!sidebarCollapsed" class="collapse-label">收起侧栏</span>
         </button>
-        <div v-if="upload.state.uploadPhase !== 'idle'" class="mini-status" @click="showUploadOverlay = true">
+        <button v-if="upload.state.uploadPhase !== 'idle'" class="mini-status" @click="showUploadOverlay = true" aria-label="查看上传进度">
           <div class="status-pulse"></div>
           <span v-show="!sidebarCollapsed" class="mono">{{ upload.state.statusText }}</span>
-        </div>
+        </button>
       </footer>
     </aside>
 
@@ -66,7 +70,7 @@
         </div>
       </header>
 
-      <div class="stage-content">
+      <div :class="['stage-content', { 'view-scroll': viewOwnsScroll }]">
         <RouterView v-slot="{ Component }">
           <KeepAlive>
             <component :is="Component" />
@@ -81,7 +85,7 @@
         <div class="overlay-card workbench-card">
           <div class="overlay-header">
             <h3 class="title-ancient">分析任务进行中</h3>
-            <button class="btn subtle" @click="showUploadOverlay = false">收起</button>
+            <n-button quaternary size="small" @click="showUploadOverlay = false">收起</n-button>
           </div>
           <div class="overlay-body">
             <div class="progress-info">
@@ -89,9 +93,13 @@
                 <strong>{{ upload.state.statusText }}</strong>
                 <span class="mono">{{ upload.state.progressPercent }}%</span>
               </div>
-              <div class="progress-track">
-                <div class="progress-bar" :style="{ width: `${upload.state.progressPercent}%` }"></div>
-              </div>
+              <n-progress
+                type="line"
+                :percentage="upload.state.progressPercent"
+                :show-indicator="false"
+                :height="6"
+                :border-radius="3"
+              />
               <div class="info-meta">
                 <span>{{ upload.state.completedProjectId || '当前任务' }}</span>
                 <span>{{ upload.state.stageLabel || formatUploadPhase(upload.state.uploadPhase) }}</span>
@@ -102,12 +110,20 @@
       </div>
     </Transition>
   </div>
+  </n-message-provider>
+  </n-dialog-provider>
+  </n-notification-provider>
+  </n-config-provider>
 </template>
 
 <script setup>
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
+import { NConfigProvider, NNotificationProvider, NDialogProvider, NMessageProvider, NButton, NProgress } from "naive-ui";
 
+import { Icon } from "@iconify/vue";
+
+import { themeOverrides, locale, dateLocale } from "./theme/naive-overrides";
 import LlmActivityIndicator from "./components/LlmActivityIndicator.vue";
 import { useProjectCatalog } from "./composables/useProjectCatalog";
 import { useSeedUpload } from "./composables/useSeedUpload";
@@ -118,19 +134,21 @@ const upload = useSeedUpload();
 const { refreshProjects } = useProjectCatalog();
 const showUploadOverlay = ref(false);
 const sidebarCollapsed = ref(false);
+const viewOwnsScroll = computed(() => route.meta?.scrollOwner === "view");
 
 const mainNav = [
-  { path: "/", label: "总览", code: "00", icon: "览" },
-  { path: "/story-graph", label: "故事图谱", code: "01", icon: "谱" },
-  { path: "/archive-library", label: "档案库", code: "02", icon: "档" },
-  { path: "/worldline", label: "世界线", code: "03", icon: "线" },
-  { path: "/character-console", label: "角色控制", code: "04", icon: "控" },
-  { path: "/writer", label: "写作台", code: "05", icon: "笔" },
+  { path: "/", label: "总览", code: "00", icon: "icon-park-outline:dashboard" },
+  { path: "/story-graph", label: "故事图谱", code: "01", icon: "icon-park-outline:connection-point-two" },
+  { path: "/archive-library", label: "档案库", code: "02", icon: "icon-park-outline:folder-open" },
+  { path: "/assets", label: "资产库", code: "02b", icon: "icon-park-outline:bookshelf" },
+  { path: "/worldline", label: "世界线", code: "03", icon: "icon-park-outline:timeline" },
+  { path: "/character-console", label: "角色控制", code: "04", icon: "icon-park-outline:peoples" },
+  { path: "/writer", label: "写作台", code: "05", icon: "icon-park-outline:edit" },
 ];
 
 const subNav = [
-  { path: "/guide", label: "帮助指南", icon: "?" },
-  { path: "/llm-facility", label: "设施面板", icon: "AI" },
+  { path: "/guide", label: "帮助指南", icon: "icon-park-outline:help" },
+  { path: "/llm-facility", label: "设施面板", icon: "icon-park-outline:cpu" },
 ];
 
 const currentNavLabel = computed(() => {
@@ -145,11 +163,16 @@ watch(() => upload.state.uploadPhase, (val) => {
   }
 });
 
-// Auto-collapse sidebar when entering workbench/module routes
+// Auto-collapse sidebar when entering workbench/module routes, auto-restore when leaving
 const workbenchPaths = new Set(["/story-graph", "/worldline", "/writer", "/character-console"]);
+let autoCollapsed = false;
 watch(() => route.path, (newPath, oldPath) => {
   if (workbenchPaths.has(newPath) && !workbenchPaths.has(oldPath)) {
     sidebarCollapsed.value = true;
+    autoCollapsed = true;
+  } else if (!workbenchPaths.has(newPath) && workbenchPaths.has(oldPath) && autoCollapsed) {
+    sidebarCollapsed.value = false;
+    autoCollapsed = false;
   }
 });
 
@@ -168,12 +191,12 @@ onMounted(() => {
 }
 
 .left-track {
-  width: 220px;
+  width: 200px;
   background: var(--bg-panel);
   border-right: 1px solid var(--line-soft);
   display: flex;
   flex-direction: column;
-  padding: var(--space-lg);
+  padding: 14px 14px;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -182,15 +205,15 @@ onMounted(() => {
 }
 
 .left-track.collapsed {
-  width: 64px;
-  padding: var(--space-lg) var(--space-sm);
+  width: 56px;
+  padding: 14px 6px;
 }
 
 .brand {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-xl);
+  gap: 4px;
+  margin-bottom: 16px;
 }
 
 .collapsed .brand {
@@ -198,8 +221,10 @@ onMounted(() => {
 }
 
 .seal {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
   background: var(--color-primary);
   display: flex;
   align-items: center;
@@ -218,10 +243,10 @@ onMounted(() => {
   color: #fff;
   font-family: var(--font-mono);
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13px;
   border: 1px solid rgba(255,255,255,0.3);
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -230,7 +255,7 @@ onMounted(() => {
 
 .brand-name {
   font-family: var(--font-heading-cn);
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--text-main);
@@ -247,7 +272,7 @@ onMounted(() => {
 .nav-track {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xl);
+  gap: 16px;
   flex: 1;
 }
 
@@ -258,32 +283,32 @@ onMounted(() => {
 }
 
 .group-label {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-dim);
-  margin-bottom: var(--space-sm);
+  margin-bottom: 4px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  padding-left: 12px;
+  padding-left: 10px;
   font-weight: 500;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  padding: 10px 12px;
+  padding: 7px 10px;
   text-decoration: none;
   color: var(--text-sub);
   border-radius: var(--radius-md);
   transition: all 0.2s ease;
   position: relative;
-  gap: var(--space-sm);
-  font-size: 14px;
+  gap: 6px;
+  font-size: 13.5px;
   white-space: nowrap;
 }
 
 .collapsed .nav-item {
   justify-content: center;
-  padding: 10px 0;
+  padding: 8px 0;
 }
 
 .nav-dot {
@@ -296,8 +321,8 @@ onMounted(() => {
 }
 
 .nav-icon {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -322,7 +347,7 @@ onMounted(() => {
 }
 
 .nav-label {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 500;
   flex: 1;
 }
@@ -353,8 +378,8 @@ onMounted(() => {
 }
 
 .nav-item.sub {
-  padding: 8px 12px;
-  font-size: 13px;
+  padding: 6px 10px;
+  font-size: 12.5px;
 }
 
 .nav-item.sub .nav-dot {
@@ -367,22 +392,22 @@ onMounted(() => {
 }
 
 .collapsed .nav-item.sub {
-  padding: 10px 0;
+  padding: 8px 0;
 }
 
 .track-footer {
   margin-top: auto;
-  padding-top: var(--space-md);
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  gap: 5px;
 }
 
 .collapse-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
+  gap: 6px;
+  padding: 7px 10px;
   background: rgba(176, 125, 75, 0.04);
   border: 1px solid rgba(176, 125, 75, 0.15);
   border-radius: 10px;
@@ -402,7 +427,7 @@ onMounted(() => {
 
 .collapsed .collapse-toggle {
   justify-content: center;
-  padding: 9px 0;
+  padding: 7px 0;
 }
 
 .collapse-chevron {
@@ -427,8 +452,8 @@ onMounted(() => {
 .mini-status {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: 10px 12px;
+  gap: 5px;
+  padding: 7px 10px;
   background: rgba(155, 44, 44, 0.08);
   border: 1px solid rgba(155, 44, 44, 0.2);
   border-radius: var(--radius-md);
@@ -465,8 +490,8 @@ onMounted(() => {
 }
 
 .stage-header {
-  height: 60px;
-  padding: 0 var(--space-xl);
+  height: 48px;
+  padding: 0 20px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -485,7 +510,7 @@ onMounted(() => {
 
 .breadcrumb .title-ancient {
   font-family: var(--font-heading-cn);
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text-main);
 }
@@ -497,9 +522,13 @@ onMounted(() => {
 }
 
 .stage-content {
-  padding: var(--space-xl);
+  padding: 18px 20px;
   flex: 1;
   overflow-y: auto;
+}
+
+.stage-content.view-scroll {
+  overflow-y: hidden;
 }
 
 /* Overlay Styles */
@@ -515,8 +544,8 @@ onMounted(() => {
 }
 
 .overlay-card {
-  width: 480px;
-  padding: var(--space-lg);
+  width: 440px;
+  padding: 16px;
   animation: slideUp 0.3s ease-out;
 }
 
@@ -524,7 +553,7 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--space-lg);
+  margin-bottom: 12px;
 }
 
 .progress-info {
@@ -539,18 +568,6 @@ onMounted(() => {
   align-items: baseline;
 }
 
-.progress-track {
-  height: 6px;
-  background: var(--bg-paper-warm);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.progress-bar {
-  height: 100%;
-  background: var(--color-primary);
-  transition: width 0.3s ease;
-}
 
 .info-meta {
   display: flex;

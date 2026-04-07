@@ -3,7 +3,7 @@
     <h2 class="card-title">对象详情</h2>
     <p>展示当前对象的结构化档案字段，直接来自 worldline agent state。</p>
 
-    <div v-if="!selectedAgent" class="empty">选择对象后，这里会显示身份、动机、关系与行动倾向。</div>
+    <n-empty v-if="!selectedAgent" description="选择对象后，这里会显示身份、动机、关系与行动倾向。" />
     <div v-else class="detail-sections">
       <section class="detail-block" v-for="item in detailSections" :key="item.key">
         <div class="detail-title">{{ item.label }}</div>
@@ -33,6 +33,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NEmpty } from "naive-ui";
 
 import { buildSelectedAgentDetailSections } from "./agentDetailPresentation.js";
 
@@ -45,7 +46,7 @@ const detailSections = computed(() => buildSelectedAgentDetailSections(props.sel
 
 <style scoped>
 .panel {
-  padding: 16px;
+  padding: 10px;
 }
 
 .panel p {
@@ -54,16 +55,16 @@ const detailSections = computed(() => buildSelectedAgentDetailSections(props.sel
 
 .detail-sections {
   display: grid;
-  gap: 10px;
-  margin-top: 10px;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .detail-block {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  padding: 12px;
+  border-radius: 8px;
+  padding: 10px;
   background: #fffaf1;
 }
 

@@ -9,14 +9,14 @@
         </p>
       </div>
       <div class="hero-pills">
-        <span class="pill"><em class="mono">状态</em>{{ latestProjectStatus }}</span>
-        <span class="pill"><em class="mono">阶段</em>{{ activeStageLabel || "等待启动" }}</span>
+        <n-tag :bordered="false" size="small"><template #icon><em class="mono">状态</em></template>{{ latestProjectStatus }}</n-tag>
+        <n-tag :bordered="false" size="small"><template #icon><em class="mono">阶段</em></template>{{ activeStageLabel || "等待启动" }}</n-tag>
       </div>
     </div>
 
     <div class="hero-actions">
-      <button class="btn primary" @click="$emit('start-new')">开始分析新小说</button>
-      <button class="btn subtle" @click="$emit('refresh')">刷新</button>
+      <n-button type="primary" @click="$emit('start-new')">开始分析新小说</n-button>
+      <n-button quaternary @click="$emit('refresh')">刷新</n-button>
     </div>
 
     <p v-if="errorMessage" class="hero-error mono">{{ errorMessage }}</p>
@@ -25,6 +25,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NButton, NTag } from "naive-ui";
 
 import { formatProjectStatus } from "../../utils/chineseDisplay";
 
@@ -46,7 +47,7 @@ const latestProjectStatus = computed(() =>
 
 <style scoped>
 .hero-panel {
-  padding: 16px 20px;
+  padding: 12px 14px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 243, 236, 0.97)),
     radial-gradient(circle at 0% 0%, rgba(61, 90, 128, 0.08), transparent 36%);
@@ -56,12 +57,12 @@ const latestProjectStatus = computed(() =>
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
 .hero-title {
-  font-size: 26px;
+  font-size: 22px;
   line-height: 1.2;
   color: var(--bg-ink);
   margin: 0;
@@ -79,29 +80,10 @@ const latestProjectStatus = computed(() =>
   flex-shrink: 0;
 }
 
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(113, 128, 150, 0.16);
-  background: rgba(255, 255, 255, 0.72);
-  font-size: 14px;
-  color: var(--text-main);
-  white-space: nowrap;
-}
-
-.pill em {
-  font-style: normal;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
 .hero-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 12px;
+  gap: 6px;
+  margin-top: 8px;
   flex-wrap: wrap;
 }
 

@@ -2,7 +2,7 @@
   <article class="workbench-card panel" :class="sessionId ? 'panel-active' : 'panel-ready'">
     <header class="panel-header">
       <p class="panel-kicker mono">WORLDLINE</p>
-      <span class="status-tag" :class="sessionStatus.tone">{{ sessionStatus.label }}</span>
+      <n-tag :type="sessionStatus.tone === 'ok' ? 'success' : sessionStatus.tone === 'warn' ? 'warning' : sessionStatus.tone === 'danger' ? 'error' : 'default'" size="small">{{ sessionStatus.label }}</n-tag>
     </header>
 
     <!-- Source section: only rendered in two-col / stacked fallback -->
@@ -38,21 +38,21 @@
         <div class="launchpad-main">
           <div class="field">
             <label>会话名称 <span class="label-hint">（方便后续识别）</span></label>
-            <input
+            <n-input
               :value="sessionLabel"
-              type="text"
               placeholder="例如：主线剧情推演、第三章分支"
-              @input="emitUpdate('sessionLabel', $event.target.value)"
+              @update:value="(val) => emitUpdate('sessionLabel', val)"
             />
           </div>
           <div class="field">
             <label>初始变量</label>
-            <textarea
+            <n-input
+              type="textarea"
               :value="variablesText"
-              rows="3"
+              :rows="3"
               placeholder="每行一个，如：主要势力提前结盟"
-              @input="emitUpdate('variablesText', $event.target.value)"
-            ></textarea>
+              @update:value="(val) => emitUpdate('variablesText', val)"
+            />
           </div>
 
           <div class="mode-grid">
@@ -72,19 +72,18 @@
           <div v-if="showContinuousSettings" class="auto-config-grid">
             <div class="field compact">
               <label>最大自动步数</label>
-              <input
+              <n-input-number
                 :value="maxSteps"
-                min="1"
-                type="number"
-                @input="emitUpdate('maxSteps', Number($event.target.value))"
+                :min="1"
+                @update:value="(val) => emitUpdate('maxSteps', val)"
               />
             </div>
             <div class="field compact">
               <label>最终条件</label>
-              <input
+              <n-input
                 :value="goalText"
                 placeholder="例如：主角公开宗门证据"
-                @input="emitUpdate('goalText', $event.target.value)"
+                @update:value="(val) => emitUpdate('goalText', val)"
               />
             </div>
           </div>
@@ -94,9 +93,9 @@
         </div>
 
         <div class="action-box launchpad-action">
-          <button class="btn primary create-btn" :disabled="busy || !selectedArchives.length" @click="createSession">
+          <n-button type="primary" :disabled="busy || !selectedArchives.length" @click="createSession">
             {{ createActionLabel }}
-          </button>
+          </n-button>
           <p v-if="sessionId" class="scope-hint mono">{{ sessionScopeHint }}</p>
         </div>
       </div>
@@ -109,27 +108,26 @@
 
       <div class="runtime-grid">
         <div class="action-box runtime-box">
-          <button class="btn" :disabled="!sessionId || busy" @click="stepForward">推进一步</button>
-          <button
+          <n-button :disabled="!sessionId || busy" @click="stepForward">推进一步</n-button>
+          <n-button
             v-if="createMode !== 'manual'"
-            class="btn"
             :disabled="!sessionId || busy"
             @click="$emit('start-auto-evolve')"
           >
             按当前模式自动推进
-          </button>
+          </n-button>
         </div>
 
         <div class="action-box runtime-box">
           <div class="field">
             <label>临时注入变量</label>
             <div class="inject-row">
-              <input
+              <n-input
                 :value="singleVariable"
                 placeholder="例如：二号角色获得预知能力"
-                @input="emitUpdate('singleVariable', $event.target.value)"
+                @update:value="(val) => emitUpdate('singleVariable', val)"
               />
-              <button class="btn" :disabled="!sessionId || busy" @click="injectVariable">注入变量</button>
+              <n-button :disabled="!sessionId || busy" @click="injectVariable">注入变量</n-button>
             </div>
             <p class="field-hint">中途注入新扰动条件</p>
           </div>
@@ -156,6 +154,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NButton, NInput, NInputNumber, NTag } from "naive-ui";
 
 import ArchiveLibraryPicker from "../../components/ArchiveLibraryPicker.vue";
 import { formatSessionScope } from "../../utils/chineseDisplay.js";

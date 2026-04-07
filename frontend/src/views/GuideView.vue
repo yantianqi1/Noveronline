@@ -21,7 +21,7 @@
               <div class="node-content">
                 <strong>{{ step.label }}</strong>
                 <p>{{ step.description }}</p>
-                <button class="btn subtle small" @click="handleStepClick(step)">跳转功能</button>
+                <n-button text size="small" @click="handleStepClick(step)">跳转功能</n-button>
               </div>
             </div>
           </div>
@@ -50,9 +50,9 @@
             </div>
             <div class="summary-row">
               <label>所处阶段</label>
-              <span class="status-tag" :class="currentStep.key === 'done' ? 'ok' : 'warn'">
+              <n-tag :type="currentStep.key === 'done' ? 'success' : 'warning'" size="small">
                 {{ currentStep.label }}
-              </span>
+              </n-tag>
             </div>
             <p class="summary-note">{{ progressSummary }}</p>
           </div>
@@ -74,6 +74,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { NButton, NTag } from "naive-ui";
 import { useRouter } from "vue-router";
 
 import { useProjectCatalog } from "../composables/useProjectCatalog";
@@ -135,14 +136,14 @@ async function handleStepClick(step) {
 }
 
 .guide-section {
-  padding: var(--space-lg);
+  padding: var(--space-md);
 }
 
 .workflow-visual {
   display: flex;
   flex-direction: column;
-  gap: var(--space-lg);
-  margin-top: var(--space-lg);
+  gap: var(--space-md);
+  margin-top: var(--space-md);
   position: relative;
 }
 
@@ -165,8 +166,8 @@ async function handleStepClick(step) {
 }
 
 .node-circle {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   background: var(--bg-panel);
   border: 2px solid var(--line-medium);
@@ -208,8 +209,8 @@ async function handleStepClick(step) {
 .concept-list {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-lg);
-  margin-top: var(--space-lg);
+  gap: var(--space-md);
+  margin-top: var(--space-md);
 }
 
 .concept-item h4 {
@@ -225,7 +226,7 @@ async function handleStepClick(step) {
 }
 
 .status-summary, .tips-card {
-  padding: var(--space-lg);
+  padding: var(--space-md);
 }
 
 .summary-details {

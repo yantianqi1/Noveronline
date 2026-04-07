@@ -28,14 +28,22 @@ class ManuscriptService:
         content: str,
         source_scene_id: str | None = None,
         insert_after_block_id: str | None = None,
+        chapter_id: str | None = None,
         chapter_tag: str | None = None,
+        pov_entity_id: str | None = None,
+        location: str | None = None,
+        involved_entities_json: str | None = None,
     ) -> dict[str, Any]:
         """Commit content to the manuscript. Spawns async metadata extraction."""
         block = self._db.commit_manuscript_block(
             project_id, content, source_scene_id, insert_after_block_id,
+            chapter_id=chapter_id,
+            pov_entity_id=pov_entity_id,
+            location=location,
+            involved_entities_json=involved_entities_json,
         )
-        # Apply chapter tag if provided
-        if chapter_tag:
+        # Legacy: apply chapter_tag if provided without chapter_id
+        if chapter_tag and not chapter_id:
             self._db.tag_manuscript_blocks(project_id, [block["block_id"]], chapter_tag)
             block["chapter_tag"] = chapter_tag
 
@@ -52,13 +60,19 @@ class ManuscriptService:
     # CRUD pass-through
     # ------------------------------------------------------------------
 
-    def list_blocks(self, project_id: str, include_content: bool = True) -> dict[str, Any]:
-        blocks = self._db.list_manuscript_blocks(project_id, include_content)
+    def list_blocks(
+        self, project_id: str, include_content: bool = True,
+        chapter_id: str | None = None,
+    ) -> dict[str, Any]:
+        blocks = self._db.list_manuscript_blocks(
+            project_id, include_content, chapter_id=chapter_id,
+        )
         stats = self._db.get_manuscript_stats(project_id)
         return {
             "blocks": blocks,
             "total_words": stats["total_words"],
             "total_blocks": stats["total_blocks"],
+            "chapters": stats.get("chapters", []),
         }
 
     def get_block(self, project_id: str, block_id: str) -> dict[str, Any] | None:
@@ -77,6 +91,16 @@ class ManuscriptService:
     def tag_blocks(self, project_id: str, block_ids: list[str], chapter_tag: str) -> int:
         return self._db.tag_manuscript_blocks(project_id, block_ids, chapter_tag)
 
+    def move_block(
+        self, project_id: str, block_id: str,
+        target_chapter_id: str | None,
+    ) -> dict[str, Any]:
+        """Move a manuscript block to a different chapter (or unassign)."""
+        self._db.move_manuscript_block_to_chapter(
+            project_id, block_id, target_chapter_id,
+        )
+        return self._db.get_manuscript_block(project_id, block_id) or {}
+
     def get_stats(self, project_id: str) -> dict[str, Any]:
         return self._db.get_manuscript_stats(project_id)
 
@@ -87,15 +111,22 @@ class ManuscriptService:
     def export_text(self, project_id: str, fmt: str = "txt") -> str:
         text = self._db.export_manuscript(project_id)
         if fmt == "md":
-            # Insert chapter headings where chapter_tag changes
+            # Insert chapter headings where chapter changes
             blocks = self._db.list_manuscript_blocks(project_id, include_content=True)
+            # Build chapter_id -> title lookup
+            stats = self._db.get_manuscript_stats(project_id)
+            ch_titles = {
+                ch["chapter_id"]: f"第{ch['chapter_order']}章 · {ch['title']}"
+                for ch in stats.get("chapters", [])
+            }
             parts: list[str] = []
-            current_tag = None
+            current_chapter = None
             for b in blocks:
-                tag = b.get("chapter_tag")
-                if tag and tag != current_tag:
-                    parts.append(f"\n# {tag}\n")
-                    current_tag = tag
+                cid = b.get("chapter_id")
+                heading = ch_titles.get(cid) or b.get("chapter_tag")
+                if heading and heading != current_chapter:
+                    parts.append(f"\n# {heading}\n")
+                    current_chapter = heading
                 parts.append(b["content"])
             return "\n\n".join(parts)
         return text

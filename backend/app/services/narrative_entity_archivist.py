@@ -366,6 +366,15 @@ class NarrativeEntityArchivist:
         if wrongly and wrongly != [_no]:
             merged["secrets"] = wrongly
 
+        # Character psychology fields
+        if personality.get("mask_behavior") and personality["mask_behavior"] != _no:
+            merged["mask_behavior"] = personality["mask_behavior"]
+        if personality.get("emotional_baseline") and personality["emotional_baseline"] != _no:
+            merged["emotional_baseline"] = personality["emotional_baseline"]
+        biases = knowledge.get("cognitive_biases", [])
+        if biases and biases != [_no]:
+            merged["cognitive_biases"] = biases
+
         # Store full profile sub-sections for rich frontend display
         merged["agent_profile"] = profile
 

@@ -68,10 +68,10 @@ watch(
 
 <style scoped>
 .workflow-stream {
-  border-radius: 16px;
+  border-radius: 10px;
   border: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.68);
-  padding: var(--space-lg);
+  padding: var(--space-md);
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);

@@ -76,6 +76,7 @@ _CLEAR_ORDER = (
     "agent_memory",
     "agent_states",
     "world_events",
+    "worldline_branches",
     "sessions",
     "chapter_meta",
     "chapter_content",
@@ -89,6 +90,8 @@ _CLEAR_ORDER = (
     "thread_lifecycle",
     "world_rule_evidence",
     "consistency_notes",
+    "volume_summaries",
+    "segment_summaries",
 )
 
 
@@ -678,13 +681,14 @@ def _migrate_worldline_runtime(
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO agent_states
-                        (state_id, session_id, entity_id, state_json,
+                        (state_id, session_id, branch_id, entity_id, state_json,
                          status, version, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state_id,
                         agent["session_id"],
+                        agent["branch_id"],
                         entity_id,
                         agent["state_json"] or "{}",
                         agent["status"] or "active",
@@ -716,14 +720,15 @@ def _migrate_worldline_runtime(
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO agent_memory
-                        (memory_id, session_id, entity_id, memory_type,
+                        (memory_id, session_id, branch_id, entity_id, memory_type,
                          summary, detail_json, salience, source_kind,
                          created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         mem["memory_id"],
                         mem["session_id"],
+                        mem["branch_id"],
                         entity_id,
                         mem["memory_type"],
                         mem["summary"],
@@ -734,6 +739,116 @@ def _migrate_worldline_runtime(
                     ),
                 )
                 counts["agent_memory"] = counts.get("agent_memory", 0) + 1
+
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 6b. session.json  -->  worldline_branches + world_events (timeline)
+# ---------------------------------------------------------------------------
+
+def _migrate_worldline_branches(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Migrate branch metadata and timeline events from session.json files."""
+    sessions_dir = os.path.join(
+        _project_dir(project_id), "worldlines", "sessions"
+    )
+    if not os.path.isdir(sessions_dir):
+        logger.info("worldlines/sessions dir not found for project %s, skipping", project_id)
+        return
+
+    from ...models.worldline import WorldlineSession
+
+    now = _now()
+    for entry in os.listdir(sessions_dir):
+        session_file = os.path.join(sessions_dir, entry, "session.json")
+        if not os.path.isfile(session_file):
+            continue
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read %s: %s", session_file, exc)
+            continue
+
+        session = WorldlineSession.from_dict(data)
+
+        # Ensure session row exists
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sessions
+                (session_id, project_id, session_type, title,
+                 focus_question, status, config_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session.session_id, project_id, "worldline",
+                session.label or session.simulation_goal,
+                session.focus_question,
+                session.status, "{}",
+                session.created_at or now,
+                session.updated_at or now,
+            ),
+        )
+
+        for branch in session.branches:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO worldline_branches
+                    (branch_id, session_id, title, core_change, narrative_value,
+                     current_step, status, evolution_intensity, evolution_depth,
+                     key_agents_json, expected_conflicts_json,
+                     actor_states_json, organization_states_json,
+                     relationship_states_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    branch.branch_id, session.session_id,
+                    branch.title, branch.core_change, branch.narrative_value,
+                    branch.current_step, branch.status,
+                    branch.evolution_intensity, branch.evolution_depth,
+                    json.dumps(branch.key_agents, ensure_ascii=False),
+                    json.dumps(branch.expected_conflicts, ensure_ascii=False),
+                    json.dumps(branch.actor_states, ensure_ascii=False),
+                    json.dumps(branch.organization_states, ensure_ascii=False),
+                    json.dumps([rs if isinstance(rs, dict) else {}
+                                for rs in branch.relationship_states],
+                               ensure_ascii=False),
+                    branch.created_at or now,
+                    branch.updated_at or now,
+                ),
+            )
+            counts["worldline_branches"] = counts.get("worldline_branches", 0) + 1
+
+            for event in branch.timeline:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO world_events
+                        (event_id, session_id, branch_id, step, title, summary,
+                         event_type, driving_entities_json, state_changes_json,
+                         status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id, session.session_id, branch.branch_id,
+                        event.step, event.title, event.summary,
+                        getattr(event, "event_type", None) or "",
+                        json.dumps(
+                            getattr(event, "driving_entities", []) or [],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            getattr(event, "state_changes", []) or [],
+                            ensure_ascii=False,
+                        ),
+                        event.status or "canon",
+                        event.created_at or now,
+                    ),
+                )
+                counts["world_events"] = counts.get("world_events", 0) + 1
 
     conn.commit()
 
@@ -1009,6 +1124,9 @@ def _migrate_agent_profiles(
                 knowledge_boundary_json = ?,
                 ultimate_goal = COALESCE(NULLIF(?, ''), ultimate_goal),
                 current_objective = COALESCE(NULLIF(?, ''), current_objective),
+                mask_behavior = COALESCE(NULLIF(?, ''), mask_behavior),
+                emotional_baseline = COALESCE(NULLIF(?, ''), emotional_baseline),
+                cognitive_biases_json = ?,
                 updated_at = ?
             WHERE entity_id = ?
             """,
@@ -1030,6 +1148,9 @@ def _migrate_agent_profiles(
                 json.dumps(knowledge, ensure_ascii=False) if knowledge else "{}",
                 motivation.get("ultimate_goal", ""),
                 motivation.get("current_objective", ""),
+                personality.get("mask_behavior", ""),
+                personality.get("emotional_baseline", ""),
+                json.dumps(knowledge.get("cognitive_biases", []), ensure_ascii=False),
                 now,
                 entity_id,
             ),
@@ -1345,11 +1466,47 @@ def _migrate_plot_state(
         )
         counts["narrative_arcs"] = counts.get("narrative_arcs", 0) + 1
 
+    # -- volume_summaries --
+    volume_summaries = plot_state.get("volume_summaries", [])
+    for idx, vol in enumerate(volume_summaries):
+        if isinstance(vol, str):
+            summary = vol
+            covered = "[]"
+            vid = f"vol_{idx:03d}"
+        elif isinstance(vol, dict):
+            summary = vol.get("summary", "")
+            covered = json.dumps(vol.get("covered_arcs", []), ensure_ascii=False)
+            vid = vol.get("volume_id", f"vol_{idx:03d}")
+        else:
+            continue
+        if not summary:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO volume_summaries (volume_id, project_id, volume_order, summary, covered_arcs_json, created_at) VALUES (?,?,?,?,?,?)",
+            (vid, project_id, idx, summary, covered, now),
+        )
+    conn.commit()
+    counts["volume_summaries"] = len(volume_summaries)
+
     # -- project_meta --
     narrative_phase = plot_state.get("narrative_phase", "")
-    # Count segments from reading notes
-    segment_summaries = plot_state.get("recent_segment_summaries", [])
-    total_segments = len(segment_summaries)
+    # Count actual total segments from reading notes top level
+    all_segs = raw.get("all_segment_summaries", [])
+    if not all_segs:
+        # Fallback: try to count from segment_summaries.json
+        seg_path = os.path.join(_project_dir(project_id), "segment_summaries.json")
+        if os.path.isfile(seg_path):
+            try:
+                with open(seg_path, encoding="utf-8") as sf:
+                    seg_data = json.load(sf)
+                seg_items = seg_data.get("summaries", seg_data) if isinstance(seg_data, dict) else seg_data
+                total_segments = len(seg_items) if isinstance(seg_items, list) else 0
+            except Exception:
+                total_segments = len(plot_state.get("recent_segment_summaries", []))
+        else:
+            total_segments = len(plot_state.get("recent_segment_summaries", []))
+    else:
+        total_segments = len(all_segs)
     conn.execute(
         """
         INSERT OR REPLACE INTO project_meta
@@ -1517,6 +1674,90 @@ def _migrate_segment_summaries(
     conn.commit()
     counts["segment_summaries"] = updated
     logger.info("Migrated %d chapter summaries for project %s", updated, project_id)
+
+
+def _migrate_full_segment_summaries(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+) -> None:
+    """Preserve full per-segment summaries in segment_summaries table."""
+    seg_path = os.path.join(_project_dir(project_id), "segment_summaries.json")
+    if not os.path.isfile(seg_path):
+        return
+    with open(seg_path, encoding="utf-8") as f:
+        data = json.load(f)
+    items = data.get("summaries", data) if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return
+
+    now = _now()
+    inserted = 0
+    for idx, item in enumerate(items):
+        if isinstance(item, dict):
+            seg_id = item.get("segment_id", f"seg_{idx:03d}")
+            summary = item.get("summary", "")
+        elif isinstance(item, str):
+            seg_id = f"seg_{idx:03d}"
+            summary = item
+        else:
+            continue
+        if not summary:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO segment_summaries (segment_id, project_id, segment_order, summary, created_at) VALUES (?,?,?,?,?)",
+            (seg_id, project_id, idx, summary, now),
+        )
+        inserted += 1
+    conn.commit()
+    counts["segment_summaries_full"] = inserted
+    logger.info("Migrated %d full segment summaries for project %s", inserted, project_id)
+
+
+def _migrate_key_locations(
+    project_id: str,
+    conn: sqlite3.Connection,
+    counts: dict[str, int],
+    name_to_id: dict[str, str],
+) -> None:
+    """Import key_locations from reading_notes as location entities."""
+    path = os.path.join(_project_dir(project_id), "reading_notes.json")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    notes = raw.get("notes", raw)
+    locations = notes.get("core_facts", {}).get("key_locations", {})
+    if not locations:
+        return
+
+    import hashlib
+    now = _now()
+    inserted = 0
+    for name, data in locations.items():
+        if not name or name in name_to_id:
+            continue
+        eid = f"e_{hashlib.sha1(name.encode()).hexdigest()[:12]}"
+        summary = ""
+        profile = {}
+        if isinstance(data, dict):
+            summary = data.get("description", data.get("summary", ""))
+            profile = data
+        elif isinstance(data, str):
+            summary = data
+        conn.execute(
+            """INSERT OR IGNORE INTO entities
+               (entity_id, project_id, name, entity_type, importance_tier, summary, profile_json, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (eid, project_id, name, "location", "minor", summary,
+             json.dumps(profile, ensure_ascii=False), now, now),
+        )
+        name_to_id[name] = eid
+        inserted += 1
+    conn.commit()
+    counts["key_locations"] = inserted
+    logger.info("Migrated %d key locations for project %s", inserted, project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1857,6 +2098,9 @@ def migrate_project(project_id: str) -> dict[str, int]:
         # 6: runtime.sqlite3 -> agent_states + agent_memory
         _migrate_worldline_runtime(project_id, conn, counts)
 
+        # 6b: session.json -> worldline_branches + world_events (timeline)
+        _migrate_worldline_branches(project_id, conn, counts)
+
         # 7: chapter_segments.json -> chapter_content (fill content)
         _migrate_chapter_segments(project_id, conn, counts)
 
@@ -1881,6 +2125,12 @@ def migrate_project(project_id: str) -> dict[str, int]:
         # 14: segment_summaries.json + reading_notes core_facts -> chapter_meta summary
         _migrate_segment_summaries(project_id, conn, counts)
 
+        # 14b: full segment summaries -> segment_summaries table
+        _migrate_full_segment_summaries(project_id, conn, counts)
+
+        # 14c: key_locations -> entities (type=location)
+        _migrate_key_locations(project_id, conn, counts, name_to_id)
+
         # 15: reading_notes characters -> character_events timeline
         _migrate_character_events(project_id, conn, counts, name_to_id)
 
@@ -1901,6 +2151,9 @@ def migrate_project(project_id: str) -> dict[str, int]:
 
         # 21: build entity associations (thread_entity_links + rule_entity_links)
         _build_entity_associations(project_id, conn, counts)
+
+    # 22: back-fill manuscript_blocks.chapter_id from chapter_tag
+    counts["manuscript_chapter_ids"] = migrate_manuscript_chapter_ids(project_id)
 
     # Rebuild all FTS indexes after bulk import
     db.rebuild_fts(project_id)
@@ -2023,3 +2276,94 @@ def _build_entity_associations(
         "Built entity associations for project %s: %d thread links, %d rule links",
         project_id, thread_links, rule_links,
     )
+
+
+# ======================================================================
+# 22. Populate manuscript_blocks.chapter_id from chapter_tag strings
+# ======================================================================
+
+
+def migrate_manuscript_chapter_ids(project_id: str) -> int:
+    """Back-fill ``chapter_id`` on manuscript blocks that only have ``chapter_tag``.
+
+    Parses the ``"第N章 · title"`` format to match against ``chapter_content`` rows.
+    If no matching chapter exists, creates one.  Idempotent — safe to run repeatedly.
+
+    Returns the number of blocks updated.
+    """
+    import re
+
+    db = NovelDB()
+    db.ensure_schema(project_id)
+    updated = 0
+
+    with db.connect(project_id) as conn:
+        # Find blocks that have a chapter_tag but no chapter_id
+        orphan_rows = conn.execute(
+            "SELECT block_id, chapter_tag FROM manuscript_blocks "
+            "WHERE project_id = ? AND chapter_tag IS NOT NULL AND chapter_id IS NULL",
+            (project_id,),
+        ).fetchall()
+        if not orphan_rows:
+            return 0
+
+        # Build lookup: chapter_order -> chapter_id, title -> chapter_id
+        chapters = conn.execute(
+            "SELECT chapter_id, chapter_order, title FROM chapter_content WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+        order_map: dict[int, str] = {r["chapter_order"]: r["chapter_id"] for r in chapters}
+        title_map: dict[str, str] = {r["title"]: r["chapter_id"] for r in chapters if r["title"]}
+
+        tag_pattern = re.compile(r"^第(\d+)章\s*·\s*(.+)$")
+        now = _now()
+
+        for row in orphan_rows:
+            tag = row["chapter_tag"]
+            chapter_id = None
+
+            m = tag_pattern.match(tag)
+            if m:
+                order = int(m.group(1))
+                title = m.group(2).strip()
+                # Try matching by order first, then by title
+                chapter_id = order_map.get(order) or title_map.get(title)
+                if not chapter_id:
+                    # Create a new chapter
+                    chapter_id = f"ch_{__import__('uuid').uuid4().hex[:12]}"
+                    conn.execute(
+                        "INSERT INTO chapter_content "
+                        "(chapter_id, project_id, chapter_order, title, content, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, '', ?, ?)",
+                        (chapter_id, project_id, order, title, now, now),
+                    )
+                    order_map[order] = chapter_id
+                    title_map[title] = chapter_id
+            else:
+                # Unparseable tag — try title match, or create chapter with raw tag as title
+                chapter_id = title_map.get(tag)
+                if not chapter_id:
+                    next_order = max(order_map.keys(), default=0) + 1
+                    chapter_id = f"ch_{__import__('uuid').uuid4().hex[:12]}"
+                    conn.execute(
+                        "INSERT INTO chapter_content "
+                        "(chapter_id, project_id, chapter_order, title, content, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, '', ?, ?)",
+                        (chapter_id, project_id, next_order, tag, now, now),
+                    )
+                    order_map[next_order] = chapter_id
+                    title_map[tag] = chapter_id
+
+            conn.execute(
+                "UPDATE manuscript_blocks SET chapter_id = ? WHERE block_id = ?",
+                (chapter_id, row["block_id"]),
+            )
+            updated += 1
+
+        conn.commit()
+
+    logger.info(
+        "Migrated %d manuscript blocks to chapter_id for project %s",
+        updated, project_id,
+    )
+    return updated

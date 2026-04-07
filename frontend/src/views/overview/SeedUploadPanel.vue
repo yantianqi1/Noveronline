@@ -6,14 +6,14 @@
         <h2 class="title-ancient">卷宗投放</h2>
         <p class="subtitle">上传小说文本，填写分析目标，开始分析。</p>
       </div>
-      <button class="btn subtle small" @click="panelExpanded = !panelExpanded">
+      <n-button quaternary size="small" @click="panelExpanded = !panelExpanded">
         {{ panelExpanded ? "收起面板" : "展开面板" }}
-      </button>
+      </n-button>
     </header>
 
     <div v-if="!panelExpanded" class="collapsed-summary">
       <span>{{ collapsedSummary }}</span>
-      <button class="btn subtle small" @click="panelExpanded = true">继续编辑</button>
+      <n-button quaternary size="small" @click="panelExpanded = true">继续编辑</n-button>
     </div>
 
     <Transition name="panel-fold">
@@ -26,6 +26,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import { NButton } from "naive-ui";
 
 import { useSeedUpload } from "../../composables/useSeedUpload";
 import SeedUploadFormFields from "./SeedUploadFormFields.vue";
@@ -74,7 +75,7 @@ watch(
 <style scoped>
 .upload-panel {
   width: 100%;
-  padding: 16px 20px;
+  padding: 12px 14px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 246, 238, 0.96)),
     radial-gradient(circle at 100% 0%, rgba(61, 90, 128, 0.05), transparent 26%);

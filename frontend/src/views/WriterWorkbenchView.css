@@ -1,6 +1,7 @@
 .writer-stage {
   display: grid;
   gap: var(--space-lg);
+  height: calc(100vh - 100px);
 }
 
 .writer-stage.desktop {
@@ -15,6 +16,11 @@
   padding: 12px;
   position: relative;
   overflow: hidden;
+}
+
+/* Only the middle column scrolls with mouse wheel */
+.writer-context {
+  overflow-y: auto;
 }
 
 .writer-panel::before {

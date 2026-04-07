@@ -76,12 +76,12 @@ defineExpose({ editingId });
 }
 
 .reading-header {
-  padding: 20px 32px 16px;
+  padding: 14px 20px 10px;
   border-bottom: 1px solid var(--border-subtle, #2d2d44);
 }
 
 .reading-chapter-title {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text-primary, #e0e0e0);
   margin: 0;
@@ -96,7 +96,7 @@ defineExpose({ editingId });
 .reading-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 32px 40px;
+  padding: 16px 20px 24px;
 }
 
 .prose-block {

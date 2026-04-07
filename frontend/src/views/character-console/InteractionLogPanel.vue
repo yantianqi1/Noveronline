@@ -6,12 +6,14 @@
         <div class="mono">{{ item.time }}</div>
         <div>{{ item.text }}</div>
       </div>
-      <div v-if="!logs.length" class="empty">暂无日志，执行第一条动作后会记录在这里。</div>
+      <n-empty v-if="!logs.length" description="暂无日志，执行第一条动作后会记录在这里。" />
     </div>
   </article>
 </template>
 
 <script setup>
+import { NEmpty } from "naive-ui";
+
 defineProps({
   logs: { type: Array, default: () => [] },
 });
@@ -19,11 +21,11 @@ defineProps({
 
 <style scoped>
 .panel {
-  padding: 16px;
+  padding: 10px;
 }
 
 .logs {
-  margin-top: 12px;
+  margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -33,8 +35,8 @@ defineProps({
 
 .log-item {
   border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  padding: 10px;
+  border-radius: 8px;
+  padding: 8px;
   background: #fffbf3;
   display: grid;
   gap: 5px;

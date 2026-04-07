@@ -1,26 +1,41 @@
 """LLM 设施面板 API。"""
 
+import logging
 import traceback
 
 from flask import jsonify, request
 
 from . import llm_bp
+from ..config import Config
 from ..services.llm_activity_tracker import llm_activity_tracker
 from ..services.llm_concurrency_service import llm_concurrency_service as _concurrency_svc
 from ..services.llm_settings_service import LlmSettingsService
+
+logger = logging.getLogger(__name__)
 
 
 def _service() -> LlmSettingsService:
     return LlmSettingsService()
 
 
+def _require_admin():
+    """Check Bearer token for mutation endpoints. Skip if ADMIN_SECRET is empty."""
+    secret = Config.ADMIN_SECRET
+    if not secret:
+        return None
+    auth = request.headers.get("Authorization", "")
+    if auth == f"Bearer {secret}":
+        return None
+    return jsonify({"success": False, "error": "未授权：需要有效的 ADMIN_SECRET"}), 401
+
+
 def _error_response(error: Exception, status_code: int = 500):
+    logger.error("LLM API error (status=%d): %s\n%s", status_code, error, traceback.format_exc())
     return (
         jsonify(
             {
                 "success": False,
                 "error": str(error),
-                "traceback": traceback.format_exc(),
             }
         ),
         status_code,
@@ -37,6 +52,9 @@ def get_llm_settings():
 
 @llm_bp.route("/channels", methods=["POST"])
 def create_llm_channel():
+    denied = _require_admin()
+    if denied:
+        return denied
     try:
         payload = request.get_json() or {}
         channel = _service().create_channel(payload)
@@ -49,6 +67,9 @@ def create_llm_channel():
 
 @llm_bp.route("/channels/<channel_key>", methods=["PATCH"])
 def update_llm_channel(channel_key: str):
+    denied = _require_admin()
+    if denied:
+        return denied
     try:
         payload = request.get_json() or {}
         channel = _service().update_channel(channel_key, payload)
@@ -61,6 +82,9 @@ def update_llm_channel(channel_key: str):
 
 @llm_bp.route("/channels/<channel_key>", methods=["DELETE"])
 def delete_llm_channel(channel_key: str):
+    denied = _require_admin()
+    if denied:
+        return denied
     try:
         result = _service().delete_channel(channel_key)
         return jsonify({"success": True, "data": result})
@@ -72,6 +96,9 @@ def delete_llm_channel(channel_key: str):
 
 @llm_bp.route("/channels/<channel_key>/sync-models", methods=["POST"])
 def sync_llm_channel_models(channel_key: str):
+    denied = _require_admin()
+    if denied:
+        return denied
     try:
         channel = _service().sync_models(channel_key)
         return jsonify({"success": True, "data": channel})
@@ -83,6 +110,9 @@ def sync_llm_channel_models(channel_key: str):
 
 @llm_bp.route("/module-bindings/<module_key>", methods=["PUT"])
 def update_llm_module_binding(module_key: str):
+    denied = _require_admin()
+    if denied:
+        return denied
     try:
         payload = request.get_json() or {}
         binding = _service().set_module_binding(module_key, payload)
@@ -95,6 +125,9 @@ def update_llm_module_binding(module_key: str):
 
 @llm_bp.route("/module-bindings/<module_key>", methods=["DELETE"])
 def delete_llm_module_binding(module_key: str):
+    denied = _require_admin()
+    if denied:
+        return denied
     try:
         result = _service().delete_module_binding(module_key)
         return jsonify({"success": True, "data": result})

@@ -5,20 +5,20 @@
 
     <div class="field">
       <label>会话范围</label>
-      <select :value="projectFilter" @change="emitUpdate('projectFilter', $event.target.value)">
-        <option v-for="item in projectSessionOptions" :key="item.value" :value="item.value">
-          {{ item.label }}
-        </option>
-      </select>
+      <n-select
+        :value="projectFilter"
+        :options="projectSessionOptions"
+        @update:value="(val) => emitUpdate('projectFilter', val)"
+      />
     </div>
     <div class="field">
       <label>世界线会话</label>
-      <select :value="sessionId" @change="emitUpdate('sessionId', $event.target.value)">
-        <option value="">请选择会话</option>
-        <option v-for="item in sessions" :key="item.session_id" :value="item.session_id">
-          {{ sessionLabel(item) }}
-        </option>
-      </select>
+      <n-select
+        :value="sessionId"
+        :options="sessionSelectOptions"
+        placeholder="请选择会话"
+        @update:value="(val) => emitUpdate('sessionId', val)"
+      />
     </div>
 
     <div v-if="activeSession" class="session-summary">
@@ -38,21 +38,24 @@
 
     <div class="field">
       <label>动作指令</label>
-      <textarea
+      <n-input
+        type="textarea"
         :value="action"
         placeholder="例如：以家族名义公开承认旧约，要求盟友在 3 天内给出立场。"
-        @input="emitUpdate('action', $event.target.value)"
-      ></textarea>
+        @update:value="(val) => emitUpdate('action', val)"
+      />
     </div>
     <div class="toolbar-row">
-      <button class="btn primary" :disabled="busy || !sessionId || !selectedAgent" @click="$emit('submitAction')">执行动作</button>
+      <n-button type="primary" :disabled="busy || !sessionId || !selectedAgent" @click="$emit('submitAction')">执行动作</n-button>
     </div>
-    <p class="status-text" :class="{ error: !!error }">{{ error || message }}</p>
+    <n-tag v-if="error" type="error">{{ error }}</n-tag>
+    <p v-else class="status-text">{{ message }}</p>
   </article>
 </template>
 
 <script setup>
 import { computed } from "vue";
+import { NButton, NInput, NSelect, NTag } from "naive-ui";
 
 import { formatAgentKind, formatAgentStatus, formatSessionScope } from "../../utils/chineseDisplay.js";
 import { buildSelectedAgentSummaryLines } from "./agentDetailPresentation.js";
@@ -73,6 +76,9 @@ const props = defineProps({
 
 const emit = defineEmits(["update:projectFilter", "update:sessionId", "update:action", "submitAction"]);
 const summaryLines = computed(() => buildSelectedAgentSummaryLines(props.selectedAgent));
+const sessionSelectOptions = computed(() =>
+  props.sessions.map((item) => ({ label: props.sessionLabel(item), value: item.session_id }))
+);
 
 function emitUpdate(field, value) {
   emit(`update:${field}`, value);
@@ -81,7 +87,7 @@ function emitUpdate(field, value) {
 
 <style scoped>
 .panel {
-  padding: 16px;
+  padding: 10px;
 }
 
 .panel p {
@@ -91,10 +97,10 @@ function emitUpdate(field, value) {
 .session-summary,
 .selected-agent {
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #fffaf1;
-  margin-top: 12px;
-  padding: 12px;
+  margin-top: 8px;
+  padding: 10px;
 }
 
 .selected-agent p,
@@ -109,7 +115,4 @@ function emitUpdate(field, value) {
   color: var(--text-main);
 }
 
-.status-text.error {
-  color: #9b4326;
-}
 </style>

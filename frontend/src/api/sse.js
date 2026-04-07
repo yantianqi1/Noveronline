@@ -12,6 +12,9 @@ function buildUrl(path) {
   return buildApiUrl(path, API_BASE_URL);
 }
 
+const DEFAULT_MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1500;
+
 /**
  * 发送 POST 请求并以 SSE 方式逐事件读取响应。
  *
@@ -22,67 +25,86 @@ function buildUrl(path) {
  * @param {function} handlers.onDone - 收到 type=done 事件时调用 (event)
  * @param {function} handlers.onError - 收到 type=error 事件或网络错误时调用 (event|Error)
  * @param {AbortSignal} [signal] - 可选的 AbortSignal 用于取消请求
+ * @param {object} [options] - 额外选项
+ * @param {number} [options.maxRetries] - 网络错误最大重试次数（默认 3）
  * @returns {Promise<void>}
  */
-export async function postSSE(path, data, handlers = {}, signal) {
+export async function postSSE(path, data, handlers = {}, signal, options = {}) {
   const { onEvent, onDone, onError } = handlers;
-  let response;
-  try {
-    response = await fetch(buildUrl(path), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data ?? {}),
-      signal,
-    });
-  } catch (err) {
-    onError?.(err);
-    return;
-  }
+  const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
 
-  if (!response.ok) {
-    onError?.(new Error(`SSE 请求失败: ${response.status}`));
-    return;
-  }
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) return;
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+    let response;
+    try {
+      response = await fetch(buildUrl(path), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data ?? {}),
+        signal,
+      });
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      onError?.(err);
+      return;
+    }
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    if (!response.ok) {
+      onError?.(new Error(`SSE 请求失败: ${response.status}`));
+      return;
+    }
 
-      // SSE 格式: "data: {...}\n\n"
-      const segments = buffer.split("\n\n");
-      buffer = segments.pop() || "";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
 
-      for (const segment of segments) {
-        const trimmed = segment.trim();
-        if (!trimmed) continue;
-        const jsonStr = trimmed.replace(/^data:\s*/, "");
-        if (!jsonStr) continue;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-        let event;
-        try {
-          event = JSON.parse(jsonStr);
-        } catch {
-          continue;
-        }
+        // SSE 格式: "data: {...}\n\n"
+        const segments = buffer.split("\n\n");
+        buffer = segments.pop() || "";
 
-        if (event.type === "error") {
-          onError?.(event);
-        } else if (event.type === "done") {
-          onDone?.(event);
-        } else {
-          onEvent?.(event);
+        for (const segment of segments) {
+          const trimmed = segment.trim();
+          if (!trimmed) continue;
+          const jsonStr = trimmed.replace(/^data:\s*/, "");
+          if (!jsonStr) continue;
+
+          let event;
+          try {
+            event = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          if (event.type === "error") {
+            onError?.(event);
+          } else if (event.type === "done") {
+            onDone?.(event);
+          } else {
+            onEvent?.(event);
+          }
         }
       }
-    }
-  } catch (err) {
-    if (err.name !== "AbortError") {
+      // Stream completed normally — no retry needed
+      return;
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
       onError?.(err);
+      return;
     }
   }
 }

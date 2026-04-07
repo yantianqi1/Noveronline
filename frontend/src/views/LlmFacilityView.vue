@@ -1,13 +1,13 @@
 <template>
   <div class="facility-stage stack">
     <!-- Header: Stats & Operations -->
-    <header class="facility-header workbench-card">
+    <n-card class="facility-header">
       <div class="header-main">
         <h2 class="title-ancient">全局设施面板</h2>
         <div class="header-actions">
-          <button class="btn subtle small" :disabled="loading" @click="reloadSettings">
+          <n-button quaternary size="small" :disabled="loading" @click="reloadSettings">
             {{ loading ? "同步中..." : "刷新状态" }}
-          </button>
+          </n-button>
         </div>
       </div>
       <div class="stats-row">
@@ -16,10 +16,10 @@
         <div class="stat-item"><label>绑定</label><strong class="mono">{{ boundModuleCount }}</strong></div>
       </div>
       <div v-if="statusText || errorText" class="message-row">
-        <span v-if="statusText" class="status-tag ok">{{ statusText }}</span>
-        <span v-if="errorText" class="status-tag danger">{{ errorText }}</span>
+        <n-tag v-if="statusText" type="success">{{ statusText }}</n-tag>
+        <n-tag v-if="errorText" type="error">{{ errorText }}</n-tag>
       </div>
-    </header>
+    </n-card>
 
     <div class="facility-grid">
       <!-- Channel Management -->
@@ -49,6 +49,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { useDialog, NButton, NCard, NTag } from "naive-ui";
 import {
   createLlmChannel,
   deleteLlmModuleBinding,
@@ -71,6 +72,7 @@ const syncingChannelKey = ref("");
 const deletingChannelKey = ref("");
 const savingModuleKey = ref("");
 const removingModuleKey = ref("");
+const dialog = useDialog();
 let pollingTimer = null;
 
 const channelBusy = computed(() => !!submittingChannelKey.value);
@@ -127,18 +129,25 @@ async function handleUpdateChannel(channelKey, payload, resetForm) {
   }
 }
 
-async function handleDeleteChannel(channelKey) {
-  if (!window.confirm("确认删除？")) return;
-  try {
-    deletingChannelKey.value = channelKey;
-    await deleteLlmChannel(channelKey);
-    statusText.value = "渠道已删除";
-    await reloadSettings();
-  } catch (error) {
-    errorText.value = error.message || "删除失败";
-  } finally {
-    deletingChannelKey.value = "";
-  }
+function handleDeleteChannel(channelKey) {
+  dialog.warning({
+    title: "确认删除",
+    content: "确认删除此渠道？该操作不可撤销。",
+    positiveText: "删除",
+    negativeText: "取消",
+    async onPositiveClick() {
+      try {
+        deletingChannelKey.value = channelKey;
+        await deleteLlmChannel(channelKey);
+        statusText.value = "渠道已删除";
+        await reloadSettings();
+      } catch (error) {
+        errorText.value = error.message || "删除失败";
+      } finally {
+        deletingChannelKey.value = "";
+      }
+    },
+  });
 }
 
 async function handleSyncChannel(channelKey) {
@@ -167,18 +176,25 @@ async function handleSaveBinding(moduleKey, payload) {
   }
 }
 
-async function handleRemoveBinding(moduleKey) {
-  if (!window.confirm("确认解绑？")) return;
-  try {
-    removingModuleKey.value = moduleKey;
-    await deleteLlmModuleBinding(moduleKey);
-    statusText.value = "绑定已解绑";
-    await reloadSettings();
-  } catch (error) {
-    errorText.value = error.message || "解绑失败";
-  } finally {
-    removingModuleKey.value = "";
-  }
+function handleRemoveBinding(moduleKey) {
+  dialog.warning({
+    title: "确认解绑",
+    content: "确认解除此模块的绑定？",
+    positiveText: "解绑",
+    negativeText: "取消",
+    async onPositiveClick() {
+      try {
+        removingModuleKey.value = moduleKey;
+        await deleteLlmModuleBinding(moduleKey);
+        statusText.value = "绑定已解绑";
+        await reloadSettings();
+      } catch (error) {
+        errorText.value = error.message || "解绑失败";
+      } finally {
+        removingModuleKey.value = "";
+      }
+    },
+  });
 }
 
 function startPolling() {
@@ -210,7 +226,6 @@ onBeforeUnmount(() => {
 }
 
 .facility-header {
-  padding: var(--space-md) var(--space-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
@@ -224,7 +239,7 @@ onBeforeUnmount(() => {
 
 .stats-row {
   display: flex;
-  gap: var(--space-xl);
+  gap: var(--space-lg);
   padding-top: var(--space-sm);
   border-top: 1px solid var(--line-soft);
 }
@@ -243,7 +258,7 @@ onBeforeUnmount(() => {
 }
 
 .stat-item strong {
-  font-size: 18px;
+  font-size: 16px;
   color: var(--text-main);
 }
 

@@ -3,40 +3,36 @@
     <h2 class="card-title">对象历史</h2>
     <p>展示对象在当前分支的快照、动作与对话历史。</p>
 
-    <div v-if="!sessionId || !selectedAgent" class="empty">选择对象后自动加载历史。</div>
-    <p v-else-if="error" class="status-text error">{{ error }}</p>
-    <div v-else class="history-grid">
-      <section class="history-block">
-        <div class="seed-title">状态快照 · {{ snapshots.length }}</div>
-        <div v-if="!snapshots.length" class="empty">暂无快照</div>
+    <n-empty v-if="!sessionId || !selectedAgent" description="选择对象后自动加载历史。" />
+    <n-tag v-else-if="error" type="error">{{ error }}</n-tag>
+    <n-tabs v-else type="line" size="small" style="margin-top: 10px">
+      <n-tab-pane :name="'snapshots'" :tab="`快照 · ${snapshots.length}`">
+        <n-empty v-if="!snapshots.length" description="暂无快照" size="small" />
         <div v-for="item in snapshots" :key="item.snapshot_id" class="history-item">
           <div class="mono">v{{ item.state_version }} · {{ formatTime(item.created_at) }}</div>
           <div>{{ item.status }} · {{ item.reason }}</div>
         </div>
-      </section>
+      </n-tab-pane>
 
-      <section class="history-block">
-        <div class="seed-title">动作日志 · {{ actions.length }}</div>
-        <div v-if="!actions.length" class="empty">暂无动作</div>
+      <n-tab-pane :name="'actions'" :tab="`动作 · ${actions.length}`">
+        <n-empty v-if="!actions.length" description="暂无动作" size="small" />
         <div v-for="item in actions" :key="item.action_event_id" class="history-item">
           <div class="mono">{{ item.status }} · {{ formatTime(item.created_at) }}</div>
           <div>{{ item.action }}</div>
         </div>
-      </section>
+      </n-tab-pane>
 
-      <section class="history-block">
-        <div class="seed-title">对话日志 · {{ dialogues.length }}</div>
-        <div v-if="!dialogues.length" class="empty">暂无对话</div>
+      <n-tab-pane :name="'dialogues'" :tab="`对话 · ${dialogues.length}`">
+        <n-empty v-if="!dialogues.length" description="暂无对话" size="small" />
         <div v-for="item in dialogues" :key="item.dialogue_id" class="history-item">
           <div class="mono">{{ item.generator_mode }} · {{ formatTime(item.created_at) }}</div>
           <div>Q: {{ item.message }}</div>
           <div>A: {{ item.reply }}</div>
         </div>
-      </section>
+      </n-tab-pane>
 
-      <section class="history-block">
-        <div class="seed-title">记忆片段 · {{ sessionMemories.length + longTermMemories.length }}</div>
-        <div v-if="!sessionMemories.length && !longTermMemories.length" class="empty">暂无记忆</div>
+      <n-tab-pane :name="'memories'" :tab="`记忆 · ${sessionMemories.length + longTermMemories.length}`">
+        <n-empty v-if="!sessionMemories.length && !longTermMemories.length" description="暂无记忆" size="small" />
         <div v-for="item in sessionMemories" :key="item.memory_id" class="history-item">
           <div class="mono">session · {{ item.memory_type }} · {{ formatTime(item.updated_at) }}</div>
           <div>{{ item.summary }}</div>
@@ -45,12 +41,14 @@
           <div class="mono">long_term · {{ item.memory_type }} · {{ formatTime(item.updated_at) }}</div>
           <div>{{ item.summary }}</div>
         </div>
-      </section>
-    </div>
+      </n-tab-pane>
+    </n-tabs>
   </article>
 </template>
 
 <script setup>
+import { NEmpty, NTabs, NTabPane, NTag } from "naive-ui";
+
 defineProps({
   sessionId: { type: String, default: "" },
   selectedAgent: { type: Object, default: null },
@@ -73,25 +71,11 @@ function formatTime(value) {
 
 <style scoped>
 .panel {
-  padding: 16px;
+  padding: 10px;
 }
 
 .panel p {
   color: var(--text-sub);
-}
-
-.history-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.history-block {
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  padding: 10px;
-  background: #fffaf1;
 }
 
 .history-item + .history-item {
@@ -100,13 +84,4 @@ function formatTime(value) {
   padding-top: 8px;
 }
 
-.status-text.error {
-  color: #9b4326;
-}
-
-@media (max-width: 1200px) {
-  .history-grid {
-    grid-template-columns: 1fr;
-  }
-}
 </style>
