@@ -42,15 +42,20 @@
 
 多 Agent 协作的创作辅助系统：
 - **Agent 工具循环**: 写作 Agent 拥有 write_prose / compile_manuscript / set_scene_status 等工具，自主规划写作步骤
+- **检索规划员**: 正式写作前由轻量 LLM 单次预演，输出 `<retrieval_plan>` 注入 orchestrator，作为最低检索基线
+- **模块化提示词**: 写作 / 评审提示词拆分为 `prompts/` 子包（5 个 writer 模块 + reviewer 模块），按任务装配
 - **世界数据写入工具**: Agent 可通过 manage_entity / manage_thread / manage_world_rule / manage_relationship 增量维护世界设定
 - **世界数据更新**: 散文提交后，可一键触发 Agent 分析并更新实体、伏笔、规则等世界数据
 - **实体关联查询**: query_entity 返回角色关联伏笔线索 + 适用世界规则，一次调用获取完整上下文
 - **大纲版本管理**: 大纲保存时自动快照，支持版本历史浏览、预览对比、标签标注、一键恢复
-- **多 Agent 流水线**: Context → Memory → Style → Writer → Reviewer 五阶段生成
 - **章节 / 场景管理**: 创建章节、拆分场景、设置 POV 角色、管理预设
 - **手稿阅读**: TOC 导航 + 散文视图，查看编译后的完整章节内容
 - **记忆系统**: 短期记忆 (episodic) + 长期记忆 (canon / candidate / experiment) 分层管理
 - **任务类型**: write_scene（场景写作）、continue（续写）、outline（章节大纲生成）
+
+### 资产库（统一视图）
+
+将角色档案、组织、关系、伏笔线索、世界规则、上传素材等 6 个数据源以**只读**方式聚合为统一的「资产条目」视图，并通过 FTS5 trigram 全文索引（`backend/uploads/system/global_search.sqlite3`）支持跨 silo 搜索与 facets 过滤。配套的 Ingestion Agent 可将自由素材抽取为结构化资产，写作 Agent 可统一检索。
 
 ### LLM 设施面板
 
