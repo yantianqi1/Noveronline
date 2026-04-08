@@ -17,9 +17,9 @@ from .novel_db import NovelDB
 
 logger = logging.getLogger(__name__)
 
-TOOL_RESULT_MAX_CHARS = 8000
-_PRESERVE_HEAD = 3000
-_PRESERVE_TAIL = 1500
+TOOL_RESULT_MAX_CHARS = 16000
+_PRESERVE_HEAD = 11000  # Enough to keep a full 5000-char deep profile + structured fields
+_PRESERVE_TAIL = 2500
 
 
 def _truncate_result(result: str, max_chars: int = TOOL_RESULT_MAX_CHARS) -> str:
@@ -99,14 +99,26 @@ def _query_entity(params: dict, project_id: str) -> str:
     if entity is None:
         return f"未找到实体：{name}"
 
-    lines = [
+    lines: list[str] = []
+
+    # Long-form character bible (deep profile) — placed at the very top so the
+    # writer LLM sees it first. This is the strongest防 OOC约束。
+    deep_profile = (entity.get("deep_profile_md") or "").strip()
+    if deep_profile:
+        lines.append("===== 角色长文档案（写作时必须严格遵守，下述行为禁区与语言禁忌优先级最高）=====")
+        lines.append(deep_profile)
+        lines.append("===== 长文档案结束 =====")
+        lines.append("")  # blank line separator
+        lines.append("以下为补充结构化字段，与上面长文档案不一致时，以长文档案为准：")
+
+    lines.extend([
         f"【{entity.get('entity_type', '未知')}】{entity.get('name', name)}",
         f"重要性：{entity.get('importance_tier', '未知')}",
         f"概述：{entity.get('summary') or '无'}",
         f"核心驱动：{entity.get('core_drive') or '无'}",
         f"表面表现：{entity.get('surface_mask') or '无'}",
         f"内在矛盾：{entity.get('hidden_tension') or '无'}",
-    ]
+    ])
 
     # Structured personality & speech fields
     _append_if(lines, "说话风格", entity.get("speech_style"))
@@ -1000,20 +1012,24 @@ def _format_asset_brief(a: dict) -> str:
 
 
 def _search_assets(params: dict, project_id: str) -> str:
+    from ..assets.global_search_indexer import MIN_QUERY_CHARS, QueryTooShort
     query = (params.get("query") or "").strip()
-    if not query:
-        return "search_assets 需要 query 参数"
+    if len(query) < MIN_QUERY_CHARS:
+        return f"search_assets 需要 query ≥ {MIN_QUERY_CHARS} 字符（当前 {len(query)}）"
     asset_type = params.get("asset_type") or None
     category = params.get("category")
     scope = params.get("scope") or "all"
     limit = int(params.get("limit") or 10)
     svc = _get_assets_service()
-    if scope == "global":
-        hits = svc.search(query, scope="global", asset_type=asset_type, category=category, limit=limit)
-    elif scope == "project":
-        hits = svc.search(query, scope="project", project_id=project_id, asset_type=asset_type, category=category, limit=limit)
-    else:
-        hits = svc.search_merged(query, project_id=project_id, asset_type=asset_type, category=category, limit=limit)
+    try:
+        if scope == "global":
+            hits = svc.search(query, scope="global", asset_type=asset_type, category=category, limit=limit)
+        elif scope == "project":
+            hits = svc.search(query, scope="project", project_id=project_id, asset_type=asset_type, category=category, limit=limit)
+        else:
+            hits = svc.search_merged(query, project_id=project_id, asset_type=asset_type, category=category, limit=limit)
+    except QueryTooShort as exc:
+        return f"search_assets query 不合法：{exc}"
     if not hits:
         return f"未在资产库中找到与“{query}”相关的已启用资产"
     return f"找到 {len(hits)} 条资产：\n\n" + "\n\n".join(_format_asset_brief(a) for a in hits)
@@ -1073,24 +1089,28 @@ def _list_assets(params: dict, project_id: str) -> str:
 
 
 def _global_search(params: dict, project_id: str) -> str:
-    from ..assets.global_search_indexer import GlobalSearchIndexer
+    from ..assets.global_search_indexer import (
+        GlobalSearchIndexer,
+        MIN_QUERY_CHARS,
+        QueryTooShort,
+    )
     query = (params.get("query") or "").strip()
-    if not query:
-        return "global_search 需要 query"
-    sources = None
-    if params.get("source"):
-        sources = [s.strip() for s in str(params["source"]).split(",") if s.strip()]
+    if len(query) < MIN_QUERY_CHARS:
+        return f"global_search 需要 query ≥ {MIN_QUERY_CHARS} 字符（当前 {len(query)}）"
+    # source 接受 list（新 schema）或逗号分隔字符串（向后兼容旧调用约定）。
+    sources: list[str] | None = None
+    raw_src = params.get("source")
+    if isinstance(raw_src, list):
+        sources = [str(s).strip() for s in raw_src if str(s).strip()]
+    elif isinstance(raw_src, str) and raw_src.strip():
+        sources = [s.strip() for s in raw_src.split(",") if s.strip()]
     limit = min(int(params.get("limit") or 20), 100)
     indexer = GlobalSearchIndexer()
-    # 懒重建：项目索引为空时先同步一次
-    with indexer._connect() as conn:  # noqa: SLF001
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM global_index WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
-    if row and row["n"] == 0:
-        indexer.reindex_project(project_id)
-    hits = indexer.search(query, project_id=project_id, sources=sources, limit=limit)
+    # 不再懒重建——索引由各 silo 写入端实时维护。query 不合法直接抛。
+    try:
+        hits = indexer.search(query, project_id=project_id, sources=sources, limit=limit)
+    except QueryTooShort as exc:
+        return f"global_search query 不合法：{exc}"
     if not hits:
         return f"未在全局索引中找到与“{query}”相关的条目"
     lines = [f"找到 {len(hits)} 条："]
@@ -1164,6 +1184,182 @@ def _query_graph_neighbors(params: dict, project_id: str) -> str:
             f"    fact: {e['fact']}\n"
             f"    对端摘要: {other_summary[:120] if other_summary else ''}"
         )
+    return "\n".join(lines)
+
+
+def _query_event(params: dict, project_id: str) -> str:
+    import sqlite3 as _sql
+    import json as _json
+    from ..local_story_graph_storage import LocalStoryGraphStorage
+    event_id = (params.get("event_id") or "").strip()
+    name = (params.get("name") or "").strip()
+    limit = max(1, min(int(params.get("limit") or 5), 20))
+    if not event_id and not name:
+        return "query_event 需要 event_id 或 name 之一"
+    storage = LocalStoryGraphStorage()
+    if not storage.has_graph(project_id):
+        return f"项目 {project_id} 暂无故事图谱"
+    db_path = storage.graph_db_path(project_id)
+    conn = _sql.connect(db_path)
+    conn.row_factory = _sql.Row
+    try:
+        # Filter to PlotEvent label via labels_json LIKE
+        rows = conn.execute(
+            "SELECT n.* FROM graph_nodes n "
+            "JOIN graph_node_labels l ON l.node_uuid = n.uuid "
+            "WHERE l.label IN ('PlotEvent', 'Conflict') "
+            "ORDER BY n.name LIMIT 500"
+        ).fetchall() if _has_table(conn, "graph_node_labels") else conn.execute(
+            "SELECT * FROM graph_nodes LIMIT 500"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    matches: list[dict] = []
+    for r in rows:
+        try:
+            attrs = _json.loads(r["attributes_json"]) if r["attributes_json"] else {}
+        except _json.JSONDecodeError:
+            attrs = {}
+        if event_id:
+            if str(attrs.get("event_id", "")) != event_id:
+                continue
+        elif name:
+            if name not in (r["name"] or "") and name not in (r["summary"] or ""):
+                continue
+        try:
+            evidence = _json.loads(r["evidence_refs_json"]) if r["evidence_refs_json"] else []
+        except _json.JSONDecodeError:
+            evidence = []
+        matches.append({
+            "uuid": r["uuid"],
+            "name": r["name"],
+            "summary": r["summary"],
+            "attrs": attrs,
+            "evidence": evidence,
+        })
+        if len(matches) >= limit:
+            break
+
+    if not matches:
+        target = event_id or name
+        return f"未找到事件：{target}"
+    lines = [f"找到 {len(matches)} 条事件："]
+    for m in matches:
+        attrs = m["attrs"]
+        lines.append(f"\n## {m['name']}")
+        if attrs.get("event_id"):
+            lines.append(f"event_id: {attrs['event_id']}")
+        if attrs.get("kind"):
+            lines.append(f"类型: {attrs['kind']}")
+        if attrs.get("arc_id"):
+            lines.append(f"所属弧线: {attrs['arc_id']}")
+        if attrs.get("chapter_id"):
+            lines.append(f"章节: {attrs['chapter_id']}")
+        participants = attrs.get("participants") or []
+        if participants:
+            lines.append(f"参与者: {', '.join(participants)}")
+        if m["summary"]:
+            lines.append(f"描述: {m['summary']}")
+        if attrs.get("consequence"):
+            lines.append(f"影响: {attrs['consequence']}")
+        for ev in (m["evidence"] or [])[:2]:
+            snippet = ev.get("snippet") if isinstance(ev, dict) else str(ev)
+            if snippet:
+                lines.append(f"佐证: {snippet}")
+    return "\n".join(lines)
+
+
+def _has_table(conn, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def _query_relationship_network(params: dict, project_id: str) -> str:
+    import sqlite3 as _sql
+    from ..local_story_graph_storage import LocalStoryGraphStorage
+    name = (params.get("name") or "").strip()
+    if not name:
+        return "query_relationship_network 需要 name"
+    limit = max(1, min(int(params.get("limit") or 30), 100))
+    storage = LocalStoryGraphStorage()
+    if not storage.has_graph(project_id):
+        return f"项目 {project_id} 暂无故事图谱"
+    db_path = storage.graph_db_path(project_id)
+    conn = _sql.connect(db_path)
+    conn.row_factory = _sql.Row
+    try:
+        node_row = conn.execute(
+            "SELECT * FROM graph_nodes WHERE name = ? LIMIT 1", (name,)
+        ).fetchone()
+        if not node_row:
+            alias_row = conn.execute(
+                "SELECT node_uuid FROM graph_aliases WHERE alias = ? LIMIT 1", (name,)
+            ).fetchone() if _has_table(conn, "graph_aliases") else None
+            if alias_row:
+                node_row = conn.execute(
+                    "SELECT * FROM graph_nodes WHERE uuid = ?", (alias_row["node_uuid"],)
+                ).fetchone()
+        if not node_row:
+            return f"故事图谱中未找到节点：{name}"
+        node_uuid = node_row["uuid"]
+        # Restrict to character/organization/faction neighbors via label join when available
+        edges = conn.execute(
+            "SELECT * FROM graph_edges "
+            "WHERE source_node_uuid = ? OR target_node_uuid = ? "
+            "ORDER BY weight DESC LIMIT ?",
+            (node_uuid, node_uuid, limit * 2),
+        ).fetchall()
+        neighbor_uuids = set()
+        for e in edges:
+            other = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
+            neighbor_uuids.add(other)
+        neighbor_map: dict[str, dict] = {}
+        if neighbor_uuids:
+            placeholders = ",".join("?" * len(neighbor_uuids))
+            for n in conn.execute(
+                f"SELECT n.uuid, n.name, n.summary, "
+                f"  (SELECT GROUP_CONCAT(label) FROM graph_node_labels WHERE node_uuid = n.uuid) AS labels "
+                f"FROM graph_nodes n WHERE n.uuid IN ({placeholders})",
+                list(neighbor_uuids),
+            ).fetchall():
+                neighbor_map[n["uuid"]] = {
+                    "name": n["name"],
+                    "summary": n["summary"],
+                    "labels": (n["labels"] or "").split(","),
+                }
+    finally:
+        conn.close()
+
+    # Filter to character-like neighbors
+    person_labels = {"Character", "Organization", "Faction", "Group"}
+    filtered = []
+    for e in edges:
+        other_uuid = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
+        info = neighbor_map.get(other_uuid)
+        if not info:
+            continue
+        if not (set(info["labels"]) & person_labels):
+            continue
+        filtered.append((e, info, other_uuid))
+        if len(filtered) >= limit:
+            break
+
+    if not filtered:
+        return f"# {node_row['name']}\n暂无角色关系网络"
+    lines = [
+        f"# {node_row['name']} 的关系网络（{len(filtered)} 条）",
+        f"摘要: {node_row['summary'] or '(无)'}",
+        "",
+    ]
+    for e, info, other_uuid in filtered:
+        direction = "→" if e["source_node_uuid"] == node_uuid else "←"
+        lines.append(
+            f"- {direction} {info['name']}  [{e['name']}, weight={e['weight']}]"
+        )
+        if e["fact"]:
+            lines.append(f"    事实: {e['fact']}")
     return "\n".join(lines)
 
 
@@ -1258,5 +1454,7 @@ _EXECUTORS: dict[str, Any] = {
     # Unified / cross-silo
     "global_search": _global_search,
     "query_graph_neighbors": _query_graph_neighbors,
+    "query_event": _query_event,
+    "query_relationship_network": _query_relationship_network,
     "query_worldline_session": _query_worldline_session,
 }

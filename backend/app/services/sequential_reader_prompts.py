@@ -56,6 +56,27 @@ JSON 结构必须严格遵循以下格式：
       "power_shift": "权力动态变化（上风/下风/平衡/无变化）"
     }
   ],
+  "co_occurrence": [
+    {
+      "a": "角色A",
+      "b": "角色B",
+      "scene": "本段中两人同场出现的简短场景描述（10-40字）",
+      "interaction_type": "互动类型（对话/合作/冲突/旁观/共处/其他）"
+    }
+  ],
+  "organization_dynamics": [
+    {
+      "organization": "组织名称",
+      "event": "组织在本段中的动态/变化（10-60字）",
+      "members_involved": ["参与的角色名"]
+    }
+  ],
+  "location_state_changes": [
+    {
+      "location": "地点名称",
+      "change": "地点的状态/氛围/控制权变化（10-60字）"
+    }
+  ],
   "plot_threads": [
     {
       "thread": "线索名称",
@@ -77,7 +98,9 @@ JSON 结构必须严格遵循以下格式：
 注意：
 - 只分析本段正文，不要臆造未出现的内容
 - character_updates 只包含本段出现或被提及的角色
-- relationship_changes 只记录本段发生的关系变化
+- relationship_changes **必须列出本段内出现的所有两两互动关系，包括配角与配角之间**；不允许只记录主角相关的关系，也不允许省略配角彼此的互动
+- co_occurrence 强制记录本段中所有"同场出现并有任何互动"的角色对（不要求是关系剧变），用于构建角色互动网络；如果只出现了一个角色，留空数组
+- organization_dynamics / location_state_changes 如无内容请留空数组 []
 - 所有字符串字段必须是字符串，不能为 null"""
 
 
@@ -91,6 +114,16 @@ ARC_SUMMARY_SYSTEM_PROMPT = """你是一名小说分析师，需要将多段阅�
 
 {
   "arc_summary": "约800字的弧线整合摘要，聚焦核心冲突、角色成长、开端→发展→结尾/悬念、对后续的铺垫",
+  "key_events": [
+    {
+      "event_id": "ev_01",
+      "title": "事件标题（10-25字，能独立识别该事件）",
+      "description": "事件正文描述（80-200字）：起因、经过、结果、影响",
+      "participants": ["参与角色名（含配角，至少 2 人）"],
+      "chapter_hint": "事件大致发生的章节/段落标识（若已知）",
+      "consequence": "对后续剧情的影响（30-80字）"
+    }
+  ],
   "character_arcs": [
     {"name": "角色名", "change": "本弧线中角色的变化/成长/转折"}
   ],
@@ -103,6 +136,8 @@ ARC_SUMMARY_SYSTEM_PROMPT = """你是一名小说分析师，需要将多段阅�
 }
 
 注意：
+- key_events **必须至少包含 3 条**，把 arc 内的关键事件拆出来；title ≠ description；participants 必须列出真实参与者（含配角）
+- relationship_shifts **优先记录配角之间、阵营内部的关系变动**；主角参与的关系变动占比 ≤ 1/3
 - character_arcs 只包含本弧线中有显著变化的角色
 - 如果某个数组为空，输出空数组 []
 - 不要包含任何额外解释"""

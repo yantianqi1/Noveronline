@@ -9,12 +9,33 @@
         </div>
       </div>
 
-      <div v-if="archiveLoading" class="archive-loading">
+      <template v-if="isEventNode">
+        <div class="event-card">
+          <div v-if="eventChapter" class="event-chapter mono">{{ eventChapter }}</div>
+          <p v-if="selectedNode.summary && selectedNode.summary !== selectedNode.name" class="event-body">
+            {{ selectedNode.summary }}
+          </p>
+          <p v-else class="no-data">暂无事件描述（流水线未产出 key_events）。</p>
+          <div v-if="eventParticipants.length" class="event-participants">
+            <span class="event-label">参与者：</span>
+            <n-tag v-for="p in eventParticipants" :key="p" size="small" :bordered="false">{{ p }}</n-tag>
+          </div>
+          <div v-if="eventConsequence" class="event-consequence">
+            <span class="event-label">影响：</span>{{ eventConsequence }}
+          </div>
+          <div v-if="eventEvidence.length" class="event-evidence">
+            <div class="event-label">原文佐证</div>
+            <p v-for="(ev, idx) in eventEvidence" :key="idx" class="event-evidence-item">— {{ ev }}</p>
+          </div>
+        </div>
+      </template>
+
+      <div v-else-if="archiveLoading" class="archive-loading">
         <n-spin size="small" />
         <span>档案加载中...</span>
       </div>
 
-      <template v-if="archiveData">
+      <template v-else-if="archiveData">
         <InspectorSection v-if="identityItems.length" title="身份特征" :items="identityItems" />
         <InspectorSection v-if="motivationItems.length" title="动机驱力" :items="motivationItems" />
         <InspectorSection v-if="tensionItems.length" title="内在张力" :items="tensionItems" />
@@ -96,6 +117,21 @@ const tierLabel = computed(() => {
 
 const aliasesList = computed(() => {
   return props.selectedNode?.attributes?.aliases || [];
+});
+
+const isEventNode = computed(() => {
+  const t = (props.selectedNode?.entity_type || "").toLowerCase();
+  return t === "plotevent" || t === "conflict" || t === "event";
+});
+
+const eventChapter = computed(() => props.selectedNode?.attributes?.chapter_id || "");
+const eventParticipants = computed(() => {
+  return props.selectedNode?.attributes?.participants || [];
+});
+const eventConsequence = computed(() => props.selectedNode?.attributes?.consequence || "");
+const eventEvidence = computed(() => {
+  const refs = props.selectedNode?.evidence_refs || [];
+  return refs.map((r) => (typeof r === "string" ? r : r.snippet || "")).filter(Boolean).slice(0, 3);
 });
 
 const payload = computed(() => archiveData.value?.template_payload || {});
@@ -200,6 +236,10 @@ watch(
     archiveData.value = null;
     archiveLoading.value = false;
     if (!node || !props.projectId) return;
+    // Event nodes never have an archive entry — skip the lookup entirely
+    // so the dedicated event card renders immediately.
+    const t = (node.entity_type || "").toLowerCase();
+    if (t === "plotevent" || t === "conflict" || t === "event") return;
 
     const gen = ++loadGeneration;
     archiveLoading.value = true;
@@ -328,6 +368,43 @@ watch(
   font-style: italic;
 }
 
+.event-card {
+  padding: 4px 0;
+}
+.event-chapter {
+  font-size: 11px;
+  color: #9a8b6f;
+  margin-bottom: 4px;
+}
+.event-body {
+  margin: 6px 0;
+  line-height: 1.55;
+  color: #564a36;
+  white-space: pre-wrap;
+}
+.event-participants,
+.event-consequence,
+.event-evidence {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: #564a36;
+}
+.event-participants {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.event-label {
+  color: #9a8b6f;
+  margin-right: 4px;
+}
+.event-evidence-item {
+  margin: 2px 0;
+  color: #7a6c52;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .mono {
   font-family: "Courier New", monospace;
   font-size: 11px;

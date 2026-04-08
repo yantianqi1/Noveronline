@@ -518,12 +518,17 @@ ASSET_TOOLS: list[dict] = [
                 "在资产库（全局 + 当前项目）中按关键词全文搜索可被 agent 调用的资产，"
                 "如写作风格(writing_style)、作家风格(author_style)、世界观(worldview)、"
                 "角色原型(character_archetype)、提示词模板(prompt_template)、稿件块(manuscript_block) 等。"
-                "只返回已启用 (enabled) 的资产。"
+                "只返回已启用 (enabled) 的资产。query 必须 ≥ 3 字符；过短直接报错，"
+                "**不会**降级为模糊匹配。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "关键词，至少 3 个字符"},
+                    "query": {
+                        "type": "string",
+                        "description": "关键词，至少 3 个字符；FTS5 trigram 严格匹配，过短会显式失败。",
+                        "minLength": 3,
+                    },
                     "asset_type": {
                         "type": "string",
                         "description": "可选：限定资产类型，例如 writing_style / worldview / character_archetype",
@@ -589,17 +594,39 @@ UNIFIED_TOOLS: list[dict] = [
         "function": {
             "name": "global_search",
             "description": (
-                "跨所有数据源（资产库 / 档案库 / 故事图谱 / 写作工坊 / 世界线 / 总览种子）"
-                "做一次全局 FTS5 搜索。当你不确定该查哪个具体工具、或想用一段模糊描述命中相关素材时使用。"
-                "返回每条命中的 source / source_ref / title / 摘要片段。"
+                "跨所有数据源做一次全局 FTS5 搜索。返回每条命中的 source / source_ref / "
+                "title / 摘要片段。**严格 FTS**：query 不足 3 字符或所有 token 都过短"
+                "会直接报错，绝不降级为模糊匹配。\n\n"
+                "数据源标识与含义（source 参数取值——只接受英文 key）：\n"
+                "  - assets       → 资产库（写作素材：文风/世界观/原型/桥段）\n"
+                "  - archive      → 档案库（角色/组织/势力/关系正典档案）\n"
+                "  - story_graph  → 故事图谱节点\n"
+                "  - novel_db     → 写作工坊（实体/情节线/世界规则/场景）\n"
+                "  - worldline    → 世界线推演会话\n"
+                "  - seed         → 总览种子流水线产物\n"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "关键词或短语，≥2 字符"},
-                    "source": {
+                    "query": {
                         "type": "string",
-                        "description": "可选：限定数据源，逗号分隔。可选 assets,archive,story_graph,novel_db,worldline,seed",
+                        "description": "关键词或短语，至少 3 字符；任何 token 过短都会显式报错。",
+                        "minLength": 3,
+                    },
+                    "source": {
+                        "type": "array",
+                        "description": "可选：限定一个或多个数据源，使用上面表中的英文 key。",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "assets",
+                                "archive",
+                                "story_graph",
+                                "novel_db",
+                                "worldline",
+                                "seed",
+                            ],
+                        },
                     },
                     "limit": {"type": "integer", "description": "默认 20，上限 100"},
                 },
@@ -620,6 +647,42 @@ UNIFIED_TOOLS: list[dict] = [
                 "properties": {
                     "name": {"type": "string", "description": "节点名称（精确或别名）"},
                     "limit": {"type": "integer", "description": "邻居数量上限，默认 20"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_event",
+            "description": (
+                "查询故事图谱中的剧情事件节点（PlotEvent）。返回事件标题、正文描述、参与角色、所属弧线、影响。"
+                "支持按 event_id 精确查询，或按事件标题做模糊匹配。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "可选：事件 ID（如 arc_001_ev_01）"},
+                    "name": {"type": "string", "description": "可选：事件标题或关键词"},
+                    "limit": {"type": "integer", "description": "默认 5"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_relationship_network",
+            "description": (
+                "查询某个角色的一阶关系网络：列出图谱中所有与该角色相连的实体 + 关系类型 + 边权重。"
+                "比 query_graph_neighbors 更聚焦于角色↔角色的直接关系，便于写作时快速引用人物羁绊。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "角色名（精确或别名）"},
+                    "limit": {"type": "integer", "description": "默认 30"},
                 },
                 "required": ["name"],
             },
@@ -677,6 +740,8 @@ TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
     "manage_thread": lambda inp: f"{'创建' if inp.get('action') == 'create' else '更新'}伏笔：{inp.get('thread_key', '?')}",
     "manage_world_rule": lambda inp: f"记录世界规则：{inp.get('fact_text', '?')[:30]}",
     "manage_relationship": lambda inp: f"管理关系：{inp.get('entity_a', '?')} ↔ {inp.get('entity_b', '?')}",
+    "query_event": lambda inp: f"查询事件：{inp.get('event_id') or inp.get('name', '?')}",
+    "query_relationship_network": lambda inp: f"查询关系网络：{inp.get('name', '?')}",
     "search_assets": lambda inp: f"搜索资产：{inp.get('query', '?')}" + (f" [{inp.get('asset_type')}]" if inp.get("asset_type") else ""),
     "get_asset": lambda inp: f"取资产：{inp.get('asset_id', '?')}",
     "list_assets": lambda inp: f"列资产：{inp.get('asset_type', '?')}",

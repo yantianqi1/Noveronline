@@ -152,6 +152,18 @@ class SequentialReader:
         if relationship_changes:
             manager.merge_relationship_changes(relationship_changes, segment_id)
 
+        co_occurrence = result.get("co_occurrence", [])
+        if co_occurrence:
+            manager.merge_co_occurrence(co_occurrence, segment_id)
+
+        org_dynamics = result.get("organization_dynamics", [])
+        if org_dynamics:
+            manager.merge_organization_dynamics(org_dynamics, segment_id)
+
+        loc_changes = result.get("location_state_changes", [])
+        if loc_changes:
+            manager.merge_location_state_changes(loc_changes, segment_id)
+
         plot_threads = result.get("plot_threads", [])
         if plot_threads:
             manager.merge_plot_threads(plot_threads, segment_id)
@@ -193,6 +205,10 @@ class SequentialReader:
             result = {}
 
         manager.add_arc_summary(arc_id, arc_summary_text, pending)
+
+        key_events = result.get("key_events", [])
+        if key_events:
+            manager.merge_key_events(key_events, arc_id)
 
         # Merge structured arc data back into notes (new format)
         for ca in result.get("character_arcs", []):

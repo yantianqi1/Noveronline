@@ -187,11 +187,23 @@ class LocalStoryGraphBuilder:
 
     def _event_candidate(self, ontology: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         snippets = [evidence_ref(event.get("chapter_id", ""), event.get("block_id", ""), item) for item in event.get("evidence", [])[:3]]
+        # Prefer explicit title (from key_events); fall back to summary (legacy
+        # arc-only events) and finally event_id. This preserves backward-compat
+        # with pipelines that haven't been re-run since the key_events upgrade.
+        title = event.get("title") or event.get("summary") or event.get("event_id") or "剧情事件"
+        summary = event.get("summary", "") or title
         return {
-            "name": event.get("summary", "") or event.get("event_id", "剧情事件"),
+            "name": title,
             "label": preferred_entity_label(ontology, "PlotEvent", "Conflict", fallback="PlotEvent"),
-            "summary": event.get("summary", ""),
-            "attributes": {"event_id": event.get("event_id", ""), "chapter_id": event.get("chapter_id", "")},
+            "summary": summary,
+            "attributes": {
+                "event_id": event.get("event_id", ""),
+                "chapter_id": event.get("chapter_id", ""),
+                "kind": event.get("kind", ""),
+                "arc_id": event.get("arc_id", ""),
+                "consequence": event.get("consequence", ""),
+                "participants": list(event.get("characters", []) or []),
+            },
             "evidence_refs": snippets,
         }
 
@@ -345,6 +357,11 @@ class LocalStoryGraphBuilder:
         return lookup.get("_attrs", {}).get(f"{key}:{value}", "")
 
     def _relationship_edge_name(self, ontology: Dict[str, Any], change: str) -> str:
+        change_l = (change or "").lower()
+        if change_l in {"co_appears", "co_occurrence", "coappears"}:
+            return preferred_edge_name(
+                ontology, "CO_APPEARS_WITH", "INTERACTS_WITH", fallback="CO_APPEARS_WITH"
+            )
         mapping = {
             "ally": ("ALLIED_WITH", "ALLY_WITH", "COOPERATES_WITH"),
             "conflict": ("CONFLICTS_WITH", "HOSTILE_TO", "THREATENS"),

@@ -46,6 +46,10 @@ class ReadingNotesManager:
                 "consistency_notes": [],
             },
             "relationship_graph": [],
+            "co_occurrence": [],
+            "organization_dynamics": [],
+            "location_state_changes": [],
+            "key_events": [],
             "plot_state": {
                 "arc_summaries": [],
                 "volume_summaries": [],
@@ -227,6 +231,70 @@ class ReadingNotesManager:
                     existing.update(thread)
                 else:
                     open_threads.append(deepcopy(thread))
+
+    def merge_co_occurrence(self, items: List[Dict], segment_id: str = "") -> None:
+        """Append co-occurrence pairs (lightweight character interactions)."""
+        bucket = self.notes.setdefault("co_occurrence", [])
+        for item in items:
+            a = (item.get("a") or "").strip()
+            b = (item.get("b") or "").strip()
+            if not a or not b or a == b:
+                continue
+            bucket.append({
+                "a": a,
+                "b": b,
+                "scene": item.get("scene", ""),
+                "interaction_type": item.get("interaction_type", ""),
+                "segment_id": segment_id,
+            })
+
+    def merge_organization_dynamics(self, items: List[Dict], segment_id: str = "") -> None:
+        bucket = self.notes.setdefault("organization_dynamics", [])
+        for item in items:
+            org = (item.get("organization") or "").strip()
+            event = (item.get("event") or "").strip()
+            if not org or not event:
+                continue
+            bucket.append({
+                "organization": org,
+                "event": event,
+                "members_involved": list(item.get("members_involved") or []),
+                "segment_id": segment_id,
+            })
+
+    def merge_location_state_changes(self, items: List[Dict], segment_id: str = "") -> None:
+        bucket = self.notes.setdefault("location_state_changes", [])
+        for item in items:
+            loc = (item.get("location") or "").strip()
+            change = (item.get("change") or "").strip()
+            if not loc or not change:
+                continue
+            bucket.append({
+                "location": loc,
+                "change": change,
+                "segment_id": segment_id,
+            })
+
+    def merge_key_events(self, items: List[Dict], arc_id: str) -> None:
+        """Add key_events extracted from an arc summary into a flat list."""
+        bucket = self.notes.setdefault("key_events", [])
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or "").strip()
+            description = (item.get("description") or "").strip()
+            if not title and not description:
+                continue
+            event_id = (item.get("event_id") or f"{arc_id}_ev_{idx + 1:02d}").strip()
+            bucket.append({
+                "event_id": f"{arc_id}_{event_id}" if not event_id.startswith(arc_id) else event_id,
+                "arc_id": arc_id,
+                "title": title or description[:20],
+                "description": description or title,
+                "participants": [p for p in (item.get("participants") or []) if isinstance(p, str) and p.strip()],
+                "chapter_hint": item.get("chapter_hint", ""),
+                "consequence": item.get("consequence", ""),
+            })
 
     def merge_consistency_notes(self, notes: List[str], segment_id: str = "") -> None:
         """Append consistency notes (contradictions/logic issues) found in a segment."""
