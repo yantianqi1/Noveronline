@@ -74,7 +74,7 @@ def test_graph_build_completion_updates_project_without_task_polling(tmp_path):
     task_id = response.get_json()["data"]["task_id"]
 
     task = wait_for_task_runtime(task_id)
-    assert task.status == TaskStatus.COMPLETED
+    assert task.status == TaskStatus.COMPLETED, task.to_dict()
 
     project = ProjectManager.get_project(project_id)
     assert project is not None
