@@ -95,16 +95,25 @@ def test_create_session_materializes_runtime_agents_and_snapshots(tmp_path, monk
     assert relation["template_key"] == "relationship.protagonist.v1"
     assert "relationship" in relation["template_sections"]
 
-    connection = sqlite3.connect(_runtime_db_path(project.project_id))
-    try:
-        registry_count = connection.execute("SELECT COUNT(*) FROM agent_registry").fetchone()[0]
-        snapshot_count = connection.execute("SELECT COUNT(*) FROM agent_state_snapshots").fetchone()[0]
-        template_row = connection.execute(
-            "SELECT importance_tier, template_key, template_version, template_sections_json FROM agent_registry WHERE agent_id = ?",
-            (character["agent_id"],),
+    from app.database import get_engine
+    from sqlalchemy import text
+
+    with get_engine().connect() as conn:
+        registry_count = conn.execute(
+            text("SELECT COUNT(*) FROM agent_registry WHERE project_id = :pid"),
+            {"pid": project.project_id},
+        ).scalar()
+        snapshot_count = conn.execute(
+            text("SELECT COUNT(*) FROM agent_state_snapshots WHERE project_id = :pid"),
+            {"pid": project.project_id},
+        ).scalar()
+        template_row = conn.execute(
+            text(
+                "SELECT importance_tier, template_key, template_version, template_sections_json "
+                "FROM agent_registry WHERE project_id = :pid AND agent_id = :aid"
+            ),
+            {"pid": project.project_id, "aid": character["agent_id"]},
         ).fetchone()
-    finally:
-        connection.close()
 
     assert registry_count >= 3
     assert snapshot_count >= 3
@@ -276,7 +285,15 @@ def test_existing_session_bootstraps_runtime_db_from_session_json(tmp_path, monk
 
     assert response.status_code == 200, response.get_json()
     assert response.get_json()["data"]["agents"]
-    assert sqlite3.connect(_runtime_db_path(project.project_id)).execute("SELECT COUNT(*) FROM agent_registry").fetchone()[0] >= 3
+    from app.database import get_engine
+    from sqlalchemy import text
+
+    with get_engine().connect() as conn:
+        agent_count = conn.execute(
+            text("SELECT COUNT(*) FROM agent_registry WHERE project_id = :pid"),
+            {"pid": project.project_id},
+        ).scalar()
+    assert agent_count >= 3
 
 
 def test_runtime_endpoints_reject_non_main_branch_id(tmp_path, monkeypatch):

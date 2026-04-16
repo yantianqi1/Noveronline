@@ -201,7 +201,7 @@ def test_local_block_fact_extractor_processes_blocks_in_batches(monkeypatch):
     )
     batch_sizes = []
 
-    def fake_extract_batch(self, batch, chapter_map, use_llm, progress_callback, skeleton, blocks, anchors):
+    async def fake_extract_batch(self, batch, chapter_map, use_llm, progress_callback, skeleton, blocks, anchors):
         batch_sizes.append(len(batch))
         return [
             {

@@ -91,12 +91,10 @@ def _minimal_block_analyses():
 
 def test_builder_emits_all_stages_in_order(tmp_path):
     builder = LocalStoryGraphBuilder()
-    # Redirect storage so save_snapshot doesn't touch real project dir.
-    builder.storage.PROJECT_FILE_NAME = "story_graph.json"
 
     events = []
 
-    with patch.object(builder.storage, "save_snapshot") as mock_save:
+    with patch.object(builder._repo, "save_snapshot") as mock_save:
         mock_save.return_value = None
         builder.build_for_project(
             project_id="proj_test",
@@ -136,7 +134,7 @@ def test_builder_emits_all_stages_in_order(tmp_path):
 def test_builder_without_callback_is_unchanged():
     """Backward compat: builder must not require a callback."""
     builder = LocalStoryGraphBuilder()
-    with patch.object(builder.storage, "save_snapshot"):
+    with patch.object(builder._repo, "save_snapshot"):
         snapshot = builder.build_for_project(
             project_id="proj_compat",
             graph_name="g",
@@ -157,7 +155,7 @@ def test_builder_does_not_swallow_callback_exceptions():
     def boom(_event):
         raise RuntimeError("callback exploded")
 
-    with patch.object(builder.storage, "save_snapshot"):
+    with patch.object(builder._repo, "save_snapshot"):
         with pytest.raises(RuntimeError, match="callback exploded"):
             builder.build_for_project(
                 project_id="proj_boom",
