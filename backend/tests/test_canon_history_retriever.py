@@ -104,11 +104,8 @@ def test_canon_history_retriever_returns_recent_anchors_and_long_range_callbacks
     assert result["world_rules"] == ["镜湖引擎会记录识海残痕。"]
     assert any("scene_focus" in item["selected_because"] for item in result["selection_trace"])
 
-    db_path = service.storage.db_path
-    with sqlite3.connect(db_path) as connection:
-        count = connection.execute(
-            "SELECT COUNT(*) FROM chapter_history_item WHERE project_id = ?",
-            (project.project_id,),
-        ).fetchone()[0]
-    assert count >= 4
+    # history_items are now derived on-the-fly from chapter_meta in the
+    # unified DB (no longer persisted to a legacy chapter_history_item table).
+    history_items = service.get_history_items(project.project_id, current_chapter_order=4)
+    assert len(history_items) >= 4
 

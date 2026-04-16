@@ -199,9 +199,9 @@ def test_task_progress_detail_exposes_structured_seed_logs(tmp_path, monkeypatch
 
     original_extract_blocks = LocalBlockFactExtractor.extract_blocks
 
-    def slow_extract_blocks(self, blocks, chapters, use_llm, skeleton=None, anchors=None, progress_callback=None):
+    async def slow_extract_blocks(self, blocks, chapters, use_llm, skeleton=None, anchors=None, progress_callback=None):
         time.sleep(0.25)
-        return original_extract_blocks(self, blocks, chapters, use_llm, skeleton, anchors, progress_callback)
+        return await original_extract_blocks(self, blocks, chapters, use_llm, skeleton, anchors, progress_callback)
 
     monkeypatch.setattr(LocalBlockFactExtractor, "extract_blocks", slow_extract_blocks)
 

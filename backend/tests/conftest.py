@@ -9,12 +9,16 @@ Why this exists:
     test fails with ``sqlite3.OperationalError: no such table: …``.
 
 What these fixtures do:
-    1. ``_session_test_paths`` (session autouse) points ``DATABASE_URL`` /
-       ``UPLOAD_FOLDER`` at a session-scoped temp directory. Tests that pass
+    1. ``_test_paths`` (function autouse) points ``DATABASE_URL`` /
+       ``UPLOAD_FOLDER`` at a *per-test* temp directory. Tests that pass
        an explicit ``settings=_settings(tmp_path)`` still override these via
        Pydantic; the env-var defaults only protect bare ``create_app()`` calls
        and the module-level ``app.main.app`` instance from hitting the real
        ``./data/mirofish.db`` or ``backend/uploads``.
+
+       Function-scoping is critical: several tables (e.g. ``chapter_content``)
+       have single-column primary keys that would collide across tests sharing
+       a session-wide database. A fresh tmp DB per test removes that coupling.
 
     2. ``_unified_db_bootstrap`` (function autouse) resets the module-level
        ``app.database._engine`` cache and monkey-patches ``app.main.create_app``
@@ -29,33 +33,18 @@ Scope:
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _session_test_paths(tmp_path_factory):
-    """Route ``DATABASE_URL`` and ``UPLOAD_FOLDER`` to a session temp dir."""
-    root = tmp_path_factory.mktemp("mirofish_session")
-    db_path = root / "session.db"
-    uploads_dir = root / "uploads"
-    uploads_dir.mkdir()
+@pytest.fixture(autouse=True)
+def _test_paths(tmp_path, monkeypatch):
+    """Route ``DATABASE_URL`` and ``UPLOAD_FOLDER`` to a per-test temp dir."""
+    db_path = tmp_path / "test.db"
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(exist_ok=True)
 
-    previous = {
-        "DATABASE_URL": os.environ.get("DATABASE_URL"),
-        "UPLOAD_FOLDER": os.environ.get("UPLOAD_FOLDER"),
-    }
-    os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
-    os.environ["UPLOAD_FOLDER"] = str(uploads_dir)
-
-    yield
-
-    for key, value in previous.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("UPLOAD_FOLDER", str(uploads_dir))
 
 
 @pytest.fixture(autouse=True)

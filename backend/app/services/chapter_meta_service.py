@@ -161,7 +161,7 @@ class ChapterMetaService:
         cm = chapter_meta
         joined = cc.outerjoin(cm, cc.c.chapter_id == cm.c.chapter_id)
         stmt = (
-            select(cc.c.chapter_id, cc.c.chapter_order, cm.c.summary, cm.c.key_events_json, cm.c.relationship_updates_json)
+            select(cc.c.chapter_id, cc.c.chapter_order, cm.c.summary, cm.c.key_events_json, cm.c.open_threads_json, cm.c.relationship_updates_json)
             .select_from(joined)
             .where(and_(cc.c.project_id == project_id, cc.c.chapter_order < int(current_chapter_order)))
             .order_by(desc(cc.c.chapter_order))
@@ -199,6 +199,43 @@ class ChapterMetaService:
                         "thread_key": "",
                         "source_kind": "chapter_card",
                         "source_ref": f"{chapter_id}:event:{index}",
+                    })
+            for index, thread in enumerate(json.loads(row.open_threads_json or "[]"), start=1):
+                if isinstance(thread, dict):
+                    thread_key = thread.get("thread_key", "") or ""
+                    summary_text = thread.get("summary", "") or thread_key
+                elif isinstance(thread, str) and thread.strip():
+                    thread_key = thread.strip()
+                    summary_text = thread_key
+                else:
+                    continue
+                items.append({
+                    "project_id": project_id,
+                    "chapter_order": chapter_order,
+                    "chapter_id": chapter_id,
+                    "item_type": "open_thread",
+                    "subject_key": f"{chapter_id}:thread:{thread_key or index}",
+                    "summary_text": summary_text,
+                    "related_entities": [],
+                    "thread_key": thread_key,
+                    "source_kind": "chapter_card",
+                    "source_ref": f"{chapter_id}:thread:{thread_key or index}",
+                })
+            for index, rel in enumerate(json.loads(row.relationship_updates_json or "[]"), start=1):
+                if isinstance(rel, dict):
+                    source = rel.get("source", "") or ""
+                    target = rel.get("target", "") or ""
+                    items.append({
+                        "project_id": project_id,
+                        "chapter_order": chapter_order,
+                        "chapter_id": chapter_id,
+                        "item_type": "relationship",
+                        "subject_key": f"{chapter_id}:rel:{index}",
+                        "summary_text": rel.get("summary", ""),
+                        "related_entities": [name for name in (source, target) if name],
+                        "thread_key": "",
+                        "source_kind": "chapter_card",
+                        "source_ref": f"{chapter_id}:rel:{index}",
                     })
         return items
 
