@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import threading
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
@@ -25,13 +25,13 @@ class ActivityRecord:
 
 
 class LlmActivityTracker:
-    """线程安全的 LLM 活动追踪单例。"""
+    """协程安全的 LLM 活动追踪单例（asyncio.Lock）。"""
 
     def __init__(self) -> None:
         self._calls: Dict[str, ActivityRecord] = {}
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def register(
+    async def register(
         self,
         module_key: str,
         module_label: str,
@@ -52,26 +52,26 @@ class LlmActivityTracker:
             started_at=time.monotonic(),
             call_type=call_type,
         )
-        with self._lock:
+        async with self._lock:
             self._calls[call_id] = record
         return call_id
 
-    def update_status(self, call_id: str, status: str) -> None:
-        """更新调用状态（waiting → running / streaming）。"""
-        with self._lock:
+    async def update_status(self, call_id: str, status: str) -> None:
+        """更新调用状态（waiting -> running / streaming）。"""
+        async with self._lock:
             record = self._calls.get(call_id)
             if record:
                 record.status = status
 
-    def unregister(self, call_id: str) -> None:
+    async def unregister(self, call_id: str) -> None:
         """调用结束，移除记录。"""
-        with self._lock:
+        async with self._lock:
             self._calls.pop(call_id, None)
 
-    def snapshot(self) -> List[dict]:
+    async def snapshot(self) -> List[dict]:
         """返回当前所有活跃调用的快照列表。"""
         now = time.monotonic()
-        with self._lock:
+        async with self._lock:
             return [
                 {
                     "call_id": r.call_id,

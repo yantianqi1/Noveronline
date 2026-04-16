@@ -7,14 +7,15 @@ relationships, capabilities, knowledge boundaries and motivations.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
 
 from .character_agent_prompts import build_character_profile_prompt
 from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
 from .step_trace_context import get_current_step, _current_step
+from .task_cancelled import TaskCancelledException
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class CharacterAgentProfileGenerator:
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(
+    async def generate(
         self,
         manager: ReadingNotesManager,
         use_llm: bool = True,
@@ -100,10 +101,10 @@ class CharacterAgentProfileGenerator:
 
         profiles: Dict[str, Any] = {}
         client = self.llm_router.build_client(MODULE_KEY)
-        # 捕获主线程的 step trace 上下文，工作线程需要手动继承
+        # 捕获当前的 step trace 上下文，传播到 asyncio.to_thread 工作线程
         _parent_step_ctx = get_current_step()
 
-        def _generate_one(name: str) -> tuple[str, Dict[str, Any]]:
+        def _generate_one_sync(name: str) -> tuple[str, Dict[str, Any]]:
             # 将主线程的 StepTraceContext 传播到工作线程，使 LLM 调用的 trace 被正确记录
             if _parent_step_ctx is not None:
                 _current_step.set(_parent_step_ctx)
@@ -121,27 +122,40 @@ class CharacterAgentProfileGenerator:
             profile = client.chat_json_value(messages, temperature=0.3, max_tokens=4096)
             return name, profile
 
-        completed = 0
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_name = {}
-            for name in important_names:
+        sem = asyncio.Semaphore(self.max_workers)
+
+        async def _bounded(name: str) -> tuple[str, Dict[str, Any]]:
+            async with sem:
                 if cancel_check is not None:
                     cancel_check()
-                future_to_name[executor.submit(_generate_one, name)] = name
-            for future in as_completed(future_to_name):
-                name = future_to_name[future]
-                try:
-                    result_name, profile = future.result()
-                    profiles[result_name] = profile
-                except Exception:
-                    logger.exception("Failed to generate profile for character %r", name)
-                    profiles[name] = self._minimal_profile(name, characters[name])
-                completed += 1
-                if progress_callback:
-                    progress_callback(
-                        "profile_done",
-                        {"name": name, "completed": completed, "total": len(important_names)},
-                    )
+                return await asyncio.to_thread(_generate_one_sync, name)
+
+        tasks = [_bounded(name) for name in important_names]
+        completed = 0
+        for coro in asyncio.as_completed(tasks):
+            name_result: Optional[str] = None
+            try:
+                result_name, profile = await coro
+                profiles[result_name] = profile
+                name_result = result_name
+            except TaskCancelledException:
+                raise
+            except Exception:
+                # When a task fails, we cannot easily map back to the name
+                # from as_completed; fallback profiles are built when the
+                # final dict is missing entries (see below).
+                logger.exception("Failed to generate profile for a character")
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    "profile_done",
+                    {"name": name_result or f"unknown_{completed}", "completed": completed, "total": len(important_names)},
+                )
+
+        # Fill in minimal profiles for any characters that failed
+        for name in important_names:
+            if name not in profiles:
+                profiles[name] = self._minimal_profile(name, characters[name])
 
         return {"profiles": profiles, "profile_count": len(profiles)}
 

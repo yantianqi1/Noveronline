@@ -6,7 +6,7 @@ from typing import Optional
 
 from .llm_activity_tracker import llm_activity_tracker as _default_activity_tracker
 from .llm_concurrency_service import llm_concurrency_service
-from ..utils.llm_client import LLMClient
+from ..utils.llm_client import AsyncLLMClient, LLMClient
 from .llm_module_registry import STAGE_TO_MODULE_KEY
 from .llm_settings_service import LlmSettingsService
 
@@ -26,11 +26,26 @@ class LlmRouter:
 
     def build_client(self, module_key: str) -> LLMClient:
         resolved = self.settings_service.resolve_module_binding(module_key)
-        self.concurrency_service.set_limit(
+        # NOTE: set_limit is now async; sync LLMClient callers don't need
+        # the concurrency gate (the sync path is being phased out).
+        return LLMClient(
+            api_key=resolved["api_key"],
+            base_url=resolved["base_url"],
+            model=resolved["model_id"],
+            channel_key=resolved["channel_key"],
+            max_concurrency=resolved["max_concurrency"],
+            concurrency_service=self.concurrency_service,
+            module_key=module_key,
+            activity_tracker=self.activity_tracker,
+        )
+
+    async def build_async_client(self, module_key: str) -> AsyncLLMClient:
+        resolved = self.settings_service.resolve_module_binding(module_key)
+        await self.concurrency_service.set_limit(
             resolved["channel_key"],
             resolved["max_concurrency"],
         )
-        return LLMClient(
+        return AsyncLLMClient(
             api_key=resolved["api_key"],
             base_url=resolved["base_url"],
             model=resolved["model_id"],

@@ -1,7 +1,7 @@
 import time
 
 from app import create_app
-from app.api import worldline_auto_evolution
+from app.api_fastapi import worldline
 from app.config import Config
 from app.models.project import ProjectManager
 from app.models.task import TaskManager, TaskStatus
@@ -131,7 +131,7 @@ def patch_router(monkeypatch, action_payloads, goal_payloads) -> None:
         ScriptedJsonClient("fake-goal-model", goal_payloads),
     )
     monkeypatch.setattr(
-        worldline_auto_evolution.worldline_auto_evolution_task_service.auto_action_service,
+        worldline.worldline_auto_evolution_task_service.auto_action_service,
         "llm_router",
         router,
     )
@@ -291,7 +291,7 @@ def test_auto_evolve_task_records_binding_error_in_task_runtime(tmp_path, monkey
             raise ValueError(f"{module_key} 缺少绑定")
 
     monkeypatch.setattr(
-        worldline_auto_evolution.worldline_auto_evolution_task_service.auto_action_service,
+        worldline.worldline_auto_evolution_task_service.auto_action_service,
         "llm_router",
         MissingBindingRouter(),
     )

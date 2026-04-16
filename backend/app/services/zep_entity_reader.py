@@ -7,7 +7,8 @@
 from typing import Dict, Any, List, Optional
 
 from ..utils.logger import get_logger
-from .local_story_graph_storage import LocalStoryGraphStorage
+from ..database import get_engine
+from ..repositories.graph_repo import GraphRepository
 from .local_story_graph_support import project_id_from_graph_id
 from .zep_entity_reader_processing import build_entity_context, build_node_map, filter_entities
 from .zep_entity_reader_types import EntityNode, FilteredEntities
@@ -16,20 +17,23 @@ logger = get_logger("mirofish.local_graph_reader")
 
 
 class LocalGraphReader:
-    def __init__(self, storage: Optional[LocalStoryGraphStorage] = None):
-        self.storage = storage or LocalStoryGraphStorage()
+    def __init__(self, storage: Optional[GraphRepository] = None):
+        self.storage = storage or GraphRepository(get_engine())
 
     def get_all_nodes(self, graph_id: str) -> List[Dict[str, Any]]:
         logger.info(f"读取本地图谱 {graph_id} 的所有节点...")
-        return self.storage.load_all_nodes(graph_id)
+        project_id = project_id_from_graph_id(graph_id)
+        return self.storage.load_all_nodes(project_id)
 
     def get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
         logger.info(f"读取本地图谱 {graph_id} 的所有边...")
-        return self.storage.load_all_edges(graph_id)
+        project_id = project_id_from_graph_id(graph_id)
+        return self.storage.load_all_edges(project_id)
 
     def get_node_edges(self, node_uuid: str, graph_id: Optional[str] = None) -> List[Dict[str, Any]]:
         resolved_graph_id = graph_id or self._graph_id_from_node_uuid(node_uuid)
-        return self.storage.load_node_edges(resolved_graph_id, node_uuid)
+        project_id = project_id_from_graph_id(resolved_graph_id)
+        return self.storage.load_node_edges(project_id, node_uuid)
 
     def filter_defined_entities(
         self,
@@ -42,7 +46,8 @@ class LocalGraphReader:
         return filter_entities(all_nodes, all_edges, defined_entity_types, enrich_with_edges)
 
     def get_entity_with_context(self, graph_id: str, entity_uuid: str) -> Optional[EntityNode]:
-        node = self.storage.load_node(graph_id, entity_uuid)
+        project_id = project_id_from_graph_id(graph_id)
+        node = self.storage.load_node(project_id, entity_uuid)
         if not node:
             return None
         edges = self.get_node_edges(entity_uuid, graph_id=graph_id)

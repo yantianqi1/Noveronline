@@ -2,7 +2,7 @@ import sqlite3
 
 from app import create_app
 from app.config import Config
-from app.api import worldline_interaction
+from app.api_fastapi import worldline as worldline_interaction
 from app.models.project import ProjectManager
 from app.models.worldline import WorldlineBranch, WorldlineSession
 from app.services.world_state_store import WorldStateStore

@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import os
-import shutil
-import tempfile
 import uuid
 
 import pytest
 
-from app.services.assets.assets_storage import (
-    AssetsStorage,
+from sqlalchemy import create_engine
+
+from app.database import init_db
+from app.repositories.asset_repo import AssetRepository
+from app.services.assets.assets_service import (
+    AssetsService,
     GLOBAL_SCOPE,
     PROJECT_SCOPE,
 )
-from app.services.assets.assets_service import AssetsService
 
 
 @pytest.fixture()
 def isolated_assets(monkeypatch, tmp_path):
-    """Redirect global + project asset DB paths into a tmp dir."""
+    """Create an in-memory engine and wire AssetsService to it."""
     upload_root = tmp_path / "uploads"
     (upload_root / "system").mkdir(parents=True)
     (upload_root / "projects").mkdir(parents=True)
@@ -30,7 +31,10 @@ def isolated_assets(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(upload_root))
     monkeypatch.setattr(ProjectManager, "PROJECTS_DIR", str(upload_root / "projects"))
 
-    yield AssetsService()
+    engine = create_engine("sqlite:///:memory:", future=True)
+    init_db(engine)
+    repo = AssetRepository(engine)
+    yield AssetsService(repo=repo)
 
 
 def test_create_get_list_global(isolated_assets):

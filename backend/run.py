@@ -1,6 +1,4 @@
-"""
-MiroFish-Novel Backend 启动入口
-"""
+"""MiroFish-Novel FastAPI backend entrypoint."""
 
 import os
 import sys
@@ -14,7 +12,6 @@ if sys.platform == "win32":
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app import create_app
 from app.config import Config
 
 
@@ -26,11 +23,12 @@ def main():
             print(f"  - {err}")
         print("  - 将继续启动；已具备的离线能力仍可使用。")
 
-    app = create_app()
-    host = os.environ.get("FLASK_HOST", "0.0.0.0")
-    port = int(os.environ.get("FLASK_PORT", 5101))
-    debug = Config.DEBUG
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    host = os.environ.get("APP_HOST", "0.0.0.0")
+    port = int(os.environ.get("APP_PORT", 3888))
+
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=host, port=port, reload=Config.DEBUG)
 
 
 if __name__ == "__main__":

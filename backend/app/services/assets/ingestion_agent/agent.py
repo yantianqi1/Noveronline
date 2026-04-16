@@ -6,14 +6,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 from typing import Any
 
 from ....models.task import TaskManager, TaskStatus
 from ...llm_router import LlmRouter
-from ..assets_service import AssetsService
-from ..assets_storage import GLOBAL_SCOPE, PROJECT_SCOPE
+from ..assets_service import AssetsService, GLOBAL_SCOPE, PROJECT_SCOPE
 from .prompts import SUPPORTED_TYPES, build_ingest_messages
 
 logger = logging.getLogger(__name__)
@@ -89,7 +88,7 @@ class IngestionAgent:
         return {"asset": asset, "raw_payload": payload}
 
     # ------------------------------------------------------------------
-    def run_background(
+    async def run_background(
         self,
         raw_text: str,
         *,
@@ -98,7 +97,7 @@ class IngestionAgent:
         hint_type: str | None = None,
     ) -> str:
         tm = TaskManager()
-        task_id = tm.create_task(
+        task_id = await tm.create_task(
             self.TASK_TYPE,
             metadata={
                 "scope": scope,
@@ -107,24 +106,24 @@ class IngestionAgent:
                 "input_chars": len(raw_text or ""),
             },
         )
-        tm.update_task(
+        await tm.update_task(
             task_id,
-            status=TaskStatus.RUNNING,
+            status=TaskStatus.PROCESSING,
             progress=10,
             message="入库 Agent 开始解析素材...",
         )
 
-        def _run() -> None:
+        async def _run() -> None:
             try:
-                tm.update_task(task_id, progress=40, message="调用 LLM 抽取字段...")
+                await tm.update_task(task_id, progress=40, message="调用 LLM 抽取字段...")
                 result = self.run_sync(
                     raw_text,
                     scope=scope,
                     project_id=project_id,
                     hint_type=hint_type,
                 )
-                tm.update_task(task_id, progress=90, message="写入资产库...")
-                tm.complete_task(
+                await tm.update_task(task_id, progress=90, message="写入资产库...")
+                await tm.complete_task(
                     task_id,
                     {
                         "asset_id": result["asset"]["asset_id"],
@@ -134,9 +133,7 @@ class IngestionAgent:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("ingestion agent failed")
-                tm.fail_task(task_id, str(exc))
+                await tm.fail_task(task_id, str(exc))
 
-        threading.Thread(
-            target=_run, daemon=True, name=f"asset-ingest-{task_id[:8]}"
-        ).start()
+        asyncio.create_task(_run())
         return task_id

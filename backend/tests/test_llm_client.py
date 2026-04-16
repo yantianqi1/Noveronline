@@ -3,7 +3,9 @@ import openai
 import pytest
 
 from app.services.llm_concurrency_service import LlmConcurrencyService
-from app.utils.llm_client import LLMClient
+from app.services.llm_router import LlmRouter
+from app.services.step_trace_context import enter_step, new_step_id
+from app.utils.llm_client import AsyncLLMClient, LLMClient
 
 
 class DummyOpenAI:
@@ -51,6 +53,16 @@ def _fake_chat_response(content: str):
     )()
 
 
+class _AsyncCompletionsProxy:
+    def __init__(self, create_fn):
+        self.create = create_fn
+
+
+class _AsyncChatProxy:
+    def __init__(self, create_fn):
+        self.completions = _AsyncCompletionsProxy(create_fn)
+
+
 def test_llm_client_sets_explicit_request_timeout(monkeypatch):
     captured = {}
 
@@ -69,6 +81,63 @@ def test_llm_client_sets_explicit_request_timeout(monkeypatch):
     assert captured["api_key"] == "test-key"
     assert captured["base_url"] == "https://example.com/v1"
     assert captured["timeout"] == 120.0
+
+
+def test_async_llm_client_sets_explicit_request_timeout(monkeypatch):
+    captured = {}
+
+    def fake_async_openai(**kwargs):
+        captured.update(kwargs)
+        return DummyOpenAI(**kwargs)
+
+    monkeypatch.setattr("app.utils.llm_client.AsyncOpenAI", fake_async_openai)
+
+    AsyncLLMClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="gpt-test",
+    )
+
+    assert captured["api_key"] == "test-key"
+    assert captured["base_url"] == "https://example.com/v1"
+    assert captured["timeout"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_async_llm_client_chat_returns_clean_content():
+    client = AsyncLLMClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="gpt-test",
+    )
+
+    async def fake_create(**kwargs):
+        return _fake_chat_response("<think>hidden</think>{\"ok\": true}")
+
+    client.client = type("FakeAsyncOpenAI", (), {"chat": _AsyncChatProxy(fake_create)})()
+
+    content = await client.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert content == "{\"ok\": true}"
+
+
+def test_llm_router_can_build_async_client(monkeypatch):
+    class FakeSettingsService:
+        def resolve_module_binding(self, module_key):
+            return {
+                "api_key": "test-key",
+                "base_url": "https://example.com/v1",
+                "model_id": "gpt-test",
+                "channel_key": "channel-router",
+                "max_concurrency": 2,
+            }
+
+    router = LlmRouter(settings_service=FakeSettingsService())
+
+    client = router.build_async_client("story_ontology")
+
+    assert isinstance(client, AsyncLLMClient)
+    assert client.model == "gpt-test"
 
 
 def test_chat_json_value_accepts_top_level_list_payload():
@@ -266,6 +335,33 @@ def test_llm_client_chat_does_not_retry_on_bad_request(monkeypatch):
         client.chat(messages=[{"role": "user", "content": "hello"}])
 
     assert attempts["count"] == 1
+
+
+def test_llm_client_chat_records_step_trace_prompt_and_response():
+    client = LLMClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="gpt-test",
+        module_key="sequential_reading",
+    )
+    client.client = type("FakeOpenAI", (), {
+        "chat": _ChatProxy(lambda **kwargs: _fake_chat_response("真实返回")),
+    })()
+    messages = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "用户正文"},
+    ]
+
+    with enter_step(new_step_id(), "segment", "deep_reading", "深度阅读", "sequential_reading", "阅读段落") as ctx:
+        assert client.chat(messages=messages, temperature=0.2, max_tokens=256) == "真实返回"
+
+    assert ctx.call_count == 1
+    call = ctx.calls[0]
+    assert call["module_key"] == "sequential_reading"
+    assert call["model"] == "gpt-test"
+    assert call["messages"] == messages
+    assert call["response_text"] == "真实返回"
+    assert call["error"] == ""
 
 
 # ── chat_json_value 降温重试测试 ──

@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import insert, select
+
 from ..config import Config
+from ..database import get_engine
 from ..models.project import ProjectManager
 from ..models.worldline import AgentAction, VariableInjection, WorldlineSession
+from ..repositories.base import BaseRepository
+from ..tables.novel import sessions, world_events, worldline_branches
 from .agents.memory import AgentMemoryService
 from .archive_library_service import ArchiveLibraryService
 from .world_state_store import WorldStateStore
@@ -201,6 +207,7 @@ class WorldlineEngine:
                 branch.branch_id,
                 agent,
                 action_item,
+                project_id=getattr(session, "project_id", "") or "",
             )
             action_event_ids.append(action_item.action_id)
         session.updated_at = datetime.now().isoformat()
@@ -356,17 +363,117 @@ class WorldlineEngine:
     # ------------------------------------------------------------------
 
     def _sync_to_novel_db(self, session: WorldlineSession) -> None:
-        """Push branch metadata and timeline events to novel.sqlite3."""
+        """Push branch metadata and timeline events to the centralised database.
+
+        Uses INSERT OR REPLACE for sessions/branches (latest snapshot wins)
+        and INSERT OR IGNORE for events (immutable).
+        """
         project_id = session.project_id
         if not project_id:
             return
         try:
-            from .writer_agent.novel_db import NovelDB
-            db = NovelDB()
-            db.sync_worldline_session(project_id, session)
+            now = datetime.now().isoformat()
+            repo = BaseRepository(get_engine())
+            with repo.connect() as conn:
+                # Upsert session row
+                existing = conn.execute(
+                    select(sessions.c.session_id).where(
+                        sessions.c.session_id == session.session_id
+                    ).limit(1)
+                ).fetchone()
+                session_values = dict(
+                    session_id=session.session_id,
+                    project_id=project_id,
+                    session_type="worldline",
+                    title=getattr(session, "label", "") or getattr(session, "simulation_goal", ""),
+                    focus_question=getattr(session, "focus_question", ""),
+                    status=getattr(session, "status", "running"),
+                    config_json="{}",
+                    created_at=getattr(session, "created_at", now),
+                    updated_at=getattr(session, "updated_at", now),
+                )
+                if existing:
+                    from sqlalchemy import update
+                    conn.execute(
+                        update(sessions)
+                        .where(sessions.c.session_id == session.session_id)
+                        .values(**session_values)
+                    )
+                else:
+                    conn.execute(insert(sessions).values(**session_values))
+
+                for branch in session.branches:
+                    # Upsert branch metadata
+                    branch_existing = conn.execute(
+                        select(worldline_branches.c.branch_id).where(
+                            (worldline_branches.c.project_id == project_id)
+                            & (worldline_branches.c.session_id == session.session_id)
+                            & (worldline_branches.c.branch_id == branch.branch_id)
+                        ).limit(1)
+                    ).fetchone()
+                    branch_values = dict(
+                        project_id=project_id,
+                        branch_id=branch.branch_id,
+                        session_id=session.session_id,
+                        title=branch.title,
+                        core_change=branch.core_change,
+                        narrative_value=getattr(branch, "narrative_value", ""),
+                        current_step=branch.current_step,
+                        status=branch.status,
+                        evolution_intensity=getattr(branch, "evolution_intensity", "medium"),
+                        evolution_depth=getattr(branch, "evolution_depth", 3),
+                        key_agents_json=_json.dumps(branch.key_agents, ensure_ascii=False),
+                        expected_conflicts_json=_json.dumps(branch.expected_conflicts, ensure_ascii=False),
+                        actor_states_json=_json.dumps(branch.actor_states, ensure_ascii=False),
+                        organization_states_json=_json.dumps(branch.organization_states, ensure_ascii=False),
+                        relationship_states_json=_json.dumps(
+                            [rs if isinstance(rs, dict) else {} for rs in branch.relationship_states],
+                            ensure_ascii=False,
+                        ),
+                        created_at=getattr(branch, "created_at", now),
+                        updated_at=getattr(branch, "updated_at", now),
+                    )
+                    if branch_existing:
+                        from sqlalchemy import update
+                        conn.execute(
+                            update(worldline_branches)
+                            .where(
+                                (worldline_branches.c.project_id == project_id)
+                                & (worldline_branches.c.session_id == session.session_id)
+                                & (worldline_branches.c.branch_id == branch.branch_id)
+                            )
+                            .values(**branch_values)
+                        )
+                    else:
+                        conn.execute(insert(worldline_branches).values(**branch_values))
+
+                    # Append timeline events (immutable, INSERT OR IGNORE)
+                    for event in branch.timeline:
+                        conn.execute(
+                            insert(world_events).prefix_with("OR IGNORE").values(
+                                event_id=event.event_id,
+                                project_id=project_id,
+                                session_id=session.session_id,
+                                branch_id=branch.branch_id,
+                                step=event.step,
+                                title=event.title,
+                                summary=event.summary,
+                                event_type=getattr(event, "event_type", "") or "",
+                                driving_entities_json=_json.dumps(
+                                    getattr(event, "driving_entities", []) or [],
+                                    ensure_ascii=False,
+                                ),
+                                state_changes_json=_json.dumps(
+                                    getattr(event, "state_changes", []) or [],
+                                    ensure_ascii=False,
+                                ),
+                                status=getattr(event, "status", "canon") or "canon",
+                                created_at=getattr(event, "created_at", now),
+                            )
+                        )
         except Exception:
             logging.getLogger(__name__).warning(
-                "Failed to sync worldline session %s to novel.sqlite3",
+                "Failed to sync worldline session %s to database",
                 session.session_id,
                 exc_info=True,
             )

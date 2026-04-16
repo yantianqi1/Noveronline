@@ -3,15 +3,16 @@
 用于跟踪长时间运行的任务（如图谱构建）
 """
 
+import asyncio
 import uuid
-import threading
 import json
 from datetime import datetime
 from enum import Enum
 from typing import Callable, Dict, Any, Optional
 from dataclasses import dataclass, field
 
-from .task_storage import TaskStorage
+from ..database import get_engine
+from ..repositories.task_repo import TaskRepository
 
 
 class TaskStatus(str, Enum):
@@ -58,21 +59,43 @@ class Task:
 class TaskManager:
     """
     任务管理器
-    线程安全的任务状态管理
+    协程安全的任务状态管理（asyncio.Lock）
     """
-    
+
     _instance = None
-    _lock = threading.Lock()
-    
+    _init_lock = asyncio.Lock()
+    _instance_ready = False
+
     def __new__(cls):
-        """单例模式"""
+        """单例模式 — 同步部分只创建对象壳。"""
         if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._task_lock = threading.Lock()
-                    cls._instance._storage = TaskStorage()
+            cls._instance = super().__new__(cls)
+            cls._instance._task_lock = asyncio.Lock()
+            cls._instance._storage = TaskRepository(get_engine())
+            cls._instance._loop: Optional[asyncio.AbstractEventLoop] = None
+            cls._instance_ready = True
         return cls._instance
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """Cache the running event loop for sync bridge calls."""
+        if self._loop is None or self._loop.is_closed():
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+        return self._loop
+
+    def sync_bridge(self, coro):
+        """Run an async TaskManager coroutine from a sync context (e.g. a
+        background thread started via ``asyncio.to_thread``).  Falls back to
+        ``asyncio.run`` when no loop is cached.
+        """
+        loop = self._ensure_loop()
+        if loop is not None and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result()
+        # No cached loop — last resort
+        return asyncio.run(coro)
 
     def _serialize(self, task: Task) -> Dict[str, Any]:
         return {
@@ -106,60 +129,26 @@ class TaskManager:
 
     def _save_task(self, task: Task) -> None:
         payload = self._serialize(task)
-        with self._storage.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO task_runs (
-                    task_id, task_type, status, created_at, updated_at, progress,
-                    message, result_json, error, metadata_json, progress_detail_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET
-                    task_type = excluded.task_type,
-                    status = excluded.status,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at,
-                    progress = excluded.progress,
-                    message = excluded.message,
-                    result_json = excluded.result_json,
-                    error = excluded.error,
-                    metadata_json = excluded.metadata_json,
-                    progress_detail_json = excluded.progress_detail_json
-                """,
-                (
-                    payload["task_id"],
-                    payload["task_type"],
-                    payload["status"],
-                    payload["created_at"],
-                    payload["updated_at"],
-                    payload["progress"],
-                    payload["message"],
-                    payload["result_json"],
-                    payload["error"],
-                    payload["metadata_json"],
-                    payload["progress_detail_json"],
-                ),
-            )
-            connection.commit()
+        self._storage.update_task(payload)
 
     def _load_task(self, task_id: str) -> Optional[Task]:
-        with self._storage.connect() as connection:
-            row = connection.execute("SELECT * FROM task_runs WHERE task_id = ?", (task_id,)).fetchone()
+        row = self._storage.get_task(task_id)
         return self._deserialize(row) if row else None
     
-    def create_task(self, task_type: str, metadata: Optional[Dict] = None) -> str:
+    async def create_task(self, task_type: str, metadata: Optional[Dict] = None) -> str:
         """
         创建新任务
-        
+
         Args:
             task_type: 任务类型
             metadata: 额外元数据
-            
+
         Returns:
             任务ID
         """
         task_id = str(uuid.uuid4())
         now = datetime.now()
-        
+
         task = Task(
             task_id=task_id,
             task_type=task_type,
@@ -169,27 +158,27 @@ class TaskManager:
             metadata=metadata or {}
         )
 
-        with self._task_lock:
+        async with self._task_lock:
             self._save_task(task)
-        
+
         return task_id
-    
-    def get_task(self, task_id: str) -> Optional[Task]:
+
+    async def get_task(self, task_id: str) -> Optional[Task]:
         """获取任务"""
-        with self._task_lock:
+        async with self._task_lock:
             return self._load_task(task_id)
 
-    def mutate_task(self, task_id: str, mutator: Callable[[Task], None]) -> None:
-        """在线程锁内原子更新任务。"""
-        with self._task_lock:
+    async def mutate_task(self, task_id: str, mutator: Callable[[Task], None]) -> None:
+        """在锁内原子更新任务。"""
+        async with self._task_lock:
             task = self._load_task(task_id)
             if not task:
                 return
             mutator(task)
             task.updated_at = datetime.now()
             self._save_task(task)
-    
-    def update_task(
+
+    async def update_task(
         self,
         task_id: str,
         status: Optional[TaskStatus] = None,
@@ -201,7 +190,7 @@ class TaskManager:
     ):
         """
         更新任务状态
-        
+
         Args:
             task_id: 任务ID
             status: 新状态
@@ -211,7 +200,7 @@ class TaskManager:
             error: 错误信息
             progress_detail: 详细进度信息
         """
-        with self._task_lock:
+        async with self._task_lock:
             task = self._load_task(task_id)
             if task:
                 task.updated_at = datetime.now()
@@ -228,29 +217,29 @@ class TaskManager:
                 if progress_detail is not None:
                     task.progress_detail = progress_detail
                 self._save_task(task)
-    
-    def complete_task(self, task_id: str, result: Dict):
+
+    async def complete_task(self, task_id: str, result: Dict):
         """标记任务完成"""
-        self.update_task(
+        await self.update_task(
             task_id,
             status=TaskStatus.COMPLETED,
             progress=100,
             message="任务完成",
             result=result
         )
-    
-    def fail_task(self, task_id: str, error: str):
+
+    async def fail_task(self, task_id: str, error: str):
         """标记任务失败"""
-        self.update_task(
+        await self.update_task(
             task_id,
             status=TaskStatus.FAILED,
             message="任务失败",
             error=error
         )
 
-    def cancel_task(self, task_id: str) -> bool:
+    async def cancel_task(self, task_id: str) -> bool:
         """Cancel a task. Only PROCESSING tasks can be cancelled."""
-        with self._task_lock:
+        async with self._task_lock:
             task = self._load_task(task_id)
             if not task or task.status != TaskStatus.PROCESSING:
                 return False
@@ -260,15 +249,15 @@ class TaskManager:
             self._save_task(task)
             return True
 
-    def is_cancelled(self, task_id: str) -> bool:
+    async def is_cancelled(self, task_id: str) -> bool:
         """Check if a task has been cancelled."""
-        with self._task_lock:
+        async with self._task_lock:
             task = self._load_task(task_id)
             return task is not None and task.status == TaskStatus.CANCELLED
 
-    def list_tasks(self, task_type: Optional[str] = None) -> list:
+    async def list_tasks(self, task_type: Optional[str] = None) -> list:
         """列出任务"""
-        with self._task_lock:
+        async with self._task_lock:
             with self._storage.connect() as connection:
                 if task_type:
                     rows = connection.execute(
@@ -279,13 +268,13 @@ class TaskManager:
                     rows = connection.execute("SELECT * FROM task_runs ORDER BY created_at DESC").fetchall()
             tasks = [self._deserialize(row) for row in rows]
             return [t.to_dict() for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)]
-    
-    def cleanup_old_tasks(self, max_age_hours: int = 24):
+
+    async def cleanup_old_tasks(self, max_age_hours: int = 24):
         """清理旧任务"""
         from datetime import timedelta
         cutoff = datetime.now() - timedelta(hours=max_age_hours)
-        
-        with self._task_lock:
+
+        async with self._task_lock:
             with self._storage.connect() as connection:
                 connection.execute(
                     """

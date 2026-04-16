@@ -1,12 +1,13 @@
+import asyncio
 import sqlite3
 import time
 
 from app import create_app
-from app.api import worldline_auto_evolution
+from app.api_fastapi import worldline
 from app.config import Config
+from app.database import get_engine
 from app.models.project import ProjectManager
 from app.models.task import TaskManager, TaskStatus
-from app.services.archive_library_storage import ArchiveLibraryStorage
 
 
 WAIT_TIMEOUT_SECONDS = 10.0
@@ -108,12 +109,11 @@ def _agent_by_name(client, session_id: str, name: str):
     return next(item for item in agents if item["display_name"] == name)
 
 
-def _runtime_db_path(project_id: str) -> str:
-    return f"{ProjectManager._get_project_dir(project_id)}/worldlines/runtime.sqlite3"
-
-
-def _archive_db_path() -> str:
-    return ArchiveLibraryStorage.default_db_path()
+def _db_path() -> str:
+    """Return the SQLite file path used by the unified engine."""
+    url = str(get_engine().url)
+    # url is like 'sqlite:///path/to/db'
+    return url.replace("sqlite:///", "")
 
 
 def _wait_for_task(task_id: str):
@@ -121,7 +121,7 @@ def _wait_for_task(task_id: str):
     manager = TaskManager()
     latest = None
     while time.time() < deadline:
-        latest = manager.get_task(task_id)
+        latest = asyncio.run(manager.get_task(task_id))
         if latest and latest.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
             return latest
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -173,14 +173,12 @@ def test_agent_memory_api_records_session_and_long_term_entries(tmp_path, monkey
     assert "秘密接触外门弟子" in context_payload["rendered_context"]
     assert context_payload["debug_hits"]
 
-    runtime_connection = sqlite3.connect(_runtime_db_path(project.project_id))
-    archive_connection = sqlite3.connect(_archive_db_path())
+    db_connection = sqlite3.connect(_db_path())
     try:
-        episodic_count = runtime_connection.execute("SELECT COUNT(*) FROM agent_episodic_memory").fetchone()[0]
-        long_term_count = archive_connection.execute("SELECT COUNT(*) FROM archive_agent_memory").fetchone()[0]
+        episodic_count = db_connection.execute("SELECT COUNT(*) FROM agent_episodic_memory").fetchone()[0]
+        long_term_count = db_connection.execute("SELECT COUNT(*) FROM archive_agent_memory").fetchone()[0]
     finally:
-        runtime_connection.close()
-        archive_connection.close()
+        db_connection.close()
 
     assert episodic_count >= 3
     assert long_term_count >= 1
@@ -287,7 +285,7 @@ def test_auto_evolve_action_prompt_excludes_candidate_memory_by_default(tmp_path
             raise AssertionError(f"unexpected module_key: {module_key}")
 
     monkeypatch.setattr(
-        worldline_auto_evolution.worldline_auto_evolution_task_service.auto_action_service,
+        worldline.worldline_auto_evolution_task_service.auto_action_service,
         "llm_router",
         FakeRouter(),
     )

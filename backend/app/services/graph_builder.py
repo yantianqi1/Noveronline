@@ -1,27 +1,28 @@
 """本地图谱构建服务。"""
 
-import threading
+import asyncio
 from typing import Any, Callable, Dict, Optional
 
+from ..database import get_engine
 from ..models.project import ProjectManager
 from ..models.task import TaskManager
+from ..repositories.graph_repo import GraphRepository
 from .graph_builder_types import GraphInfo
 from .graph_builder_worker import run_graph_build
 from .local_story_graph_builder import LocalStoryGraphBuilder
-from .local_story_graph_storage import LocalStoryGraphStorage
 
 
 class GraphBuilderService:
     def __init__(
         self,
         builder: Optional[LocalStoryGraphBuilder] = None,
-        storage: Optional[LocalStoryGraphStorage] = None,
+        repo: Optional[GraphRepository] = None,
     ):
         self.builder = builder or LocalStoryGraphBuilder()
-        self.storage = storage or LocalStoryGraphStorage()
+        self._repo = repo or GraphRepository(get_engine())
         self.task_manager = TaskManager()
 
-    def build_graph_async(
+    async def build_graph_async(
         self,
         project_id: str,
         text: str,
@@ -30,7 +31,7 @@ class GraphBuilderService:
         chunk_size: int = 500,
         chunk_overlap: int = 50,
     ) -> str:
-        task_id = self.task_manager.create_task(
+        task_id = await self.task_manager.create_task(
             task_type="graph_build",
             metadata={
                 "project_id": project_id,
@@ -39,15 +40,12 @@ class GraphBuilderService:
                 "text_length": len(text),
             },
         )
-        thread = threading.Thread(
-            target=self._build_graph_worker,
-            args=(task_id, project_id, text, ontology, graph_name, chunk_size, chunk_overlap),
-            daemon=True,
+        asyncio.create_task(
+            self._build_graph_worker(task_id, project_id, text, ontology, graph_name, chunk_size, chunk_overlap)
         )
-        thread.start()
         return task_id
 
-    def _build_graph_worker(
+    async def _build_graph_worker(
         self,
         task_id: str,
         project_id: str,
@@ -57,7 +55,10 @@ class GraphBuilderService:
         chunk_size: int,
         chunk_overlap: int,
     ) -> None:
-        run_graph_build(self, task_id, project_id, text, ontology, graph_name, chunk_size, chunk_overlap)
+        self.task_manager._ensure_loop()
+        await asyncio.to_thread(
+            run_graph_build, self, task_id, project_id, text, ontology, graph_name, chunk_size, chunk_overlap,
+        )
 
     def build_graph(
         self,
@@ -96,10 +97,25 @@ class GraphBuilderService:
         )
 
     def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
-        return self.storage.load_snapshot(graph_id)
+        from .local_story_graph_support import project_id_from_graph_id
+        project_id = project_id_from_graph_id(graph_id)
+        meta = self._repo.load_snapshot(project_id) or {}
+        nodes = self._repo.load_all_nodes(project_id)
+        edges = self._repo.load_all_edges(project_id)
+        return {
+            "graph_id": meta.get("graph_id", graph_id),
+            "project_id": meta.get("project_id", project_id),
+            "graph_name": meta.get("graph_name", ""),
+            "built_at": meta.get("built_at", ""),
+            "build_version": meta.get("build_version", ""),
+            "nodes": nodes,
+            "edges": edges,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+        }
 
     def get_graph_info(self, graph_id: str) -> GraphInfo:
-        payload = self.storage.load_snapshot(graph_id)
+        payload = self.get_graph_data(graph_id)
         entity_types = sorted({
             label
             for node in payload.get("nodes", [])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Any, Dict, List, Tuple
@@ -15,6 +16,9 @@ from .seed_task_progress import SeedTaskProgressTracker
 from .step_trace_context import record_artifact
 from .task_cancelled import TaskCancelledException
 from ..utils.task_file_logger import TaskFileLogger
+
+LONG_NOVEL_CHAPTER_THRESHOLD = 100
+LONG_NOVEL_BLOCK_TARGET_CHAR_COUNT = 680
 
 
 class SeedExtractRunner:
@@ -40,12 +44,22 @@ class SeedExtractRunner:
             self.task_logger = TaskFileLogger(project_dir, task_id)
 
     def _check_cancelled(self) -> None:
-        if self.service.task_manager.is_cancelled(self.task_id):
+        tm = self.service.task_manager
+        if tm.sync_bridge(tm.is_cancelled(self.task_id)):
             raise TaskCancelledException(self.task_id, "runner")
 
     def _log(self, stage: str, message: str, level: str = "info") -> None:
         if self.task_logger:
             getattr(self.task_logger, level)(stage, message)
+
+    def _record_unified_db_ready(self) -> None:
+        self._log("migration", "已切换为统一数据库主真相源")
+        self.progress.note(
+            "agent_profiles",
+            "统一数据库已就绪",
+            "后续写作与检索将直接使用主库，不再回填 legacy novel.sqlite3",
+            meta={"kind": "migration", "target": "unified_db"},
+        )
 
     def run(
         self,
@@ -82,13 +96,21 @@ class SeedExtractRunner:
 
             self._check_cancelled()
 
+            compatibility_artifacts = self._build_story_artifacts(
+                project_id,
+                chapter_segments,
+                use_llm=False,
+            )
+
+            self._check_cancelled()
+
             # Stage 3: global_integration + ontology
             t0 = time.time()
             if self.task_logger:
                 self.task_logger.stage_start("global_integration", "聚合分析与本体生成")
             seed_analysis, ontology = self._global_integration_and_ontology(
                 project_id, project_name, analysis_goal, additional_context,
-                documents, manager,
+                documents, manager, compatibility_artifacts,
             )
             if self.task_logger:
                 self.task_logger.stage_end("global_integration", time.time() - t0, self._seed_counts_text(seed_analysis))
@@ -105,23 +127,7 @@ class SeedExtractRunner:
 
             # Finalize
             self.service._finalize_project(project_id, analysis_goal, ontology, seed_analysis)
-
-            # Auto-populate novel.sqlite3 for writer agent
-            try:
-                from .writer_agent.novel_db_migration import migrate_project
-                migrate_counts = migrate_project(project_id)
-                self._log("migration", f"novel.sqlite3 已填充: {migrate_counts}")
-                self.progress.note(
-                    "agent_profiles",
-                    "数据已写入写作数据库",
-                    f"entities={migrate_counts.get('entities', 0)}, "
-                    f"relationships={migrate_counts.get('relationships', 0)}, "
-                    f"evidence={migrate_counts.get('entity_evidence', 0)}",
-                    meta={"kind": "migration"},
-                )
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception("novel.sqlite3 migration failed for %s", project_id)
+            self._record_unified_db_ready()
 
             self.progress.complete(
                 "上传完成，项目与种子分析已生成。",
@@ -188,12 +194,6 @@ class SeedExtractRunner:
                 f"段落 {seg_id}（章节 {chapter_range}，{len(chapters)} 章，~{est_tokens} tokens）",
                 "\n".join(lines),
             )
-        record_artifact(
-            "分段总结",
-            f"共 {segment_result.get('segment_count', 0)} 个阅读段，"
-            f"章节总数 {chapter_segments['chapter_count']}",
-            kind="stat",
-        )
         self.progress.end_step(step_id)
         self.progress.set_counts(
             chapter_count=chapter_segments["chapter_count"],
@@ -290,6 +290,161 @@ class SeedExtractRunner:
         )
         return manager
 
+    def _build_story_artifacts(
+        self,
+        project_id: str,
+        chapter_segments: Dict[str, Any],
+        use_llm: bool,
+    ) -> Dict[str, Any]:
+        from .analysis_block_builder import AnalysisBlockBuilder
+        from .anchor_point_builder import AnchorPointBuilder
+        from .chapter_card_generator import ChapterCardGenerator
+        from .continuity_consistency_auditor import ContinuityConsistencyAuditor
+        from .contextual_block_analyzer import ContextualBlockAnalyzer
+        from .local_block_fact_extractor import LocalBlockFactExtractor
+        from .novel_seed_analyzer import NovelSeedAnalyzer
+        from .sentence_atlas_builder import build_sentence_map
+        from .skeleton_timeline_builder import SkeletonTimelineBuilder
+        from .story_memory_builder import StoryMemoryBuilder
+
+        chapters = chapter_segments["chapters"]
+        sentence_map = build_sentence_map(chapter_segments.get("sentence_atlas", []))
+        chapter_map = {chapter["chapter_id"]: chapter for chapter in chapters}
+        analysis_blocks = AnalysisBlockBuilder(
+            target_owned_char_count=self._analysis_block_target(chapters)
+        ).build(chapters)
+        ProjectManager.save_project_json(project_id, "analysis_blocks.json", analysis_blocks)
+        self.progress.set_counts(block_count=analysis_blocks["block_count"])
+        self.progress.note("analysis_blocks", "分析块已生成", f"{analysis_blocks['block_count']} 个剧情块")
+
+        skeleton = SkeletonTimelineBuilder(NovelSeedAnalyzer()).build(chapters)
+        ProjectManager.save_project_json(project_id, "skeleton_timeline.json", skeleton)
+        self.progress.note("skeleton_timeline", "骨架时间线已生成", f"{skeleton['chapter_count']} 章")
+
+        if use_llm:
+            anchors = AnchorPointBuilder().build(analysis_blocks["blocks"], chapters, skeleton)
+        else:
+            anchors = self._offline_anchor_points(analysis_blocks["blocks"], skeleton)
+        ProjectManager.save_project_json(project_id, "anchor_points.json", anchors)
+        self.progress.note("anchor_generation", "剧情锚点已生成", f"{anchors['anchor_count']} 个锚点")
+
+        extractor = LocalBlockFactExtractor()
+        if use_llm:
+            local_facts = self.service.task_manager.sync_bridge(
+                extractor.extract_blocks(
+                    analysis_blocks["blocks"],
+                    chapters,
+                    True,
+                    skeleton=skeleton,
+                    anchors=anchors,
+                )
+            )
+        else:
+            packets = [
+                extractor._extract_block(
+                    block,
+                    chapter_map,
+                    sentence_map,
+                    False,
+                    None,
+                    skeleton,
+                    analysis_blocks["blocks"],
+                    anchors,
+                    None,
+                )
+                for block in analysis_blocks["blocks"]
+            ]
+            local_facts = {"block_count": len(packets), "packets": packets}
+        ProjectManager.save_project_json(project_id, "local_block_facts.json", local_facts)
+
+        story_payload = StoryMemoryBuilder().build(
+            local_facts["packets"], analysis_blocks["blocks"], anchors["anchors"], skeleton,
+        )
+        story_memory = story_payload["story_memory"]
+        ProjectManager.save_project_json(project_id, "story_memory.json", story_memory)
+        ProjectManager.save_project_json(project_id, "story_memory_snapshots.json", {"snapshots": story_payload["snapshots"]})
+
+        analyzer = ContextualBlockAnalyzer()
+        if use_llm:
+            block_analyses = self.service.task_manager.sync_bridge(
+                analyzer.analyze_blocks(
+                    analysis_blocks["blocks"],
+                    local_facts["packets"],
+                    story_payload["snapshots"],
+                    chapters,
+                    True,
+                )
+            )
+        else:
+            packets_by_id = {item["block_id"]: item for item in local_facts["packets"]}
+            snapshots_by_id = {item["block_id"]: item for item in story_payload["snapshots"]}
+            blocks = [
+                analyzer._analyze_block(
+                    block,
+                    packets_by_id[block["block_id"]],
+                    snapshots_by_id[block["block_id"]],
+                    chapter_map,
+                    sentence_map,
+                    False,
+                    None,
+                )
+                for block in analysis_blocks["blocks"]
+            ]
+            block_analyses = {"block_count": len(blocks), "blocks": blocks}
+        ProjectManager.save_project_json(project_id, "block_analyses.json", block_analyses)
+        consistency = ContinuityConsistencyAuditor().audit(story_memory, block_analyses["blocks"], local_facts["packets"])
+        ProjectManager.save_project_json(project_id, "consistency_report.json", consistency)
+
+        if use_llm:
+            cards = ChapterCardGenerator().generate_cards(chapters, story_memory, block_analyses)
+        else:
+            cards = self._offline_chapter_cards(chapters, story_memory, block_analyses)
+        ProjectManager.save_project_json(project_id, "chapter_cards.json", cards)
+        self.progress.note("chapter_card_generation", "章节卡已生成", f"{cards['chapter_count']} 张章节卡")
+        continuity = ChapterContinuityService().build_from_chapter_cards(cards["chapters"])
+        ProjectManager.save_project_json(project_id, "chapter_continuity.json", continuity)
+        return {"story_memory": story_memory, "block_analyses": block_analyses}
+
+    def _analysis_block_target(self, chapters: List[Dict[str, Any]]) -> int:
+        if len(chapters) >= LONG_NOVEL_CHAPTER_THRESHOLD:
+            return LONG_NOVEL_BLOCK_TARGET_CHAR_COUNT
+        return 5000
+
+    def _offline_anchor_points(self, blocks: List[Dict[str, Any]], skeleton: Dict[str, Any]) -> Dict[str, Any]:
+        anchors = []
+        sketches = {item["chapter_id"]: item for item in skeleton.get("chapter_sketches", [])}
+        for index in range(0, len(blocks), 5):
+            group = blocks[index:index + 5]
+            anchors.append(self._offline_anchor(index // 5 + 1, group, sketches))
+        return {"anchor_count": len(anchors), "anchors": anchors}
+
+    def _offline_anchor(self, index: int, blocks: List[Dict[str, Any]], sketches: Dict[str, Any]) -> Dict[str, Any]:
+        chapter_ids = [chapter_id for block in blocks for chapter_id in block.get("owned_chapter_ids", [])]
+        characters = sorted({name for chapter_id in chapter_ids for name in sketches.get(chapter_id, {}).get("characters", [])})
+        organizations = sorted({name for chapter_id in chapter_ids for name in sketches.get(chapter_id, {}).get("organizations", [])})
+        return {
+            "anchor_id": f"anchor_{index:04d}",
+            "block_range": [block["block_id"] for block in blocks],
+            "start_block_order": blocks[0].get("order", 0),
+            "end_block_order": blocks[-1].get("order", 0),
+            "world_state": {
+                "active_characters": [{"name": name, "status": "active"} for name in characters],
+                "active_organizations": [{"name": name, "status": "active"} for name in organizations],
+                "key_relationships": [],
+                "open_plot_threads": [],
+                "recent_events_summary": "；".join(sketches.get(chapter_id, {}).get("tail_hook", "") for chapter_id in chapter_ids)[:300],
+            },
+        }
+
+    def _offline_chapter_cards(self, chapters: List[Dict[str, Any]], story_memory: Dict[str, Any], block_analyses: Dict[str, Any]) -> Dict[str, Any]:
+        from .chapter_card_fallback_builder import ChapterCardFallbackBuilder
+
+        builder = ChapterCardFallbackBuilder()
+        cards = []
+        for chapter in sorted(chapters, key=lambda item: item.get("order", 0)):
+            cards.append(builder.build(chapter, story_memory, block_analyses, cards))
+        return {"chapter_count": len(cards), "chapters": cards}
+
     # ── Stage 3: global_integration + ontology ──
 
     def _global_integration_and_ontology(
@@ -300,6 +455,7 @@ class SeedExtractRunner:
         additional_context: str,
         documents: List[Dict[str, str]],
         manager: ReadingNotesManager,
+        story_artifacts: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # global_integration: aggregate seed analysis from reading notes
         self.progress.enter_stage("global_integration", "正在聚合种子分析", 78, "从阅读笔记中聚合角色、组织与关系")
@@ -309,6 +465,10 @@ class SeedExtractRunner:
             analysis_goal=analysis_goal,
             project_name=project_name,
         )
+        compatibility_block_count = story_artifacts.get("story_memory", {}).get("block_count")
+        if isinstance(compatibility_block_count, int) and compatibility_block_count > 0:
+            seed_analysis.setdefault("source_stats", {})["block_count"] = compatibility_block_count
+            seed_analysis.setdefault("story_memory", {})["block_count"] = compatibility_block_count
         ProjectManager.save_project_json(project_id, "seed_analysis.json", seed_analysis)
         # 记录产物：聚合结果摘要
         chars = seed_analysis.get("characters", [])
@@ -347,7 +507,8 @@ class SeedExtractRunner:
             analysis_goal=analysis_goal,
             additional_context=additional_context or None,
             use_llm=self.use_llm,
-            story_memory={"reading_notes_context": manager.assemble_context()},
+            story_memory=story_artifacts.get("story_memory") or {"reading_notes_context": manager.assemble_context()},
+            block_analyses=story_artifacts.get("block_analyses", {}).get("blocks", []),
             progress_callback=build_ontology_progress_callback(self.progress),
         )
         self.progress.end_step(step_id)
@@ -390,11 +551,13 @@ class SeedExtractRunner:
             group_key="agent_build",
             group_label="角色构建",
         )
-        agent_profiles = self.service.character_agent_profile_generator.generate(
-            manager=manager,
-            use_llm=self.use_llm,
-            progress_callback=profile_progress_callback,
-            cancel_check=self._check_cancelled,
+        agent_profiles = asyncio.run(
+            self.service.character_agent_profile_generator.generate(
+                manager=manager,
+                use_llm=self.use_llm,
+                progress_callback=profile_progress_callback,
+                cancel_check=self._check_cancelled,
+            )
         )
         # 记录产物：生成的角色档案摘要
         import json
@@ -457,8 +620,8 @@ class SeedExtractRunner:
         router = LlmRouter()
         for module_key in (
             "sequential_reading",
-            "character_agent_profile",
             "story_ontology",
+            "character_agent_profile",
         ):
             try:
                 router.build_client(module_key)

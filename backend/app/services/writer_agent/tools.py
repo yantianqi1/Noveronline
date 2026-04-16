@@ -444,6 +444,137 @@ NOVEL_TOOLS: list[dict] = [
     },
 ]
 
+# ----------------------------------------------------------------------
+# Book-run tools (字数/禁词审计 + 段落编辑)
+# ----------------------------------------------------------------------
+BOOK_RUN_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_chapter_word_stats",
+            "description": (
+                "返回一章所有已提交稿件块的字数明细：每块的 block_id / block_order / word_count / 前 32 字预览，"
+                "以及总字数、目标字数、差值(diff=total-target)。字数按非空白字符计数（贴近中文 字数 习惯）。"
+                "WORD_AUDIT 阶段必须先调此工具获取差值才能决定扩写或精简。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chapter_id": {"type": "string", "description": "章节 ID"},
+                    "target_word_count": {"type": "integer", "description": "本章目标字数；不提供则不计算差值"},
+                },
+                "required": ["chapter_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_forbidden_lexicon",
+            "description": (
+                "对当前章节（或指定若干块）运行禁词扫描脚本。返回命中列表：每条含 block_id / block_order / match / "
+                "start / end / entry_id / pattern / match_type / severity / context（命中前后各 40 字）。"
+                "LEXICON_AUDIT 阶段必须先调此工具定位命中再逐个 rewrite_span。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chapter_id": {"type": "string", "description": "章节 ID（与 block_ids 二选一）"},
+                    "block_ids": {"type": "array", "items": {"type": "string"}, "description": "可选：仅扫描这些块"},
+                    "lexicon_asset_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "生效的禁词表 asset_id 列表；不提供则取项目全部 forbidden_lexicon 类型的启用资产",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_forbidden_lexicon",
+            "description": "列出本项目下所有 forbidden_lexicon 类型资产的标题、条目数、是否启用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_entries": {"type": "boolean", "description": "是否展开每条条目，默认 false"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upsert_forbidden_lexicon",
+            "description": (
+                "创建或更新一份禁词资产。entries 为字符串数组（简写，literal 模式）或对象数组（含 pattern / "
+                "match_type / category / severity / note / whitelist_contexts）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "存在则更新，不存在则新建"},
+                    "title": {"type": "string", "description": "资产标题（新建必填）"},
+                    "entries": {
+                        "type": "array",
+                        "items": {},
+                        "description": "条目数组；字符串元素按字面量处理",
+                    },
+                },
+                "required": ["entries"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "splice_block",
+            "description": (
+                "在指定位置插入或替换稿件块。position=before 在锚点前插入；position=after 在锚点后插入；"
+                "position=replace_range 替换从 anchor_block_id 到 end_anchor_block_id（含）之间的所有块为新内容单块。"
+                "单次插入/替换净字数变化不得超过 chapter 目标字数的 40%，超出将被拒绝（防过冲）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chapter_id": {"type": "string", "description": "章节 ID"},
+                    "anchor_block_id": {"type": "string", "description": "锚点块 ID"},
+                    "position": {"type": "string", "enum": ["before", "after", "replace_range"]},
+                    "end_anchor_block_id": {"type": "string", "description": "replace_range 模式下的结束锚点（含）"},
+                    "content": {"type": "string", "description": "要写入的新正文"},
+                    "reason": {"type": "string", "description": "操作理由（用于调试日志）"},
+                },
+                "required": ["chapter_id", "anchor_block_id", "position", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rewrite_span",
+            "description": (
+                "在单个稿件块内做局部字符串替换（非 replace_all）。original_text 必须在块内唯一出现一次，"
+                "否则操作被拒绝（调用方应先 get_manuscript_context 扩展上下文或把 original_text 扩到更长段落）。"
+                "LEXICON_AUDIT 阶段用来修复单点命中最省 token。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "block_id": {"type": "string", "description": "稿件块 ID"},
+                    "original_text": {"type": "string", "description": "待替换的原文（必须块内唯一）"},
+                    "new_text": {"type": "string", "description": "替换后的文本"},
+                    "reason": {"type": "string", "description": "操作理由"},
+                },
+                "required": ["block_id", "original_text", "new_text"],
+            },
+        },
+    },
+]
+BOOK_RUN_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in BOOK_RUN_TOOLS}
+
 # Manuscript-specific tools (added to agent toolset during continuation tasks)
 MANUSCRIPT_TOOLS: list[dict] = [
     {
@@ -745,4 +876,10 @@ TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
     "search_assets": lambda inp: f"搜索资产：{inp.get('query', '?')}" + (f" [{inp.get('asset_type')}]" if inp.get("asset_type") else ""),
     "get_asset": lambda inp: f"取资产：{inp.get('asset_id', '?')}",
     "list_assets": lambda inp: f"列资产：{inp.get('asset_type', '?')}",
+    "get_chapter_word_stats": lambda inp: f"字数统计：{inp.get('chapter_id', '?')}",
+    "scan_forbidden_lexicon": lambda inp: f"扫描禁词：{inp.get('chapter_id') or inp.get('block_ids') or '全章'}",
+    "list_forbidden_lexicon": lambda _: "列出禁词表",
+    "upsert_forbidden_lexicon": lambda inp: f"保存禁词表：{inp.get('title') or inp.get('asset_id', '?')}",
+    "splice_block": lambda inp: f"拼接块 [{inp.get('position', '?')}] 锚={inp.get('anchor_block_id', '?')}",
+    "rewrite_span": lambda inp: f"改写 {inp.get('block_id', '?')}",
 }

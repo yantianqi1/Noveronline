@@ -1,8 +1,8 @@
-"""步骤级 trace 上下文，基于 contextvars 实现线程安全隐式传播。"""
+"""步骤级 trace 上下文，基于 contextvars 实现协程安全隐式传播。"""
 
 from __future__ import annotations
 
-import threading
+import asyncio
 import time
 import uuid
 from contextlib import contextmanager
@@ -26,16 +26,16 @@ class StepTraceContext:
     started_at_wall: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     calls: List[Dict[str, Any]] = field(default_factory=list)
     artifacts: List[Dict[str, Any]] = field(default_factory=list)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
-    def record_call(self, call_data: Dict[str, Any]) -> None:
-        """线程安全地追加一条 LLM 调用记录。"""
-        with self._lock:
+    async def record_call(self, call_data: Dict[str, Any]) -> None:
+        """协程安全地追加一条 LLM 调用记录。"""
+        async with self._lock:
             self.calls.append(call_data)
 
-    def record_artifact(self, label: str, content: str, kind: str = "text") -> None:
+    async def record_artifact(self, label: str, content: str, kind: str = "text") -> None:
         """追加一条非 LLM 产物记录（输入文本、处理结果、统计等）。"""
-        with self._lock:
+        async with self._lock:
             self.artifacts.append({"label": label, "content": content, "kind": kind})
 
     @property
@@ -85,17 +85,36 @@ def get_current_step() -> Optional[StepTraceContext]:
 
 
 def record_call(call_data: Dict[str, Any]) -> None:
-    """向当前步骤追加调用记录。若无活动步骤则静默跳过。"""
+    """向当前步骤追加调用记录。
+
+    Schedules the async record_call on the running event loop.
+    Safe to call from both sync and async contexts.
+    """
     ctx = _current_step.get(None)
-    if ctx is not None:
-        ctx.record_call(call_data)
+    if ctx is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(ctx.record_call(call_data))
+    except RuntimeError:
+        # No running event loop -- append directly (no contention in sync-only code)
+        ctx.calls.append(call_data)
 
 
 def record_artifact(label: str, content: str, kind: str = "text") -> None:
-    """向当前步骤追加产物记录。若无活动步骤则静默跳过。"""
+    """向当前步骤追加产物记录。
+
+    Schedules the async record_artifact on the running event loop.
+    Safe to call from both sync and async contexts.
+    """
     ctx = _current_step.get(None)
-    if ctx is not None:
-        ctx.record_artifact(label, content, kind)
+    if ctx is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(ctx.record_artifact(label, content, kind))
+    except RuntimeError:
+        ctx.artifacts.append({"label": label, "content": content, "kind": kind})
 
 
 def new_step_id() -> str:

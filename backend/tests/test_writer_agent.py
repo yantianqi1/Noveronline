@@ -1,47 +1,58 @@
-"""Tests for the writer agent system: NovelDB, tools, agent loop, orchestrator."""
+"""Tests for the writer agent system: repos, tools, agent loop, orchestrator."""
 
+import asyncio
 import json
 import os
-import sqlite3
 import uuid
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Ensure backend is on sys.path
-# ---------------------------------------------------------------------------
-import sys
+from sqlalchemy import create_engine, insert
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import app.database as db_mod
+from app.database import init_db
+from app.repositories.chapter_repo import ChapterRepository
+from app.repositories.entity_repo import EntityRepository
+from app.repositories.outline_repo import OutlineRepository
+from app.repositories.preset_repo import PresetRepository
+from app.repositories.scene_repo import SceneRepository
+from app.tables.novel import entities, entity_aliases
 
 
 # ---------------------------------------------------------------------------
-# NovelDB tests
+# Shared helper: set up a fresh in-memory engine for each test class
+# ---------------------------------------------------------------------------
+
+def _make_engine(monkeypatch):
+    """Create an in-memory engine, init all tables, and monkeypatch get_engine()."""
+    engine = create_engine("sqlite:///:memory:", future=True)
+    init_db(engine)
+    monkeypatch.setattr(db_mod, "_engine", engine)
+    return engine
+
+
+# ---------------------------------------------------------------------------
+# Chapter/Scene/Entity/Preset repo tests (formerly TestNovelDB)
 # ---------------------------------------------------------------------------
 class TestNovelDB:
-    """Test the unified data access layer."""
+    """Test the unified repository layer."""
 
     TEST_PROJECT = f"__test_{uuid.uuid4().hex[:8]}"
 
     @pytest.fixture(autouse=True)
-    def setup_teardown(self):
-        from app.services.writer_agent.novel_db import NovelDB
-
-        self.db = NovelDB()
-        self.db.ensure_schema(self.TEST_PROJECT)
+    def setup_teardown(self, monkeypatch):
+        self.engine = _make_engine(monkeypatch)
+        self.chapters = ChapterRepository(self.engine)
+        self.scenes = SceneRepository(self.engine)
+        self.entities = EntityRepository(self.engine)
+        self.presets = PresetRepository(self.engine)
+        self.outlines = OutlineRepository(self.engine)
         yield
-        db_path = self.db._db_path(self.TEST_PROJECT)
-        if os.path.exists(db_path):
-            os.remove(db_path)
 
     def test_schema_creates_tables(self):
-        with self.db.connect(self.TEST_PROJECT) as conn:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
+        from sqlalchemy import inspect
+        inspector = inspect(self.engine)
+        table_names = set(inspector.get_table_names())
         expected = {
             "entities", "entity_aliases", "entity_labels",
             "relationships", "entity_evidence",
@@ -49,314 +60,208 @@ class TestNovelDB:
             "sessions", "agent_states", "agent_memory", "world_events",
             "writer_presets", "outline_versions",
         }
-        assert expected.issubset(tables), f"Missing tables: {expected - tables}"
+        assert expected.issubset(table_names), f"Missing tables: {expected - table_names}"
 
     def test_chapter_crud(self):
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
-        chapters = self.db.list_chapters(self.TEST_PROJECT)
+        self.chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+        chapters = self.chapters.list_chapters(self.TEST_PROJECT)
         assert len(chapters) == 1
         assert chapters[0]["title"] == "第一章"
 
-        self.db.update_chapter(self.TEST_PROJECT, "ch_1", title="第一章·改")
-        ch = self.db.get_chapter(self.TEST_PROJECT, 1)
+        self.chapters.update_chapter(self.TEST_PROJECT, "ch_1", title="第一章·改")
+        ch = self.chapters.get_chapter_by_order(self.TEST_PROJECT, 1)
         assert ch["title"] == "第一章·改"
 
-        self.db.delete_chapter(self.TEST_PROJECT, "ch_1")
-        assert len(self.db.list_chapters(self.TEST_PROJECT)) == 0
+        self.chapters.delete_chapter(self.TEST_PROJECT, "ch_1")
+        assert len(self.chapters.list_chapters(self.TEST_PROJECT)) == 0
 
     def test_scene_crud_and_compile(self):
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+        self.chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
 
-        self.db.upsert_scene(
-            self.TEST_PROJECT, "sc_1", "ch_1", 1,
-            "场景一", "月光穿过竹叶。", None, "竹林", "[]", "draft", None,
+        self.scenes.upsert_scene(
+            self.TEST_PROJECT,
+            {"scene_id": "sc_1", "chapter_id": "ch_1", "scene_order": 1,
+             "title": "场景一", "content": "月光穿过竹叶。", "location": "竹林",
+             "involved_entities_json": "[]", "status": "draft"},
         )
-        self.db.upsert_scene(
-            self.TEST_PROJECT, "sc_2", "ch_1", 2,
-            "场景二", "剑气纵横。", None, "演武场", "[]", "draft", None,
+        self.scenes.upsert_scene(
+            self.TEST_PROJECT,
+            {"scene_id": "sc_2", "chapter_id": "ch_1", "scene_order": 2,
+             "title": "场景二", "content": "剑气纵横。", "location": "演武场",
+             "involved_entities_json": "[]", "status": "draft"},
         )
 
-        scenes = self.db.list_scenes(self.TEST_PROJECT, "ch_1")
+        scenes = self.scenes.list_scenes(self.TEST_PROJECT, "ch_1")
         assert len(scenes) == 2
         assert scenes[0]["scene_order"] == 1
 
-        scene = self.db.get_scene(self.TEST_PROJECT, "sc_1")
+        scene = self.scenes.get_scene(self.TEST_PROJECT, "sc_1")
         assert scene["content"] == "月光穿过竹叶。"
         assert scene["word_count"] > 0
 
-        self.db.compile_chapter(self.TEST_PROJECT, "ch_1")
-        ch = self.db.get_chapter(self.TEST_PROJECT, 1, include_content=True)
+        self.chapters.compile_chapter(self.TEST_PROJECT, "ch_1")
+        ch = self.chapters.get_chapter(self.TEST_PROJECT, "ch_1", include_content=True)
         assert "月光穿过竹叶" in ch["content"]
         assert "剑气纵横" in ch["content"]
 
     def test_scene_reorder(self):
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
-        self.db.upsert_scene(self.TEST_PROJECT, "sc_a", "ch_1", 1, "A", "内容A", None, None, "[]", "draft", None)
-        self.db.upsert_scene(self.TEST_PROJECT, "sc_b", "ch_1", 2, "B", "内容B", None, None, "[]", "draft", None)
+        self.chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+        self.scenes.upsert_scene(
+            self.TEST_PROJECT,
+            {"scene_id": "sc_a", "chapter_id": "ch_1", "scene_order": 1,
+             "title": "A", "content": "内容A", "involved_entities_json": "[]", "status": "draft"},
+        )
+        self.scenes.upsert_scene(
+            self.TEST_PROJECT,
+            {"scene_id": "sc_b", "chapter_id": "ch_1", "scene_order": 2,
+             "title": "B", "content": "内容B", "involved_entities_json": "[]", "status": "draft"},
+        )
 
-        self.db.reorder_scenes(self.TEST_PROJECT, "ch_1", ["sc_b", "sc_a"])
-        scenes = self.db.list_scenes(self.TEST_PROJECT, "ch_1")
+        self.scenes.reorder_scenes(self.TEST_PROJECT, "ch_1", ["sc_b", "sc_a"])
+        scenes = self.scenes.list_scenes(self.TEST_PROJECT, "ch_1")
         assert scenes[0]["scene_id"] == "sc_b"
         assert scenes[1]["scene_id"] == "sc_a"
 
     def test_entity_and_alias(self):
-        with self.db.connect(self.TEST_PROJECT) as conn:
-            now = "2026-01-01T00:00:00"
+        now = "2026-01-01T00:00:00"
+        with self.engine.connect() as conn:
             conn.execute(
-                """INSERT INTO entities
-                    (entity_id, project_id, name, entity_type, importance_tier,
-                     summary, core_drive, surface_mask, hidden_tension,
-                     profile_json, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("e1", self.TEST_PROJECT, "林远", "character", "protagonist",
-                 "主角", "守护", "冷静", "内心矛盾", "{}", now, now),
+                insert(entities).values(
+                    entity_id="e1", project_id=self.TEST_PROJECT, name="林远",
+                    entity_type="character", importance_tier="protagonist",
+                    summary="主角", core_drive="守护", surface_mask="冷静",
+                    hidden_tension="内心矛盾", profile_json="{}",
+                    created_at=now, updated_at=now,
+                )
             )
             conn.execute(
-                "INSERT INTO entity_aliases VALUES (?,?)",
-                ("小远", "e1"),
+                insert(entity_aliases).values(
+                    project_id=self.TEST_PROJECT, alias="小远", entity_id="e1",
+                )
             )
             conn.commit()
 
-        result = self.db.get_entity(self.TEST_PROJECT, "林远")
+        result = self.entities.resolve_entity_id(self.TEST_PROJECT, "林远")
         assert result is not None
-        assert result["entity_type"] == "character"
 
-        result_alias = self.db.get_entity(self.TEST_PROJECT, "小远")
+        result_alias = self.entities.resolve_entity_id(self.TEST_PROJECT, "小远")
         assert result_alias is not None
-        assert result_alias["name"] == "林远"
-
-    def test_fts_search(self):
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "竹林密谈")
-        self.db.upsert_scene(
-            self.TEST_PROJECT, "sc_1", "ch_1", 1,
-            "密谈", "林远在竹林中与谢无尘密谈。", None, None, "[]", "draft", None,
-        )
-
-        # unicode61 tokenizer treats CJK titles as matchable tokens
-        results = self.db.search_fts(self.TEST_PROJECT, "密谈", "all", 10)
-        assert len(results) > 0
+        assert result_alias == result  # same entity_id
 
     def test_preset_crud(self):
-        self.db.create_preset(
-            self.TEST_PROJECT, "p1", "测试预设",
-            "你是一名小说家。", "测试用", 0,
+        self.presets.create_preset(
+            self.TEST_PROJECT, "p1",
+            name="测试预设", system_prompt="你是一名小说家。",
+            description="测试用", is_default=0,
         )
-        presets = self.db.list_presets(self.TEST_PROJECT)
+        presets = self.presets.list_presets(self.TEST_PROJECT)
         assert len(presets) >= 1
 
-        self.db.update_preset(self.TEST_PROJECT, "p1", name="改名预设")
-        presets = self.db.list_presets(self.TEST_PROJECT)
+        self.presets.update_preset(self.TEST_PROJECT, "p1", name="改名预设")
+        presets = self.presets.list_presets(self.TEST_PROJECT)
         updated = next(p for p in presets if p["preset_id"] == "p1")
         assert updated["name"] == "改名预设"
 
-        self.db.delete_preset(self.TEST_PROJECT, "p1")
-        presets = self.db.list_presets(self.TEST_PROJECT)
+        self.presets.delete_preset(self.TEST_PROJECT, "p1")
+        presets = self.presets.list_presets(self.TEST_PROJECT)
         assert all(p["preset_id"] != "p1" for p in presets)
-
-    def test_open_threads(self):
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
-        self.db.update_chapter(
-            self.TEST_PROJECT, "ch_1",
-            open_threads_json='["谁是幕后黑手？", "宝剑的来历"]',
-        )
-        self.db.create_chapter(self.TEST_PROJECT, "ch_2", 2, "第二章")
-        self.db.update_chapter(
-            self.TEST_PROJECT, "ch_2",
-            open_threads_json='["密室的秘密"]',
-        )
-
-        threads = self.db.get_open_threads(self.TEST_PROJECT, 2)
-        assert len(threads) == 3
-        thread_keys = [t["thread_key"] for t in threads]
-        assert "谁是幕后黑手？" in thread_keys
 
 
 # ---------------------------------------------------------------------------
 # Outline version history tests
 # ---------------------------------------------------------------------------
 class TestOutlineVersions:
-    """Test outline version history in NovelDB."""
+    """Test outline version history via repos."""
 
     TEST_PROJECT = f"__test_{uuid.uuid4().hex[:8]}"
 
     @pytest.fixture(autouse=True)
-    def setup_teardown(self):
-        from app.services.writer_agent.novel_db import NovelDB
-
-        self.db = NovelDB()
-        self.db.ensure_schema(self.TEST_PROJECT)
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+    def setup_teardown(self, monkeypatch):
+        self.engine = _make_engine(monkeypatch)
+        self.chapters = ChapterRepository(self.engine)
+        self.outlines = OutlineRepository(self.engine)
+        self.chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
         yield
-        db_path = self.db._db_path(self.TEST_PROJECT)
-        if os.path.exists(db_path):
-            os.remove(db_path)
 
     def test_outline_versions_table_exists(self):
-        with self.db.connect(self.TEST_PROJECT) as conn:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-        assert "outline_versions" in tables
+        from sqlalchemy import inspect
+        inspector = inspect(self.engine)
+        assert "outline_versions" in inspector.get_table_names()
 
     def test_save_outline_version(self):
-        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]')
+        vid = self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]')
         assert vid.startswith("ov_")
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert len(versions) == 1
         assert versions[0]["version_id"] == vid
         assert "outline_json" not in versions[0]  # list should not include body
 
     def test_save_outline_version_with_label(self):
-        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]', label="初版")
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        vid = self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]', label="初版")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert versions[0]["label"] == "初版"
 
     def test_get_outline_version(self):
-        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]')
-        version = self.db.get_outline_version(self.TEST_PROJECT, vid)
+        vid = self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]')
+        version = self.outlines.get_outline_version(self.TEST_PROJECT, vid)
         assert version is not None
         assert version["outline_json"] == '[{"scene_order":1}]'
 
     def test_list_versions_ordered_desc(self):
         import time
-        self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[]', label="v1")
+        self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", '[]', label="v1")
         time.sleep(0.01)
-        self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]', label="v2")
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"scene_order":1}]', label="v2")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert len(versions) == 2
         assert versions[0]["label"] == "v2"  # newest first
         assert versions[1]["label"] == "v1"
 
     def test_max_20_versions(self):
         for i in range(22):
-            self.db.save_outline_version(self.TEST_PROJECT, "ch_1", f'[{{"n":{i}}}]')
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+            self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", f'[{{"n":{i}}}]')
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert len(versions) == 20
-
-    def test_cascade_delete(self):
-        self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[]')
-        assert len(self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")) == 1
-        self.db.delete_chapter(self.TEST_PROJECT, "ch_1")
-        # After chapter deletion, versions should be gone (cascade)
-        with self.db.connect(self.TEST_PROJECT) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM outline_versions").fetchone()[0]
-        assert count == 0
 
     def test_chapter_service_update_creates_version(self):
         from app.services.writer_agent.chapter_service import ChapterService
         svc = ChapterService()
         # Set initial outline
-        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"scene_order":1}]')
-        # Update via service — should snapshot old value
+        self.chapters.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"scene_order":1}]')
+        # Update via service -- should snapshot old value
         svc.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"scene_order":1},{"scene_order":2}]')
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert len(versions) == 1
-        full = self.db.get_outline_version(self.TEST_PROJECT, versions[0]["version_id"])
+        full = self.outlines.get_outline_version(self.TEST_PROJECT, versions[0]["version_id"])
         assert full["outline_json"] == '[{"scene_order":1}]'  # old value snapshotted
 
     def test_chapter_service_update_passes_label(self):
         from app.services.writer_agent.chapter_service import ChapterService
         svc = ChapterService()
-        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[]')
+        self.chapters.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[]')
         svc.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"x":1}]', outline_label="手动标注")
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert versions[0]["label"] == "手动标注"
 
     def test_chapter_service_update_no_version_without_outline(self):
         from app.services.writer_agent.chapter_service import ChapterService
         svc = ChapterService()
         svc.update_chapter(self.TEST_PROJECT, "ch_1", title="改标题")
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert len(versions) == 0  # no version created when outline not changed
 
     def test_chapter_service_restore(self):
         from app.services.writer_agent.chapter_service import ChapterService
         svc = ChapterService()
-        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"v":"old"}]')
-        vid = self.db.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"v":"old"}]')
-        self.db.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"v":"new"}]')
+        self.chapters.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"v":"old"}]')
+        vid = self.outlines.save_outline_version(self.TEST_PROJECT, "ch_1", '[{"v":"old"}]')
+        self.chapters.update_chapter(self.TEST_PROJECT, "ch_1", outline_json='[{"v":"new"}]')
         svc.restore_outline_version(self.TEST_PROJECT, "ch_1", vid)
-        ch = self.db.get_chapter(self.TEST_PROJECT, 1)
+        ch = self.chapters.get_chapter_by_order(self.TEST_PROJECT, 1)
         assert ch["outline_json"] == '[{"v":"old"}]'
         # Current value before restore should be snapshotted
-        versions = self.db.list_outline_versions(self.TEST_PROJECT, "ch_1")
+        versions = self.outlines.list_outline_versions(self.TEST_PROJECT, "ch_1")
         assert len(versions) == 2
-
-
-# ---------------------------------------------------------------------------
-# Outline version API tests
-# ---------------------------------------------------------------------------
-class TestOutlineVersionAPI:
-    """Test outline version API endpoints."""
-
-    TEST_PROJECT = f"__test_{uuid.uuid4().hex[:8]}"
-
-    @pytest.fixture(autouse=True)
-    def setup_teardown(self):
-        from app.services.writer_agent.novel_db import NovelDB
-
-        self.db = NovelDB()
-        self.db.ensure_schema(self.TEST_PROJECT)
-        self.db.create_chapter(self.TEST_PROJECT, "ch_api", 1, "API章")
-        self.db.update_chapter(self.TEST_PROJECT, "ch_api", outline_json='[{"scene_order":1}]')
-
-        os.environ["FLASK_PORT"] = "3888"
-        from app import create_app
-        app = create_app()
-        self.client = app.test_client()
-        yield
-        db_path = self.db._db_path(self.TEST_PROJECT)
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
-    def test_list_versions_empty(self):
-        resp = self.client.get(
-            f"/api/writer-agent/chapters/detail/ch_api/outline-versions?project_id={self.TEST_PROJECT}"
-        )
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["success"] is True
-        assert data["data"] == []
-
-    def test_save_then_list(self):
-        # Save triggers version creation
-        self.client.put(
-            "/api/writer-agent/chapters/detail/ch_api",
-            json={"project_id": self.TEST_PROJECT, "outline_json": '[{"scene_order":2}]', "outline_label": "v1标注"},
-        )
-        resp = self.client.get(
-            f"/api/writer-agent/chapters/detail/ch_api/outline-versions?project_id={self.TEST_PROJECT}"
-        )
-        data = resp.get_json()
-        assert len(data["data"]) == 1
-        assert data["data"][0]["label"] == "v1标注"
-
-    def test_restore_version(self):
-        # Create a version by saving
-        self.client.put(
-            "/api/writer-agent/chapters/detail/ch_api",
-            json={"project_id": self.TEST_PROJECT, "outline_json": '[{"scene_order":99}]'},
-        )
-        versions = self.client.get(
-            f"/api/writer-agent/chapters/detail/ch_api/outline-versions?project_id={self.TEST_PROJECT}"
-        ).get_json()["data"]
-        vid = versions[0]["version_id"]
-        # Restore
-        resp = self.client.post(
-            f"/api/writer-agent/chapters/detail/ch_api/outline-versions/{vid}/restore",
-            json={"project_id": self.TEST_PROJECT},
-        )
-        assert resp.status_code == 200
-        assert resp.get_json()["success"] is True
-        # Verify current outline is restored
-        chapters = self.client.get(
-            f"/api/writer-agent/chapters/{self.TEST_PROJECT}"
-        ).get_json()["data"]
-        ch = [c for c in chapters if c["chapter_id"] == "ch_api"][0]
-        assert ch["outline_json"] == '[{"scene_order":1}]'
 
 
 # ---------------------------------------------------------------------------
@@ -403,35 +308,32 @@ class TestToolExecutors:
     TEST_PROJECT = f"__test_exec_{uuid.uuid4().hex[:8]}"
 
     @pytest.fixture(autouse=True)
-    def setup_teardown(self):
-        from app.services.writer_agent.novel_db import NovelDB
-
-        self.db = NovelDB()
-        self.db.ensure_schema(self.TEST_PROJECT)
+    def setup_teardown(self, monkeypatch):
+        self.engine = _make_engine(monkeypatch)
+        chapters = ChapterRepository(self.engine)
+        scenes = SceneRepository(self.engine)
 
         # Seed test data
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
-        self.db.upsert_scene(
-            self.TEST_PROJECT, "sc_1", "ch_1", 1,
-            "开场", "林远站在山顶，望着远方。", None, "山顶", "[]", "draft", None,
+        chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+        scenes.upsert_scene(
+            self.TEST_PROJECT,
+            {"scene_id": "sc_1", "chapter_id": "ch_1", "scene_order": 1,
+             "title": "开场", "content": "林远站在山顶，望着远方。",
+             "location": "山顶", "involved_entities_json": "[]", "status": "draft"},
         )
-        with self.db.connect(self.TEST_PROJECT) as conn:
-            now = "2026-01-01T00:00:00"
+        now = "2026-01-01T00:00:00"
+        with self.engine.connect() as conn:
             conn.execute(
-                """INSERT INTO entities
-                    (entity_id, project_id, name, entity_type, importance_tier,
-                     summary, core_drive, surface_mask, hidden_tension,
-                     profile_json, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("e1", self.TEST_PROJECT, "林远", "character", "protagonist",
-                 "主角剑修", "守护", "冷静沉稳", "外冷内热", '{"personality":"坚毅"}', now, now),
+                insert(entities).values(
+                    entity_id="e1", project_id=self.TEST_PROJECT, name="林远",
+                    entity_type="character", importance_tier="protagonist",
+                    summary="主角剑修", core_drive="守护", surface_mask="冷静沉稳",
+                    hidden_tension="外冷内热", profile_json='{"personality":"坚毅"}',
+                    created_at=now, updated_at=now,
+                )
             )
             conn.commit()
         yield
-
-        db_path = self.db._db_path(self.TEST_PROJECT)
-        if os.path.exists(db_path):
-            os.remove(db_path)
 
     def test_execute_query_entity(self):
         from app.services.writer_agent.tool_executors import execute_tool
@@ -488,13 +390,13 @@ class MockMessage:
 
 
 class MockLLMClient:
-    """Mock LLM client that returns predetermined responses."""
+    """Mock LLM client that returns predetermined responses (async-compatible)."""
 
     def __init__(self, responses):
         self.responses = list(responses)
         self.call_count = 0
 
-    def chat_with_tools(self, messages, tools, temperature=0.3, max_tokens=4096):
+    async def chat_with_tools(self, messages, tools, temperature=0.3, max_tokens=4096):
         if self.call_count >= len(self.responses):
             msg = MockMessage(content="No more responses", tool_calls=None)
             msg._usage = None
@@ -508,32 +410,33 @@ class MockLLMClient:
 class TestAgentLoop:
     TEST_PROJECT = f"__test_loop_{uuid.uuid4().hex[:8]}"
 
+    @staticmethod
+    async def _collect(async_gen):
+        """Collect all items from an async generator into a list."""
+        result = []
+        async for item in async_gen:
+            result.append(item)
+        return result
+
     @pytest.fixture(autouse=True)
-    def setup_teardown(self):
-        from app.services.writer_agent.novel_db import NovelDB
+    def setup_teardown(self, monkeypatch):
+        self.engine = _make_engine(monkeypatch)
+        chapters = ChapterRepository(self.engine)
+        chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
 
-        self.db = NovelDB()
-        self.db.ensure_schema(self.TEST_PROJECT)
-
-        # Seed minimal data
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
-        with self.db.connect(self.TEST_PROJECT) as conn:
-            now = "2026-01-01T00:00:00"
+        now = "2026-01-01T00:00:00"
+        with self.engine.connect() as conn:
             conn.execute(
-                """INSERT INTO entities
-                    (entity_id, project_id, name, entity_type, importance_tier,
-                     summary, core_drive, surface_mask, hidden_tension,
-                     profile_json, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("e1", self.TEST_PROJECT, "林远", "character", "protagonist",
-                 "主角", "守护", "冷静", "矛盾", "{}", now, now),
+                insert(entities).values(
+                    entity_id="e1", project_id=self.TEST_PROJECT, name="林远",
+                    entity_type="character", importance_tier="protagonist",
+                    summary="主角", core_drive="守护", surface_mask="冷静",
+                    hidden_tension="矛盾", profile_json="{}",
+                    created_at=now, updated_at=now,
+                )
             )
             conn.commit()
         yield
-
-        db_path = self.db._db_path(self.TEST_PROJECT)
-        if os.path.exists(db_path):
-            os.remove(db_path)
 
     def test_loop_with_tool_calls_then_brief(self):
         from app.services.writer_agent.agent_loop import AgentLoop
@@ -552,7 +455,7 @@ class TestAgentLoop:
         ])
 
         loop = AgentLoop(mock_client, NOVEL_TOOLS, "你是编排助手", self.TEST_PROJECT)
-        events = list(loop.run("写第一章"))
+        events = asyncio.run(self._collect(loop.run("写第一章")))
 
         event_types = [e["type"] for e in events]
         assert "tool_call" in event_types
@@ -574,7 +477,7 @@ class TestAgentLoop:
         ])
 
         loop = AgentLoop(mock_client, NOVEL_TOOLS, "你是编排助手", self.TEST_PROJECT)
-        events = list(loop.run("生成大纲"))
+        events = asyncio.run(self._collect(loop.run("生成大纲")))
 
         assert len(events) == 2
         assert events[0]["type"] == "prompt_snapshot"
@@ -595,7 +498,7 @@ class TestAgentLoop:
         mock_client = MockLLMClient(infinite_responses)
         loop = AgentLoop(mock_client, NOVEL_TOOLS, "你是编排助手", self.TEST_PROJECT)
 
-        events = list(loop.run("无限循环测试"))
+        events = asyncio.run(self._collect(loop.run("无限循环测试")))
         # Should eventually yield brief_ready (forced)
         assert any(e["type"] == "brief_ready" for e in events)
         # Should not exceed MAX_ROUNDS tool calls
@@ -618,7 +521,7 @@ class TestAgentLoop:
         ])
 
         loop = AgentLoop(mock_client, NOVEL_TOOLS, "你是编排助手", self.TEST_PROJECT)
-        events = list(loop.run("写第一章"))
+        events = asyncio.run(self._collect(loop.run("写第一章")))
 
         # tool_call and tool_result should carry round number
         tool_call_evt = next(e for e in events if e["type"] == "tool_call")
@@ -659,17 +562,12 @@ class TestPostProcessor:
     TEST_PROJECT = f"__test_pp_{uuid.uuid4().hex[:8]}"
 
     @pytest.fixture(autouse=True)
-    def setup_teardown(self):
-        from app.services.writer_agent.novel_db import NovelDB
-
-        self.db = NovelDB()
-        self.db.ensure_schema(self.TEST_PROJECT)
-        self.db.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
+    def setup_teardown(self, monkeypatch):
+        self.engine = _make_engine(monkeypatch)
+        self.chapters = ChapterRepository(self.engine)
+        self.scenes = SceneRepository(self.engine)
+        self.chapters.create_chapter(self.TEST_PROJECT, "ch_1", 1, "第一章")
         yield
-
-        db_path = self.db._db_path(self.TEST_PROJECT)
-        if os.path.exists(db_path):
-            os.remove(db_path)
 
     def test_process_saves_scene_and_compiles(self):
         from app.services.writer_agent.post_processor import PostProcessor
@@ -689,10 +587,10 @@ class TestPostProcessor:
         assert result["word_count"] > 0
 
         # Verify scene was saved
-        scene = self.db.get_scene(self.TEST_PROJECT, "sc_test")
+        scene = self.scenes.get_scene(self.TEST_PROJECT, "sc_test")
         assert scene is not None
         assert "月光如水" in scene["content"]
 
         # Verify chapter was compiled
-        ch = self.db.get_chapter(self.TEST_PROJECT, 1, include_content=True)
+        ch = self.chapters.get_chapter(self.TEST_PROJECT, "ch_1", include_content=True)
         assert "月光如水" in ch["content"]

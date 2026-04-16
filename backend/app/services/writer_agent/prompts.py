@@ -384,3 +384,253 @@ def build_world_update_prompt(project_id: str, chapter_order: int = 0) -> str:
         "```\n"
         "如果散文中没有需要更新的内容，直接输出「无需更新世界数据」。"
     )
+
+
+# ----------------------------------------------------------------------
+# Book-run prompts: multi-chapter agent task (plan → outline → chapter →
+# word audit → lexicon audit → commit)
+# ----------------------------------------------------------------------
+
+
+def _format_plan_brief(plan: dict) -> str:
+    chapter_count = plan.get("chapter_count") or 0
+    per_chap = plan.get("per_chapter_word_target") or 0
+    tol = plan.get("word_tolerance_pct") or 10
+    direction = (plan.get("overall_direction") or "").strip() or "（未填）"
+    brief = (plan.get("global_brief") or "").strip() or "（无）"
+    start = plan.get("start_chapter_order") or 1
+    lexicon = plan.get("forbidden_lexicon_asset_ids") or []
+    style = plan.get("style_asset_ids") or []
+    return (
+        f"成书计划：{plan.get('title') or '（未命名）'}\n"
+        f"  - 章节数：{chapter_count}（起始章={start}）\n"
+        f"  - 每章目标字数：{per_chap}（容忍度 ±{tol}%）\n"
+        f"  - 整体走向：{direction}\n"
+        f"  - 全局补充：{brief}\n"
+        f"  - 选中禁词资产：{lexicon or '（无）'}\n"
+        f"  - 选中文风资产：{style or '（无）'}"
+    )
+
+
+def build_book_retrieval_planner_prompt(plan: dict) -> str:
+    """Retrieval planner for the RETRIEVE stage of book_run.
+
+    Outputs the same {rationale, calls[]} JSON contract as
+    build_retrieval_planner_prompt so the existing RetrievalPlanner wrapper
+    can consume it unchanged.
+    """
+    return (
+        "你是小说写作 agent 的「书级检索规划员」。任务是整合"
+        "【接下来要生成整本多章节小说】所需的全局上下文检索清单。\n"
+        "你不调用任何工具，只输出 JSON。\n"
+        "\n"
+        "输出格式（严格 JSON，不要 markdown 代码块）：\n"
+        "{\n"
+        '  "rationale": "一句话说明总体检索策略",\n'
+        '  "calls": [\n'
+        '    {"tool": "get_story_overview", "arguments": {}, "reason": "摸清全书叙事阶段"},\n'
+        '    {"tool": "query_segment_summaries", "arguments": {"limit": 30}, "reason": "获取已有段落摘要"},\n'
+        '    {"tool": "get_open_threads", "arguments": {"up_to_chapter": 1}, "reason": "未解决伏笔"}\n'
+        "  ]\n"
+        "}\n"
+        "\n"
+        "可用工具白名单（只从这里选）：\n"
+        "  query_entity, query_relationship, query_graph_neighbors,\n"
+        "  get_open_threads, search_world_rules, search_settings,\n"
+        "  get_recent_scenes, get_manuscript_context, get_story_overview,\n"
+        "  query_segment_summaries, global_search, search_assets, list_assets,\n"
+        "  list_forbidden_lexicon\n"
+        "\n"
+        "硬规则：\n"
+        "- 必须出 get_story_overview 了解全书结构\n"
+        "- 若 overall_direction 或 global_brief 提到任何角色名 → 逐个出 query_entity\n"
+        "- 若选中了文风资产 → 出 list_assets(asset_type='writing_style') 或 search_assets\n"
+        "- 若选中了禁词资产 → 出 list_forbidden_lexicon(include_entries=true)\n"
+        "- 必须出 get_open_threads 获取全书未解决悬念\n"
+        "- calls 数量 4-10 条，不重复\n"
+        "\n"
+        + _format_plan_brief(plan)
+    )
+
+
+def build_book_outline_prompt(plan: dict, retrieval_summary: str = "") -> str:
+    """System prompt for the OUTLINE stage: produce a multi-chapter beat list."""
+    chapter_count = plan.get("chapter_count") or 1
+    per_chap = plan.get("per_chapter_word_target") or 3000
+    start = plan.get("start_chapter_order") or 1
+    return (
+        "你是小说写作 agent 的「成书大纲设计师」。基于作者的成书计划和已检索的全局上下文，"
+        f"输出 {chapter_count} 章的大纲数组（扁平结构，通过 chapter_index 归属到各章）。\n"
+        "\n"
+        f"{_format_plan_brief(plan)}\n"
+        "\n"
+        "## 检索摘要（已为你收集的全局上下文）\n"
+        f"{retrieval_summary.strip() or '（空，请用读工具自行补充必要信息）'}\n"
+        "\n"
+        "## 生成要求\n"
+        f"1. 大纲必须覆盖 {chapter_count} 章，chapter_index 取值 {start} 到 {start + chapter_count - 1}。\n"
+        "2. 每章包含 3-6 个 beat；同一章的 beat 按 scene_order 从 1 开始编号。\n"
+        f"3. 每章所有 beat 的 target_word_count 之和应接近 {per_chap}；每个 beat 按情节权重分配字数。\n"
+        "4. 每章首 beat（scene_order=1）必须携带 direction_hint 字段，一句话描述本章发展方向，呼应作者给出的 overall_direction。\n"
+        "5. 跨章节保持因果递进：新开悬念 → 推进 → 在后章解决或承接下一本。\n"
+        "6. 严格遵守检索到的角色设定和已有伏笔，不得与既定事实矛盾。\n"
+        "7. 不要写具体对话与动作，只写宏观情节目标。\n"
+        "\n"
+        "## 输出格式（唯一合法输出）\n"
+        "直接输出一个 JSON 数组，用 ```json 代码块包裹：\n"
+        "```json\n"
+        "[\n"
+        "  {\n"
+        f'    "chapter_index": {start},\n'
+        '    "scene_order": 1,\n'
+        '    "title": "开篇：契机",\n'
+        '    "summary": "引出主角困境，抛出核心矛盾",\n'
+        '    "pov": "角色名",\n'
+        '    "key_events": ["关键转折 1"],\n'
+        '    "target_word_count": 1200,\n'
+        '    "direction_hint": "本章从日常冲突切入，铺设主反派暗线"\n'
+        "  }\n"
+        "]\n"
+        "```\n"
+        "\n"
+        "可以调用的读工具：query_entity / query_relationship / get_open_threads / search_world_rules / \n"
+        "search_assets / get_asset / global_search / query_segment_summaries / get_story_overview。\n"
+        "严禁调用 manage_* / splice_block / rewrite_span 等写工具。"
+    )
+
+
+def build_chapter_writer_prompt(
+    plan: dict,
+    chapter_order: int,
+    chapter_id: str,
+    chapter_outline: list[dict],
+    prev_chapter_summary: str = "",
+    retrieval_summary: str = "",
+) -> str:
+    """System prompt for generating a single chapter inside book_run.
+
+    Reuses the write_scene 6-step discipline but injects book-level context
+    and tightens the word-count target into a soft goal.
+    """
+    per_chap = plan.get("per_chapter_word_target") or 3000
+    tol = plan.get("word_tolerance_pct") or 10
+    lower = int(per_chap * (1 - tol / 100))
+    upper = int(per_chap * (1 + tol / 100))
+    outline_lines = []
+    for beat in chapter_outline or []:
+        outline_lines.append(
+            f"  - beat#{beat.get('scene_order', '?')} 『{beat.get('title', '')}』 "
+            f"pov={beat.get('pov', '')}  目标字数≈{beat.get('target_word_count', '?')}  "
+            f"摘要：{beat.get('summary', '')}"
+        )
+    outline_block = "\n".join(outline_lines) or "（大纲为空）"
+    return (
+        f"你是小说写作 agent 的「单章执笔」。现在为第 {chapter_order} 章生成正文，"
+        "需要严格遵守成书计划、大纲、既有设定与文风。\n"
+        "\n"
+        f"{_format_plan_brief(plan)}\n"
+        "\n"
+        f"## 本章大纲（chapter_id={chapter_id}）\n"
+        f"{outline_block}\n"
+        "\n"
+        "## 前章摘要\n"
+        f"{prev_chapter_summary.strip() or '（本章为起始章）'}\n"
+        "\n"
+        "## 全局检索摘要\n"
+        f"{retrieval_summary.strip() or '（空）'}\n"
+        "\n"
+        "## 硬目标\n"
+        f"- 本章目标字数：{per_chap}（容忍区间 [{lower}, {upper}]）\n"
+        "- 字数是软目标，先把情节写完整；之后会有字数审计阶段自动补齐或精简。\n"
+        "- 不要堆砌水词凑字数。\n"
+        "- 严禁违反检索到的角色档案、关系、世界规则。\n"
+        "- 避开明显敏感词或作者风格禁用词（如有 forbidden_lexicon 资产，后续禁词审计会兜底）。\n"
+        "\n"
+        "## 执行流程\n"
+        "1. 调用 query_entity/query_relationship 补齐大纲中涉及的每位角色档案与关系。\n"
+        "2. 调用 get_open_threads 确认本章需要推进或承接哪些伏笔。\n"
+        "3. 生成完整章节正文（全部段落）。段落之间用空行分隔。\n"
+        "4. 在最终回答中，用 ```chapter ... ``` 代码块包裹整章正文（不要加其他 JSON / 注释）；"
+        "代码块外可选输出一行 `SUMMARY: xxx`（本章一句话摘要，供后续章节参考）。\n"
+        "5. 不要调用任何写工具；落库由编排器统一完成。\n"
+        "\n"
+        "## 可用工具\n"
+        "读：query_entity, query_relationship, query_chapter, query_scene, get_recent_scenes,\n"
+        "    get_open_threads, search_world_rules, search_settings, search_assets, get_asset,\n"
+        "    get_manuscript_context, search_manuscript, get_manuscript_stats,\n"
+        "    get_story_overview, query_segment_summaries。\n"
+        "禁用：所有 manage_*、splice_block、rewrite_span、upsert_forbidden_lexicon（审计阶段专用）。"
+    )
+
+
+def build_word_audit_prompt(plan: dict, chapter_order: int, chapter_id: str) -> str:
+    """System prompt for the WORD_AUDIT inner loop.
+
+    Tool whitelist is enforced by the orchestrator (only word-related tools
+    + splice_block). This prompt narrates the policy the LLM must follow.
+    """
+    per_chap = plan.get("per_chapter_word_target") or 3000
+    tol = plan.get("word_tolerance_pct") or 10
+    lower = int(per_chap * (1 - tol / 100))
+    upper = int(per_chap * (1 + tol / 100))
+    return (
+        f"你是小说写作 agent 的「字数审计员」。第 {chapter_order} 章（{chapter_id}）"
+        f"已落地全部正文，目标字数 {per_chap}（允许区间 [{lower}, {upper}]）。"
+        "你的唯一任务：把本章字数拉回允许区间，不改变情节骨架。\n"
+        "\n"
+        "## 执行顺序（必须）\n"
+        f"1. 首先调用 get_chapter_word_stats(chapter_id='{chapter_id}', target_word_count={per_chap})，"
+        "拿到 total / diff / 每块字数。\n"
+        "2. 如果 |diff| 已在允许区间内，直接输出 `{\"verdict\":\"pass\"}` 并结束（不再调用任何工具）。\n"
+        "3. 否则：\n"
+        "   - diff < 0（字数不足）：**扩写**\n"
+        "     * 在情绪铺陈/环境描写/角色内心独白稀薄的位置，用 splice_block(position='before' 或 'after') 插入新块。\n"
+        "     * 禁止拉长章节结尾；禁止在收束段后追加新情节。\n"
+        "     * 每次插入字数不超过 |diff| 的 40%，防止过冲。\n"
+        "   - diff > 0（字数超出）：**精简**\n"
+        "     * 用 splice_block(position='replace_range', anchor_block_id=X, end_anchor_block_id=Y, content=新正文) 对冗余块做合并精简。\n"
+        "     * 保留事件骨架、核心对白；删除修饰、排比、无效环境描写。\n"
+        "4. 每次操作后，必须再次调用 get_chapter_word_stats 复核。\n"
+        "5. 最多操作 6 轮；若仍未进入区间，输出 `{\"verdict\":\"fail\", \"reason\":\"...\"}` 让编排器决定。\n"
+        "\n"
+        "## 允许的工具\n"
+        "- get_chapter_word_stats（读）\n"
+        "- query_scene / search_manuscript / get_manuscript_context（读，用于定位合适的插入/删减位置）\n"
+        "- splice_block（写）\n"
+        "其他工具全部禁用，如调用将被编排器忽略。\n"
+        "\n"
+        "## 每次 splice_block 必填 reason\n"
+        "例：reason='在对话外的内心独白薄弱处扩写 180 字补足字数'。"
+    )
+
+
+def build_lexicon_audit_prompt(plan: dict, chapter_order: int, chapter_id: str) -> str:
+    """System prompt for the LEXICON_AUDIT inner loop."""
+    lexicon_ids = plan.get("forbidden_lexicon_asset_ids") or []
+    ids_str = ", ".join(f"'{aid}'" for aid in lexicon_ids) or "（未选中，自动用项目内全部启用资产）"
+    return (
+        f"你是小说写作 agent 的「禁词审计员」。第 {chapter_order} 章（{chapter_id}）"
+        "已落地全部正文。你的唯一任务：对照禁词资产扫描命中，逐条用 rewrite_span 修复。\n"
+        "\n"
+        "## 执行顺序（必须）\n"
+        "1. 首先调用 scan_forbidden_lexicon("
+        f"chapter_id='{chapter_id}', lexicon_asset_ids=[{ids_str}])，拿到命中列表。\n"
+        "2. 如果命中为 0，输出 `{\"verdict\":\"pass\"}` 并结束。\n"
+        "3. 否则：对每个命中——\n"
+        "   a. 如果 context 片段足以唯一定位：直接 rewrite_span(block_id=..., original_text=<含命中的短语>, new_text=<等价改写>)\n"
+        "   b. 如果 original_text 可能在块内不唯一：先 get_manuscript_context 或再次调用 scan_forbidden_lexicon 获取更大上下文，把 original_text 扩到块内唯一。\n"
+        "   c. 改写后新文本必须保持原意，字数变化控制在 ±20%。\n"
+        "4. 所有命中处理完毕后，再次调用 scan_forbidden_lexicon 复核；若有残留继续修复；最多 6 轮。\n"
+        "5. 6 轮后仍有命中则输出 `{\"verdict\":\"fail\", \"remaining\":N}`。\n"
+        "\n"
+        "## 允许的工具\n"
+        "- scan_forbidden_lexicon（读）\n"
+        "- get_manuscript_context（读）\n"
+        "- rewrite_span（写）\n"
+        "其他工具全部禁用。\n"
+        "\n"
+        "## 改写原则\n"
+        "- 用同义或近义表达替换被禁词/句式，不要直接删除导致语意断裂。\n"
+        "- 保留角色口吻和叙事节奏。\n"
+        "- 每次 rewrite_span 必填 reason。"
+    )

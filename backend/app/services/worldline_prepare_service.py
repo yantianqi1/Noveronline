@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
+import asyncio
+import json
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..database import get_engine
 from ..models.task import TaskManager, TaskStatus
 from ..models.worldline import WorldlineSession
+from ..repositories.worldline_prepare_repo import WorldlinePrepareRepository
 from .llm_router import LlmRouter
-from .worldline_prepare_storage import WorldlinePrepareStorage
 
 
 TASK_TYPE = "worldline_prepare"
@@ -48,40 +49,38 @@ class WorldlinePrepareService:
     def __init__(self, engine, llm_router: Optional[LlmRouter] = None):
         self.engine = engine
         self.llm_router = llm_router or LlmRouter()
+        self._repo = WorldlinePrepareRepository(get_engine())
 
-    def start_prepare(self, **payload) -> Dict[str, str]:
+    async def start_prepare(self, **payload) -> Dict[str, str]:
         resolved, container_dir, source, question, world_variables = self._resolve_prepare_context(payload)
         prepare_id = f"prep_{uuid.uuid4().hex[:12]}"
-        task_id = TaskManager().create_task(TASK_TYPE, metadata={"prepare_id": prepare_id, "project_id": resolved["project_id"]})
+        task_id = await TaskManager().create_task(TASK_TYPE, metadata={"prepare_id": prepare_id, "project_id": resolved["project_id"]})
         now = self._now()
-        storage = WorldlinePrepareStorage(container_dir)
-        storage.save_run(
-            {
-                "prepare_id": prepare_id,
-                "task_id": task_id,
-                "label": payload.get("label", ""),
-                "project_id": resolved["project_id"],
-                "graph_id": resolved["graph_id"],
-                "session_scope": resolved["session_scope"],
-                "status": "preparing",
-                "stage": STAGES[0],
-                "can_start": False,
-                "focus_question": question,
-                "branch_count": 1,
-                "source_summary": source["source_summary"],
-                "source": source,
-                "world_variables": [item.to_dict() for item in world_variables],
-                "input_payload": dict(payload),
-                "source_archive_ids": list(resolved["source_archive_ids"]),
-                "source_project_ids": list(resolved["source_project_ids"]),
-                "source_archive_count": resolved["source_archive_count"],
-                "started_session_id": "",
-                "error": None,
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        self._append_event(storage, prepare_id, STAGES[0], "info", "开始加载世界线源输入", {"graph_id": resolved["graph_id"]})
+        self._repo.save_run(self._encode_run({
+            "prepare_id": prepare_id,
+            "task_id": task_id,
+            "label": payload.get("label", ""),
+            "project_id": resolved["project_id"],
+            "graph_id": resolved["graph_id"],
+            "session_scope": resolved["session_scope"],
+            "status": "preparing",
+            "stage": STAGES[0],
+            "can_start": False,
+            "focus_question": question,
+            "branch_count": 1,
+            "source_summary": source["source_summary"],
+            "source": source,
+            "world_variables": [item.to_dict() for item in world_variables],
+            "input_payload": dict(payload),
+            "source_archive_ids": list(resolved["source_archive_ids"]),
+            "source_project_ids": list(resolved["source_project_ids"]),
+            "source_archive_count": resolved["source_archive_count"],
+            "started_session_id": "",
+            "error": None,
+            "created_at": now,
+            "updated_at": now,
+        }))
+        self._append_event(prepare_id, STAGES[0], "info", "开始加载世界线源输入", {"graph_id": resolved["graph_id"]})
         self._start_worker(task_id, prepare_id, container_dir)
         return {"prepare_id": prepare_id, "task_id": task_id}
 
@@ -90,17 +89,16 @@ class WorldlinePrepareService:
 
     def list_prepare_agents(self, prepare_id: str, project_id: Optional[str] = None, graph_id: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         run, container_dir = self._load_run(prepare_id, project_id, graph_id)
-        agents = WorldlinePrepareStorage(container_dir).list_dossiers(prepare_id)
+        agents = [self._decode_dossier(d) for d in self._repo.list_dossiers(prepare_id)]
         return agents, run
 
     def get_dossier_for_session(self, container_dir: str, session, agent_id: str) -> Optional[Dict[str, Any]]:
         if not getattr(session, "prepare_id", ""):
             return None
-        storage = WorldlinePrepareStorage(container_dir)
-        dossier = storage.get_dossier(session.prepare_id, agent_id)
+        dossier = self._repo.get_dossier(session.prepare_id, agent_id)
         if not dossier:
             return None
-        return dossier | {"prepare_id": session.prepare_id}
+        return self._decode_dossier(dossier) | {"prepare_id": session.prepare_id}
 
     def start_session(self, prepare_id: str, project_id: Optional[str] = None, graph_id: Optional[str] = None) -> Tuple[WorldlineSession, Dict[str, Any]]:
         run, container_dir = self._load_run(prepare_id, project_id, graph_id)
@@ -110,8 +108,7 @@ class WorldlinePrepareService:
             session = self.engine.get_session(run["started_session_id"], project_id=run.get("project_id"), graph_id=run["graph_id"])
             if session:
                 return session, run
-        storage = WorldlinePrepareStorage(container_dir)
-        dossiers = storage.list_dossiers(prepare_id)
+        dossiers = [self._decode_dossier(d) for d in self._repo.list_dossiers(prepare_id)]
         world_variables = self.engine.branch_service.normalize_variables(run.get("world_variables", []))
         branches = self.engine.branch_service.build_branches(run["branch_count"], run["source"], run["focus_question"], world_variables)
         self._apply_dossiers(branches[0], dossiers)
@@ -137,17 +134,16 @@ class WorldlinePrepareService:
         self.engine.store.save_session(container_dir, session)
         self.engine.runtime_service.ensure_session_runtime(container_dir, session)
         updated = run | {"started_session_id": session.session_id, "updated_at": self._now()}
-        storage.save_run(updated)
-        self._append_event(storage, prepare_id, STAGES[-1], "info", "prepare 结果已启动为 session", {"session_id": session.session_id})
+        self._repo.save_run(self._encode_run(updated))
+        self._append_event(prepare_id, STAGES[-1], "info", "prepare 结果已启动为 session", {"session_id": session.session_id})
         return session, updated
 
     def build_dialogue_bundle(self, container_dir: str, session, agent: Dict[str, Any]) -> Dict[str, Any]:
         dossier = self.get_dossier_for_session(container_dir, session, agent["agent_id"])
         if not dossier:
             return {}
-        storage = WorldlinePrepareStorage(container_dir)
         peers = []
-        for item in storage.list_dossiers(session.prepare_id):
+        for item in [self._decode_dossier(d) for d in self._repo.list_dossiers(session.prepare_id)]:
             if item["agent_id"] == agent["agent_id"]:
                 continue
             peers.append({"agent_id": item["agent_id"], "display_name": item["display_name"], "agent_kind": item["agent_kind"], "public_profile": item["public_profile"]})
@@ -156,8 +152,7 @@ class WorldlinePrepareService:
     def build_action_views(self, container_dir: str, session, agents: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         if not getattr(session, "prepare_id", ""):
             return {}
-        storage = WorldlinePrepareStorage(container_dir)
-        dossiers = {item["agent_id"]: item for item in storage.list_dossiers(session.prepare_id)}
+        dossiers = {item["agent_id"]: item for item in [self._decode_dossier(d) for d in self._repo.list_dossiers(session.prepare_id)]}
         return {
             agent["agent_id"]: {
                 "display_name": agent["display_name"],
@@ -168,21 +163,18 @@ class WorldlinePrepareService:
         }
 
     def _start_worker(self, task_id: str, prepare_id: str, container_dir: str) -> None:
-        thread = threading.Thread(target=self._run_prepare, args=(task_id, prepare_id, container_dir), daemon=True)
-        thread.start()
+        asyncio.create_task(self._run_prepare(task_id, prepare_id, container_dir))
 
-    def _run_prepare(self, task_id: str, prepare_id: str, container_dir: str) -> None:
-        storage = WorldlinePrepareStorage(container_dir)
+    async def _run_prepare(self, task_id: str, prepare_id: str, container_dir: str) -> None:
         manager = TaskManager()
         try:
-            run = storage.get_run(prepare_id)
-            self._update_task(manager, task_id, 10, "世界线 prepare：已加载源输入", STAGES[0], {})
+            run = self._decode_run(self._repo.get_run(prepare_id))
+            await self._update_task(manager, task_id, 10, "世界线 prepare：已加载源输入", STAGES[0], {})
             branch = self._prepare_branch(run)
             agents = self.engine.runtime_service.registry.list_agents(branch)
             client = self.llm_router.build_client(MODULE_KEY)
-            self._append_event(storage, prepare_id, STAGES[1], "info", "开始物化 agent dossier", {"agent_count": len(agents)})
-            self._materialize_dossiers(
-                storage,
+            self._append_event(prepare_id, STAGES[1], "info", "开始物化 agent dossier", {"agent_count": len(agents)})
+            await self._materialize_dossiers(
                 manager,
                 task_id,
                 prepare_id,
@@ -191,18 +183,18 @@ class WorldlinePrepareService:
                 agents,
                 client,
             )
-            run = (storage.get_run(prepare_id) or {}) | {"status": "ready", "stage": STAGES[-1], "can_start": True, "updated_at": self._now()}
-            storage.save_run(run)
-            self._append_event(storage, prepare_id, STAGES[2], "info", "所有 dossier 校验通过", {"agent_count": len(agents)})
-            self._append_event(storage, prepare_id, STAGES[3], "info", "已完成世界启动快照组装", {})
-            self._append_event(storage, prepare_id, STAGES[4], "info", "prepare 已完成，可开始推演", {})
-            manager.update_task(task_id, status=TaskStatus.COMPLETED, progress=100, message="世界线 prepare 已完成", result={"prepare_id": prepare_id}, progress_detail={"stage": STAGES[-1], "prepare_id": prepare_id})
+            run = (self._decode_run(self._repo.get_run(prepare_id)) or {}) | {"status": "ready", "stage": STAGES[-1], "can_start": True, "updated_at": self._now()}
+            self._repo.save_run(self._encode_run(run))
+            self._append_event(prepare_id, STAGES[2], "info", "所有 dossier 校验通过", {"agent_count": len(agents)})
+            self._append_event(prepare_id, STAGES[3], "info", "已完成世界启动快照组装", {})
+            self._append_event(prepare_id, STAGES[4], "info", "prepare 已完成，可开始推演", {})
+            await manager.update_task(task_id, status=TaskStatus.COMPLETED, progress=100, message="世界线 prepare 已完成", result={"prepare_id": prepare_id}, progress_detail={"stage": STAGES[-1], "prepare_id": prepare_id})
         except Exception as exc:
-            run = storage.get_run(prepare_id)
+            run = self._decode_run(self._repo.get_run(prepare_id))
             if run:
-                storage.save_run(run | {"status": "failed", "stage": run.get("stage", STAGES[0]), "can_start": False, "error": str(exc), "updated_at": self._now()})
-                self._append_event(storage, prepare_id, run.get("stage", STAGES[0]), "error", "prepare 失败", {"error": str(exc)})
-            manager.update_task(task_id, status=TaskStatus.FAILED, progress=100, message="世界线 prepare 失败", error=str(exc), progress_detail={"stage": STAGES[0], "prepare_id": prepare_id})
+                self._repo.save_run(self._encode_run(run | {"status": "failed", "stage": run.get("stage", STAGES[0]), "can_start": False, "error": str(exc), "updated_at": self._now()}))
+                self._append_event(prepare_id, run.get("stage", STAGES[0]), "error", "prepare 失败", {"error": str(exc)})
+            await manager.update_task(task_id, status=TaskStatus.FAILED, progress=100, message="世界线 prepare 失败", error=str(exc), progress_detail={"stage": STAGES[0], "prepare_id": prepare_id})
 
     def _prepare_branch(self, run: Dict[str, Any]):
         variables = self.engine.branch_service.normalize_variables(
@@ -277,9 +269,8 @@ class WorldlinePrepareService:
             "updated_at": now,
         }
 
-    def _materialize_dossiers(
+    async def _materialize_dossiers(
         self,
-        storage: WorldlinePrepareStorage,
         manager: TaskManager,
         task_id: str,
         prepare_id: str,
@@ -290,36 +281,39 @@ class WorldlinePrepareService:
     ) -> None:
         completed = 0
         max_workers = self._prepare_max_workers(client, len(agents))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._build_dossier_for_agent, agent, branch, run): agent
-                for agent in agents
-            }
-            for future in as_completed(futures):
-                agent = futures[future]
-                dossier = future.result()
-                completed += 1
-                storage.save_dossier(prepare_id, dossier)
-                self._append_event(
-                    storage,
-                    prepare_id,
-                    STAGES[1],
-                    "info",
-                    f"完成 agent 整备：{agent['display_name']}",
-                    {"agent_id": agent["agent_id"]},
+        sem = asyncio.Semaphore(max_workers)
+
+        async def _bounded(agent: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+            async with sem:
+                dossier = await asyncio.to_thread(
+                    self._build_dossier_for_agent, agent, branch, run
                 )
-                self._update_task(
-                    manager,
-                    task_id,
-                    10 + int((completed / max(len(agents), 1)) * 55),
-                    "世界线 prepare：正在整备 agent",
-                    STAGES[1],
-                    {
-                        "current": completed,
-                        "total": len(agents),
-                        "agent_id": agent["agent_id"],
-                    },
-                )
+                return agent, dossier
+
+        tasks = [_bounded(agent) for agent in agents]
+        for coro in asyncio.as_completed(tasks):
+            agent, dossier = await coro
+            completed += 1
+            self._repo.save_dossier(prepare_id, self._encode_dossier(dossier))
+            self._append_event(
+                prepare_id,
+                STAGES[1],
+                "info",
+                f"完成 agent 整备：{agent['display_name']}",
+                {"agent_id": agent["agent_id"]},
+            )
+            await self._update_task(
+                manager,
+                task_id,
+                10 + int((completed / max(len(agents), 1)) * 55),
+                "世界线 prepare：正在整备 agent",
+                STAGES[1],
+                {
+                    "current": completed,
+                    "total": len(agents),
+                    "agent_id": agent["agent_id"],
+                },
+            )
 
     def _build_dossier_for_agent(
         self,
@@ -352,18 +346,94 @@ class WorldlinePrepareService:
         branch.relationship_states = relationships
 
     def _load_run(self, prepare_id: str, project_id: Optional[str], graph_id: Optional[str]) -> Tuple[Dict[str, Any], str]:
-        for container_dir in self.engine.store._candidate_containers(project_id, graph_id):
-            storage = WorldlinePrepareStorage(container_dir)
-            run = storage.get_run(prepare_id)
-            if run:
-                return run, container_dir
+        row = self._repo.get_run(prepare_id)
+        if not row:
+            raise ValueError(f"prepare 不存在: {prepare_id}")
+        run = self._decode_run(row)
+        # container_dir is still needed by callers for filesystem-based state
+        for container_dir in self.engine.store._candidate_containers(project_id or run.get("project_id"), graph_id or run.get("graph_id")):
+            return run, container_dir
         raise ValueError(f"prepare 不存在: {prepare_id}")
 
-    def _update_task(self, manager: TaskManager, task_id: str, progress: int, message: str, stage: str, detail: Dict[str, Any]) -> None:
-        manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=progress, message=message, progress_detail={"stage": stage} | detail)
+    async def _update_task(self, manager: TaskManager, task_id: str, progress: int, message: str, stage: str, detail: Dict[str, Any]) -> None:
+        await manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=progress, message=message, progress_detail={"stage": stage} | detail)
 
-    def _append_event(self, storage: WorldlinePrepareStorage, prepare_id: str, stage: str, level: str, message: str, detail: Dict[str, Any]) -> None:
-        storage.append_event({"event_id": f"prep_evt_{uuid.uuid4().hex[:12]}", "prepare_id": prepare_id, "stage": stage, "level": level, "message": message, "detail": detail, "created_at": self._now()})
+    def _append_event(self, prepare_id: str, stage: str, level: str, message: str, detail: Dict[str, Any]) -> None:
+        self._repo.append_event({
+            "event_id": f"prep_evt_{uuid.uuid4().hex[:12]}",
+            "prepare_id": prepare_id,
+            "stage": stage,
+            "level": level,
+            "message": message,
+            "detail_json": json.dumps(detail, ensure_ascii=False),
+            "created_at": self._now(),
+        })
 
     def _now(self) -> str:
         return datetime.now().isoformat()
+
+    # ------------------------------------------------------------------
+    # JSON encode/decode helpers for repo ↔ service dict translation
+    # ------------------------------------------------------------------
+
+    _RUN_JSON_FIELDS = {
+        "source_summary": "source_summary_json",
+        "source": "source_json",
+        "world_variables": "world_variables_json",
+        "input_payload": "input_payload_json",
+        "source_archive_ids": "source_archive_ids_json",
+        "source_project_ids": "source_project_ids_json",
+    }
+
+    _DOSSIER_JSON_FIELDS = {
+        "template_sections": "template_sections_json",
+        "validation_errors": "validation_errors_json",
+        "public_profile": "public_profile_json",
+        "private_profile": "private_profile_json",
+        "runtime_seed_state": "runtime_seed_state_json",
+        "relationship_view": "relationship_view_json",
+        "memory_seed_summary": "memory_seed_summary_json",
+        "source_evidence_summary": "source_evidence_summary_json",
+    }
+
+    def _encode_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert service dict (plain keys) to repo dict (_json column names)."""
+        out = dict(payload)
+        for plain_key, json_key in self._RUN_JSON_FIELDS.items():
+            if plain_key in out:
+                out[json_key] = json.dumps(out.pop(plain_key), ensure_ascii=False)
+        if "can_start" in out:
+            out["can_start"] = int(bool(out["can_start"]))
+        if "source_archive_count" in out:
+            out["source_archive_count"] = int(out["source_archive_count"])
+        # Remove keys not in the table
+        out.pop("label", None)
+        return out
+
+    def _decode_run(self, row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Convert repo dict (_json column names) to service dict (plain keys)."""
+        if not row:
+            return None
+        out = dict(row)
+        for plain_key, json_key in self._RUN_JSON_FIELDS.items():
+            if json_key in out:
+                out[plain_key] = json.loads(out.pop(json_key) or "null")
+        if "can_start" in out:
+            out["can_start"] = bool(out["can_start"])
+        return out
+
+    def _encode_dossier(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert service dossier dict to repo dict with _json columns."""
+        out = dict(payload)
+        for plain_key, json_key in self._DOSSIER_JSON_FIELDS.items():
+            if plain_key in out:
+                out[json_key] = json.dumps(out.pop(plain_key), ensure_ascii=False)
+        return out
+
+    def _decode_dossier(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert repo dossier dict to service dict with plain keys."""
+        out = dict(row)
+        for plain_key, json_key in self._DOSSIER_JSON_FIELDS.items():
+            if json_key in out:
+                out[plain_key] = json.loads(out.pop(json_key) or "null")
+        return out

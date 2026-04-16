@@ -3,18 +3,20 @@ LLM客户端封装
 统一使用OpenAI格式调用
 """
 
+import asyncio
 import copy
 import logging
 import re
 import time
 import uuid
 from contextlib import nullcontext
-from typing import Generator, Optional, Dict, Any, List
-from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
+from typing import AsyncIterator, Generator, Optional, Dict, Any, List
+from openai import AsyncOpenAI, OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 
 from ..config import Config
 from ..services.step_trace_context import get_current_step
 from .llm_json import normalize_json_object, parse_json_response
+from .llm_trace_recorder import append_llm_trace_call
 from .llm_transient import is_transient_llm_error
 from .upstream_error_formatter import format_upstream_service_error
 
@@ -130,6 +132,7 @@ class LLMClient:
         Returns the raw response message object so the caller can inspect tool_calls.
         """
         step_ctx = get_current_step()
+        captured_messages = copy.deepcopy(messages) if step_ctx else None
         t0 = time.monotonic()
         call_id = self._track_register("chat_with_tools")
         try:
@@ -143,10 +146,14 @@ class LLMClient:
             response = self._chat_with_retry(kwargs, call_id)
             usage = self._extract_usage(response)
             if step_ctx:
-                self._record_trace(step_ctx, None, response.choices[0].message.content or "", None, t0, "chat_with_tools", usage=usage)
+                self._record_trace(step_ctx, captured_messages, response.choices[0].message.content or "", None, t0, "chat_with_tools", usage=usage)
             msg = response.choices[0].message
             msg._usage = usage  # Attach for caller access
             return msg
+        except Exception as exc:
+            if step_ctx:
+                self._record_trace(step_ctx, captured_messages, "", str(exc), t0, "chat_with_tools", usage=None)
+            raise
         finally:
             self._track_unregister(call_id)
 
@@ -290,9 +297,9 @@ class LLMClient:
             self._track_unregister(call_id)
 
     def _slot(self):
-        if not self.concurrency_service or not self.channel_key:
-            return nullcontext()
-        return self.concurrency_service.slot(self.channel_key)
+        # Concurrency gating is now async-only via async_slot().
+        # The sync LLMClient path uses nullcontext as a no-op.
+        return nullcontext()
 
     def _chat_with_retry(self, kwargs: Dict[str, Any], call_id: Optional[str]):
         delay = LLM_RETRY_INITIAL_DELAY_SECONDS
@@ -351,26 +358,17 @@ class LLMClient:
                 self._record_trace(step_ctx, captured_messages, "".join(collected), None, t0 or time.monotonic(), "chat_stream")
 
     # ── Activity tracking helpers ──
+    # The sync LLMClient no longer tracks activity since the tracker
+    # is now async-only.  AsyncLLMClient overrides these with await.
 
     def _track_register(self, call_type: str) -> Optional[str]:
-        if not self.activity_tracker or not self.module_key:
-            return None
-        return self.activity_tracker.register(
-            module_key=self.module_key,
-            module_label=self._module_label,
-            model=self.model,
-            channel_key=self.channel_key,
-            call_type=call_type,
-            status="waiting",
-        )
+        return None
 
     def _track_running(self, call_id: Optional[str], status: str = "running") -> None:
-        if call_id and self.activity_tracker:
-            self.activity_tracker.update_status(call_id, status)
+        pass
 
     def _track_unregister(self, call_id: Optional[str]) -> None:
-        if call_id and self.activity_tracker:
-            self.activity_tracker.unregister(call_id)
+        pass
 
     # ── Token usage extraction ──
 
@@ -398,21 +396,114 @@ class LLMClient:
         call_type: str,
         usage: Optional[Dict[str, int]] = None,
     ) -> None:
-        from datetime import datetime
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        record = {
-            "call_id": uuid.uuid4().hex[:12],
-            "module_key": self.module_key,
-            "module_label": self._module_label,
-            "model": self.model,
-            "channel_key": self.channel_key,
-            "call_type": call_type,
-            "started_at": datetime.now().isoformat(timespec="seconds"),
-            "elapsed_ms": elapsed_ms,
-            "messages": messages or [],
-            "response_text": response_text,
-            "error": error,
-        }
-        if usage:
-            record["usage"] = usage
-        step_ctx.record_call(record)
+        append_llm_trace_call(
+            step_ctx,
+            messages=messages,
+            response_text=response_text,
+            error=error,
+            started_at=t0,
+            call_type=call_type,
+            model=self.model,
+            module_key=self.module_key,
+            module_label=self._module_label,
+            channel_key=self.channel_key,
+            usage=usage,
+        )
+
+
+class AsyncLLMClient(LLMClient):
+    """Async OpenAI-compatible LLM client for FastAPI services."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        channel_key: str = "",
+        max_concurrency: int = 0,
+        concurrency_service=None,
+        module_key: str = "",
+        activity_tracker=None,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+        self.channel_key = channel_key
+        self.max_concurrency = int(max_concurrency or 0)
+        self.concurrency_service = concurrency_service
+        self.module_key = module_key
+        self.activity_tracker = activity_tracker
+        self._module_label = self._resolve_module_label(module_key, activity_tracker)
+        if not self.api_key or not self.base_url or not self.model:
+            raise ValueError("LLM 客户端初始化缺少必要配置")
+        self.client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=Config.LLM_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    async def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 4096, response_format: Optional[Dict] = None) -> str:
+        kwargs = self._chat_kwargs(messages, temperature, max_tokens, response_format)
+        response = await self._chat_with_retry(kwargs)
+        return self._clean_content(response.choices[0].message.content)
+
+    async def chat_json_value(self, messages: List[Dict[str, str]], temperature: float = 0.3, max_tokens: int = 4096) -> Any:
+        content = await self.chat(messages, temperature, max_tokens, {"type": "json_object"})
+        return parse_json_response(content)
+
+    async def chat_json(self, messages: List[Dict[str, str]], temperature: float = 0.3, max_tokens: int = 4096) -> Dict[str, Any]:
+        return normalize_json_object(await self.chat_json_value(messages, temperature, max_tokens), "LLM响应")
+
+    async def chat_with_tools(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+    ) -> Any:
+        """Async version of chat_with_tools. Returns the raw response message."""
+        kwargs = self._chat_kwargs(messages, temperature, max_tokens, None)
+        kwargs["tools"] = tools
+        response = await self._chat_with_retry(kwargs)
+        usage = self._extract_usage(response)
+        msg = response.choices[0].message
+        msg._usage = usage
+        return msg
+
+    async def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 4096) -> AsyncIterator[str]:
+        stream = await self.client.chat.completions.create(
+            **self._chat_kwargs(messages, temperature, max_tokens, None),
+            stream=True,
+        )
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+    def sync_chat(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 4096, response_format: Optional[Dict] = None) -> str:
+        return asyncio.run(self.chat(messages, temperature, max_tokens, response_format))
+
+    async def _chat_with_retry(self, kwargs: Dict[str, Any]):
+        delay = LLM_RETRY_INITIAL_DELAY_SECONDS
+        for attempt in range(LLM_TRANSIENT_MAX_RETRIES + 1):
+            try:
+                return await self.client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if not self._should_retry(exc, attempt):
+                    raise
+                self._log_retry(exc, attempt + 1, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, LLM_RETRY_MAX_DELAY_SECONDS)
+        raise RuntimeError("LLM 请求重试流程意外结束")
+
+    def _chat_kwargs(self, messages, temperature, max_tokens, response_format):
+        kwargs = {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        if response_format:
+            kwargs["response_format"] = response_format
+        return kwargs
+
+    def _resolve_module_label(self, module_key: str, activity_tracker) -> str:
+        if not module_key or not activity_tracker:
+            return module_key
+        from ..services.llm_module_registry import MODULE_BY_KEY
+        defn = MODULE_BY_KEY.get(module_key)
+        return defn.label if defn else module_key

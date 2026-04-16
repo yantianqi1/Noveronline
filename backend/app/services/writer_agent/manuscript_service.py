@@ -1,28 +1,56 @@
-"""Manuscript management service — commit, metadata extraction, export."""
+"""Manuscript management service -- commit, metadata extraction, export."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import threading
 from typing import Any
 
-from .novel_db import NovelDB
+from ...database import get_engine
+from ...repositories import EntityRepository, ManuscriptRepository
+from ..assets.manuscript_adapter import ManuscriptAssetAdapter
 
 logger = logging.getLogger(__name__)
 
 
+def _get_adapter(project_id: str) -> ManuscriptAssetAdapter:
+    """Build a ManuscriptAssetAdapter for the given project.
+
+    The adapter owns the complex commit/stats/FTS logic that lives on top
+    of the raw assets table.  A chapter_lookup callback is wired via the
+    ChapterRepository so chapter tags resolve correctly.
+    """
+    from ...repositories import ChapterRepository
+
+    engine = get_engine()
+    chapter_repo = ChapterRepository(engine)
+
+    def chapter_lookup(chapter_id: str | None) -> dict | None:
+        if not chapter_id:
+            return None
+        return chapter_repo.get_chapter(project_id, chapter_id)
+
+    return ManuscriptAssetAdapter(project_id, chapter_lookup=chapter_lookup)
+
+
 class ManuscriptService:
-    """High-level manuscript operations wrapping NovelDB."""
+    """High-level manuscript operations wrapping repository layer."""
 
     def __init__(self) -> None:
-        self._db = NovelDB()
+        self._engine = get_engine()
+
+    def _adapter(self, project_id: str) -> ManuscriptAssetAdapter:
+        return _get_adapter(project_id)
+
+    def _entity_repo(self) -> EntityRepository:
+        return EntityRepository(self._engine)
 
     # ------------------------------------------------------------------
     # Commit
     # ------------------------------------------------------------------
 
-    def commit(
+    async def commit(
         self,
         project_id: str,
         content: str,
@@ -35,8 +63,11 @@ class ManuscriptService:
         involved_entities_json: str | None = None,
     ) -> dict[str, Any]:
         """Commit content to the manuscript. Spawns async metadata extraction."""
-        block = self._db.commit_manuscript_block(
-            project_id, content, source_scene_id, insert_after_block_id,
+        adapter = self._adapter(project_id)
+        block = adapter.commit(
+            content,
+            source_scene_id=source_scene_id,
+            insert_after_block_id=insert_after_block_id,
             chapter_id=chapter_id,
             pov_entity_id=pov_entity_id,
             location=location,
@@ -44,15 +75,13 @@ class ManuscriptService:
         )
         # Legacy: apply chapter_tag if provided without chapter_id
         if chapter_tag and not chapter_id:
-            self._db.tag_manuscript_blocks(project_id, [block["block_id"]], chapter_tag)
+            adapter.tag_blocks([block["block_id"]], chapter_tag)
             block["chapter_tag"] = chapter_tag
 
-        # Async LLM metadata extraction (best-effort)
-        threading.Thread(
-            target=self._extract_metadata_safe,
-            args=(project_id, block["block_id"], content),
-            daemon=True,
-        ).start()
+        # Async LLM metadata extraction (best-effort, fire-and-forget)
+        asyncio.create_task(
+            self._extract_metadata_async(project_id, block["block_id"], content)
+        )
 
         return block
 
@@ -64,10 +93,11 @@ class ManuscriptService:
         self, project_id: str, include_content: bool = True,
         chapter_id: str | None = None,
     ) -> dict[str, Any]:
-        blocks = self._db.list_manuscript_blocks(
-            project_id, include_content, chapter_id=chapter_id,
+        adapter = self._adapter(project_id)
+        blocks = adapter.list_blocks(
+            include_content=include_content, chapter_id=chapter_id,
         )
-        stats = self._db.get_manuscript_stats(project_id)
+        stats = adapter.stats()
         return {
             "blocks": blocks,
             "total_words": stats["total_words"],
@@ -76,45 +106,46 @@ class ManuscriptService:
         }
 
     def get_block(self, project_id: str, block_id: str) -> dict[str, Any] | None:
-        return self._db.get_manuscript_block(project_id, block_id)
+        return self._adapter(project_id).get_block(block_id)
 
     def update_block(self, project_id: str, block_id: str, **kwargs: Any) -> dict[str, Any]:
-        self._db.update_manuscript_block(project_id, block_id, **kwargs)
-        return self._db.get_manuscript_block(project_id, block_id) or {}
+        adapter = self._adapter(project_id)
+        adapter.update_block(block_id, **kwargs)
+        return adapter.get_block(block_id) or {}
 
     def delete_block(self, project_id: str, block_id: str) -> None:
-        self._db.delete_manuscript_block(project_id, block_id)
+        self._adapter(project_id).delete_block(block_id)
 
     def reorder(self, project_id: str, block_ids: list[str]) -> None:
-        self._db.reorder_manuscript_blocks(project_id, block_ids)
+        self._adapter(project_id).reorder(block_ids)
 
     def tag_blocks(self, project_id: str, block_ids: list[str], chapter_tag: str) -> int:
-        return self._db.tag_manuscript_blocks(project_id, block_ids, chapter_tag)
+        return self._adapter(project_id).tag_blocks(block_ids, chapter_tag)
 
     def move_block(
         self, project_id: str, block_id: str,
         target_chapter_id: str | None,
     ) -> dict[str, Any]:
         """Move a manuscript block to a different chapter (or unassign)."""
-        self._db.move_manuscript_block_to_chapter(
-            project_id, block_id, target_chapter_id,
-        )
-        return self._db.get_manuscript_block(project_id, block_id) or {}
+        adapter = self._adapter(project_id)
+        adapter.move_to_chapter(block_id, target_chapter_id)
+        return adapter.get_block(block_id) or {}
 
     def get_stats(self, project_id: str) -> dict[str, Any]:
-        return self._db.get_manuscript_stats(project_id)
+        return self._adapter(project_id).stats()
 
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
 
     def export_text(self, project_id: str, fmt: str = "txt") -> str:
-        text = self._db.export_manuscript(project_id)
+        adapter = self._adapter(project_id)
+        text = adapter.export_text()
         if fmt == "md":
             # Insert chapter headings where chapter changes
-            blocks = self._db.list_manuscript_blocks(project_id, include_content=True)
+            blocks = adapter.list_blocks(include_content=True)
             # Build chapter_id -> title lookup
-            stats = self._db.get_manuscript_stats(project_id)
+            stats = adapter.stats()
             ch_titles = {
                 ch["chapter_id"]: f"第{ch['chapter_order']}章 · {ch['title']}"
                 for ch in stats.get("chapters", [])
@@ -135,10 +166,22 @@ class ManuscriptService:
     # Async metadata extraction
     # ------------------------------------------------------------------
 
+    async def _extract_metadata_async(
+        self, project_id: str, block_id: str, content: str,
+    ) -> None:
+        """Best-effort metadata extraction -- never raises."""
+        try:
+            await asyncio.to_thread(self._extract_metadata, project_id, block_id, content)
+        except Exception:
+            logger.warning(
+                "Manuscript metadata extraction failed for block %s",
+                block_id, exc_info=True,
+            )
+
     def _extract_metadata_safe(
         self, project_id: str, block_id: str, content: str,
     ) -> None:
-        """Best-effort metadata extraction — never raises."""
+        """Sync best-effort metadata extraction -- kept for backward compat."""
         try:
             self._extract_metadata(project_id, block_id, content)
         except Exception:
@@ -155,8 +198,10 @@ class ManuscriptService:
         router = LlmRouter()
         client = router.build_client("writer_orchestrator")
 
+        adapter = self._adapter(project_id)
+
         # Get previous block summary for context
-        blocks = self._db.list_manuscript_blocks(project_id, include_content=False)
+        blocks = adapter.list_blocks(include_content=False)
         current_idx = None
         for i, b in enumerate(blocks):
             if b["block_id"] == block_id:
@@ -201,8 +246,8 @@ class ManuscriptService:
             eid = self._resolve_entity_name(project_id, name)
             involved_ids.append(eid or name)
 
-        self._db.update_manuscript_block(
-            project_id, block_id,
+        adapter.update_block(
+            block_id,
             summary=result.get("summary", ""),
             open_threads_json=json.dumps(
                 result.get("open_threads", []), ensure_ascii=False
@@ -217,7 +262,4 @@ class ManuscriptService:
     def _resolve_entity_name(self, project_id: str, name: str) -> str | None:
         if not name:
             return None
-        entity = self._db.get_entity(project_id, name)
-        if entity:
-            return entity["entity_id"]
-        return None
+        return self._entity_repo().resolve_entity_id(project_id, name)

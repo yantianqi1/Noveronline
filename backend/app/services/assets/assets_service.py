@@ -1,19 +1,21 @@
 """资产库业务服务。
 
-封装双层 (global / project) 存储的 CRUD、过滤、FTS 搜索、批量启停、批量分类。
+封装统一资产仓库的 CRUD、过滤、搜索、批量启停、批量分类。
 所有 ``search_*`` 默认只返回 ``enabled=1`` 的资产，便于 agent 工具直接调用。
 """
 
 from __future__ import annotations
 
 import json
-import re
-import sqlite3
 import uuid
 from datetime import datetime
 from typing import Any, Iterable
 
-from .assets_storage import AssetsStorage, GLOBAL_SCOPE, PROJECT_SCOPE
+from ...database import get_engine
+from ...repositories.asset_repo import AssetRepository
+
+GLOBAL_SCOPE = "global"
+PROJECT_SCOPE = "project"
 
 
 # ----------------------------------------------------------------------
@@ -29,7 +31,7 @@ def _new_id() -> str:
     return f"asset_{uuid.uuid4().hex[:16]}"
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     d = dict(row)
     for k in ("payload_json", "tags_json"):
         raw = d.get(k)
@@ -45,24 +47,6 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return d
 
 
-_FTS_TOKEN_RE = re.compile(r"[\s,;，；、]+")
-
-
-def _build_fts_match(query: str) -> str:
-    """Convert a free-form query into an FTS5 MATCH expression.
-
-    Splits on whitespace/punctuation, drops short tokens that the trigram
-    tokenizer cannot match, and AND-joins the rest. Returns ``""`` if the
-    query has no usable terms — callers should fall back to LIKE.
-    """
-    # FTS5 trigram tokenizer needs ≥3 codepoints per term to produce any trigram.
-    tokens = [t for t in _FTS_TOKEN_RE.split(query.strip()) if len(t) >= 3]
-    if not tokens:
-        return ""
-    quoted = [f'"{t}"' for t in tokens]
-    return " AND ".join(quoted)
-
-
 # ----------------------------------------------------------------------
 # Service
 # ----------------------------------------------------------------------
@@ -71,24 +55,8 @@ def _build_fts_match(query: str) -> str:
 class AssetsService:
     """双层资产库的业务入口。"""
 
-    def __init__(self) -> None:
-        self._global = AssetsStorage.for_global()
-        self._project_cache: dict[str, AssetsStorage] = {}
-
-    # -- routing -------------------------------------------------------
-
-    def _store(self, scope: str, project_id: str | None) -> AssetsStorage:
-        if scope == GLOBAL_SCOPE:
-            return self._global
-        if scope == PROJECT_SCOPE:
-            if not project_id:
-                raise ValueError("project scope requires project_id")
-            store = self._project_cache.get(project_id)
-            if store is None:
-                store = AssetsStorage.for_project(project_id)
-                self._project_cache[project_id] = store
-            return store
-        raise ValueError(f"invalid scope: {scope}")
+    def __init__(self, repo: AssetRepository | None = None) -> None:
+        self._repo = repo or AssetRepository(get_engine())
 
     # -- create / update / delete --------------------------------------
 
@@ -114,41 +82,28 @@ class AssetsService:
             raise ValueError("title is required")
         if scope == PROJECT_SCOPE and not project_id:
             raise ValueError("project scope requires project_id")
-        store = self._store(scope, project_id)
         now = _now()
         aid = asset_id or _new_id()
         word_count = len(content or "")
-        with store.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO assets (
-                    asset_id, scope, project_id, asset_type, category, title,
-                    summary, content, payload_json, tags_json,
-                    source_kind, source_ref, enabled, pinned, word_count,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    aid,
-                    scope,
-                    project_id if scope == PROJECT_SCOPE else None,
-                    asset_type,
-                    category or "",
-                    title,
-                    summary or "",
-                    content or "",
-                    json.dumps(payload or {}, ensure_ascii=False),
-                    json.dumps(tags or [], ensure_ascii=False),
-                    source_kind or "",
-                    source_ref or "",
-                    1 if enabled else 0,
-                    1 if pinned else 0,
-                    word_count,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
+        self._repo.create_asset({
+            "asset_id": aid,
+            "scope": scope,
+            "project_id": project_id if scope == PROJECT_SCOPE else None,
+            "asset_type": asset_type,
+            "category": category or "",
+            "title": title,
+            "summary": summary or "",
+            "content": content or "",
+            "payload_json": json.dumps(payload or {}, ensure_ascii=False),
+            "tags_json": json.dumps(tags or [], ensure_ascii=False),
+            "source_kind": source_kind or "",
+            "source_ref": source_ref or "",
+            "enabled": 1 if enabled else 0,
+            "pinned": 1 if pinned else 0,
+            "word_count": word_count,
+            "created_at": now,
+            "updated_at": now,
+        })
         return self.get(aid, scope=scope, project_id=project_id) or {}
 
     def update(
@@ -163,39 +118,24 @@ class AssetsService:
             "asset_type", "category", "title", "summary", "content",
             "source_kind", "source_ref",
         }
-        sets: list[str] = []
-        params: list[Any] = []
+        update_vals: dict[str, Any] = {}
         for key, value in fields.items():
             if key in allowed:
-                sets.append(f"{key} = ?")
-                params.append(value if value is not None else "")
+                update_vals[key] = value if value is not None else ""
             elif key == "payload":
-                sets.append("payload_json = ?")
-                params.append(json.dumps(value or {}, ensure_ascii=False))
+                update_vals["payload_json"] = json.dumps(value or {}, ensure_ascii=False)
             elif key == "tags":
-                sets.append("tags_json = ?")
-                params.append(json.dumps(value or [], ensure_ascii=False))
+                update_vals["tags_json"] = json.dumps(value or [], ensure_ascii=False)
             elif key == "enabled":
-                sets.append("enabled = ?")
-                params.append(1 if value else 0)
+                update_vals["enabled"] = 1 if value else 0
             elif key == "pinned":
-                sets.append("pinned = ?")
-                params.append(1 if value else 0)
+                update_vals["pinned"] = 1 if value else 0
         if "content" in fields:
-            sets.append("word_count = ?")
-            params.append(len(fields.get("content") or ""))
-        if not sets:
+            update_vals["word_count"] = len(fields.get("content") or "")
+        if not update_vals:
             return self.get(asset_id, scope=scope, project_id=project_id) or {}
-        sets.append("updated_at = ?")
-        params.append(_now())
-        params.append(asset_id)
-        store = self._store(scope, project_id)
-        with store.connect() as conn:
-            conn.execute(
-                f"UPDATE assets SET {', '.join(sets)} WHERE asset_id = ?",
-                params,
-            )
-            conn.commit()
+        update_vals["updated_at"] = _now()
+        self._repo.update_asset(asset_id, **update_vals)
         return self.get(asset_id, scope=scope, project_id=project_id) or {}
 
     def delete(
@@ -205,15 +145,7 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> bool:
-        store = self._store(scope, project_id)
-        with store.connect() as conn:
-            cur = conn.execute("DELETE FROM assets WHERE asset_id = ?", (asset_id,))
-            conn.execute(
-                "DELETE FROM asset_links WHERE src_asset_id = ? OR dst_asset_id = ?",
-                (asset_id, asset_id),
-            )
-            conn.commit()
-            return cur.rowcount > 0
+        return self._repo.delete_asset(asset_id) > 0
 
     # -- read ----------------------------------------------------------
 
@@ -224,11 +156,7 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> dict[str, Any] | None:
-        store = self._store(scope, project_id)
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
-            ).fetchone()
+        row = self._repo.get_asset(asset_id)
         return _row_to_dict(row) if row else None
 
     def find(self, asset_id: str, project_id: str | None = None) -> dict[str, Any] | None:
@@ -250,29 +178,15 @@ class AssetsService:
         limit: int = 200,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        store = self._store(scope, project_id)
-        clauses: list[str] = []
-        params: list[Any] = []
-        if asset_type:
-            clauses.append("asset_type = ?")
-            params.append(asset_type)
-        if category is not None:
-            clauses.append("category = ?")
-            params.append(category)
-        if enabled_only:
-            clauses.append("enabled = 1")
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.extend([limit, offset])
-        with store.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM assets
-                {where}
-                ORDER BY pinned DESC, updated_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                params,
-            ).fetchall()
+        rows = self._repo.list_assets(
+            scope=scope,
+            project_id=project_id,
+            asset_type=asset_type,
+            category=category,
+            enabled_only=enabled_only,
+            limit=limit,
+            offset=offset,
+        )
         return [_row_to_dict(r) for r in rows]
 
     def search(
@@ -286,56 +200,20 @@ class AssetsService:
         enabled_only: bool = True,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """FTS search within a single layer.
-
-        Falls back to LIKE if the query has no trigram-eligible tokens.
-        """
-        store = self._store(scope, project_id)
-        match_expr = _build_fts_match(query)
-        rows: list[sqlite3.Row]
-        with store.connect() as conn:
-            if match_expr:
-                sql = """
-                    SELECT a.*, snippet(assets_fts, 2, '<b>', '</b>', '...', 32) AS snippet
-                    FROM assets_fts
-                    JOIN assets a ON a.rowid = assets_fts.rowid
-                    WHERE assets_fts MATCH ?
-                """
-                params: list[Any] = [match_expr]
-                if asset_type:
-                    sql += " AND a.asset_type = ?"
-                    params.append(asset_type)
-                if category is not None:
-                    sql += " AND a.category = ?"
-                    params.append(category)
-                if enabled_only:
-                    sql += " AND a.enabled = 1"
-                sql += " LIMIT ?"
-                params.append(limit)
-                rows = conn.execute(sql, params).fetchall()
-            else:
-                like = f"%{query}%"
-                sql = """
-                    SELECT a.*, SUBSTR(a.content, 1, 96) AS snippet
-                    FROM assets a
-                    WHERE (a.title LIKE ? OR a.summary LIKE ? OR a.content LIKE ?)
-                """
-                params = [like, like, like]
-                if asset_type:
-                    sql += " AND a.asset_type = ?"
-                    params.append(asset_type)
-                if category is not None:
-                    sql += " AND a.category = ?"
-                    params.append(category)
-                if enabled_only:
-                    sql += " AND a.enabled = 1"
-                sql += " ORDER BY a.updated_at DESC LIMIT ?"
-                params.append(limit)
-                rows = conn.execute(sql, params).fetchall()
+        """Search within a single layer using LIKE."""
+        rows = self._repo.search_assets(
+            query,
+            scope=scope,
+            project_id=project_id,
+            asset_type=asset_type,
+            category=category,
+            enabled_only=enabled_only,
+            limit=limit,
+        )
         results = []
         for r in rows:
             d = _row_to_dict(r)
-            d["snippet"] = r["snippet"] if "snippet" in r.keys() else ""
+            d["snippet"] = (r.get("content") or "")[:96]
             results.append(d)
         return results
 
@@ -420,15 +298,7 @@ class AssetsService:
         ids = list(asset_ids)
         if not ids:
             return 0
-        store = self._store(scope, project_id)
-        placeholders = ",".join("?" * len(ids))
-        with store.connect() as conn:
-            cur = conn.execute(
-                f"UPDATE assets SET enabled = ?, updated_at = ? WHERE asset_id IN ({placeholders})",
-                [1 if enabled else 0, _now(), *ids],
-            )
-            conn.commit()
-            return cur.rowcount
+        return self._repo.batch_set_enabled(ids, enabled, updated_at=_now())
 
     def batch_set_category(
         self,
@@ -441,15 +311,7 @@ class AssetsService:
         ids = list(asset_ids)
         if not ids:
             return 0
-        store = self._store(scope, project_id)
-        placeholders = ",".join("?" * len(ids))
-        with store.connect() as conn:
-            cur = conn.execute(
-                f"UPDATE assets SET category = ?, updated_at = ? WHERE asset_id IN ({placeholders})",
-                [category or "", _now(), *ids],
-            )
-            conn.commit()
-            return cur.rowcount
+        return self._repo.batch_set_category(ids, category, updated_at=_now())
 
     # -- links ---------------------------------------------------------
 
@@ -462,17 +324,12 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> None:
-        store = self._store(scope, project_id)
-        with store.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO asset_links
-                    (src_asset_id, dst_asset_id, relation, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (src_asset_id, dst_asset_id, relation, _now()),
-            )
-            conn.commit()
+        self._repo.upsert_link({
+            "src_asset_id": src_asset_id,
+            "dst_asset_id": dst_asset_id,
+            "relation": relation,
+            "created_at": _now(),
+        })
 
     def list_links(
         self,
@@ -481,10 +338,4 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        store = self._store(scope, project_id)
-        with store.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM asset_links WHERE src_asset_id = ?",
-                (src_asset_id,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+        return self._repo.list_links(src_asset_id)

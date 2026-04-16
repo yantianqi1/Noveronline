@@ -6,7 +6,9 @@ import json
 import logging
 from typing import Any
 
-from .novel_db import NovelDB
+from ...database import get_engine
+from ...repositories import ChapterRepository, EntityRepository
+from ..assets.manuscript_adapter import ManuscriptAssetAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,7 @@ THREADS_BUDGET_RATIO = 0.15   # 15% for open threads
 META_BUDGET_RATIO = 0.10      # 10% for pov/location/narrative_note
 # remaining 10% reserved for entity/relationship queries by the agent
 
-# Continuation-optimized budgets — more raw prose for tone/rhythm matching
+# Continuation-optimized budgets -- more raw prose for tone/rhythm matching
 CONT_TAIL_TEXT_BUDGET_RATIO = 0.40
 CONT_SUMMARY_BUDGET_RATIO = 0.30
 CONT_THREADS_BUDGET_RATIO = 0.12
@@ -38,8 +40,24 @@ def _estimate_tokens(text: str) -> int:
 _EVENTS_BUDGET_RATIO = 0.10
 
 
+def _get_manuscript_adapter(project_id: str) -> ManuscriptAssetAdapter:
+    """Build a ManuscriptAssetAdapter with chapter_lookup wired to ChapterRepository.
+
+    Also used by tool_executors for manuscript search/stats.
+    """
+    engine = get_engine()
+    chapter_repo = ChapterRepository(engine)
+
+    def chapter_lookup(chapter_id: str | None) -> dict | None:
+        if not chapter_id:
+            return None
+        return chapter_repo.get_chapter(project_id, chapter_id)
+
+    return ManuscriptAssetAdapter(project_id, chapter_lookup=chapter_lookup)
+
+
 def _collect_recent_events(
-    db: NovelDB,
+    entity_repo: EntityRepository,
     project_id: str,
     pov_entity_id: str,
     last_block: dict,
@@ -65,7 +83,7 @@ def _collect_recent_events(
 
     for eid in entity_ids[:5]:  # cap to avoid excessive queries
         try:
-            events = db.get_entity_recent_events(project_id, eid, limit=3)
+            events = entity_repo.get_entity_recent_events(project_id, eid, limit=3)
         except Exception:
             continue
         for ev in events:
@@ -100,11 +118,14 @@ def build_continuation_context(
 
     Returns a dict suitable for both frontend display and LLM injection.
     """
-    db = NovelDB()
-    blocks = db.get_manuscript_continuation_blocks(project_id, limit=50)
+    engine = get_engine()
+    entity_repo = EntityRepository(engine)
+    adapter = _get_manuscript_adapter(project_id)
+
+    blocks = adapter.get_continuation_blocks(limit=50)
 
     if not blocks:
-        stats = db.get_manuscript_stats(project_id)
+        stats = adapter.stats()
         return {
             "recent_summaries": [],
             "writing_styles": [],
@@ -196,10 +217,10 @@ def build_continuation_context(
 
     # --- Recent character events (use reserved 10% budget) ---
     recent_character_events = _collect_recent_events(
-        db, project_id, last_pov, last_block, token_budget,
+        entity_repo, project_id, last_pov, last_block, token_budget,
     )
 
-    stats = db.get_manuscript_stats(project_id)
+    stats = adapter.stats()
 
     # --- Enabled writing_style assets (global + project), if any ---
     writing_styles: list[dict[str, Any]] = []

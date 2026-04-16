@@ -10,8 +10,9 @@ import pytest
 from app import create_app
 from app.config import Config
 from app.models.project import ProjectManager, ProjectStatus
+from app.services.llm_router import LlmRouter
 
-from tests.seed_test_helpers import install_fake_seed_llm
+from tests.seed_test_helpers import FakeSeedLlmClient, install_fake_seed_llm
 
 NOVEL_TEXT = """
 第1章 镜湖夜
@@ -115,6 +116,46 @@ def test_new_pipeline_end_to_end(tmp_path, monkeypatch):
     # in test_character_agent_profile_generator.py. Here we just verify the
     # artifact is produced.
     assert "profile_count" in agent_profiles
+
+
+def test_new_pipeline_only_calls_active_llm_modules(tmp_path, monkeypatch):
+    ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
+    Config.ZEP_API_KEY = None
+    state = {"anchor_calls": 0}
+    module_calls = {}
+
+    def fake_build_client(self, module_key):
+        module_calls[module_key] = module_calls.get(module_key, 0) + 1
+        return FakeSeedLlmClient(module_key, state)
+
+    monkeypatch.setattr(LlmRouter, "build_client", fake_build_client)
+
+    app = create_app()
+    client = app.test_client()
+
+    file_data = (io.BytesIO(NOVEL_TEXT.encode("utf-8")), "test_novel.txt")
+    resp = client.post(
+        "/api/project/seed/extract",
+        data={
+            "files": file_data,
+            "analysis_goal": "分析镜湖旧案的人物关系与剧情线",
+            "project_name": "镜湖测试",
+            "use_llm": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 202, f"Upload failed: {resp.status_code} {resp.data}"
+    task_id = resp.get_json()["data"]["task_id"]
+
+    task_result = wait_for_task(client, task_id)
+    assert task_result["status"] == "completed", f"Task failed: {task_result.get('error', task_result)}"
+    assert module_calls.get("sequential_reading", 0) > 0
+    assert module_calls.get("story_ontology", 0) > 0
+    assert module_calls.get("character_agent_profile", 0) > 0
+    assert module_calls.get("local_block_facts", 0) == 0
+    assert module_calls.get("anchor_point_summary", 0) == 0
+    assert module_calls.get("contextual_block_analysis", 0) == 0
+    assert module_calls.get("novel_chapter_summarizer", 0) == 0
 
 
 def test_new_pipeline_offline(tmp_path, monkeypatch):

@@ -4,18 +4,32 @@ until LLM decides not to call any more tools.
 Ported from the claude-code-from-scratch TypeScript agent loop pattern.
 """
 
-import concurrent.futures
+import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Generator, List
+from collections.abc import AsyncIterator
+from typing import Any, Dict, List
 
 from .tools import TOOL_DISPLAY_FORMATTERS
 
 logger = logging.getLogger(__name__)
 
-# Write tools modify DB state — must execute serially to avoid SQLite WAL contention.
-_WRITE_TOOL_NAMES = {"manage_entity", "manage_thread", "manage_world_rule", "manage_relationship"}
+# Write tools modify DB state -- must execute serially to avoid SQLite WAL contention.
+# Write tools modify DB state -- must execute serially to avoid SQLite WAL contention.
+_WRITE_TOOL_NAMES = {
+    "manage_entity",
+    "manage_thread",
+    "manage_world_rule",
+    "manage_relationship",
+    "record_character_event",
+    "splice_block",
+    "rewrite_span",
+    "upsert_forbidden_lexicon",
+}
+
+# Read tools that never mutate state.
+_READ_TOOL_NAMES_EXCLUDED = _WRITE_TOOL_NAMES
 
 
 class AgentLoop:
@@ -69,7 +83,7 @@ class AgentLoop:
     def _context_chars(self) -> int:
         return sum(len(str(m.get("content", ""))) for m in self.messages)
 
-    def run(self, user_message: str) -> Generator[Dict[str, Any], None, None]:
+    async def run(self, user_message: str) -> AsyncIterator[Dict[str, Any]]:
         """
         Run the agent loop. Yields events:
         - {"type": "tool_call", "name": str, "input": dict}
@@ -93,7 +107,7 @@ class AgentLoop:
                 "messages": full_messages,
             }
             try:
-                response = self.client.chat_with_tools(
+                response = await self.client.chat_with_tools(
                     messages=full_messages,
                     tools=self.tools,
                     temperature=0.3,
@@ -149,39 +163,39 @@ class AgentLoop:
                 yield {"type": "tool_call", **self._stamp(), "round": round_num, "name": tool_name, "input": tool_input, "display": display}
                 pending.append((tc, tool_name, tool_input))
 
-            # Execute tools: read-only tools run in parallel, write tools run serially.
-            def _run_tool(item):
-                tc, tool_name, tool_input = item
+            # Execute tools: read-only tools run in parallel via asyncio, write tools run serially.
+            def _run_tool_sync(item):
+                tc_inner, tool_name_inner, tool_input_inner = item
                 t_start = time.monotonic()
                 try:
-                    result = execute_tool(tool_name, tool_input, self.project_id)
+                    result = execute_tool(tool_name_inner, tool_input_inner, self.project_id)
                     elapsed = int((time.monotonic() - t_start) * 1000)
-                    return tc, tool_name, result, "ok", elapsed
+                    return tc_inner, tool_name_inner, result, "ok", elapsed
                 except Exception as exc:
-                    logger.exception("Tool %s failed", tool_name)
+                    logger.exception("Tool %s failed", tool_name_inner)
                     elapsed = int((time.monotonic() - t_start) * 1000)
-                    return tc, tool_name, f"工具执行失败: {exc}", "error", elapsed
+                    return tc_inner, tool_name_inner, f"工具执行失败: {exc}", "error", elapsed
 
             read_pending = [p for p in pending if p[1] not in _WRITE_TOOL_NAMES]
             write_pending = [p for p in pending if p[1] in _WRITE_TOOL_NAMES]
 
             results_map: Dict[str, tuple] = {}
 
-            # Phase A: read tools in parallel
-            if len(read_pending) == 1:
-                tc, tool_name, result, status, tool_ms = _run_tool(read_pending[0])
-                results_map[tc.id] = (tc, tool_name, result, status, tool_ms)
-            elif read_pending:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-                    futures = {pool.submit(_run_tool, item): item[0].id for item in read_pending}
-                    for future in concurrent.futures.as_completed(futures):
-                        tc, tool_name, result, status, tool_ms = future.result()
-                        results_map[tc.id] = (tc, tool_name, result, status, tool_ms)
+            # Phase A: read tools in parallel via asyncio.to_thread
+            if read_pending:
+                read_coros = [
+                    asyncio.to_thread(_run_tool_sync, item) for item in read_pending
+                ]
+                read_results = await asyncio.gather(*read_coros)
+                for tc_r, tool_name_r, result_r, status_r, tool_ms_r in read_results:
+                    results_map[tc_r.id] = (tc_r, tool_name_r, result_r, status_r, tool_ms_r)
 
             # Phase B: write tools serially (SQLite WAL safety)
             for item in write_pending:
-                tc, tool_name, result, status, tool_ms = _run_tool(item)
-                results_map[tc.id] = (tc, tool_name, result, status, tool_ms)
+                tc_w, tool_name_w, result_w, status_w, tool_ms_w = await asyncio.to_thread(
+                    _run_tool_sync, item
+                )
+                results_map[tc_w.id] = (tc_w, tool_name_w, result_w, status_w, tool_ms_w)
 
             # Append results in original order (deterministic message history)
             for tc, tool_name, tool_input in pending:

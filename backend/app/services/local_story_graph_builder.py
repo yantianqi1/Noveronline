@@ -8,8 +8,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 ProgressCallback = Optional[Callable[[Dict[str, Any]], None]]
 
+from ..database import get_engine
+from ..repositories.graph_repo import GraphRepository
 from .local_story_graph_models import EvidenceRef, GraphEdge, GraphNode, GraphSnapshot
-from .local_story_graph_storage import LocalStoryGraphStorage
 from .local_story_graph_support import (
     DEFAULT_ARTIFACT_EDGE,
     DEFAULT_EVENT_EDGE,
@@ -34,8 +35,8 @@ from .local_story_graph_support import (
 
 
 class LocalStoryGraphBuilder:
-    def __init__(self, storage: Optional[LocalStoryGraphStorage] = None):
-        self.storage = storage or LocalStoryGraphStorage()
+    def __init__(self, repo: Optional[GraphRepository] = None):
+        self._repo = repo or GraphRepository(get_engine())
 
     def build_for_project(
         self,
@@ -90,7 +91,7 @@ class LocalStoryGraphBuilder:
             edges=edges,
         )
         emit("persist", 92, counts={"nodes": len(nodes), "edges": len(edges)})
-        self.storage.save_snapshot(project_id, snapshot)
+        self._repo.save_snapshot(project_id, snapshot.graph_id, snapshot.to_dict())
         entity_types = sorted({label for node in nodes for label in node.labels if label not in {"Entity", "Node"}})
         emit("finalize", 100, counts={
             "nodes": len(nodes),

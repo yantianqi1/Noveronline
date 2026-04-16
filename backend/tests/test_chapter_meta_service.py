@@ -1,108 +1,49 @@
 """ChapterMetaService 单元测试。"""
 
 import json
-import os
-import sqlite3
-import tempfile
 
 import pytest
 
-from app.services.chapter_meta_storage import ChapterMetaStorage
+from sqlalchemy import create_engine
+
+from app.database import init_db
+from app.repositories.chapter_repo import ChapterRepository
 from app.services.chapter_meta_service import ChapterMetaService
 
 
 @pytest.fixture
-def tmp_db():
-    """创建临时数据库路径。"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield os.path.join(tmpdir, "test_chapter_meta.sqlite3")
+def engine():
+    """Create an in-memory engine with all tables."""
+    eng = create_engine("sqlite:///:memory:", future=True)
+    init_db(eng)
+    return eng
 
 
 @pytest.fixture
-def storage(tmp_db):
-    return ChapterMetaStorage(db_path=tmp_db)
+def repo(engine):
+    return ChapterRepository(engine)
 
 
 @pytest.fixture
-def service(storage):
-    return ChapterMetaService(storage=storage)
+def service(repo):
+    return ChapterMetaService(repo=repo)
 
 
 class TestChapterMetaStorage:
-    def test_schema_creation(self, storage):
-        """验证表和索引成功创建。"""
-        with storage.connect() as conn:
-            tables = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='chapter_meta'"
-            ).fetchall()
-            assert len(tables) == 1
+    def test_schema_creation(self, engine):
+        """Verify tables are created by init_db."""
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        assert "chapter_meta" in inspector.get_table_names()
+        assert "chapter_content" in inspector.get_table_names()
 
-    def test_idempotent_schema(self, storage):
-        """确保多次 ensure_schema 不会报错。"""
-        storage.ensure_schema()
-        storage.ensure_schema()
-        with storage.connect() as conn:
-            tables = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='chapter_meta'"
-            ).fetchall()
-            assert len(tables) == 1
-
-    def test_ensure_schema_rebuilds_legacy_chapter_index_unique_constraint(self, tmp_db):
-        """旧库若唯一索引仍指向 chapter_index，应迁移到 chapter_order。"""
-        conn = sqlite3.connect(tmp_db)
-        conn.execute(
-            """
-            CREATE TABLE chapter_meta (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id TEXT NOT NULL,
-                chapter_index INTEGER NOT NULL,
-                chapter_id TEXT NOT NULL DEFAULT '',
-                title TEXT NOT NULL DEFAULT '',
-                summary_text TEXT NOT NULL DEFAULT '',
-                open_threads_json TEXT NOT NULL DEFAULT '[]',
-                timeline_note TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX idx_chapter_meta_unique ON chapter_meta(project_id, chapter_index)"
-        )
-        conn.execute(
-            "CREATE INDEX idx_chapter_meta_project ON chapter_meta(project_id, chapter_index ASC)"
-        )
-        conn.execute(
-            """
-            INSERT INTO chapter_meta (
-                project_id, chapter_index, chapter_id, title, summary_text,
-                open_threads_json, timeline_note, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("proj_legacy", 1, "chapter_0001", "旧标题", "旧摘要", "[]", "", "now", "now"),
-        )
-        conn.commit()
-        conn.close()
-
-        storage = ChapterMetaStorage(db_path=tmp_db)
-        service = ChapterMetaService(storage=storage)
-
-        service.save_chapter_summary(
-            project_id="proj_legacy",
-            chapter_index=1,
-            summary_text="新摘要",
-        )
-
-        with storage.connect() as conn:
-            index_cols = conn.execute(
-                "PRAGMA index_info(idx_chapter_meta_unique)"
-            ).fetchall()
-            assert [row["name"] for row in index_cols] == ["project_id", "chapter_order"]
-
-        result = service.get_single_summary("proj_legacy", 1)
-        assert result is not None
-        assert result["summary_text"] == "新摘要"
-
+    def test_idempotent_schema(self, engine):
+        """Ensure multiple init_db calls don't raise."""
+        init_db(engine)
+        init_db(engine)
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        assert "chapter_meta" in inspector.get_table_names()
 
 
 class TestChapterMetaServiceWrite:

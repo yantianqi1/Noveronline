@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from app.services.llm_concurrency_service import LlmConcurrencyService
 
 
@@ -121,6 +123,25 @@ def test_concurrency_service_does_not_interrupt_inflight_requests_when_limit_shr
     release_worker.set()
     thread.join()
     assert service.snapshot("channel_gamma") == {
+        "limit": 1,
+        "inflight": 0,
+        "waiting": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_concurrency_service_supports_async_slot():
+    service = LlmConcurrencyService()
+    service.set_limit("channel_async", 1)
+
+    async with service.async_slot("channel_async"):
+        assert service.snapshot("channel_async") == {
+            "limit": 1,
+            "inflight": 1,
+            "waiting": 0,
+        }
+
+    assert service.snapshot("channel_async") == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 import uuid
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
-from .assets_storage import AssetsStorage
+from app.database import get_engine
 
 
 _BLOCK_ORDER_GAP = 10
@@ -40,7 +41,7 @@ _PAYLOAD_KEYS = (
 )
 
 
-def _row_to_block(row: sqlite3.Row, include_content: bool = True) -> dict[str, Any]:
+def _row_to_block(row: Any, include_content: bool = True) -> dict[str, Any]:
     payload = {}
     raw = row["payload_json"]
     if raw:
@@ -78,16 +79,30 @@ class ManuscriptAssetAdapter:
 
     def __init__(self, project_id: str, chapter_lookup: ChapterLookup | None = None):
         self.project_id = project_id
-        self.store = AssetsStorage.for_project(project_id)
+        self._engine = get_engine()
         self._chapter_lookup = chapter_lookup or (lambda _cid: None)
+
+    @contextmanager
+    def _connect(self) -> Iterator[Any]:
+        """Yield a DBAPI connection backed by the shared SQLAlchemy engine."""
+        raw = self._engine.raw_connection()
+        # SQLAlchemy pool wraps the DBAPI connection; access the underlying
+        # sqlite3.Connection to set row_factory properly.
+        inner = raw.driver_connection if hasattr(raw, "driver_connection") else raw
+        inner.row_factory = sqlite3.Row
+        try:
+            yield inner
+            inner.commit()
+        finally:
+            raw.close()
 
     # ------------------------------------------------------------------
     # SQL helpers
     # ------------------------------------------------------------------
 
     def _select_blocks(
-        self, conn: sqlite3.Connection, where: str = "", params: tuple = ()
-    ) -> list[sqlite3.Row]:
+        self, conn: Any, where: str = "", params: tuple = ()
+    ) -> list[Any]:
         sql = """
             SELECT * FROM assets
             WHERE asset_type = 'manuscript_block' AND project_id = ?
@@ -99,7 +114,7 @@ class ManuscriptAssetAdapter:
         sql += " ORDER BY CAST(json_extract(payload_json, '$.block_order') AS INTEGER)"
         return conn.execute(sql, all_params).fetchall()
 
-    def _max_block_order(self, conn: sqlite3.Connection) -> int:
+    def _max_block_order(self, conn: Any) -> int:
         row = conn.execute(
             """
             SELECT COALESCE(MAX(CAST(json_extract(payload_json, '$.block_order') AS INTEGER)), 0) AS mx
@@ -109,7 +124,7 @@ class ManuscriptAssetAdapter:
         ).fetchone()
         return int(row["mx"] or 0)
 
-    def _set_block_order(self, conn: sqlite3.Connection, asset_id: str, order: int) -> None:
+    def _set_block_order(self, conn: Any, asset_id: str, order: int) -> None:
         conn.execute(
             """
             UPDATE assets
@@ -148,7 +163,7 @@ class ManuscriptAssetAdapter:
         word_count = len(content)
         chapter_tag = self._resolve_chapter_tag(chapter_id)
 
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             # Determine block_order
             if insert_after_block_id:
                 ref = conn.execute(
@@ -230,7 +245,7 @@ class ManuscriptAssetAdapter:
             "committed_at": now,
         }
 
-    def _renumber(self, conn: sqlite3.Connection) -> None:
+    def _renumber(self, conn: Any) -> None:
         rows = self._select_blocks(conn)
         for idx, r in enumerate(rows):
             self._set_block_order(conn, r["asset_id"], (idx + 1) * _BLOCK_ORDER_GAP)
@@ -238,7 +253,7 @@ class ManuscriptAssetAdapter:
     def list_blocks(
         self, *, include_content: bool = True, chapter_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             if chapter_id is not None:
                 rows = self._select_blocks(
                     conn,
@@ -254,7 +269,7 @@ class ManuscriptAssetAdapter:
             return blocks
 
     def get_block(self, block_id: str) -> dict[str, Any] | None:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM assets WHERE asset_id = ? AND asset_type = 'manuscript_block'",
                 (block_id,),
@@ -267,7 +282,7 @@ class ManuscriptAssetAdapter:
             "chapter_id", "chapter_tag", "open_threads_json", "pov_entity_id",
             "involved_entities_json", "location", "narrative_note",
         }
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT payload_json, content FROM assets WHERE asset_id = ?",
                 (block_id,),
@@ -308,7 +323,7 @@ class ManuscriptAssetAdapter:
             conn.commit()
 
     def delete_block(self, block_id: str) -> None:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             conn.execute(
                 "DELETE FROM assets WHERE asset_id = ? AND asset_type = 'manuscript_block'",
                 (block_id,),
@@ -316,13 +331,13 @@ class ManuscriptAssetAdapter:
             conn.commit()
 
     def reorder(self, block_ids: list[str]) -> None:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             for idx, bid in enumerate(block_ids):
                 self._set_block_order(conn, bid, (idx + 1) * _BLOCK_ORDER_GAP)
             conn.commit()
 
     def tag_blocks(self, block_ids: list[str], chapter_tag: str) -> int:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             for bid in block_ids:
                 row = conn.execute(
                     "SELECT payload_json FROM assets WHERE asset_id = ?",
@@ -355,7 +370,7 @@ class ManuscriptAssetAdapter:
     # ------------------------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT COUNT(*) AS total_blocks, COALESCE(SUM(word_count), 0) AS total_words
@@ -407,10 +422,11 @@ class ManuscriptAssetAdapter:
         }
 
     def search_fts(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        # Reuse the assets FTS index, restricting to manuscript_block.
-        from .assets_service import _build_fts_match
-        match_expr = _build_fts_match(query)
-        with self.store.connect() as conn:
+        # Build FTS match expression inline
+        terms = query.split()
+        parts = [f'"{t.replace(chr(34), chr(34)*2)}"' for t in terms if len(t) >= 3]
+        match_expr = " OR ".join(parts) if parts else ""
+        with self._connect() as conn:
             if match_expr:
                 rows = conn.execute(
                     """
@@ -463,7 +479,7 @@ class ManuscriptAssetAdapter:
         return "\n\n".join(b["content"] for b in blocks)
 
     def get_continuation_blocks(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self.store.connect() as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM assets

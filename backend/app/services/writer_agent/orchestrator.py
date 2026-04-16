@@ -1,11 +1,13 @@
 """Dual-layer writer orchestrator: orchestrator agent + writer agent."""
 
+import asyncio
 import json
 import logging
 import re
 import time
 import uuid
-from typing import Any, Dict, Generator, Optional
+from collections.abc import AsyncIterator
+from typing import Any, Dict, Optional
 
 from .agent_loop import AgentLoop
 from .prompts import build_orchestrator_prompt
@@ -13,7 +15,10 @@ from .retrieval_planner import RetrievalPlanner
 from .tools import NOVEL_TOOLS, MANUSCRIPT_TOOLS, ASSET_TOOLS, UNIFIED_TOOLS
 from .writer import WriterComposer
 from .post_processor import PostProcessor
-from .novel_db import NovelDB
+
+from ...database import get_engine
+from ...repositories.chapter_repo import ChapterRepository
+from ...repositories.preset_repo import PresetRepository
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +38,7 @@ class WriterOrchestrator:
         from ...services.llm_router import LlmRouter
         self.router = llm_router or LlmRouter()
 
-    def run(self, request: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
+    async def run(self, request: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
         """
         Execute the full writing pipeline.
 
@@ -64,9 +69,10 @@ class WriterOrchestrator:
         chapter_id = request.get("chapter_id", "")
         scene_order = request.get("scene_order", 1)
 
-        # Ensure novel.sqlite3 exists
-        db = NovelDB()
-        db.ensure_schema(project_id)
+        # Repositories for novel data access
+        engine = get_engine()
+        chapter_repo = ChapterRepository(engine)
+        preset_repo = PresetRepository(engine)
 
         # --- Phase 1: Orchestrator Agent ---
 
@@ -86,7 +92,7 @@ class WriterOrchestrator:
 
         system_prompt = build_orchestrator_prompt(task_type, context)
         try:
-            orchestrator_client = self.router.build_client("writer_orchestrator")
+            orchestrator_client = await self.router.build_async_client("writer_orchestrator")
         except ValueError as exc:
             yield {"type": "error", **_stamp(), "message": f"LLM 模块未绑定 (writer_orchestrator): {exc}"}
             return
@@ -106,7 +112,7 @@ class WriterOrchestrator:
                 "message": "检索规划员分析中...",
             }
             planner = RetrievalPlanner(self.router)
-            plan_dict = planner.plan(task_type, context)
+            plan_dict = await asyncio.to_thread(planner.plan, task_type, context)
             retrieval_plan_text = RetrievalPlanner.render_for_user_message(plan_dict)
             yield {
                 "type": "retrieval_plan",
@@ -150,7 +156,7 @@ class WriterOrchestrator:
         brief_content = ""
         tool_count = 0
         tool_results_raw: list[dict] = []  # Collect raw tool outputs
-        for event in agent_loop.run(user_msg):
+        async for event in agent_loop.run(user_msg):
             if event["type"] == "brief_ready":
                 brief_content = event.get("content", "")
             elif event["type"] in ("tool_call", "tool_result", "thinking", "prompt_snapshot"):
@@ -179,7 +185,7 @@ class WriterOrchestrator:
         # Parse writing_brief
         writing_brief = self._parse_brief(brief_content, context)
 
-        # Inject raw tool results directly — bypasses LLM summarization loss
+        # Inject raw tool results directly -- bypasses LLM summarization loss
         if tool_results_raw:
             writing_brief["_tool_results"] = tool_results_raw
 
@@ -193,7 +199,7 @@ class WriterOrchestrator:
         # Force-inject chapter outline into writing_brief so the writer
         # composer always has it, regardless of orchestrator tool calls.
         if chapter_id and task_type in ("write_scene", "continue"):
-            chapter = db.get_chapter_by_id(project_id, chapter_id)
+            chapter = await asyncio.to_thread(chapter_repo.get_chapter, project_id, chapter_id)
             if not chapter:
                 logger.warning("Chapter %s not found for project %s, skipping outline injection", chapter_id, project_id)
             elif chapter.get("outline_json"):
@@ -209,7 +215,8 @@ class WriterOrchestrator:
         # composer always has it, even if the orchestrator brief missed these keys.
         if task_type == "continue":
             from .manuscript_context_builder import build_continuation_context
-            cont_ctx = build_continuation_context(
+            cont_ctx = await asyncio.to_thread(
+                build_continuation_context,
                 project_id, last_block_id=context.get("last_block_id") or None,
             )
             if cont_ctx.get("tail_text"):
@@ -242,8 +249,9 @@ class WriterOrchestrator:
         if task_type == "outline":
             outline = self._parse_outline(brief_content)
             if chapter_id:
-                db.ensure_chapter(project_id, chapter_id)
-                db.update_chapter(
+                await asyncio.to_thread(chapter_repo.ensure_chapter, project_id, chapter_id)
+                await asyncio.to_thread(
+                    chapter_repo.update_chapter,
                     project_id, chapter_id,
                     outline_json=json.dumps(outline, ensure_ascii=False),
                 )
@@ -259,13 +267,14 @@ class WriterOrchestrator:
 
         # --- Phase 2: Writer Agent ---
         try:
-            writer_model = self.router.build_client("writer_composer").model
+            writer_client = await self.router.build_async_client("writer_composer")
+            writer_model = writer_client.model
         except Exception:
             writer_model = "unknown"
         yield {"type": "orchestrator_status", "phase": "writing", **_stamp(), "message": "写作层启动中...", "model": writer_model}
 
         # Load preset prompt
-        preset_prompt = self._load_preset(project_id, request.get("preset_id"))
+        preset_prompt = await asyncio.to_thread(self._load_preset, project_id, request.get("preset_id"))
 
         composer = WriterComposer(llm_router=self.router)
 
@@ -286,20 +295,19 @@ class WriterOrchestrator:
         full_text = ""
 
         try:
-            stream = composer.compose_stream(writing_brief, preset_prompt)
+            async for chunk in composer.compose_stream(writing_brief, preset_prompt):
+                full_text += chunk
+                yield {"type": "writer_token", "token": chunk}
         except ValueError as exc:
             yield {"type": "error", **_stamp(), "message": f"LLM 模块未绑定 (writer_composer): {exc}"}
             return
-
-        for chunk in stream:
-            full_text += chunk
-            yield {"type": "writer_token", "token": chunk}
 
         # --- Phase 3: Post-Processing ---
         scene_id = request.get("scene_id") or f"sc_{uuid.uuid4().hex[:12]}"
 
         processor = PostProcessor()
-        result = processor.process(
+        result = await asyncio.to_thread(
+            processor.process,
             project_id=project_id,
             chapter_id=chapter_id,
             scene_order=scene_order,
@@ -469,8 +477,8 @@ class WriterOrchestrator:
 
     def _load_preset(self, project_id: str, preset_id: Optional[str]) -> str:
         """Load writing preset prompt. Falls back to default if not found."""
-        db = NovelDB()
-        presets = db.list_presets(project_id)
+        preset_repo = PresetRepository(get_engine())
+        presets = preset_repo.list_presets(project_id)
 
         if preset_id:
             for p in presets:

@@ -1,6 +1,6 @@
 """异步小说种子提取任务服务（四阶段管线）。"""
 
-import threading
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from ..models.project import ProjectManager, ProjectStatus
@@ -38,7 +38,7 @@ class SeedExtractTaskService:
         self.ontology_generator = ontology_generator or StoryOntologyGenerator()
         self.character_agent_profile_generator = character_agent_profile_generator or CharacterAgentProfileGenerator()
 
-    def create_task(
+    async def create_task(
         self,
         project_id: str,
         project_name: str,
@@ -47,7 +47,7 @@ class SeedExtractTaskService:
         use_llm: bool,
         segment_token_limit: int = 50000,
     ) -> str:
-        task_id = self.task_manager.create_task(
+        task_id = await self.task_manager.create_task(
             task_type="seed_extract",
             metadata={"project_id": project_id, "project_name": project_name},
         )
@@ -57,27 +57,12 @@ class SeedExtractTaskService:
         project.status = ProjectStatus.SEED_PROCESSING
         project.seed_task_id = task_id
         ProjectManager.save_project(project)
-        self._start_worker(task_id, project_id, project_name, analysis_goal, additional_context, use_llm, segment_token_limit)
+        asyncio.create_task(
+            self._run_worker(task_id, project_id, project_name, analysis_goal, additional_context, use_llm, segment_token_limit)
+        )
         return task_id
 
-    def _start_worker(
-        self,
-        task_id: str,
-        project_id: str,
-        project_name: str,
-        analysis_goal: str,
-        additional_context: str,
-        use_llm: bool,
-        segment_token_limit: int = 50000,
-    ) -> None:
-        thread = threading.Thread(
-            target=self._run_worker,
-            args=(task_id, project_id, project_name, analysis_goal, additional_context, use_llm, segment_token_limit),
-            daemon=True,
-        )
-        thread.start()
-
-    def _run_worker(
+    async def _run_worker(
         self,
         task_id: str,
         project_id: str,
@@ -90,7 +75,14 @@ class SeedExtractTaskService:
         self.smart_segmenter = SmartNovelSegmenter(target_token_limit=segment_token_limit)
         runner = SeedExtractRunner(self, task_id, use_llm, project_id=project_id)
         try:
-            runner.run(project_id, project_name, analysis_goal, additional_context)
+            # Initialize progress detail from async context (safe on event loop).
+            await runner.progress.async_initialize()
+            # Cache the event loop so sync_bridge works from threads.
+            self.task_manager._ensure_loop()
+            # run() is still sync-heavy (LLM calls, file I/O) — delegate to thread
+            await asyncio.to_thread(
+                runner.run, project_id, project_name, analysis_goal, additional_context,
+            )
         except TaskCancelledException:
             pass  # Already handled inside runner.run()
         except Exception as exc:

@@ -1,69 +1,72 @@
-import sqlite3
+"""Test archive memory timeline via LongTermMemoryStore with in-memory engine."""
 
-from app.config import Config
-from app.models.project import ProjectManager
+from sqlalchemy import create_engine
+
+from app.database import init_db
+from app.repositories.archive_repo import ArchiveRepository
 from app.services.agents.memory import LongTermMemoryStore
-from app.services.archive_library_storage import ArchiveLibraryStorage
 
 
-def _configure_storage(tmp_path, monkeypatch):
-    upload_root = tmp_path / "uploads"
-    monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(upload_root))
-    ProjectManager.PROJECTS_DIR = str(upload_root / "projects")
-    return upload_root
+def _make_engine():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    init_db(engine)
+    return engine
 
 
-def test_archive_memory_timeline_exposes_active_heads_and_event_chain(tmp_path, monkeypatch):
-    upload_root = _configure_storage(tmp_path, monkeypatch)
-    db_dir = upload_root / "system"
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = db_dir / Config.ARCHIVE_LIBRARY_DB_FILENAME
-    connection = sqlite3.connect(db_path)
-    connection.execute(
-        """
-        CREATE TABLE archive_agent_memory (
-            memory_id TEXT PRIMARY KEY,
-            archive_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            memory_type TEXT NOT NULL,
-            normalized_subject TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            detail_json TEXT NOT NULL,
-            source_kind TEXT NOT NULL,
-            source_ref_id TEXT NOT NULL,
-            salience REAL NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        INSERT INTO archive_agent_memory (
-            memory_id, archive_id, agent_id, memory_type, normalized_subject, summary,
-            detail_json, source_kind, source_ref_id, salience, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "ltm_legacy",
-            "archive_demo",
-            "agent_demo",
-            "strategy",
-            "公开密信",
-            "沈夜决定公开一页密信。",
-            "{}",
-            "action_applied",
-            "action_1",
-            0.8,
-            "2026-03-20T10:00:00",
-            "2026-03-20T10:00:00",
-        ),
-    )
-    connection.commit()
-    connection.close()
+def _seed_legacy_memory(repo: ArchiveRepository) -> None:
+    """Insert a legacy-style canon memory row for testing."""
+    repo.upsert_memory({
+        "memory_id": "ltm_legacy",
+        "project_id": "proj_test",
+        "archive_id": "archive_demo",
+        "agent_id": "agent_demo",
+        "memory_type": "strategy",
+        "normalized_subject": "公开密信",
+        "summary": "沈夜决定公开一页密信。",
+        "detail_json": "{}",
+        "source_kind": "action_applied",
+        "source_ref_id": "action_1",
+        "salience": 0.8,
+        "memory_layer": "canon",
+        "status": "active",
+        "version": 1,
+        "parent_memory_id": "",
+        "source_session_id": "",
+        "source_branch_id": "",
+        "evidence_json": "[]",
+        "adopted_at": "2026-03-20T10:00:00",
+        "rejected_at": None,
+        "created_at": "2026-03-20T10:00:00",
+        "updated_at": "2026-03-20T10:00:00",
+    })
+    # Simulate the bootstrap_legacy event
+    import uuid
+    repo.log_memory_event({
+        "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+        "project_id": "proj_test",
+        "memory_id": "ltm_legacy",
+        "archive_id": "archive_demo",
+        "normalized_subject": "公开密信",
+        "memory_type": "strategy",
+        "event_type": "bootstrap_legacy",
+        "memory_layer": "canon",
+        "status": "active",
+        "version": 1,
+        "parent_memory_id": "",
+        "source_session_id": "",
+        "source_branch_id": "",
+        "summary": "沈夜决定公开一页密信。",
+        "evidence_json": "[]",
+        "created_at": "2026-03-20T10:00:00",
+    })
 
-    storage = ArchiveLibraryStorage(str(db_path))
-    store = LongTermMemoryStore(storage=storage)
+
+def test_archive_memory_timeline_exposes_active_heads_and_event_chain():
+    engine = _make_engine()
+    repo = ArchiveRepository(engine)
+    _seed_legacy_memory(repo)
+
+    store = LongTermMemoryStore(repo=repo)
     candidate_id = store.append_candidate(
         archive_id="archive_demo",
         agent_id="agent_demo",
@@ -77,6 +80,7 @@ def test_archive_memory_timeline_exposes_active_heads_and_event_chain(tmp_path, 
         source_session_id="session_demo",
         source_branch_id="main",
         evidence=[{"snippet": "先公开半页密信"}],
+        project_id="proj_test",
     )
     store.promote_to_canon("archive_demo", candidate_id)
 

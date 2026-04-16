@@ -1,8 +1,8 @@
 """带故事记忆快照的块级分析服务。"""
 
+import asyncio
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..utils.llm_client import LLMClient
@@ -119,7 +119,7 @@ class ContextualBlockAnalyzer:
         self.prompt_budget_manager = prompt_budget_manager or PromptBudgetManager()
         self.max_workers = max_workers
 
-    def analyze_blocks(
+    async def analyze_blocks(
         self,
         blocks: Sequence[Dict[str, Any]],
         local_block_facts: Sequence[Dict[str, Any]],
@@ -135,10 +135,12 @@ class ContextualBlockAnalyzer:
         snapshot_map = {item["block_id"]: item for item in snapshots}
         chapter_map = {item["chapter_id"]: item for item in chapters}
         sentence_map = build_sentence_map(sentence_atlas)
-        results: List[Dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, max(len(blocks), 1))) as executor:
-            futures = [
-                executor.submit(
+
+        sem = asyncio.Semaphore(min(self.max_workers, max(len(blocks), 1)))
+
+        async def _bounded(block: Dict[str, Any]) -> Dict[str, Any]:
+            async with sem:
+                return await asyncio.to_thread(
                     self._analyze_block,
                     block,
                     packet_map[block["block_id"]],
@@ -148,10 +150,8 @@ class ContextualBlockAnalyzer:
                     use_llm,
                     progress_callback,
                 )
-                for block in blocks
-            ]
-            for future in as_completed(futures):
-                results.append(future.result())
+
+        results = list(await asyncio.gather(*[_bounded(block) for block in blocks]))
         results.sort(key=lambda item: item["block_id"])
         return {"block_count": len(results), "blocks": results}
 

@@ -2,7 +2,7 @@
 
 import re
 import logging
-from typing import Generator
+from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +18,17 @@ class WriterComposer:
         from ...services.llm_router import LlmRouter
         self.router = llm_router or LlmRouter()
 
-    def compose_stream(
+    async def compose_stream(
         self, writing_brief: dict, preset_prompt: str
-    ) -> Generator[str, None, None]:
+    ) -> AsyncIterator[str]:
         """
-        Stream prose text from the writer model.
+        Stream prose text from the writer model (async).
 
         Args:
             writing_brief: Structured writing instructions from the orchestrator
             preset_prompt: User's writing style system prompt (from writer_presets)
         """
-        client = self.router.build_client("writer_composer")
+        client = await self.router.build_async_client("writer_composer")
 
         system_prompt = self._build_system_prompt(preset_prompt, writing_brief)
         user_prompt = self._build_user_prompt(writing_brief)
@@ -41,7 +41,7 @@ class WriterComposer:
         think_buffer = ""
         in_think = False
 
-        for chunk in client.chat_stream(
+        async for chunk in client.chat_stream(
             messages, temperature=WRITER_TEMPERATURE, max_tokens=WRITER_MAX_TOKENS
         ):
             # Filter <think>...</think> tags (some models produce these)

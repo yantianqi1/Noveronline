@@ -1,7 +1,7 @@
 """块级局部事实提取服务。"""
 
+import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..utils.llm_client import LLMClient
@@ -57,7 +57,7 @@ class LocalBlockFactExtractor:
         self.block_batch_size = block_batch_size
         self.llm_concurrent_limit = llm_concurrent_limit
 
-    def extract_blocks(
+    async def extract_blocks(
         self,
         blocks: Sequence[Dict[str, Any]],
         chapters: Sequence[Dict[str, Any]],
@@ -75,7 +75,7 @@ class LocalBlockFactExtractor:
         for batch in self._block_batches(blocks):
             if not use_llm:
                 packets.extend(
-                    self._extract_batch(
+                    await self._extract_batch(
                         batch,
                         chapter_map,
                         use_llm,
@@ -87,7 +87,7 @@ class LocalBlockFactExtractor:
                 )
                 continue
             packets.extend(
-                self._extract_batch(
+                await self._extract_batch(
                     batch,
                     chapter_map,
                     use_llm,
@@ -107,7 +107,7 @@ class LocalBlockFactExtractor:
             for index in range(0, len(blocks), self.block_batch_size)
         ]
 
-    def _extract_batch(
+    async def _extract_batch(
         self,
         batch: Sequence[Dict[str, Any]],
         chapter_map: Dict[str, Dict[str, Any]],
@@ -118,13 +118,14 @@ class LocalBlockFactExtractor:
         anchors: Dict[str, Any],
         sentence_map: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
-        packets: List[Dict[str, Any]] = []
         client = self._resolve_llm_client() if use_llm else None
         active_sentence_map = sentence_map or {}
         worker_limit = self._worker_limit(use_llm, len(batch), client)
-        with ThreadPoolExecutor(max_workers=min(worker_limit, max(len(batch), 1))) as executor:
-            futures = [
-                executor.submit(
+        sem = asyncio.Semaphore(min(worker_limit, max(len(batch), 1)))
+
+        async def _bounded(block: Dict[str, Any]) -> Dict[str, Any]:
+            async with sem:
+                return await asyncio.to_thread(
                     self._extract_block,
                     block,
                     chapter_map,
@@ -136,11 +137,8 @@ class LocalBlockFactExtractor:
                     anchors,
                     client,
                 )
-                for block in batch
-            ]
-            for future in as_completed(futures):
-                packets.append(future.result())
-        return packets
+
+        return list(await asyncio.gather(*[_bounded(block) for block in batch]))
 
     def _resolve_llm_client(self) -> LLMClient:
         return self.llm_client or self.llm_router.build_client(self.MODULE_KEY)

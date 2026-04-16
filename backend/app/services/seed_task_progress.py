@@ -27,7 +27,12 @@ DEFAULT_METRICS = {
 
 
 class SeedTaskProgressTracker:
-    """为种子分析任务维护结构化进度详情。"""
+    """为种子分析任务维护结构化进度详情。
+
+    All public methods are sync and internally bridge to the async
+    ``TaskManager`` via ``sync_bridge`` so they can be called from
+    background threads started with ``asyncio.to_thread``.
+    """
 
     def __init__(
         self,
@@ -44,7 +49,15 @@ class SeedTaskProgressTracker:
         self.llm_router = llm_router or LlmRouter()
         self._active_step_cm: Optional[Any] = None
         self._active_step_ctx: Optional[StepTraceContext] = None
-        self._initialize_detail()
+        # NOTE: Do NOT call _initialize_detail() here — it uses sync_bridge
+        # which deadlocks when called from the event loop thread.
+        # Call async_initialize() from async context instead.
+
+    def _mutate(self, mutator) -> None:
+        """Bridge: sync caller -> async TaskManager.mutate_task."""
+        self.task_manager.sync_bridge(
+            self.task_manager.mutate_task(self.task_id, mutator)
+        )
 
     def enter_stage(self, stage: str, label: str, progress: int, detail: str = "") -> None:
         def mutate(task) -> None:
@@ -60,9 +73,9 @@ class SeedTaskProgressTracker:
             task.message = label
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
-    # ── Step lifecycle ──
+    # -- Step lifecycle --
 
     def begin_step(
         self,
@@ -100,7 +113,7 @@ class SeedTaskProgressTracker:
             )
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
         return step_id
 
     def end_step(self, step_id: str) -> None:
@@ -164,7 +177,7 @@ class SeedTaskProgressTracker:
             )
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def set_counts(self, chapter_count: Optional[int] = None, block_count: Optional[int] = None, segment_count: Optional[int] = None) -> None:
         def mutate(task) -> None:
@@ -181,7 +194,7 @@ class SeedTaskProgressTracker:
                 metrics["segment_count"] = segment_count
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def reset_block_progress(self) -> None:
         def mutate(task) -> None:
@@ -191,7 +204,7 @@ class SeedTaskProgressTracker:
             metrics["active_workers"] = 0
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def block_started(self, stage: str, title: str, detail: str, meta: Dict[str, Any]) -> None:
         def mutate(task) -> None:
@@ -201,7 +214,7 @@ class SeedTaskProgressTracker:
             progress_detail["llm_activity"] = self._activity_snapshot(title, {"stage": stage, **meta})
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def block_completed(self, stage: str, title: str, detail: str, meta: Dict[str, Any]) -> None:
         def mutate(task) -> None:
@@ -214,7 +227,7 @@ class SeedTaskProgressTracker:
             progress_detail["llm_activity"] = self._pending_activity(progress_detail["stage_label"], stage)
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def note(self, stage: str, title: str, detail: str = "", level: str = "info", meta: Optional[Dict[str, Any]] = None) -> None:
         note_meta = dict(meta or {})
@@ -231,7 +244,7 @@ class SeedTaskProgressTracker:
             progress_detail["timeline"].append(self._event(stage, level, "completed", title, detail, note_meta))
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def llm_action(
         self,
@@ -257,7 +270,7 @@ class SeedTaskProgressTracker:
             )
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def complete(self, message: str, result: Dict[str, Any]) -> None:
         def mutate(task) -> None:
@@ -274,7 +287,7 @@ class SeedTaskProgressTracker:
             task.result = result
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
     def fail(self, error_message: str) -> None:
         def mutate(task) -> None:
@@ -290,9 +303,13 @@ class SeedTaskProgressTracker:
             task.error = error_message
             task.progress_detail = progress_detail
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        self._mutate(mutate)
 
-    def _initialize_detail(self) -> None:
+    async def async_initialize(self) -> None:
+        """Initialize task progress detail from an async context (event loop).
+
+        Must be awaited before the runner enters a background thread.
+        """
         def mutate(task) -> None:
             task.progress_detail = {
                 "stage": "queued",
@@ -303,7 +320,21 @@ class SeedTaskProgressTracker:
                 "timeline": [],
             }
 
-        self.task_manager.mutate_task(self.task_id, mutate)
+        await self.task_manager.mutate_task(self.task_id, mutate)
+
+    def _initialize_detail(self) -> None:
+        """Sync version — only safe from a background thread (via sync_bridge)."""
+        def mutate(task) -> None:
+            task.progress_detail = {
+                "stage": "queued",
+                "stage_label": "任务已创建，等待开始",
+                "active_stage": self._active_stage("queued", "任务已创建，等待开始", 0, "pending"),
+                "task_metrics": copy.deepcopy(DEFAULT_METRICS),
+                "llm_activity": self._pending_activity("等待进入分析阶段"),
+                "timeline": [],
+            }
+
+        self._mutate(mutate)
 
     def _activity_snapshot(self, action: str, meta: Dict[str, Any]) -> Dict[str, Any]:
         stage = meta.get("stage", "")

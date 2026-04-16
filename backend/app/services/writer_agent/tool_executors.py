@@ -1,6 +1,6 @@
 """Tool executor implementations for the novel writer agent.
 
-Each executor calls the corresponding ``NovelDB`` method and formats
+Each executor calls the corresponding repository methods and formats
 the result as readable text for the LLM.
 """
 
@@ -10,10 +10,42 @@ import json
 import logging
 import os
 import traceback
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import and_, insert, or_, select, update
+
 from ...config import Config
-from .novel_db import NovelDB
+from ...database import get_engine
+from ...repositories import (
+    ChapterRepository,
+    EntityRepository,
+    EventRepository,
+    ManuscriptRepository,
+    MetaRepository,
+    NarrativeRepository,
+    RelationshipRepository,
+    SceneRepository,
+    SearchRepository,
+    ThreadRepository,
+    WorldRuleRepository,
+)
+from ...tables.novel import (
+    agent_memory,
+    agent_states,
+    character_events,
+    entities,
+    entity_aliases,
+    entity_evidence,
+    plot_threads,
+    relationship_events,
+    sessions,
+    thread_lifecycle,
+    world_events,
+    world_rule_evidence,
+    worldline_branches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +64,10 @@ def _truncate_result(result: str, max_chars: int = TOOL_RESULT_MAX_CHARS) -> str
         + f"\n\n... [省略 {omitted} 字] ...\n\n"
         + result[-_PRESERVE_TAIL:]
     )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +95,31 @@ def execute_tool(tool_name: str, tool_input: dict, project_id: str) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_db() -> NovelDB:
-    """Return a fresh NovelDB instance so each call gets its own connection.
+def _get_repos() -> dict[str, Any]:
+    """Return a dict of repository instances sharing a single engine.
 
-    A module-level singleton is unsafe when tools execute concurrently via
-    ThreadPoolExecutor — SQLite connections are not thread-safe.
+    Each call creates fresh repo objects (lightweight); the underlying engine
+    is a shared singleton so connection-pool overhead is minimal.
     """
-    return NovelDB()
+    engine = get_engine()
+    return {
+        "entity": EntityRepository(engine),
+        "scene": SceneRepository(engine),
+        "chapter": ChapterRepository(engine),
+        "thread": ThreadRepository(engine),
+        "world_rule": WorldRuleRepository(engine),
+        "relationship": RelationshipRepository(engine),
+        "manuscript": ManuscriptRepository(engine),
+        "event": EventRepository(engine),
+        "outline": OutlineRepository(engine),
+        "narrative": NarrativeRepository(engine),
+        "meta": MetaRepository(engine),
+        "search": SearchRepository(engine),
+    }
+
+
+# Re-export OutlineRepository for _get_repos
+from ...repositories import OutlineRepository  # noqa: E402
 
 
 def _pretty_json(raw: str | None) -> str:
@@ -95,7 +149,8 @@ def _append_if(lines: list[str], label: str, value: str | None) -> None:
 def _query_entity(params: dict, project_id: str) -> str:
     name = params["name"]
     entity_type = params.get("entity_type")
-    entity = _get_db().get_entity(project_id, name, entity_type)
+    repos = _get_repos()
+    entity = repos["entity"].get_entity_by_name(project_id, name, entity_type)
     if entity is None:
         return f"未找到实体：{name}"
 
@@ -154,7 +209,7 @@ def _query_entity(params: dict, project_id: str) -> str:
     # --- Associated plot threads ---
     entity_id = entity.get("entity_id", "")
     if entity_id:
-        threads = _get_db().get_entity_threads(project_id, entity_id, limit=5)
+        threads = repos["thread"].get_entity_threads(project_id, entity_id, limit=5)
         if threads:
             lines.append("\n【关联伏笔】")
             for t in threads:
@@ -168,7 +223,7 @@ def _query_entity(params: dict, project_id: str) -> str:
                 lines.append(text)
 
         # --- Associated world rules ---
-        rules = _get_db().get_entity_rules(project_id, entity_id, limit=5)
+        rules = repos["world_rule"].get_entity_rules(project_id, entity_id, limit=5)
         if rules:
             lines.append("\n【适用世界规则】")
             for r in rules:
@@ -178,7 +233,7 @@ def _query_entity(params: dict, project_id: str) -> str:
                     lines.append(f"    证据：{snippet}")
 
         # --- Recent events ---
-        events = _get_db().get_entity_recent_events(project_id, entity_id, limit=5)
+        events = repos["entity"].get_entity_recent_events(project_id, entity_id, limit=5)
         if events:
             lines.append("\n【近期事件】")
             for e in events:
@@ -195,7 +250,30 @@ def _query_entity(params: dict, project_id: str) -> str:
 def _query_relationship(params: dict, project_id: str) -> str:
     entity_a = params["entity_a"]
     entity_b = params["entity_b"]
-    rels = _get_db().get_relationship(project_id, entity_a, entity_b)
+    repos = _get_repos()
+    # Resolve names to entity_ids
+    a_id = repos["entity"].resolve_entity_id(project_id, entity_a)
+    b_id = repos["entity"].resolve_entity_id(project_id, entity_b)
+    if not a_id or not b_id:
+        return f"未找到 {entity_a} 与 {entity_b} 之间的关系记录"
+
+    # Bidirectional lookup: all relationships where (source, target) match
+    engine = get_engine()
+    from ...tables.novel import relationships as rel_tbl
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(rel_tbl).where(
+                and_(
+                    rel_tbl.c.project_id == project_id,
+                    or_(
+                        and_(rel_tbl.c.source_id == a_id, rel_tbl.c.target_id == b_id),
+                        and_(rel_tbl.c.source_id == b_id, rel_tbl.c.target_id == a_id),
+                    ),
+                )
+            )
+        ).fetchall()
+        rels = [dict(r._mapping) for r in rows]
+
     if not rels:
         return f"未找到 {entity_a} 与 {entity_b} 之间的关系记录"
 
@@ -216,7 +294,8 @@ def _query_relationship(params: dict, project_id: str) -> str:
 def _query_chapter(params: dict, project_id: str) -> str:
     chapter_order = params["chapter_order"]
     include_content = params.get("include_content", False)
-    chapter = _get_db().get_chapter(project_id, chapter_order, include_content)
+    repos = _get_repos()
+    chapter = repos["chapter"].get_chapter_by_order(project_id, chapter_order, include_content)
     if chapter is None:
         return f"未找到第 {chapter_order} 章"
 
@@ -244,14 +323,15 @@ def _query_chapter(params: dict, project_id: str) -> str:
 def _query_scene(params: dict, project_id: str) -> str:
     chapter_id = params["chapter_id"]
     scene_order = params.get("scene_order")
+    repos = _get_repos()
 
     if scene_order is not None:
         # Find the specific scene by chapter_id + scene_order
-        scenes = _get_db().list_scenes(project_id, chapter_id)
+        scene_list = repos["scene"].list_scenes(project_id, chapter_id)
         scene = None
-        for s in scenes:
+        for s in scene_list:
             if s.get("scene_order") == scene_order:
-                scene = _get_db().get_scene(project_id, s["scene_id"])
+                scene = repos["scene"].get_scene(project_id, s["scene_id"])
                 break
         if scene is None:
             return f"未找到章节 {chapter_id} 的第 {scene_order} 个场景"
@@ -268,11 +348,11 @@ def _query_scene(params: dict, project_id: str) -> str:
         return "\n".join(lines)
     else:
         # List all scenes for the chapter
-        scenes = _get_db().list_scenes(project_id, chapter_id)
-        if not scenes:
+        scene_list = repos["scene"].list_scenes(project_id, chapter_id)
+        if not scene_list:
             return f"章节 {chapter_id} 暂无场景"
         lines = [f"章节 {chapter_id} 场景列表："]
-        for s in scenes:
+        for s in scene_list:
             lines.append(
                 f"  [{s.get('scene_order', '?')}] {s.get('title') or '无标题'}"
                 f" （{s.get('status', '未知')}，{s.get('word_count', 0)} 字）"
@@ -284,7 +364,18 @@ def _search_settings(params: dict, project_id: str) -> str:
     query = params["query"]
     scope = params.get("scope", "all")
     limit = params.get("limit", 10)
-    results = _get_db().search_fts(project_id, query, scope, limit)
+    repos = _get_repos()
+
+    # Map scope to source filters for the global search index
+    source_map = {
+        "entities": ["entity"],
+        "chapters": ["chapter"],
+        "scenes": ["scene"],
+    }
+    sources = source_map.get(scope)  # None means "all"
+    results = repos["search"].search(
+        query, project_id=project_id, sources=sources, limit=limit,
+    )
     if not results:
         return f"未找到与「{query}」相关的设定"
 
@@ -303,12 +394,13 @@ def _get_recent_scenes(params: dict, project_id: str) -> str:
     chapter_id = params["chapter_id"]
     scene_order = params["scene_order"]
     count = params.get("count", 2)
-    scenes = _get_db().get_recent_scenes(project_id, chapter_id, scene_order, count)
-    if not scenes:
+    repos = _get_repos()
+    recent = repos["scene"].get_recent_scenes(project_id, chapter_id, scene_order, count)
+    if not recent:
         return "没有找到前序场景"
 
     parts: list[str] = []
-    for s in scenes:
+    for s in recent:
         lines = [
             f"场景 {s.get('scene_order', '?')}：{s.get('title') or '无标题'}",
             s.get("content", ""),
@@ -321,7 +413,39 @@ def _get_world_state(params: dict, project_id: str) -> str:
     session_id = params["session_id"]
     entity_id = params.get("entity_id")
     branch_id = params.get("branch_id")
-    state = _get_db().get_world_state(project_id, session_id, entity_id, branch_id)
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        # Session
+        session_row = conn.execute(
+            select(sessions).where(sessions.c.session_id == session_id).limit(1)
+        ).fetchone()
+        session = dict(session_row._mapping) if session_row else None
+
+        # Agent states
+        state_clauses = [agent_states.c.session_id == session_id]
+        if branch_id:
+            state_clauses.append(agent_states.c.branch_id == branch_id)
+        if entity_id:
+            state_clauses.append(agent_states.c.entity_id == entity_id)
+        state_rows = conn.execute(
+            select(agent_states).where(and_(*state_clauses))
+        ).fetchall()
+
+        # Events
+        ev_clauses = [world_events.c.session_id == session_id]
+        if branch_id:
+            ev_clauses.append(world_events.c.branch_id == branch_id)
+        ev_rows = conn.execute(
+            select(world_events).where(and_(*ev_clauses))
+            .order_by(world_events.c.step.desc()).limit(10)
+        ).fetchall()
+
+    state = {
+        "session": session,
+        "agent_states": [dict(r._mapping) for r in state_rows],
+        "recent_events": [dict(r._mapping) for r in ev_rows],
+    }
 
     lines: list[str] = []
 
@@ -360,7 +484,17 @@ def _get_world_state(params: dict, project_id: str) -> str:
 
 def _list_worldline_branches(params: dict, project_id: str) -> str:
     session_id = params["session_id"]
-    branches = _get_db().list_worldline_branches(project_id, session_id)
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(worldline_branches).where(
+                and_(
+                    worldline_branches.c.session_id == session_id,
+                    worldline_branches.c.project_id == project_id,
+                )
+            ).order_by(worldline_branches.c.created_at)
+        ).fetchall()
+        branches = [dict(r._mapping) for r in rows]
     if not branches:
         return f"会话 {session_id} 暂无分支数据"
     lines = [f"会话 {session_id} 共有 {len(branches)} 个分支："]
@@ -385,7 +519,17 @@ def _get_branch_timeline(params: dict, project_id: str) -> str:
     session_id = params["session_id"]
     branch_id = params["branch_id"]
     limit = params.get("limit", 20)
-    events = _get_db().get_branch_timeline(project_id, session_id, branch_id, limit)
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(world_events).where(
+                and_(
+                    world_events.c.session_id == session_id,
+                    world_events.c.branch_id == branch_id,
+                )
+            ).order_by(world_events.c.step.asc()).limit(limit)
+        ).fetchall()
+        events = [dict(r._mapping) for r in rows]
     if not events:
         return f"分支 {branch_id} 暂无事件"
     lines = [f"分支 {branch_id} 时间线（{len(events)} 条事件）："]
@@ -404,7 +548,18 @@ def _get_branch_agent_state(params: dict, project_id: str) -> str:
     session_id = params["session_id"]
     branch_id = params["branch_id"]
     entity_id = params.get("entity_id")
-    states = _get_db().get_branch_agent_state(project_id, session_id, branch_id, entity_id)
+    engine = get_engine()
+    clauses = [
+        agent_states.c.session_id == session_id,
+        agent_states.c.branch_id == branch_id,
+    ]
+    if entity_id:
+        clauses.append(agent_states.c.entity_id == entity_id)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(agent_states).where(and_(*clauses))
+        ).fetchall()
+        states = [dict(r._mapping) for r in rows]
     if not states:
         target = f"实体 {entity_id}" if entity_id else "所有实体"
         return f"分支 {branch_id} 中 {target} 暂无状态数据"
@@ -429,7 +584,8 @@ def _format_entity_names(entities: list[dict]) -> str:
 
 def _get_open_threads(params: dict, project_id: str) -> str:
     up_to_chapter = params["up_to_chapter"]
-    threads = _get_db().get_open_threads(project_id, up_to_chapter)
+    repos = _get_repos()
+    threads = repos["thread"].get_open_threads(project_id, up_to_chapter=up_to_chapter)
     if not threads:
         return f"截至第 {up_to_chapter} 章，暂无未解决的伏笔线索"
 
@@ -447,7 +603,7 @@ def _get_open_threads(params: dict, project_id: str) -> str:
             # Reverse link: show entities involved in this thread
             thread_id = t.get("thread_id")
             if thread_id:
-                ents = _get_db().get_thread_entities(project_id, thread_id, limit=5)
+                ents = repos["thread"].get_thread_entities(project_id, thread_id, limit=5)
                 if ents:
                     lines.append(f"   涉及实体：{_format_entity_names(ents)}")
         else:
@@ -501,7 +657,10 @@ def _get_manuscript_context(params: dict, project_id: str) -> str:
 def _search_manuscript(params: dict, project_id: str) -> str:
     query = params["query"]
     limit = params.get("limit", 10)
-    results = _get_db().search_manuscript_fts(project_id, query, limit)
+    # Use the manuscript adapter (still backed by assets table) for FTS
+    from .manuscript_context_builder import _get_manuscript_adapter
+    adapter = _get_manuscript_adapter(project_id)
+    results = adapter.search_fts(query, limit=limit)
     if not results:
         return f"稿件中未找到与「{query}」相关的内容"
 
@@ -516,7 +675,9 @@ def _search_manuscript(params: dict, project_id: str) -> str:
 
 
 def _get_manuscript_stats(params: dict, project_id: str) -> str:
-    stats = _get_db().get_manuscript_stats(project_id)
+    from .manuscript_context_builder import _get_manuscript_adapter
+    adapter = _get_manuscript_adapter(project_id)
+    stats = adapter.stats()
     lines = [
         f"稿件统计：",
         f"总段落数：{stats['total_blocks']}",
@@ -538,7 +699,8 @@ def _get_manuscript_stats(params: dict, project_id: str) -> str:
 
 def _get_character_voice(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
-    entity = _get_db().get_entity(project_id, name)
+    repos = _get_repos()
+    entity = repos["entity"].get_entity_by_name(project_id, name)
     if not entity:
         return f"未找到角色 {name}"
     lines = [f"【角色语言风格】{entity.get('name', name)}"]
@@ -573,16 +735,17 @@ def _get_character_voice(inp: dict, project_id: str) -> str:
         lines.append(f"内在矛盾：{entity['hidden_tension']}")
     # Also fetch entity_evidence quotes
     try:
-        _get_db().ensure_schema(project_id)
-        with _get_db().connect(project_id) as conn:
+        engine = get_engine()
+        with engine.connect() as conn:
             evs = conn.execute(
-                "SELECT snippet FROM entity_evidence WHERE owner_id = ? LIMIT 10",
-                (entity.get("entity_id", ""),),
+                select(entity_evidence.c.snippet).where(
+                    entity_evidence.c.owner_id == entity.get("entity_id", "")
+                ).limit(10)
             ).fetchall()
             if evs:
                 lines.append("原文引用：")
                 for ev in evs:
-                    lines.append(f"  「{ev['snippet']}」")
+                    lines.append(f"  「{ev.snippet}」")
     except Exception:
         pass
     return "\n".join(lines)
@@ -591,48 +754,81 @@ def _get_character_voice(inp: dict, project_id: str) -> str:
 def _query_relationship_timeline(inp: dict, project_id: str) -> str:
     a_name = inp.get("entity_a", "")
     b_name = inp.get("entity_b", "")
-    a = _get_db().get_entity(project_id, a_name)
-    b = _get_db().get_entity(project_id, b_name)
+    repos = _get_repos()
+    a = repos["entity"].get_entity_by_name(project_id, a_name)
+    b = repos["entity"].get_entity_by_name(project_id, b_name)
     if not a or not b:
         missing = a_name if not a else b_name
         return f"未找到角色 {missing}"
     a_id = a.get("entity_id", "")
     b_id = b.get("entity_id", "")
-    db = _get_db()
-    db.ensure_schema(project_id)
-    # Query by entity_id first; also try by name since some legacy data
-    # stores names directly in the entity_id columns.
-    with db.connect(project_id) as conn:
+
+    engine = get_engine()
+    with engine.connect() as conn:
         rows = conn.execute(
-            """SELECT * FROM relationship_events
-               WHERE project_id = ?
-                 AND ((source_entity_id = ? AND target_entity_id = ?)
-                   OR (source_entity_id = ? AND target_entity_id = ?)
-                   OR (source_entity_id = ? AND target_entity_id = ?)
-                   OR (source_entity_id = ? AND target_entity_id = ?))
-               ORDER BY chapter_order, segment_id""",
-            (project_id, a_id, b_id, b_id, a_id, a_name, b_name, b_name, a_name),
+            select(relationship_events).where(
+                and_(
+                    relationship_events.c.project_id == project_id,
+                    or_(
+                        and_(
+                            relationship_events.c.source_entity_id == a_id,
+                            relationship_events.c.target_entity_id == b_id,
+                        ),
+                        and_(
+                            relationship_events.c.source_entity_id == b_id,
+                            relationship_events.c.target_entity_id == a_id,
+                        ),
+                        and_(
+                            relationship_events.c.source_entity_id == a_name,
+                            relationship_events.c.target_entity_id == b_name,
+                        ),
+                        and_(
+                            relationship_events.c.source_entity_id == b_name,
+                            relationship_events.c.target_entity_id == a_name,
+                        ),
+                    ),
+                )
+            ).order_by(
+                relationship_events.c.chapter_order,
+                relationship_events.c.segment_id,
+            )
         ).fetchall()
-    if not rows:
+        results = [dict(r._mapping) for r in rows]
+
+    if not results:
         return f"未找到 {a_name} 与 {b_name} 之间的关系事件"
-    lines = [f"【关系时间线】{a_name} ↔ {b_name}（共 {len(rows)} 条事件）"]
-    for r in rows:
+    lines = [f"【关系时间线】{a_name} ↔ {b_name}（共 {len(results)} 条事件）"]
+    for r in results:
         parts = []
-        if r["segment_id"]:
+        if r.get("segment_id"):
             parts.append(f"[{r['segment_id']}]")
-        if r["relation_type"]:
+        if r.get("relation_type"):
             parts.append(f"关系: {r['relation_type']}")
-        if r["trigger_event"]:
+        if r.get("trigger_event"):
             parts.append(f"触发: {r['trigger_event']}")
-        if r["evidence"]:
+        if r.get("evidence"):
             parts.append(f"证据: {r['evidence']}")
-        if r["emotional_shift"]:
+        if r.get("emotional_shift"):
             parts.append(f"情感: {r['emotional_shift']}")
-        if r["power_shift"]:
+        if r.get("power_shift"):
             parts.append(f"权力: {r['power_shift']}")
         lines.append("  " + " | ".join(parts))
+
     # Append current relationship state
-    rels = _get_db().get_relationship(project_id, a_name, b_name)
+    from ...tables.novel import relationships as rel_tbl
+    with engine.connect() as conn:
+        rel_rows = conn.execute(
+            select(rel_tbl).where(
+                and_(
+                    rel_tbl.c.project_id == project_id,
+                    or_(
+                        and_(rel_tbl.c.source_id == a_id, rel_tbl.c.target_id == b_id),
+                        and_(rel_tbl.c.source_id == b_id, rel_tbl.c.target_id == a_id),
+                    ),
+                )
+            )
+        ).fetchall()
+        rels = [dict(r._mapping) for r in rel_rows]
     if rels:
         lines.append("当前关系状态：")
         for rel in rels:
@@ -644,65 +840,87 @@ def _query_character_timeline(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
     event_type = inp.get("event_type", "all")
     limit = inp.get("limit", 20)
-    entity = _get_db().get_entity(project_id, name)
+    repos = _get_repos()
+    entity = repos["entity"].get_entity_by_name(project_id, name)
     entity_id = entity.get("entity_id", name) if entity else name
-    _get_db().ensure_schema(project_id)
-    with _get_db().connect(project_id) as conn:
-        if event_type and event_type != "all":
-            rows = conn.execute(
-                "SELECT * FROM character_events WHERE project_id = ? AND entity_id = ? AND event_type = ? ORDER BY chapter_order, segment_id LIMIT ?",
-                (project_id, entity_id, event_type, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM character_events WHERE project_id = ? AND entity_id = ? ORDER BY chapter_order, segment_id LIMIT ?",
-                (project_id, entity_id, limit),
-            ).fetchall()
-    if not rows:
+
+    engine = get_engine()
+    clauses = [
+        character_events.c.project_id == project_id,
+        character_events.c.entity_id == entity_id,
+    ]
+    if event_type and event_type != "all":
+        clauses.append(character_events.c.event_type == event_type)
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(character_events).where(and_(*clauses))
+            .order_by(character_events.c.chapter_order, character_events.c.segment_id)
+            .limit(limit)
+        ).fetchall()
+        results = [dict(r._mapping) for r in rows]
+
+    if not results:
         return f"未找到 {name} 的事件记录"
-    lines = [f"【角色时间线】{name}（共 {len(rows)} 条事件）"]
-    for r in rows:
-        prefix = f"[{r['event_type']}]" if r["event_type"] else ""
-        seg = f" ({r['segment_id']})" if r["segment_id"] else ""
+    lines = [f"【角色时间线】{name}（共 {len(results)} 条事件）"]
+    for r in results:
+        prefix = f"[{r['event_type']}]" if r.get("event_type") else ""
+        seg = f" ({r['segment_id']})" if r.get("segment_id") else ""
         lines.append(f"  {prefix} {r['summary']}{seg}")
     return "\n".join(lines)
 
 
 def _query_thread_history(inp: dict, project_id: str) -> str:
     thread_key = inp.get("thread_key", "")
-    _get_db().ensure_schema(project_id)
-    with _get_db().connect(project_id) as conn:
+    repos = _get_repos()
+    engine = get_engine()
+
+    # Try thread_lifecycle table first
+    with engine.connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM thread_lifecycle WHERE project_id = ? AND thread_key LIKE ? ORDER BY chapter_order, segment_id",
-            (project_id, f"%{thread_key}%"),
+            select(thread_lifecycle).where(
+                and_(
+                    thread_lifecycle.c.project_id == project_id,
+                    thread_lifecycle.c.thread_key.like(f"%{thread_key}%"),
+                )
+            ).order_by(thread_lifecycle.c.chapter_order, thread_lifecycle.c.segment_id)
         ).fetchall()
-    if not rows:
+        lifecycle_results = [dict(r._mapping) for r in rows]
+
+    if not lifecycle_results:
         # Also check plot_threads table
-        with _get_db().connect(project_id) as conn:
+        with engine.connect() as conn:
             pt_rows = conn.execute(
-                "SELECT * FROM plot_threads WHERE project_id = ? AND (thread_key LIKE ? OR detail LIKE ?)",
-                (project_id, f"%{thread_key}%", f"%{thread_key}%"),
+                select(plot_threads).where(
+                    and_(
+                        plot_threads.c.project_id == project_id,
+                        or_(
+                            plot_threads.c.thread_key.like(f"%{thread_key}%"),
+                            plot_threads.c.detail.like(f"%{thread_key}%"),
+                        ),
+                    )
+                )
             ).fetchall()
-        if not pt_rows:
+            pt_results = [dict(r._mapping) for r in pt_rows]
+
+        if not pt_results:
             return f"未找到与「{thread_key}」相关的伏笔线索"
-        lines = [f"【伏笔线索】匹配到 {len(pt_rows)} 条"]
-        for r in pt_rows:
+        lines = [f"【伏笔线索】匹配到 {len(pt_results)} 条"]
+        for r in pt_results:
             lines.append(f"  [{r['status']}] {r['thread_key']}：{r['detail']}")
-            try:
-                tid = r["thread_id"]
-            except (KeyError, IndexError):
-                tid = None
+            tid = r.get("thread_id")
             if tid:
-                ents = _get_db().get_thread_entities(project_id, tid, limit=5)
+                ents = repos["thread"].get_thread_entities(project_id, tid, limit=5)
                 if ents:
                     lines.append(f"    关联实体：{_format_entity_names(ents)}")
         return "\n".join(lines)
-    lines = [f"【伏笔生命周期】{thread_key}（共 {len(rows)} 条记录）"]
-    for r in rows:
-        parts = [f"[{r['status']}]", r["detail"] or ""]
-        if r["resolution_detail"]:
+
+    lines = [f"【伏笔生命周期】{thread_key}（共 {len(lifecycle_results)} 条记录）"]
+    for r in lifecycle_results:
+        parts = [f"[{r['status']}]", r.get("detail") or ""]
+        if r.get("resolution_detail"):
             parts.append(f"解决方式: {r['resolution_detail']}")
-        if r["segment_id"]:
+        if r.get("segment_id"):
             parts.append(f"({r['segment_id']})")
         lines.append("  " + " ".join(p for p in parts if p))
     return "\n".join(lines)
@@ -711,54 +929,51 @@ def _query_thread_history(inp: dict, project_id: str) -> str:
 def _search_world_rules(inp: dict, project_id: str) -> str:
     query = inp.get("query", "")
     limit = inp.get("limit", 10)
-    _get_db().ensure_schema(project_id)
-    fts_param = _get_db()._fts_match_param(query)
-    results = []
-    with _get_db().connect(project_id) as conn:
-        try:
-            rows = conn.execute(
-                """SELECT wre.evidence_id, wre.fact_text, wre.evidence_snippet, wre.segment_id,
-                          snippet(world_rule_evidence_fts, 0, '<b>', '</b>', '...', 48) AS snip
-                   FROM world_rule_evidence_fts
-                   JOIN world_rule_evidence wre ON wre.rowid = world_rule_evidence_fts.rowid
-                   WHERE world_rule_evidence_fts MATCH ?
-                   LIMIT ?""",
-                (fts_param, limit),
-            ).fetchall()
-            for r in rows:
-                results.append(r)
-        except Exception:
-            # Fallback to LIKE
-            rows = conn.execute(
-                "SELECT evidence_id, fact_text, evidence_snippet, segment_id FROM world_rule_evidence WHERE project_id = ? AND (fact_text LIKE ? OR evidence_snippet LIKE ?) LIMIT ?",
-                (project_id, f"%{query}%", f"%{query}%", limit),
-            ).fetchall()
-            for r in rows:
-                results.append(r)
+    repos = _get_repos()
+    engine = get_engine()
+
+    like_pattern = f"%{query}%"
+    results: list[dict] = []
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(world_rule_evidence).where(
+                and_(
+                    world_rule_evidence.c.project_id == project_id,
+                    or_(
+                        world_rule_evidence.c.fact_text.like(like_pattern),
+                        world_rule_evidence.c.evidence_snippet.like(like_pattern),
+                    ),
+                )
+            ).limit(limit)
+        ).fetchall()
+        results = [dict(r._mapping) for r in rows]
+
     if not results:
         # Also search agent_memory world_rules
-        with _get_db().connect(project_id) as conn:
-            rows = conn.execute(
-                "SELECT summary, detail_json FROM agent_memory WHERE memory_type = 'world_rule' AND summary LIKE ? LIMIT ?",
-                (f"%{query}%", limit),
+        with engine.connect() as conn:
+            mem_rows = conn.execute(
+                select(agent_memory.c.summary, agent_memory.c.detail_json).where(
+                    and_(
+                        agent_memory.c.memory_type == "world_rule",
+                        agent_memory.c.summary.like(like_pattern),
+                    )
+                ).limit(limit)
             ).fetchall()
-            if rows:
-                lines = [f"搜索「{query}」世界观规则（{len(rows)} 条）："]
-                for r in rows:
-                    lines.append(f"  规则：{r['summary']}")
+            if mem_rows:
+                lines = [f"搜索「{query}」世界观规则（{len(mem_rows)} 条）："]
+                for r in mem_rows:
+                    lines.append(f"  规则：{r.summary}")
                 return "\n".join(lines)
         return f"未找到与「{query}」相关的世界观规则"
+
     lines = [f"搜索「{query}」世界观规则（{len(results)} 条）："]
     for r in results:
         lines.append(f"  规则：{r['fact_text']}")
-        if r["evidence_snippet"]:
+        if r.get("evidence_snippet"):
             lines.append(f"    证据：{r['evidence_snippet']}")
-        try:
-            eid = r["evidence_id"]
-        except (KeyError, IndexError):
-            eid = None
+        eid = r.get("evidence_id")
         if eid:
-            ents = _get_db().get_rule_entities(project_id, eid, limit=5)
+            ents = repos["world_rule"].get_rule_entities(project_id, eid, limit=5)
             if ents:
                 lines.append(f"    关联实体：{_format_entity_names(ents)}")
     return "\n".join(lines)
@@ -775,6 +990,8 @@ def _manage_entity(params: dict, project_id: str) -> str:
     if not name:
         return "缺少必填参数 name"
 
+    repos = _get_repos()
+
     if action == "create":
         entity_type = params.get("entity_type")
         summary = params.get("summary")
@@ -789,7 +1006,7 @@ def _manage_entity(params: dict, project_id: str) -> str:
         if params.get("aliases"):
             kwargs["aliases"] = params["aliases"]
         try:
-            result = _get_db().create_entity(project_id, name, entity_type, summary, **kwargs)
+            result = repos["entity"].create_entity(project_id, name, entity_type, summary, **kwargs)
         except ValueError as e:
             return str(e)
         return f"已创建实体「{name}」（{entity_type}），ID: {result['entity_id']}"
@@ -806,10 +1023,10 @@ def _manage_entity(params: dict, project_id: str) -> str:
             kwargs["aliases"] = params["aliases"]
         if not kwargs:
             return "未提供任何更新字段"
-        ok = _get_db().update_entity(project_id, name, **kwargs)
+        ok = repos["entity"].update_entity_by_name(project_id, name, **kwargs)
         if not ok:
             return f"未找到实体「{name}」，无法更新。如需新建请使用 action='create'"
-        return f"已更���实体「{name}」的设定"
+        return f"已更新实体「{name}」的设定"
 
     return f"未知操作：{action}，请使用 create 或 update"
 
@@ -820,10 +1037,12 @@ def _manage_thread(params: dict, project_id: str) -> str:
     if not thread_key:
         return "缺少必填参数 thread_key"
 
+    repos = _get_repos()
+
     if action == "create":
         detail = params.get("detail", "")
         chapter_order = params.get("chapter_order", 0)
-        result = _get_db().create_thread(project_id, thread_key, detail, chapter_order=chapter_order)
+        result = repos["thread"].create_thread(project_id, thread_key, detail, chapter_order=chapter_order)
         return f"已创建伏笔「{thread_key}」，ID: {result['thread_id']}"
 
     elif action == "update":
@@ -832,14 +1051,14 @@ def _manage_thread(params: dict, project_id: str) -> str:
         resolution = params.get("resolution_detail")
         chapter_order = params.get("chapter_order", 0)
         try:
-            ok = _get_db().update_thread(
+            ok = repos["thread"].update_thread(
                 project_id, thread_key, status=status, detail=detail,
                 resolution_detail=resolution, chapter_order=chapter_order,
             )
         except ValueError as e:
             return str(e)
         if not ok:
-            return f"未找到伏���「{thread_key}」，如需新建请使用 action='create'"
+            return f"未找到伏笔「{thread_key}」，如需新建请使用 action='create'"
         status_note = f"，状态→{status}" if status else ""
         return f"已更新伏笔「{thread_key}」{status_note}"
 
@@ -853,11 +1072,90 @@ def _manage_world_rule(params: dict, project_id: str) -> str:
     snippet = params.get("evidence_snippet", "")
     chapter_order = params.get("chapter_order", 0)
     try:
-        result = _get_db().create_or_update_world_rule(project_id, fact_text, snippet, chapter_order)
+        result = _create_or_update_world_rule(project_id, fact_text, snippet, chapter_order)
     except Exception as e:
         return f"世界规则写入失败：{e}"
     verb = "更新" if result.get("updated") else "记录"
     return f"已{verb}世界规则：{fact_text}"
+
+
+def _create_or_update_world_rule(
+    project_id: str, fact_text: str, evidence_snippet: str = "", chapter_order: int = 0,
+) -> dict[str, Any]:
+    """Create a world rule or update if fact_text already exists. Inline replacement for NovelDB method."""
+    engine = get_engine()
+    now = _now()
+    with engine.connect() as conn:
+        existing = conn.execute(
+            select(world_rule_evidence.c.evidence_id).where(
+                and_(
+                    world_rule_evidence.c.fact_text == fact_text,
+                    world_rule_evidence.c.project_id == project_id,
+                )
+            )
+        ).fetchone()
+        if existing:
+            eid = existing.evidence_id
+            conn.execute(
+                update(world_rule_evidence).where(
+                    world_rule_evidence.c.evidence_id == eid
+                ).values(evidence_snippet=evidence_snippet, chapter_order=chapter_order)
+            )
+            updated = True
+        else:
+            eid = f"wre_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                insert(world_rule_evidence).values(
+                    evidence_id=eid,
+                    project_id=project_id,
+                    fact_text=fact_text,
+                    evidence_snippet=evidence_snippet,
+                    chapter_order=chapter_order,
+                    created_at=now,
+                )
+            )
+            updated = False
+
+        # Auto-link entities mentioned in the text
+        text = f"{fact_text} {evidence_snippet}"
+        for entity_id in _link_entities_for_text(conn, project_id, text):
+            from ...tables.novel import rule_entity_links
+            conn.execute(
+                insert(rule_entity_links).prefix_with("OR IGNORE").values(
+                    project_id=project_id,
+                    evidence_id=eid,
+                    entity_id=entity_id,
+                    relevance="constrains",
+                    created_at=now,
+                )
+            )
+        conn.commit()
+    return {"evidence_id": eid, "fact_text": fact_text, "updated": updated}
+
+
+def _link_entities_for_text(conn, project_id: str, text: str) -> list[str]:
+    """Scan text for known entity names/aliases and return matched entity_ids."""
+    matched: list[str] = []
+    seen: set[str] = set()
+    for row in conn.execute(
+        select(entities.c.entity_id, entities.c.name).where(
+            entities.c.project_id == project_id
+        )
+    ).fetchall():
+        name = row.name
+        if name and len(name) >= 2 and name in text and row.entity_id not in seen:
+            matched.append(row.entity_id)
+            seen.add(row.entity_id)
+    for row in conn.execute(
+        select(entity_aliases.c.entity_id, entity_aliases.c.alias).select_from(
+            entity_aliases.join(entities, entity_aliases.c.entity_id == entities.c.entity_id)
+        ).where(entities.c.project_id == project_id)
+    ).fetchall():
+        alias = row.alias
+        if alias and len(alias) >= 2 and alias in text and row.entity_id not in seen:
+            matched.append(row.entity_id)
+            seen.add(row.entity_id)
+    return matched
 
 
 def _manage_relationship(params: dict, project_id: str) -> str:
@@ -871,13 +1169,100 @@ def _manage_relationship(params: dict, project_id: str) -> str:
         if params.get(k) is not None:
             kwargs[k] = params[k]
     try:
-        result = _get_db().create_or_update_relationship(
-            project_id, a, b, rel_type, **kwargs,
-        )
+        result = _create_or_update_relationship(project_id, a, b, rel_type, **kwargs)
     except ValueError as e:
         return str(e)
     verb = "更新" if result.get("updated") else "创建"
     return f"已{verb}关系：{a} ↔ {b}（{rel_type}）"
+
+
+def _create_or_update_relationship(
+    project_id: str, source_name: str, target_name: str, relation_type: str, **kwargs: Any,
+) -> dict[str, Any]:
+    """Create or update a relationship between two entities. Inline replacement for NovelDB method."""
+    from ...tables.novel import relationships as rel_tbl
+
+    repos = _get_repos()
+    source_id = repos["entity"].resolve_entity_id(project_id, source_name)
+    if not source_id:
+        raise ValueError(f"未找到实体「{source_name}」")
+    target_id = repos["entity"].resolve_entity_id(project_id, target_name)
+    if not target_id:
+        raise ValueError(f"未找到实体「{target_name}」")
+
+    now = _now()
+    engine = get_engine()
+    writable = {"description", "trust_level", "power_dynamic", "history", "conflict_trigger"}
+    extras = {k: v for k, v in kwargs.items() if k in writable and v is not None}
+    prev_relation_type = ""
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(rel_tbl.c.relation_id, rel_tbl.c.relation_type).where(
+                and_(
+                    rel_tbl.c.project_id == project_id,
+                    or_(
+                        and_(rel_tbl.c.source_id == source_id, rel_tbl.c.target_id == target_id),
+                        and_(rel_tbl.c.source_id == target_id, rel_tbl.c.target_id == source_id),
+                    ),
+                )
+            )
+        ).fetchone()
+
+        if row:
+            rid = row.relation_id
+            prev_relation_type = row.relation_type or ""
+            up: dict[str, Any] = {"relation_type": relation_type, "updated_at": now}
+            up.update(extras)
+            conn.execute(
+                update(rel_tbl).where(rel_tbl.c.relation_id == rid).values(**up)
+            )
+            updated = True
+        else:
+            rid = f"rel_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                insert(rel_tbl).values(
+                    relation_id=rid,
+                    project_id=project_id,
+                    source_id=source_id,
+                    target_id=target_id,
+                    relation_type=relation_type,
+                    description=extras.get("description", ""),
+                    trust_level=extras.get("trust_level"),
+                    power_dynamic=extras.get("power_dynamic", ""),
+                    conflict_trigger=extras.get("conflict_trigger", ""),
+                    updated_at=now,
+                )
+            )
+            updated = False
+
+        # Auto-record a relationship_event for timeline tracking
+        event_id = f"re_{uuid.uuid4().hex[:12]}"
+        conn.execute(
+            insert(relationship_events).values(
+                event_id=event_id,
+                project_id=project_id,
+                source_entity_id=source_id,
+                target_entity_id=target_id,
+                segment_id="",
+                chapter_order=0,
+                relation_type=relation_type,
+                previous_state=prev_relation_type if updated else "",
+                new_state=relation_type,
+                trigger_event=extras.get("description", ""),
+                emotional_shift="",
+                power_shift=extras.get("power_dynamic", ""),
+                evidence=extras.get("conflict_trigger", ""),
+                created_at=now,
+            )
+        )
+        conn.commit()
+    return {
+        "relation_id": rid,
+        "source": source_name,
+        "target": target_name,
+        "updated": updated,
+    }
 
 
 def _record_character_event(params: dict, project_id: str) -> str:
@@ -890,29 +1275,44 @@ def _record_character_event(params: dict, project_id: str) -> str:
         return "缺少必填参数 summary"
     chapter_order = params.get("chapter_order", 0)
 
-    entity = _get_db().get_entity(project_id, name)
+    repos = _get_repos()
+    entity = repos["entity"].get_entity_by_name(project_id, name)
     if not entity:
         return f"未找到角色「{name}」"
     entity_id = entity.get("entity_id", name)
 
-    result = _get_db().record_character_event(
-        project_id, entity_id, event_type, summary,
-        chapter_order=chapter_order,
-    )
-    return f"已记录角色事件：{name} [{event_type}] {summary}（ID: {result['event_id']}）"
+    event_id = f"ce_{uuid.uuid4().hex[:12]}"
+    now = _now()
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(
+            insert(character_events).values(
+                event_id=event_id,
+                project_id=project_id,
+                entity_id=entity_id,
+                segment_id="",
+                chapter_order=chapter_order,
+                event_type=event_type,
+                summary=summary,
+                detail_json="{}",
+                created_at=now,
+            )
+        )
+        conn.commit()
+    return f"已记录角色事件：{name} [{event_type}] {summary}（ID: {event_id}）"
 
 
 def _get_story_overview(params: dict, project_id: str) -> str:
-    db = _get_db()
+    repos = _get_repos()
     lines: list[str] = []
 
-    meta = db.get_project_meta(project_id)
+    meta = repos["narrative"].get_project_meta(project_id)
     if meta:
         lines.append(f"【叙事阶段】{meta.get('narrative_phase') or '未知'}")
         lines.append(f"【总段落数】{meta.get('total_segments', 0)}")
 
     if params.get("include_arcs", True):
-        arcs = db.get_narrative_arcs(project_id)
+        arcs = repos["narrative"].list_narrative_arcs(project_id)
         if arcs:
             lines.append(f"\n【叙事弧线】共 {len(arcs)} 条")
             for a in arcs:
@@ -921,7 +1321,7 @@ def _get_story_overview(params: dict, project_id: str) -> str:
                 lines.append(f"  - {a['arc_id']}: {a['summary']}{seg_info}")
 
     if params.get("include_volumes", True):
-        vols = db.get_volume_summaries(project_id)
+        vols = repos["narrative"].list_volume_summaries(project_id)
         if vols:
             lines.append(f"\n【卷册摘要】共 {len(vols)} 卷")
             for v in vols:
@@ -931,19 +1331,21 @@ def _get_story_overview(params: dict, project_id: str) -> str:
 
 
 def _query_segment_summaries(params: dict, project_id: str) -> str:
-    db = _get_db()
+    repos = _get_repos()
     segment_ids = params.get("segment_ids")
     offset = params.get("offset", 0)
     limit = params.get("limit", 30)
 
-    summaries = db.get_segment_summaries(project_id, segment_ids, offset, limit)
+    summaries = repos["narrative"].list_segment_summaries(
+        project_id, segment_ids, offset=offset, limit=limit,
+    )
     lines: list[str] = [f"【逐段摘要】共返回 {len(summaries)} 条"]
     for s in summaries:
         lines.append(f"\n[{s['segment_id']}] (序号 {s['segment_order']})")
         lines.append(s["summary"])
 
     if params.get("include_consistency_notes", True):
-        notes = db.get_consistency_notes(project_id)
+        notes = repos["narrative"].list_consistency_notes(project_id)
         if notes:
             lines.append(f"\n【一致性注释】共 {len(notes)} 条")
             for n in notes:
@@ -1124,40 +1526,44 @@ def _global_search(params: dict, project_id: str) -> str:
 
 
 def _query_graph_neighbors(params: dict, project_id: str) -> str:
-    import sqlite3 as _sql
-    from ..local_story_graph_storage import LocalStoryGraphStorage
+    from app.database import get_engine as _get_engine
+    from app.repositories.graph_repo import GraphRepository as _GraphRepo
     name = (params.get("name") or "").strip()
     if not name:
         return "query_graph_neighbors 需要 name"
     limit = int(params.get("limit") or 20)
-    storage = LocalStoryGraphStorage()
-    if not storage.has_graph(project_id):
+    repo = _GraphRepo(_get_engine())
+    if not repo.has_graph(project_id):
         return f"项目 {project_id} 暂无故事图谱"
-    db_path = storage.graph_db_path(project_id)
-    conn = _sql.connect(db_path)
-    conn.row_factory = _sql.Row
-    try:
+    from sqlalchemy import text as _text
+    with repo.engine.connect() as conn:
         # 1) find node by exact name or alias
         node_row = conn.execute(
-            "SELECT * FROM graph_nodes WHERE name = ? LIMIT 1", (name,)
-        ).fetchone()
+            _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND name = :name LIMIT 1"),
+            {"pid": project_id, "name": name},
+        ).mappings().first()
         if not node_row:
             alias_row = conn.execute(
-                "SELECT node_uuid FROM graph_aliases WHERE alias = ? LIMIT 1", (name,)
-            ).fetchone()
+                _text("SELECT node_uuid FROM graph_aliases WHERE project_id = :pid AND alias = :name LIMIT 1"),
+                {"pid": project_id, "name": name},
+            ).mappings().first()
             if alias_row:
                 node_row = conn.execute(
-                    "SELECT * FROM graph_nodes WHERE uuid = ?", (alias_row["node_uuid"],)
-                ).fetchone()
+                    _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND uuid = :uuid"),
+                    {"pid": project_id, "uuid": alias_row["node_uuid"]},
+                ).mappings().first()
         if not node_row:
             return f"故事图谱中未找到节点：{name}"
 
         node_uuid = node_row["uuid"]
         edges = conn.execute(
-            "SELECT * FROM graph_edges WHERE source_node_uuid = ? OR target_node_uuid = ? "
-            "ORDER BY weight DESC LIMIT ?",
-            (node_uuid, node_uuid, limit),
-        ).fetchall()
+            _text(
+                "SELECT * FROM graph_edges WHERE project_id = :pid "
+                "AND (source_node_uuid = :uuid OR target_node_uuid = :uuid) "
+                "ORDER BY weight DESC LIMIT :lim"
+            ),
+            {"pid": project_id, "uuid": node_uuid, "lim": limit},
+        ).mappings().all()
         # gather neighbor info
         neighbor_uuids = set()
         for e in edges:
@@ -1165,14 +1571,14 @@ def _query_graph_neighbors(params: dict, project_id: str) -> str:
             neighbor_uuids.add(other)
         neighbor_map = {}
         if neighbor_uuids:
-            placeholders = ",".join("?" * len(neighbor_uuids))
+            placeholders = ",".join(f":u{i}" for i in range(len(neighbor_uuids)))
+            bind = {"pid": project_id}
+            bind.update({f"u{i}": u for i, u in enumerate(neighbor_uuids)})
             for n in conn.execute(
-                f"SELECT uuid, name, summary FROM graph_nodes WHERE uuid IN ({placeholders})",
-                list(neighbor_uuids),
-            ).fetchall():
+                _text(f"SELECT uuid, name, summary FROM graph_nodes WHERE project_id = :pid AND uuid IN ({placeholders})"),
+                bind,
+            ).mappings().all():
                 neighbor_map[n["uuid"]] = (n["name"], n["summary"])
-    finally:
-        conn.close()
 
     lines = [f"# 节点：{node_row['name']}", f"摘要：{node_row['summary'] or '(无)'}", "", f"## 邻居 / 关系（{len(edges)} 条）"]
     for e in edges:
@@ -1188,32 +1594,29 @@ def _query_graph_neighbors(params: dict, project_id: str) -> str:
 
 
 def _query_event(params: dict, project_id: str) -> str:
-    import sqlite3 as _sql
     import json as _json
-    from ..local_story_graph_storage import LocalStoryGraphStorage
+    from app.database import get_engine as _get_engine
+    from app.repositories.graph_repo import GraphRepository as _GraphRepo
     event_id = (params.get("event_id") or "").strip()
     name = (params.get("name") or "").strip()
     limit = max(1, min(int(params.get("limit") or 5), 20))
     if not event_id and not name:
         return "query_event 需要 event_id 或 name 之一"
-    storage = LocalStoryGraphStorage()
-    if not storage.has_graph(project_id):
+    repo = _GraphRepo(_get_engine())
+    if not repo.has_graph(project_id):
         return f"项目 {project_id} 暂无故事图谱"
-    db_path = storage.graph_db_path(project_id)
-    conn = _sql.connect(db_path)
-    conn.row_factory = _sql.Row
-    try:
-        # Filter to PlotEvent label via labels_json LIKE
+    from sqlalchemy import text as _text
+    with repo.engine.connect() as conn:
+        # Filter to PlotEvent label via graph_node_labels join
         rows = conn.execute(
-            "SELECT n.* FROM graph_nodes n "
-            "JOIN graph_node_labels l ON l.node_uuid = n.uuid "
-            "WHERE l.label IN ('PlotEvent', 'Conflict') "
-            "ORDER BY n.name LIMIT 500"
-        ).fetchall() if _has_table(conn, "graph_node_labels") else conn.execute(
-            "SELECT * FROM graph_nodes LIMIT 500"
-        ).fetchall()
-    finally:
-        conn.close()
+            _text(
+                "SELECT n.* FROM graph_nodes n "
+                "JOIN graph_node_labels l ON l.project_id = n.project_id AND l.node_uuid = n.uuid "
+                "WHERE n.project_id = :pid AND l.label IN ('PlotEvent', 'Conflict') "
+                "ORDER BY n.name LIMIT 500"
+            ),
+            {"pid": project_id},
+        ).mappings().all()
 
     matches: list[dict] = []
     for r in rows:
@@ -1277,60 +1680,66 @@ def _has_table(conn, name: str) -> bool:
 
 
 def _query_relationship_network(params: dict, project_id: str) -> str:
-    import sqlite3 as _sql
-    from ..local_story_graph_storage import LocalStoryGraphStorage
+    from app.database import get_engine as _get_engine
+    from app.repositories.graph_repo import GraphRepository as _GraphRepo
     name = (params.get("name") or "").strip()
     if not name:
         return "query_relationship_network 需要 name"
     limit = max(1, min(int(params.get("limit") or 30), 100))
-    storage = LocalStoryGraphStorage()
-    if not storage.has_graph(project_id):
+    repo = _GraphRepo(_get_engine())
+    if not repo.has_graph(project_id):
         return f"项目 {project_id} 暂无故事图谱"
-    db_path = storage.graph_db_path(project_id)
-    conn = _sql.connect(db_path)
-    conn.row_factory = _sql.Row
-    try:
+    from sqlalchemy import text as _text
+    with repo.engine.connect() as conn:
         node_row = conn.execute(
-            "SELECT * FROM graph_nodes WHERE name = ? LIMIT 1", (name,)
-        ).fetchone()
+            _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND name = :name LIMIT 1"),
+            {"pid": project_id, "name": name},
+        ).mappings().first()
         if not node_row:
             alias_row = conn.execute(
-                "SELECT node_uuid FROM graph_aliases WHERE alias = ? LIMIT 1", (name,)
-            ).fetchone() if _has_table(conn, "graph_aliases") else None
+                _text("SELECT node_uuid FROM graph_aliases WHERE project_id = :pid AND alias = :name LIMIT 1"),
+                {"pid": project_id, "name": name},
+            ).mappings().first()
             if alias_row:
                 node_row = conn.execute(
-                    "SELECT * FROM graph_nodes WHERE uuid = ?", (alias_row["node_uuid"],)
-                ).fetchone()
+                    _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND uuid = :uuid"),
+                    {"pid": project_id, "uuid": alias_row["node_uuid"]},
+                ).mappings().first()
         if not node_row:
             return f"故事图谱中未找到节点：{name}"
         node_uuid = node_row["uuid"]
         # Restrict to character/organization/faction neighbors via label join when available
         edges = conn.execute(
-            "SELECT * FROM graph_edges "
-            "WHERE source_node_uuid = ? OR target_node_uuid = ? "
-            "ORDER BY weight DESC LIMIT ?",
-            (node_uuid, node_uuid, limit * 2),
-        ).fetchall()
+            _text(
+                "SELECT * FROM graph_edges "
+                "WHERE project_id = :pid AND (source_node_uuid = :uuid OR target_node_uuid = :uuid) "
+                "ORDER BY weight DESC LIMIT :lim"
+            ),
+            {"pid": project_id, "uuid": node_uuid, "lim": limit * 2},
+        ).mappings().all()
         neighbor_uuids = set()
         for e in edges:
             other = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
             neighbor_uuids.add(other)
         neighbor_map: dict[str, dict] = {}
         if neighbor_uuids:
-            placeholders = ",".join("?" * len(neighbor_uuids))
+            placeholders = ",".join(f":u{i}" for i in range(len(neighbor_uuids)))
+            bind = {"pid": project_id}
+            bind.update({f"u{i}": u for i, u in enumerate(neighbor_uuids)})
             for n in conn.execute(
-                f"SELECT n.uuid, n.name, n.summary, "
-                f"  (SELECT GROUP_CONCAT(label) FROM graph_node_labels WHERE node_uuid = n.uuid) AS labels "
-                f"FROM graph_nodes n WHERE n.uuid IN ({placeholders})",
-                list(neighbor_uuids),
-            ).fetchall():
+                _text(
+                    f"SELECT n.uuid, n.name, n.summary, "
+                    f"  (SELECT GROUP_CONCAT(label) FROM graph_node_labels "
+                    f"   WHERE project_id = :pid AND node_uuid = n.uuid) AS labels "
+                    f"FROM graph_nodes n WHERE n.project_id = :pid AND n.uuid IN ({placeholders})"
+                ),
+                bind,
+            ).mappings().all():
                 neighbor_map[n["uuid"]] = {
                     "name": n["name"],
                     "summary": n["summary"],
                     "labels": (n["labels"] or "").split(","),
                 }
-    finally:
-        conn.close()
 
     # Filter to character-like neighbors
     person_labels = {"Character", "Organization", "Faction", "Group"}
@@ -1418,6 +1827,460 @@ def _query_worldline_session(params: dict, project_id: str) -> str:
     return "\n".join(lines)
 
 
+# ----------------------------------------------------------------------
+# Book-run executors: word-count audit, forbidden-lexicon scan, splice/rewrite
+# ----------------------------------------------------------------------
+
+_SPLICE_MAX_DELTA_CHARS = 5000  # hard cap per single splice action
+_REWRITE_MAX_DELTA_CHARS = 3000  # hard cap per single rewrite_span action
+_SCAN_REGEX_TIMEOUT_SECONDS = 5
+
+
+def _get_manuscript_adapter(project_id: str):
+    from .manuscript_service import _get_adapter
+    return _get_adapter(project_id)
+
+
+def _block_chars(content: str | None) -> int:
+    from ...utils.word_count import count_cjk_chars
+    return count_cjk_chars(content)
+
+
+def _get_chapter_word_stats(params: dict, project_id: str) -> str:
+    chapter_id = params.get("chapter_id") or ""
+    if not chapter_id:
+        return "get_chapter_word_stats 需要 chapter_id"
+    target = params.get("target_word_count")
+    adapter = _get_manuscript_adapter(project_id)
+    blocks = adapter.list_blocks(include_content=True, chapter_id=chapter_id)
+    if not blocks:
+        return f"章节 {chapter_id} 暂无已提交稿件块"
+    lines: list[str] = []
+    total = 0
+    for b in blocks:
+        c = _block_chars(b.get("content") or "")
+        total += c
+        preview = (b.get("content") or "").strip().replace("\n", " ")[:32]
+        lines.append(
+            f"- block_id={b['block_id']}  order={b.get('block_order')}  chars={c}  preview={preview!r}"
+        )
+    header = [f"章节 {chapter_id} 共 {len(blocks)} 块，总字数={total}"]
+    if target is not None:
+        try:
+            target_int = int(target)
+            diff = total - target_int
+            pct = (diff / target_int * 100) if target_int else 0.0
+            header.append(f"目标={target_int}，差值={diff:+d}（{pct:+.1f}%）")
+        except (TypeError, ValueError):
+            pass
+    return "\n".join(header + [""] + lines)
+
+
+def _load_forbidden_lexicon_entries(
+    project_id: str, lexicon_asset_ids: list[str] | None
+) -> list[dict]:
+    """Load and normalize forbidden_lexicon entries from selected assets.
+
+    Normalized entry shape: {
+        id, pattern, match_type, category, severity, note,
+        whitelist_contexts, asset_id, asset_title
+    }
+    """
+    svc = _get_assets_service()
+    if lexicon_asset_ids:
+        assets: list[dict] = []
+        for aid in lexicon_asset_ids:
+            asset = svc.find(aid, project_id=project_id)
+            if asset and asset.get("enabled") and asset.get("asset_type") == "forbidden_lexicon":
+                assets.append(asset)
+    else:
+        assets = svc.list_merged(
+            project_id=project_id,
+            asset_type="forbidden_lexicon",
+            enabled_only=True,
+            limit=50,
+        )
+    out: list[dict] = []
+    for asset in assets:
+        payload = asset.get("payload") or {}
+        raw_entries = payload.get("entries") or []
+        for i, raw in enumerate(raw_entries):
+            if isinstance(raw, str):
+                norm = {"pattern": raw, "match_type": "literal"}
+            elif isinstance(raw, dict):
+                norm = dict(raw)
+            else:
+                continue
+            if not norm.get("pattern"):
+                continue
+            out.append(
+                {
+                    "id": norm.get("id") or f"{asset['asset_id']}#{i}",
+                    "pattern": norm["pattern"],
+                    "match_type": (norm.get("match_type") or "literal").lower(),
+                    "category": norm.get("category") or "word",
+                    "severity": norm.get("severity") or "block",
+                    "note": norm.get("note") or "",
+                    "whitelist_contexts": norm.get("whitelist_contexts") or [],
+                    "asset_id": asset["asset_id"],
+                    "asset_title": asset.get("title") or "",
+                }
+            )
+    return out
+
+
+def _scan_forbidden_lexicon(params: dict, project_id: str) -> str:
+    import re as _re
+    import time as _time
+
+    chapter_id = params.get("chapter_id") or ""
+    block_ids = params.get("block_ids") or []
+    lexicon_asset_ids = params.get("lexicon_asset_ids") or []
+
+    adapter = _get_manuscript_adapter(project_id)
+    if block_ids:
+        blocks = []
+        for bid in block_ids:
+            b = adapter.get_block(bid)
+            if b:
+                blocks.append(b)
+    elif chapter_id:
+        blocks = adapter.list_blocks(include_content=True, chapter_id=chapter_id)
+    else:
+        return "scan_forbidden_lexicon 需要 chapter_id 或 block_ids"
+    if not blocks:
+        return "未找到待扫描的稿件块"
+
+    entries = _load_forbidden_lexicon_entries(project_id, lexicon_asset_ids or None)
+    if not entries:
+        return "没有已启用的禁词资产（forbidden_lexicon），跳过扫描"
+
+    deadline = _time.monotonic() + _SCAN_REGEX_TIMEOUT_SECONDS
+    hits: list[dict] = []
+    for entry in entries:
+        pattern = entry["pattern"]
+        match_type = entry["match_type"]
+        try:
+            if match_type == "regex":
+                compiled = _re.compile(pattern)
+            elif match_type == "phrase":
+                compiled = _re.compile(_re.escape(pattern).replace(r"\ ", r"\s+"))
+            else:
+                compiled = None  # literal
+        except _re.error as exc:
+            hits.append(
+                {
+                    "block_id": None,
+                    "error": f"正则 {pattern!r} 编译失败：{exc}",
+                    "entry_id": entry["id"],
+                }
+            )
+            continue
+        for b in blocks:
+            if _time.monotonic() > deadline:
+                hits.append({"error": "扫描超时 5s，已中止（请精简正则规则）"})
+                break
+            content = b.get("content") or ""
+            if compiled is None:
+                start = 0
+                while True:
+                    idx = content.find(pattern, start)
+                    if idx < 0:
+                        break
+                    hits.append(_format_hit(b, entry, idx, idx + len(pattern), pattern))
+                    start = idx + max(len(pattern), 1)
+            else:
+                for m in compiled.finditer(content):
+                    if _time.monotonic() > deadline:
+                        break
+                    hits.append(
+                        _format_hit(b, entry, m.start(), m.end(), m.group(0))
+                    )
+        else:
+            continue
+        break  # timeout broke inner loop
+
+    # Apply whitelist filter
+    filtered: list[dict] = []
+    for h in hits:
+        if "error" in h:
+            filtered.append(h)
+            continue
+        wls = h.get("whitelist_contexts") or []
+        if wls and any(wl for wl in wls if wl in (h.get("context") or "")):
+            continue
+        filtered.append(h)
+
+    if not filtered:
+        return f"扫描完成，共比对 {len(entries)} 条规则，未命中任何禁词。"
+    lines = [f"扫描完成，共比对 {len(entries)} 条规则，命中 {len(filtered)} 处："]
+    for h in filtered[:80]:
+        if "error" in h:
+            lines.append(f"  [错误] {h['error']}")
+            continue
+        lines.append(
+            f"- block={h['block_id']}(order={h['block_order']}) "
+            f"match={h['match']!r}  [{h['match_type']}/{h['severity']}] "
+            f"entry={h['entry_id']}  ctx={h['context']!r}"
+        )
+    if len(filtered) > 80:
+        lines.append(f"... 另有 {len(filtered) - 80} 条命中省略")
+    return "\n".join(lines)
+
+
+def _format_hit(
+    block: dict, entry: dict, start: int, end: int, matched: str
+) -> dict:
+    content = block.get("content") or ""
+    ctx_start = max(0, start - 40)
+    ctx_end = min(len(content), end + 40)
+    return {
+        "block_id": block["block_id"],
+        "block_order": block.get("block_order"),
+        "match": matched,
+        "start": start,
+        "end": end,
+        "entry_id": entry["id"],
+        "pattern": entry["pattern"],
+        "match_type": entry["match_type"],
+        "severity": entry["severity"],
+        "asset_title": entry["asset_title"],
+        "context": content[ctx_start:ctx_end].replace("\n", " "),
+        "whitelist_contexts": entry.get("whitelist_contexts") or [],
+    }
+
+
+def _list_forbidden_lexicon(params: dict, project_id: str) -> str:
+    include_entries = bool(params.get("include_entries"))
+    svc = _get_assets_service()
+    assets = svc.list_merged(
+        project_id=project_id,
+        asset_type="forbidden_lexicon",
+        enabled_only=False,
+        limit=50,
+    )
+    if not assets:
+        return "暂无 forbidden_lexicon 类型资产"
+    lines = [f"共 {len(assets)} 份禁词资产："]
+    for a in assets:
+        payload = a.get("payload") or {}
+        entries = payload.get("entries") or []
+        lines.append(
+            f"- [{a['asset_id']}] {a.get('title', '')}  条目={len(entries)}  enabled={a.get('enabled')}  scope={a.get('scope')}"
+        )
+        if include_entries and entries:
+            for i, e in enumerate(entries[:30]):
+                if isinstance(e, str):
+                    lines.append(f"    {i}. {e}  (literal)")
+                elif isinstance(e, dict):
+                    lines.append(
+                        f"    {i}. {e.get('pattern', '?')}  "
+                        f"[{e.get('match_type', 'literal')}/{e.get('category', 'word')}/{e.get('severity', 'block')}]"
+                    )
+            if len(entries) > 30:
+                lines.append(f"    ... 另有 {len(entries) - 30} 条")
+    return "\n".join(lines)
+
+
+def _upsert_forbidden_lexicon(params: dict, project_id: str) -> str:
+    asset_id = params.get("asset_id")
+    title = (params.get("title") or "").strip()
+    raw_entries = params.get("entries")
+    if not isinstance(raw_entries, list):
+        return "upsert_forbidden_lexicon 需要 entries 数组"
+    normalized: list[dict] = []
+    for raw in raw_entries:
+        if isinstance(raw, str):
+            if raw.strip():
+                normalized.append({"pattern": raw.strip(), "match_type": "literal"})
+        elif isinstance(raw, dict):
+            if not raw.get("pattern"):
+                continue
+            normalized.append(
+                {
+                    "pattern": str(raw["pattern"]),
+                    "match_type": (raw.get("match_type") or "literal").lower(),
+                    "category": raw.get("category") or "word",
+                    "severity": raw.get("severity") or "block",
+                    "note": raw.get("note") or "",
+                    "whitelist_contexts": raw.get("whitelist_contexts") or [],
+                }
+            )
+    # Validate regex entries up-front
+    import re as _re
+    for e in normalized:
+        if e["match_type"] == "regex":
+            try:
+                _re.compile(e["pattern"])
+            except _re.error as exc:
+                return f"禁词正则 {e['pattern']!r} 不合法：{exc}"
+
+    svc = _get_assets_service()
+    payload = {"entries": normalized}
+    if asset_id:
+        existing = svc.find(asset_id, project_id=project_id)
+        if not existing:
+            return f"未找到 asset_id={asset_id}"
+        svc.update(
+            asset_id,
+            scope=existing.get("scope", "project"),
+            project_id=existing.get("project_id"),
+            title=title or existing.get("title") or "禁词表",
+            payload=payload,
+        )
+        return f"已更新禁词资产 {asset_id}，共 {len(normalized)} 条规则"
+    if not title:
+        return "新建禁词资产必须提供 title"
+    created = svc.create(
+        scope="project",
+        project_id=project_id,
+        asset_type="forbidden_lexicon",
+        title=title,
+        summary=f"{len(normalized)} 条禁用规则",
+        payload=payload,
+        source_kind="writer_agent",
+    )
+    return f"已创建禁词资产 {created.get('asset_id')}，共 {len(normalized)} 条规则"
+
+
+def _splice_block(params: dict, project_id: str) -> str:
+    chapter_id = params.get("chapter_id") or ""
+    anchor_block_id = params.get("anchor_block_id") or ""
+    position = (params.get("position") or "").lower()
+    content = params.get("content") or ""
+    end_anchor = params.get("end_anchor_block_id")
+    if not chapter_id or not anchor_block_id or not position:
+        return "splice_block 需要 chapter_id / anchor_block_id / position"
+    if position not in ("before", "after", "replace_range"):
+        return f"position 必须是 before|after|replace_range，收到 {position!r}"
+    if not content and position != "replace_range":
+        return "splice_block 在 before/after 模式下 content 不能为空"
+
+    new_chars = _block_chars(content)
+    if new_chars > _SPLICE_MAX_DELTA_CHARS:
+        return (
+            f"splice_block 被拒绝：单次写入 {new_chars} 字超过上限 "
+            f"{_SPLICE_MAX_DELTA_CHARS}，请拆分为多次调用"
+        )
+
+    adapter = _get_manuscript_adapter(project_id)
+    anchor = adapter.get_block(anchor_block_id)
+    if not anchor:
+        return f"找不到锚点块 {anchor_block_id}"
+    if anchor.get("chapter_id") != chapter_id:
+        return f"锚点块不属于章节 {chapter_id}"
+
+    reason = params.get("reason") or ""
+
+    if position == "after":
+        block = adapter.commit(
+            content,
+            insert_after_block_id=anchor_block_id,
+            chapter_id=chapter_id,
+        )
+        return (
+            f"已在 {anchor_block_id} 之后插入新块 {block['block_id']}"
+            f"（字数={new_chars}，reason={reason!r}）"
+        )
+
+    if position == "before":
+        blocks = adapter.list_blocks(include_content=False, chapter_id=chapter_id)
+        blocks.sort(key=lambda b: b.get("block_order") or 0)
+        prev_id = None
+        for b in blocks:
+            if b["block_id"] == anchor_block_id:
+                break
+            prev_id = b["block_id"]
+        block = adapter.commit(
+            content,
+            insert_after_block_id=prev_id,
+            chapter_id=chapter_id,
+        )
+        return (
+            f"已在 {anchor_block_id} 之前插入新块 {block['block_id']}"
+            f"（字数={new_chars}，reason={reason!r}）"
+        )
+
+    # replace_range
+    if not end_anchor:
+        end_anchor = anchor_block_id
+    end_block = adapter.get_block(end_anchor)
+    if not end_block or end_block.get("chapter_id") != chapter_id:
+        return f"replace_range 的结束锚点 {end_anchor} 不合法"
+    start_order = anchor.get("block_order") or 0
+    end_order = end_block.get("block_order") or 0
+    if end_order < start_order:
+        return "end_anchor_block_id 的顺序必须 ≥ anchor_block_id"
+
+    blocks = adapter.list_blocks(include_content=True, chapter_id=chapter_id)
+    in_range = [
+        b for b in blocks
+        if (b.get("block_order") or 0) >= start_order
+        and (b.get("block_order") or 0) <= end_order
+    ]
+    if not in_range:
+        return "replace_range 区间内无块"
+    old_chars = sum(_block_chars(b.get("content") or "") for b in in_range)
+    delta = new_chars - old_chars
+    if abs(delta) > _SPLICE_MAX_DELTA_CHARS:
+        return (
+            f"splice_block replace_range 被拒绝：净变化 {delta:+d} 字超过上限 "
+            f"±{_SPLICE_MAX_DELTA_CHARS}"
+        )
+
+    adapter.update_block(anchor_block_id, content=content)
+    removed: list[str] = []
+    for b in in_range:
+        if b["block_id"] == anchor_block_id:
+            continue
+        adapter.delete_block(b["block_id"])
+        removed.append(b["block_id"])
+    return (
+        f"已替换区间：保留 {anchor_block_id} 并写入新正文（{old_chars} → {new_chars} 字，"
+        f"净变化 {delta:+d}），删除 {len(removed)} 块：{removed}。reason={reason!r}"
+    )
+
+
+def _rewrite_span(params: dict, project_id: str) -> str:
+    block_id = params.get("block_id") or ""
+    original = params.get("original_text") or ""
+    new_text = params.get("new_text") or ""
+    reason = params.get("reason") or ""
+    if not block_id or not original:
+        return "rewrite_span 需要 block_id 和 original_text"
+
+    old_chars = _block_chars(original)
+    new_chars = _block_chars(new_text)
+    if abs(new_chars - old_chars) > _REWRITE_MAX_DELTA_CHARS:
+        return (
+            f"rewrite_span 被拒绝：字数变化 {new_chars - old_chars:+d} 超过上限 "
+            f"±{_REWRITE_MAX_DELTA_CHARS}"
+        )
+
+    adapter = _get_manuscript_adapter(project_id)
+    block = adapter.get_block(block_id)
+    if not block:
+        return f"找不到 block_id={block_id}"
+    content = block.get("content") or ""
+    occurrences = content.count(original)
+    if occurrences == 0:
+        return (
+            f"original_text 未出现在块 {block_id} 中，请先 get_manuscript_context "
+            f"或 scan_forbidden_lexicon 核对实际文本"
+        )
+    if occurrences > 1:
+        return (
+            f"original_text 在块 {block_id} 中出现 {occurrences} 次（不唯一），"
+            f"请扩展 original_text 使之唯一后重试"
+        )
+    updated = content.replace(original, new_text, 1)
+    adapter.update_block(block_id, content=updated)
+    return (
+        f"已在 {block_id} 内完成 1 次替换"
+        f"（{old_chars} → {new_chars} 字，reason={reason!r}）"
+    )
+
+
 _EXECUTORS: dict[str, Any] = {
     "query_entity": _query_entity,
     "query_relationship": _query_relationship,
@@ -1457,4 +2320,11 @@ _EXECUTORS: dict[str, Any] = {
     "query_event": _query_event,
     "query_relationship_network": _query_relationship_network,
     "query_worldline_session": _query_worldline_session,
+    # Book-run (字数/禁词审计 + 段落编辑)
+    "get_chapter_word_stats": _get_chapter_word_stats,
+    "scan_forbidden_lexicon": _scan_forbidden_lexicon,
+    "list_forbidden_lexicon": _list_forbidden_lexicon,
+    "upsert_forbidden_lexicon": _upsert_forbidden_lexicon,
+    "splice_block": _splice_block,
+    "rewrite_span": _rewrite_span,
 }

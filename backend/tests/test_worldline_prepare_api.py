@@ -229,7 +229,7 @@ def test_worldline_prepare_materializes_dossiers_and_start_uses_prepare_snapshot
     app = create_app()
     client = app.test_client()
 
-    from app.api import worldline_prepare
+    from app.api_fastapi import worldline as worldline_prepare
 
     fake_router = _FakeRouter()
     monkeypatch.setattr(worldline_prepare.worldline_prepare_service, "llm_router", fake_router)
@@ -287,7 +287,7 @@ def test_worldline_prepare_failure_surfaces_task_error_and_blocks_start(tmp_path
     app = create_app()
     client = app.test_client()
 
-    from app.api import worldline_prepare
+    from app.api_fastapi import worldline as worldline_prepare
 
     class MissingRouter:
         def build_client(self, module_key):
@@ -320,7 +320,8 @@ def test_agent_dialogue_context_does_not_leak_other_agent_private_profile(tmp_pa
     app = create_app()
     client = app.test_client()
 
-    from app.api import worldline_prepare, worldline_interaction
+    from app.api_fastapi import worldline as worldline_prepare
+    from app.api_fastapi import worldline as worldline_interaction
 
     fake_router = _FakeRouter()
     monkeypatch.setattr(worldline_prepare.worldline_prepare_service, "llm_router", fake_router)
@@ -357,7 +358,7 @@ def test_worldline_prepare_materializes_dossiers_in_parallel(tmp_path, monkeypat
     app = create_app()
     client = app.test_client()
 
-    from app.api import worldline_prepare
+    from app.api_fastapi import worldline as worldline_prepare
 
     parallel_client = _ParallelPrepareClient()
 
@@ -385,7 +386,7 @@ def test_worldline_prepare_parallel_worker_failure_fails_entire_prepare(tmp_path
     app = create_app()
     client = app.test_client()
 
-    from app.api import worldline_prepare
+    from app.api_fastapi import worldline as worldline_prepare
 
     parallel_client = _ParallelPrepareClient(fail_on="玄霄宗")
 
@@ -421,7 +422,7 @@ def test_worldline_prepare_accepts_single_object_list_payload(tmp_path, monkeypa
     app = create_app()
     client = app.test_client()
 
-    from app.api import worldline_prepare
+    from app.api_fastapi import worldline as worldline_prepare
 
     class ListWrappedRouter:
         def build_client(self, module_key):

@@ -4,7 +4,10 @@ import sqlite3
 import time
 
 from app import create_app
+from app.config import Config
 from app.models.project import ProjectManager
+from app.models.task import TaskManager, TaskStatus
+from app.services.seed_extract_task_service import SeedExtractTaskService
 from app.services.zep_entity_reader import ZepEntityReader
 
 
@@ -32,22 +35,33 @@ def wait_for_task(client, task_id: str, timeout: float = 15.0):
 
 
 def create_seed_project(client):
-    upload = io.BytesIO(build_small_novel().encode("utf-8"))
-    response = client.post(
-        "/api/project/seed/extract",
-        data={
-            "analysis_goal": "提取角色、组织、地点、物件与关系，用于故事图谱和世界线推演",
-            "project_name": "本地图谱测试",
-            "use_llm": "false",
-            "files": (upload, "local-graph-novel.txt"),
-        },
-        content_type="multipart/form-data",
+    Config.UPLOAD_FOLDER = os.path.dirname(ProjectManager.PROJECTS_DIR)
+    project = ProjectManager.create_project("本地图谱测试")
+    project.analysis_goal = "提取角色、组织、地点、物件与关系，用于故事图谱和世界线推演"
+    files_dir = os.path.join(ProjectManager._get_project_dir(project.project_id), "files")
+    os.makedirs(files_dir, exist_ok=True)
+    with open(os.path.join(files_dir, "local-graph-novel.txt"), "w", encoding="utf-8") as file_obj:
+        file_obj.write(build_small_novel())
+    project.files = [{
+        "filename": "local-graph-novel.txt",
+        "saved_filename": "local-graph-novel.txt",
+        "size": len(build_small_novel()),
+    }]
+    ProjectManager.save_project(project)
+    task_id = SeedExtractTaskService().create_task(
+        project.project_id,
+        project.name,
+        project.analysis_goal,
+        "",
+        False,
     )
-    assert response.status_code == 202, response.get_json()
-    payload = response.get_json()["data"]
-    task = wait_for_task(client, payload["task_id"])
-    assert task["status"] == "completed", task
-    return payload["project_id"]
+    deadline = time.time() + 15
+    task = TaskManager().get_task(task_id)
+    while time.time() < deadline and task and task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+        time.sleep(0.05)
+        task = TaskManager().get_task(task_id)
+    assert task and task.status == TaskStatus.COMPLETED, task.to_dict() if task else None
+    return project.project_id
 
 
 def test_build_graph_creates_local_story_graph_and_query_api(tmp_path):

@@ -1,5 +1,7 @@
 """Tests for TaskCancelledException and TaskStatus.CANCELLED."""
 
+import asyncio
+
 import pytest
 
 from app.models.task import TaskManager, TaskStatus
@@ -14,18 +16,30 @@ from app.services.reading_notes_manager import ReadingNotesManager
 # ---------------------------------------------------------------------------
 
 def make_manager() -> TaskManager:
-    """Return a TaskManager wired to a fresh temp-file SQLite DB."""
-    import tempfile
-    from app.models.task_storage import TaskStorage
+    """Return a TaskManager wired to a fresh in-memory SQLite DB."""
+    from sqlalchemy import create_engine
+    from app.database import init_db
+    from app.repositories.task_repo import TaskRepository
+    import app.database as db_mod
 
     # Reset the singleton so each test gets an isolated instance
     TaskManager._instance = None
-    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
-    tmp.close()
-    storage = TaskStorage(tmp.name)
+    TaskManager._instance_ready = False
+    # Save and restore the global engine to avoid polluting other tests
+    prev_engine = db_mod._engine
+    engine = create_engine("sqlite:///:memory:", future=True)
+    init_db(engine)
+    repo = TaskRepository(engine)
     mgr = TaskManager()
-    mgr._storage = storage
+    mgr._storage = repo
+    # Restore the global engine so other test modules aren't affected
+    db_mod._engine = prev_engine
     return mgr
+
+
+def _run(coro):
+    """Bridge async TaskManager methods into sync test code."""
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -42,13 +56,13 @@ def test_cancelled_status_exists():
 
 def test_cancel_task_processing():
     mgr = make_manager()
-    task_id = mgr.create_task("test_type")
-    mgr.update_task(task_id, status=TaskStatus.PROCESSING)
+    task_id = _run(mgr.create_task("test_type"))
+    _run(mgr.update_task(task_id, status=TaskStatus.PROCESSING))
 
-    result = mgr.cancel_task(task_id)
+    result = _run(mgr.cancel_task(task_id))
 
     assert result is True
-    task = mgr.get_task(task_id)
+    task = _run(mgr.get_task(task_id))
     assert task.status == TaskStatus.CANCELLED
 
 
@@ -58,13 +72,13 @@ def test_cancel_task_processing():
 
 def test_cancel_task_not_processing():
     mgr = make_manager()
-    task_id = mgr.create_task("test_type")
+    task_id = _run(mgr.create_task("test_type"))
     # Status is PENDING by default
 
-    result = mgr.cancel_task(task_id)
+    result = _run(mgr.cancel_task(task_id))
 
     assert result is False
-    task = mgr.get_task(task_id)
+    task = _run(mgr.get_task(task_id))
     assert task.status == TaskStatus.PENDING
 
 
@@ -74,13 +88,13 @@ def test_cancel_task_not_processing():
 
 def test_cancel_task_already_completed():
     mgr = make_manager()
-    task_id = mgr.create_task("test_type")
-    mgr.complete_task(task_id, result={"ok": True})
+    task_id = _run(mgr.create_task("test_type"))
+    _run(mgr.complete_task(task_id, result={"ok": True}))
 
-    result = mgr.cancel_task(task_id)
+    result = _run(mgr.cancel_task(task_id))
 
     assert result is False
-    task = mgr.get_task(task_id)
+    task = _run(mgr.get_task(task_id))
     assert task.status == TaskStatus.COMPLETED
 
 
@@ -91,7 +105,7 @@ def test_cancel_task_already_completed():
 def test_cancel_task_nonexistent():
     mgr = make_manager()
 
-    result = mgr.cancel_task("00000000-0000-0000-0000-000000000000")
+    result = _run(mgr.cancel_task("00000000-0000-0000-0000-000000000000"))
 
     assert result is False
 
@@ -116,14 +130,14 @@ def test_task_cancelled_exception():
 
 def test_is_cancelled_helper():
     mgr = make_manager()
-    task_id = mgr.create_task("test_type")
-    mgr.update_task(task_id, status=TaskStatus.PROCESSING)
+    task_id = _run(mgr.create_task("test_type"))
+    _run(mgr.update_task(task_id, status=TaskStatus.PROCESSING))
 
-    assert mgr.is_cancelled(task_id) is False
+    assert _run(mgr.is_cancelled(task_id)) is False
 
-    mgr.cancel_task(task_id)
+    _run(mgr.cancel_task(task_id))
 
-    assert mgr.is_cancelled(task_id) is True
+    assert _run(mgr.is_cancelled(task_id)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -237,4 +251,4 @@ def test_profile_generator_respects_cancellation():
     manager = _manager_with_many_characters()
 
     with pytest.raises(TaskCancelledException):
-        gen.generate(manager, use_llm=True, cancel_check=cancel_check)
+        asyncio.run(gen.generate(manager, use_llm=True, cancel_check=cancel_check))

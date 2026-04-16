@@ -187,7 +187,7 @@ class StoryMemoryBuilder:
         block_id: str,
         entity: Dict[str, Any],
     ) -> None:
-        name = entity["name"]
+        name = alias_map.get(entity["name"], entity["name"])
         record = entity_registry.setdefault(
             name,
             {

@@ -1,4 +1,4 @@
-"""本地图谱构建后台线程逻辑。"""
+"""本地图谱构建后台任务逻辑。"""
 
 import traceback
 from typing import Any, Dict, List
@@ -41,7 +41,7 @@ def _build_progress_callback(service, task_id: str):
             task.progress = progress
             task.message = stage  # 前端用 buildStageMeta 翻译
 
-        task_manager.mutate_task(task_id, _mutate)
+        task_manager.sync_bridge(task_manager.mutate_task(task_id, _mutate))
 
     return _callback
 
@@ -56,13 +56,14 @@ def run_graph_build(
     chunk_size: int,
     chunk_overlap: int,
 ):
+    """Sync worker — expected to run inside ``asyncio.to_thread``."""
     task_manager = service.task_manager
-    task_manager.update_task(
+    task_manager.sync_bridge(task_manager.update_task(
         task_id,
         status=TaskStatus.PROCESSING,
         progress=0,
         message="start",
-    )
+    ))
     progress_callback = _build_progress_callback(service, task_id)
     try:
         snapshot = service.build_graph(
@@ -74,12 +75,12 @@ def run_graph_build(
         )
         graph_info = service.get_graph_info(snapshot.graph_id)
         _complete_graph_project(project_id, snapshot.graph_id)
-        task_manager.complete_task(task_id, {
+        task_manager.sync_bridge(task_manager.complete_task(task_id, {
             "graph_id": snapshot.graph_id,
             "graph_info": graph_info.to_dict(),
             "node_count": snapshot.node_count,
             "edge_count": snapshot.edge_count,
-        })
+        }))
     except Exception as error:
         error_msg = f"{str(error)}\n{traceback.format_exc()}"
         # 写一条 failed 阶段事件，便于前端定位出错位置
@@ -96,9 +97,9 @@ def run_graph_build(
                 "failed_after": task.metadata.get("latest_stage", ""),
             })
             task.metadata["stages"] = stages
-        task_manager.mutate_task(task_id, _mutate_failed)
+        task_manager.sync_bridge(task_manager.mutate_task(task_id, _mutate_failed))
         _fail_graph_project(project_id, error_msg)
-        task_manager.fail_task(task_id, error_msg)
+        task_manager.sync_bridge(task_manager.fail_task(task_id, error_msg))
 
 
 def _complete_graph_project(project_id: str, graph_id: str) -> None:

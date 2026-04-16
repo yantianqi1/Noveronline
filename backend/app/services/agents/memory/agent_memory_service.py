@@ -26,6 +26,7 @@ class AgentMemoryService:
         memory_type = self._dialogue_type(message, reply)
         summary = f"对话提及“{message.strip()}”，回应重点：{reply[:60] or '暂无'}"
         detail = {"message": message, "reply": reply, "generator_mode": result.get("generator_mode", "template")}
+        pid = getattr(session, "project_id", "") or ""
         self._store_session_memory(
             container_dir,
             session.session_id,
@@ -38,9 +39,10 @@ class AgentMemoryService:
             dialogue_id,
             normalize_memory_subject(message),
             0.55,
+            project_id=pid,
         )
 
-    def record_action_queued(self, container_dir: str, session_id: str, branch_id: str, agent: Dict[str, Any], action_item) -> None:
+    def record_action_queued(self, container_dir: str, session_id: str, branch_id: str, agent: Dict[str, Any], action_item, project_id: str = "") -> None:
         detail = action_item.to_dict()
         self._store_session_memory(
             container_dir,
@@ -54,9 +56,11 @@ class AgentMemoryService:
             action_item.action_id,
             normalize_memory_subject(action_item.target or action_item.action),
             0.7,
+            project_id=project_id,
         )
 
     def record_step(self, container_dir: str, session, branch, step_result: Dict[str, Any], registry) -> None:
+        pid = getattr(session, "project_id", "") or ""
         for action in step_result.get("consumed_actions", []):
             agent = registry.resolve_agent(branch, action.agent_id or action.actor)
             if not agent:
@@ -75,6 +79,7 @@ class AgentMemoryService:
                 action.action_id,
                 normalize_memory_subject(action.target or action.action),
                 0.82,
+                project_id=pid,
             )
             self._promote(
                 agent,
@@ -106,6 +111,7 @@ class AgentMemoryService:
                 str(change.get("entity", "")),
                 normalize_memory_subject(change.get("entity", "")),
                 0.6,
+                project_id=pid,
             )
 
     def agent_memories(self, container_dir: str, session_id: str, branch_id: str, agent: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
@@ -158,6 +164,7 @@ class AgentMemoryService:
         target = str(relation.get("target") or "").strip()
         if not source or not target:
             return
+        pid = getattr(session, "project_id", "") or ""
         summary = f"与{target if source else ''}的关系变化：{relation.get('change', 'stable')}，{relation.get('note', '')}".strip("，")
         source_agent = registry.resolve_agent(branch, source)
         target_agent = registry.resolve_agent(branch, target)
@@ -178,6 +185,7 @@ class AgentMemoryService:
                 f"{source}->{target}",
                 normalize_memory_subject(counterpart),
                 0.74,
+                project_id=pid,
             )
             self._promote(agent, session.session_id, branch.branch_id, "relationship", line, detail, "relation_change", f"{source}->{target}", normalize_memory_subject(counterpart), 0.72)
         relation_agent = registry.resolve_agent(branch, f"{source}->{target}")
@@ -195,9 +203,10 @@ class AgentMemoryService:
                 f"{source}->{target}",
                 normalize_memory_subject(f"{source}_{target}"),
                 0.76,
+                project_id=pid,
             )
 
-    def _store_session_memory(self, container_dir: str, session_id: str, branch_id: str, agent: Dict[str, Any], memory_type: str, summary: str, detail: Dict[str, Any], source_kind: str, source_ref_id: str, normalized_subject: str, salience: float) -> None:
+    def _store_session_memory(self, container_dir: str, session_id: str, branch_id: str, agent: Dict[str, Any], memory_type: str, summary: str, detail: Dict[str, Any], source_kind: str, source_ref_id: str, normalized_subject: str, salience: float, project_id: str = "") -> None:
         self.episodic_store.insert(
             container_dir,
             session_id,
@@ -211,6 +220,7 @@ class AgentMemoryService:
             source_ref_id,
             normalized_subject,
             salience,
+            project_id=project_id,
         )
 
     def _promote(self, agent: Dict[str, Any], session_id: str, branch_id: str, memory_type: str, summary: str, detail: Dict[str, Any], source_kind: str, source_ref_id: str, normalized_subject: str, salience: float) -> None:

@@ -5,8 +5,9 @@
 - ``assets``      —— 现有 ``AssetsService`` (assets_library.sqlite3 + 项目层)
 - ``archive``     —— ``ArchiveLibraryService`` (archive_library.sqlite3)
 - ``story_graph`` —— ``LocalStoryGraphStorage`` (story_graph.json/.sqlite3)
-- ``novel_db``    —— ``writer_agent.NovelDB`` (novel.sqlite3) 中的
-                     entities / plot_threads / world_rules / scenes
+- ``novel_db``    —— ``EntityRepository`` / ``ThreadRepository`` /
+                     ``WorldRuleRepository`` / ``SceneRepository`` 中的
+                     entities / plot_threads / world_rule_evidence / scenes
 - ``worldline``   —— ``backend/uploads/projects/<pid>/worldlines/`` 文件系统
 - ``seed``        —— ``narrative_archives.json`` / ``agent_profiles.json``
 
@@ -21,17 +22,30 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
+from sqlalchemy import and_, select
+
 from ...config import Config
+from ...database import get_engine
 from ...models.project import ProjectManager
+from ...repositories.archive_repo import ArchiveRepository
+from ...repositories.entity_repo import EntityRepository
+from ...repositories.graph_repo import GraphRepository
+from ...repositories.thread_repo import ThreadRepository
+from ...repositories.world_rule_repo import WorldRuleRepository
+from ...repositories.scene_repo import SceneRepository
+from ...tables.archive import archive_agent_memory
+from ...tables.novel import (
+    chapter_content,
+    entities,
+    plot_threads,
+    scenes,
+    world_rule_evidence,
+)
 from ..archive_library_service import ArchiveLibraryService
-from ..local_story_graph_storage import LocalStoryGraphStorage
-from ..writer_agent.novel_db import NovelDB
-from .assets_service import AssetsService
-from .assets_storage import GLOBAL_SCOPE, PROJECT_SCOPE
+from .assets_service import GLOBAL_SCOPE, PROJECT_SCOPE, AssetsService
 
 
 SOURCE_ASSETS = "assets"
@@ -327,8 +341,13 @@ class Readers:
     def __init__(self) -> None:
         self.assets = AssetsService()
         self.archive = ArchiveLibraryService()
-        self.story_graph = LocalStoryGraphStorage()
-        self.novel_db = NovelDB()
+        engine = get_engine()
+        self._archive_repo = ArchiveRepository(engine)
+        self._graph_repo = GraphRepository(engine)
+        self._entity_repo = EntityRepository(engine)
+        self._thread_repo = ThreadRepository(engine)
+        self._rule_repo = WorldRuleRepository(engine)
+        self._scene_repo = SceneRepository(engine)
 
     # -- assets --------------------------------------------------------
     def read_assets(self, project_id: str | None) -> list[UnifiedAsset]:
@@ -370,23 +389,27 @@ class Readers:
         layer_by_archive: dict[str, str] = {}
         if items:
             archive_ids = [it["archive_id"] for it in items if it.get("archive_id")]
-            with self.archive.storage.connect() as conn:
-                # 旧库可能缺 archive_agent_memory 表；在这里做一次显式探测，
-                # 缺表就跳过（属于已知 schema 演进，不是错误）；其余异常向上抛。
-                table_exists = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='archive_agent_memory'"
-                ).fetchone()
-                if table_exists and archive_ids:
-                    placeholders = ",".join("?" * len(archive_ids))
-                    rows = conn.execute(
-                        f"SELECT archive_id, memory_layer FROM archive_agent_memory "
-                        f"WHERE status = 'active' AND archive_id IN ({placeholders})",
-                        archive_ids,
-                    ).fetchall()
+            if archive_ids:
+                # Query active memory layers through the archive repo.
+                # Use a direct SQLAlchemy select since the repo does not
+                # expose a bulk "layers by archive IDs" helper.
+                with self._archive_repo.connect() as conn:
+                    stmt = (
+                        select(
+                            archive_agent_memory.c.archive_id,
+                            archive_agent_memory.c.memory_layer,
+                        )
+                        .where(
+                            and_(
+                                archive_agent_memory.c.status == "active",
+                                archive_agent_memory.c.archive_id.in_(archive_ids),
+                            ),
+                        )
+                    )
+                    rows = conn.execute(stmt).fetchall()
                     for row in rows:
-                        aid = row["archive_id"]
-                        layer = (row["memory_layer"] or "").lower()
+                        aid = row._mapping["archive_id"]
+                        layer = (row._mapping["memory_layer"] or "").lower()
                         cur = layer_by_archive.get(aid)
                         if cur == "canon":
                             continue
@@ -423,9 +446,9 @@ class Readers:
 
     # -- story graph ---------------------------------------------------
     def read_story_graph(self, project_id: str | None) -> list[UnifiedAsset]:
-        if not project_id or not self.story_graph.has_graph(project_id):
+        if not project_id or not self._graph_repo.has_graph(project_id):
             return []
-        nodes = self.story_graph.load_all_nodes(project_id)
+        nodes = self._graph_repo.load_all_nodes(project_id)
         out: list[UnifiedAsset] = []
         for n in nodes:
             labels = n.get("labels") or []
@@ -452,110 +475,97 @@ class Readers:
     def read_novel_db(self, project_id: str | None) -> list[UnifiedAsset]:
         if not project_id:
             return []
-        db_path = os.path.join(
-            Config.UPLOAD_FOLDER, "projects", project_id, "novel.sqlite3"
-        )
-        if not os.path.exists(db_path):
-            return []
         out: list[UnifiedAsset] = []
-        # Ensure schema migrations are applied before reading legacy DBs
-        # (older project DBs may predate columns like entities.summary).
-        self.novel_db.ensure_schema(project_id)
-        with self.novel_db.connect(project_id) as conn:
-            for row in conn.execute(
-                "SELECT entity_id, name, entity_type, importance_tier, summary, "
-                "core_drive, updated_at FROM entities WHERE project_id = ?",
-                (project_id,),
-            ).fetchall():
+
+        # Entities via repository
+        for row in self._entity_repo.list_entities(project_id, limit=500):
+            out.append(
+                UnifiedAsset(
+                    source=SOURCE_NOVEL_DB,
+                    source_ref=f"entity:{row['entity_id']}",
+                    entity_type=row.get("entity_type") or "entity",
+                    title=row.get("name") or row["entity_id"],
+                    summary=row.get("summary") or row.get("core_drive") or "",
+                    scope="project",
+                    project_id=project_id,
+                    importance=row.get("importance_tier") or "",
+                    updated_at=row.get("updated_at") or "",
+                    payload=row,
+                    origin_link=f"/writer-workbench?entity_id={row['entity_id']}",
+                )
+            )
+
+        # Plot threads via repository
+        for row in self._thread_repo.list_threads(project_id, limit=500):
+            out.append(
+                UnifiedAsset(
+                    source=SOURCE_NOVEL_DB,
+                    source_ref=f"thread:{row['thread_id']}",
+                    entity_type="plot_thread",
+                    title=row.get("thread_key") or row["thread_id"],
+                    summary=row.get("detail") or "",
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("updated_at") or "",
+                    payload=row,
+                    origin_link=f"/writer-workbench?thread_id={row['thread_id']}",
+                )
+            )
+
+        # World rules via repository (world_rule_evidence table)
+        for row in self._rule_repo.list_rules(project_id, limit=500):
+            out.append(
+                UnifiedAsset(
+                    source=SOURCE_NOVEL_DB,
+                    source_ref=f"rule:{row['evidence_id']}",
+                    entity_type="world_rule",
+                    title=row.get("fact_text", "")[:60] or row["evidence_id"],
+                    summary=row.get("evidence_snippet") or row.get("fact_text") or "",
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/writer-workbench?rule_id={row['evidence_id']}",
+                )
+            )
+
+        # Scenes via SQLAlchemy (need cross-table JOIN)
+        from sqlalchemy import func
+        stmt = (
+            select(
+                scenes.c.scene_id,
+                scenes.c.title,
+                func.substr(scenes.c.content, 1, 80).label("summary"),
+                scenes.c.status,
+                scenes.c.updated_at,
+            )
+            .select_from(
+                scenes.join(
+                    chapter_content,
+                    scenes.c.chapter_id == chapter_content.c.chapter_id,
+                )
+            )
+            .where(chapter_content.c.project_id == project_id)
+            .order_by(scenes.c.updated_at.desc())
+            .limit(200)
+        )
+        with self._scene_repo.connect() as conn:
+            for row in conn.execute(stmt).fetchall():
+                r = dict(row._mapping)
                 out.append(
                     UnifiedAsset(
                         source=SOURCE_NOVEL_DB,
-                        source_ref=f"entity:{row['entity_id']}",
-                        entity_type=row["entity_type"] or "entity",
-                        title=row["name"] or row["entity_id"],
-                        summary=row["summary"] or row["core_drive"] or "",
+                        source_ref=f"scene:{r['scene_id']}",
+                        entity_type="scene",
+                        title=r.get("title") or r["scene_id"],
+                        summary=r.get("summary") or "",
                         scope="project",
                         project_id=project_id,
-                        importance=row["importance_tier"] or "",
-                        updated_at=row["updated_at"] or "",
-                        payload=dict(row),
-                        origin_link=f"/writer-workbench?entity_id={row['entity_id']}",
+                        updated_at=r.get("updated_at") or "",
+                        payload=r,
+                        origin_link=f"/writer-workbench?scene_id={r['scene_id']}",
                     )
                 )
-            for row in conn.execute(
-                "SELECT thread_id, thread_key, status, detail, updated_at "
-                "FROM plot_threads WHERE project_id = ?",
-                (project_id,),
-            ).fetchall():
-                out.append(
-                    UnifiedAsset(
-                        source=SOURCE_NOVEL_DB,
-                        source_ref=f"thread:{row['thread_id']}",
-                        entity_type="plot_thread",
-                        title=row["thread_key"] or row["thread_id"],
-                        summary=row["detail"] or "",
-                        scope="project",
-                        project_id=project_id,
-                        updated_at=row["updated_at"] or "",
-                        payload=dict(row),
-                        origin_link=f"/writer-workbench?thread_id={row['thread_id']}",
-                    )
-                )
-            # world_rules / scenes 表在新项目中可能尚未建立——做显式存在性
-            # 探测，缺表就跳过；其它异常向上抛。
-            def _has_table(name: str) -> bool:
-                return conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    (name,),
-                ).fetchone() is not None
-            if _has_table("world_rules"):
-                for row in conn.execute(
-                    "SELECT rule_id, rule_key, statement, scope, updated_at "
-                    "FROM world_rules WHERE project_id = ?",
-                    (project_id,),
-                ).fetchall():
-                    out.append(
-                        UnifiedAsset(
-                            source=SOURCE_NOVEL_DB,
-                            source_ref=f"rule:{row['rule_id']}",
-                            entity_type="world_rule",
-                            title=row["rule_key"] or row["rule_id"],
-                            summary=row["statement"] or "",
-                            scope="project",
-                            project_id=project_id,
-                            updated_at=row["updated_at"] or "",
-                            payload=dict(row),
-                            origin_link=f"/writer-workbench?rule_id={row['rule_id']}",
-                        )
-                    )
-            if _has_table("scenes"):
-                # NOTE: scenes 表没有 summary 列；用 content 截断当摘要。
-                # 同时 scenes 没有 project_id 字段，必须 JOIN chapter_content
-                # 才能按项目过滤。
-                for row in conn.execute(
-                    "SELECT s.scene_id AS scene_id, s.title AS title, "
-                    "       substr(s.content, 1, 80) AS summary, "
-                    "       s.status AS status, s.updated_at AS updated_at "
-                    "FROM scenes s "
-                    "JOIN chapter_content c ON c.chapter_id = s.chapter_id "
-                    "WHERE c.project_id = ? "
-                    "ORDER BY s.updated_at DESC LIMIT 200",
-                    (project_id,),
-                ).fetchall():
-                    out.append(
-                        UnifiedAsset(
-                            source=SOURCE_NOVEL_DB,
-                            source_ref=f"scene:{row['scene_id']}",
-                            entity_type="scene",
-                            title=row["title"] or row["scene_id"],
-                            summary=row["summary"] or "",
-                            scope="project",
-                            project_id=project_id,
-                            updated_at=row["updated_at"] or "",
-                            payload=dict(row),
-                            origin_link=f"/writer-workbench?scene_id={row['scene_id']}",
-                        )
-                    )
         return out
 
     # -- worldline -----------------------------------------------------
