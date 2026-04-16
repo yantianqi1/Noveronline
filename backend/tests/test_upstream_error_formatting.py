@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import openai
 import pytest
@@ -24,7 +26,7 @@ def test_local_block_fact_extractor_summarizes_html_gateway_errors(monkeypatch):
 
     extractor = LocalBlockFactExtractor(llm_client=AlwaysFailingClient())
 
-    payload = extractor.extract_blocks(
+    payload = asyncio.run(extractor.extract_blocks(
         blocks=[
             {
                 "block_id": "block_0001",
@@ -44,7 +46,7 @@ def test_local_block_fact_extractor_summarizes_html_gateway_errors(monkeypatch):
         use_llm=True,
         skeleton={"global_characters": [], "global_organizations": [], "chapter_sketches": []},
         anchors={"anchors": []},
-    )
+    ))
 
     packet = payload["packets"][0]
     assert packet["generation_mode"] == "rule_fallback"

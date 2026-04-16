@@ -1,3 +1,5 @@
+import asyncio
+
 from app.services.local_block_fact_extractor import LocalBlockFactExtractor
 
 
@@ -42,7 +44,7 @@ def test_local_block_fact_extractor_materializes_line_protocol_into_packet():
     client = LineProtocolClient()
     extractor = LocalBlockFactExtractor(llm_client=client)
 
-    payload = extractor.extract_blocks(
+    payload = asyncio.run(extractor.extract_blocks(
         blocks=[
             {
                 "block_id": "block_0001",
@@ -70,7 +72,7 @@ def test_local_block_fact_extractor_materializes_line_protocol_into_packet():
             {"sentence_id": "chapter_0001_s002", "chapter_id": "chapter_0001", "order": 2, "chapter_order": 1, "text": "小婵告诉他是苏家赘婿。", "char_range": {"start": 9, "end": 21}},
             {"sentence_id": "chapter_0001_s003", "chapter_id": "chapter_0001", "order": 3, "chapter_order": 1, "text": "苏檀儿回府后自然地挽住宁毅的手。", "char_range": {"start": 21, "end": 38}},
         ],
-    )
+    ))
 
     packet = payload["packets"][0]
     assert len(client.calls) == 4

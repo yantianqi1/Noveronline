@@ -1,5 +1,7 @@
 """Tests for CharacterAgentProfileGenerator."""
 
+import asyncio
+
 import pytest
 from app.services.reading_notes_manager import ReadingNotesManager
 from app.services.character_agent_profile_generator import (
@@ -139,7 +141,7 @@ def test_generate_profiles():
         llm_router=FakeProfileRouter(),
         importance_threshold=DEFAULT_IMPORTANCE_THRESHOLD,
     )
-    result = gen.generate(mgr, use_llm=True)
+    result = asyncio.run(gen.generate(mgr, use_llm=True))
 
     assert "profiles" in result
     assert "profile_count" in result
@@ -157,7 +159,7 @@ def test_generate_profiles_offline():
         llm_router=FakeProfileRouter(),
         importance_threshold=DEFAULT_IMPORTANCE_THRESHOLD,
     )
-    result = gen.generate(mgr, use_llm=False)
+    result = asyncio.run(gen.generate(mgr, use_llm=False))
 
     profiles = result["profiles"]
     assert "沈夜" in profiles
@@ -187,7 +189,7 @@ def test_progress_callback():
     def callback(event_name: str, payload: dict):
         events.append((event_name, payload))
 
-    gen.generate(mgr, use_llm=True, progress_callback=callback)
+    asyncio.run(gen.generate(mgr, use_llm=True, progress_callback=callback))
 
     event_names = [e[0] for e in events]
     assert "profiles_start" in event_names, "profiles_start event must be emitted"

@@ -1,3 +1,5 @@
+import asyncio
+
 from app.services.anchor_point_builder import AnchorPointBuilder
 from app.services.chapter_card_generator import ChapterCardGenerator
 from app.services.contextual_block_analyzer import ContextualBlockAnalyzer
@@ -17,7 +19,7 @@ class AlwaysInvalidJsonClient:
 def test_local_block_fact_extractor_falls_back_to_offline_when_llm_json_is_invalid():
     extractor = LocalBlockFactExtractor(llm_client=AlwaysInvalidJsonClient())
 
-    payload = extractor.extract_blocks(
+    payload = asyncio.run(extractor.extract_blocks(
         blocks=[
             {
                 "block_id": "block_0001",
@@ -37,7 +39,7 @@ def test_local_block_fact_extractor_falls_back_to_offline_when_llm_json_is_inval
         use_llm=True,
         skeleton={"global_characters": [], "global_organizations": [], "chapter_sketches": []},
         anchors={"anchors": []},
-    )
+    ))
 
     packet = payload["packets"][0]
     assert payload["block_count"] == 1
@@ -49,7 +51,7 @@ def test_local_block_fact_extractor_falls_back_to_offline_when_llm_json_is_inval
 def test_contextual_block_analyzer_falls_back_to_offline_when_llm_json_is_invalid():
     analyzer = ContextualBlockAnalyzer(llm_client=AlwaysInvalidJsonClient())
 
-    payload = analyzer.analyze_blocks(
+    payload = asyncio.run(analyzer.analyze_blocks(
         blocks=[
             {
                 "block_id": "block_0001",
@@ -70,7 +72,7 @@ def test_contextual_block_analyzer_falls_back_to_offline_when_llm_json_is_invali
         snapshots=[{"block_id": "block_0001", "recent_blocks": []}],
         chapters=[{"chapter_id": "chapter_0001", "title": "第1章", "content": "沈夜继续追查镜湖旧案。"}],
         use_llm=True,
-    )
+    ))
 
     block = payload["blocks"][0]
     assert payload["block_count"] == 1

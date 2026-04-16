@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -91,14 +92,14 @@ def test_extract_sync_with_mock_llm(isolated):
 
     extractor = StyleExtractor(llm_router=fake_router, max_workers=2)
     text = ("段落示例。" * 80 + "\n\n") * 6  # ensure multiple chunks
-    result = extractor.extract_sync(
+    result = asyncio.run(extractor.extract_sync(
         text,
         title="测试风格",
         category="测试",
         tags=["t1"],
         target_chunk_chars=200,
         max_chunks=8,
-    )
+    ))
     assert result["asset"]["title"] == "测试风格"
     assert result["asset"]["asset_type"] == "writing_style"
     assert result["successful_chunks"] >= 1

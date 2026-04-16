@@ -1,3 +1,5 @@
+import asyncio
+
 from app import create_app
 from app.models.project import ProjectManager
 from app.models.project_types import ProjectStatus
@@ -54,7 +56,7 @@ def test_get_task_disables_http_caching_for_live_progress(tmp_path):
     ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
     reset_task_manager()
     manager = TaskManager()
-    task_id = manager.create_task(task_type="seed_extract")
+    task_id = asyncio.run(manager.create_task(task_type="seed_extract"))
     app = create_app()
     client = app.test_client()
 

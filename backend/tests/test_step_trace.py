@@ -164,6 +164,7 @@ class TestProgressTrackerSteps:
     """集成测试：SeedTaskProgressTracker 的 begin_step/end_step。"""
 
     def test_begin_end_step_paired(self, monkeypatch, tmp_path):
+        import asyncio
         from app.config import Config
         from app.models.task import TaskManager
 
@@ -171,7 +172,7 @@ class TestProgressTrackerSteps:
         TaskManager._instance = None
 
         tm = TaskManager()
-        task_id = tm.create_task(task_type="test", metadata={"project_id": "p1"})
+        task_id = asyncio.run(tm.create_task(task_type="test", metadata={"project_id": "p1"}))
 
         from app.services.seed_task_progress import SeedTaskProgressTracker
 
@@ -188,7 +189,7 @@ class TestProgressTrackerSteps:
         assert get_current_step() is None
 
         # 检查 timeline 事件
-        task = tm.get_task(task_id)
+        task = asyncio.run(tm.get_task(task_id))
         timeline = task.progress_detail.get("timeline", [])
         step_events = [e for e in timeline if e.get("meta", {}).get("step_id") == sid]
         assert len(step_events) >= 2  # start + complete
@@ -202,6 +203,7 @@ class TestProgressTrackerSteps:
         TaskManager._instance = None
 
     def test_note_gets_step_id(self, monkeypatch, tmp_path):
+        import asyncio
         from app.config import Config
         from app.models.task import TaskManager
         from app.services.seed_task_progress import SeedTaskProgressTracker
@@ -210,12 +212,12 @@ class TestProgressTrackerSteps:
         TaskManager._instance = None
 
         tm = TaskManager()
-        task_id = tm.create_task(task_type="test", metadata={})
+        task_id = asyncio.run(tm.create_task(task_type="test", metadata={}))
         tracker = SeedTaskProgressTracker(tm, task_id, use_llm=False)
         tracker.enter_stage("extract_text", "文本提取", 5)
         tracker.note("extract_text", "文本提取完成", "3份文稿")
 
-        task = tm.get_task(task_id)
+        task = asyncio.run(tm.get_task(task_id))
         timeline = task.progress_detail.get("timeline", [])
         note_events = [e for e in timeline if e["title"] == "文本提取完成"]
         assert len(note_events) == 1

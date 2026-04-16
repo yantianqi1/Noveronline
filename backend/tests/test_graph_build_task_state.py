@@ -1,3 +1,4 @@
+import asyncio
 import time
 import io
 import os
@@ -25,7 +26,7 @@ def wait_for_task_runtime(task_id: str, timeout: float = 15.0):
     manager = TaskManager()
     latest = None
     while time.time() < deadline:
-        latest = manager.get_task(task_id)
+        latest = asyncio.run(manager.get_task(task_id))
         if latest and latest.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
             return latest
         time.sleep(0.05)
@@ -46,13 +47,13 @@ def create_seed_project(client):
         "size": len(build_small_novel()),
     }]
     ProjectManager.save_project(project)
-    task_id = SeedExtractTaskService().create_task(
+    task_id = asyncio.run(SeedExtractTaskService().create_task(
         project.project_id,
         project.name,
         project.analysis_goal,
         "",
         False,
-    )
+    ))
     task = wait_for_task_runtime(task_id)
     assert task.status == TaskStatus.COMPLETED
     return project.project_id

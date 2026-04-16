@@ -1,3 +1,5 @@
+import asyncio
+
 from app.config import Config
 from app.models.task import TaskManager, TaskStatus
 
@@ -11,18 +13,18 @@ def test_task_manager_persists_tasks_across_singleton_rebuild(tmp_path, monkeypa
     reset_task_manager()
 
     manager = TaskManager()
-    task_id = manager.create_task("seed_extract", {"project_id": "proj_demo"})
-    manager.update_task(
+    task_id = asyncio.run(manager.create_task("seed_extract", {"project_id": "proj_demo"}))
+    asyncio.run(manager.update_task(
         task_id,
         status=TaskStatus.PROCESSING,
         progress=42,
         message="正在处理",
         progress_detail={"stage": "extract"},
-    )
+    ))
 
     reset_task_manager()
     recovered_manager = TaskManager()
-    recovered_task = recovered_manager.get_task(task_id)
+    recovered_task = asyncio.run(recovered_manager.get_task(task_id))
 
     assert recovered_task is not None
     assert recovered_task.status == TaskStatus.PROCESSING

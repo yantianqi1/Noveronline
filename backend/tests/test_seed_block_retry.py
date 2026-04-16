@@ -1,3 +1,4 @@
+import asyncio
 import threading
 
 from app.services.local_block_fact_extractor import LocalBlockFactExtractor
@@ -100,7 +101,7 @@ def test_local_block_fact_extractor_retries_transient_gateway_failures(monkeypat
     client = FlakyBlockClient(failures_before_success=2)
     extractor = LocalBlockFactExtractor(llm_client=client)
 
-    result = extractor.extract_blocks(
+    result = asyncio.run(extractor.extract_blocks(
         blocks=[
             {
                 "block_id": "block_0001",
@@ -120,7 +121,7 @@ def test_local_block_fact_extractor_retries_transient_gateway_failures(monkeypat
         use_llm=True,
         skeleton={"global_characters": [], "global_organizations": [], "chapter_sketches": []},
         anchors={"anchors": []},
-    )
+    ))
 
     assert client.calls == 3
     assert result["block_count"] == 1
@@ -150,17 +151,16 @@ def test_local_block_fact_extractor_honors_client_concurrency_limit():
         for index in range(1, 5)
     ]
 
-    worker = threading.Thread(
-        target=extractor.extract_blocks,
-        kwargs={
-            "blocks": blocks,
-            "chapters": chapters,
-            "use_llm": True,
-            "skeleton": {"global_characters": [], "global_organizations": [], "chapter_sketches": []},
-            "anchors": {"anchors": []},
-        },
-        daemon=True,
-    )
+    def _run_extractor():
+        asyncio.run(extractor.extract_blocks(
+            blocks=blocks,
+            chapters=chapters,
+            use_llm=True,
+            skeleton={"global_characters": [], "global_organizations": [], "chapter_sketches": []},
+            anchors={"anchors": []},
+        ))
+
+    worker = threading.Thread(target=_run_extractor, daemon=True)
     worker.start()
 
     assert client.started.wait(timeout=1), "未观察到达到预期的并发请求数"

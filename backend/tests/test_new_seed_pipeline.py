@@ -1,5 +1,6 @@
 """End-to-end integration tests for the new 4-stage seed pipeline."""
 
+import asyncio
 import io
 import json
 import os
@@ -184,23 +185,23 @@ def test_new_pipeline_offline(tmp_path, monkeypatch):
 
         from app.services.seed_extract_task_service import SeedExtractTaskService
         service = SeedExtractTaskService()
-        task_id = service.create_task(
+        task_id = asyncio.run(service.create_task(
             project_id=project_id,
             project_name="离线测试",
             analysis_goal="离线分析",
             additional_context="",
             use_llm=False,
-        )
+        ))
 
         # Wait for task completion
         deadline = time.time() + 15.0
         while time.time() < deadline:
-            task = service.task_manager.get_task(task_id)
+            task = asyncio.run(service.task_manager.get_task(task_id))
             if task and task.status in ("completed", "failed"):
                 break
             time.sleep(0.05)
 
-        task = service.task_manager.get_task(task_id)
+        task = asyncio.run(service.task_manager.get_task(task_id))
         assert task is not None
         assert task.status == "completed", f"Task failed: {task.error}"
 

@@ -1,3 +1,5 @@
+import asyncio
+
 from app.services.contextual_block_analyzer import ContextualBlockAnalyzer
 
 
@@ -25,7 +27,7 @@ class ContextLineProtocolClient:
 def test_contextual_block_analyzer_materializes_line_protocol():
     analyzer = ContextualBlockAnalyzer(llm_client=ContextLineProtocolClient())
 
-    payload = analyzer.analyze_blocks(
+    payload = asyncio.run(analyzer.analyze_blocks(
         blocks=[
             {
                 "block_id": "block_0001",
@@ -61,7 +63,7 @@ def test_contextual_block_analyzer_materializes_line_protocol():
             {"sentence_id": "chapter_0001_s002", "chapter_id": "chapter_0001", "order": 2, "chapter_order": 1, "text": "小婵告诉他是苏家赘婿。", "char_range": {"start": 9, "end": 21}},
             {"sentence_id": "chapter_0001_s003", "chapter_id": "chapter_0001", "order": 3, "chapter_order": 1, "text": "苏檀儿回府后自然地挽住宁毅的手。", "char_range": {"start": 21, "end": 38}},
         ],
-    )
+    ))
 
     block = payload["blocks"][0]
     assert block["plot_summary_sentence_refs"] == ["chapter_0001_s001", "chapter_0001_s003"]

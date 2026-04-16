@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 from app import create_app
@@ -84,7 +85,7 @@ def wait_for_task(task_id: str, timeout: float = WAIT_TIMEOUT_SECONDS):
     manager = TaskManager()
     latest = None
     while time.time() < deadline:
-        latest = manager.get_task(task_id)
+        latest = asyncio.run(manager.get_task(task_id))
         if latest and latest.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
             return latest
         time.sleep(POLL_INTERVAL_SECONDS)

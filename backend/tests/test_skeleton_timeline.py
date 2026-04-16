@@ -1,3 +1,5 @@
+import asyncio
+
 from app.services.local_block_fact_extractor import LocalBlockFactExtractor
 from app.services.novel_seed_analyzer import NovelSeedAnalyzer
 from app.services.skeleton_timeline_builder import SkeletonTimelineBuilder
@@ -176,7 +178,7 @@ def test_local_block_fact_extractor_injects_skeleton_context_into_llm_prompt():
         ]
     }
 
-    payload = extractor.extract_blocks(blocks, chapters, use_llm=True, skeleton=skeleton, anchors=anchors)
+    payload = asyncio.run(extractor.extract_blocks(blocks, chapters, use_llm=True, skeleton=skeleton, anchors=anchors))
 
     assert payload["block_count"] == 2
     user_message = client.messages[-1][1]["content"]
@@ -230,7 +232,7 @@ def test_local_block_fact_extractor_processes_blocks_in_batches(monkeypatch):
         for index in range(1, 6)
     ]
 
-    payload = extractor.extract_blocks(blocks, chapters, use_llm=False, skeleton=None, anchors=None)
+    payload = asyncio.run(extractor.extract_blocks(blocks, chapters, use_llm=False, skeleton=None, anchors=None))
 
     assert batch_sizes == [2, 2, 1]
     assert [item["block_id"] for item in payload["packets"]] == [block["block_id"] for block in blocks]
