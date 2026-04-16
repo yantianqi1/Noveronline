@@ -16,6 +16,7 @@ from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
 from .step_trace_context import get_current_step, _current_step
 from .task_cancelled import TaskCancelledException
+from ..utils.llm_json import normalize_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ class CharacterAgentProfileGenerator:
                 story_summary=story_summary,
             )
             profile = client.chat_json_value(messages, temperature=0.3, max_tokens=4096)
+            profile = normalize_json_object(profile, f"角色档案 {name}")
             return name, profile
 
         sem = asyncio.Semaphore(self.max_workers)

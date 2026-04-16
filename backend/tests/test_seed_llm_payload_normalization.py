@@ -148,5 +148,5 @@ def test_async_seed_pipeline_normalizes_loose_llm_payloads(tmp_path, monkeypatch
     assert task["status"] == "completed", task
 
     seed_analysis = task["result"]["seed_analysis"]
-    assert seed_analysis["character_count"] >= 2
-    assert seed_analysis["organization_count"] >= 1
+    assert seed_analysis["character_count"] >= 2, task["result"]
+    assert seed_analysis["organization_count"] >= 1, task["result"]

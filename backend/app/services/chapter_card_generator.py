@@ -150,6 +150,7 @@ class ChapterCardGenerator:
                 temperature=0.2,
                 max_tokens=4096,
             )
+            payload = normalize_json_object(payload, "章节卡生成")
             return self._normalize_card(chapter, payload)
         except Exception as exc:
             if not should_use_rule_fallback(exc):
