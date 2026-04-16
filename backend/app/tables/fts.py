@@ -27,8 +27,39 @@ FTS_TABLE_DDL = (
 )
 
 
+# Triggers keep contentless external-content FTS tables in sync with their
+# base tables. Only assets_fts has triggers right now because that is the
+# only FTS index actively read at runtime (via ManuscriptAssetAdapter and
+# the search API). Other FTS tables remain bootstrap-only — they exist but
+# carry no rows until an explicit rebuild is added.
+FTS_TRIGGER_DDL = (
+    """
+    CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
+        INSERT INTO assets_fts(rowid, title, summary, content, category, tags_json)
+        VALUES (new.rowid, new.title, new.summary, new.content, new.category, new.tags_json);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS assets_ad AFTER DELETE ON assets BEGIN
+        INSERT INTO assets_fts(assets_fts, rowid, title, summary, content, category, tags_json)
+        VALUES ('delete', old.rowid, old.title, old.summary, old.content, old.category, old.tags_json);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE ON assets BEGIN
+        INSERT INTO assets_fts(assets_fts, rowid, title, summary, content, category, tags_json)
+        VALUES ('delete', old.rowid, old.title, old.summary, old.content, old.category, old.tags_json);
+        INSERT INTO assets_fts(rowid, title, summary, content, category, tags_json)
+        VALUES (new.rowid, new.title, new.summary, new.content, new.category, new.tags_json);
+    END
+    """,
+)
+
+
 def register_sqlite_fts() -> None:
     for statement in FTS_TABLE_DDL:
+        event.listen(metadata, "after_create", DDL(statement).execute_if(dialect="sqlite"))
+    for statement in FTS_TRIGGER_DDL:
         event.listen(metadata, "after_create", DDL(statement).execute_if(dialect="sqlite"))
 
 
