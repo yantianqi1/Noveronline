@@ -46,6 +46,7 @@ def _register_middleware(app: FastAPI, settings: Settings) -> None:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_private_network=True,
     )
     app.middleware("http")(_private_network_cors)
     app.add_middleware(ApiKeyAuthMiddleware, settings=settings)

@@ -121,7 +121,7 @@ def test_unified_metadata_declares_all_regular_tables():
         "agent_memory", "agent_registry", "agent_state_snapshots",
         "agent_states", "archive_agent_memory",
         "archive_agent_memory_events", "archive_library", "archive_sources",
-        "asset_links", "assets", "chapter_content", "chapter_meta",
+        "asset_links", "assets", "book_plans", "chapter_content", "chapter_meta",
         "character_events", "consistency_notes", "entities",
         "entity_aliases", "entity_evidence", "entity_labels",
         "global_index", "graph_aliases", "graph_edges", "graph_evidence",
