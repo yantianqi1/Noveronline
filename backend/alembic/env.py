@@ -18,6 +18,17 @@ if config.config_file_name is not None:
 
 
 def database_url() -> str:
+    """Resolve the target database URL.
+
+    Prefer an explicit ``sqlalchemy.url`` set on the Alembic ``Config``
+    (used by programmatic invocations such as ``init_db(..., use_alembic=True)``
+    and the Phase D upgrade/downgrade tests) before falling back to
+    ``Settings().DATABASE_URL``. This lets callers run migrations against a
+    one-off database without mutating process-wide environment variables.
+    """
+    explicit = config.get_main_option("sqlalchemy.url")
+    if explicit and explicit != "sqlite:///./data/mirofish.db":
+        return explicit
     return Settings().DATABASE_URL
 
 

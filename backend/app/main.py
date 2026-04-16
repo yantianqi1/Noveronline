@@ -31,7 +31,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 def _lifespan(engine):
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        init_db(engine)
+        # Production/dev runtime goes through alembic so the schema lifecycle
+        # stays owned by migration revisions. Tests bypass this via the
+        # ``_unified_db_bootstrap`` conftest fixture, which calls
+        # ``init_db(..., use_alembic=False)`` for a fast per-test create_all.
+        init_db(engine, use_alembic=True)
         yield
         engine.dispose()
 

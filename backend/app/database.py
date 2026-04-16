@@ -36,14 +36,41 @@ def create_engine_from_settings(settings: Settings) -> Engine:
     return create_engine(database_url, future=True, **_engine_options(database_url))
 
 
-def init_db(engine: Engine, metadata: MetaData | None = None) -> None:
+def init_db(
+    engine: Engine,
+    metadata: MetaData | None = None,
+    *,
+    use_alembic: bool = False,
+) -> None:
+    """Initialise the unified database schema.
+
+    By default (``use_alembic=False``) calls ``metadata.create_all(engine)``
+    for fast test/dev bootstrap. When ``use_alembic=True`` runs
+    ``alembic upgrade head`` against ``engine.url`` instead — this is the
+    production runtime path and guarantees ``alembic_version`` is stamped
+    so later migrations can apply cleanly.
+    """
     global _engine
     _engine = engine
-    target_metadata = metadata or default_metadata
-    target_metadata.create_all(engine)
+    if use_alembic:
+        _run_alembic_upgrade(engine)
+    else:
+        target_metadata = metadata or default_metadata
+        target_metadata.create_all(engine)
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
         connection.commit()
+
+
+def _run_alembic_upgrade(engine: Engine) -> None:
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    backend_root = Path(__file__).resolve().parents[1]
+    cfg = AlembicConfig(str(backend_root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_root / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", str(engine.url))
+    command.upgrade(cfg, "head")
 
 
 def _engine_options(database_url: str) -> dict:
