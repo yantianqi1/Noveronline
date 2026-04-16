@@ -49,24 +49,35 @@ def create_seed_project(client):
         "size": len(build_small_novel()),
     }]
     ProjectManager.save_project(project)
-    task_id = asyncio.run(SeedExtractTaskService().create_task(
-        project.project_id,
-        project.name,
-        project.analysis_goal,
-        "",
-        False,
-    ))
-    deadline = time.time() + 15
-    task = asyncio.run(TaskManager().get_task(task_id))
-    while time.time() < deadline and task and task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
-        time.sleep(0.05)
-        task = asyncio.run(TaskManager().get_task(task_id))
-    assert task and task.status == TaskStatus.COMPLETED, task.to_dict() if task else None
+
+    # Run create_task + wait for worker completion in a single asyncio loop —
+    # asyncio.run would kill the create_task()-scheduled background worker on
+    # loop close, leaving the task permanently PENDING.
+    async def _create_and_wait() -> str:
+        service = SeedExtractTaskService()
+        task_id = await service.create_task(
+            project.project_id,
+            project.name,
+            project.analysis_goal,
+            "",
+            False,
+        )
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            task = await service.task_manager.get_task(task_id)
+            if task and task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+                assert task.status == TaskStatus.COMPLETED, task.to_dict()
+                return task_id
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"seed task did not complete: {task_id}")
+
+    asyncio.run(_create_and_wait())
     return project.project_id
 
 
 def test_build_graph_creates_local_story_graph_and_query_api(tmp_path):
     ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
+    TaskManager._instance = None
 
     app = create_app()
     client = app.test_client()
@@ -110,6 +121,7 @@ def test_build_graph_creates_local_story_graph_and_query_api(tmp_path):
 
 def test_local_graph_reader_exposes_entities_for_archives_and_worldbuilding(tmp_path):
     ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
+    TaskManager._instance = None
 
     app = create_app()
     client = app.test_client()
