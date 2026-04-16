@@ -91,16 +91,19 @@ def test_build_graph_creates_local_story_graph_and_query_api(tmp_path):
     assert all("evidence_refs" in item for item in payload["nodes"])
     assert all("evidence_refs" in item for item in payload["edges"])
 
-    project_dir = ProjectManager._get_project_dir(project_id)
-    assert os.path.exists(f"{project_dir}/story_graph.json")
-    sqlite_path = f"{project_dir}/story_graph.sqlite3"
-    assert os.path.exists(sqlite_path)
-    connection = sqlite3.connect(sqlite_path)
-    try:
-        node_count = connection.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
-        edge_count = connection.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
-    finally:
-        connection.close()
+    # Graph data now persists to the unified DB (graph_nodes / graph_edges)
+    # instead of legacy per-project story_graph.json / story_graph.sqlite3.
+    from app.database import get_engine
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        node_count = conn.execute(
+            text("SELECT COUNT(*) FROM graph_nodes WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).scalar()
+        edge_count = conn.execute(
+            text("SELECT COUNT(*) FROM graph_edges WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).scalar()
     assert node_count >= 4
     assert edge_count >= 3
 
