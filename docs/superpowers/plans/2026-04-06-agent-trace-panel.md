@@ -1086,7 +1086,7 @@ Expected: Build succeeds with no errors or warnings related to removed code.
 
 Start backend and frontend:
 ```bash
-cd backend && FLASK_PORT=3888 uv run python run.py &
+cd backend && APP_PORT=3888 uv run python run.py &
 cd frontend && npm run dev -- --port 3999 &
 ```
 

@@ -396,7 +396,7 @@ class TestOutlineVersionAPI:
         self.db.create_chapter(self.TEST_PROJECT, "ch_api", 1, "API章")
         self.db.update_chapter(self.TEST_PROJECT, "ch_api", outline_json='[{"scene_order":1}]')
 
-        os.environ["FLASK_PORT"] = "3888"
+        os.environ["APP_PORT"] = "3888"
         from app import create_app
         app = create_app()
         self.client = app.test_client()

@@ -74,7 +74,7 @@
 ```bash
 cd backend
 uv sync                              # 安装依赖
-FLASK_PORT=3888 uv run python run.py  # 启动服务
+APP_PORT=3888 uv run python run.py    # 启动服务
 ```
 
 如果 `uv` 不可用：
@@ -82,7 +82,7 @@ FLASK_PORT=3888 uv run python run.py  # 启动服务
 ```bash
 cd backend
 pip install -r requirements.txt      # 或从 pyproject.toml 安装
-FLASK_PORT=3888 python3 run.py
+APP_PORT=3888 python3 run.py
 ```
 
 ### 前端
@@ -101,9 +101,9 @@ npm run dev -- --port 3999   # 开发服务器（自动代理 /api 到后端 :38
 # LLM 配置通过前端"LLM 设施面板"管理，无需在此设置 API key
 LLM_REQUEST_TIMEOUT_SECONDS=120    # LLM 请求超时（秒）
 
-# Flask
-FLASK_HOST=0.0.0.0
-FLASK_PORT=3888
+# App runtime
+APP_HOST=0.0.0.0
+APP_PORT=3888
 
 # Zep（可选，仅在线图谱构建需要）
 ZEP_API_KEY=your_zep_api_key_here

@@ -17,14 +17,14 @@ Migrated from the upstream `MiroFish` project (GitHub: `https://github.com/666gh
 ```bash
 cd backend
 uv sync                                # Install Python dependencies
-FLASK_PORT=3888 uv run python run.py   # Start Flask server on localhost:3888
+APP_PORT=3888 uv run python run.py     # Start FastAPI server on localhost:3888
 ```
 
 If `uv` is unavailable:
 
 ```bash
 cd backend
-FLASK_PORT=3888 python3 run.py
+APP_PORT=3888 python3 run.py
 ```
 
 ### Frontend
@@ -113,7 +113,7 @@ Vite dev server proxies `/api` to Flask backend at `http://127.0.0.1:3888`.
 ## Environment Variables
 
 See `.env.example`:
-- `FLASK_PORT` (default 3888), `FLASK_HOST`, `FLASK_DEBUG`
+- `APP_PORT` (default 3888), `APP_HOST`, `APP_DEBUG`
 - `LLM_REQUEST_TIMEOUT_SECONDS` (default 120)
 - `ZEP_API_KEY` (optional, only for online graph construction)
 - `NARRATIVE_DEFAULT_BRANCH_COUNT` (default 3), `NARRATIVE_DEFAULT_TIMELINE_STEPS` (default 12)
