@@ -15,6 +15,7 @@ from .sequential_reader_prompts import (
     build_segment_reading_prompt,
     build_volume_summary_prompt,
 )
+from ..utils.llm_json import normalize_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class SequentialReader:
 
             try:
                 result = client.chat_json_value(messages, temperature=0.3, max_tokens=8192)
+                result = normalize_json_object(result, f"segment {segment_id}")
                 self._merge_segment_result(manager, result, segment_id)
             except Exception:
                 logger.exception("LLM error on segment %s; skipping merge", segment_id)
@@ -198,6 +200,7 @@ class SequentialReader:
 
         try:
             result = client.chat_json_value(messages, temperature=0.3, max_tokens=4096)
+            result = normalize_json_object(result, f"arc {arc_id}")
             arc_summary_text = result.get("arc_summary", "")
         except Exception:
             logger.exception("LLM error generating arc summary %s", arc_id)
@@ -251,6 +254,7 @@ class SequentialReader:
 
         try:
             result = client.chat_json_value(messages, temperature=0.3, max_tokens=6144)
+            result = normalize_json_object(result, f"volume {volume_id}")
             volume_summary_text = result.get("volume_summary", "")
         except Exception:
             logger.exception("LLM error generating volume summary %s", volume_id)
