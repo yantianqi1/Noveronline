@@ -274,6 +274,7 @@ commit：`feat(search): add sqlite/postgres search backend abstraction`
 |---|---|---|---|
 | (C1) chore gitignore + 删空目录 | `5314810` | 2026-04-16 | 前序会话，已完成 |
 | Phase B (test infra) | `225274e` | 2026-04-16 | `backend/tests/conftest.py` autouse fixture；96→56 失败（修 40 个、0 回归）；桶 A 全清。残留 2 个 `no such table: agent_registry` 属于桶 C（测试打开 legacy `worldlines/runtime.sqlite3` 直查表），Phase C 处理。安全锚：`pre-phase-b-20260416`。 |
+| Phase A (C2/C3/C4) | C2=`c2d2278` / C3=`531647f` / C4=`7c80058` | 2026-04-16 | C2: backend Flask→FastAPI + SQLAlchemy (187 files)；C3: frontend Vue→React (298 files, `npm run build` 绿)；C4: docs 全量 + CLAUDE.md/README.md/两份 superpowers spec 里的 `FLASK_*→APP_*` (9 files)。终态工作树 clean。后端测试 56 failed / 374 passed 持平 Phase B 基线，0 回归。安全锚：`pre-phase-a-20260416`。 |
 | Phase A (C2/C3/C4) | _未开始_ | | |
 | Phase C (剩余测试) | _未开始_ | | |
 | Phase D / Task 3 | _未开始_ | | |
