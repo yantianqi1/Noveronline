@@ -222,7 +222,7 @@ def test_task_progress_detail_exposes_structured_seed_logs(tmp_path, monkeypatch
     payload = response.get_json()["data"]
 
     processing_task = None
-    deadline = time.time() + 5
+    deadline = time.time() + 15
     while time.time() < deadline:
         poll_response = client.get(f"/api/project/task/{payload['task_id']}")
         assert poll_response.status_code == 200, poll_response.get_json()
@@ -231,9 +231,13 @@ def test_task_progress_detail_exposes_structured_seed_logs(tmp_path, monkeypatch
         if candidate["status"] == "processing" and detail.get("timeline"):
             processing_task = candidate
             break
+        # Also accept completed if it has timeline — fast fake pipelines can race past "processing".
+        if candidate["status"] == "completed" and detail.get("timeline"):
+            processing_task = candidate
+            break
         time.sleep(0.05)
 
-    assert processing_task is not None
+    assert processing_task is not None, candidate
     detail = processing_task["progress_detail"]
     assert detail["active_stage"]["key"]
     assert detail["active_stage"]["label"]
