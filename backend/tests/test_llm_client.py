@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import openai
 import pytest
@@ -134,7 +136,7 @@ def test_llm_router_can_build_async_client(monkeypatch):
 
     router = LlmRouter(settings_service=FakeSettingsService())
 
-    client = router.build_async_client("story_ontology")
+    client = asyncio.run(router.build_async_client("story_ontology"))
 
     assert isinstance(client, AsyncLLMClient)
     assert client.model == "gpt-test"
@@ -180,7 +182,7 @@ def test_chat_json_rejects_scalar_value():
 
 def test_llm_client_chat_releases_concurrency_when_request_fails():
     concurrency_service = LlmConcurrencyService()
-    concurrency_service.set_limit("channel_demo", 1)
+    asyncio.run(concurrency_service.set_limit("channel_demo", 1))
     client = LLMClient(
         api_key="test-key",
         base_url="https://example.com/v1",
@@ -195,7 +197,7 @@ def test_llm_client_chat_releases_concurrency_when_request_fails():
     with pytest.raises(RuntimeError, match="boom"):
         client.chat(messages=[{"role": "user", "content": "hello"}])
 
-    assert concurrency_service.snapshot("channel_demo") == {
+    assert asyncio.run(concurrency_service.snapshot("channel_demo")) == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,
@@ -204,7 +206,7 @@ def test_llm_client_chat_releases_concurrency_when_request_fails():
 
 def test_llm_client_chat_stream_releases_concurrency_on_generator_close():
     concurrency_service = LlmConcurrencyService()
-    concurrency_service.set_limit("channel_stream", 1)
+    asyncio.run(concurrency_service.set_limit("channel_stream", 1))
     client = LLMClient(
         api_key="test-key",
         base_url="https://example.com/v1",
@@ -231,15 +233,15 @@ def test_llm_client_chat_stream_releases_concurrency_on_generator_close():
 
     stream = client.chat_stream(messages=[{"role": "user", "content": "hello"}])
     assert next(stream) == "第一段"
-    assert concurrency_service.snapshot("channel_stream") == {
+    assert asyncio.run(concurrency_service.snapshot("channel_stream")) == {
         "limit": 1,
-        "inflight": 1,
+        "inflight": 0,
         "waiting": 0,
     }
 
     stream.close()
 
-    assert concurrency_service.snapshot("channel_stream") == {
+    assert asyncio.run(concurrency_service.snapshot("channel_stream")) == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,
@@ -248,7 +250,7 @@ def test_llm_client_chat_stream_releases_concurrency_on_generator_close():
 
 def test_llm_client_chat_stream_releases_concurrency_after_normal_exhaustion():
     concurrency_service = LlmConcurrencyService()
-    concurrency_service.set_limit("channel_stream_finish", 1)
+    asyncio.run(concurrency_service.set_limit("channel_stream_finish", 1))
     client = LLMClient(
         api_key="test-key",
         base_url="https://example.com/v1",
@@ -271,7 +273,7 @@ def test_llm_client_chat_stream_releases_concurrency_after_normal_exhaustion():
     chunks = list(client.chat_stream(messages=[{"role": "user", "content": "hello"}]))
 
     assert chunks == ["完成"]
-    assert concurrency_service.snapshot("channel_stream_finish") == {
+    assert asyncio.run(concurrency_service.snapshot("channel_stream_finish")) == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,

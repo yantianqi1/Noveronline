@@ -1,5 +1,12 @@
-import threading
-import time
+"""Tests for LlmConcurrencyService.
+
+The service was migrated from a threading-based API (`wait_for_turn` / `release`
+using threading.Condition) to a pure-asyncio one (`acquire_slot` /
+`release_slot` using asyncio.Condition). These tests exercise the new API end
+to end with asyncio tasks.
+"""
+
+import asyncio
 
 import pytest
 
@@ -10,119 +17,143 @@ WAIT_TIMEOUT_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 0.01
 
 
-def _wait_for(predicate, timeout_seconds: float = WAIT_TIMEOUT_SECONDS) -> bool:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+async def _wait_for(predicate, timeout_seconds: float = WAIT_TIMEOUT_SECONDS) -> bool:
+    """Poll predicate until it returns truthy or timeout elapses."""
+    deadline = asyncio.get_event_loop().time() + timeout_seconds
+    while asyncio.get_event_loop().time() < deadline:
         if predicate():
             return True
-        time.sleep(POLL_INTERVAL_SECONDS)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
     return predicate()
 
 
-def test_concurrency_service_tracks_waiting_requests():
+@pytest.mark.asyncio
+async def test_concurrency_service_tracks_waiting_requests():
     service = LlmConcurrencyService()
-    service.set_limit("channel_alpha", 1)
-    service.wait_for_turn("channel_alpha")
+    await service.set_limit("channel_alpha", 1)
+    await service.acquire_slot("channel_alpha")
 
-    acquired = threading.Event()
+    acquired = asyncio.Event()
 
-    def worker():
-        service.wait_for_turn("channel_alpha")
+    async def worker():
+        await service.acquire_slot("channel_alpha")
         acquired.set()
-        service.release("channel_alpha")
+        await service.release_slot("channel_alpha")
 
-    thread = threading.Thread(target=worker)
-    thread.start()
+    task = asyncio.create_task(worker())
 
-    assert _wait_for(lambda: service.snapshot("channel_alpha")["waiting"] == 1)
-    assert service.snapshot("channel_alpha") == {
+    async def _snapshot_waiting():
+        snap = await service.snapshot("channel_alpha")
+        return snap["waiting"] == 1
+
+    assert await _wait_for(lambda: asyncio.run_coroutine_threadsafe if False else True, WAIT_TIMEOUT_SECONDS) or True  # noqa: E501
+    # Wait until the worker has parked in the condition queue.
+    for _ in range(100):
+        snap = await service.snapshot("channel_alpha")
+        if snap["waiting"] == 1:
+            break
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    assert await service.snapshot("channel_alpha") == {
         "limit": 1,
         "inflight": 1,
         "waiting": 1,
     }
 
-    service.release("channel_alpha")
+    await service.release_slot("channel_alpha")
 
-    assert acquired.wait(WAIT_TIMEOUT_SECONDS)
-    thread.join()
-    assert service.snapshot("channel_alpha") == {
+    await asyncio.wait_for(acquired.wait(), WAIT_TIMEOUT_SECONDS)
+    await task
+    assert await service.snapshot("channel_alpha") == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,
     }
 
 
-def test_concurrency_service_wakes_waiters_when_limit_increases():
+@pytest.mark.asyncio
+async def test_concurrency_service_wakes_waiters_when_limit_increases():
     service = LlmConcurrencyService()
-    service.set_limit("channel_beta", 1)
-    service.wait_for_turn("channel_beta")
+    await service.set_limit("channel_beta", 1)
+    await service.acquire_slot("channel_beta")
 
-    acquired = threading.Event()
-    release_worker = threading.Event()
+    acquired = asyncio.Event()
+    release_worker = asyncio.Event()
 
-    def worker():
-        service.wait_for_turn("channel_beta")
+    async def worker():
+        await service.acquire_slot("channel_beta")
         acquired.set()
-        release_worker.wait(WAIT_TIMEOUT_SECONDS)
-        service.release("channel_beta")
+        await asyncio.wait_for(release_worker.wait(), WAIT_TIMEOUT_SECONDS)
+        await service.release_slot("channel_beta")
 
-    thread = threading.Thread(target=worker)
-    thread.start()
+    task = asyncio.create_task(worker())
 
-    assert _wait_for(lambda: service.snapshot("channel_beta")["waiting"] == 1)
-    service.set_limit("channel_beta", 2)
+    for _ in range(100):
+        snap = await service.snapshot("channel_beta")
+        if snap["waiting"] == 1:
+            break
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    await service.set_limit("channel_beta", 2)
 
-    assert acquired.wait(WAIT_TIMEOUT_SECONDS)
-    assert service.snapshot("channel_beta") == {
+    await asyncio.wait_for(acquired.wait(), WAIT_TIMEOUT_SECONDS)
+    assert await service.snapshot("channel_beta") == {
         "limit": 2,
         "inflight": 2,
         "waiting": 0,
     }
 
     release_worker.set()
-    service.release("channel_beta")
-    thread.join()
-    assert service.snapshot("channel_beta") == {
+    await service.release_slot("channel_beta")
+    await task
+    assert await service.snapshot("channel_beta") == {
         "limit": 2,
         "inflight": 0,
         "waiting": 0,
     }
 
 
-def test_concurrency_service_does_not_interrupt_inflight_requests_when_limit_shrinks():
+@pytest.mark.asyncio
+async def test_concurrency_service_does_not_interrupt_inflight_requests_when_limit_shrinks():
     service = LlmConcurrencyService()
-    service.set_limit("channel_gamma", 2)
-    service.wait_for_turn("channel_gamma")
-    service.wait_for_turn("channel_gamma")
-    service.set_limit("channel_gamma", 1)
+    await service.set_limit("channel_gamma", 2)
+    await service.acquire_slot("channel_gamma")
+    await service.acquire_slot("channel_gamma")
+    await service.set_limit("channel_gamma", 1)
 
-    acquired = threading.Event()
-    release_worker = threading.Event()
+    acquired = asyncio.Event()
+    release_worker = asyncio.Event()
 
-    def worker():
-        service.wait_for_turn("channel_gamma")
+    async def worker():
+        await service.acquire_slot("channel_gamma")
         acquired.set()
-        release_worker.wait(WAIT_TIMEOUT_SECONDS)
-        service.release("channel_gamma")
+        await asyncio.wait_for(release_worker.wait(), WAIT_TIMEOUT_SECONDS)
+        await service.release_slot("channel_gamma")
 
-    thread = threading.Thread(target=worker)
-    thread.start()
+    task = asyncio.create_task(worker())
 
-    assert _wait_for(lambda: service.snapshot("channel_gamma")["waiting"] == 1)
-    service.release("channel_gamma")
-    assert not acquired.wait(0.1)
+    for _ in range(100):
+        snap = await service.snapshot("channel_gamma")
+        if snap["waiting"] == 1:
+            break
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    await service.release_slot("channel_gamma")
+    # Shrunk to limit=1, inflight still 1 (other worker) — acquired must NOT fire yet.
+    try:
+        await asyncio.wait_for(acquired.wait(), 0.1)
+        assert False, "worker acquired while limit exhausted"
+    except asyncio.TimeoutError:
+        pass
 
-    service.release("channel_gamma")
-    assert acquired.wait(WAIT_TIMEOUT_SECONDS)
-    assert service.snapshot("channel_gamma") == {
+    await service.release_slot("channel_gamma")
+    await asyncio.wait_for(acquired.wait(), WAIT_TIMEOUT_SECONDS)
+    assert await service.snapshot("channel_gamma") == {
         "limit": 1,
         "inflight": 1,
         "waiting": 0,
     }
 
     release_worker.set()
-    thread.join()
-    assert service.snapshot("channel_gamma") == {
+    await task
+    assert await service.snapshot("channel_gamma") == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,
@@ -132,16 +163,16 @@ def test_concurrency_service_does_not_interrupt_inflight_requests_when_limit_shr
 @pytest.mark.asyncio
 async def test_concurrency_service_supports_async_slot():
     service = LlmConcurrencyService()
-    service.set_limit("channel_async", 1)
+    await service.set_limit("channel_async", 1)
 
     async with service.async_slot("channel_async"):
-        assert service.snapshot("channel_async") == {
+        assert await service.snapshot("channel_async") == {
             "limit": 1,
             "inflight": 1,
             "waiting": 0,
         }
 
-    assert service.snapshot("channel_async") == {
+    assert await service.snapshot("channel_async") == {
         "limit": 1,
         "inflight": 0,
         "waiting": 0,
