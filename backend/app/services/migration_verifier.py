@@ -14,11 +14,19 @@ from ..tables import metadata
 
 
 class MigrationVerifier:
-    """Compare legacy per-project stores against the unified database."""
+    """Compare legacy per-project and global stores against the unified database."""
 
     DOMAIN_SOURCES = {
         "novel": "novel.sqlite3",
         "story_graph": "story_graph.sqlite3",
+        "project_assets": "project_assets.sqlite3",
+        "worldline_runtime": "worldlines/runtime.sqlite3",
+    }
+
+    GLOBAL_SOURCES = {
+        "llm_facility": "llm_facility.sqlite3",
+        "archive_library": "archive_library.sqlite3",
+        "assets_library": "assets_library.sqlite3",
     }
 
     def __init__(self, *, upload_root: str | Path, engine: Engine):
@@ -42,6 +50,23 @@ class MigrationVerifier:
             "risk_level": self._risk_level(overall_verdict),
         }
 
+    def verify_global(self) -> dict[str, Any]:
+        system_dir = self.upload_root / "system"
+        legacy_sources = self._global_source_report(system_dir)
+        domains = {
+            domain_name: self._verify_global_domain(domain_name, system_dir / filename)
+            for domain_name, filename in self.GLOBAL_SOURCES.items()
+        }
+        overall_verdict = self._overall_verdict_global(domains)
+        return {
+            "scope": "global",
+            "system_dir": str(system_dir),
+            "legacy_sources": legacy_sources,
+            "domains": domains,
+            "overall_verdict": overall_verdict,
+            "risk_level": self._risk_level(overall_verdict),
+        }
+
     def _legacy_source_report(self, project_dir: Path) -> dict[str, dict[str, Any]]:
         report: dict[str, dict[str, Any]] = {
             "project_dir": {"exists": project_dir.exists(), "path": str(project_dir)},
@@ -59,31 +84,75 @@ class MigrationVerifier:
                 "exists": (project_dir / "story_graph.json").exists(),
                 "path": str(project_dir / "story_graph.json"),
             },
+            "project_assets_db": {
+                "exists": (project_dir / "project_assets.sqlite3").exists(),
+                "path": str(project_dir / "project_assets.sqlite3"),
+            },
+            "worldline_runtime_db": {
+                "exists": (project_dir / "worldlines" / "runtime.sqlite3").exists(),
+                "path": str(project_dir / "worldlines" / "runtime.sqlite3"),
+            },
         }
         return report
 
+    def _global_source_report(self, system_dir: Path) -> dict[str, dict[str, Any]]:
+        return {
+            "system_dir": {"exists": system_dir.exists(), "path": str(system_dir)},
+            "llm_facility_db": {
+                "exists": (system_dir / "llm_facility.sqlite3").exists(),
+                "path": str(system_dir / "llm_facility.sqlite3"),
+            },
+            "archive_library_db": {
+                "exists": (system_dir / "archive_library.sqlite3").exists(),
+                "path": str(system_dir / "archive_library.sqlite3"),
+            },
+            "assets_library_db": {
+                "exists": (system_dir / "assets_library.sqlite3").exists(),
+                "path": str(system_dir / "assets_library.sqlite3"),
+            },
+        }
+
     def _verify_domain(self, project_id: str, domain_name: str, source_path: Path) -> dict[str, Any]:
         if not source_path.exists():
-            return {
-                "domain": domain_name,
-                "source_path": str(source_path),
-                "source_available": False,
-                "status": "warn",
-                "legacy_row_count": 0,
-                "unified_row_count": 0,
-                "missing_in_unified_count": 0,
-                "unexpected_in_unified_count": 0,
-                "mismatch_count": 0,
-                "table_count": 0,
-                "tables": [],
-                "notes": ["legacy source missing"],
-            }
+            return self._empty_domain_report(domain_name, source_path)
 
         with sqlite3.connect(source_path) as connection:
             connection.row_factory = sqlite3.Row
             table_names = self._source_tables(connection)
             table_reports = [self._verify_table(project_id, connection, table_name) for table_name in table_names]
 
+        return self._aggregate_table_reports(domain_name, source_path, table_reports)
+
+    def _verify_global_domain(self, domain_name: str, source_path: Path) -> dict[str, Any]:
+        if not source_path.exists():
+            return self._empty_domain_report(domain_name, source_path)
+
+        with sqlite3.connect(source_path) as connection:
+            connection.row_factory = sqlite3.Row
+            table_names = self._source_tables_global(connection)
+            table_reports = [self._verify_table_global(connection, table_name) for table_name in table_names]
+
+        return self._aggregate_table_reports(domain_name, source_path, table_reports)
+
+    def _empty_domain_report(self, domain_name: str, source_path: Path) -> dict[str, Any]:
+        return {
+            "domain": domain_name,
+            "source_path": str(source_path),
+            "source_available": False,
+            "status": "warn",
+            "legacy_row_count": 0,
+            "unified_row_count": 0,
+            "missing_in_unified_count": 0,
+            "unexpected_in_unified_count": 0,
+            "mismatch_count": 0,
+            "table_count": 0,
+            "tables": [],
+            "notes": ["legacy source missing"],
+        }
+
+    def _aggregate_table_reports(
+        self, domain_name: str, source_path: Path, table_reports: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         legacy_row_count = sum(item["legacy_row_count"] for item in table_reports)
         unified_row_count = sum(item["unified_row_count"] for item in table_reports)
         missing_count = sum(item["missing_in_unified_count"] for item in table_reports)
@@ -104,7 +173,7 @@ class MigrationVerifier:
             "mismatch_count": mismatch_count,
             "table_count": len(table_reports),
             "tables": table_reports,
-            "notes": [] if table_reports else ["no comparable project-scoped tables found"],
+            "notes": [] if table_reports else ["no comparable tables found"],
         }
 
     def _source_tables(self, connection: sqlite3.Connection) -> list[str]:
@@ -120,15 +189,42 @@ class MigrationVerifier:
             result.append(name)
         return result
 
+    def _source_tables_global(self, connection: sqlite3.Connection) -> list[str]:
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        return [row[0] for row in rows if row[0] in metadata.tables]
+
     def _verify_table(self, project_id: str, source_conn: sqlite3.Connection, table_name: str) -> dict[str, Any]:
         source_columns = self._source_columns(source_conn, table_name)
         unified_table = metadata.tables[table_name]
         compare_columns = [column for column in source_columns if column in unified_table.c and column != "project_id"]
-        key_columns = self._key_columns(source_conn, table_name, unified_table)
+        key_columns = self._key_columns(source_conn, table_name, unified_table, exclude_project_id=True)
 
         legacy_rows = [dict(row) for row in source_conn.execute(f"SELECT * FROM {table_name}").fetchall()]
         unified_rows = self._fetch_unified_rows(project_id, table_name)
 
+        return self._compare_rows(table_name, legacy_rows, unified_rows, key_columns, compare_columns)
+
+    def _verify_table_global(self, source_conn: sqlite3.Connection, table_name: str) -> dict[str, Any]:
+        source_columns = self._source_columns(source_conn, table_name)
+        unified_table = metadata.tables[table_name]
+        compare_columns = [column for column in source_columns if column in unified_table.c]
+        key_columns = self._key_columns(source_conn, table_name, unified_table, exclude_project_id=False)
+
+        legacy_rows = [dict(row) for row in source_conn.execute(f"SELECT * FROM {table_name}").fetchall()]
+        unified_rows = self._fetch_unified_rows_global(table_name)
+
+        return self._compare_rows(table_name, legacy_rows, unified_rows, key_columns, compare_columns)
+
+    def _compare_rows(
+        self,
+        table_name: str,
+        legacy_rows: list[dict[str, Any]],
+        unified_rows: list[dict[str, Any]],
+        key_columns: list[str],
+        compare_columns: list[str],
+    ) -> dict[str, Any]:
         legacy_index = {self._row_key(row, key_columns): row for row in legacy_rows}
         unified_index = {self._row_key(row, key_columns): row for row in unified_rows}
 
@@ -174,21 +270,37 @@ class MigrationVerifier:
         rows = source_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
         return [row[1] for row in rows]
 
-    def _key_columns(self, source_conn: sqlite3.Connection, table_name: str, unified_table) -> list[str]:
+    def _key_columns(
+        self,
+        source_conn: sqlite3.Connection,
+        table_name: str,
+        unified_table,
+        *,
+        exclude_project_id: bool,
+    ) -> list[str]:
         pragma_rows = source_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
         source_keys = [row[1] for row in sorted(pragma_rows, key=lambda item: item[5]) if row_has_pk(row)]
         if source_keys:
-            return [column for column in source_keys if column != "project_id"]
-        unified_keys = [column.name for column in unified_table.primary_key.columns if column.name != "project_id"]
+            return [column for column in source_keys if not (exclude_project_id and column == "project_id")]
+        unified_keys = [
+            column.name
+            for column in unified_table.primary_key.columns
+            if not (exclude_project_id and column.name == "project_id")
+        ]
         if unified_keys:
             return unified_keys
         source_columns = self._source_columns(source_conn, table_name)
-        return [column for column in source_columns if column != "project_id"]
+        return [column for column in source_columns if not (exclude_project_id and column == "project_id")]
 
     def _fetch_unified_rows(self, project_id: str, table_name: str) -> list[dict[str, Any]]:
         statement = text(f"SELECT * FROM {table_name} WHERE project_id = :project_id")
         with self.engine.connect() as connection:
             return [dict(row._mapping) for row in connection.execute(statement, {"project_id": project_id}).fetchall()]
+
+    def _fetch_unified_rows_global(self, table_name: str) -> list[dict[str, Any]]:
+        statement = text(f"SELECT * FROM {table_name}")
+        with self.engine.connect() as connection:
+            return [dict(row._mapping) for row in connection.execute(statement).fetchall()]
 
     def _row_key(self, row: dict[str, Any], key_columns: list[str]) -> tuple[Any, ...]:
         return tuple(row.get(column) for column in key_columns)
@@ -204,7 +316,17 @@ class MigrationVerifier:
         statuses = [domain["status"] for domain in domains.values()]
         if any(status == "fail" for status in statuses):
             return "fail"
-        if not legacy_sources["project_meta"]["exists"] or any(status == "warn" for status in statuses):
+        if not legacy_sources["project_meta"]["exists"]:
+            return "warn"
+        if statuses and all(status == "warn" for status in statuses):
+            return "warn"
+        return "pass"
+
+    def _overall_verdict_global(self, domains: dict[str, Any]) -> str:
+        statuses = [domain["status"] for domain in domains.values()]
+        if any(status == "fail" for status in statuses):
+            return "fail"
+        if statuses and all(status == "warn" for status in statuses):
             return "warn"
         return "pass"
 
