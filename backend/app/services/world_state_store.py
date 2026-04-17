@@ -1,11 +1,19 @@
 """
 世界线状态存储。
-项目会话保存在项目目录，混合档案等全局会话保存在独立全局空间。
+
+Phase E (2026-04-17):
+    Session 元数据（原 ``sessions/<sid>/session.json`` + ``index.json``）
+    已迁入 ``worldline_sessions`` 表。本类的 ``save_session`` /
+    ``load_session`` / ``list_sessions`` 都转调
+    :class:`WorldlineSessionRepository`；``container_dir`` 参数保留是为
+    了兼容引擎里现有的调用签名（以及 ``load_json_if_exists`` 仍读取
+    项目目录下的其他 artefact 文件），但对 session 数据本身不再使用。
 """
+
+from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import Config
@@ -14,6 +22,9 @@ from ..models.worldline import WorldlineSession
 
 
 class WorldStateStore:
+    def __init__(self) -> None:
+        self._repo = None
+
     @property
     def projects_dir(self) -> str:
         return ProjectManager.PROJECTS_DIR
@@ -23,6 +34,61 @@ class WorldStateStore:
         path = os.path.join(Config.UPLOAD_FOLDER, "system", "global_worldlines")
         os.makedirs(path, exist_ok=True)
         return path
+
+    # ------------------------------------------------------------------
+    # Session persistence (DB-backed)
+    # ------------------------------------------------------------------
+
+    def _get_repo(self):
+        """Lazy repo binding — keeps the store constructable before
+        ``init_db()`` has ever run and always uses the current engine."""
+        from ..database import get_engine
+        from ..repositories.worldline_session_repo import WorldlineSessionRepository
+
+        return WorldlineSessionRepository(get_engine())
+
+    def save_session(self, container_dir: str, session: WorldlineSession) -> str:
+        """Persist a session.
+
+        ``container_dir`` is accepted for backward compatibility with
+        callers in ``worldline_engine`` / ``worldline_event_service`` /
+        ``worldline_prepare_service`` but is no longer read from or
+        written to — all state is stored in ``worldline_sessions``.
+        """
+        del container_dir  # deprecated, unused
+        self._get_repo().save_session(session.to_dict())
+        return f"db:worldline_sessions/{session.session_id}"
+
+    def load_session(
+        self,
+        session_id: str,
+        project_id: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Optional[WorldlineSession]:
+        """Load a session by id.
+
+        ``project_id`` / ``graph_id`` hints are kept for signature
+        compatibility; ``session_id`` is globally unique in the DB so
+        they're no longer needed to disambiguate.
+        """
+        del project_id, graph_id
+        payload = self._get_repo().load_session(session_id)
+        if payload is None:
+            return None
+        return WorldlineSession.from_dict(payload)
+
+    def list_sessions(
+        self,
+        project_id: Optional[str] = None,
+        graph_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        return self._get_repo().list_sessions(project_id=project_id, graph_id=graph_id, limit=limit)
+
+    # ------------------------------------------------------------------
+    # Container resolution (still filesystem-based: used by other
+    # worldline artefacts and for graph_id→project lookup)
+    # ------------------------------------------------------------------
 
     def resolve_container(
         self,
@@ -47,52 +113,31 @@ class WorldStateStore:
             return match_project.project_id, container_dir
         return None, self._graph_container(graph_id)
 
-    def save_session(self, container_dir: str, session: WorldlineSession) -> str:
-        session.updated_at = datetime.now().isoformat()
-        path = self._session_file(container_dir, session.session_id)
-        with open(path, "w", encoding="utf-8") as file_obj:
-            json.dump(session.to_dict(), file_obj, ensure_ascii=False, indent=2)
-        self._upsert_index(container_dir, session)
-        return path
-
-    def load_session(
-        self,
-        session_id: str,
-        project_id: Optional[str] = None,
-        graph_id: Optional[str] = None,
-    ) -> Optional[WorldlineSession]:
-        for container_dir in self._candidate_containers(project_id, graph_id):
-            path = os.path.join(container_dir, "worldlines", "sessions", session_id, "session.json")
-            if not os.path.exists(path):
-                continue
-            with open(path, "r", encoding="utf-8") as file_obj:
-                return WorldlineSession.from_dict(json.load(file_obj))
-        return None
-
-    def list_sessions(
-        self,
-        project_id: Optional[str] = None,
-        graph_id: Optional[str] = None,
-        limit: int = 20,
-    ) -> List[Dict[str, Any]]:
-        sessions: List[Dict[str, Any]] = []
-        for container_dir in self._candidate_containers(project_id, graph_id):
-            index_file = self._index_file(container_dir)
-            if not os.path.exists(index_file):
-                continue
-            with open(index_file, "r", encoding="utf-8") as file_obj:
-                sessions.extend(json.load(file_obj).get("sessions", []))
-        sessions.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
-        return sessions[:limit]
-
     def load_json_if_exists(self, container_dir: str, filename: str) -> Optional[Dict[str, Any]]:
+        """Read an adjacent JSON artefact (non-session) from the project
+        directory. Sessions are in the DB — this helper is for other
+        files like ``seed_analysis.json`` / ``reading_notes.json`` / etc.
+        that callers pass through ``resolve_container``'s returned path."""
         path = os.path.join(container_dir, filename)
         if not os.path.exists(path):
             return None
         with open(path, "r", encoding="utf-8") as file_obj:
             return json.load(file_obj)
 
+    # ------------------------------------------------------------------
+    # Internal helpers retained for container path resolution
+    # ------------------------------------------------------------------
+
+    def _find_project_by_graph_id(self, graph_id: str) -> Optional[Any]:
+        for project in ProjectManager.list_projects(limit=1000):
+            if project.graph_id == graph_id:
+                return project
+        return None
+
     def _candidate_containers(self, project_id: Optional[str], graph_id: Optional[str]) -> List[str]:
+        """Candidate filesystem directories when a caller still needs a
+        path to read non-session artefacts (e.g. ``seed_analysis.json``)
+        rather than a DB-backed session."""
         if project_id:
             return [ProjectManager._get_project_dir(project_id)]
         if graph_id:
@@ -102,8 +147,7 @@ class WorldStateStore:
                 containers.append(ProjectManager._get_project_dir(match_project.project_id))
             containers.append(self._mixed_container())
             return self._dedupe(containers)
-        containers = self._project_containers() + self._global_containers()
-        return self._dedupe(containers)
+        return self._dedupe(self._project_containers() + self._global_containers())
 
     def _project_containers(self) -> List[str]:
         ProjectManager._ensure_projects_dir()
@@ -123,65 +167,15 @@ class WorldStateStore:
         )
         return containers
 
-    def _find_project_by_graph_id(self, graph_id: str) -> Optional[Any]:
-        for project in ProjectManager.list_projects(limit=1000):
-            if project.graph_id == graph_id:
-                return project
-        return None
-
-    def _worldlines_root(self, container_dir: str) -> str:
-        path = os.path.join(container_dir, "worldlines")
-        os.makedirs(path, exist_ok=True)
-        return path
-
-    def _sessions_root(self, container_dir: str) -> str:
-        path = os.path.join(self._worldlines_root(container_dir), "sessions")
-        os.makedirs(path, exist_ok=True)
-        return path
-
-    def _session_dir(self, container_dir: str, session_id: str) -> str:
-        path = os.path.join(self._sessions_root(container_dir), session_id)
-        os.makedirs(path, exist_ok=True)
-        return path
-
-    def _session_file(self, container_dir: str, session_id: str) -> str:
-        return os.path.join(self._session_dir(container_dir, session_id), "session.json")
-
-    def _index_file(self, container_dir: str) -> str:
-        return os.path.join(self._worldlines_root(container_dir), "index.json")
-
-    def _upsert_index(self, container_dir: str, session: WorldlineSession) -> None:
-        index_file = self._index_file(container_dir)
-        payload: Dict[str, Any] = {"sessions": []}
-        if os.path.exists(index_file):
-            with open(index_file, "r", encoding="utf-8") as file_obj:
-                payload = json.load(file_obj)
-        sessions = payload.get("sessions", [])
-        record = {
-            "session_id": session.session_id,
-            "project_id": session.project_id,
-            "graph_id": session.graph_id,
-            "label": session.label,
-            "simulation_goal": session.simulation_goal,
-            "branch_count": session.branch_count,
-            "session_scope": session.session_scope,
-            "status": session.status,
-            "source_archive_ids": session.source_archive_ids,
-            "source_project_ids": session.source_project_ids,
-            "source_archive_count": session.source_archive_count,
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-        }
-        for idx, item in enumerate(sessions):
-            if item.get("session_id") != session.session_id:
+    def _dedupe(self, values: List[str]) -> List[str]:
+        seen: set[str] = set()
+        items: List[str] = []
+        for value in values:
+            if value in seen:
                 continue
-            sessions[idx] = record
-            break
-        else:
-            sessions.append(record)
-        sessions.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
-        with open(index_file, "w", encoding="utf-8") as file_obj:
-            json.dump({"sessions": sessions}, file_obj, ensure_ascii=False, indent=2)
+            seen.add(value)
+            items.append(value)
+        return items
 
     def _mixed_container(self) -> str:
         path = os.path.join(self.global_root, "mixed")
@@ -198,13 +192,3 @@ class WorldStateStore:
         path = os.path.join(self._graphs_root(), safe_graph_id)
         os.makedirs(path, exist_ok=True)
         return path
-
-    def _dedupe(self, values: List[str]) -> List[str]:
-        seen = set()
-        items: List[str] = []
-        for value in values:
-            if value in seen:
-                continue
-            seen.add(value)
-            items.append(value)
-        return items
