@@ -572,36 +572,26 @@ class Readers:
     def read_worldline(self, project_id: str | None) -> list[UnifiedAsset]:
         if not project_id:
             return []
-        wl_dir = os.path.join(
-            Config.UPLOAD_FOLDER, "projects", project_id, "worldlines"
-        )
-        if not os.path.isdir(wl_dir):
-            return []
+        from ...repositories.worldline_session_repo import WorldlineSessionRepository
+
+        repo = WorldlineSessionRepository(get_engine())
         out: list[UnifiedAsset] = []
-        sessions_dir = os.path.join(wl_dir, "sessions")
-        if os.path.isdir(sessions_dir):
-            for fname in sorted(os.listdir(sessions_dir)):
-                if not fname.endswith(".json"):
-                    continue
-                path = os.path.join(sessions_dir, fname)
-                # 损坏的 session JSON 视为 bug，不静默跳过。
-                with open(path, "r", encoding="utf-8") as fp:
-                    data = json.load(fp)
-                sid = fname.removesuffix(".json")
-                out.append(
-                    UnifiedAsset(
-                        source=SOURCE_WORLDLINE,
-                        source_ref=f"session:{sid}",
-                        entity_type="worldline_session",
-                        title=data.get("title") or sid,
-                        summary=data.get("summary") or data.get("description") or "",
-                        scope="project",
-                        project_id=project_id,
-                        updated_at=data.get("updated_at") or "",
-                        payload=data if isinstance(data, dict) else {},
-                        origin_link=f"/worldline?session_id={sid}",
-                    )
+        for summary in repo.list_sessions(project_id=project_id, limit=200):
+            sid = summary["session_id"]
+            out.append(
+                UnifiedAsset(
+                    source=SOURCE_WORLDLINE,
+                    source_ref=f"session:{sid}",
+                    entity_type="worldline_session",
+                    title=summary.get("label") or sid,
+                    summary=summary.get("simulation_goal") or "",
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=summary.get("updated_at") or "",
+                    payload=summary,
+                    origin_link=f"/worldline?session_id={sid}",
                 )
+            )
         return out
 
     # -- seed pipeline outputs -----------------------------------------
