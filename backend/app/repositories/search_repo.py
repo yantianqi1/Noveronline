@@ -5,10 +5,10 @@ through the unified database engine.
 
 Table: global_index (composite PK: source + source_ref)
 
-This repository handles CRUD and LIKE-based search. The original FTS5
-trigram virtual table (global_index_fts) is a SQLite-specific feature
-that cannot be expressed portably in SQLAlchemy Core; the search method
-uses LIKE filtering instead, which works across SQLite and PostgreSQL.
+Write-path and delete-path are dialect-neutral SQLAlchemy Core.
+Read-path (``search``) is delegated to a dialect-specific backend via
+``search_backends.select_backend`` — SQLite FTS5, PostgreSQL pg_trgm,
+or the portable LIKE fallback.
 """
 
 from __future__ import annotations
@@ -16,17 +16,23 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-from sqlalchemy import Engine, and_, delete, desc, insert, or_, select, update
+from sqlalchemy import Engine, and_, delete, insert, or_, select, update
 
 from app.tables.search import global_index
 
 from .base import BaseRepository
+from .search_backends import SearchBackend, select_backend
 
 
 class SearchRepository(BaseRepository):
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, *, backend: SearchBackend | None = None):
         super().__init__(engine)
         self.table = global_index
+        self._backend = backend or select_backend(engine)
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend.name
 
     # ------------------------------------------------------------------
     # 1. upsert  (bulk upsert by source + source_ref)
@@ -115,7 +121,7 @@ class SearchRepository(BaseRepository):
             return result.rowcount or 0
 
     # ------------------------------------------------------------------
-    # 4. search  (LIKE-based with optional filters)
+    # 4. search  (dialect-specific backend routing)
     # ------------------------------------------------------------------
 
     def search(
@@ -128,56 +134,14 @@ class SearchRepository(BaseRepository):
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """LIKE-based search across title and body with optional filters."""
-        tbl = self.table
-        like_pattern = f"%{query}%"
-        clauses = [
-            or_(
-                tbl.c.title.like(like_pattern),
-                tbl.c.body.like(like_pattern),
-            )
-        ]
-        if project_id:
-            clauses.append(tbl.c.project_id == project_id)
-        if sources:
-            src_list = list(sources)
-            clauses.append(tbl.c.source.in_(src_list))
-        if entity_types:
-            et_list = list(entity_types)
-            clauses.append(tbl.c.entity_type.in_(et_list))
-
-        stmt = (
-            select(tbl)
-            .where(and_(*clauses))
-            .order_by(desc(tbl.c.updated_at))
-            .limit(limit)
-            .offset(offset)
+        """Delegate the search to the dialect-specific backend."""
+        results = self._backend.search(
+            self.engine,
+            query,
+            project_id=project_id,
+            sources=sources,
+            entity_types=entity_types,
+            limit=limit,
+            offset=offset,
         )
-        with self.connect() as conn:
-            rows = conn.execute(stmt).fetchall()
-
-        results: list[dict[str, Any]] = []
-        for r in rows:
-            r_dict = dict(r._mapping)
-            payload: dict[str, Any] = {}
-            try:
-                payload = json.loads(r_dict.get("payload_json") or "{}") or {}
-            except (json.JSONDecodeError, TypeError):
-                payload = {}
-
-            body_text = r_dict.get("body") or ""
-            tags_text = r_dict.get("tags") or ""
-
-            results.append({
-                "source": r_dict["source"],
-                "source_ref": r_dict["source_ref"],
-                "project_id": r_dict.get("project_id"),
-                "entity_type": r_dict.get("entity_type", ""),
-                "title": r_dict.get("title", ""),
-                "summary": body_text.split("\n", 1)[0],
-                "tags": tags_text.split() if tags_text else [],
-                "updated_at": r_dict.get("updated_at", ""),
-                "payload": payload,
-                "snippet": body_text[:96] if body_text else "",
-            })
-        return results
+        return [item.to_dict() for item in results]
