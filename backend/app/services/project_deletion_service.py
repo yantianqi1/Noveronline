@@ -100,6 +100,7 @@ ALL_PROJECT_SCOPED_TABLES: tuple[Table, ...] = (
     worldline_tables.prepare_runs,
     worldline_tables.prepared_agent_dossiers,
     worldline_tables.prepare_event_log,
+    worldline_tables.worldline_sessions,
     # llm.py
     llm_tables.writer_presets_global,
 )

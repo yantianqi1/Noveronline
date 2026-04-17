@@ -133,7 +133,8 @@ def test_unified_metadata_declares_all_regular_tables():
         "rule_entity_links", "scenes", "segment_summaries", "sessions",
         "task_runs", "thread_entity_links", "thread_lifecycle",
         "volume_summaries", "world_events", "world_rule_evidence",
-        "worldline_branches", "writer_presets", "writer_presets_global",
+        "worldline_branches", "worldline_sessions", "writer_presets",
+        "writer_presets_global",
     }
 
     assert set(metadata.tables) == expected

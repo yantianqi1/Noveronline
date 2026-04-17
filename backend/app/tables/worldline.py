@@ -13,3 +13,22 @@ agent_episodic_memory = table("agent_episodic_memory", text_col("memory_id", pri
 prepare_runs = table("prepare_runs", text_col("prepare_id", primary_key=True), text_col("task_id", nullable=False), project_id(nullable=True), text_col("graph_id", nullable=False), text_col("session_scope", nullable=False), text_col("status", nullable=False), text_col("stage", nullable=False), int_col("can_start", nullable=False, default="0"), text_col("focus_question", nullable=False), int_col("branch_count", nullable=False), text_col("source_summary_json", nullable=False), text_col("source_json", nullable=False), text_col("world_variables_json", nullable=False), text_col("input_payload_json", nullable=False), text_col("source_archive_ids_json", nullable=False), text_col("source_project_ids_json", nullable=False), int_col("source_archive_count", nullable=False, default="0"), text_col("started_session_id", nullable=False, default="''"), text_col("error"), text_col("created_at", nullable=False), text_col("updated_at", nullable=False))
 prepared_agent_dossiers = table("prepared_agent_dossiers", project_id(nullable=True), text_col("prepare_id", nullable=False), text_col("agent_id", nullable=False), text_col("agent_kind", nullable=False), text_col("display_name", nullable=False), text_col("source_archive_id", nullable=False, default="''"), text_col("source_entity_uuid", nullable=False, default="''"), text_col("importance_tier", nullable=False), text_col("template_key", nullable=False), text_col("template_version", nullable=False), text_col("template_sections_json", nullable=False), text_col("model_name", nullable=False), text_col("validation_errors_json", nullable=False), text_col("public_profile_json", nullable=False), text_col("private_profile_json", nullable=False), text_col("runtime_seed_state_json", nullable=False), text_col("relationship_view_json", nullable=False), text_col("memory_seed_summary_json", nullable=False), text_col("source_evidence_summary_json", nullable=False), text_col("created_at", nullable=False), text_col("updated_at", nullable=False), composite_pk("prepare_id", "agent_id"))
 prepare_event_log = table("prepare_event_log", text_col("event_id", primary_key=True), project_id(nullable=True), text_col("prepare_id", nullable=False), text_col("stage", nullable=False), text_col("level", nullable=False), text_col("message", nullable=False), text_col("detail_json", nullable=False), text_col("created_at", nullable=False))
+worldline_sessions = table(
+    "worldline_sessions",
+    text_col("session_id", primary_key=True),
+    project_id(nullable=True),
+    text_col("graph_id", nullable=False, default="''"),
+    text_col("session_scope", nullable=False, default="'project'"),
+    text_col("label", nullable=False, default="''"),
+    text_col("prepare_id", nullable=False, default="''"),
+    text_col("status", nullable=False, default="'running'"),
+    text_col("simulation_goal", nullable=False, default="''"),
+    text_col("focus_question", nullable=False, default="''"),
+    int_col("branch_count", nullable=False, default="1"),
+    int_col("source_archive_count", nullable=False, default="0"),
+    text_col("source_archive_ids_json", nullable=False, default="'[]'"),
+    text_col("source_project_ids_json", nullable=False, default="'[]'"),
+    text_col("session_data_json", nullable=False, default="'{}'"),
+    text_col("created_at", nullable=False),
+    text_col("updated_at", nullable=False),
+)
