@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.models.project import ProjectManager
+from app.repositories.project_artifact_repo import load_project_artifact
 from app.services.archive_candidate_builder import ArchiveCandidateBuilder
 from app.services.archive_library_service import ArchiveLibraryService
 from app.services.chapter_context_pack_builder import ChapterContextPackBuilder
@@ -61,7 +62,7 @@ def _resolve_project_context(data: dict):
 
 
 def _load_seed_analysis(project):
-    return ProjectManager.load_project_json(project.project_id, "seed_analysis.json") if project else None
+    return load_project_artifact(project.project_id, "seed_analysis") if project else None
 
 
 def _build_entities_from_seed_analysis(seed_analysis):
@@ -115,7 +116,7 @@ async def generate_archives(body: GenerateArchivesRequest):
         payload = body.model_dump()
         graph_id, project = _resolve_project_context(payload)
         candidates, entity_lookup, types = _archive_candidates(graph_id, project, graph_entity_types(payload.get("entity_types"), graph_id))
-        raw = ProjectManager.load_project_json(project.project_id, "agent_profiles.json") if project else None
+        raw = load_project_artifact(project.project_id, "agent_profiles") if project else None
         archives = NarrativeEntityArchivist(candidate_builder=_get_archive_candidate_builder()).generate_archives_from_candidates(candidates, use_llm=payload.get("use_llm", True), tier_overrides=_candidate_override_map(payload), entity_lookup=entity_lookup, agent_profiles=(raw or {}).get("profiles", {}))
         data = {"graph_id": graph_id, "project_id": project.project_id if project else None, "count": len(archives), "entity_types": types, "archives": [item.to_dict() for item in archives]}
         if project:
@@ -242,7 +243,7 @@ async def build_chapter_context(body: ChapterContextRequest):
 async def get_reviewer_rules(project_id: str = ""):
     if not project_id:
         return err("需要 project_id", status_code=400)
-    data = ProjectManager.load_project_json(project_id, "reviewer_rules.json")
+    data = load_project_artifact(project_id, "reviewer_rules")
     custom_prompt = (data or {}).get("custom_prompt", "")
     return ok({"custom_prompt": custom_prompt, "default_prompt": REVIEWER_SYSTEM_PROMPT, "is_custom": bool(custom_prompt)})
 

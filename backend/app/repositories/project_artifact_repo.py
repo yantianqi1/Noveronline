@@ -133,4 +133,23 @@ class ProjectArtifactRepository(BaseRepository):
         return result.rowcount or 0
 
 
-__all__ = ["ProjectArtifactRepository", "artifact_key_from_filename"]
+__all__ = [
+    "ProjectArtifactRepository",
+    "artifact_key_from_filename",
+    "load_project_artifact",
+]
+
+
+def load_project_artifact(project_id: str, filename: str) -> Any | None:
+    """Convenience wrapper: fetch a project artifact keyed by filename.
+
+    Used by service-layer code that wants a one-liner equivalent of the
+    legacy ``ProjectManager.load_project_json`` call. Accepts either the
+    filename (``seed_analysis.json``) or the bare artifact key
+    (``seed_analysis``). Returns ``None`` when no row exists.
+    """
+    from ..database import get_engine
+
+    return ProjectArtifactRepository(get_engine()).load(
+        project_id, artifact_key_from_filename(filename),
+    )

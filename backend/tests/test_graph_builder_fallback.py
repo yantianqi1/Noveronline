@@ -23,8 +23,8 @@ def test_build_graph_falls_back_to_reading_notes():
         "relations": [],
     }
 
-    with patch("app.services.graph_builder.ProjectManager") as mock_pm:
-        def load_json(pid, filename):
+    with patch("app.repositories.project_artifact_repo.load_project_artifact") as mock_load:
+        def load_artifact(pid, filename):
             mapping = {
                 "local_block_facts.json": None,
                 "block_analyses.json": None,
@@ -36,7 +36,7 @@ def test_build_graph_falls_back_to_reading_notes():
                 "chapter_segments.json": None,
             }
             return mapping.get(filename)
-        mock_pm.load_project_json.side_effect = load_json
+        mock_load.side_effect = load_artifact
 
         mock_builder = MagicMock()
         mock_builder.build_for_project.return_value = MagicMock(

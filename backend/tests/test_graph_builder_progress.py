@@ -179,8 +179,8 @@ def test_service_passes_callback_to_builder():
     mock_builder = MagicMock()
     mock_builder.build_for_project.return_value = MagicMock(graph_id="g1", node_count=1, edge_count=0)
 
-    with patch("app.services.graph_builder.ProjectManager") as mock_pm:
-        mock_pm.load_project_json.return_value = {"block_count": 0, "packets": [], "entity_registry": {}}
+    with patch("app.repositories.project_artifact_repo.load_project_artifact") as mock_load:
+        mock_load.return_value = {"block_count": 0, "packets": [], "entity_registry": {}}
         service = GraphBuilderService(builder=mock_builder)
         cb = lambda e: None
         service.build_graph("p", "text", {}, "g", progress_callback=cb)

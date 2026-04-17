@@ -4,7 +4,7 @@ import asyncio
 from typing import Any, Callable, Dict, Optional
 
 from ..database import get_engine
-from ..models.project import ProjectManager
+from ..models.project import ProjectManager  # noqa: F401 — re-exported for historical test patches
 from ..models.task import TaskManager
 from ..repositories.graph_repo import GraphRepository
 from .graph_builder_types import GraphInfo
@@ -130,10 +130,14 @@ class GraphBuilderService:
         )
 
     def _required_json(self, project_id: str, filename: str) -> Dict[str, Any]:
-        payload = ProjectManager.load_project_json(project_id, filename)
+        from ..repositories.project_artifact_repo import load_project_artifact
+
+        payload = load_project_artifact(project_id, filename)
         if payload is None:
             raise ValueError(f"项目缺少构建本地图谱所需工件: {filename}")
         return payload
 
     def _optional_json(self, project_id: str, filename: str) -> Optional[Dict[str, Any]]:
-        return ProjectManager.load_project_json(project_id, filename)
+        from ..repositories.project_artifact_repo import load_project_artifact
+
+        return load_project_artifact(project_id, filename)

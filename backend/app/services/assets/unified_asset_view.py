@@ -29,7 +29,6 @@ from sqlalchemy import and_, select
 
 from ...config import Config
 from ...database import get_engine
-from ...models.project import ProjectManager
 from ...repositories.archive_repo import ArchiveRepository
 from ...repositories.entity_repo import EntityRepository
 from ...repositories.graph_repo import GraphRepository
@@ -598,8 +597,10 @@ class Readers:
     def read_seed(self, project_id: str | None) -> list[UnifiedAsset]:
         if not project_id:
             return []
+        from ...repositories.project_artifact_repo import load_project_artifact
+
         out: list[UnifiedAsset] = []
-        archives = ProjectManager.load_project_json(project_id, "narrative_archives.json") or {}
+        archives = load_project_artifact(project_id, "narrative_archives") or {}
         if isinstance(archives, dict):
             characters = archives.get("characters") or {}
             if isinstance(characters, dict):
@@ -662,7 +663,7 @@ class Readers:
                 )
         # Reading notes — expose arc_summaries and key_events as searchable
         # entries so the writer agent (and global FTS) can pull them.
-        reading_notes = ProjectManager.load_project_json(project_id, "reading_notes.json") or {}
+        reading_notes = load_project_artifact(project_id, "reading_notes") or {}
         if isinstance(reading_notes, dict):
             notes_inner = reading_notes.get("notes", reading_notes)
             plot_state = notes_inner.get("plot_state", {}) if isinstance(notes_inner, dict) else {}
@@ -708,7 +709,7 @@ class Readers:
                 )
 
         # Ontology — expose entity_types so writer agent can introspect labels.
-        ontology = ProjectManager.load_project_json(project_id, "ontology.json") or {}
+        ontology = load_project_artifact(project_id, "ontology") or {}
         if isinstance(ontology, dict):
             for entity_type in ontology.get("entity_types", []) or []:
                 if not isinstance(entity_type, dict):
@@ -730,7 +731,7 @@ class Readers:
                     )
                 )
 
-        profiles = ProjectManager.load_project_json(project_id, "agent_profiles.json") or {}
+        profiles = load_project_artifact(project_id, "agent_profiles") or {}
         if isinstance(profiles, dict):
             for key, prof in profiles.items():
                 if not isinstance(prof, dict):

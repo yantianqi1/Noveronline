@@ -6,6 +6,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ..models.project import ProjectManager
+from ..repositories.project_artifact_repo import load_project_artifact
 from .canon_history_retriever import CanonHistoryRetriever
 from .chapter_context_ranker import ChapterContextRanker, MAX_MUST_KNOW, MAX_SCENES, MAX_SHOULD_KNOW, MAX_WARNINGS
 from .memory_subject_utils import normalize_memory_subject
@@ -34,9 +35,9 @@ class ChapterContextPackBuilder:
 
     def build_options(self, project_id: str) -> Dict[str, Any]:
         project = self._require_project(project_id)
-        chapters = self._load_required_json(project_id, "chapter_segments.json")["chapters"]
-        continuity = self._load_required_json(project_id, "chapter_continuity.json")
-        seed_analysis = ProjectManager.load_project_json(project_id, "seed_analysis.json") or {}
+        chapters = self._load_required_artifact(project_id, "chapter_segments")["chapters"]
+        continuity = self._load_required_artifact(project_id, "chapter_continuity")
+        seed_analysis = load_project_artifact(project_id, "seed_analysis") or {}
         chapter_map = {item["chapter_id"]: item for item in continuity.get("chapters", [])}
         chapter_options = []
         for chapter in chapters:
@@ -513,17 +514,17 @@ class ChapterContextPackBuilder:
             "selection_trace": [],
         }
 
-    def _load_required_json(self, project_id: str, filename: str) -> Dict[str, Any]:
-        payload = ProjectManager.load_project_json(project_id, filename)
+    def _load_required_artifact(self, project_id: str, artifact_key: str) -> Dict[str, Any]:
+        payload = load_project_artifact(project_id, artifact_key)
         if payload is None:
-            raise ValueError(f"项目缺少必需产物: {filename}")
+            raise ValueError(f"项目缺少必需产物: {artifact_key}.json")
         return payload
 
     def _load_project_sources(self, project_id: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         return (
-            self._load_required_json(project_id, "story_memory.json"),
-            self._load_required_json(project_id, "chapter_continuity.json"),
-            self._load_required_json(project_id, "consistency_report.json"),
+            self._load_required_artifact(project_id, "story_memory"),
+            self._load_required_artifact(project_id, "chapter_continuity"),
+            self._load_required_artifact(project_id, "consistency_report"),
         )
 
     def _require_project(self, project_id: str):

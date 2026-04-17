@@ -4,7 +4,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from ..models.project import ProjectManager
+from ..repositories.project_artifact_repo import load_project_artifact
 from .archive_library_service import ArchiveLibraryService
 from .world_state_store import WorldStateStore
 
@@ -93,7 +93,7 @@ class WorldlineSourceLoader:
         seed_analysis = self.store.load_json_if_exists(container_dir, "seed_analysis.json")
         if seed_analysis or not project:
             return seed_analysis or {}
-        return ProjectManager.load_project_json(project.project_id, "seed_analysis.json") or {}
+        return load_project_artifact(project.project_id, "seed_analysis") or {}
 
     def _load_archives(
         self,

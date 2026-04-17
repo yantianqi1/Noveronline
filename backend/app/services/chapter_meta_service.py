@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional, Sequence
 from sqlalchemy import and_, delete, desc, insert, select, update
 
 from ..database import get_engine
-from ..models.project import ProjectManager
 from ..repositories.chapter_repo import ChapterRepository
+from ..repositories.project_artifact_repo import load_project_artifact
 from ..tables.novel import chapter_content, chapter_meta
 
 logger = logging.getLogger(__name__)
@@ -240,8 +240,8 @@ class ChapterMetaService:
         return items
 
     def get_world_rules(self, project_id: str) -> List[str]:
-        """Return world rules from story_memory.json (legacy source)."""
-        story_memory = ProjectManager.load_project_json(project_id, "story_memory.json") or {}
+        """Return world rules from the story_memory artifact."""
+        story_memory = load_project_artifact(project_id, "story_memory") or {}
         return [str(item or "").strip() for item in story_memory.get("world_rules", []) if str(item or "").strip()]
 
     def get_chapter_continuity_context(
@@ -341,7 +341,7 @@ class ChapterMetaService:
     def _get_prev_chapter_ending(self, project_id: str, current_chapter_order: int) -> str:
         if int(current_chapter_order) <= 1:
             return ""
-        chapters = (ProjectManager.load_project_json(project_id, "chapter_segments.json") or {}).get("chapters", [])
+        chapters = (load_project_artifact(project_id, "chapter_segments") or {}).get("chapters", [])
         prev_order = int(current_chapter_order) - 1
         for chapter in chapters:
             if int(chapter.get("order") or 0) != prev_order:
