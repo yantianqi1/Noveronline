@@ -132,7 +132,7 @@ class MigrationVerifier:
             table_names = self._source_tables_global(connection)
             table_reports = [self._verify_table_global(connection, table_name) for table_name in table_names]
 
-        return self._aggregate_table_reports(domain_name, source_path, table_reports)
+        return self._aggregate_table_reports(domain_name, source_path, table_reports, strict_superset=False)
 
     def _empty_domain_report(self, domain_name: str, source_path: Path) -> dict[str, Any]:
         return {
@@ -151,16 +151,33 @@ class MigrationVerifier:
         }
 
     def _aggregate_table_reports(
-        self, domain_name: str, source_path: Path, table_reports: list[dict[str, Any]]
+        self,
+        domain_name: str,
+        source_path: Path,
+        table_reports: list[dict[str, Any]],
+        *,
+        strict_superset: bool = True,
     ) -> dict[str, Any]:
         legacy_row_count = sum(item["legacy_row_count"] for item in table_reports)
         unified_row_count = sum(item["unified_row_count"] for item in table_reports)
         missing_count = sum(item["missing_in_unified_count"] for item in table_reports)
         unexpected_count = sum(item["unexpected_in_unified_count"] for item in table_reports)
         mismatch_count = sum(item["mismatch_count"] for item in table_reports)
-        status = "pass" if not (missing_count or unexpected_count or mismatch_count) else "fail"
+        if strict_superset:
+            fail_signal = missing_count or unexpected_count or mismatch_count
+        else:
+            fail_signal = missing_count or mismatch_count
+        status = "pass" if not fail_signal else "fail"
         if not table_reports:
             status = "warn"
+        notes: list[str] = []
+        if not table_reports:
+            notes.append("no comparable tables found")
+        elif not strict_superset and unexpected_count:
+            notes.append(
+                f"unified store has {unexpected_count} rows beyond the legacy source"
+                " (expected when other silos also write to this table)"
+            )
         return {
             "domain": domain_name,
             "source_path": str(source_path),
@@ -173,7 +190,7 @@ class MigrationVerifier:
             "mismatch_count": mismatch_count,
             "table_count": len(table_reports),
             "tables": table_reports,
-            "notes": [] if table_reports else ["no comparable tables found"],
+            "notes": notes,
         }
 
     def _source_tables(self, connection: sqlite3.Connection) -> list[str]:
