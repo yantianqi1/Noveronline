@@ -78,6 +78,7 @@ ALL_PROJECT_SCOPED_TABLES: tuple[Table, ...] = (
     novel_tables.plot_threads,
     novel_tables.narrative_arcs,
     novel_tables.project_meta,
+    novel_tables.project_artifacts,
     novel_tables.writer_presets,
     novel_tables.character_events,
     novel_tables.relationship_events,

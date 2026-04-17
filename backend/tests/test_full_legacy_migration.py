@@ -425,6 +425,63 @@ def _seed_all_legacy(upload_root: Path, project_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_migrate_seed_json_mirrors_project_artifacts(tmp_path, monkeypatch):
+    """Phase G / Task 8: every ``*.json`` (except ``project.json``) in a legacy
+    project directory lands in ``project_artifacts`` keyed by filename stem."""
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_artifacts"
+    project_dir = upload_root / "projects" / project_id
+    system_dir = upload_root / "system"
+    _seed_project_meta(project_dir, project_id)
+    _seed_chapter_segments_json(project_dir)
+    # Add several JSONs that have no structured unified-table mapping yet.
+    (project_dir / "seed_analysis.json").write_text(
+        json.dumps({"characters": [{"name": "Aria"}], "world_rules": ["gravity"]}),
+        encoding="utf-8",
+    )
+    (project_dir / "ontology.json").write_text(
+        json.dumps({"entity_types": [{"name": "Character"}]}),
+        encoding="utf-8",
+    )
+    (project_dir / "reviewer_rules.json").write_text(
+        json.dumps({"custom_prompt": "be kind"}),
+        encoding="utf-8",
+    )
+    # Malformed JSON is skipped silently (keeps the migration resilient).
+    (project_dir / "broken.json").write_text("{ this is not json", encoding="utf-8")
+    _seed_legacy_llm_facility(system_dir)
+    _seed_legacy_archive_library(system_dir)
+    _seed_legacy_assets_library(system_dir)
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    seed_scope = report[f"seed_json:{project_id}"]
+    # chapter_segments counts as chapter_content + chapter_meta; artifact count
+    # covers every successfully-parsed JSON (chapter_segments + seed_analysis
+    # + ontology + reviewer_rules = 4; broken.json is excluded).
+    assert seed_scope["project_artifacts"] == 4
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT artifact_key, payload_json FROM project_artifacts "
+                "WHERE project_id = :pid ORDER BY artifact_key"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+    keys = [row[0] for row in rows]
+    assert keys == ["chapter_segments", "ontology", "reviewer_rules", "seed_analysis"]
+    loaded = {row[0]: json.loads(row[1]) for row in rows}
+    assert loaded["seed_analysis"]["characters"][0]["name"] == "Aria"
+    assert loaded["reviewer_rules"] == {"custom_prompt": "be kind"}
+
+
 def test_migrate_legacy_data_covers_all_domains(tmp_path, monkeypatch):
     from scripts.migrate_legacy_data import migrate_legacy_data
 

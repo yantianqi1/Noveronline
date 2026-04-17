@@ -73,6 +73,15 @@ world_events = table("world_events", text_col("event_id", primary_key=True), pro
 plot_threads = table("plot_threads", text_col("thread_id", primary_key=True), project_id(), text_col("thread_key", nullable=False), text_col("status", nullable=False, default="'open'"), text_col("detail", nullable=False, default="''"), text_col("source_chapter"), text_col("created_at", nullable=False), text_col("updated_at", nullable=False))
 narrative_arcs = table("narrative_arcs", text_col("arc_id", primary_key=True), project_id(), text_col("summary", nullable=False), text_col("covered_segments_json", default="'[]'"), text_col("created_at", nullable=False))
 project_meta = table("project_meta", project_id(), text_col("narrative_phase"), int_col("total_segments", default="0"), text_col("updated_at", nullable=False), composite_pk("project_id"))
+project_artifacts = table(
+    "project_artifacts",
+    project_id(),
+    text_col("artifact_key", nullable=False),
+    text_col("payload_json", nullable=False, default="'{}'"),
+    text_col("created_at", nullable=False),
+    text_col("updated_at", nullable=False),
+    composite_pk("project_id", "artifact_key"),
+)
 writer_presets = table("writer_presets", text_col("preset_id", primary_key=True), project_id(nullable=True), text_col("name", nullable=False), text_col("description", default="''"), text_col("system_prompt", nullable=False), int_col("is_default", default="0"), text_col("created_at", nullable=False), text_col("updated_at", nullable=False))
 character_events = table("character_events", text_col("event_id", primary_key=True), project_id(), text_col("entity_id", nullable=False), text_col("segment_id", nullable=False, default="''"), int_col("chapter_order", default="0"), text_col("event_type", nullable=False, default="'action'"), text_col("summary", nullable=False), text_col("detail_json", default="'{}'"), text_col("created_at", nullable=False))
 relationship_events = table("relationship_events", text_col("event_id", primary_key=True), project_id(), text_col("source_entity_id", nullable=False), text_col("target_entity_id", nullable=False), text_col("segment_id", nullable=False, default="''"), int_col("chapter_order", default="0"), text_col("relation_type", default="''"), text_col("previous_state", default="''"), text_col("new_state", default="''"), text_col("trigger_event", default="''"), text_col("emotional_shift", default="''"), text_col("power_shift", default="''"), text_col("evidence", default="''"), text_col("created_at", nullable=False))

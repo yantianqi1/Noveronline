@@ -1,12 +1,15 @@
 """Migrate legacy seed JSON blobs into unified tables.
 
 Scope note (2026-04-17):
-    Only ``chapter_segments.json`` has a fully defined mapping today
-    (``chapter_content`` + ``chapter_meta``). ``seed_analysis.json`` /
-    ``ontology.json`` / ``agent_profiles.json`` / ``narrative_archives.json``
-    have no corresponding unified-table columns yet — their mapping is
-    owned by Phase G / Task 8. Placeholder methods exist below so new
-    mappings can land incrementally without touching the orchestrator.
+    ``chapter_segments.json`` maps to ``chapter_content`` + ``chapter_meta``.
+    The remaining per-project JSON files (``seed_analysis.json`` /
+    ``ontology.json`` / ``agent_profiles.json`` / ``reviewer_rules.json``
+    / ``story_memory.json`` / ``reading_notes.json`` /
+    ``chapter_continuity.json`` / ``consistency_report.json`` /
+    ``narrative_archives.json`` / ``chapter_cards.json`` etc.) are mirrored
+    verbatim into ``project_artifacts`` as TEXT JSON keyed by
+    ``(project_id, artifact_key)``. Phase G / Task 8 uses this table as
+    the runtime read source.
 """
 
 from __future__ import annotations
@@ -16,11 +19,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, insert
+from sqlalchemy import and_, delete, insert, select, update
 
-from app.tables.novel import chapter_content, chapter_meta
+from app.tables.novel import chapter_content, chapter_meta, project_artifacts
 
 from .base import BaseDomainMigrator, MigrationContext
+
+# project.json stores the Project model (name/status/timestamps). It is
+# not a semantic "artifact" and should stay on disk as the authoritative
+# project record.
+EXCLUDED_ARTIFACT_FILENAMES: frozenset[str] = frozenset({"project.json"})
 
 
 def _now_iso() -> str:
@@ -48,6 +56,9 @@ class SeedJsonDomainMigrator(BaseDomainMigrator):
         if n_chapters:
             counts["chapter_content"] = n_chapters
             counts["chapter_meta"] = n_chapters
+        n_artifacts = self._migrate_project_artifacts(ctx)
+        if n_artifacts:
+            counts["project_artifacts"] = n_artifacts
         return counts
 
     def _migrate_chapter_segments(self, ctx: MigrationContext) -> int:
@@ -100,5 +111,73 @@ class SeedJsonDomainMigrator(BaseDomainMigrator):
             conn.execute(insert(chapter_meta), meta_rows)
         return len(content_rows)
 
+    def _migrate_project_artifacts(self, ctx: MigrationContext) -> int:
+        project_id = ctx.project_id
+        assert project_id is not None
+        project_dir = ctx.upload_root / "projects" / project_id
+        if not project_dir.is_dir():
+            return 0
+        artifact_paths = sorted(
+            path
+            for path in project_dir.glob("*.json")
+            if path.is_file() and path.name not in EXCLUDED_ARTIFACT_FILENAMES
+        )
+        if not artifact_paths:
+            return 0
+        if ctx.dry_run:
+            return len(artifact_paths)
 
-__all__ = ["SeedJsonDomainMigrator"]
+        now = _now_iso()
+        rows: list[dict[str, Any]] = []
+        for path in artifact_paths:
+            try:
+                raw_text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            # Validate parseability before writing (keep bad JSON on disk).
+            try:
+                json.loads(raw_text)
+            except json.JSONDecodeError:
+                continue
+            artifact_key = path.stem
+            rows.append(
+                {
+                    "project_id": project_id,
+                    "artifact_key": artifact_key,
+                    "payload_json": raw_text,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        if not rows:
+            return 0
+
+        with ctx.engine.begin() as conn:
+            for row in rows:
+                existing = conn.execute(
+                    select(project_artifacts.c.project_id)
+                    .where(
+                        and_(
+                            project_artifacts.c.project_id == project_id,
+                            project_artifacts.c.artifact_key == row["artifact_key"],
+                        )
+                    )
+                    .limit(1)
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        update(project_artifacts)
+                        .where(
+                            and_(
+                                project_artifacts.c.project_id == project_id,
+                                project_artifacts.c.artifact_key == row["artifact_key"],
+                            )
+                        )
+                        .values(payload_json=row["payload_json"], updated_at=row["updated_at"])
+                    )
+                else:
+                    conn.execute(insert(project_artifacts).values(**row))
+        return len(rows)
+
+
+__all__ = ["SeedJsonDomainMigrator", "EXCLUDED_ARTIFACT_FILENAMES"]

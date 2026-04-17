@@ -137,15 +137,54 @@ class ProjectManager:
         path = cls._get_project_json_path(project_id, filename)
         with open(path, "w", encoding="utf-8") as file_obj:
             json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+        _mirror_artifact_to_db(project_id, filename, payload)
         return path
 
     @classmethod
     def load_project_json(cls, project_id: str, filename: str) -> Optional[Dict[str, Any]]:
+        payload = _load_artifact_from_db(project_id, filename)
+        if payload is not None:
+            return payload
         path = cls._get_project_json_path(project_id, filename)
         if not os.path.exists(path):
             return None
         with open(path, "r", encoding="utf-8") as file_obj:
             return json.load(file_obj)
+
+
+def _mirror_artifact_to_db(project_id: str, filename: str, payload: Any) -> None:
+    """Mirror a per-project JSON artifact into ``project_artifacts``.
+
+    Writes the payload keyed by ``(project_id, artifact_key)`` so runtime
+    services can read from the unified DB instead of the filesystem.
+    ``get_engine()`` auto-initializes on first call if the app hasn't run
+    ``init_db()`` yet, so this path works both in production and in the
+    standalone unit tests that call ``save_project_json`` without an app.
+    """
+    from ..database import get_engine
+    from ..repositories.project_artifact_repo import (
+        ProjectArtifactRepository,
+        artifact_key_from_filename,
+    )
+
+    engine = get_engine()
+    ProjectArtifactRepository(engine).save(
+        project_id, artifact_key_from_filename(filename), payload,
+    )
+
+
+def _load_artifact_from_db(project_id: str, filename: str) -> Optional[Any]:
+    """Load a per-project JSON artifact from ``project_artifacts`` if present."""
+    from ..database import get_engine
+    from ..repositories.project_artifact_repo import (
+        ProjectArtifactRepository,
+        artifact_key_from_filename,
+    )
+
+    engine = get_engine()
+    return ProjectArtifactRepository(engine).load(
+        project_id, artifact_key_from_filename(filename),
+    )
 
 
 __all__ = ["Project", "ProjectManager", "ProjectStatus"]

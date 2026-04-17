@@ -55,11 +55,19 @@ def _unified_db_bootstrap(monkeypatch):
     leak via ``get_engine()``, then wraps ``app.main.create_app`` so that
     ``init_db()`` runs synchronously on the fresh engine attached to
     ``app.state.engine``.
+
+    A ``yield + finally`` teardown also force-resets ``_engine`` to ``None``
+    after the test, independent of ``monkeypatch``'s undo behavior. Without
+    this, a test that writes through ``ProjectManager.save_project_json``
+    (which triggers ``get_engine()`` auto-bootstrap against a tmp DB) can
+    leave ``_engine`` bound to a database file whose tmp directory gets
+    removed by pytest's cleanup — the next test then sees "no such table"
+    / "database is locked" errors against the dangling handle.
     """
     import app.database as db_mod
     import app.main as main_mod
 
-    monkeypatch.setattr(db_mod, "_engine", None, raising=False)
+    db_mod._engine = None
 
     original_create_app = main_mod.create_app
 
@@ -69,3 +77,7 @@ def _unified_db_bootstrap(monkeypatch):
         return app_instance
 
     monkeypatch.setattr(main_mod, "create_app", _create_app_with_bootstrap)
+    try:
+        yield
+    finally:
+        db_mod._engine = None
