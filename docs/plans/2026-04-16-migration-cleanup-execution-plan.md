@@ -257,6 +257,7 @@ commit：`feat(search): add sqlite/postgres search backend abstraction`
 |---|---|
 | `docs/plans/2026-04-14-database-unification-migration-plan.md` | P0+P1 的权威技术方案（见其中 §五 Task 1-12） |
 | `docs/plans/2026-04-16-migration-cleanup-execution-plan.md`（本文件） | 执行层路线图 + 当前状态快照 |
+| `docs/plans/2026-04-17-remaining-phases-implementation-guide.md` | 剩余 Phase 的深度调研 + 文件级实施指南（Task 4/6/7/8/9/11） |
 | `/Users/yantianqi/.claude/plans/humming-hatching-dragonfly.md` | 前序会话的仓库整理原始 plan（Phase A 入库操作手册） |
 | `backend/app/database.py` | 统一数据库入口 |
 | `backend/app/tables/*.py` | 12 张 SQLAlchemy Core 表 |
@@ -291,10 +292,11 @@ commit：`feat(search): add sqlite/postgres search backend abstraction`
 把下面这段话粘进下一会话：
 
 ```
-当前在 /Volumes/Fanxiang S500Pro/项目/novelwork-chonggou，分支 gemini，HEAD 应为 5314810。
-先读 docs/plans/2026-04-16-migration-cleanup-execution-plan.md（执行路线图）和
-docs/plans/2026-04-14-database-unification-migration-plan.md（技术方案）。
-按本次我指定的 Phase 开工，结束时在执行路线图的 §九 追加完成记录。
+当前在 /Volumes/Fanxiang S500Pro/项目/novelwork-chonggou，分支 gemini。
+先读三份 plan：
+  docs/plans/2026-04-16-migration-cleanup-execution-plan.md（总路线图，§九 看进度）
+  docs/plans/2026-04-14-database-unification-migration-plan.md（技术方案，§五 看 Task 详情）
+  docs/plans/2026-04-17-remaining-phases-implementation-guide.md（详细实施方案，含调研成果）
 
 本次要做的是：<Phase X>
 ```
