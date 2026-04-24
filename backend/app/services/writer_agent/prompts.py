@@ -1,6 +1,75 @@
 """Orchestrator system prompts for the novel writer agent, differentiated by task_type."""
 
 
+def build_anti_cliche_constraints(brief: dict | None = None) -> str:
+    """Static anti-cliché / anti-pattern-reuse rules for the writer composer.
+
+    Injected into the writer system prompt as a dedicated section so the
+    composer sees the rules alongside the task-specific brief. Unlike
+    ``brief["dedup_constraints"]`` (which is dynamic and per-project),
+    these rules are universal defaults that fight generic stylistic drift:
+    metaphor density, repeated sentence openers, hedging verbs, paragraph
+    rhythm, POV voice fidelity, and dialogue/description/monologue balance.
+
+    A ``brief`` may be provided so the POV voice fingerprint can be echoed
+    back verbatim (reinforces the composer's sense of the speaker); missing
+    brief is fine — falls through to a generic reminder.
+    """
+    brief = brief or {}
+    pov = brief.get("pov") or {}
+    speech_style = (pov.get("speech_style") or "").strip() if isinstance(pov, dict) else ""
+    pov_name = (pov.get("name") or "").strip() if isinstance(pov, dict) else ""
+
+    pov_block = ""
+    if pov_name or speech_style:
+        who = pov_name or "视角角色"
+        style_line = f"其说话风格：{speech_style}" if speech_style else "保持前文既定的说话风格。"
+        pov_block = (
+            f"- **POV 语言指纹**：本段完全从{who}的视角叙述，严禁切换全知叙述或旁白。"
+            f"{style_line}必要的内心独白也需符合该角色的用词习惯，"
+            f"不要出现角色原本不可能使用的书面语或外来词。\n"
+        )
+    else:
+        pov_block = (
+            "- **POV 语言指纹**：全程锁定在视角角色的眼睛与口吻里，"
+            "严禁切换全知旁白，内心独白要贴合该角色的用词水平。\n"
+        )
+
+    return (
+        "### 反套路约束（静态硬规则，务必遵守）\n"
+        "写作必须主动规避以下"
+        "网络小说与人工写作最常见的套路化问题：\n\n"
+        "**修辞密度**\n"
+        "- 每 200 字内最多出现 1 个比喻或拟人句；不要连续两句都用『像/如/仿佛』起头。\n"
+        "- 禁止堆砌意象（例如『像一滴墨、像一片雪、像一声叹息』这种三连比喻）。\n"
+        "- 宁用一个精准的动作细节代替三个陈旧比喻。\n\n"
+        "**修饰词克制**\n"
+        "- 大幅减少『仿佛 / 似乎 / 好像 / 不知为何 / 莫名 / 竟然』等软化修饰；每 300 字最多出现 1 次。\n"
+        "- 禁止使用『瞳孔一缩』『嘴角勾起』『眼神复杂』这类网文高频套话。\n"
+        "- 避免滥用『眼中的世界 / 心中某处 / 心底深处 / 某个念头』这类模糊抒情。\n\n"
+        "**句式多样性**\n"
+        "- 禁止连续 3 句以上以同一个词开头（常见陷阱：『他/她』『但』『只见』『突然』『然而』）。\n"
+        "- 每段话内句子长度需要有长短变化；禁止一段内全是相似长度的短句或长句。\n"
+        "- 避免连续两段都以环境描写开头或都以对白开头。\n\n"
+        "**段落与场景节奏**\n"
+        "- 单段字数建议落在 50–150 字；不要连续出现 3 段以上的超长段（> 200 字）或 5 段以上连续短段（< 30 字）。\n"
+        "- 单场景字数 800–1500 字为佳；中途必须有至少 1 次动作、对白或认知转折。\n"
+        "- 场景开场 80 字内必须交代『发生在哪里 / 谁在场 / 此刻在做什么』其中至少 2 项；"
+        "禁止以大段纯抒情或纯环境描写开场（黄昏/清晨/月光/风声均为高危起手）。\n\n"
+        "**内容比例**\n"
+        "- 对白、描写、心理活动大致按 35:35:30 的比例分布，可按场景目的略调，但严禁单一成分压倒性占据整段。\n"
+        "- 纯心理独白不得连续超过 80 字；必须用外部动作或感官细节打断节奏。\n\n"
+        "**人物一致性**\n"
+        f"{pov_block}"
+        "- 涉及角色的任何行动、对白必须与角色档案里的性格、目标、口吻一致。"
+        "若前文已给出该角色的标志性动作或口头禅，本段可复用其本意但换表达形式，禁止原样照抄。\n\n"
+        "**场景模式**\n"
+        "- 禁止本章与前三章使用相同的开场结构（例如都是『环境 + 角色发呆 + 心理揭示』）。\n"
+        "- 禁止在相邻两章让 POV 做完全相同的行为（照例坐、目光穿过、凝视远方）。\n"
+        "- 若本场景主线是内心戏，必须安排至少一个外部事件/人物切入；反之，外部戏必须有一处内心反应。\n"
+    )
+
+
 def build_orchestrator_prompt(task_type: str, context: dict) -> str:
     """Build the system prompt for the orchestrator agent based on task type and frontend context."""
 
@@ -23,14 +92,20 @@ def build_orchestrator_prompt(task_type: str, context: dict) -> str:
         "## 可用数据检索工具（必读）\n"
         "\n"
         "【精准查询】（已知目标时优先用）\n"
-        "- query_entity(name)              —— 角色/组织/地点/物品/技能完整档案 + 关联线索 + 适用规则\n"
-        "- query_relationship(a, b)        —— 两个实体的关系\n"
-        "- query_graph_neighbors(name)     —— 故事图谱中某节点的所有邻居 + 关系边（用于挖掘\"这个人身边都有谁\"）\n"
+        "- query_entity(name, section=...) —— 角色/组织/地点/物品/技能档案。**分段返回**：\n"
+        "    section='overview'（默认）：基础字段 + 别名 + 标签 + 简介，最省 token\n"
+        "    section='profile'          ：完整长文档案 + 性格/语言风格/能力等结构化字段\n"
+        "    section='relations'        ：该实体全部双向关系 + 关联伏笔 + 适用世界规则\n"
+        "    section='events'           ：完整事件列表，支持 cursor 翻页\n"
+        "    section='memories'         ：canon + candidate 长期记忆（含尚未采纳的假设）\n"
+        "- query_relationship(a, b, include_candidate=true) —— 两实体关系 + archive 候选关系假设\n"
+        "- query_graph_neighbors(name)     —— 故事图谱中某节点的所有邻居 + 关系边\n"
         "- query_chapter / query_scene     —— 章节/场景内容\n"
         "- get_open_threads                —— 截至当前章节的未解决悬念\n"
         "- search_world_rules(query)       —— 适用世界规则\n"
-        "- search_settings(query)          —— 设定库关键词\n"
-        "- query_worldline_session         —— 最近一次世界线推演的变量与事件流（用于\"假如…\"探索性续写）\n"
+        "- search_settings(query, scope)   —— 设定库关键词；scope 可取 entities/chapters/scenes/"
+        "relationships/world_rules/threads/memory(候选记忆)/all\n"
+        "- query_worldline_session         —— 最近一次世界线推演的变量与事件流\n"
         "- get_recent_scenes / get_manuscript_context —— 前序正文\n"
         "- get_story_overview / query_segment_summaries —— 全局叙事定位\n"
         "\n"
@@ -39,11 +114,26 @@ def build_orchestrator_prompt(task_type: str, context: dict) -> str:
         "- search_assets(query)            —— 资产库（文风/世界观/原型/桥段）\n"
         "\n"
         "## 触发原则\n"
-        "1. 用户提到任何角色名 → 必 query_entity；若关系暧昧 → 加 query_graph_neighbors\n"
-        "2. 用户描述模糊（\"那种感觉\"/\"以前的事\"）→ 先 global_search(用户原话) 兜底\n"
-        "3. 写作风格/桥段需求 → search_assets\n"
-        "4. 涉及世界线分支或\"假如\" → query_worldline_session\n"
-        "5. 任意检索返回空 → 必须用 global_search 二次兜底，再决定是否提示创作者补设定\n"
+        "1. 用户提到任何角色名 → 必 query_entity(section='overview')；若是 POV/关键角色 → 再取 section='profile' 和 'memories'\n"
+        "2. 关系暧昧或多人互动 → query_relationship(include_candidate=true) + query_graph_neighbors\n"
+        "3. 涉及未采纳的候选设定 → search_settings(scope='memory')\n"
+        "4. 用户描述模糊（\"那种感觉\"/\"以前的事\"）→ 先 global_search(用户原话) 兜底\n"
+        "5. 写作风格/桥段需求 → search_assets\n"
+        "6. 涉及世界线分支或\"假如\" → query_worldline_session\n"
+        "7. 任意检索返回空 → 必须用 global_search 二次兜底，再决定是否提示创作者补设定\n"
+        "\n"
+        "## 工具返回未找到 + 候选列表 时（自我纠错约束）\n"
+        "query_entity / query_relationship / get_character_voice / query_character_timeline / "
+        "query_relationship_timeline 查不到时会返回「未找到『X』。项目里相似候选如下：」，"
+        "**你必须**按以下顺序处理，不允许直接跳过：\n"
+        "  a. 从候选列表里挑最匹配的 canonical_name 重试一次查询；\n"
+        "  b. 若候选都不合适，调用 global_search(原名字) 做第二次兜底；\n"
+        "  c. 仍无果且用户指令明确该角色存在 → 调用 manage_entity(action='create') 先建档再继续；\n"
+        "  d. 若用户未明确此角色 → 视作幻觉，在 writing_brief.constraints 里标注「忽略虚构角色 X」。\n"
+        "工具已告诉你 canonical_name 和匹配原因，不允许自行换别名瞎猜——按候选重试即可。\n"
+        "\n"
+        "## 工具返回「注：你查的『X』已解析为『Y』」时\n"
+        "后续所有工具调用 **必须用 Y（canonical_name）**，不要再传 X，否则工具会在每一轮都额外花一次 fuzzy 解析。\n"
         "\n"
         "若用户消息中包含 <retrieval_plan> 块，请把它视为最低检索基线：清单内每一项都必须实际调用，"
         "之后才能考虑额外工具调用。"
@@ -109,6 +199,10 @@ def _build_write_scene(chapter_order, chapter_id, pov_character, involved_entiti
         "  □ 是否调用了 get_story_overview 了解叙事定位？\n"
         "  □ 若任一关系查询为空，是否调用 query_graph_neighbors 补救？\n"
         "  □ 若用户指令模糊或涉及风格，是否调用 global_search / search_assets 兜底？\n"
+        "  □ 反套路检查：是否用 get_recent_scenes / query_chapter 看过前 3 章的开场方式？"
+        "本章的 scene_focus 必须明确与前章不同的开场结构（例如前章若为『环境描写 + 角色凝视』，本章须换）。\n"
+        "  □ 反套路检查：是否注意到前文 POV 角色反复出现的动作/口头禅？"
+        "需在 writing_brief.constraints 里列出『本章避免重复使用：XXX』的具体条目。\n"
         "\n"
         "全部确认后，输出一个 JSON 格式的 writing_brief。\n"
         "重要：不要压缩或概括工具返回的信息，尽量保留原始细节，尤其是角色档案和关系描述。\n"
@@ -198,6 +292,9 @@ def _build_continue(chapter_order, chapter_id, user_instruction, last_block_id="
         "  □ 是否调用了 get_story_overview 了解叙事阶段？\n"
         "  □ 若任一关系查询为空，是否调用 query_graph_neighbors 补救？\n"
         "  □ 若用户指令模糊或涉及风格，是否调用 global_search / search_assets 兜底？\n"
+        "  □ 反重复检查：续写时若发现前文已用过的开场/比喻/POV 动作，"
+        "需在 writing_brief.constraints 里列出『续写避免重复使用：XXX』条目，"
+        "并明确给出 tail_text 之后的第一句话应该采用的新结构（动作 / 对白 / 场景切换）。\n"
         "\n"
         "全部确认后，输出一个 JSON 格式的 writing_brief。\n"
         "重要：不要压缩或概括工具返回的信息，尽量保留原始细节，尤其是角色档案和关系描述。\n"
@@ -307,8 +404,11 @@ def build_retrieval_planner_prompt(task_type: str, context: dict) -> str:
         "{\n"
         '  "rationale": "为什么要查这些（一句话）",\n'
         '  "calls": [\n'
-        '    {"tool": "query_entity", "arguments": {"name": "李雷"}, "reason": "视角角色"},\n'
+        '    {"tool": "query_entity", "arguments": {"name": "李雷", "section": "overview"}, "reason": "视角角色基础档案"},\n'
+        '    {"tool": "query_entity", "arguments": {"name": "李雷", "section": "profile"}, "reason": "性格语言风格"},\n'
+        '    {"tool": "query_entity", "arguments": {"name": "李雷", "section": "memories"}, "reason": "候选记忆与正典"},\n'
         '    {"tool": "query_graph_neighbors", "arguments": {"name": "李雷", "limit": 10}, "reason": "挖掘人物关系"},\n'
+        '    {"tool": "search_settings", "arguments": {"query": "<关键词>", "scope": "memory"}, "reason": "候选设定"},\n'
         '    {"tool": "global_search", "arguments": {"query": "<用户原话关键词>"}, "reason": "模糊兜底"}\n'
         "  ]\n"
         "}\n"
@@ -319,15 +419,22 @@ def build_retrieval_planner_prompt(task_type: str, context: dict) -> str:
         "  get_recent_scenes, get_manuscript_context, get_story_overview, query_segment_summaries,\n"
         "  global_search, search_assets\n"
         "\n"
-        "硬规则：\n"
-        "- 任何 POV 角色 / 涉及角色 → 必出 query_entity\n"
-        "- 涉及多人互动 → 出 query_graph_neighbors\n"
+        "硬规则（必须全部遵守，不合规则的计划会被 orchestrator 拒绝）：\n"
+        "- 任何 POV 角色 / 涉及角色 → 至少出一条 query_entity(section='overview')\n"
+        "  若角色在 context 中明确标识为 POV 或关键角色 → 再追加一条\n"
+        "  query_entity(section='profile') 获取说话风格和性格全集；以及一条\n"
+        "  query_entity(section='memories') 拿 canon+candidate 长期记忆\n"
+        "- 涉及多人互动（涉及角色 ≥ 2）→ 对每一对涉及角色出 query_relationship\n"
+        "  （默认 include_candidate=true，拉取候选关系假设）；并出一条 query_graph_neighbors\n"
+        "- 任务涉及未采纳的世界设定 / 候选规则 → 追加\n"
+        "  search_settings(query='<任务关键词>', scope='memory')\n"
         "- 用户指令含风格/手法关键词（像XX/用XX手法/XX风）→ 出 search_assets\n"
         "- 用户描述含模糊指代或不确定词（那种/以前/类似）→ 出 global_search\n"
         "- continue 任务 → 必出 get_manuscript_context\n"
         "- outline 任务 → 必出 get_story_overview\n"
         f"- 当前 task_type = {task_type}\n"
-        "- calls 数量 3-8 之间，宁多勿少；不要重复同一个工具+参数\n"
+        "- calls 数量 3-10 之间（query_entity 分多次 section 算多条，不受 3-8 旧限制约束）\n"
+        "- 同一工具+完全相同参数不要重复；但 query_entity 不同 section 视为不同调用\n"
     )
 
 
@@ -634,3 +741,158 @@ def build_lexicon_audit_prompt(plan: dict, chapter_order: int, chapter_id: str) 
         "- 保留角色口吻和叙事节奏。\n"
         "- 每次 rewrite_span 必填 reason。"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Dedup extractor (writer_dedup_extractor module)
+#
+# Runs once after each scene/chapter is committed. Task: read the finished
+# prose and surface the small set of surface-level patterns most likely to be
+# subconsciously reused in the NEXT generation — not generic vocabulary, but
+# the specific stock phrases, figurative fragments, POV tics, and scene
+# templates that make consecutive chapters feel samey. The output is used as
+# an anti-repetition constraint block for future runs.
+# ──────────────────────────────────────────────────────────────────────────
+
+def build_dedup_extractor_prompt() -> str:
+    """System prompt for the dedup pattern extractor LLM.
+
+    Output contract: a single JSON object with five array fields. Keys are
+    always present (may be empty); entries are the verbatim (or very lightly
+    normalized) Chinese substrings the writer should avoid echoing in the
+    next chapter. Emphasize *specific surface forms*, not generic topics.
+    """
+    return (
+        "你是一名写作查重员。读下面的小说正文，列出该文本中"
+        "最有可能在下一章被作者潜意识复用的『表层套路』——不是通用词汇，"
+        "而是特定的开场短语、比喻小片段、POV 口头禅、动作替代词、场景模板。\n"
+        "\n"
+        "严格输出一个合法 JSON 对象（不要 markdown、不要解释）：\n"
+        "{\n"
+        '  "opening_phrases": ["..."],      // 段落起始模板，如 "黄昏总是走得很慢" "他坐在门槛上"\n'
+        '  "figurative_phrases": ["..."],   // 比喻/拟人小片段，如 "像一滴浓稠的墨" "眼中的世界是重叠的"\n'
+        '  "action_verbs": ["..."],        // POV 角色反复出现的动作搭配，如 "目光穿过" "照例坐"\n'
+        '  "sentence_starters": ["..."],   // 句首模板，如 "但没人知道" "只见" "突然"\n'
+        '  "scene_templates": ["..."]      // 场景骨架一句话，如 "黄昏医馆+门槛发呆+心理独白"\n'
+        "}\n"
+        "\n"
+        "规则：\n"
+        "1. 每类最多 8 条，只列真正高风险的；宁缺毋滥。\n"
+        "2. 必须是正文中原样或极轻微改写的文本，不要抽象成范畴。\n"
+        "3. 成语、常用动词（走/看/说）不算套路；只抓风格辨识度高的。\n"
+        "4. 不要输出角色名、地名、具体人物设定。\n"
+        "5. 不要用 markdown，不要在 JSON 外加任何字符。\n"
+    )
+
+
+def build_dedup_extractor_user_message(chapter_order: int, scene_order: int | None, content: str) -> str:
+    scene_part = f"，场景 {scene_order}" if scene_order else ""
+    return f"第 {chapter_order} 章{scene_part} 正文如下，请严格按上述 JSON 结构输出：\n\n{content}"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Writer reviewer (writer_reviewer module)
+#
+# Runs once after the writer composer produces a draft, BEFORE the draft is
+# committed. Reads draft + context + accumulated dedup constraints, returns a
+# JSON critique with scored issues and concrete rewrite suggestions. The
+# frontend shows the issue list to the user; the user decides whether to
+# trigger a rewrite pass or accept the draft as-is.
+# ──────────────────────────────────────────────────────────────────────────
+
+def build_reviewer_prompt() -> str:
+    """System prompt for the independent reviewer LLM.
+
+    Emphasis is on *surface* problems the writer most often introduces in
+    long-running generation jobs: cliché reuse, paragraph rhythm breakage,
+    POV drift, and factual contradictions with the immediate prior text.
+    The reviewer must output strict JSON — the frontend renders it as a
+    checkable issue list, so partial markdown or prose will break the UI.
+    """
+    return (
+        "你是一名严苛的小说编辑。你收到了一篇刚写出的初稿片段，需要对照写作简报、"
+        "前文末尾、以及该项目前几章已经使用过的『反重复清单』，找出本稿中的问题。\n"
+        "\n"
+        "你关注以下类别的问题（severity: high / medium / low）：\n"
+        "- cliche：陈词滥调、网文高频套话、空洞的抒情句\n"
+        "- pattern_reuse：场景开场/行为模式/比喻句与前文重复\n"
+        "- pov_drift：视角游移，出现了非 POV 角色才知道的信息或叙事语气切换\n"
+        "- timeline：与前文时间、地点、人物动作不连贯\n"
+        "- pacing：单段过长/过短、整段无转折、修辞密度失衡\n"
+        "- figurative_density：比喻/拟人过密，每 200 字超过 1 处\n"
+        "- redundant_modifier：『仿佛/似乎/好像/莫名』等软化修饰滥用\n"
+        "- voice：POV 说话风格与角色档案不符\n"
+        "\n"
+        "严格输出一个合法 JSON（不要 markdown、不要解释、不要在 JSON 外加任何字符）：\n"
+        "{\n"
+        '  "overall_score": 0.0-1.0,               // 初稿整体质量，<=0.7 表示明显需要修改\n'
+        '  "summary": "一句话总评(50字内)",\n'
+        '  "issues": [\n'
+        "    {\n"
+        '      "id": "iss_1",                    // 自增 id\n'
+        '      "severity": "high|medium|low",\n'
+        '      "category": "上述类别之一",\n'
+        '      "location": "段落 N 第 M 句 / 开头 / 结尾",\n'
+        '      "original": "初稿中被点出的原句(<=80字)",\n'
+        '      "suggestion": "改写后的版本(<=120字，保持场景走向一致)",\n'
+        '      "reason": "为什么需要改(<=30字)"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "\n"
+        "规则：\n"
+        "1. 最多列 8 条，优先 high severity；宁少勿多，不要把正常比喻都当问题。\n"
+        "2. overall_score ≥ 0.85 且没有 high 问题时，issues 可以为空数组。\n"
+        "3. suggestion 必须是具体改写，不能是『请重写』这种空话。\n"
+        "4. 如果前文 dedup 清单里的短语在初稿中复现了，必须作为 high / pattern_reuse 列出。\n"
+        "5. 不要评价角色命名、世界观设定本身，只评价行文质量。\n"
+    )
+
+
+def build_reviewer_user_message(
+    *,
+    draft: str,
+    scene_focus: str = "",
+    pov_name: str = "",
+    speech_style: str = "",
+    prev_narrative: str = "",
+    dedup_constraints: dict | None = None,
+) -> str:
+    """Build the reviewer user message with draft + surrounding context."""
+    parts: list[str] = []
+    if scene_focus:
+        parts.append(f"【本场景焦点】{scene_focus}")
+    if pov_name or speech_style:
+        parts.append(
+            f"【POV 角色】{pov_name or '(未指定)'}"
+            + (f"，说话风格：{speech_style}" if speech_style else "")
+        )
+    if prev_narrative:
+        tail = prev_narrative[-1200:] if len(prev_narrative) > 1200 else prev_narrative
+        parts.append(f"【前文末尾】\n{tail}")
+
+    # Dedup constraints block
+    if dedup_constraints and any(dedup_constraints.values()):
+        lines: list[str] = []
+        labels = {
+            "opening_phrase": "开场短语",
+            "figurative_phrase": "比喻/意象",
+            "action_verb": "动作词",
+            "sentence_starter": "句首模板",
+            "scene_template": "场景模板",
+        }
+        for ptype, label in labels.items():
+            entries = dedup_constraints.get(ptype) or []
+            if not entries:
+                continue
+            rendered = "、".join(
+                entry[0] if isinstance(entry, (list, tuple)) else str(entry)
+                for entry in entries[:8]
+            )
+            lines.append(f"- {label}：{rendered}")
+        if lines:
+            parts.append("【前文已大量使用（本章禁止原样复用）】\n" + "\n".join(lines))
+
+    parts.append(f"【初稿全文】\n{draft}")
+    parts.append("请严格按上文 JSON 结构输出审校结果。")
+    return "\n\n".join(parts)

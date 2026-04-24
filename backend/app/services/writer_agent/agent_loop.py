@@ -28,6 +28,19 @@ _WRITE_TOOL_NAMES = {
     "upsert_forbidden_lexicon",
 }
 
+# propose_* tools draft structured cards for the user to adopt. They read
+# DB + assemble a render payload but do NOT write — so they can be run in
+# the read-parallel phase alongside other read tools without SQLite WAL
+# contention.
+_PROPOSE_TOOL_NAMES = {
+    "propose_outline_scene",
+    "propose_chapter_structure",
+    "propose_prose_continuation",
+    "propose_splice_block",
+    "propose_rewrite_span",
+    "propose_relationship",
+}
+
 # Read tools that never mutate state.
 _READ_TOOL_NAMES_EXCLUDED = _WRITE_TOOL_NAMES
 
@@ -168,38 +181,45 @@ class AgentLoop:
                 tc_inner, tool_name_inner, tool_input_inner = item
                 t_start = time.monotonic()
                 try:
-                    result = execute_tool(tool_name_inner, tool_input_inner, self.project_id)
+                    ret = execute_tool(tool_name_inner, tool_input_inner, self.project_id)
+                    # ``execute_tool`` always returns a dict with {result, render?}.
+                    result_text = ret.get("result", "") if isinstance(ret, dict) else str(ret)
+                    render_payload = ret.get("render") if isinstance(ret, dict) else None
                     elapsed = int((time.monotonic() - t_start) * 1000)
-                    return tc_inner, tool_name_inner, result, "ok", elapsed
+                    return tc_inner, tool_name_inner, result_text, render_payload, "ok", elapsed
                 except Exception as exc:
                     logger.exception("Tool %s failed", tool_name_inner)
                     elapsed = int((time.monotonic() - t_start) * 1000)
-                    return tc_inner, tool_name_inner, f"工具执行失败: {exc}", "error", elapsed
+                    return tc_inner, tool_name_inner, f"工具执行失败: {exc}", None, "error", elapsed
 
             read_pending = [p for p in pending if p[1] not in _WRITE_TOOL_NAMES]
             write_pending = [p for p in pending if p[1] in _WRITE_TOOL_NAMES]
 
             results_map: Dict[str, tuple] = {}
 
-            # Phase A: read tools in parallel via asyncio.to_thread
+            # Phase A: read tools + propose tools in parallel via asyncio.to_thread.
+            # propose_* tools read DB and build render payloads but never mutate,
+            # so they share the read lane without WAL contention.
             if read_pending:
                 read_coros = [
                     asyncio.to_thread(_run_tool_sync, item) for item in read_pending
                 ]
                 read_results = await asyncio.gather(*read_coros)
-                for tc_r, tool_name_r, result_r, status_r, tool_ms_r in read_results:
-                    results_map[tc_r.id] = (tc_r, tool_name_r, result_r, status_r, tool_ms_r)
+                for entry in read_results:
+                    tc_r = entry[0]
+                    results_map[tc_r.id] = entry
 
             # Phase B: write tools serially (SQLite WAL safety)
             for item in write_pending:
-                tc_w, tool_name_w, result_w, status_w, tool_ms_w = await asyncio.to_thread(
-                    _run_tool_sync, item
-                )
-                results_map[tc_w.id] = (tc_w, tool_name_w, result_w, status_w, tool_ms_w)
+                entry = await asyncio.to_thread(_run_tool_sync, item)
+                tc_w = entry[0]
+                results_map[tc_w.id] = entry
 
             # Append results in original order (deterministic message history)
             for tc, tool_name, tool_input in pending:
-                _, resolved_name, result, status, tool_ms = results_map[tc.id]
+                _, resolved_name, result, render, status, tool_ms = results_map[tc.id]
+                # LLM-visible message carries text only — render JSON would
+                # pollute token budget without helping the model.
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -213,6 +233,7 @@ class AgentLoop:
                     "name": resolved_name,
                     "summary": summary,
                     "full_result": result,
+                    "render": render,
                     "status": status,
                     "tool_elapsed_ms": tool_ms,
                 }

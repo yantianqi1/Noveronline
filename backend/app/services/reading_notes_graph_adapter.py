@@ -25,6 +25,10 @@ def adapt_reading_notes_for_graph(
         notes.get("relationship_graph", []),
         notes.get("co_occurrence", []),
     )
+    _augment_locations_from_state_changes(
+        entity_registry,
+        notes.get("location_state_changes", []),
+    )
     event_timeline = _build_event_timeline(
         notes.get("plot_state", {}),
         notes.get("key_events", []),
@@ -107,6 +111,56 @@ def _build_entity_registry(
         }
 
     return registry
+
+
+def _augment_locations_from_state_changes(
+    registry: Dict[str, Dict[str, Any]],
+    location_state_changes: List[Dict[str, Any]],
+) -> None:
+    """Fall back to ``notes.location_state_changes`` when ``core_facts.key_locations``
+    is empty or incomplete.
+
+    The sequential reader currently records location activity in a flat list
+    (``location_state_changes``) without ever populating ``key_locations``; this
+    helper recovers those entries as location entities so they can surface as
+    graph nodes. For each unique location name, we aggregate the ``change``
+    text into a summary (first change wins, subsequent ones feed evidence) and
+    union segment_ids into mention_blocks.
+    """
+    if not location_state_changes:
+        return
+    for item in location_state_changes:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("location") or "").strip()
+        change = (item.get("change") or "").strip()
+        if not name:
+            continue
+        segment_id = (item.get("segment_id") or "").strip()
+        entry = registry.get(name)
+        if entry is None:
+            entry = {
+                "entity_type": "location",
+                "summary": change or name,
+                "importance_tier": "supporting",
+                "aliases": [],
+                "mention_blocks": [segment_id] if segment_id else [],
+                "evidence": [change] if change else [name],
+            }
+            registry[name] = entry
+            continue
+        if entry.get("entity_type") != "location":
+            continue
+        if change:
+            if not entry.get("summary") or entry["summary"] == name:
+                entry["summary"] = change
+            existing_evidence = entry.setdefault("evidence", [])
+            if change not in existing_evidence:
+                existing_evidence.append(change)
+        if segment_id:
+            mention_blocks = entry.setdefault("mention_blocks", [])
+            if segment_id not in mention_blocks:
+                mention_blocks.append(segment_id)
 
 
 def _build_relationship_ledger(

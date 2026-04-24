@@ -11,8 +11,9 @@ import logging
 from typing import Any
 
 from ....models.task import TaskManager, TaskStatus
+from ....schemas.asset_types import AssetType
 from ....services.llm_router import LlmRouter
-from ..assets_service import AssetsService, GLOBAL_SCOPE
+from ..assets_service import AssetsService, GLOBAL_SCOPE, PROJECT_SCOPE
 from .aggregator import aggregate_chunk_results, render_style_content
 from .chunk_style_prompt import build_chunk_messages
 from .chunker import chunk_novel
@@ -47,8 +48,12 @@ class StyleExtractor:
         tags: list[str] | None = None,
         target_chunk_chars: int = 3000,
         max_chunks: int = 30,
+        scope: str = GLOBAL_SCOPE,
+        project_id: str | None = None,
         on_progress=None,
     ) -> dict[str, Any]:
+        if scope == PROJECT_SCOPE and not project_id:
+            raise ValueError("project scope 必须提供 project_id")
         chunks = chunk_novel(text, target_chars=target_chunk_chars, max_chunks=max_chunks)
         if not chunks:
             raise ValueError("待提取的文本为空")
@@ -98,9 +103,10 @@ class StyleExtractor:
         content = render_style_content(aggregated)
 
         asset = self.assets.create(
-            scope=GLOBAL_SCOPE,
-            asset_type="writing_style",
+            scope=scope,
+            asset_type=AssetType.WRITING_STYLE.value,
             title=title,
+            project_id=project_id if scope == PROJECT_SCOPE else None,
             category=category,
             summary=aggregated.get("tone") or aggregated.get("narrative_pov") or "",
             content=content,
@@ -127,12 +133,22 @@ class StyleExtractor:
         tags: list[str] | None = None,
         target_chunk_chars: int = 3000,
         max_chunks: int = 30,
+        scope: str = GLOBAL_SCOPE,
+        project_id: str | None = None,
     ) -> str:
         """Spawn a background task, return task_id immediately."""
+        if scope == PROJECT_SCOPE and not project_id:
+            raise ValueError("project scope 必须提供 project_id")
         tm = TaskManager()
         task_id = await tm.create_task(
             self.TASK_TYPE,
-            metadata={"title": title, "category": category, "input_chars": len(text or "")},
+            metadata={
+                "title": title,
+                "category": category,
+                "input_chars": len(text or ""),
+                "scope": scope,
+                "project_id": project_id,
+            },
         )
         await tm.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="启动文风提取任务...")
 
@@ -153,6 +169,8 @@ class StyleExtractor:
                     tags=tags,
                     target_chunk_chars=target_chunk_chars,
                     max_chunks=max_chunks,
+                    scope=scope,
+                    project_id=project_id,
                     on_progress=lambda done, total: asyncio.ensure_future(_on_progress(done, total)),
                 )
                 await tm.complete_task(task_id, {

@@ -77,8 +77,9 @@ function scheduleStepCollapse(opts: {
   chapterKey: string;
 }) {
   const state = ensureStep(opts.steps.current, opts.stepId);
+  if (state.collapsed) return;
   if (Date.now() < state.lockedUntil) return;
-  clearTimer(opts.timers, opts.stepId);
+  if (opts.timers.current.has(opts.stepId)) return;
   const timer = setTimeout(() => collapseUnlockedStep(opts), STEP_AUTO_COLLAPSE_MS);
   opts.timers.current.set(opts.stepId, timer);
 }

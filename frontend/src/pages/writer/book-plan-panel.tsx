@@ -30,6 +30,7 @@ import {
   updateBookPlan,
   type BookPlanInput,
 } from "@/api/writer-agent";
+import { useBookRunStatusStore } from "@/stores/book-run-store";
 
 const STAGES = [
   { key: "PLAN_INIT", label: "初始化" },
@@ -156,12 +157,24 @@ export function BookPlanPanel({ projectId }: BookPlanPanelProps) {
     setAuditHits([]);
     const controller = new AbortController();
     abortRef.current = controller;
+    // Mirror runtime state to the shared store so StatusBar/other subscribers see live updates.
+    const store = useBookRunStatusStore.getState();
+    store.setPlanId(currentPlanId);
+    store.resetRuntime();
+    store.setRunning(true);
+    store.setAbortController(controller);
 
     try {
       await runBookRun(
         currentPlanId,
         {
           onEvent: (ev: any) => {
+            // Fan out to the store first so subscribers update synchronously.
+            try {
+              useBookRunStatusStore.getState().patchFromEvent(ev);
+            } catch {
+              // Store errors must never break the local panel's rendering.
+            }
             const type = ev?.type;
             if (!type) return;
             if (type === "book_run_stage") {
@@ -214,6 +227,14 @@ export function BookPlanPanel({ projectId }: BookPlanPanelProps) {
     } finally {
       setRunning(false);
       abortRef.current = null;
+      // Notify shared subscribers that the run has ended.
+      try {
+        const store = useBookRunStatusStore.getState();
+        store.setRunning(false);
+        store.setAbortController(null);
+      } catch {
+        // Non-critical.
+      }
     }
   }
 
@@ -222,6 +243,13 @@ export function BookPlanPanel({ projectId }: BookPlanPanelProps) {
     await abortBookRun(currentPlanId);
     abortRef.current?.abort();
     setRunning(false);
+    try {
+      const store = useBookRunStatusStore.getState();
+      store.setRunning(false);
+      store.setAbortController(null);
+    } catch {
+      // Non-critical.
+    }
   }
 
   function loadPlan(plan: any) {

@@ -99,6 +99,11 @@ export async function postSSE(
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // Once the server has started emitting SSE events the request is no longer
+    // idempotent — replaying the POST would re-run the writer agent from scratch
+    // and duplicate `writer_token` output. Retries are only safe BEFORE any
+    // payload has been seen.
+    let hasReceivedData = false;
 
     try {
       while (true) {
@@ -113,6 +118,11 @@ export async function postSSE(
         for (const segment of segments) {
           const trimmed = segment.trim();
           if (!trimmed) continue;
+          // Ignore comment/heartbeat lines like ":ping"
+          if (trimmed.startsWith(":")) {
+            hasReceivedData = true;
+            continue;
+          }
           const jsonStr = trimmed.replace(/^data:\s*/, "");
           if (!jsonStr) continue;
 
@@ -123,6 +133,7 @@ export async function postSSE(
             continue;
           }
 
+          hasReceivedData = true;
           if (event.type === "error") {
             onError?.(event);
           } else if (event.type === "done") {
@@ -136,6 +147,12 @@ export async function postSSE(
       return;
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      // If the server already began streaming, retrying would re-trigger the
+      // same generation and append duplicated tokens. Surface the error instead.
+      if (hasReceivedData) {
+        onError?.(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
         continue;

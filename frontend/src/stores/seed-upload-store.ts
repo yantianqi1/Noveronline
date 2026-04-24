@@ -9,6 +9,7 @@ import { create } from "zustand";
 import type {
   ActiveStage,
   SeedLlmActivity,
+  SequentialReadingRetry,
   TaskMetrics,
   TimelineEvent,
 } from "@/lib/seed-upload-task-state";
@@ -28,6 +29,7 @@ export interface SeedUploadViewState {
   llmActivity: SeedLlmActivity;
   timeline: TimelineEvent[];
   taskStartedAt: string;
+  sequentialReadingRetry?: SequentialReadingRetry;
 }
 
 export interface SeedUploadResult {
@@ -85,10 +87,17 @@ function hasFile(existing: File[], incoming: File): boolean {
   return existing.some((item) => fileKey(item) === fileKey(incoming));
 }
 
+function stemFromFileName(name: string): string {
+  const base = name.replace(/^.*[\\/]/, "");
+  const idx = base.lastIndexOf(".");
+  return (idx > 0 ? base.slice(0, idx) : base).trim();
+}
+
 const DEFAULT_GOAL = "提取全部有名角色、组织和关系，用于世界线推演。";
+const DEFAULT_PROJECT_NAME = "我的小说项目";
 
 const initialState: SeedUploadState = {
-  projectName: "我的小说项目",
+  projectName: DEFAULT_PROJECT_NAME,
   analysisGoal: DEFAULT_GOAL,
   additionalContext: "",
   segmentTokenLimit: 50000,
@@ -111,6 +120,7 @@ const initialState: SeedUploadState = {
   llmActivity: { ...DEFAULT_LLM_ACTIVITY },
   timeline: [],
   taskStartedAt: "",
+  sequentialReadingRetry: undefined,
 };
 
 /* ---------- Store ---------- */
@@ -126,7 +136,17 @@ export const useSeedUploadStore = create<SeedUploadState & SeedUploadActions>()(
         if (!isSupported(file) || hasFile(merged, file)) continue;
         merged.push(file);
       }
-      set({ files: merged });
+      const patch: Partial<SeedUploadState> = { files: merged };
+      const currentName = get().projectName.trim();
+      const isPlaceholder = !currentName || currentName === DEFAULT_PROJECT_NAME;
+      if (isPlaceholder && merged.length > current.length) {
+        const firstNew = merged[current.length];
+        if (firstNew) {
+          const stem = stemFromFileName(firstNew.name);
+          if (stem) patch.projectName = stem;
+        }
+      }
+      set(patch);
     },
 
     removeFile: (file: File) => {
@@ -159,6 +179,7 @@ export const useSeedUploadStore = create<SeedUploadState & SeedUploadActions>()(
         llmActivity: { ...DEFAULT_LLM_ACTIVITY },
         timeline: [],
         taskStartedAt: "",
+        sequentialReadingRetry: undefined,
       });
       clearPersistedActiveTask();
     },

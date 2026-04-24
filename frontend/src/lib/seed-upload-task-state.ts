@@ -46,6 +46,11 @@ export interface TimelineEvent {
   meta: Record<string, unknown>;
 }
 
+export interface SequentialReadingRetry {
+  pendingSegments: string[];
+  count: number;
+}
+
 export const DEFAULT_TASK_METRICS: TaskMetrics = {
   chapterCount: 0,
   blockCount: 0,
@@ -178,6 +183,7 @@ export interface StructuredView {
   llmActivity: SeedLlmActivity;
   timeline: TimelineEvent[];
   taskStartedAt: string;
+  sequentialReadingRetry?: SequentialReadingRetry;
 }
 
 export function applyStructuredView(

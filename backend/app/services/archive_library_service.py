@@ -26,6 +26,11 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _now_ts() -> float:
+    """Unix timestamp used as a fallback ``file_mtime`` for DB-native writes."""
+    return datetime.now().timestamp()
+
+
 def _bool_to_int(value: Any) -> int:
     return 1 if bool(value) else 0
 
@@ -88,7 +93,9 @@ class ArchiveLibraryService:
         limit: int = 20,
         offset: int = 0,
     ) -> Dict[str, Any]:
-        self.sync_incremental()
+        # DB is the source of truth — no JSON sync on the read path (Phase 2
+        # 去 JSON 化). Call ``sync_incremental()`` explicitly for one-time
+        # backfill from legacy ``narrative_archives.json``.
         limit = max(1, min(limit, 200))
         offset = max(0, offset)
         if q.strip():
@@ -102,7 +109,8 @@ class ArchiveLibraryService:
             # Apply additional filters not supported by search_archives
             filtered = all_results
             if entity_type:
-                filtered = [r for r in filtered if r.get("entity_type") == entity_type]
+                et = entity_type.lower()
+                filtered = [r for r in filtered if str(r.get("entity_type", "")).lower() == et]
             if agent_kind:
                 filtered = [r for r in filtered if r.get("agent_kind") == agent_kind]
             if importance_tier:
@@ -133,7 +141,6 @@ class ArchiveLibraryService:
         return {"items": items, "count": len(items), "total": total, "limit": limit, "offset": offset}
 
     def get_archive(self, archive_id: str) -> Dict[str, Any]:
-        self.sync_incremental()
         row = self._repo.get_archive(archive_id)
         if not row:
             raise ValueError(f"档案不存在: {archive_id}")
@@ -142,7 +149,6 @@ class ArchiveLibraryService:
     def resolve_archives(self, archive_ids: List[str]) -> List[Dict[str, Any]]:
         if not archive_ids:
             raise ValueError("请提供 archive_ids")
-        self.sync_incremental()
         rows = self._repo.resolve_archives(archive_ids)
         records = {_row_to_archive(r)["archive_id"]: _row_to_archive(r) for r in rows}
         missing = [archive_id for archive_id in archive_ids if archive_id not in records]
@@ -151,13 +157,32 @@ class ArchiveLibraryService:
         return [records[archive_id] for archive_id in archive_ids]
 
     def reindex(self) -> int:
-        # Delete all archives and sources, then resync
+        """One-time reindex: drops all DB rows + re-imports from legacy JSON.
+
+        Only useful when recovering a DB from scratch against a filesystem
+        that still has ``narrative_archives.json`` files. Runtime writers
+        go through ``write_archives_for_project`` instead.
+        """
+        # Delete all archives and sources, then re-import from legacy JSON
         for source in self._repo.list_sources():
             self._repo.delete_archives_by_project(source["project_id"])
             self._repo.delete_source(source["project_id"])
-        return self.sync_incremental(force=True)
+        return self.import_from_legacy_json(force=True)
 
-    def sync_project_archives(self, project_id: str, force: bool = False) -> List[Dict[str, Any]]:
+    # ------------------------------------------------------------------
+    # Phase 2 · one-time JSON → DB backfill utilities
+    # ------------------------------------------------------------------
+    # These are NOT on any runtime hot path after Phase 2. They exist only
+    # to bring legacy projects (pre-2026-04-18) that still have a
+    # ``narrative_archives.json`` artifact into the unified DB.
+
+    def import_project_from_legacy_json(
+        self, project_id: str, force: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Import a single project's archive JSON into the DB (one-shot).
+
+        Prefer ``write_archives_for_project`` for live writes.
+        """
         project = ProjectManager.get_project(project_id)
         if not project:
             raise ValueError(f"项目不存在: {project_id}")
@@ -166,8 +191,96 @@ class ArchiveLibraryService:
             raise ValueError("档案同步失败")
         return self.list_archives(project_id=project_id, limit=500)["items"]
 
-    def sync_incremental(self, force: bool = False) -> int:
+    def import_from_legacy_json(self, force: bool = False) -> int:
+        """Import every project's archive JSON into the DB (one-shot)."""
         return self._sync_projects(self._iter_projects(), force=force)
+
+    # -- Deprecated aliases kept for backwards compatibility --------------
+    # Old callers may still reach for these names; both are now thin
+    # wrappers that delegate to the explicit ``import_*_from_legacy_json``
+    # entry points. New code should use ``write_archives_for_project`` for
+    # live writes or ``import_*_from_legacy_json`` for migrations.
+
+    def sync_project_archives(self, project_id: str, force: bool = False) -> List[Dict[str, Any]]:
+        """DEPRECATED: use ``write_archives_for_project`` (live) or
+        ``import_project_from_legacy_json`` (one-shot JSON import).
+        """
+        return self.import_project_from_legacy_json(project_id, force=force)
+
+    def sync_incremental(self, force: bool = False) -> int:
+        """DEPRECATED: use ``import_from_legacy_json``."""
+        return self.import_from_legacy_json(force=force)
+
+    # ------------------------------------------------------------------
+    # Phase 2 · DB-native write entry point
+    # ------------------------------------------------------------------
+    def write_archives(
+        self,
+        project_id: str,
+        project_name: str,
+        payload: Dict[str, Any],
+        *,
+        file_path: str = "",
+        file_mtime: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """Write the ``payload['archives']`` list straight to the DB.
+
+        Replaces any existing archive rows for the project. This is the
+        primary write path after Phase 2 — callers should no longer rely
+        on ``save_project_json('narrative_archives.json') + sync_project_archives``
+        to land in the DB.
+
+        ``file_path`` / ``file_mtime`` are optional breadcrumbs retained
+        only so ``_is_unchanged`` (used by the legacy JSON-import path
+        below) can still skip redundant re-imports. Safe to omit for
+        brand-new DB-native writes.
+        """
+        if not project_id:
+            raise ValueError("project_id 不能为空")
+        archives = payload.get("archives")
+        if not isinstance(archives, list):
+            raise ValueError(f"{project_id} 的 archives 字段必须是列表")
+
+        # Build a minimal project-like object compatible with _archive_record
+        class _ProjectLike:
+            pass
+
+        project = _ProjectLike()
+        project.project_id = project_id
+        project.name = project_name or project_id
+
+        self._delete_project_records(project_id)
+        for archive in archives:
+            entity_uuid = str(archive.get("entity_uuid") or "").strip()
+            if not entity_uuid:
+                raise ValueError(f"{project_id} 的档案缺少 entity_uuid")
+            record = self._archive_record(project, archive)
+            self._repo.upsert_archive(record)
+        self._repo.upsert_source({
+            "project_id": project_id,
+            "project_name": project.name,
+            "file_path": file_path or f"db://archive_library/{project_id}",
+            "file_mtime": file_mtime or _now_ts(),
+            "synced_at": _now(),
+        })
+        return self.list_archives(project_id=project_id, limit=500)["items"]
+
+    def write_archives_for_project(
+        self, project_id: str, payload: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Convenience wrapper: resolves ``project_name`` via ProjectManager.
+
+        Falls back to ``project_id`` as the display name if the project
+        manager can't locate the project (e.g. test harness).
+        """
+        name = project_id
+        try:
+            project = ProjectManager.get_project(project_id)
+            if project and getattr(project, "name", ""):
+                name = project.name
+        except Exception:
+            pass
+        return self.write_archives(project_id, name, payload)
 
     def _iter_projects(self) -> List[Any]:
         ProjectManager._ensure_projects_dir()

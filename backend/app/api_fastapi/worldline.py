@@ -384,6 +384,17 @@ async def list_worldline_prepare_agents(prepare_id: str, project_id: str | None 
         return err(exc)
 
 
+@router.post("/session/prepare/{prepare_id}/resume")
+async def resume_worldline_prepare(prepare_id: str):
+    try:
+        result = await prepare_service().resume_prepare(prepare_id)
+        return ok(result, status_code=202)
+    except ValueError as exc:
+        return err(exc, status_code=400)
+    except Exception as exc:
+        return err(exc)
+
+
 @router.post("/session/prepare/{prepare_id}/start")
 async def start_worldline_from_prepare(prepare_id: str, body: StartFromPrepareRequest = Body(default_factory=StartFromPrepareRequest)):
     try:

@@ -8,7 +8,7 @@ import type { ApiResponse } from "@/api/http";
 import {
   getArchiveLibraryDetail,
   listArchiveLibrary,
-} from "@/api/archive";
+} from "@/api/assets";
 import { listProjects } from "@/api/project";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -631,7 +631,7 @@ export function ArchiveLibraryPicker({
 }: ArchiveLibraryPickerProps) {
   const [searchText, setSearchText] = React.useState("");
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
-  const [entityType, setEntityType] = React.useState<string>("");
+  const [agentKind, setAgentKind] = React.useState<string>("");
   const [importanceTier, setImportanceTier] = React.useState<string>("");
   const [expandedArchiveId, setExpandedArchiveId] = React.useState<string>("");
 
@@ -659,14 +659,14 @@ export function ArchiveLibraryPicker({
       "archiveLibrary",
       debouncedSearch,
       projectId || "",
-      entityType,
+      agentKind,
       importanceTier,
     ],
     queryFn: () =>
       listArchiveLibrary({
         q: debouncedSearch,
         projectId: projectId || "",
-        entityType: entityType || "",
+        agentKind: agentKind || "",
         importanceTier: importanceTier || "",
         limit: 60,
       }),
@@ -736,12 +736,20 @@ export function ArchiveLibraryPicker({
               onValueChange={(v) => onProjectIdChange(v || "")}
             >
               <SelectTrigger className="min-w-[120px]">
-                <SelectValue placeholder="全部项目" />
+                <SelectValue placeholder="全部项目">
+                  {(value: unknown) => {
+                    const id = typeof value === "string" ? value : "";
+                    if (!id) return "全部项目";
+                    const found = projects.find((p) => p.project_id === id);
+                    const name = (found?.name || "").trim();
+                    return name || "未命名项目";
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {projects.map((p) => (
                   <SelectItem key={p.project_id} value={p.project_id}>
-                    {p.name || p.project_id}
+                    {(p.name || "").trim() || "未命名项目"}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -749,11 +757,18 @@ export function ArchiveLibraryPicker({
           )}
 
           <Select
-            value={entityType || null}
-            onValueChange={(v) => setEntityType(v || "")}
+            value={agentKind || null}
+            onValueChange={(v) => setAgentKind(v || "")}
           >
             <SelectTrigger className="min-w-[100px]">
-              <SelectValue placeholder="全部类型" />
+              <SelectValue placeholder="全部类型">
+                {(value: unknown) => {
+                  const v = typeof value === "string" ? value : "";
+                  if (!v) return "全部类型";
+                  const opt = ENTITY_TYPE_OPTIONS.find((o) => o.value === v);
+                  return opt?.label || v;
+                }}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {ENTITY_TYPE_OPTIONS.map((opt) => (
@@ -769,7 +784,14 @@ export function ArchiveLibraryPicker({
             onValueChange={(v) => setImportanceTier(v || "")}
           >
             <SelectTrigger className="min-w-[100px]">
-              <SelectValue placeholder="全部位阶" />
+              <SelectValue placeholder="全部位阶">
+                {(value: unknown) => {
+                  const v = typeof value === "string" ? value : "";
+                  if (!v) return "全部位阶";
+                  const opt = IMPORTANCE_TIER_OPTIONS.find((o) => o.value === v);
+                  return opt?.label || v;
+                }}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {IMPORTANCE_TIER_OPTIONS.map((opt) => (
@@ -780,7 +802,7 @@ export function ArchiveLibraryPicker({
             </SelectContent>
           </Select>
 
-          {(projectId || entityType || importanceTier) && (
+          {(projectId || agentKind || importanceTier) && (
             <Button
               type="button"
               variant="ghost"
@@ -788,7 +810,7 @@ export function ArchiveLibraryPicker({
               className="h-9 px-2 text-xs"
               onClick={() => {
                 if (onProjectIdChange) onProjectIdChange("");
-                setEntityType("");
+                setAgentKind("");
                 setImportanceTier("");
               }}
             >

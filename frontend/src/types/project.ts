@@ -7,6 +7,8 @@ export interface Project {
   updated_at: string;
   file_count?: number;
   total_size?: number;
+  seed_task_id?: string | null;
+  graph_build_task_id?: string | null;
 }
 
 export interface Task {

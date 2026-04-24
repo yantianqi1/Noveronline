@@ -51,7 +51,9 @@ class WorldlineSourceLoader:
     ) -> Dict[str, Any]:
         config = self._load_config(container_dir, config_override)
         seed_analysis = self._load_seed_analysis(project, container_dir)
-        resolved_archives = self._load_archives(container_dir, archives)
+        resolved_archives = self._load_archives(
+            container_dir, archives, project.project_id if project else None,
+        )
         entities = self._load_entities(graph_id, entity_types, resolved_archives, seed_analysis)
 
         actors, organizations = self._build_actor_maps(project.project_id if project else None, resolved_archives, seed_analysis, entities)
@@ -99,17 +101,31 @@ class WorldlineSourceLoader:
         self,
         container_dir: str,
         archives: Optional[List[Dict[str, Any]]],
+        project_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if archives is not None:
             return archives
+        # 1) Snapshot path: a worldline run may carry its own pinned archive
+        # copy in the container dir (historic behaviour). Still supported so
+        # old runs keep working — but no new callers should rely on it.
         archive_payload = self.store.load_json_if_exists(container_dir, "narrative_archives.json")
-        if not archive_payload:
-            return []
-        if isinstance(archive_payload.get("archives"), list):
-            return archive_payload["archives"]
-        if isinstance(archive_payload, list):
-            return archive_payload
-        raise ValueError("narrative_archives.json 结构无效")
+        if archive_payload:
+            if isinstance(archive_payload.get("archives"), list):
+                return archive_payload["archives"]
+            if isinstance(archive_payload, list):
+                return archive_payload
+            raise ValueError("narrative_archives.json 结构无效")
+        # 2) Phase 2 · DB-native read. With the JSON write gone, the
+        # archive_library table is the live source of truth.
+        if project_id:
+            try:
+                result = ArchiveLibraryService().list_archives(
+                    project_id=project_id, limit=1000,
+                )
+                return result.get("items", [])
+            except Exception:
+                return []
+        return []
 
     def _load_entities(
         self,

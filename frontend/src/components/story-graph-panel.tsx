@@ -46,12 +46,17 @@ export interface StoryGraphPanelProps {
   nodes: GraphNodeVM[];
   edges: GraphEdgeVM[];
   selectedNodeId?: string | null;
+  selectedNodeIds?: ReadonlySet<string>;
   selectedEdgeId?: string | null;
   showEdgeLabels?: boolean;
   visibleLabelNodeIds?: Set<string>;
-  onNodeSelect?: (node: GraphNodeVM) => void;
+  onNodeSelect?: (
+    node: GraphNodeVM,
+    modifiers?: { ctrlOrMeta: boolean; shift: boolean },
+  ) => void;
   onEdgeSelect?: (edge: GraphEdgeVM) => void;
   onCanvasSelect?: () => void;
+  onBoxSelect?: (nodeIds: string[]) => void;
   className?: string;
 }
 
@@ -129,12 +134,14 @@ export function StoryGraphPanel({
   nodes,
   edges,
   selectedNodeId,
+  selectedNodeIds,
   selectedEdgeId,
   showEdgeLabels = false,
   visibleLabelNodeIds,
   onNodeSelect,
   onEdgeSelect,
   onCanvasSelect,
+  onBoxSelect,
   className,
 }: StoryGraphPanelProps) {
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -163,9 +170,11 @@ export function StoryGraphPanel({
   const onNodeSelectRef = React.useRef(onNodeSelect);
   const onEdgeSelectRef = React.useRef(onEdgeSelect);
   const onCanvasSelectRef = React.useRef(onCanvasSelect);
+  const onBoxSelectRef = React.useRef(onBoxSelect);
   onNodeSelectRef.current = onNodeSelect;
   onEdgeSelectRef.current = onEdgeSelect;
   onCanvasSelectRef.current = onCanvasSelect;
+  onBoxSelectRef.current = onBoxSelect;
 
   // Build & mount D3 scene when node/edge data changes
   React.useEffect(() => {
@@ -227,6 +236,11 @@ export function StoryGraphPanel({
     const zoomBehavior = d3
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
+      .filter((event) => {
+        // Let shift+drag fall through for box selection
+        if (event.type === "mousedown" && event.shiftKey) return false;
+        return !event.ctrlKey && !event.button;
+      })
       .on("zoom", (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
         st.zoomTransform = event.transform;
         viewport.attr("transform", event.transform.toString());
@@ -313,13 +327,17 @@ export function StoryGraphPanel({
         d.fy = null;
       });
 
-    const handleNodeClick = (_event: Event, node: RenderableNode & DragExtra) => {
-      (_event as Event).stopPropagation();
+    const handleNodeClick = (event: Event, node: RenderableNode & DragExtra) => {
+      event.stopPropagation();
       if (node.dragMoved) {
         node.dragMoved = false;
         return;
       }
-      onNodeSelectRef.current?.(node.raw as unknown as GraphNodeVM);
+      const me = event as MouseEvent;
+      onNodeSelectRef.current?.(node.raw as unknown as GraphNodeVM, {
+        ctrlOrMeta: Boolean(me.ctrlKey || me.metaKey),
+        shift: Boolean(me.shiftKey),
+      });
     };
 
     // Node circles
@@ -363,6 +381,79 @@ export function StoryGraphPanel({
       node: nodeCircles,
       nodeLabel: nodeLabels,
     };
+
+    // ---- Shift+drag box selection ----
+    const boxSelectRect = viewport
+      .append("rect")
+      .attr("class", "story-graph-selection-box")
+      .attr("fill", "rgba(233, 30, 99, 0.10)")
+      .attr("stroke", "#E91E63")
+      .attr("stroke-width", 1)
+      .attr("stroke-dasharray", "4 3")
+      .attr("pointer-events", "none")
+      .style("display", "none");
+
+    let boxStart: [number, number] | null = null;
+
+    svgSel.on("mousedown.boxselect", (event: MouseEvent) => {
+      if (!event.shiftKey || !onBoxSelectRef.current) return;
+      const viewportNode = viewport.node() as SVGGElement | null;
+      if (!viewportNode) return;
+      const [x, y] = d3.pointer(event, viewportNode);
+      boxStart = [x, y];
+      boxSelectRect
+        .attr("x", x)
+        .attr("y", y)
+        .attr("width", 0)
+        .attr("height", 0)
+        .style("display", "");
+      event.preventDefault();
+    });
+
+    svgSel.on("mousemove.boxselect", (event: MouseEvent) => {
+      if (!boxStart) return;
+      const viewportNode = viewport.node() as SVGGElement | null;
+      if (!viewportNode) return;
+      const [x, y] = d3.pointer(event, viewportNode);
+      const [sx, sy] = boxStart;
+      boxSelectRect
+        .attr("x", Math.min(sx, x))
+        .attr("y", Math.min(sy, y))
+        .attr("width", Math.abs(x - sx))
+        .attr("height", Math.abs(y - sy));
+    });
+
+    const endBoxSelection = (event: MouseEvent) => {
+      if (!boxStart) return;
+      const viewportNode = viewport.node() as SVGGElement | null;
+      if (!viewportNode) {
+        boxStart = null;
+        boxSelectRect.style("display", "none");
+        return;
+      }
+      const [x, y] = d3.pointer(event, viewportNode);
+      const [sx, sy] = boxStart;
+      const x0 = Math.min(sx, x);
+      const x1 = Math.max(sx, x);
+      const y0 = Math.min(sy, y);
+      const y1 = Math.max(sy, y);
+      boxStart = null;
+      boxSelectRect.style("display", "none");
+      if (x1 - x0 < 4 && y1 - y0 < 4) return;
+      const hits = model.nodes
+        .filter((n) => {
+          const nx = n.x ?? 0;
+          const ny = n.y ?? 0;
+          return nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1;
+        })
+        .map((n) => n.id);
+      if (hits.length > 0) {
+        onBoxSelectRef.current?.(hits);
+      }
+    };
+
+    svgSel.on("mouseup.boxselect", endBoxSelection);
+    svgSel.on("mouseleave.boxselect", endBoxSelection);
 
     // Update edge label background rects to match text bounding box
     function updateEdgeLabelBackgrounds() {
@@ -439,6 +530,10 @@ export function StoryGraphPanel({
     const st = stateRef.current;
     if (!st.selections || !st.model) return;
 
+    const multiIds = selectedNodeIds ?? new Set<string>();
+    const isInMulti = (id: string) => multiIds.has(id);
+    const hasMulti = multiIds.size > 0;
+
     const adjacentEdgeIds = st.model.adjacencyByNodeId.get(selectedNodeId ?? "") ?? new Set<string>();
     const neighborStrength = buildNeighborStrengthMap(st.model.edges, selectedNodeId ?? null);
     const hasNodeSelection = !!selectedNodeId;
@@ -450,11 +545,16 @@ export function StoryGraphPanel({
 
     // Nodes
     st.selections.node
-      .attr("stroke", (node) => (node.id === selectedNodeId ? NODE_STROKE_SELECTED : NODE_STROKE))
-      .attr("stroke-width", (node) =>
-        node.id === selectedNodeId ? NODE_SELECTED_WIDTH : NODE_STROKE_WIDTH,
-      )
+      .attr("stroke", (node) => {
+        if (node.id === selectedNodeId || isInMulti(node.id)) return NODE_STROKE_SELECTED;
+        return NODE_STROKE;
+      })
+      .attr("stroke-width", (node) => {
+        if (node.id === selectedNodeId || isInMulti(node.id)) return NODE_SELECTED_WIDTH;
+        return NODE_STROKE_WIDTH;
+      })
       .attr("r", (node) => {
+        if (isInMulti(node.id)) return NODE_RADIUS + 3;
         if (!hasNodeSelection) return NODE_RADIUS;
         if (node.id === selectedNodeId) return NODE_RADIUS + 4;
         const strength = neighborStrength.get(node.id);
@@ -462,12 +562,15 @@ export function StoryGraphPanel({
         return NODE_RADIUS;
       })
       .attr("opacity", (node) => {
+        if (isInMulti(node.id)) return 1;
+        if (hasMulti && !hasNodeSelection) return 0.35;
         if (!hasNodeSelection) return 1;
         if (node.id === selectedNodeId) return 1;
         if (neighborStrength.has(node.id)) return 0.6 + neighborStrength.get(node.id)! * 0.4;
         return 0.2;
       })
       .style("filter", (node) => {
+        if (isInMulti(node.id)) return "drop-shadow(0 0 5px rgba(233, 30, 99, 0.8))";
         if (!hasNodeSelection) return null;
         if (node.id === selectedNodeId) return "drop-shadow(0 0 6px #E91E63)";
         const strength = neighborStrength.get(node.id);
@@ -515,7 +618,7 @@ export function StoryGraphPanel({
         return visibleLabelNodeIds?.has(node.id) ? null : "none";
       });
     }
-  }, [selectedNodeId, selectedEdgeId, visibleLabelNodeIds]);
+  }, [selectedNodeId, selectedEdgeId, visibleLabelNodeIds, selectedNodeIds]);
 
   // Toggle node label visibility
   React.useEffect(() => {

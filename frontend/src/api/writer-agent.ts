@@ -26,10 +26,108 @@ export function updateWorldData(
   return postSSE("/api/writer-agent/world-update", payload, handlers, signal);
 }
 
+/** Apply user-selected reviewer suggestions — SSE stream of the rewrite. */
+export function applyReviewer(
+  payload: unknown,
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSSE("/api/writer-agent/apply-reviewer", payload, handlers, signal);
+}
+
+/* ---------- One-click buttons (W-3 §4.4) ---------- */
+
+export function oneClickCompleteOutline(
+  payload: { project_id: string; chapter_id: string; chapter_order?: number },
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSSE(
+    "/api/writer-agent/one-click/complete-outline",
+    payload,
+    handlers,
+    signal,
+  );
+}
+
+export function oneClickAlignWords(
+  payload: {
+    project_id: string;
+    chapter_id: string;
+    chapter_order?: number;
+    target_word_count: number;
+    tolerance_pct?: number;
+  },
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSSE(
+    "/api/writer-agent/one-click/align-words",
+    payload,
+    handlers,
+    signal,
+  );
+}
+
+export function oneClickScanLexicon(
+  payload: {
+    project_id: string;
+    chapter_id: string;
+    chapter_order?: number;
+    lexicon_asset_ids?: string[];
+  },
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSSE(
+    "/api/writer-agent/one-click/scan-lexicon",
+    payload,
+    handlers,
+    signal,
+  );
+}
+
+export function oneClickFillRelationships(
+  payload: { project_id: string; chapter_id: string; chapter_order?: number },
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSSE(
+    "/api/writer-agent/one-click/fill-relationships",
+    payload,
+    handlers,
+    signal,
+  );
+}
+
+export function oneClickContinueChapter(
+  payload: {
+    project_id: string;
+    chapter_id: string;
+    chapter_order?: number;
+    last_block_id?: string;
+    target_word_count?: number;
+    preset_id?: string;
+  },
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postSSE(
+    "/api/writer-agent/one-click/continue-chapter",
+    payload,
+    handlers,
+    signal,
+  );
+}
+
 /* ---------- Scene CRUD ---------- */
 
 export function getScenes(chapterId: string, projectId: string): Promise<ApiResponse> {
   return get(`/api/writer-agent/scenes/${chapterId}?project_id=${projectId}`);
+}
+
+export function createScene(chapterId: string, payload: unknown): Promise<ApiResponse> {
+  return post(`/api/writer-agent/scenes/${chapterId}`, payload);
 }
 
 export function getSceneDetail(sceneId: string, projectId: string): Promise<ApiResponse> {
@@ -246,6 +344,14 @@ export function updateBookPlan(planId: string, payload: Partial<BookPlanInput>):
 
 export function deleteBookPlan(planId: string): Promise<ApiResponse> {
   return del(`/api/writer-agent/book-plans/${planId}`);
+}
+
+export function getBookPlanStatus(planId: string): Promise<ApiResponse> {
+  return get(`/api/writer-agent/book-plans/${planId}/status`);
+}
+
+export function getActiveBookPlan(projectId: string): Promise<ApiResponse> {
+  return get(`/api/writer-agent/book-plans/active/by-project?project_id=${encodeURIComponent(projectId)}`);
 }
 
 export function runBookRun(

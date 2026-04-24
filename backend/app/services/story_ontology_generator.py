@@ -5,6 +5,7 @@
 
 from typing import Callable, Dict, Any, List, Optional
 
+from ..config import Settings
 from ..utils.llm_client import LLMClient
 from ..utils.llm_json import normalize_json_object
 from .llm_router import LlmRouter
@@ -76,12 +77,12 @@ STORY_ONTOLOGY_SYSTEM_PROMPT = """你是一位专业的小说结构分析师、�
 }
 
 约束：
-- entity_types 输出 6-10 个
-- edge_types 输出 6-10 个
+- entity_types 通常输出 6-10 个；以小说实际涉及的核心叙事维度为准，世界观简单的短篇可少于 6 个
+- edge_types 通常输出 6-10 个；同样以实际关系丰富度为准，**宁少勿编**
 - 必须包含 Character / Organization / Faction / PlotEvent 这类叙事核心类型，名称可细化
 - 如果文本里有 AI、系统、机械、数字意识，必须专门设计对应实体类型
 - 不要把纯抽象概念当成唯一核心实体，抽象概念更适合变成属性、事件或关系背景
-- examples 必须来自给定的小说材料，不要编造不存在的名字
+- examples 必须来自给定的小说材料，不要编造不存在的名字；如某类型在原文中实例不足 2 个，examples 可以只列 1 个
 
 ## 输出示范（仅供参考格式，实际输出应基于给定的小说材料）
 {
@@ -138,6 +139,10 @@ STORY_ONTOLOGY_SYSTEM_PROMPT = """你是一位专业的小说结构分析师、�
 class StoryOntologyGenerator:
     """小说专用 ontology 生成器"""
 
+    # Total budget when running as a single-shot call. With chunking enabled
+    # (Phase E-5), individual chunks are bounded by ``SEED_ONTOLOGY_CHUNK_SIZE``
+    # instead and this constant becomes the *per-chunk* hard ceiling for the
+    # legacy non-chunked fallback path.
     MAX_TEXT_LENGTH_FOR_LLM = 60000
     MODULE_KEY = "story_ontology"
 
@@ -161,28 +166,18 @@ class StoryOntologyGenerator:
         progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         combined_text = "\n\n---\n\n".join(document_texts)
+        chunk_size = Settings().SEED_ONTOLOGY_CHUNK_SIZE
+        # Build the upper-bound source first; ``build_story_context_source`` will
+        # still cap at MAX_TEXT_LENGTH_FOR_LLM for structured/continuity sources
+        # which are already compressed. For raw text we pass the full body and
+        # let chunking decide.
         llm_source = build_story_context_source(
-            max_length=self.MAX_TEXT_LENGTH_FOR_LLM,
+            max_length=max(self.MAX_TEXT_LENGTH_FOR_LLM, chunk_size * 4),
             combined_text=combined_text,
             chapter_continuity=chapter_continuity,
             story_memory=story_memory,
             block_analyses=block_analyses,
         )
-
-        user_message = f"""## 小说材料
-{llm_source}
-
-## 分析目标
-{analysis_goal}
-"""
-
-        if additional_context:
-            user_message += f"\n## 额外说明\n{additional_context}\n"
-
-        messages = [
-            {"role": "system", "content": STORY_ONTOLOGY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ]
 
         if not use_llm:
             if progress_callback:
@@ -192,25 +187,20 @@ class StoryOntologyGenerator:
             progress_callback("start", {"summary_length": len(llm_source)})
         try:
             client = self.llm_client or self.llm_router.build_client(self.MODULE_KEY)
-            if hasattr(client, "chat"):
-                payload = StoryOntologyLineProtocolExecutor(client).generate(user_message)
-                if progress_callback:
-                    progress_callback(
-                        "complete",
-                        {
-                            "entity_type_count": len(payload.get("entity_types", [])),
-                            "edge_type_count": len(payload.get("edge_types", [])),
-                        },
-                    )
-                return payload
-            payload = client.chat_json_value(messages=messages, temperature=0.3, max_tokens=4096)
-            payload = normalize_json_object(payload, "小说本体生成")
+            chunks = self._chunk_source(llm_source, chunk_size)
+            payload = self._generate_via_chunks(
+                client=client,
+                chunks=chunks,
+                analysis_goal=analysis_goal,
+                additional_context=additional_context,
+            )
             if progress_callback:
                 progress_callback(
                     "complete",
                     {
                         "entity_type_count": len(payload.get("entity_types", [])),
                         "edge_type_count": len(payload.get("edge_types", [])),
+                        "chunk_count": len(chunks),
                     },
                 )
             return payload
@@ -231,6 +221,187 @@ class StoryOntologyGenerator:
                     },
                 )
             return payload
+
+    # ------------------------------------------------------------------
+    # Phase E-5: chunk + merge helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _chunk_source(text: str, chunk_size: int) -> List[str]:
+        """Split ``text`` into ≤ ``chunk_size``-byte chunks at paragraph breaks.
+
+        A "paragraph break" is one or more blank lines. Single chunks may exceed
+        ``chunk_size`` if a paragraph itself is larger; that's preferable to
+        cutting a sentence mid-word and producing garbage entities.
+        """
+        if chunk_size <= 0 or len(text) <= chunk_size:
+            return [text]
+        paragraphs = text.split("\n\n")
+        chunks: List[str] = []
+        buffer: List[str] = []
+        running = 0
+        for para in paragraphs:
+            piece = para if not buffer else "\n\n" + para
+            piece_len = len(piece)
+            if buffer and running + piece_len > chunk_size:
+                chunks.append("".join(buffer))
+                buffer = [para]
+                running = len(para)
+                continue
+            buffer.append(piece)
+            running += piece_len
+        if buffer:
+            chunks.append("".join(buffer))
+        return chunks
+
+    def _generate_via_chunks(
+        self,
+        *,
+        client: Any,
+        chunks: List[str],
+        analysis_goal: str,
+        additional_context: Optional[str],
+    ) -> Dict[str, Any]:
+        """Call the LLM once per chunk and merge the results."""
+        partials: List[Dict[str, Any]] = []
+        for index, chunk in enumerate(chunks):
+            user_message = self._build_user_message(
+                chunk_text=chunk,
+                analysis_goal=analysis_goal,
+                additional_context=additional_context,
+                chunk_index=index,
+                chunk_total=len(chunks),
+            )
+            messages = [
+                {"role": "system", "content": STORY_ONTOLOGY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ]
+            if hasattr(client, "chat"):
+                payload = StoryOntologyLineProtocolExecutor(client).generate(user_message)
+            else:
+                raw = client.chat_json_value(
+                    messages=messages, temperature=0.3, max_tokens=4096,
+                )
+                payload = normalize_json_object(raw, "小说本体生成")
+            partials.append(payload)
+        if len(partials) == 1:
+            return partials[0]
+        return self._merge_ontology_payloads(partials)
+
+    @staticmethod
+    def _build_user_message(
+        *,
+        chunk_text: str,
+        analysis_goal: str,
+        additional_context: Optional[str],
+        chunk_index: int,
+        chunk_total: int,
+    ) -> str:
+        header = ""
+        if chunk_total > 1:
+            header = (
+                f"## 注意：当前是分块 {chunk_index + 1}/{chunk_total}\n"
+                f"本提示词只展示小说的一部分材料，请基于本块内容设计 ontology；"
+                f"系统会在 LLM 调用结束后合并各分块的 entity_types / edge_types。\n\n"
+            )
+        user_message = f"""{header}## 小说材料
+{chunk_text}
+
+## 分析目标
+{analysis_goal}
+"""
+        if additional_context:
+            user_message += f"\n## 额外说明\n{additional_context}\n"
+        return user_message
+
+    @staticmethod
+    def _merge_ontology_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge entity_types / edge_types / story_focus across chunk results."""
+        entity_by_name: Dict[str, Dict[str, Any]] = {}
+        for payload in payloads:
+            for et in payload.get("entity_types", []) or []:
+                name = (et.get("name") or "").strip()
+                if not name:
+                    continue
+                if name not in entity_by_name:
+                    entity_by_name[name] = {
+                        "name": name,
+                        "description": et.get("description", ""),
+                        "attributes": [],
+                        "examples": [],
+                    }
+                slot = entity_by_name[name]
+                # description: keep first non-empty
+                if not slot["description"] and et.get("description"):
+                    slot["description"] = et["description"]
+                # attributes: dedupe by attribute name
+                existing_attr_names = {a.get("name") for a in slot["attributes"]}
+                for attr in et.get("attributes", []) or []:
+                    aname = attr.get("name")
+                    if aname and aname not in existing_attr_names:
+                        slot["attributes"].append(attr)
+                        existing_attr_names.add(aname)
+                # examples: accumulate, dedupe, cap at 10
+                existing_examples = set(slot["examples"])
+                for ex in et.get("examples", []) or []:
+                    if ex and ex not in existing_examples and len(slot["examples"]) < 10:
+                        slot["examples"].append(ex)
+                        existing_examples.add(ex)
+
+        edge_by_name: Dict[str, Dict[str, Any]] = {}
+        for payload in payloads:
+            for ed in payload.get("edge_types", []) or []:
+                name = (ed.get("name") or "").strip()
+                if not name:
+                    continue
+                if name not in edge_by_name:
+                    edge_by_name[name] = {
+                        "name": name,
+                        "description": ed.get("description", ""),
+                        "source_targets": [],
+                        "attributes": [],
+                    }
+                slot = edge_by_name[name]
+                if not slot["description"] and ed.get("description"):
+                    slot["description"] = ed["description"]
+                existing_st = {
+                    (st.get("source"), st.get("target"))
+                    for st in slot["source_targets"]
+                }
+                for st in ed.get("source_targets", []) or []:
+                    key = (st.get("source"), st.get("target"))
+                    if key not in existing_st:
+                        slot["source_targets"].append(st)
+                        existing_st.add(key)
+                existing_attr_names = {a.get("name") for a in slot["attributes"]}
+                for attr in ed.get("attributes", []) or []:
+                    aname = attr.get("name")
+                    if aname and aname not in existing_attr_names:
+                        slot["attributes"].append(attr)
+                        existing_attr_names.add(aname)
+
+        # analysis_summary: keep the longest non-empty
+        summary = ""
+        for payload in payloads:
+            text = (payload.get("analysis_summary") or "").strip()
+            if len(text) > len(summary):
+                summary = text
+
+        # story_focus: dedupe in order
+        focus: List[str] = []
+        seen_focus = set()
+        for payload in payloads:
+            for f in payload.get("story_focus", []) or []:
+                if f and f not in seen_focus:
+                    focus.append(f)
+                    seen_focus.add(f)
+
+        return {
+            "entity_types": list(entity_by_name.values()),
+            "edge_types": list(edge_by_name.values()),
+            "analysis_summary": summary,
+            "story_focus": focus,
+        }
 
     def _offline_ontology(self, combined_text: str, analysis_goal: str) -> Dict[str, Any]:
         has_ai = any(keyword in combined_text for keyword in ["AI", "系统", "机械", "智能", "算法", "数字意识"])

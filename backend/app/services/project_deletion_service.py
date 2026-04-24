@@ -35,6 +35,14 @@ from ..tables.base import metadata
 # 否则 `test_project_deletion_cascade_covers_all_tables` 会红。
 
 # 已由 repo 方法覆盖的表（不需要在本服务里手动删除）。
+# Post-P5: ``archive_library`` is still in metadata as a legacy definition
+# (kept so alembic revision 20260412_0001 can replay). Migration
+# 20260419_0003 drops the table at runtime. Real archive rows live in
+# ``assets`` with ``asset_type='archive_entity'``, and
+# ``archive_repo.delete_archives_by_project`` targets them there. Listing
+# ``archive_library`` here satisfies the static coverage check in
+# ``test_cascade_delete_tables_cover_all_project_scoped`` without doing
+# redundant work — the repo call handles the real data.
 COVERED_BY_REPO_METHODS: tuple[Table, ...] = (
     archive_tables.archive_library,
     archive_tables.archive_sources,
@@ -91,6 +99,7 @@ ALL_PROJECT_SCOPED_TABLES: tuple[Table, ...] = (
     novel_tables.thread_entity_links,
     novel_tables.rule_entity_links,
     novel_tables.book_plans,
+    novel_tables.dedup_index,
     # worldline.py
     worldline_tables.agent_registry,
     worldline_tables.agent_state_snapshots,

@@ -32,6 +32,7 @@ from ...database import get_engine
 from ...repositories.archive_repo import ArchiveRepository
 from ...repositories.entity_repo import EntityRepository
 from ...repositories.graph_repo import GraphRepository
+from ...repositories.relationship_repo import RelationshipRepository
 from ...repositories.thread_repo import ThreadRepository
 from ...repositories.world_rule_repo import WorldRuleRepository
 from ...repositories.scene_repo import SceneRepository
@@ -204,20 +205,99 @@ def _archive_lifecycle_override(source: str, payload: Any) -> str | None:
 def classify(source: str, entity_type: str, payload: dict[str, Any] | None = None) -> tuple[str, str]:
     """把 (source, entity_type) 翻译成 (category, lifecycle)。
 
-    查找顺序：CATEGORY_MAP → LEGACY_ENTITY_TYPE_ALIASES →
-    _FALLBACK_CATEGORY_BY_SOURCE → CATEGORY_OTHER。
+    查找顺序:
+      1. 持久化 classification_map 表(migration 20260418_0001 落库的行)
+      2. Python 常量 CATEGORY_MAP / LEGACY_ENTITY_TYPE_ALIASES / LIFECYCLE_MAP
+         作为兜底(migration 未跑的测试环境也能工作)
+      3. _FALLBACK_CATEGORY_BY_SOURCE → CATEGORY_OTHER
+
+    最后由 ``_archive_lifecycle_override`` 为 archive 候选层做降级。
     """
-    key = (source, entity_type or "")
-    category = (
-        CATEGORY_MAP.get(key)
-        or LEGACY_ENTITY_TYPE_ALIASES.get(key)
-        or _FALLBACK_CATEGORY_BY_SOURCE.get(source, CATEGORY_OTHER)
-    )
-    lifecycle = LIFECYCLE_MAP.get(source, LIFECYCLE_CANON)
+    cat, life = _resolve_from_db(source, entity_type or "")
+    if cat is None:
+        # Python 兜底:让 CATEGORY_MAP / LEGACY_ENTITY_TYPE_ALIASES 继续生效。
+        key = (source, entity_type or "")
+        cat = (
+            CATEGORY_MAP.get(key)
+            or LEGACY_ENTITY_TYPE_ALIASES.get(key)
+            or _FALLBACK_CATEGORY_BY_SOURCE.get(source, CATEGORY_OTHER)
+        )
+        life = LIFECYCLE_MAP.get(source, LIFECYCLE_CANON)
     override = _archive_lifecycle_override(source, payload)
     if override:
-        lifecycle = override
-    return category, lifecycle
+        life = override
+    return cat, life
+
+
+# ----------------------------------------------------------------------
+# classification_map DB cache
+# ----------------------------------------------------------------------
+# Keyed by engine URL so switching DBs (per-test tmp sqlite) does not serve
+# stale rows to a fresh engine. Production only ever has one URL.
+
+_CLASSIFICATION_CACHE: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
+
+
+def _resolve_from_db(source: str, entity_type: str) -> tuple[str | None, str | None]:
+    """Look up (category, lifecycle) for (source, entity_type) in the
+    persistent ``classification_map`` table.
+
+    Falls back to the source wildcard row ``(source, '*')`` when the exact
+    pair is absent. Returns ``(None, None)`` if the table is empty or
+    unreachable (e.g. migration not yet applied in a test sandbox), so the
+    caller can fall back to the Python constants.
+    """
+    cache = _load_classification_cache()
+    if not cache:
+        return None, None
+    hit = cache.get((source, entity_type))
+    if hit:
+        return hit
+    wildcard = cache.get((source, "*"))
+    if wildcard:
+        return wildcard
+    return None, None
+
+
+def _load_classification_cache() -> dict[tuple[str, str], tuple[str, str]]:
+    try:
+        engine = get_engine()
+    except Exception:
+        return {}
+    url_key = str(engine.url)
+    cached = _CLASSIFICATION_CACHE.get(url_key)
+    if cached is not None:
+        return cached
+    try:
+        from ...tables.assets import classification_map
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    classification_map.c.source,
+                    classification_map.c.entity_type,
+                    classification_map.c.category,
+                    classification_map.c.lifecycle,
+                )
+            ).fetchall()
+    except Exception:
+        # Table may not exist yet (fresh test DB without migrations, or
+        # bootstrap ordering). Cache empty so classify() uses the Python
+        # constants path; reset via reset_classification_cache() if needed.
+        _CLASSIFICATION_CACHE[url_key] = {}
+        return _CLASSIFICATION_CACHE[url_key]
+    built: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in rows:
+        m = row._mapping
+        built[(m["source"], m["entity_type"])] = (m["category"], m["lifecycle"])
+    _CLASSIFICATION_CACHE[url_key] = built
+    return built
+
+
+def reset_classification_cache() -> None:
+    """Drop all cached classification_map snapshots. Call after seeding or
+    during tests that need the next classify() to re-read the DB.
+    """
+    _CLASSIFICATION_CACHE.clear()
 
 
 # ----------------------------------------------------------------------
@@ -347,10 +427,15 @@ class Readers:
         self._thread_repo = ThreadRepository(engine)
         self._rule_repo = WorldRuleRepository(engine)
         self._scene_repo = SceneRepository(engine)
+        self._relationship_repo = RelationshipRepository(engine)
 
     # -- assets --------------------------------------------------------
     def read_assets(self, project_id: str | None) -> list[UnifiedAsset]:
         rows = self.assets.list_merged(project_id=project_id, limit=500)
+        # Post-P5: archive entities share the ``assets`` table but are
+        # surfaced under source='archive' via ``read_archive``. Skip them
+        # here to avoid double-counting in the unified list.
+        rows = [r for r in rows if r.get("asset_type") != "archive_entity"]
         results: list[UnifiedAsset] = []
         for r in rows:
             results.append(
@@ -528,6 +613,54 @@ class Readers:
                 )
             )
 
+        # Relationships via repository. Title renders as "A → B（type）" so the
+        # global FTS index hits on either side's name or the relation type.
+        # Resolve source_id/target_id to names in one batch pass.
+        rel_rows = self._relationship_repo.list_relationships(project_id, limit=500)
+        if rel_rows:
+            name_cache: dict[str, str] = {}
+
+            def _name_for(entity_id: str) -> str:
+                if not entity_id:
+                    return ""
+                if entity_id in name_cache:
+                    return name_cache[entity_id]
+                row = self._entity_repo.get_entity(project_id, entity_id)
+                nm = (row or {}).get("name") or entity_id
+                name_cache[entity_id] = nm
+                return nm
+
+            for row in rel_rows:
+                src_name = _name_for(row.get("source_id") or "")
+                tgt_name = _name_for(row.get("target_id") or "")
+                rel_type = row.get("relation_type") or "关系"
+                title = f"{src_name} → {tgt_name}（{rel_type}）"
+                summary_parts = [row.get("description") or ""]
+                if row.get("power_dynamic"):
+                    summary_parts.append(f"权力={row['power_dynamic']}")
+                if row.get("conflict_trigger"):
+                    summary_parts.append(f"冲突={row['conflict_trigger']}")
+                out.append(
+                    UnifiedAsset(
+                        source=SOURCE_NOVEL_DB,
+                        source_ref=f"relationship:{row['relation_id']}",
+                        entity_type="relationship",
+                        title=title,
+                        summary=" / ".join(p for p in summary_parts if p),
+                        scope="project",
+                        project_id=project_id,
+                        updated_at=row.get("updated_at") or "",
+                        payload=row,
+                        origin_link=f"/writer-workbench?relation_id={row['relation_id']}",
+                    )
+                )
+
+        # Archive candidate memories (agent-proposed facts not yet promoted to
+        # canon). Indexed with entity_type="agent_memory_candidate" so the
+        # writer agent's search_settings(scope="memory") can surface them,
+        # without mixing into the canonical entity/thread/rule results.
+        out.extend(self._read_candidate_memories(project_id))
+
         # Scenes via SQLAlchemy (need cross-table JOIN)
         from sqlalchemy import func
         stmt = (
@@ -563,6 +696,54 @@ class Readers:
                         updated_at=r.get("updated_at") or "",
                         payload=r,
                         origin_link=f"/writer-workbench?scene_id={r['scene_id']}",
+                    )
+                )
+        return out
+
+    def _read_candidate_memories(self, project_id: str) -> list[UnifiedAsset]:
+        """Surface archive candidate memories as indexable assets.
+
+        The writer agent uses search_settings(scope="memory") to find these;
+        without indexing them here, unadopted world hypotheses (relationships,
+        rules, goals) would never show up in cross-silo search.
+        """
+        try:
+            archives = self._archive_repo.list_archives(project_id=project_id, limit=500)
+        except Exception:
+            return []
+        if not archives:
+            return []
+
+        out: list[UnifiedAsset] = []
+        for arc in archives:
+            archive_id = arc.get("archive_id")
+            if not archive_id:
+                continue
+            try:
+                rows = self._archive_repo.list_active_memory(
+                    archive_id, layers=("candidate",), statuses=("active",), limit=50,
+                )
+            except Exception:
+                continue
+            owner = arc.get("entity_name") or archive_id
+            for r in rows:
+                mid = r.get("memory_id") or ""
+                mtype = r.get("memory_type") or "memory"
+                subject = r.get("normalized_subject") or ""
+                summary = r.get("summary") or ""
+                title = f"[{mtype}] {owner}：{subject or summary[:40]}"
+                out.append(
+                    UnifiedAsset(
+                        source=SOURCE_NOVEL_DB,
+                        source_ref=f"agent_memory_candidate:{mid}",
+                        entity_type="agent_memory_candidate",
+                        title=title,
+                        summary=summary,
+                        scope="project",
+                        project_id=project_id,
+                        updated_at=r.get("updated_at") or "",
+                        payload=r,
+                        origin_link=f"/assets?archive_id={archive_id}&memory_id={mid}",
                     )
                 )
         return out
@@ -903,3 +1084,139 @@ class UnifiedAssetView:
             if it["source_ref"] == ref:
                 return it
         return None
+
+    # -- cross-silo merges --------------------------------------------
+    # Thin wrappers around NarrativeEntityService so callers who already use
+    # UnifiedAssetView have a single façade for merged character/relationship
+    # views (entities + archive + character_archetype refs).
+
+    def get_entity(
+        self, *, project_id: str, name: str | None = None, entity_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the merged (entity + canon archive + archetype refs) view.
+
+        Provide either ``name`` or ``entity_id``. Returns ``None`` if neither
+        the entity nor a matching archive exists for that project.
+        """
+        from ..narrative_entity_service import NarrativeEntityService
+        svc = NarrativeEntityService()
+        if entity_id:
+            merged = svc.get_by_entity_id(project_id, entity_id)
+        elif name:
+            merged = svc.get_by_name(project_id, name)
+        else:
+            raise ValueError("get_entity requires either 'name' or 'entity_id'")
+        return merged.to_dict() if merged else None
+
+    def get_relationship(
+        self, *, project_id: str, entity_a: str, entity_b: str,
+    ) -> dict[str, Any] | None:
+        """Return relationship row + supplementary summary from both archives.
+
+        Reads ``relationships`` (by resolved entity_ids) and enriches the row
+        with ``relationship_summary`` from either participant's archive
+        (canon side) if present. Returns ``None`` when no relationship row
+        exists between the two entities.
+        """
+        from ...repositories.relationship_repo import RelationshipRepository
+        from ..narrative_entity_service import NarrativeEntityService
+        engine = get_engine()
+        svc = NarrativeEntityService(engine)
+        a_merged = svc.get_by_name(project_id, entity_a)
+        b_merged = svc.get_by_name(project_id, entity_b)
+        a_id = a_merged.entity_id if a_merged else None
+        b_id = b_merged.entity_id if b_merged else None
+        if not a_id or not b_id:
+            return None
+        rel_repo = RelationshipRepository(engine)
+        rel = rel_repo.get_relationship_between(project_id, a_id, b_id)
+        if rel is None:
+            return None
+        # Canon-side summary enrichment: take whichever archive has a
+        # relationship_summary filled in.
+        canon_summary = ""
+        for side in (a_merged, b_merged):
+            if side and side.canon_profile:
+                s = (side.canon_profile.get("relationship_summary") or "").strip()
+                if s:
+                    canon_summary = s
+                    break
+        enriched = dict(rel)
+        if canon_summary:
+            enriched["canon_relationship_summary"] = canon_summary
+        enriched["entity_a"] = {
+            "name": entity_a,
+            "entity_id": a_id,
+            "archive_id": a_merged.archive_id if a_merged else None,
+        }
+        enriched["entity_b"] = {
+            "name": entity_b,
+            "entity_id": b_id,
+            "archive_id": b_merged.archive_id if b_merged else None,
+        }
+        return enriched
+
+    def search_world_rules_unified(
+        self, *, project_id: str, query: str | None = None, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Combine novel_db ``world_rule_evidence`` with assets of type
+        ``worldview`` / ``world_rule`` into one ranked list.
+
+        Both sources carry canonical world-setting info; merging lets the
+        writer agent retrieve them in a single call instead of branching.
+        """
+        engine = get_engine()
+        out: list[dict[str, Any]] = []
+        # novel_db rules
+        from ...repositories.world_rule_repo import WorldRuleRepository
+        rule_repo = WorldRuleRepository(engine)
+        rows = rule_repo.list_rules(project_id, limit=limit) or []
+        q = (query or "").strip().lower()
+        for r in rows:
+            if q:
+                haystack = (
+                    (r.get("fact_text") or "") + " " + (r.get("evidence_snippet") or "")
+                ).lower()
+                if q not in haystack:
+                    continue
+            out.append(
+                {
+                    "source": SOURCE_NOVEL_DB,
+                    "ref": f"rule:{r.get('evidence_id')}",
+                    "title": (r.get("fact_text") or "")[:60],
+                    "summary": r.get("evidence_snippet") or r.get("fact_text") or "",
+                    "payload": r,
+                }
+            )
+        # assets.worldview / world_rule
+        for asset_type in ("worldview", "world_rule"):
+            try:
+                assets = self._readers.assets.list_merged(
+                    project_id=project_id,
+                    asset_type=asset_type,
+                    enabled_only=True,
+                    limit=limit,
+                ) or []
+            except Exception:
+                assets = []
+            for a in assets:
+                if q:
+                    haystack = (
+                        (a.get("title") or "")
+                        + " "
+                        + (a.get("summary") or "")
+                        + " "
+                        + (a.get("content") or "")
+                    ).lower()
+                    if q not in haystack:
+                        continue
+                out.append(
+                    {
+                        "source": SOURCE_ASSETS,
+                        "ref": f"asset:{a.get('asset_id')}",
+                        "title": a.get("title") or "",
+                        "summary": a.get("summary") or a.get("content") or "",
+                        "payload": a,
+                    }
+                )
+        return out[:limit]

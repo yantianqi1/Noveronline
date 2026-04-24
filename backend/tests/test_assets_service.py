@@ -143,3 +143,53 @@ def test_delete(isolated_assets):
     a = svc.create(scope=GLOBAL_SCOPE, asset_type="note", title="临时笔记")
     assert svc.delete(a["asset_id"], scope=GLOBAL_SCOPE) is True
     assert svc.get(a["asset_id"], scope=GLOBAL_SCOPE) is None
+
+
+def test_link_persists_project_id(isolated_assets):
+    """project 范围下的 link 必须把 project_id 写入 asset_links，
+    否则 cascade_delete_project 按 project_id 过滤删除时会漏掉它们。"""
+    svc = isolated_assets
+    pid = f"proj_{uuid.uuid4().hex[:8]}"
+    src = svc.create(
+        scope=PROJECT_SCOPE, project_id=pid,
+        asset_type="note", title="A",
+    )
+    dst = svc.create(
+        scope=PROJECT_SCOPE, project_id=pid,
+        asset_type="note", title="B",
+    )
+    svc.link(
+        src["asset_id"], dst["asset_id"], "references",
+        scope=PROJECT_SCOPE, project_id=pid,
+    )
+    from sqlalchemy import select
+    from app.tables.assets import asset_links
+    with svc._repo.connect() as conn:
+        row = conn.execute(
+            select(asset_links).where(
+                asset_links.c.src_asset_id == src["asset_id"],
+            ),
+        ).fetchone()
+    assert row is not None
+    assert row._mapping["project_id"] == pid
+
+
+def test_link_global_scope_leaves_project_id_null(isolated_assets):
+    """global scope 下的 link 不应写 project_id。"""
+    svc = isolated_assets
+    a = svc.create(scope=GLOBAL_SCOPE, asset_type="note", title="A")
+    b = svc.create(scope=GLOBAL_SCOPE, asset_type="note", title="B")
+    svc.link(
+        a["asset_id"], b["asset_id"], "references",
+        scope=GLOBAL_SCOPE,
+    )
+    from sqlalchemy import select
+    from app.tables.assets import asset_links
+    with svc._repo.connect() as conn:
+        row = conn.execute(
+            select(asset_links).where(
+                asset_links.c.src_asset_id == a["asset_id"],
+            ),
+        ).fetchone()
+    assert row is not None
+    assert row._mapping["project_id"] is None

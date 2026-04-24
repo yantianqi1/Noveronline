@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import logging
 import uuid
 import json
 from datetime import datetime
@@ -13,6 +14,20 @@ from dataclasses import dataclass, field
 
 from ..database import get_engine
 from ..repositories.task_repo import TaskRepository
+
+logger = logging.getLogger(__name__)
+
+
+def _log_if_failed(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget coroutines scheduled via sync_bridge
+    on the event loop thread. Surfaces failures that would otherwise be
+    silently swallowed."""
+    try:
+        exc = task.exception()
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        return
+    if exc is not None:
+        logger.exception("sync_bridge fire-and-forget task failed: %s", exc)
 
 
 class TaskStatus(str, Enum):
@@ -89,8 +104,25 @@ class TaskManager:
         """Run an async TaskManager coroutine from a sync context (e.g. a
         background thread started via ``asyncio.to_thread``).  Falls back to
         ``asyncio.run`` when no loop is cached.
+
+        If invoked while already running on the cached event loop thread
+        (e.g. an async coroutine's ``except`` block calling ``progress.fail``
+        which internally dispatches through ``sync_bridge``), blocking on
+        ``future.result()`` would deadlock: the current thread IS the
+        event loop, so scheduling the coroutine on that loop and then
+        blocking prevents the loop from ever running it. In that case we
+        schedule it as a fire-and-forget task instead; progress updates
+        complete asynchronously as soon as the current coroutine yields.
         """
         loop = self._ensure_loop()
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is not None and current_loop is loop:
+            task = asyncio.ensure_future(coro, loop=loop)
+            task.add_done_callback(_log_if_failed)
+            return None
         if loop is not None and loop.is_running():
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             return future.result()

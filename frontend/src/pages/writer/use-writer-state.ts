@@ -19,7 +19,7 @@ import {
   getArchiveMemoryTimeline,
   adoptArchiveMemory,
   rejectArchiveMemory,
-} from "@/api/archive";
+} from "@/api/assets";
 import {
   runWriterAgent,
   getScenes,
@@ -44,6 +44,7 @@ import {
   getOutlineVersion,
   restoreOutlineVersion,
   updateWorldData,
+  applyReviewer,
 } from "@/api/writer-agent";
 import { useProjectCatalog } from "@/hooks/use-project-catalog";
 import { useNotification } from "@/hooks/use-notification";
@@ -59,7 +60,7 @@ import type {
   ContextItem,
   WorldlineAgent,
 } from "./writer-workbench-state";
-import type { AgentTraceState, AgentRound } from "@/components/agent-trace-panel";
+import type { AgentTraceState, AgentRound, AgentToolCall } from "@/components/agent-trace-panel";
 
 /* ================================================================
    Types
@@ -118,6 +119,15 @@ export interface OutlineVersionItem {
   label?: string;
   created_at: string;
   outline_json?: string;
+}
+
+// One entry from the orchestrator's ``data_health_warning`` SSE event. Matches
+// the backend payload in ``_collect_data_health_issues``.
+export interface DataHealthIssue {
+  code: string;
+  severity: "info" | "warning";
+  title: string;
+  hint: string;
 }
 
 export interface ContinuationCtx {
@@ -200,6 +210,14 @@ export function useWriterState() {
   const [involvedEntityIds] = useState<string[]>([]);
   const draftAbortControllerRef = useRef<AbortController | null>(null);
 
+  /* ─── Data health self-check (Task 4) ─── */
+  // Populated from the ``data_health_warning`` SSE event that the orchestrator
+  // emits before the retrieval planner runs. Each issue is
+  // ``{code, severity, title, hint}``. Reset on every run so stale warnings
+  // don't linger after the user fixes the underlying data.
+  const [dataHealthIssues, setDataHealthIssues] = useState<DataHealthIssue[]>([]);
+  const [dataHealthDismissed, setDataHealthDismissed] = useState(false);
+
   /* ─── Agent trace ─── */
   const [agentTrace, setAgentTrace] = useState<AgentTraceState>({
     orchestrator: { status: "idle", model: "", rounds: [], summary: undefined },
@@ -221,6 +239,10 @@ export function useWriterState() {
   const [continuationContext, setContinuationContext] = useState<ContinuationCtx | null>(null);
   const [showContinueButton, setShowContinueButton] = useState(false);
   const [lastCommittedBlockId, setLastCommittedBlockId] = useState("");
+  // Task 5: optional user-picked continuation anchor. When empty, falls back
+  // to lastCommittedBlockId (the latest committed block). Lets authors pick
+  // any block in the TOC as the "continue from here" point.
+  const [selectedAnchorBlockId, setSelectedAnchorBlockId] = useState<string | null>(null);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitDone, setCommitDone] = useState(false);
   const [commitTargetChapterId, setCommitTargetChapterId] = useState("");
@@ -316,6 +338,7 @@ export function useWriterState() {
     setAgentTrace({
       orchestrator: { status: "idle", model: "", rounds: [], summary: undefined },
       writer: { status: "idle", model: "", wordCount: 0, elapsedMs: 0 },
+      reviewer: { status: "idle" },
       error: "",
     });
   }, []);
@@ -341,6 +364,45 @@ export function useWriterState() {
 
   const handleTraceEvent = useCallback(
     (event: SSEEvent) => {
+      // React 19 StrictMode intentionally double-invokes state updaters to surface
+      // impure reducers. Side effects (ref mutations, setState on other atoms,
+      // appending tokens) MUST happen outside the setAgentTrace updater — otherwise
+      // each writer_token gets appended twice, which is the root cause of the
+      // observed prose duplication.
+      if (event.type === "writer_token") {
+        const token = (event.token as string) || "";
+        contentRef.current += token;
+        const wordCount = contentRef.current.length;
+        setAgentSceneContent(contentRef.current);
+        setDraftPhase("writing");
+        setAgentTrace((prev) => ({
+          ...prev,
+          writer: { ...prev.writer, status: "running", wordCount },
+        }));
+        return;
+      }
+
+      if (event.type === "orchestrator_status") {
+        setDraftPhase(event.phase === "writing" ? "writing" : "collecting");
+        setMessage((event.message as string) || "编排中...");
+      } else if (event.type === "data_health_warning") {
+        // Fired once per run, right after orchestrator_status starting. Reset
+        // the dismissed flag so fresh issues show a banner even if the user
+        // closed the previous one.
+        const issues = Array.isArray(event.issues)
+          ? (event.issues as DataHealthIssue[])
+          : [];
+        setDataHealthIssues(issues);
+        setDataHealthDismissed(false);
+      } else if (event.type === "outline_ready") {
+        setDraftPhase("done");
+        setOutlineData(event.outline as OutlineScene[]);
+      } else if (event.type === "error") {
+        setError((event.message as string) || "生成失败");
+        setAgentStreaming(false);
+        setDraftPhase(contentRef.current ? "done" : "idle");
+      }
+
       setAgentTrace((prev) => {
         const next = { ...prev };
 
@@ -354,8 +416,6 @@ export function useWriterState() {
             }
           }
           next.orchestrator = orchStatus;
-          setDraftPhase(event.phase === "writing" ? "writing" : "collecting");
-          setMessage((event.message as string) || "编排中...");
         } else if (event.type === "thinking") {
           const rn = (event.round as number) ?? Math.max(0, prev.orchestrator.rounds.length - 1);
           const rounds = ensureRound(rn, prev);
@@ -394,6 +454,7 @@ export function useWriterState() {
                   fullResult: (event.full_result as string) || (event.summary as string),
                   status: (event.status === "error" ? "error" : "done") as "done" | "error",
                   toolElapsedMs: (event.tool_elapsed_ms as number) || 0,
+                  render: (event.render as AgentToolCall["render"]) ?? null,
                 }
               : tc,
           );
@@ -427,18 +488,28 @@ export function useWriterState() {
               tokenUsage: (event.token_usage as { total_tokens?: number }) ?? undefined,
             },
           };
-        } else if (event.type === "writer_token") {
-          setDraftPhase("writing");
-          contentRef.current += (event.token as string) || "";
-          setAgentSceneContent(contentRef.current);
-          next.writer = { ...prev.writer, status: "running", wordCount: contentRef.current.length };
-        } else if (event.type === "outline_ready") {
-          setDraftPhase("done");
-          setOutlineData(event.outline as OutlineScene[]);
+        } else if (event.type === "reviewer_status") {
+          next.reviewer = {
+            ...(prev.reviewer || { status: "idle" }),
+            status: (event.status as "running" | "done" | "error") || "running",
+          };
+        } else if (event.type === "reviewer_feedback") {
+          next.reviewer = {
+            ...(prev.reviewer || { status: "running" }),
+            status: "done",
+            feedback: event.feedback as NonNullable<AgentTraceState["reviewer"]>["feedback"],
+            sceneId: event.scene_id as string | undefined,
+            chapterId: event.chapter_id as string | undefined,
+            chapterOrder: event.chapter_order as number | undefined,
+            sceneOrder: event.scene_order as number | undefined,
+          };
+        } else if (event.type === "reviewer_complete") {
+          next.reviewer = {
+            ...(prev.reviewer || { status: "done" }),
+            status: "done",
+            elapsedMs: (event.elapsed_ms as number) || 0,
+          };
         } else if (event.type === "error") {
-          setError((event.message as string) || "生成失败");
-          setAgentStreaming(false);
-          setDraftPhase(contentRef.current ? "done" : "idle");
           next.error = (event.message as string) || "生成失败";
         }
         return next;
@@ -777,6 +848,8 @@ export function useWriterState() {
     setOutlineData(null);
     setDraftPhase("collecting");
     resetAgentTrace();
+    setDataHealthIssues([]);
+    setDataHealthDismissed(false);
     setCommitDone(false);
     if (worldUpdateAbortRef.current) {
       worldUpdateAbortRef.current.abort();
@@ -804,7 +877,10 @@ export function useWriterState() {
       session_id: sessionId,
       selected_text: "",
       scene_id: selectedSceneId,
-      last_block_id: taskType === "continue" ? lastCommittedBlockId : "",
+      last_block_id:
+        taskType === "continue"
+          ? (selectedAnchorBlockId || lastCommittedBlockId)
+          : "",
     };
 
     if (draftAbortControllerRef.current) {
@@ -819,7 +895,13 @@ export function useWriterState() {
         onDone: handleTraceDone,
         onError(event) {
           setAgentStreaming(false);
-          setDraftPhase(contentRef.current ? "done" : "idle");
+          // When the stream fails mid-generation, prose collected so far is
+          // almost always truncated and useless. Keeping it on-screen only
+          // invites the user to hit "generate" again and see the broken head
+          // prepended to the new output, so we drop it and reset the editor.
+          contentRef.current = "";
+          setAgentSceneContent("");
+          setDraftPhase("idle");
           const msg =
             (event as SSEEvent)?.message ??
             (event as Error)?.toString?.() ??
@@ -844,6 +926,7 @@ export function useWriterState() {
     selectedPresetId,
     sessionId,
     lastCommittedBlockId,
+    selectedAnchorBlockId,
     resetAgentTrace,
     handleTraceEvent,
     handleTraceDone,
@@ -1069,7 +1152,7 @@ export function useWriterState() {
     setTaskType("continue");
     try {
       const res = await getContinuationContext(projectId, {
-        lastBlockId: lastCommittedBlockId,
+        lastBlockId: selectedAnchorBlockId || lastCommittedBlockId,
       });
       setContinuationContext(
         ((res.data as ContinuationCtx) || res) as ContinuationCtx,
@@ -1077,7 +1160,102 @@ export function useWriterState() {
     } catch (err: unknown) {
       setError((err as Error).message || "加载续写上下文失败");
     }
-  }, [projectId, lastCommittedBlockId]);
+  }, [projectId, lastCommittedBlockId, selectedAnchorBlockId]);
+
+  const dismissReviewerFeedback = useCallback(() => {
+    setAgentTrace((prev) => ({
+      ...prev,
+      reviewer: { ...(prev.reviewer || { status: "idle" }), feedback: undefined },
+    }));
+  }, []);
+
+  /** Re-run the writer composer with reviewer-selected rewrites, in place. */
+  const handleApplyReviewer = useCallback(
+    async (acceptedIssueIds: string[]) => {
+      if (!projectId) return;
+      const reviewer = agentTrace.reviewer;
+      const feedback = reviewer?.feedback;
+      if (!feedback || !reviewer?.sceneId) {
+        setError("没有可应用的审校建议");
+        return;
+      }
+      const accepted = (feedback.issues || []).filter((i) =>
+        acceptedIssueIds.includes(i.id),
+      );
+      if (!accepted.length) {
+        setError("请至少选择一条改写建议");
+        return;
+      }
+      const draft = contentRef.current || agentSceneContent;
+      if (!draft.trim()) {
+        setError("初稿内容为空，无法改写");
+        return;
+      }
+
+      setError("");
+      setAgentStreaming(true);
+      setDraftPhase("writing");
+      // Hold the original draft in contentRef so we can restore on error.
+      const originalDraft = draft;
+      contentRef.current = "";
+      setAgentSceneContent("");
+
+      const payload = {
+        project_id: projectId,
+        scene_id: reviewer.sceneId,
+        chapter_id: reviewer.chapterId || chapterId || "",
+        chapter_order:
+          reviewer.chapterOrder ??
+          chapterOptions.find((c) => c.chapter_id === chapterId)?.order ??
+          chapterOrder,
+        scene_order: reviewer.sceneOrder ?? 1,
+        preset_id: selectedPresetId,
+        pov_entity_id: povCharacter,
+        involved_entity_ids: involvedEntityIds,
+        writing_brief: {}, // server falls back to its stored brief via scene repo (not yet wired)
+        accepted_issues: accepted,
+        draft: originalDraft,
+      };
+
+      try {
+        await applyReviewer(payload, {
+          onEvent: handleTraceEvent,
+          onDone: handleTraceDone,
+          onError(event) {
+            setAgentStreaming(false);
+            // Restore original draft so the user can still see it and retry.
+            contentRef.current = originalDraft;
+            setAgentSceneContent(originalDraft);
+            setDraftPhase("done");
+            const msg =
+              (event as SSEEvent)?.message ??
+              (event as Error)?.toString?.() ??
+              "改写失败";
+            setError(msg as string);
+          },
+        });
+      } catch (err: unknown) {
+        setAgentStreaming(false);
+        contentRef.current = originalDraft;
+        setAgentSceneContent(originalDraft);
+        setDraftPhase("done");
+        setError((err as Error)?.message || "改写失败");
+      }
+    },
+    [
+      projectId,
+      agentTrace.reviewer,
+      agentSceneContent,
+      chapterId,
+      chapterOptions,
+      chapterOrder,
+      selectedPresetId,
+      povCharacter,
+      involvedEntityIds,
+      handleTraceEvent,
+      handleTraceDone,
+    ],
+  );
 
   const handleWorldUpdate = useCallback(async () => {
     if (!projectId || !agentSceneContent) return;
@@ -1365,10 +1543,16 @@ export function useWriterState() {
     agentSceneContent,
     agentStreaming,
     agentTrace,
+    handleTraceEvent,
     outlineData,
     canSubmit,
     canGenerate,
     generateButtonLabel,
+
+    /* data health (Task 4) */
+    dataHealthIssues,
+    dataHealthDismissed,
+    dismissDataHealth: () => setDataHealthDismissed(true),
 
     /* scenes */
     scenes,
@@ -1390,6 +1574,9 @@ export function useWriterState() {
     setManuscriptSelectedChapterId,
     continuationContext,
     showContinueButton,
+    // Task 5: continuation anchor override
+    selectedAnchorBlockId,
+    setSelectedAnchorBlockId,
     commitBusy,
     commitDone,
     commitTargetChapterId,
@@ -1413,6 +1600,14 @@ export function useWriterState() {
     openPresetEditor,
     handlePresetSave,
     handleAgentGenerate,
+    // Task 6: cancel the in-flight draft stream. Triggers AbortController →
+    // sse.ts onError → which already clears contentRef + resets draftPhase.
+    cancelDraft: () => {
+      if (draftAbortControllerRef.current) {
+        draftAbortControllerRef.current.abort();
+        draftAbortControllerRef.current = null;
+      }
+    },
     handleSaveReviewerRules,
     handleResetReviewerRules,
     loadSelectedTimeline,
@@ -1424,6 +1619,8 @@ export function useWriterState() {
     handleCommitToManuscript,
     handleContinueNext,
     handleWorldUpdate,
+    handleApplyReviewer,
+    dismissReviewerFeedback,
     handleManuscriptBlockSave,
     handleManuscriptBlockDelete,
     handleMoveManuscriptBlock,

@@ -23,6 +23,7 @@ import {
   getWorldlineTimeline,
   injectWorldlineVariable,
   prepareWorldlineSession,
+  resumeWorldlinePrepare,
   startPreparedWorldlineSession,
 } from "@/api/worldline";
 import { getTask } from "@/api/project";
@@ -311,6 +312,26 @@ export default function WorldlinePage() {
       }
       if (autoEvolution.prepareAfterSessionCreate()) {
         await startAutoEvolve();
+      }
+    } catch (err: unknown) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resumePrepareFlow() {
+    if (!prepareId) return;
+    try {
+      setBusy(true);
+      setError("");
+      const res = await resumeWorldlinePrepare(prepareId);
+      const data = res.data as Record<string, unknown>;
+      const nextTaskId = (data.task_id as string) || "";
+      if (nextTaskId) setPrepareTaskId(nextTaskId);
+      setFeedback("已续传 LLM 整备,跳过已完成的 agent");
+      if (nextTaskId) {
+        await waitForPreparedSession(nextTaskId, prepareId);
       }
     } catch (err: unknown) {
       setError((err as Error).message);
@@ -645,6 +666,19 @@ export default function WorldlinePage() {
                   <span>prepare_id: {prepareId}</span>
                   {prepareTaskId && <span>task: {prepareTaskId}</span>}
                 </div>
+                {prepareSnapshot?.status === "failed" && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={resumePrepareFlow}
+                      title="保留已生成的 agent dossier,只补跑失败/未跑的部分"
+                    >
+                      断点续传
+                    </Button>
+                  </div>
+                )}
               </article>
             )}
 

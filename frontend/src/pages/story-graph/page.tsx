@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, RefreshCw, Network, BarChart3, FileArchive, Eye, EyeOff, Target } from "lucide-react";
+import { Loader2, RefreshCw, Network, BarChart3, FileArchive, Eye, EyeOff, Target, MousePointerSquareDashed, Sparkles } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { ApiResponse } from "@/api/http";
@@ -34,6 +34,7 @@ import {
   AgentTemplateConfigurator,
   type ArchiveCandidate,
 } from "./agent-template-configurator";
+import { GraphBondGeneratorDialog } from "./graph-bond-generator-dialog";
 import { createGraphBuildTaskPoller, type TaskData } from "./graph-build-task-poller";
 import {
   type GraphNodeVM,
@@ -76,6 +77,7 @@ function toViewNodes(rawNodes: unknown[]): GraphNodeVM[] {
       entity_type: labels.find((l: string) => !["Entity", "Node"].includes(l)) || "Unknown",
       summary: String(n.summary || ""),
       attributes: (n.attributes as Record<string, unknown>) || {},
+      evidence_refs: (n.evidence_refs as GraphNodeVM["evidence_refs"]) || [],
     });
   });
 }
@@ -128,6 +130,9 @@ export default function StoryGraphPage() {
   // Selection
   const [selectedNode, setSelectedNode] = React.useState<GraphNodeVM | null>(null);
   const [selectedEdge, setSelectedEdge] = React.useState<GraphEdgeVM | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = React.useState<Set<string>>(() => new Set());
+  const [selectionMode, setSelectionMode] = React.useState<"single" | "multi">("single");
+  const [bondDialogOpen, setBondDialogOpen] = React.useState(false);
 
   // Type filtering
   const [visibleTypes, setVisibleTypes] = React.useState<Record<string, boolean>>({
@@ -203,7 +208,17 @@ export default function StoryGraphPage() {
         setSelectedEdge(null);
       }
     }
-  }, [visibleNodes, visibleEdges, selectedNode, selectedEdge]);
+    if (selectedNodeIds.size > 0) {
+      const visibleIds = new Set(visibleNodes.map(resolveNodeId));
+      let changed = false;
+      const next = new Set<string>();
+      selectedNodeIds.forEach((id) => {
+        if (visibleIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      if (changed) setSelectedNodeIds(next);
+    }
+  }, [visibleNodes, visibleEdges, selectedNode, selectedEdge, selectedNodeIds]);
 
   /* -- graph data refresh -- */
   const refreshGraph = React.useCallback(
@@ -339,17 +354,47 @@ export default function StoryGraphPage() {
   }
 
   /* -- selection handlers -- */
-  function handleNodeSelect(node: GraphNodeVM) {
+  function toggleMultiSelect(nodeId: string) {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }
+
+  function handleNodeSelect(
+    node: GraphNodeVM,
+    modifiers?: { ctrlOrMeta: boolean; shift: boolean },
+  ) {
+    const isMultiClick = selectionMode === "multi" || Boolean(modifiers?.ctrlOrMeta);
+    if (isMultiClick) {
+      toggleMultiSelect(node.id);
+      return;
+    }
     setSelectedEdge(null);
     setSelectedNode(node);
+    setSelectedNodeIds(new Set());
   }
 
   function handleEdgeSelect(edge: GraphEdgeVM) {
     setSelectedNode(null);
     setSelectedEdge(edge);
+    setSelectedNodeIds(new Set());
   }
 
   function handleCanvasSelect() {
+    setSelectedNode(null);
+    setSelectedEdge(null);
+    setSelectedNodeIds(new Set());
+  }
+
+  function handleBoxSelect(ids: string[]) {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
     setSelectedNode(null);
     setSelectedEdge(null);
   }
@@ -484,12 +529,14 @@ export default function StoryGraphPage() {
                 nodes={visibleNodes}
                 edges={visibleEdges}
                 selectedNodeId={selectedNodeId}
+                selectedNodeIds={selectedNodeIds}
                 selectedEdgeId={selectedEdgeId}
                 showEdgeLabels={showEdgeLabels}
                 visibleLabelNodeIds={visibleLabelNodeIds}
                 onNodeSelect={handleNodeSelect}
                 onEdgeSelect={handleEdgeSelect}
                 onCanvasSelect={handleCanvasSelect}
+                onBoxSelect={handleBoxSelect}
                 className="h-full"
               />
 
@@ -531,6 +578,51 @@ export default function StoryGraphPage() {
                   </div>
                 </div>
 
+                {/* Multi-select toolbar */}
+                <div className="flex flex-wrap items-center gap-1 flex-shrink-0 rounded-md border border-dashed border-border/60 bg-muted/30 px-2 py-1.5">
+                  <Button
+                    variant={selectionMode === "multi" ? "default" : "outline"}
+                    size="sm"
+                    className="h-6 px-2 text-[11px]"
+                    onClick={() =>
+                      setSelectionMode((m) => (m === "multi" ? "single" : "multi"))
+                    }
+                  >
+                    <MousePointerSquareDashed className="mr-1 h-3 w-3" />
+                    {selectionMode === "multi" ? "多选中" : "多选模式"}
+                  </Button>
+                  <span className="text-[11px] text-muted-foreground">
+                    {"已选 "}
+                    <span className="font-semibold text-foreground">{selectedNodeIds.size}</span>
+                    {" 个"}
+                    {selectedNodeIds.size === 0 && (
+                      <span className="ml-1 text-[10px] opacity-70">
+                        {"(Ctrl/⌘+点击 或 Shift+拖动框选)"}
+                      </span>
+                    )}
+                  </span>
+                  {selectedNodeIds.size > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setSelectedNodeIds(new Set())}
+                    >
+                      {"清空"}
+                    </Button>
+                  )}
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="ml-auto h-6 px-2 text-[11px]"
+                    disabled={selectedNodeIds.size < 2 || selectedNodeIds.size > 6}
+                    onClick={() => setBondDialogOpen(true)}
+                  >
+                    <Sparkles className="mr-1 h-3 w-3" />
+                    {"生成羁绊/支线"}
+                  </Button>
+                </div>
+
                 {/* Type filter row */}
                 <div className="flex flex-wrap gap-1 items-center flex-shrink-0">
                   {GRAPH_TYPE_OPTIONS.map((item) => (
@@ -570,6 +662,18 @@ export default function StoryGraphPage() {
         error={taskError}
         onClose={() => setConfiguratorVisible(false)}
         onConfirm={createArchives}
+      />
+
+      {/* Graph bond/plot-thread generator dialog */}
+      <GraphBondGeneratorDialog
+        open={bondDialogOpen}
+        projectId={projectId}
+        selectedNodes={graphNodes.filter((n) => selectedNodeIds.has(n.id))}
+        onOpenChange={setBondDialogOpen}
+        onGenerated={() => {
+          // Optional: refresh graph or notify. Keep selection so user can
+          // re-generate without re-picking nodes.
+        }}
       />
     </div>
   );

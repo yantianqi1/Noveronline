@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
+from ....schemas.asset_types import INGESTIBLE_TYPES
 
-SUPPORTED_TYPES = (
-    "writing_style",     # 文风
-    "worldview",         # 世界观/设定
-    "character_archetype",  # 角色原型/角色卡
-    "world_rule",        # 创作规则/世界规则
-    "plot_template",     # 桥段/情节模板
-    "prompt_template",   # 提示词模板
-    "note",              # 普通笔记
-)
+
+# Back-compat alias: older imports referenced this local name.
+SUPPORTED_TYPES = INGESTIBLE_TYPES
 
 INGEST_SYSTEM = (
     "你是「资产入库 Agent」。用户会粘贴一段原始素材，你需要把它转化成"

@@ -222,30 +222,47 @@ def build_continuation_context(
 
     stats = adapter.stats()
 
-    # --- Enabled writing_style assets (global + project), if any ---
+    # --- Enabled reference assets (global + project), by type ---
+    # writing_style: always load, agent most often leans on it.
+    # character_archetype / worldview / prompt_template: fewer per type so the
+    # context block stays manageable — the agent can still call
+    # list_assets / search_assets when it needs more.
     writing_styles: list[dict[str, Any]] = []
+    character_archetypes: list[dict[str, Any]] = []
+    worldviews: list[dict[str, Any]] = []
+    prompt_templates: list[dict[str, Any]] = []
+    _asset_type_limits = [
+        ("writing_style", writing_styles, 10),
+        ("character_archetype", character_archetypes, 5),
+        ("worldview", worldviews, 5),
+        ("prompt_template", prompt_templates, 3),
+    ]
     try:
         from ..assets.assets_service import AssetsService
         assets_svc = AssetsService()
-        for s in assets_svc.list_merged(
-            project_id=project_id,
-            asset_type="writing_style",
-            enabled_only=True,
-            limit=10,
-        ):
-            writing_styles.append({
-                "asset_id": s["asset_id"],
-                "title": s.get("title", ""),
-                "category": s.get("category", ""),
-                "summary": s.get("summary", ""),
-                "content": s.get("content", ""),
-            })
+        for asset_type, bucket, limit in _asset_type_limits:
+            for s in assets_svc.list_merged(
+                project_id=project_id,
+                asset_type=asset_type,
+                enabled_only=True,
+                limit=limit,
+            ):
+                bucket.append({
+                    "asset_id": s["asset_id"],
+                    "title": s.get("title", ""),
+                    "category": s.get("category", ""),
+                    "summary": s.get("summary", ""),
+                    "content": s.get("content", ""),
+                })
     except Exception:
-        logger.warning("failed to load writing_style assets", exc_info=True)
+        logger.warning("failed to load reference assets", exc_info=True)
 
     return {
         "recent_summaries": summaries,
         "writing_styles": writing_styles,
+        "character_archetypes": character_archetypes,
+        "worldviews": worldviews,
+        "prompt_templates": prompt_templates,
         "active_threads": active_threads,
         "last_pov": last_pov,
         "last_location": last_location,

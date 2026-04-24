@@ -75,7 +75,10 @@ def create_seed_project(client):
     return project.project_id
 
 
-def test_build_graph_creates_local_story_graph_and_query_api(tmp_path):
+def test_build_graph_creates_local_story_graph_and_query_api(tmp_path, monkeypatch):
+    # 这组测试校验独立 /build-graph 流程;关掉 seed 自动串联避免同测试进程里连续
+    # 跑两次 build_graph 触发 TaskManager 单例事件循环竞争。
+    monkeypatch.setenv("SEED_AUTO_LINK_GLOBAL_DATA", "false")
     ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
     TaskManager._instance = None
 
@@ -119,7 +122,8 @@ def test_build_graph_creates_local_story_graph_and_query_api(tmp_path):
     assert edge_count >= 3
 
 
-def test_local_graph_reader_exposes_entities_for_archives_and_worldbuilding(tmp_path):
+def test_local_graph_reader_exposes_entities_for_archives_and_worldbuilding(tmp_path, monkeypatch):
+    monkeypatch.setenv("SEED_AUTO_LINK_GLOBAL_DATA", "false")
     ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
     TaskManager._instance = None
 

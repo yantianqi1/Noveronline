@@ -9,9 +9,19 @@ import type { ContinuationCtx } from "./use-writer-state";
 
 interface ContinuationContextPanelProps {
   context: ContinuationCtx;
+  // Task 5: user-picked anchor override + clear callback. When set, the panel
+  // shows an explicit "续写锚点已改为此段" indicator above the tail snippet so
+  // the author knows the generated continuation won't start from the latest
+  // commit. ``onClearAnchor`` makes it one-click to revert.
+  anchorBlockId?: string | null;
+  onClearAnchor?: () => void;
 }
 
-export function ContinuationContextPanel({ context }: ContinuationContextPanelProps) {
+export function ContinuationContextPanel({
+  context,
+  anchorBlockId,
+  onClearAnchor,
+}: ContinuationContextPanelProps) {
   const [collapsed, setCollapsed] = React.useState(true);
 
   const hasContent =
@@ -62,6 +72,21 @@ export function ContinuationContextPanel({ context }: ContinuationContextPanelPr
       {/* Anchor — always visible */}
       {context.tail_text && (
         <div className="mx-3 mb-2 rounded-r-md border-l-[3px] border-l-primary bg-muted/50 p-3">
+          {anchorBlockId && (
+            <div className="mb-2 flex items-center gap-2 rounded border border-amber-500/40 bg-amber-50 px-2 py-1 text-[11px] text-amber-900 dark:border-amber-500/60 dark:bg-amber-950/40 dark:text-amber-200">
+              <span className="font-semibold">锚点已覆盖</span>
+              <span className="flex-1 truncate font-mono">{anchorBlockId.slice(0, 10)}…</span>
+              {onClearAnchor && (
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 text-[11px] text-amber-700 hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/60"
+                  onClick={onClearAnchor}
+                >
+                  恢复最新
+                </button>
+              )}
+            </div>
+          )}
           <div className="mb-1.5 flex items-center gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-primary">
               续写起点

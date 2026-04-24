@@ -19,9 +19,9 @@ def _split_csv(value: str | None) -> list[str]:
 
 
 @router.get("")
-async def list_unified(project_id: str | None = None, source: str | None = None, entity_type: str | None = None, scope: str | None = None, q: str | None = None, page: int = 1, page_size: int = 50):
+async def list_unified(project_id: str | None = None, source: str | None = None, entity_type: str | None = None, category: str | None = None, lifecycle: str | None = None, scope: str | None = None, q: str | None = None, page: int = 1, page_size: int = 50):
     try:
-        return ok(UnifiedAssetView().list(project_id=project_id, sources=_split_csv(source) or None, entity_types=_split_csv(entity_type) or None, scope=scope, q=q, page=page, page_size=page_size))
+        return ok(UnifiedAssetView().list(project_id=project_id, sources=_split_csv(source) or None, entity_types=_split_csv(entity_type) or None, categories=_split_csv(category) or None, lifecycles=_split_csv(lifecycle) or None, scope=scope, q=q, page=page, page_size=page_size))
     except Exception as exc:
         return err(exc)
 
@@ -40,11 +40,6 @@ async def search_unified(q: str = "", project_id: str | None = None, source: str
         if not q.strip():
             return err("q 不能为空", status_code=400)
         indexer = GlobalSearchIndexer()
-        if project_id:
-            with indexer._connect() as conn:
-                row = conn.execute("SELECT COUNT(*) AS n FROM global_index WHERE project_id = ?", (project_id,)).fetchone()
-            if row and row["n"] == 0:
-                indexer.reindex_project(project_id)
         return ok(indexer.search(q, project_id=project_id, sources=_split_csv(source) or None, entity_types=_split_csv(entity_type) or None, limit=limit, offset=offset))
     except Exception as exc:
         return err(exc)

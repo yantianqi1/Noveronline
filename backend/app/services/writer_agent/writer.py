@@ -4,6 +4,8 @@ import re
 import logging
 from collections.abc import AsyncIterator
 
+from .prompts import build_anti_cliche_constraints
+
 logger = logging.getLogger(__name__)
 
 WRITER_TEMPERATURE = 0.8
@@ -126,6 +128,52 @@ class WriterComposer:
             constraints = "\n".join(f"- {c}" for c in brief["constraints"])
             sections.append(f"\n### 约束（不能违反）\n{constraints}")
 
+        # Static anti-cliché rules (metaphor density, sentence variety, POV
+        # voice, paragraph rhythm, scene-opening diversity). Always injected
+        # so the composer never loses sight of the house style.
+        sections.append("\n" + build_anti_cliche_constraints(brief))
+
+        # Anti-repetition constraints: high-frequency patterns pulled from
+        # earlier chapters of this project. The writer should either AVOID
+        # these exact strings or rephrase them into a visibly different form.
+        # Empty buckets are skipped so the block only shows up when there's
+        # real accumulated history to fight against.
+        dedup = brief.get("dedup_constraints") or {}
+        if isinstance(dedup, dict) and any(dedup.values()):
+            _TYPE_LABELS = {
+                "opening_phrase": "开场短语（禁止原样复用，请换一个起手）",
+                "figurative_phrase": "比喻/意象（已使用过，本章请避免或改写）",
+                "action_verb": "角色动作词（请换动作或换角度）",
+                "sentence_starter": "句首模板（变换起手词，避免节奏重复）",
+                "scene_template": "场景模板（禁止重复同款骨架）",
+            }
+            parts: list[str] = []
+            for ptype, label in _TYPE_LABELS.items():
+                entries = dedup.get(ptype) or []
+                if not entries:
+                    continue
+                line_items = []
+                for entry in entries:
+                    if isinstance(entry, (list, tuple)) and entry:
+                        text = entry[0]
+                        count = entry[1] if len(entry) > 1 else None
+                    else:
+                        text = entry
+                        count = None
+                    if count:
+                        line_items.append(f"- {text}（前文出现 {count} 次）")
+                    else:
+                        line_items.append(f"- {text}")
+                parts.append(f"**{label}**\n" + "\n".join(line_items))
+            if parts:
+                sections.append(
+                    "\n### 反重复约束（前文已用，本章需主动避让）\n"
+                    "以下内容是该作品前几章已经频繁使用的表层套路；"
+                    "本章写作时请避免原样复用或直接改写成同义变体。"
+                    "必须使用不同的开场方式、不同的比喻意象、不同的动作替代词。\n\n"
+                    + "\n\n".join(parts)
+                )
+
         # For rewrite/expand, include original text
         if brief.get("original_text"):
             sections.append(f"\n### 原文\n{brief['original_text']}")
@@ -133,18 +181,24 @@ class WriterComposer:
         # For continue, include continuation context and tail text
         if brief.get("continuation_context"):
             cc = brief["continuation_context"]
-            styles = cc.get("writing_styles") or []
-            if styles:
-                style_blocks = []
-                for s in styles:
+            # Render enabled reference assets by type.
+            _ASSET_SECTIONS = [
+                ("writing_styles",       "写作风格指引(资产库已启用的 writing_style)"),
+                ("character_archetypes", "角色原型参考(assets.character_archetype)"),
+                ("worldviews",           "世界观参考(assets.worldview)"),
+                ("prompt_templates",     "Prompt 模板参考(assets.prompt_template)"),
+            ]
+            for key, heading in _ASSET_SECTIONS:
+                items = cc.get(key) or []
+                if not items:
+                    continue
+                blocks = []
+                for s in items:
                     head = f"【{s.get('title', '')}】"
                     if s.get("category"):
-                        head += f"（{s['category']}）"
-                    style_blocks.append(head + "\n" + (s.get("content") or s.get("summary") or ""))
-                sections.append(
-                    "\n### 写作风格指引（资产库已启用的 writing_style）\n"
-                    + "\n\n".join(style_blocks)
-                )
+                        head += f"({s['category']})"
+                    blocks.append(head + "\n" + (s.get("content") or s.get("summary") or ""))
+                sections.append(f"\n### {heading}\n" + "\n\n".join(blocks))
             if cc.get("narrative_note"):
                 sections.append(f"\n### 叙事状态\n{cc['narrative_note']}")
             if cc.get("last_location"):

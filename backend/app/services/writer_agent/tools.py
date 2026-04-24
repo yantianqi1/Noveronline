@@ -7,7 +7,17 @@ NOVEL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "query_entity",
-            "description": "查询角色/组织/物品/地点/技能的档案设定。返回：完整 profile（核心驱动力、隐藏矛盾、说话风格等）+ 关联伏笔线索 + 适用世界规则 + 近期事件时间线。一次调用即可获得该实体的完整上下文。",
+            "description": (
+                "查询角色/组织/物品/地点/技能的档案设定。**分段返回**，单次返回控制在 16K 字符内，"
+                "需要完整画像时按需多次调用不同 section。\n"
+                "可用 section：\n"
+                "  - overview（默认）：基础字段 + 别名 + 标签 + 简介 + 核心驱动/表面/内在矛盾；最省 token\n"
+                "  - profile：完整长文档案（deep_profile_md）+ 性格/价值观/说话风格/能力/恐惧等所有结构化字段\n"
+                "  - relations：该实体全部双向关系（relationships 表）+ 关联伏笔 + 适用世界规则\n"
+                "  - events：完整角色事件列表，按章节倒序，支持游标分页\n"
+                "  - memories：archive 正典（canon）+ 候选（candidate）长期记忆，按 salience 排序\n"
+                "调用建议：优先 overview 摸底，再视任务挑 profile / relations / memories 精确拉取。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -26,6 +36,19 @@ NOVEL_TOOLS: list[dict] = [
                         ],
                         "description": "可选，限定实体类型以缩小搜索范围",
                     },
+                    "section": {
+                        "type": "string",
+                        "enum": ["overview", "profile", "relations", "events", "memories"],
+                        "description": "要取的档案段落，默认 overview。不同 section 返回完全不同的内容集合。",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "分页游标（仅 events / memories 使用）。首次查询留空；工具结尾若返回 next_cursor=... 则下次传入该值继续翻页。",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "events/memories/relations 单次返回条数上限，默认 events=50 / memories=20 / relations=20。",
+                    },
                 },
                 "required": ["name"],
             },
@@ -35,7 +58,11 @@ NOVEL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "query_relationship",
-            "description": "查询两个实体之间的关系记录，包括关系类型、信任度、权力动态、历史和冲突触发点。",
+            "description": (
+                "查询两个实体之间的关系记录，包括关系类型、信任度、权力动态、历史和冲突触发点。"
+                "默认同时返回 archive 中的候选（candidate）关系假设——即世界线探索/自动演化输出"
+                "但尚未采纳的关系；这些会单独放在「候选关系假设」小节。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -46,6 +73,10 @@ NOVEL_TOOLS: list[dict] = [
                     "entity_b": {
                         "type": "string",
                         "description": "第二个实体名称",
+                    },
+                    "include_candidate": {
+                        "type": "boolean",
+                        "description": "是否同时返回 archive 候选关系记忆。默认 true；若只想看已采纳的正典关系，设为 false。",
                     },
                 },
                 "required": ["entity_a", "entity_b"],
@@ -98,7 +129,10 @@ NOVEL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "search_settings",
-            "description": "全文搜索设定资料，跨实体、章节、场景、记忆等范围检索。",
+            "description": (
+                "全文搜索设定资料，跨实体、章节、场景、关系、世界规则、候选记忆等范围检索。"
+                "走统一的 global_index FTS 索引（若索引为空会自动 reindex 本项目一次）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -114,6 +148,7 @@ NOVEL_TOOLS: list[dict] = [
                             "scenes",
                             "memory",
                             "relationships",
+                            "world_rules",
                             "threads",
                             "evidence",
                             "timeline",
@@ -123,7 +158,12 @@ NOVEL_TOOLS: list[dict] = [
                             "consistency",
                             "all",
                         ],
-                        "description": "搜索范围：entities/chapters/scenes/memory/relationships/threads/evidence/timeline/arcs/segments/volumes/consistency/all，默认 all",
+                        "description": (
+                            "搜索范围。支持：entities(角色/组织/物品/地点/技能)、chapters(章节)、"
+                            "scenes(场景)、memory(archive 候选记忆)、relationships(双向关系)、"
+                            "world_rules(世界规则)、threads(伏笔)。其余 evidence/timeline/arcs/"
+                            "segments/volumes/consistency 为历史保留项，当前命中 all。默认 all。"
+                        ),
                     },
                     "limit": {
                         "type": "integer",
@@ -439,6 +479,271 @@ NOVEL_TOOLS: list[dict] = [
                     "chapter_order": {"type": "integer", "description": "关联章节序号（可选）"},
                 },
                 "required": ["name", "event_type", "summary"],
+            },
+        },
+    },
+    # ------------------------------------------------------------------
+    # propose_* tools — draft render cards for user to adopt (§4.4).
+    # These tools NEVER write DB. They only package validated parameters
+    # into a structured render payload (ToolRenderPayload) that the
+    # frontend renders as a card with an [采纳] button.
+    # ------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_outline_scene",
+            "description": (
+                "为当前章节的大纲缺口生成一个 SceneProposalCard（不落库，等用户采纳）。"
+                "只在『一键补全大纲』流程中使用；严禁调用 manage_* / splice_block / rewrite_span。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chapter_id": {"type": "string", "description": "目标章节 ID"},
+                    "insert_after_scene_order": {
+                        "type": "integer",
+                        "description": "在哪个 scene_order 之后插入；0 表示章首",
+                    },
+                    "scene_order": {
+                        "type": "integer",
+                        "description": "可选：新场景的 scene_order；缺省为 insert_after_scene_order+1",
+                    },
+                    "title": {"type": "string", "description": "场景标题"},
+                    "summary": {"type": "string", "description": "场景摘要（2–4 句）"},
+                    "pov": {"type": "string", "description": "POV 角色名（可为空）"},
+                    "key_events": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "关键事件点数组",
+                    },
+                    "target_word_count": {
+                        "type": "integer",
+                        "description": "目标字数（估算）",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "为什么需要新增这一场景（缺口诊断）",
+                    },
+                },
+                "required": [
+                    "chapter_id",
+                    "insert_after_scene_order",
+                    "title",
+                    "summary",
+                    "reason",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_chapter_structure",
+            "description": (
+                "批量草拟多章骨架（不落库）。用于『补全成书卷轴』类提案；每章至少给"
+                " title + summary。生成的是 ChapterStructureProposalCard。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "可选：所属 book_plan_id",
+                    },
+                    "start_chapter_order": {
+                        "type": "integer",
+                        "description": "首章 chapter_order，缺省为 1",
+                    },
+                    "chapters": {
+                        "type": "array",
+                        "description": "章节数组（至少 1 项）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "chapter_order": {"type": "integer"},
+                                "title": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "hook": {"type": "string"},
+                                "word_target": {"type": "integer"},
+                                "pov_character": {"type": "string"},
+                                "key_threads": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["title", "summary"],
+                        },
+                    },
+                    "overall_arc": {
+                        "type": "string",
+                        "description": "整段故事弧概述",
+                    },
+                    "rationale": {"type": "string", "description": "提案理由"},
+                },
+                "required": ["chapters"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_splice_block",
+            "description": (
+                "为章节生成 ProseDiffViewCard（扩写/精简提案，不落库）。"
+                "用于『一键对齐字数』：diff<0 时 position=after 扩写，diff>0 时 position=replace_range 精简。"
+                "严禁调用真 splice_block / rewrite_span。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chapter_id": {"type": "string"},
+                    "anchor_block_id": {"type": "string"},
+                    "position": {
+                        "type": "string",
+                        "enum": ["before", "after", "replace_range"],
+                    },
+                    "end_anchor_block_id": {
+                        "type": "string",
+                        "description": "replace_range 时使用，指定区间结束块",
+                    },
+                    "new_content": {"type": "string", "description": "建议正文"},
+                    "reason": {"type": "string", "description": "提案理由"},
+                    "intent": {
+                        "type": "string",
+                        "enum": ["expand", "shrink"],
+                        "description": "扩写/精简，用于卡片着色",
+                    },
+                    "chapter_label": {
+                        "type": "string",
+                        "description": "可选：展示用章节标签（如『第 3 章』）",
+                    },
+                },
+                "required": [
+                    "chapter_id",
+                    "anchor_block_id",
+                    "position",
+                    "new_content",
+                    "reason",
+                    "intent",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_rewrite_span",
+            "description": (
+                "生成 ProseDiffViewCard 改写提案（不落库）。预检：字数 ±300 内、"
+                "original_text 块内唯一。用于『一键扫禁词』；严禁调用真 rewrite_span。"
+                "new_text 必须非空，reason 必须非空——防止误点采纳后语义塌陷。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "block_id": {"type": "string"},
+                    "original_text": {
+                        "type": "string",
+                        "description": "必须在该 block 内唯一出现",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "等价改写（保留原意、口吻、字数 ±20%）",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "提案理由（如『禁词 [X] 改写』）",
+                    },
+                    "match_entry_id": {
+                        "type": "string",
+                        "description": "可选：关联的 forbidden_lexicon 条目 ID",
+                    },
+                    "chapter_label": {"type": "string"},
+                },
+                "required": ["block_id", "original_text", "new_text", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_relationship",
+            "description": (
+                "生成 RelationshipProposalCard（不落库，等用户采纳才写 DB）。"
+                "用于『一键补关系』：基于本章原文证据提出角色间新关系。严禁调用"
+                " manage_relationship。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_a": {"type": "string"},
+                    "entity_b": {"type": "string"},
+                    "relation_type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "trust_level": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                    },
+                    "power_dynamic": {"type": "string"},
+                    "conflict_trigger": {"type": "string"},
+                    "evidence_snippet": {
+                        "type": "string",
+                        "description": "原文证据（必填，避免无据生成）",
+                    },
+                    "source_scene_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "entity_a",
+                    "entity_b",
+                    "relation_type",
+                    "description",
+                    "evidence_snippet",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_prose_continuation",
+            "description": (
+                "声明『检索已完成，请外层 OneClickRunner 启动 WriterComposer 流式写正文』。"
+                "仅在『一键续写』流程中由章尾续写助手调用一次。调用后 runner 会接管，"
+                "使用这里提供的 writing_brief 驱动 WriterComposer，然后组装"
+                " ProseDiffViewCard。严禁调用 manage_* / splice_block / rewrite_span。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "anchor_block_id": {
+                        "type": "string",
+                        "description": "章末最后一块 block_id（续写锚点）",
+                    },
+                    "target_word_count": {
+                        "type": "integer",
+                        "minimum": 200,
+                        "maximum": 1200,
+                        "description": "期望续写字数（200–1200）",
+                    },
+                    "writing_brief": {
+                        "type": "object",
+                        "description": (
+                            "写作指令对象：pov/tail_text/story_context/"
+                            "continuation_hint 等，由 WriterComposer 直接消费"
+                        ),
+                    },
+                    "continuation_hint": {
+                        "type": "string",
+                        "description": "可选：给 composer 的额外口吻/方向提示",
+                    },
+                },
+                "required": ["anchor_block_id", "target_word_count", "writing_brief"],
             },
         },
     },
@@ -845,7 +1150,7 @@ UNIFIED_TOOL_NAME_SET: set[str] = {t["function"]["name"] for t in UNIFIED_TOOLS}
 
 # Human-readable display formatters for timeline log
 TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
-    "query_entity": lambda inp: f"查询角色档案：{inp.get('name', '?')}",
+    "query_entity": lambda inp: f"查询角色档案：{inp.get('name', '?')}" + (f" [{inp.get('section')}]" if inp.get('section') and inp.get('section') != 'overview' else ""),
     "query_relationship": lambda inp: f"查询关系：{inp.get('entity_a', '?')} ↔ {inp.get('entity_b', '?')}",
     "query_chapter": lambda inp: f"查询章节：第{inp.get('chapter_order', '?')}章",
     "query_scene": lambda inp: f"查询场景：{inp.get('chapter_id', '?')}" + (f" #{inp['scene_order']}" if inp.get("scene_order") else ""),
@@ -882,4 +1187,11 @@ TOOL_DISPLAY_FORMATTERS: dict[str, callable] = {
     "upsert_forbidden_lexicon": lambda inp: f"保存禁词表：{inp.get('title') or inp.get('asset_id', '?')}",
     "splice_block": lambda inp: f"拼接块 [{inp.get('position', '?')}] 锚={inp.get('anchor_block_id', '?')}",
     "rewrite_span": lambda inp: f"改写 {inp.get('block_id', '?')}",
+    # propose_* tools
+    "propose_outline_scene": lambda inp: f"提案新场景：{inp.get('title', '?')} @ {inp.get('chapter_id', '?')}",
+    "propose_chapter_structure": lambda inp: f"提案章节骨架：{len(inp.get('chapters') or [])} 章",
+    "propose_splice_block": lambda inp: f"提案{('扩写' if inp.get('intent') == 'expand' else '精简')}：{inp.get('anchor_block_id', '?')}",
+    "propose_rewrite_span": lambda inp: f"提案改写：{inp.get('block_id', '?')}",
+    "propose_relationship": lambda inp: f"提案关系：{inp.get('entity_a', '?')} ↔ {inp.get('entity_b', '?')}",
+    "propose_prose_continuation": lambda inp: f"交付续写 brief：锚 {inp.get('anchor_block_id', '?')} · {inp.get('target_word_count', 0)} 字",
 }

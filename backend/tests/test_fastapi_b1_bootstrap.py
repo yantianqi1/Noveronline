@@ -122,7 +122,8 @@ def test_unified_metadata_declares_all_regular_tables():
         "agent_states", "archive_agent_memory",
         "archive_agent_memory_events", "archive_library", "archive_sources",
         "asset_links", "assets", "book_plans", "chapter_content", "chapter_meta",
-        "character_events", "consistency_notes", "entities",
+        "character_events", "classification_map", "consistency_notes",
+        "dedup_index", "entities",
         "entity_aliases", "entity_evidence", "entity_labels",
         "global_index", "graph_aliases", "graph_edges", "graph_evidence",
         "graph_meta", "graph_node_labels", "graph_nodes", "llm_channels",
@@ -150,6 +151,7 @@ def test_project_scoped_tables_include_project_id_column():
         if name not in {
             "llm_channels", "llm_models", "llm_module_bindings",
             "writer_presets_global", "task_runs",
+            "classification_map",
         }
     }
 

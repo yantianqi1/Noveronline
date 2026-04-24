@@ -77,7 +77,7 @@ class SeedTaskProgressTracker:
 
     # -- Step lifecycle --
 
-    def begin_step(
+    def declare_step(
         self,
         stage: str,
         step_kind: str,
@@ -85,13 +85,57 @@ class SeedTaskProgressTracker:
         group_key: str = "",
         group_label: str = "",
     ) -> str:
-        """进入一个逻辑小步骤，返回 step_id。同时激活 trace 上下文。"""
+        """预先声明一个步骤（pending），让前端在执行前就能把整个清单排出来。
+
+        返回的 step_id 应随后传给 ``begin_step(..., step_id=...)`` 完成激活。
+        此方法只追加一条 ``status="pending"`` 的 timeline 事件，不会进入
+        trace 上下文，也不会影响 ``active_stage``。
+        """
         if not group_key:
             group_key = chapter_for_stage(stage)
         if not group_label:
             group_label = label_for_chapter(group_key)
 
         step_id = new_step_id()
+        step_meta = {
+            "kind": step_kind,
+            "step_id": step_id,
+            "step_kind": step_kind,
+            "group_key": group_key,
+            "group_label": group_label,
+            "has_trace": False,
+        }
+
+        def mutate(task) -> None:
+            progress_detail = self._detail_copy(task.progress_detail)
+            progress_detail["timeline"].append(
+                self._event(stage, "info", "pending", title, "", step_meta)
+            )
+            task.progress_detail = progress_detail
+
+        self._mutate(mutate)
+        return step_id
+
+    def begin_step(
+        self,
+        stage: str,
+        step_kind: str,
+        title: str,
+        group_key: str = "",
+        group_label: str = "",
+        step_id: Optional[str] = None,
+    ) -> str:
+        """进入一个逻辑小步骤，返回 step_id。同时激活 trace 上下文。
+
+        传入 ``step_id`` 以复用 ``declare_step`` 预分配的 id；不传则新生。
+        """
+        if not group_key:
+            group_key = chapter_for_stage(stage)
+        if not group_label:
+            group_label = label_for_chapter(group_key)
+
+        if step_id is None:
+            step_id = new_step_id()
         cm = enter_step(step_id, step_kind, group_key, group_label, stage, title)
         ctx = cm.__enter__()
         self._active_step_cm = cm
@@ -137,7 +181,8 @@ class SeedTaskProgressTracker:
         self._active_step_cm = None
         self._active_step_ctx = None
 
-        # 写 trace bundle
+        # 写 trace bundle — 写失败时 has_trace 降级为 False，前端走
+        # NoTracePanel，而不是拉到 404 trace_unavailable 的红色错误。
         if has_trace and self.project_id:
             bundle = {
                 "step_id": ctx.step_id,
@@ -152,7 +197,8 @@ class SeedTaskProgressTracker:
                 "calls": calls,
                 "artifacts": artifacts,
             }
-            write_step_bundle(self.project_id, self.task_id, step_id, bundle)
+            wrote = write_step_bundle(self.project_id, self.task_id, step_id, bundle)
+            has_trace = has_trace and wrote
 
         step_meta = {
             "kind": ctx.step_kind,
@@ -242,6 +288,75 @@ class SeedTaskProgressTracker:
         def mutate(task) -> None:
             progress_detail = self._detail_copy(task.progress_detail)
             progress_detail["timeline"].append(self._event(stage, level, "completed", title, detail, note_meta))
+            task.progress_detail = progress_detail
+
+        self._mutate(mutate)
+
+    def update_active_step_detail(self, detail: str) -> None:
+        """Overwrite the detail of the currently active step in place.
+
+        Intended for the "无感" retry path: we want the user to see the
+        step taking a bit longer with a live status message, not a new
+        error line in the timeline.
+        """
+        def mutate(task) -> None:
+            progress_detail = self._detail_copy(task.progress_detail)
+            for item in reversed(progress_detail["timeline"]):
+                if item.get("status") != "active":
+                    continue
+                meta = item.get("meta", {}) or {}
+                if meta.get("step_id") or meta.get("kind") == "segment":
+                    item["detail"] = detail
+                    break
+            active_stage = progress_detail.get("active_stage") or {}
+            if active_stage:
+                active_stage["detail"] = detail
+                progress_detail["active_stage"] = active_stage
+            llm_activity = progress_detail.get("llm_activity") or {}
+            if llm_activity:
+                llm_activity["action"] = detail
+                progress_detail["llm_activity"] = llm_activity
+            task.progress_detail = progress_detail
+
+        self._mutate(mutate)
+
+    def emit_warning(
+        self,
+        stage: str,
+        title: str,
+        detail: str = "",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append a non-blocking warning event (does NOT mark the task failed)."""
+        warn_meta = dict(meta or {})
+        warn_meta.setdefault("kind", "warning")
+        warn_meta.setdefault("step_id", new_step_id())
+        warn_meta.setdefault("step_kind", "warning")
+        group_key = chapter_for_stage(stage)
+        warn_meta.setdefault("group_key", group_key)
+        warn_meta.setdefault("group_label", label_for_chapter(group_key))
+        warn_meta.setdefault("has_trace", False)
+
+        def mutate(task) -> None:
+            progress_detail = self._detail_copy(task.progress_detail)
+            progress_detail["timeline"].append(
+                self._event(stage, "warning", "completed", title, detail, warn_meta)
+            )
+            task.progress_detail = progress_detail
+
+        self._mutate(mutate)
+
+    def set_sequential_reading_retry(self, pending_segments: list) -> None:
+        """Expose still-failing segments to the frontend for the manual-retry button."""
+        def mutate(task) -> None:
+            progress_detail = self._detail_copy(task.progress_detail)
+            if pending_segments:
+                progress_detail["sequential_reading_retry"] = {
+                    "pending_segments": list(pending_segments),
+                    "count": len(pending_segments),
+                }
+            else:
+                progress_detail.pop("sequential_reading_retry", None)
             task.progress_detail = progress_detail
 
         self._mutate(mutate)

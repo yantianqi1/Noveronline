@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 ProgressCallback = Optional[Callable[[Dict[str, Any]], None]]
 
+from ..config import Settings
 from ..database import get_engine
 from ..repositories.graph_repo import GraphRepository
 from .local_story_graph_models import EvidenceRef, GraphEdge, GraphNode, GraphSnapshot
@@ -187,12 +188,14 @@ class LocalStoryGraphBuilder:
         return candidates
 
     def _event_candidate(self, ontology: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
-        snippets = [evidence_ref(event.get("chapter_id", ""), event.get("block_id", ""), item) for item in event.get("evidence", [])[:3]]
+        evidence_cap = Settings().GRAPH_EVENT_CANDIDATE_EVIDENCE_LIMIT
+        snippets = [evidence_ref(event.get("chapter_id", ""), event.get("block_id", ""), item) for item in event.get("evidence", [])[:evidence_cap]]
         # Prefer explicit title (from key_events); fall back to summary (legacy
         # arc-only events) and finally event_id. This preserves backward-compat
         # with pipelines that haven't been re-run since the key_events upgrade.
-        title = event.get("title") or event.get("summary") or event.get("event_id") or "剧情事件"
-        summary = event.get("summary", "") or title
+        description = event.get("summary", "") or ""
+        title = event.get("title") or description or event.get("event_id") or "剧情事件"
+        summary = description or title
         return {
             "name": title,
             "label": preferred_entity_label(ontology, "PlotEvent", "Conflict", fallback="PlotEvent"),
@@ -204,6 +207,8 @@ class LocalStoryGraphBuilder:
                 "arc_id": event.get("arc_id", ""),
                 "consequence": event.get("consequence", ""),
                 "participants": list(event.get("characters", []) or []),
+                "description": description,
+                "title_display": title,
             },
             "evidence_refs": snippets,
         }
@@ -221,11 +226,12 @@ class LocalStoryGraphBuilder:
     def _raw_candidates(self, ontology: Dict[str, Any], extracted_text: str, registry: Dict[str, Any]) -> List[Dict[str, Any]]:
         known = {normalize_name(name) for name in registry}
         sentences = split_sentences(extracted_text)
+        evidence_cap = Settings().GRAPH_ARTIFACT_CANDIDATE_LIMIT
         candidates = []
         for name in find_artifact_candidates(extracted_text):
             if normalize_name(name) in known:
                 continue
-            evidence = [evidence_ref(snippet=item) for item in sentences if name in item][:3]
+            evidence = [evidence_ref(snippet=item) for item in sentences if name in item][:evidence_cap]
             candidates.append({"name": name, "label": preferred_entity_label(ontology, "Artifact", "KnowledgeItem", fallback="Artifact"), "summary": evidence[0].snippet if evidence else name, "attributes": {"aliases": []}, "evidence_refs": evidence})
         return candidates
 
@@ -266,6 +272,7 @@ class LocalStoryGraphBuilder:
 
     def _event_edges(self, ontology: Dict[str, Any], story_memory: Dict[str, Any], lookup: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
         edges = []
+        evidence_cap = Settings().GRAPH_EVENT_EVIDENCE_LIMIT
         for event in story_memory.get("event_timeline", []):
             event_uuid = self._uuid_by_attribute(lookup, "event_id", event.get("event_id", ""))
             if not event_uuid:
@@ -275,7 +282,7 @@ class LocalStoryGraphBuilder:
                 actor_uuid = self._resolve_entity_uuid(lookup, name)
                 if not actor_uuid:
                     continue
-                evidence = [evidence_ref(event.get("chapter_id", ""), event.get("block_id", ""), item) for item in event.get("evidence", [])[:2]]
+                evidence = [evidence_ref(event.get("chapter_id", ""), event.get("block_id", ""), item) for item in event.get("evidence", [])[:evidence_cap]]
                 edges.append({"name": preferred_edge_name(ontology, "PARTICIPATES_IN", "INVOLVED_IN", fallback=DEFAULT_EVENT_EDGE), "fact": event.get("summary", ""), "source_uuid": actor_uuid, "target_uuid": event_uuid, "attributes": {"chapter_id": event.get("chapter_id", "")}, "weight": 1, "evidence_refs": evidence})
             for location_name in cooccurring_names(event.get("summary", ""), lookup.get("Location", {}).keys()):
                 location_uuid = lookup.get("Location", {}).get(location_name)
@@ -286,6 +293,7 @@ class LocalStoryGraphBuilder:
 
     def _artifact_edges(self, ontology: Dict[str, Any], extracted_text: str, lookup: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
         edges = []
+        pair_limit = Settings().GRAPH_ARTIFACT_EDGE_PAIR_LIMIT
         artifact_names = list(lookup.get("Artifact", {}).keys()) + list(lookup.get("KnowledgeItem", {}).keys())
         entity_names = list(lookup.get("Character", {}).keys()) + list(lookup.get("Organization", {}).keys())
         for sentence in split_sentences(extracted_text):
@@ -293,8 +301,8 @@ class LocalStoryGraphBuilder:
             entities = cooccurring_names(sentence, entity_names)
             if not artifacts or not entities:
                 continue
-            for source_name in entities[:2]:
-                for target_name in artifacts[:2]:
+            for source_name in entities[:pair_limit]:
+                for target_name in artifacts[:pair_limit]:
                     source_uuid = self._resolve_entity_uuid(lookup, source_name)
                     target_uuid = self._resolve_entity_uuid(lookup, target_name)
                     if source_uuid and target_uuid:

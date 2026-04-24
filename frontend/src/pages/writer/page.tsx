@@ -42,10 +42,20 @@ import { ManuscriptProseView } from "./manuscript-prose-view";
 import type { ManuscriptProseViewRef } from "./manuscript-prose-view";
 import { ContinuationContextPanel } from "./continuation-context-panel";
 import { OutlineView } from "./outline-view";
+import { ReviewerPanel } from "./reviewer-panel";
 import { PresetEditor } from "./preset-editor";
 import { BookPlanPanel } from "./book-plan-panel";
 import { ForbiddenLexiconPanel } from "./forbidden-lexicon-panel";
 import { createChapter, getChapters } from "@/api/writer-agent";
+import {
+  KeyboardShortcutProvider,
+  useWriterShortcuts,
+} from "./layout/keyboard-shortcut-provider";
+import { BookPlanDrawer } from "./layout/book-plan-drawer";
+import { CommandPalette } from "./layout/command-palette";
+import { OneClickActionRow } from "./layout/one-click-action-row";
+import { WriterStatusBarHost } from "./layout/writer-status-bar-host";
+import { useWriterLayoutStore } from "@/stores/writer-layout-store";
 
 /* ---------- Helpers ---------- */
 
@@ -64,9 +74,44 @@ function formatSelectionBecause(reasons: string[] = []): string {
 /* ---------- Component ---------- */
 
 export default function WriterPage() {
+  return (
+    <KeyboardShortcutProvider>
+      <WriterPageBody />
+    </KeyboardShortcutProvider>
+  );
+}
+
+function WriterPageBody() {
   const state = useWriterState();
   const manuscriptProseRef = React.useRef<ManuscriptProseViewRef>(null);
   const traceScrollRef = React.useRef<HTMLDivElement>(null);
+
+  /* ─── Drawer + layout version ─── */
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
+  const layoutVersion = useWriterLayoutStore((s) => s.layoutVersion);
+  const effectiveVersion = React.useMemo(() => {
+    if (typeof window !== "undefined") {
+      const qs = new URLSearchParams(window.location.search);
+      const override = qs.get("layout");
+      if (override === "v1" || override === "v2") return override;
+    }
+    return layoutVersion;
+  }, [layoutVersion]);
+  const v2Enabled = effectiveVersion === "v2";
+
+  useWriterShortcuts([
+    {
+      key: "mod+b",
+      handler: () => setDrawerOpen((prev) => !prev),
+      enabled: v2Enabled,
+    },
+    {
+      key: "mod+k",
+      handler: () => setPaletteOpen((prev) => !prev),
+      enabled: v2Enabled,
+    },
+  ]);
 
   /* ─── Create chapter dialog ─── */
   const [createChapterOpen, setCreateChapterOpen] = React.useState(false);
@@ -186,8 +231,14 @@ export default function WriterPage() {
 
   return (
     <>
+      {v2Enabled && (
+        <WriterStatusBarHost
+          projectId={state.projectId}
+          onOpenDrawer={() => setDrawerOpen(true)}
+        />
+      )}
       <div
-        className={`grid h-[calc(100vh-100px)] gap-4 ${
+        className={`grid ${v2Enabled ? "h-[calc(100vh-138px)]" : "h-[calc(100vh-100px)]"} gap-4 ${
           isManuscript || isOutline
             ? "grid-cols-[minmax(260px,300px)_minmax(0,1fr)]"
             : state.debugCollapsed
@@ -205,6 +256,8 @@ export default function WriterPage() {
               totalWords={state.manuscriptTotalWords}
               totalBlocks={state.manuscriptBlocks.length}
               untaggedCount={state.manuscriptUntaggedCount}
+              anchorBlockId={state.selectedAnchorBlockId}
+              onSelectAnchor={state.setSelectedAnchorBlockId}
               onJump={handleManuscriptJump}
               onCreateChapter={state.handleCreateManuscriptChapter}
               onRenameChapter={state.handleRenameManuscriptChapter}
@@ -530,7 +583,7 @@ export default function WriterPage() {
         </aside>
 
         {/* ═══════════════════ MAIN CONTENT ═══════════════════ */}
-        <main className="flex flex-col overflow-hidden rounded-lg border border-border/40 bg-card">
+        <main className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border/40 bg-card">
           {/* Header bar */}
           <div className="flex items-center justify-between border-b border-border/40 px-3 py-2">
             <div className="flex items-baseline gap-2">
@@ -544,6 +597,15 @@ export default function WriterPage() {
                 </span>
               )}
             </div>
+            {v2Enabled && state.chapterId && (
+              <OneClickActionRow
+                projectId={state.projectId}
+                chapterId={state.chapterId}
+                chapterOrder={state.chapterOrder}
+                onEvent={state.handleTraceEvent}
+                className="mx-2"
+              />
+            )}
             <Tabs
               value={state.viewMode}
               onValueChange={(v) => v && state.switchViewMode(v as ViewMode)}
@@ -613,8 +675,43 @@ export default function WriterPage() {
 
           {/* ─── Writing mode ─── */}
           {isWriting && (
-            <ScrollArea className="flex-1">
+            <ScrollArea className="min-h-0 flex-1">
               <div className="p-3">
+                {/* Data health banner (Task 4): warn when narrative / graph /
+                    worldline data is missing so the author can act before the
+                    agent finishes writing with poor context. */}
+                {state.dataHealthIssues.length > 0 && !state.dataHealthDismissed && (
+                  <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-50 p-2.5 dark:border-amber-500/60 dark:bg-amber-950/40">
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                        本项目数据不完整（{state.dataHealthIssues.length}）
+                      </h3>
+                      <button
+                        type="button"
+                        className="rounded px-1 text-[11px] text-amber-700 hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/60"
+                        onClick={state.dismissDataHealth}
+                      >
+                        隐藏
+                      </button>
+                    </div>
+                    <ul className="mt-2 space-y-1.5 text-[12px] leading-5 text-amber-900 dark:text-amber-100">
+                      {state.dataHealthIssues.map((issue) => (
+                        <li key={issue.code}>
+                          <span
+                            className={
+                              issue.severity === "warning"
+                                ? "mr-1 inline-block rounded bg-amber-200 px-1 text-[10px] font-bold text-amber-900 dark:bg-amber-800 dark:text-amber-100"
+                                : "mr-1 inline-block rounded bg-slate-200 px-1 text-[10px] font-bold text-slate-700 dark:bg-slate-700 dark:text-slate-200"
+                            }
+                          >
+                            {issue.severity === "warning" ? "WARN" : "INFO"}
+                          </span>
+                          <strong>{issue.title}</strong>：{issue.hint}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {/* Context pack */}
                 {state.contextPack && (
                   <div className="mb-3 rounded-lg border border-border/40 p-2.5">
@@ -816,7 +913,11 @@ export default function WriterPage() {
 
                 {/* Continuation context panel */}
                 {state.continuationContext && (
-                  <ContinuationContextPanel context={state.continuationContext} />
+                  <ContinuationContextPanel
+                    context={state.continuationContext}
+                    anchorBlockId={state.selectedAnchorBlockId}
+                    onClearAnchor={() => state.setSelectedAnchorBlockId(null)}
+                  />
                 )}
 
                 {/* Continuation banner */}
@@ -833,7 +934,7 @@ export default function WriterPage() {
                   )}
 
                 {/* Draft output: outline or scene editor */}
-                <div className="my-3 min-h-[400px] overflow-hidden rounded-lg border border-border/40 bg-gradient-to-b from-card to-muted/20">
+                <div className="my-3 flex h-[60vh] min-h-[400px] flex-col overflow-hidden rounded-lg border border-border/40 bg-gradient-to-b from-card to-muted/20">
                   {state.outlineData ? (
                     <OutlineView
                       outline={state.outlineData}
@@ -906,6 +1007,19 @@ export default function WriterPage() {
                       )}
                       {state.generateButtonLabel}
                     </Button>
+                    {/* Task 6: cancel in-flight generation. Visible only while
+                        the stream is active so the button doesn't distract
+                        during setup. */}
+                    {(state.draftPhase === "collecting" ||
+                      state.draftPhase === "writing") && (
+                      <Button
+                        variant="outline"
+                        onClick={state.cancelDraft}
+                        title="中断当前生成流"
+                      >
+                        取消
+                      </Button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -949,7 +1063,7 @@ export default function WriterPage() {
             </button>
 
             {!state.debugCollapsed && (
-              <div className="ml-8 flex flex-col gap-2.5">
+              <div className="ml-8 flex h-full flex-col gap-2.5 overflow-y-auto pr-1">
                 <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50">
                   TRACE &amp; LOG
                 </p>
@@ -976,10 +1090,35 @@ export default function WriterPage() {
                       ref={traceScrollRef}
                       className="max-h-[400px] overflow-y-auto py-2"
                     >
-                      <AgentTracePanel state={state.agentTrace} />
+                      <AgentTracePanel
+                        state={state.agentTrace}
+                        renderContext={{
+                          projectId: state.projectId,
+                          chapterId: state.chapterId,
+                          sceneId: state.selectedSceneId,
+                          onPrependToInput: (text) =>
+                            state.setAuthorInstruction(
+                              state.authorInstruction
+                                ? `${text}\n\n${state.authorInstruction}`
+                                : text,
+                            ),
+                        }}
+                      />
                     </div>
                   )}
                 </div>
+
+                {/* Writer reviewer panel — shown after a draft commits and the
+                    reviewer has produced feedback. One-shot UI: apply rewrites
+                    or dismiss to keep the original draft. */}
+                {state.agentTrace.reviewer?.feedback && (
+                  <ReviewerPanel
+                    feedback={state.agentTrace.reviewer.feedback}
+                    streaming={state.agentStreaming}
+                    onApply={state.handleApplyReviewer}
+                    onDismiss={() => state.dismissReviewerFeedback()}
+                  />
+                )}
 
                 {/* Memory review */}
                 <div className="rounded-lg border border-border/40 p-2.5">
@@ -1266,6 +1405,30 @@ export default function WriterPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <BookPlanDrawer
+        open={drawerOpen}
+        onOpenChange={setDrawerOpen}
+        projectId={state.projectId}
+      />
+      {v2Enabled && (
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          chapters={state.manuscriptChapterList.map((c) => ({
+            chapter_id: c.chapter_id,
+            title: c.title,
+            order: c.order,
+          }))}
+          currentChapterId={state.chapterId}
+          onSwitchView={(v) => state.switchViewMode(v as ViewMode)}
+          onJumpToChapter={(chapterId) => {
+            state.switchViewMode("manuscript" as ViewMode);
+            state.setManuscriptSelectedChapterId?.(chapterId);
+          }}
+          onOpenBookPlan={() => setDrawerOpen(true)}
+        />
+      )}
     </>
   );
 }

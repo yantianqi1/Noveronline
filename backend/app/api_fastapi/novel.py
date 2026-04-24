@@ -120,8 +120,9 @@ async def generate_archives(body: GenerateArchivesRequest):
         archives = NarrativeEntityArchivist(candidate_builder=_get_archive_candidate_builder()).generate_archives_from_candidates(candidates, use_llm=payload.get("use_llm", True), tier_overrides=_candidate_override_map(payload), entity_lookup=entity_lookup, agent_profiles=(raw or {}).get("profiles", {}))
         data = {"graph_id": graph_id, "project_id": project.project_id if project else None, "count": len(archives), "entity_types": types, "archives": [item.to_dict() for item in archives]}
         if project:
-            ProjectManager.save_project_json(project.project_id, "narrative_archives.json", data)
-            synced = ArchiveLibraryService().sync_project_archives(project.project_id, force=True)
+            # Phase 2 · DB-only write. No more narrative_archives.json —
+            # worldline_source_loader now reads archives from the DB.
+            synced = ArchiveLibraryService().write_archives_for_project(project.project_id, data)
             archive_map = {item["entity_uuid"]: item["archive_id"] for item in synced}
             data["archives"] = [{**item, "archive_id": archive_map.get(item.get("entity_uuid"))} for item in data["archives"]]
         return ok(data)
@@ -144,7 +145,7 @@ async def generate_parallel_world_config(body: ParallelWorldConfigRequest):
             entities = _build_entities_from_seed_analysis(seed)
         config = ParallelWorldConfigGenerator().generate(analysis_goal=goal, entities=entities, variables=payload.get("variables", []), branch_count=payload.get("branch_count"), use_llm=payload.get("use_llm", True))
         if project:
-            ProjectManager.save_project_json(project.project_id, "parallel_world_config.json", config.to_dict())
+            ProjectManager.save_project_artifact(project.project_id, "parallel_world_config.json", config.to_dict())
         return ok({"project_id": project.project_id if project else None, "graph_id": graph_id, "config": config.to_dict()})
     except Exception as exc:
         return err(exc)
@@ -173,7 +174,7 @@ async def run_seed_analysis(body: SeedAnalysisRequest):
                 return err("项目缺少可用文本，无法生成种子分析", status_code=400)
             from app.services.novel_seed_analyzer import NovelSeedAnalyzer
             seed = NovelSeedAnalyzer().analyze_text(text=text, analysis_goal=payload.get("analysis_goal") or project.analysis_goal or "", project_name=project.name)
-            ProjectManager.save_project_json(project.project_id, "seed_analysis.json", seed)
+            ProjectManager.save_project_artifact(project.project_id, "seed_analysis.json", seed)
         return ok(seed)
     except Exception as exc:
         return err(exc)
@@ -255,5 +256,5 @@ async def save_reviewer_rules(body: ReviewerRulesRequest):
     if not project_id:
         return err("需要 project_id", status_code=400)
     from datetime import datetime
-    ProjectManager.save_project_json(project_id, "reviewer_rules.json", {"custom_prompt": payload.get("custom_prompt", ""), "updated_at": datetime.now().isoformat()})
+    ProjectManager.save_project_artifact(project_id, "reviewer_rules.json", {"custom_prompt": payload.get("custom_prompt", ""), "updated_at": datetime.now().isoformat()})
     return ok(None)

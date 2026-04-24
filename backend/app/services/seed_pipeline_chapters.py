@@ -23,7 +23,18 @@ PIPELINE_CHAPTERS: List[Dict] = [
     {
         "key": "agent_build",
         "label": "角色构建",
-        "stages": ["agent_profiles", "completed", "failed"],
+        "stages": ["agent_profiles"],
+    },
+    {
+        "key": "global_link",
+        "label": "数据打通",
+        "stages": [
+            "archive_sync",
+            "graph_build",
+            "index_rebuild",
+            "completed",
+            "failed",
+        ],
     },
 ]
 

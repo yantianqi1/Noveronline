@@ -56,15 +56,15 @@ export function SceneEditor({
   }
 
   return (
-    <div className="relative flex h-full flex-col">
+    <div className="relative flex h-full min-h-0 flex-1 flex-col">
       {streaming ? (
-        <div className="flex-1 overflow-y-auto whitespace-pre-wrap break-words p-3.5 text-sm leading-relaxed text-foreground">
+        <div className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words p-3.5 text-sm leading-relaxed text-foreground">
           {content}
           <span className="animate-pulse text-blue-400">&#x2588;</span>
         </div>
       ) : (
         <Textarea
-          className="min-h-[400px] flex-1 resize-y border-0 p-3.5 text-sm leading-relaxed focus-visible:ring-0"
+          className="min-h-0 flex-1 resize-none border-0 p-3.5 text-sm leading-relaxed focus-visible:ring-0"
           value={content}
           onChange={(e) => onUpdate?.(e.target.value)}
           readOnly={readonly}

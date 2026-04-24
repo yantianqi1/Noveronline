@@ -16,7 +16,7 @@ import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { ApiResponse } from "@/api/http";
-import { getArchiveLibraryDetail } from "@/api/archive";
+import { getArchiveLibraryDetail } from "@/api/assets";
 
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";

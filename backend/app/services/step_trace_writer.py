@@ -28,12 +28,17 @@ def write_step_bundle(
     task_id: str,
     step_id: str,
     bundle: Dict[str, Any],
-) -> None:
-    """将步骤 trace bundle 原子写入磁盘。"""
+) -> bool:
+    """原子写入步骤 trace bundle；返回是否写成功。
+
+    磁盘异常（外置盘抖动、权限、inode 满等）只打日志不抛出，但返回 False
+    让调用方把时间线的 ``has_trace`` 降级为 False，避免前端拉到 404
+    ``trace_unavailable`` 的误导性错误。
+    """
     dest = _bundle_path(project_id, task_id, step_id)
     directory = os.path.dirname(dest)
-    os.makedirs(directory, exist_ok=True)
     try:
+        os.makedirs(directory, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -45,8 +50,10 @@ def write_step_bundle(
             except OSError:
                 pass
             raise
+        return True
     except Exception:
         logger.exception("写入步骤 trace bundle 失败: %s/%s/%s", project_id, task_id, step_id)
+        return False
 
 
 def load_step_bundle(

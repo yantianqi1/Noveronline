@@ -8,7 +8,6 @@ import {
   Trash2,
   FileText,
   ChevronDown,
-  ChevronRight,
   Loader2,
   Package,
   BookOpen,
@@ -17,17 +16,22 @@ import {
   Globe2,
   Sprout,
   ExternalLink,
+  LayoutGrid,
+  List,
+  KanbanSquare,
+  Users,
+  Link2,
+  Map,
+  Film,
+  Library,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { ApiResponse } from "@/api/http";
 import {
-  listAssets,
   listUnifiedAssets,
   getUnifiedFacets,
   searchGlobalAssets,
-  createAsset,
-  updateAsset,
   deleteAsset,
   startAssetIngestion,
   getAssetIngestionStatus,
@@ -42,6 +46,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -60,7 +72,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
 /* ------------------------------------------------------------------ */
@@ -90,6 +102,43 @@ function getSourceMeta(key: string): SourceMeta {
     icon: <FileText className="h-3 w-3" />,
     color: "bg-gray-500",
   };
+}
+
+/* 语义范畴 — 回答「这是什么」。与后端 unified_asset_view.CATEGORY_* 对齐 */
+interface CategoryMeta {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  color: string;  // tailwind bg-* token for the facet chip
+}
+
+const CATEGORIES: CategoryMeta[] = [
+  { key: "characters", label: "角色", icon: <Users className="h-3 w-3" />, color: "bg-violet-500" },
+  { key: "relationships", label: "关系", icon: <Link2 className="h-3 w-3" />, color: "bg-rose-500" },
+  { key: "world", label: "世界设定", icon: <Map className="h-3 w-3" />, color: "bg-teal-500" },
+  { key: "plot", label: "情节/场景", icon: <Film className="h-3 w-3" />, color: "bg-orange-500" },
+  { key: "materials", label: "写作素材", icon: <Library className="h-3 w-3" />, color: "bg-sky-500" },
+  { key: "other", label: "其它", icon: <FileText className="h-3 w-3" />, color: "bg-gray-400" },
+];
+
+/* 生命周期 — 回答「处于什么阶段」。与后端 LIFECYCLE_* 对齐 */
+interface LifecycleMeta {
+  key: string;
+  label: string;
+  tone: string;  // tailwind text-* for the lifecycle badge
+}
+
+const LIFECYCLES: LifecycleMeta[] = [
+  { key: "seed", label: "种子", tone: "text-lime-600 bg-lime-50 border-lime-200" },
+  { key: "candidate", label: "候选待审", tone: "text-amber-600 bg-amber-50 border-amber-200" },
+  { key: "canon", label: "正典", tone: "text-emerald-600 bg-emerald-50 border-emerald-200" },
+  { key: "material", label: "素材", tone: "text-sky-600 bg-sky-50 border-sky-200" },
+  { key: "simulation", label: "模拟", tone: "text-blue-600 bg-blue-50 border-blue-200" },
+  { key: "graph", label: "图谱", tone: "text-orange-600 bg-orange-50 border-orange-200" },
+];
+
+function getLifecycleMeta(key: string): LifecycleMeta | undefined {
+  return LIFECYCLES.find((l) => l.key === key);
 }
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
@@ -151,6 +200,8 @@ interface UnifiedItem {
   project_id?: string;
   updated_at?: string;
   origin_link?: string;
+  category?: string;
+  lifecycle?: string;
   payload?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -161,6 +212,11 @@ interface FacetSource {
 }
 
 interface FacetEntityType {
+  key: string;
+  count: number;
+}
+
+interface FacetBucket {
   key: string;
   count: number;
 }
@@ -187,20 +243,24 @@ interface IngestionTaskState {
 function AssetCard({
   item,
   onClick,
+  onDelete,
 }: {
   item: UnifiedItem;
   onClick: () => void;
+  onDelete?: (item: UnifiedItem) => void;
 }) {
   const source = getSourceMeta(item.source);
   const typeLabel = ENTITY_TYPE_LABELS[item.entity_type || ""] || item.entity_type || "--";
   const importanceLabel = item.importance ? (IMPORTANCE_LABELS[item.importance] || item.importance) : null;
+  const lifecycle = item.lifecycle ? getLifecycleMeta(item.lifecycle) : undefined;
+  const deletable = item.source === "assets" && !!onDelete;
 
   return (
     <Card
       className="flex cursor-pointer flex-col gap-1.5 p-3 transition-all hover:border-primary/30 hover:shadow-md"
       onClick={onClick}
     >
-      {/* Header: source badge + type + importance */}
+      {/* Header: source badge + type + lifecycle + importance */}
       <div className="flex items-center gap-2 text-[11px]">
         <span
           className={cn(
@@ -212,6 +272,15 @@ function AssetCard({
           {source.icon}
         </span>
         <span className="text-muted-foreground">{typeLabel}</span>
+        {lifecycle && (
+          <Badge
+            variant="outline"
+            className={cn("h-4 border px-1 text-[9px] font-normal", lifecycle.tone)}
+            title={`生命周期:${lifecycle.label}`}
+          >
+            {lifecycle.label}
+          </Badge>
+        )}
         {importanceLabel && (
           <Badge variant="secondary" className="ml-auto text-[10px]">
             {importanceLabel}
@@ -239,8 +308,82 @@ function AssetCard({
             <span>全局</span>
           </>
         )}
+        {deletable && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete!(item);
+            }}
+            className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            title="删除"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
     </Card>
+  );
+}
+
+/* Compact row variant used by the list view. */
+function AssetRow({
+  item,
+  onClick,
+  onDelete,
+}: {
+  item: UnifiedItem;
+  onClick: () => void;
+  onDelete?: (item: UnifiedItem) => void;
+}) {
+  const source = getSourceMeta(item.source);
+  const typeLabel = ENTITY_TYPE_LABELS[item.entity_type || ""] || item.entity_type || "--";
+  const lifecycle = item.lifecycle ? getLifecycleMeta(item.lifecycle) : undefined;
+  const deletable = item.source === "assets" && !!onDelete;
+  return (
+    <div
+      className="group flex cursor-pointer items-center gap-2 rounded border border-transparent px-2 py-1.5 text-xs hover:border-primary/20 hover:bg-muted/40"
+      onClick={onClick}
+    >
+      <span
+        className={cn(
+          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-white",
+          source.color,
+        )}
+        title={source.label}
+      >
+        {source.icon}
+      </span>
+      <span className="w-20 shrink-0 truncate text-muted-foreground">{typeLabel}</span>
+      {lifecycle && (
+        <Badge
+          variant="outline"
+          className={cn("h-4 shrink-0 border px-1 text-[9px] font-normal", lifecycle.tone)}
+        >
+          {lifecycle.label}
+        </Badge>
+      )}
+      <span className="min-w-0 flex-1 truncate font-medium">
+        {item.title || item.name || "(无标题)"}
+      </span>
+      <span className="hidden shrink-0 truncate text-muted-foreground md:inline md:max-w-[200px]">
+        {item.summary || ""}
+      </span>
+      <span className="shrink-0 text-[10px] text-muted-foreground">{item.updated_at || ""}</span>
+      {deletable && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete!(item);
+          }}
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+          title="删除"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -252,16 +395,19 @@ function DetailSheet({
   item,
   open,
   onClose,
+  onDelete,
 }: {
   item: UnifiedItem | null;
   open: boolean;
   onClose: () => void;
+  onDelete?: (item: UnifiedItem) => void;
 }) {
   const [payloadExpanded, setPayloadExpanded] = React.useState(false);
 
   if (!item) return null;
 
   const source = getSourceMeta(item.source);
+  const deletable = item.source === "assets" && !!onDelete;
 
   return (
     <Sheet open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
@@ -353,6 +499,23 @@ function DetailSheet({
                 </pre>
               )}
             </div>
+
+            {/* Delete action — only for source=assets */}
+            {deletable && (
+              <>
+                <Separator />
+                <div className="flex justify-end">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => onDelete!(item)}
+                  >
+                    <Trash2 className="mr-1 h-3.5 w-3.5" />
+                    删除资产
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         </ScrollArea>
       </SheetContent>
@@ -560,6 +723,12 @@ function FacetSidebar({
   facetSources,
   selectedSources,
   onSourceToggle,
+  facetCategories,
+  selectedCategories,
+  onCategoryToggle,
+  facetLifecycles,
+  selectedLifecycles,
+  onLifecycleToggle,
   facetEntityTypes,
   selectedTypes,
   onTypeToggle,
@@ -570,6 +739,12 @@ function FacetSidebar({
   facetSources: Record<string, number>;
   selectedSources: string[];
   onSourceToggle: (key: string) => void;
+  facetCategories: Record<string, number>;
+  selectedCategories: string[];
+  onCategoryToggle: (key: string) => void;
+  facetLifecycles: Record<string, number>;
+  selectedLifecycles: string[];
+  onLifecycleToggle: (key: string) => void;
   facetEntityTypes: FacetEntityType[];
   selectedTypes: string[];
   onTypeToggle: (key: string) => void;
@@ -581,16 +756,79 @@ function FacetSidebar({
         <h3 className="mb-2 text-xs font-semibold uppercase text-muted-foreground">项目范围</h3>
         <Select value={projectId || ""} onValueChange={(v) => onProjectChange(v || "")}>
           <SelectTrigger className="w-full">
-            <SelectValue placeholder="（全局范围 / 不选项目）" />
+            <SelectValue placeholder="(全局范围 / 不选项目)">
+              {(value: unknown) => {
+                const id = typeof value === "string" ? value : "";
+                if (!id) return "(全局范围 / 不选项目)";
+                const found = projects.find((p) => p.project_id === id);
+                const name = (found?.name || "").trim();
+                return name || "未命名项目";
+              }}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             {projects.map((p) => (
               <SelectItem key={p.project_id} value={p.project_id}>
-                {p.name || p.project_id}
+                {(p.name || "").trim() || "未命名项目"}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
+      </div>
+
+      {/* Semantic category — 这是什么 */}
+      <div>
+        <h3 className="mb-2 text-xs font-semibold uppercase text-muted-foreground">语义范畴</h3>
+        <div className="flex flex-col gap-1">
+          {CATEGORIES.map((c) => {
+            const count = facetCategories[c.key];
+            if (count === undefined) return null;
+            const checked = selectedCategories.includes(c.key);
+            return (
+              <label
+                key={c.key}
+                className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/40"
+              >
+                <Checkbox
+                  checked={checked}
+                  onCheckedChange={() => onCategoryToggle(c.key)}
+                />
+                <span className={cn("inline-flex h-5 w-5 items-center justify-center rounded text-white", c.color)}>
+                  {c.icon}
+                </span>
+                <span className="flex-1">{c.label}</span>
+                <span className="text-[11px] text-muted-foreground">{count}</span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Lifecycle — 处于什么阶段 */}
+      <div>
+        <h3 className="mb-2 text-xs font-semibold uppercase text-muted-foreground">生命周期</h3>
+        <div className="flex flex-col gap-1">
+          {LIFECYCLES.map((l) => {
+            const count = facetLifecycles[l.key];
+            if (count === undefined) return null;
+            const checked = selectedLifecycles.includes(l.key);
+            return (
+              <label
+                key={l.key}
+                className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/40"
+              >
+                <Checkbox
+                  checked={checked}
+                  onCheckedChange={() => onLifecycleToggle(l.key)}
+                />
+                <Badge variant="outline" className={cn("h-5 border px-1.5 text-[10px] font-normal", l.tone)}>
+                  {l.label}
+                </Badge>
+                <span className="ml-auto text-[11px] text-muted-foreground">{count}</span>
+              </label>
+            );
+          })}
+        </div>
       </div>
 
       {/* Data sources */}
@@ -668,10 +906,47 @@ export default function AssetLibraryPage() {
     SOURCES.map((s) => s.key),
   );
   const [selectedTypes, setSelectedTypes] = React.useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = React.useState<string[]>([]);
+  const [selectedLifecycles, setSelectedLifecycles] = React.useState<string[]>([]);
+  const [viewMode, setViewMode] = React.useState<"cards" | "list" | "kanban">("cards");
 
   /* -- detail / ingestion drawers -- */
   const [detailItem, setDetailItem] = React.useState<UnifiedItem | null>(null);
   const [ingestionOpen, setIngestionOpen] = React.useState(false);
+
+  /* -- delete confirmation -- */
+  const [deleteTarget, setDeleteTarget] = React.useState<UnifiedItem | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: (target: UnifiedItem) =>
+      deleteAsset(target.source_ref || "", {
+        scope: target.scope === "project" ? "project" : "global",
+        projectId: target.project_id || "",
+      }),
+    onSuccess: () => {
+      notifySuccess("已删除");
+      setDeleteTarget(null);
+      setDetailItem(null);
+      queryClient.invalidateQueries({ queryKey: ["unifiedAssets"] });
+      queryClient.invalidateQueries({ queryKey: ["unifiedFacets"] });
+      queryClient.invalidateQueries({ queryKey: ["globalAssetSearch"] });
+    },
+    onError: (err: Error) => {
+      notifyError(err.message || "删除失败");
+      setDeleteTarget(null);
+    },
+  });
+
+  const handleRequestDelete = React.useCallback((item: UnifiedItem) => {
+    if (item.source !== "assets" || !item.source_ref) return;
+    setDeleteTarget(item);
+  }, []);
+
+  const confirmDelete = React.useCallback(() => {
+    if (deleteTarget) {
+      deleteMutation.mutate(deleteTarget);
+    }
+  }, [deleteTarget, deleteMutation]);
 
   /* -- debounce search -- */
   React.useEffect(() => {
@@ -707,22 +982,37 @@ export default function AssetLibraryPage() {
   const facetsData = (facetsQuery.data as ApiResponse | undefined)?.data as {
     sources?: FacetSource[];
     entity_types?: FacetEntityType[];
+    categories?: FacetBucket[];
+    lifecycles?: FacetBucket[];
+    total?: number;
   } | undefined;
   const facetSources = React.useMemo(() => {
     return Object.fromEntries(
       (facetsData?.sources || []).map((s) => [s.key, s.count]),
     );
   }, [facetsData]);
+  const facetCategories = React.useMemo(() => {
+    return Object.fromEntries(
+      (facetsData?.categories || []).map((c) => [c.key, c.count]),
+    );
+  }, [facetsData]);
+  const facetLifecycles = React.useMemo(() => {
+    return Object.fromEntries(
+      (facetsData?.lifecycles || []).map((l) => [l.key, l.count]),
+    );
+  }, [facetsData]);
   const facetEntityTypes = facetsData?.entity_types || [];
 
   /* -- unified list query (normal browse) -- */
   const listQuery = useQuery({
-    queryKey: ["unifiedAssets", projectId, selectedSources, selectedTypes],
+    queryKey: ["unifiedAssets", projectId, selectedSources, selectedTypes, selectedCategories, selectedLifecycles],
     queryFn: () =>
       listUnifiedAssets({
         projectId,
         sources: selectedSources,
         entityTypes: selectedTypes,
+        categories: selectedCategories,
+        lifecycles: selectedLifecycles,
         pageSize: 200,
       }),
     enabled: !searchActive,
@@ -793,11 +1083,33 @@ export default function AssetLibraryPage() {
     );
   }
 
+  function handleCategoryToggle(key: string) {
+    setSelectedCategories((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
+  }
+
+  function handleLifecycleToggle(key: string) {
+    setSelectedLifecycles((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
+  }
+
   function clearSearch() {
     setSearchQuery("");
     setDebouncedSearch("");
     setSearchActive(false);
   }
+
+  /* -- stats for the header strip -- */
+  const candidateCount = facetLifecycles.candidate || 0;
+  const statCards: Array<{ key: string; label: string; count: number; color: string; icon: React.ReactNode }> = [
+    { key: "characters", label: "角色", color: "bg-violet-50 text-violet-600", icon: <Users className="h-3.5 w-3.5" />, count: facetCategories.characters || 0 },
+    { key: "relationships", label: "关系", color: "bg-rose-50 text-rose-600", icon: <Link2 className="h-3.5 w-3.5" />, count: facetCategories.relationships || 0 },
+    { key: "world", label: "世界设定", color: "bg-teal-50 text-teal-600", icon: <Map className="h-3.5 w-3.5" />, count: facetCategories.world || 0 },
+    { key: "plot", label: "情节/场景", color: "bg-orange-50 text-orange-600", icon: <Film className="h-3.5 w-3.5" />, count: facetCategories.plot || 0 },
+    { key: "materials", label: "写作素材", color: "bg-sky-50 text-sky-600", icon: <Library className="h-3.5 w-3.5" />, count: facetCategories.materials || 0 },
+  ];
 
   return (
     <div className="flex h-[calc(100vh-60px)] flex-col gap-4 p-4">
@@ -806,7 +1118,7 @@ export default function AssetLibraryPage() {
         <div>
           <h1 className="text-xl font-semibold">资产库</h1>
           <p className="text-sm text-muted-foreground">
-            统一查看本项目所有数据：种子档案、故事图谱、写作工坊、世界线、独立资产 ——
+            统一查看本项目所有数据:种子档案、故事图谱、写作工坊、世界线、独立资产 ——
             一个入口、一个搜索框、一份可视化。
           </p>
         </div>
@@ -830,14 +1142,58 @@ export default function AssetLibraryPage() {
         </div>
       </div>
 
-      {/* Search bar */}
+      {/* Stats strip: one tile per category + candidate review shortcut */}
+      <div className="flex flex-wrap items-center gap-2">
+        {statCards.map((c) => (
+          <button
+            key={c.key}
+            type="button"
+            onClick={() => handleCategoryToggle(c.key)}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs transition-colors",
+              selectedCategories.includes(c.key)
+                ? "border-primary/50 bg-primary/5"
+                : "border-border/60 hover:border-primary/30",
+            )}
+            title={`按「${c.label}」过滤`}
+          >
+            <span className={cn("inline-flex h-6 w-6 items-center justify-center rounded", c.color)}>
+              {c.icon}
+            </span>
+            <span className="flex flex-col items-start leading-none">
+              <span className="text-[10px] text-muted-foreground">{c.label}</span>
+              <span className="text-sm font-semibold">{c.count}</span>
+            </span>
+          </button>
+        ))}
+        {candidateCount > 0 && (
+          <button
+            type="button"
+            onClick={() => handleLifecycleToggle("candidate")}
+            className={cn(
+              "ml-auto inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs transition-colors",
+              selectedLifecycles.includes("candidate")
+                ? "border-amber-500/70 bg-amber-50"
+                : "border-amber-400/40 bg-amber-50/50 hover:border-amber-500/60",
+            )}
+            title="筛选候选记忆待审核"
+          >
+            <span className="inline-flex h-6 min-w-6 items-center justify-center rounded bg-amber-500 px-1 text-[10px] font-bold text-white">
+              {candidateCount}
+            </span>
+            <span className="font-medium text-amber-700">候选待审核</span>
+          </button>
+        )}
+      </div>
+
+      {/* Search bar + view switcher */}
       <div className="flex items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="全局搜索：跨所有数据源（>=2 字符即触发）"
+            placeholder="全局搜索:跨所有数据源(>=2 字符即触发)"
             className="pl-9"
           />
           {searchQuery && (
@@ -858,9 +1214,22 @@ export default function AssetLibraryPage() {
             </Button>
           </Badge>
         )}
+        <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as "cards" | "list" | "kanban")}>
+          <TabsList className="h-8">
+            <TabsTrigger value="cards" className="h-6 px-2 text-xs" title="卡片视图">
+              <LayoutGrid className="h-3.5 w-3.5" />
+            </TabsTrigger>
+            <TabsTrigger value="list" className="h-6 px-2 text-xs" title="紧凑列表">
+              <List className="h-3.5 w-3.5" />
+            </TabsTrigger>
+            <TabsTrigger value="kanban" className="h-6 px-2 text-xs" title="生命周期看板">
+              <KanbanSquare className="h-3.5 w-3.5" />
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
 
-      {/* Main layout: facets sidebar + card grid */}
+      {/* Main layout: facets sidebar + content */}
       <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr] gap-4 overflow-hidden">
         {/* Facets */}
         <ScrollArea className="min-h-0">
@@ -871,6 +1240,12 @@ export default function AssetLibraryPage() {
             facetSources={facetSources}
             selectedSources={selectedSources}
             onSourceToggle={handleSourceToggle}
+            facetCategories={facetCategories}
+            selectedCategories={selectedCategories}
+            onCategoryToggle={handleCategoryToggle}
+            facetLifecycles={facetLifecycles}
+            selectedLifecycles={selectedLifecycles}
+            onLifecycleToggle={handleLifecycleToggle}
             facetEntityTypes={facetEntityTypes}
             selectedTypes={selectedTypes}
             onTypeToggle={handleTypeToggle}
@@ -882,7 +1257,7 @@ export default function AssetLibraryPage() {
           {/* Errors */}
           {listErrors.length > 0 && (
             <div className="mb-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs">
-              <strong>部分数据源加载失败：</strong>
+              <strong>部分数据源加载失败:</strong>
               <ul className="mt-1 list-inside list-disc">
                 {listErrors.map((e) => (
                   <li key={e.source}>{e.source}: {e.error}</li>
@@ -901,15 +1276,63 @@ export default function AssetLibraryPage() {
             <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
               没有匹配的资产
             </div>
-          ) : (
+          ) : viewMode === "cards" ? (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
               {items.map((item, idx) => (
                 <AssetCard
                   key={`${item.source}:${item.source_ref || idx}`}
                   item={item}
                   onClick={() => setDetailItem(item)}
+                  onDelete={handleRequestDelete}
                 />
               ))}
+            </div>
+          ) : viewMode === "list" ? (
+            <div className="flex flex-col gap-0.5">
+              {items.map((item, idx) => (
+                <AssetRow
+                  key={`${item.source}:${item.source_ref || idx}`}
+                  item={item}
+                  onClick={() => setDetailItem(item)}
+                  onDelete={handleRequestDelete}
+                />
+              ))}
+            </div>
+          ) : (
+            /* Kanban — group by lifecycle column */
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
+              {LIFECYCLES.filter((l) => items.some((it) => (it.lifecycle || "canon") === l.key)).map((l) => {
+                const colItems = items.filter((it) => (it.lifecycle || "canon") === l.key);
+                return (
+                  <div
+                    key={l.key}
+                    className={cn(
+                      "flex min-h-[200px] flex-col gap-2 rounded-lg border p-2",
+                      l.tone,
+                    )}
+                  >
+                    <div className="flex items-center justify-between px-1 text-xs font-semibold">
+                      <span>{l.label}</span>
+                      <span className="rounded bg-white/70 px-1.5 text-[10px]">{colItems.length}</span>
+                    </div>
+                    <div className="flex flex-col gap-2 overflow-hidden">
+                      {colItems.slice(0, 40).map((item, idx) => (
+                        <AssetCard
+                          key={`${item.source}:${item.source_ref || idx}`}
+                          item={item}
+                          onClick={() => setDetailItem(item)}
+                          onDelete={handleRequestDelete}
+                        />
+                      ))}
+                      {colItems.length > 40 && (
+                        <span className="px-1 text-[10px] text-muted-foreground">
+                          另有 {colItems.length - 40} 条未显示
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </ScrollArea>
@@ -920,6 +1343,7 @@ export default function AssetLibraryPage() {
         item={detailItem}
         open={!!detailItem}
         onClose={() => setDetailItem(null)}
+        onDelete={handleRequestDelete}
       />
 
       {/* Ingestion drawer */}
@@ -932,6 +1356,35 @@ export default function AssetLibraryPage() {
           queryClient.invalidateQueries({ queryKey: ["unifiedFacets"] });
         }}
       />
+
+      {/* Delete confirmation dialog */}
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>确认删除</DialogTitle>
+            <DialogDescription>
+              {deleteTarget
+                ? `确认删除资产「${deleteTarget.title || deleteTarget.name || "(无标题)"}」吗？此操作不可撤销。`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmDelete}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? "删除中..." : "删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

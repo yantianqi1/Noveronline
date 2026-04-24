@@ -99,3 +99,23 @@ def test_parse_json_truncated_false_still_raises_on_bad_input():
     """truncated=False 时，严重损坏的输入仍应抛出 ValueError。"""
     with pytest.raises(ValueError, match="LLM返回的JSON格式无效"):
         parse_json_response("完全不是 JSON 的内容，也没有大括号", truncated=False)
+
+
+# ── Phase E-1: dropped-field warning ──
+
+
+def test_repair_truncated_json_logs_dropped_field_name(monkeypatch):
+    """When the trailing key:value pair is dropped, log the field name."""
+    from app.utils import llm_json as llm_json_mod
+
+    captured: list[tuple] = []
+
+    def _fake_warning(*args, **kwargs):
+        captured.append(args)
+
+    monkeypatch.setattr(llm_json_mod.logger, "warning", _fake_warning)
+    truncated = '{"summary": "hello", "world_building": '
+    repaired = llm_json_mod._repair_truncated_json(truncated)
+    assert repaired.endswith("}")
+    flattened = " ".join(str(arg) for tup in captured for arg in tup)
+    assert "world_building" in flattened

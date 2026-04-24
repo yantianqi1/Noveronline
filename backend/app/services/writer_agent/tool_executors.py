@@ -12,12 +12,13 @@ import os
 import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict
 
 from sqlalchemy import and_, insert, or_, select, update
 
 from ...config import Config
 from ...database import get_engine
+from ...schemas.asset_types import AssetType
 from ...repositories import (
     ChapterRepository,
     EntityRepository,
@@ -75,20 +76,61 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 
-def execute_tool(tool_name: str, tool_input: dict, project_id: str) -> str:
+class ToolExecResultDict(TypedDict, total=False):
+    """Executor return shape seen by ``AgentLoop``.
+
+    Legacy executors return plain ``str``; ``execute_tool`` wraps those into
+    ``{"result": truncated_str}``. New-style executors return this dict
+    directly with an optional pre-serialised ``render`` payload dict.
+    """
+
+    result: str
+    render: dict
+
+
+def execute_tool(
+    tool_name: str,
+    tool_input: dict,
+    project_id: str,
+) -> ToolExecResultDict:
     """Execute a named tool.
 
-    Returns a formatted string result, truncated with head+tail preservation.
+    Always returns a dict. ``result`` is the truncated text the LLM sees;
+    ``render`` (optional) is a UI-only payload already serialised by the
+    executor (e.g. ``WordBudgetRender(...).model_dump(mode="json")``).
+    Legacy executors that still return plain ``str`` are wrapped
+    transparently so this change is backwards compatible.
     """
     executor = _EXECUTORS.get(tool_name)
     if executor is None:
-        return f"未知工具：{tool_name}"
+        return {"result": f"未知工具：{tool_name}"}
     try:
-        result = executor(tool_input, project_id)
+        raw = executor(tool_input, project_id)
     except Exception:
         logger.error("Tool %s execution failed:\n%s", tool_name, traceback.format_exc())
-        result = f"工具 {tool_name} 执行出错：{traceback.format_exc()}"
-    return _truncate_result(result)
+        return {"result": f"工具 {tool_name} 执行出错：{traceback.format_exc()}"}
+
+    # Back-compat: legacy executors still return plain str.
+    if isinstance(raw, str):
+        return {"result": _truncate_result(raw)}
+
+    # New-style executors return a dict with {result, render?}. We only
+    # truncate `result` — `render` is structured UI data the frontend needs
+    # whole.
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Tool %s returned unexpected type %s; coercing via str()",
+            tool_name,
+            type(raw).__name__,
+        )
+        return {"result": _truncate_result(str(raw))}
+
+    result_text = _truncate_result(str(raw.get("result", "")))
+    out: ToolExecResultDict = {"result": result_text}
+    render = raw.get("render")
+    if render is not None:
+        out["render"] = render
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +184,267 @@ def _append_if(lines: list[str], label: str, value: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Name resolution with fuzzy suggestions
+# ---------------------------------------------------------------------------
+#
+# Problem: the seed pipeline populates `graph_nodes` + `archive_library` but
+# leaves the `entities` table empty, and the project's own alias map
+# (`graph_aliases`) isn't visible to `EntityRepository`. So a tool call like
+# query_entity("白鲤") — where 白鲤 is a graph alias pointing to the canonical
+# node "朱灵韵" — gets a hard "未找到" even though the data is right there.
+# On top of that, name-query tools previously returned a flat "not found" with
+# no hint of the canonical name, forcing the agent to give up.
+#
+# The resolver below unifies lookup across all real data sources and, on miss,
+# surfaces up to 5 candidates via substring + single-char decomposition so the
+# agent can self-correct without human intervention.
+
+from dataclasses import dataclass, field  # noqa: E402
+
+
+@dataclass
+class NameResolveResult:
+    entity: dict | None = None
+    merged: Any | None = None
+    graph_node: dict | None = None
+    canonical_name: str | None = None
+    matched_via: str = ""  # entity | entity_alias | archive | graph_node | graph_alias
+    suggestions: list[dict] = field(default_factory=list)
+
+    @property
+    def found(self) -> bool:
+        return (
+            self.entity is not None
+            or self.merged is not None
+            or self.graph_node is not None
+        )
+
+
+def _lookup_graph_node_by_name(project_id: str, name: str) -> dict | None:
+    """Find a graph node by name or alias. Returns {uuid, name, summary, matched_via} or None."""
+    from ...repositories.graph_repo import GraphRepository
+
+    return GraphRepository(get_engine()).lookup_node_by_name_or_alias(project_id, name)
+
+
+def _gather_fuzzy_suggestions(
+    project_id: str, name: str, limit: int = 5,
+) -> list[dict]:
+    """Collect fuzzy candidates via substring + single-char decomposition.
+
+    Sources: graph_nodes.name, graph_aliases.alias, archive_library.entity_name.
+    Ordered by importance_tier (protagonist/major first), deduped by canonical name.
+    """
+    from ...repositories.graph_repo import GraphRepository
+    from ...tables.assets import assets as assets_table
+
+    engine = get_engine()
+    seen: set[str] = set()
+    out: list[dict] = []
+
+    # --- Graph sources (nodes + aliases + CJK single-char decomposition) ---
+    # find_graph_candidates already dedups within the graph slice and applies
+    # the same single-char decomposition rule; we just merge its payload into
+    # our uniform shape.
+    graph_repo = GraphRepository(engine)
+    for cand in graph_repo.find_graph_candidates(project_id, name, limit=limit * 3):
+        if cand["canonical_name"] in seen:
+            continue
+        seen.add(cand["canonical_name"])
+        out.append(
+            {
+                "canonical_name": cand["canonical_name"],
+                "source": cand["source"],
+                "entity_type": "",
+                "importance_tier": "",
+                "summary": cand.get("summary", ""),
+                "why": cand["why"],
+            }
+        )
+
+    # --- Archive entities (merged into the assets table in P5) ---
+    # This crosses repo boundaries, so we keep a targeted Core select here
+    # rather than inflating AssetRepository with a narrow helper. Still
+    # SQLAlchemy-typed — no raw text() strings.
+    pattern = f"%{name}%"
+    with engine.connect() as conn:
+        archive_rows = conn.execute(
+            select(
+                assets_table.c.entity_name,
+                assets_table.c.entity_type,
+                assets_table.c.importance_tier,
+            )
+            .where(
+                and_(
+                    assets_table.c.project_id == project_id,
+                    assets_table.c.asset_type == "archive_entity",
+                    assets_table.c.entity_name.like(pattern),
+                )
+            )
+            .limit(15)
+        ).fetchall()
+
+    for row in archive_rows:
+        canonical = row.entity_name or ""
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(
+            {
+                "canonical_name": canonical,
+                "source": "archive",
+                "entity_type": row.entity_type or "",
+                "importance_tier": row.importance_tier or "",
+                "summary": "",
+                "why": f"档案库名字含「{name}」",
+            }
+        )
+
+    tier_priority = {"protagonist": 0, "major": 1, "supporting": 2, "minor": 3}
+    out.sort(key=lambda x: tier_priority.get(x.get("importance_tier") or "", 5))
+    return out[:limit]
+
+
+def _resolve_entity_fuzzy(
+    project_id: str, name: str, entity_type: str | None = None,
+) -> NameResolveResult:
+    """Unified entity-name resolution across all project data sources.
+
+    Precedence for a direct hit: entities > archive (merged) > graph_nodes.
+    Alias hits get redirected to the canonical name; we then re-query the
+    richer sources so the caller always gets the best available payload.
+    On miss, gathers up to 5 fuzzy candidates for the agent to retry.
+    """
+    result = NameResolveResult()
+    if not name:
+        return result
+
+    repos = _get_repos()
+    engine = get_engine()
+
+    # L1: entities / entity_aliases
+    entity = repos["entity"].get_entity_by_name(project_id, name, entity_type)
+    if entity:
+        result.entity = entity
+        result.canonical_name = entity.get("name") or name
+        result.matched_via = "entity"
+
+    # L2: archive / merged view
+    try:
+        from ..narrative_entity_service import NarrativeEntityService
+        merged = NarrativeEntityService(engine).get_by_name(project_id, name)
+        if merged is not None:
+            result.merged = merged
+            if not result.canonical_name:
+                result.canonical_name = merged.name or name
+                result.matched_via = "archive"
+    except Exception:
+        logger.warning("NarrativeEntityService merge failed for %s", name, exc_info=True)
+
+    # L3: graph_nodes + graph_aliases
+    node_info = _lookup_graph_node_by_name(project_id, name)
+    if node_info:
+        result.graph_node = node_info
+        canonical = node_info["name"]
+        if not result.canonical_name:
+            result.canonical_name = canonical
+            result.matched_via = node_info.get("matched_via", "graph_node")
+        # Alias redirected to a new canonical name — re-hydrate entities/archive
+        # so the caller gets the richer shape instead of a bare graph node.
+        if canonical and canonical != name:
+            if result.entity is None:
+                hydrated = repos["entity"].get_entity_by_name(
+                    project_id, canonical, entity_type,
+                )
+                if hydrated:
+                    result.entity = hydrated
+            if result.merged is None:
+                try:
+                    from ..narrative_entity_service import NarrativeEntityService
+                    rehydrated = NarrativeEntityService(engine).get_by_name(
+                        project_id, canonical,
+                    )
+                    if rehydrated is not None:
+                        result.merged = rehydrated
+                except Exception:
+                    logger.warning(
+                        "NarrativeEntityService rehydrate failed for %s",
+                        canonical, exc_info=True,
+                    )
+
+    if result.found:
+        return result
+
+    # Miss: gather suggestions so the agent can retry a corrected name.
+    result.suggestions = _gather_fuzzy_suggestions(project_id, name)
+    return result
+
+
+def _format_suggestions(name: str, suggestions: list[dict]) -> str:
+    """Render a 'not found + did-you-mean' message that prods the agent to retry."""
+    if not suggestions:
+        return (
+            f"未找到「{name}」，项目里也没有相似候选。\n"
+            "可能原因：① 该名字是写作指令里的幻觉，并非项目真实存在的角色/实体；"
+            "② 名字严重错别字。请先用 global_search 或 search_assets 确认；"
+            "若确认是新角色，请调用 manage_entity(action='create') 先建档，再继续写作。"
+        )
+    lines = [f"未找到「{name}」。项目里相似候选如下，请用 query_entity 重试正确名字："]
+    for s in suggestions:
+        meta_parts = [x for x in (s.get("entity_type"), s.get("importance_tier")) if x]
+        meta = f"（{'/'.join(meta_parts)}）" if meta_parts else ""
+        head = f"  - {s['canonical_name']}{meta} [来源:{s.get('source', '')}]"
+        lines.append(head)
+        why = s.get("why", "")
+        if why:
+            lines.append(f"      命中原因：{why}")
+        summary = s.get("summary") or ""
+        if summary:
+            lines.append(f"      简介：{summary}")
+    lines.append(
+        "注意：若以上候选都不是你想查的人，请用 global_search 再确认一次；"
+        "若确认是全新角色，请用 manage_entity(action='create') 先建档——**不要直接放弃检索**。"
+    )
+    return "\n".join(lines)
+
+
+def _format_graph_only(project_id: str, node: dict) -> str:
+    """Fallback formatter when only a graph node exists (no entity/archive row)."""
+    from ...repositories.graph_repo import GraphRepository
+
+    node_uuid = node.get("uuid", "")
+    lines = [
+        f"【图谱节点】{node.get('name', '')}",
+        f"概述：{node.get('summary') or '无'}",
+    ]
+
+    graph_repo = GraphRepository(get_engine())
+    labels = graph_repo.get_node_labels(project_id, node_uuid, limit=8)
+    if labels:
+        lines.append(f"标签：{', '.join(labels)}")
+
+    # get_neighbors_with_labels returns the edge + neighbor rollup already
+    # ordered by weight DESC, so no extra post-processing needed.
+    neighbors = graph_repo.get_neighbors_with_labels(project_id, node_uuid, limit=10)
+    if neighbors:
+        lines.append("\n【图谱关系】")
+        for nb in neighbors:
+            direction = "→" if nb["direction"] == "outgoing" else "←"
+            line = (
+                f"  {direction} {nb['neighbor_name']}"
+                f"（{nb['edge_name']}, weight={nb['edge_weight']}）"
+            )
+            if nb["edge_fact"]:
+                line += f"：{nb['edge_fact']}"
+            lines.append(line)
+    lines.append(
+        "\n（注：此实体仅在故事图谱中存在，尚无结构化角色档案。"
+        "写作时请结合上面的图谱关系推断具体设定。）"
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Individual executors
 # ---------------------------------------------------------------------------
 
@@ -149,31 +452,180 @@ def _append_if(lines: list[str], label: str, value: str | None) -> None:
 def _query_entity(params: dict, project_id: str) -> str:
     name = params["name"]
     entity_type = params.get("entity_type")
-    repos = _get_repos()
-    entity = repos["entity"].get_entity_by_name(project_id, name, entity_type)
-    if entity is None:
-        return f"未找到实体：{name}"
+    section = (params.get("section") or "overview").strip().lower()
+    if section not in {"overview", "profile", "relations", "events", "memories"}:
+        return (
+            f"query_entity section 参数非法：{section!r}。允许的值："
+            "overview / profile / relations / events / memories。"
+        )
+    resolved = _resolve_entity_fuzzy(project_id, name, entity_type)
 
-    lines: list[str] = []
+    if not resolved.found:
+        return _format_suggestions(name, resolved.suggestions)
 
-    # Long-form character bible (deep profile) — placed at the very top so the
-    # writer LLM sees it first. This is the strongest防 OOC约束。
+    entity = resolved.entity
+    merged = resolved.merged
+    graph_node = resolved.graph_node
+    canonical = resolved.canonical_name or name
+
+    # Note to agent when the query was resolved via alias/canonical remap,
+    # so downstream tool calls can use the canonical name and not waste a
+    # second round re-querying.
+    header = ""
+    if canonical != name:
+        header = (
+            f"注：你查的「{name}」已通过 {resolved.matched_via} 解析为「{canonical}」。"
+            f"后续 query_relationship / query_character_timeline 等请直接用「{canonical}」。\n\n"
+        )
+
+    # Archive-only / graph-only fallbacks don't support paginated sections —
+    # they don't have an entity row to hang section-specific data off, so we
+    # return the same compact view regardless of section.
+    if entity is None and merged is not None and merged.archive_id:
+        body = _format_archive_only(merged)
+        if section in {"relations", "events"}:
+            body += (
+                f"\n\n（section={section}：该实体仅存在于档案库，"
+                "尚无 entities 行，因此无法返回 in-story 关系/事件。"
+                "请用 query_relationship 或 search_settings 进一步查询。）"
+            )
+        elif section == "memories" and merged.archive_id:
+            body += "\n\n" + _render_memory_section(merged.archive_id, params)
+        return header + body
+
+    if entity is None and merged is None and graph_node is not None:
+        return header + _format_graph_only(project_id, graph_node) + (
+            f"\n\n（section={section}：该实体仅存在于故事图谱，"
+            "尚无结构化档案；请结合图谱邻居推断。）"
+        )
+
+    # Main path: entity row exists (optionally with merged archive).
+    entity_id = entity.get("entity_id", "")
+    if section == "overview":
+        return header + _render_entity_overview(project_id, entity, merged, entity_id)
+    if section == "profile":
+        return header + _render_entity_profile(entity, merged)
+    if section == "relations":
+        return header + _render_entity_relations(project_id, entity, entity_id, params)
+    if section == "events":
+        return header + _render_entity_events(project_id, entity, entity_id, params)
+    if section == "memories":
+        archive_id = (merged.archive_id if merged is not None else None) or entity.get("archive_id")
+        if not archive_id:
+            return header + (
+                f"【{entity.get('name', name)}】暂无 archive，无法查询长期记忆。"
+                "请改用 section='overview' 或 section='profile'。"
+            )
+        return header + _render_memory_section(archive_id, params)
+
+    # Shouldn't happen — guarded at top.
+    return header + f"未知 section：{section}"
+
+
+# ---------------------------------------------------------------------------
+# query_entity section renderers
+# ---------------------------------------------------------------------------
+
+
+def _render_entity_overview(
+    project_id: str, entity: dict, merged: Any, entity_id: str,
+) -> str:
+    """overview section: basics + aliases + labels + short summary.
+
+    Deliberately compact — designed to be the first call the agent makes on
+    every POV/involved character, so we keep it cheap.
+    """
+    lines: list[str] = [
+        f"【{entity.get('entity_type', '未知')}】{entity.get('name', '')}（section=overview）",
+        f"重要性：{entity.get('importance_tier', '未知')}",
+    ]
+
+    # aliases + labels via entity_repo.get_entity_with_details
+    aliases: list[str] = []
+    labels: list[str] = []
+    if entity_id:
+        try:
+            repos = _get_repos()
+            detailed = repos["entity"].get_entity_with_details(project_id, entity_id)
+            if detailed:
+                aliases = [a for a in detailed.get("aliases", []) if a and a != entity.get("name")]
+                labels = list(detailed.get("labels", []))
+        except Exception:
+            logger.warning("get_entity_with_details failed for %s", entity_id, exc_info=True)
+
+    if aliases:
+        lines.append(f"别名：{'、'.join(aliases)}")
+    if labels:
+        lines.append(f"标签：{'、'.join(labels)}")
+    _append_if(lines, "概述", entity.get("summary"))
+    _append_if(lines, "核心驱动", entity.get("core_drive"))
+    _append_if(lines, "表面表现", entity.get("surface_mask"))
+    _append_if(lines, "内在矛盾", entity.get("hidden_tension"))
+    _append_if(lines, "当前目标", entity.get("current_objective"))
+    _append_if(lines, "终极目标", entity.get("ultimate_goal"))
+
+    # Canon fields exclusive to archive
+    if merged is not None and merged.canon_profile:
+        cp = merged.canon_profile
+        if cp.get("relationship_summary"):
+            lines.append(f"正典·关系概述：{cp['relationship_summary']}")
+        if cp.get("agent_behavior_hint"):
+            lines.append(f"Agent 行为提示：{cp['agent_behavior_hint']}")
+
+    lines.append("")
+    lines.append(
+        "（overview 只含基础字段。续取：section='profile' 拿长文档案，"
+        "section='relations' 拿关系/伏笔/规则，section='events' 拿事件，"
+        "section='memories' 拿 canon + candidate 记忆。）"
+    )
+    return "\n".join(lines)
+
+
+def _render_entity_profile(entity: dict, merged: Any) -> str:
+    """profile section: deep_profile_md + full structured personality fields."""
+    lines: list[str] = [
+        f"【{entity.get('entity_type', '未知')}】{entity.get('name', '')}（section=profile）",
+    ]
+
     deep_profile = (entity.get("deep_profile_md") or "").strip()
     if deep_profile:
         lines.append("===== 角色长文档案（写作时必须严格遵守，下述行为禁区与语言禁忌优先级最高）=====")
         lines.append(deep_profile)
         lines.append("===== 长文档案结束 =====")
-        lines.append("")  # blank line separator
+        lines.append("")
         lines.append("以下为补充结构化字段，与上面长文档案不一致时，以长文档案为准：")
 
-    lines.extend([
-        f"【{entity.get('entity_type', '未知')}】{entity.get('name', name)}",
-        f"重要性：{entity.get('importance_tier', '未知')}",
-        f"概述：{entity.get('summary') or '无'}",
-        f"核心驱动：{entity.get('core_drive') or '无'}",
-        f"表面表现：{entity.get('surface_mask') or '无'}",
-        f"内在矛盾：{entity.get('hidden_tension') or '无'}",
-    ])
+    # Canon profile from archive (canon-exclusive fields only)
+    if merged is not None and merged.canon_profile:
+        cp = merged.canon_profile
+        canon_lines: list[str] = []
+
+        def _maybe(label: str, canon_val, entity_field: str | None = None) -> None:
+            if not canon_val:
+                return
+            if entity_field and (entity.get(entity_field) or "") == canon_val:
+                return
+            canon_lines.append(f"{label}：{canon_val}")
+
+        _maybe("身份定位", cp.get("entity_role"), "entity_role")
+        _maybe("正典·核心驱动", cp.get("core_drive"), "core_drive")
+        _maybe("正典·表面伪装", cp.get("surface_mask"), "surface_mask")
+        _maybe("正典·深层张力", cp.get("hidden_tension"), "hidden_tension")
+        if cp.get("relationship_summary"):
+            canon_lines.append(f"正典·关系概述：{cp['relationship_summary']}")
+        if cp.get("agent_behavior_hint"):
+            canon_lines.append(f"Agent 行为提示：{cp['agent_behavior_hint']}")
+        notable = _pretty_json(cp.get("notable_risks_json"))
+        if notable:
+            canon_lines.append(f"正典·风险清单：{notable}")
+
+        if canon_lines:
+            lines.append("")
+            lines.append(
+                "===== 正典档案（与 entity 同名字段已折叠，此处仅列 canon 独有或与 entity 不一致的部分）====="
+            )
+            lines.extend(canon_lines)
+            lines.append("===== 正典档案结束 =====")
 
     # Structured personality & speech fields
     _append_if(lines, "说话风格", entity.get("speech_style"))
@@ -204,91 +656,430 @@ def _query_entity(params: dict, project_id: str) -> str:
     _append_if(lines, "行为提示", entity.get("agent_behavior_hint"))
     _append_if(lines, "风险", _pretty_json(entity.get("notable_risks_json")))
 
-    lines.append(f"详细设定：{_pretty_json(entity.get('profile_json')) or '无'}")
+    _append_if(lines, "详细设定", _pretty_json(entity.get("profile_json")))
 
-    # --- Associated plot threads ---
-    entity_id = entity.get("entity_id", "")
-    if entity_id:
-        threads = repos["thread"].get_entity_threads(project_id, entity_id, limit=5)
-        if threads:
-            lines.append("\n【关联伏笔】")
-            for t in threads:
-                status = t.get("status", "open")
-                label = _STATUS_LABELS.get(status, status)
-                key = t.get("thread_key", "")
-                detail = t.get("detail", "")
-                text = f"  [{label}] {key}"
-                if detail:
-                    text += f"：{detail}"
-                lines.append(text)
+    # Character archetype refs
+    if merged is not None and merged.archetype_refs:
+        lines.append("\n【关联角色原型模板】")
+        for ref in merged.archetype_refs[:5]:
+            title = ref.get("title") or ref.get("asset_id") or ""
+            summary = ref.get("summary") or ""
+            scope = ref.get("scope") or ""
+            scope_tag = f"({scope})" if scope else ""
+            line = f"  · {title} {scope_tag}"
+            if summary:
+                line += f"：{summary}"
+            lines.append(line)
 
-        # --- Associated world rules ---
-        rules = repos["world_rule"].get_entity_rules(project_id, entity_id, limit=5)
-        if rules:
-            lines.append("\n【适用世界规则】")
-            for r in rules:
-                lines.append(f"  规则：{r.get('fact_text', '')}")
-                snippet = r.get("evidence_snippet", "")
-                if snippet:
-                    lines.append(f"    证据：{snippet}")
+    return "\n".join(lines)
 
-        # --- Recent events ---
-        events = repos["entity"].get_entity_recent_events(project_id, entity_id, limit=5)
-        if events:
-            lines.append("\n【近期事件】")
-            for e in events:
-                etype = e.get("event_type", "")
-                prefix = f"[{etype}] " if etype else ""
-                detail = e.get("summary", "")
-                ch = e.get("chapter_order", "")
-                ch_prefix = f"第{ch}章：" if ch else ""
-                lines.append(f"  {prefix}{ch_prefix}{detail}")
 
+def _render_entity_relations(
+    project_id: str, entity: dict, entity_id: str, params: dict,
+) -> str:
+    """relations section: all bidirectional relationships + threads + world rules."""
+    limit = max(1, min(int(params.get("limit") or 20), 100))
+    lines: list[str] = [
+        f"【{entity.get('name', '')}】关系网络（section=relations）",
+    ]
+
+    repos = _get_repos()
+
+    rels = repos["relationship"].get_entity_relationships(
+        project_id, entity_id, limit=limit,
+    )
+    if rels:
+        # Pre-resolve opposite-end entity names
+        other_ids = {
+            r.get("target_id") if r.get("source_id") == entity_id else r.get("source_id")
+            for r in rels
+        }
+        other_ids.discard(None)
+        name_map: dict[str, str] = {}
+        for oid in other_ids:
+            if not oid:
+                continue
+            row = repos["entity"].get_entity(project_id, oid)
+            if row:
+                name_map[oid] = row.get("name") or oid
+
+        lines.append(f"\n【双向关系】（共 {len(rels)} 条）")
+        for r in rels:
+            if r.get("source_id") == entity_id:
+                other_id = r.get("target_id")
+                direction = "→"
+            else:
+                other_id = r.get("source_id")
+                direction = "←"
+            other_name = name_map.get(other_id or "", other_id or "?")
+            rel_type = r.get("relation_type") or "未分类"
+            trust = r.get("trust_level")
+            power = r.get("power_dynamic") or ""
+            lines.append(f"  {direction} {other_name}（{rel_type}）")
+            if r.get("description"):
+                lines.append(f"    描述：{r['description']}")
+            meta_parts = []
+            if trust is not None and trust != "":
+                meta_parts.append(f"信任={trust}")
+            if power:
+                meta_parts.append(f"权力={power}")
+            if r.get("conflict_trigger"):
+                meta_parts.append(f"冲突触发={r['conflict_trigger']}")
+            if meta_parts:
+                lines.append(f"    {'、'.join(meta_parts)}")
+    else:
+        lines.append("\n【双向关系】无")
+
+    threads = repos["thread"].get_entity_threads(project_id, entity_id, limit=limit)
+    if threads:
+        lines.append(f"\n【关联伏笔】（共 {len(threads)} 条）")
+        for t in threads:
+            status = t.get("status", "open")
+            label = _STATUS_LABELS.get(status, status)
+            key = t.get("thread_key", "")
+            detail = t.get("detail", "")
+            text = f"  [{label}] {key}"
+            if detail:
+                text += f"：{detail}"
+            lines.append(text)
+
+    rules = repos["world_rule"].get_entity_rules(project_id, entity_id, limit=limit)
+    if rules:
+        lines.append(f"\n【适用世界规则】（共 {len(rules)} 条）")
+        for r in rules:
+            lines.append(f"  规则：{r.get('fact_text', '')}")
+            snippet = r.get("evidence_snippet", "")
+            if snippet:
+                lines.append(f"    证据：{snippet}")
+
+    if len(lines) == 1:
+        lines.append("（尚无关系 / 伏笔 / 世界规则记录。）")
+    return "\n".join(lines)
+
+
+def _render_entity_events(
+    project_id: str, entity: dict, entity_id: str, params: dict,
+) -> str:
+    """events section: paginated character_events, newest first."""
+    limit = max(1, min(int(params.get("limit") or 50), 200))
+    cursor = params.get("cursor") or ""
+
+    # Cursor protocol: "offset=<n>" — resilient and avoids coupling to DB row IDs.
+    offset = 0
+    if cursor.startswith("offset="):
+        try:
+            offset = max(0, int(cursor.split("=", 1)[1]))
+        except ValueError:
+            offset = 0
+
+    repos = _get_repos()
+    # Fetch offset + limit + 1 so we know if there's a next page.
+    all_events = repos["entity"].get_entity_recent_events(
+        project_id, entity_id, limit=offset + limit + 1,
+    )
+    page = all_events[offset : offset + limit]
+    has_more = len(all_events) > offset + limit
+
+    lines: list[str] = [
+        f"【{entity.get('name', '')}】事件时间线（section=events, offset={offset}, limit={limit}）",
+    ]
+    if not page:
+        lines.append("（该实体尚无事件记录。）")
+        return "\n".join(lines)
+
+    for e in page:
+        etype = e.get("event_type", "")
+        prefix = f"[{etype}] " if etype else ""
+        detail = e.get("summary", "")
+        ch = e.get("chapter_order", "")
+        ch_prefix = f"第{ch}章：" if ch else ""
+        lines.append(f"  {prefix}{ch_prefix}{detail}")
+
+    if has_more:
+        next_offset = offset + limit
+        lines.append(f"\nnext_cursor=offset={next_offset}")
+        lines.append("（还有更多事件；下次调用 query_entity 传入 cursor 继续。）")
+    else:
+        lines.append("\n（已到事件列表末尾。）")
+    return "\n".join(lines)
+
+
+def _render_memory_section(archive_id: str, params: dict) -> str:
+    """memories section: canon + candidate long-term memories from archive."""
+    limit = max(1, min(int(params.get("limit") or 20), 100))
+    try:
+        from ..agents.memory.long_term_store import LongTermMemoryStore
+    except Exception:
+        logger.warning("LongTermMemoryStore import failed", exc_info=True)
+        return "（无法加载长期记忆模块。）"
+
+    store = LongTermMemoryStore()
+    canon = store.list_active_memories(archive_id, layers=("canon",), limit=limit)
+    candidate = store.list_active_memories(archive_id, layers=("candidate",), limit=limit)
+
+    lines: list[str] = [f"【长期记忆】archive={archive_id}（section=memories）"]
+
+    def _render_mem_block(title: str, rows: list[dict]) -> None:
+        if not rows:
+            lines.append(f"\n{title}（0 条）")
+            return
+        lines.append(f"\n{title}（{len(rows)} 条，按更新时间/显著性排序）")
+        for m in rows:
+            mtype = m.get("memory_type", "")
+            subject = m.get("normalized_subject") or ""
+            summary = m.get("summary", "")
+            salience = m.get("salience")
+            layer = m.get("memory_layer", "")
+            head = f"  [{mtype}] {subject} — {summary}"
+            meta = []
+            if salience is not None:
+                meta.append(f"salience={salience:.2f}" if isinstance(salience, float) else f"salience={salience}")
+            if layer:
+                meta.append(f"layer={layer}")
+            if meta:
+                head += f"  ({', '.join(meta)})"
+            lines.append(head)
+
+    _render_mem_block("正典记忆（canon，已采纳）", canon)
+    _render_mem_block("候选记忆（candidate，尚未采纳——写作时可参考但不可作为既定事实）", candidate)
+    return "\n".join(lines)
+
+
+def _format_archive_only(merged: Any) -> str:
+    """Fallback formatter when the character exists in the archive but has no
+    in-story entity row yet (e.g. seed-stage projects).
+    """
+    cp = merged.canon_profile or {}
+    lines = [
+        f"【{merged.entity_type or '角色'}】{merged.name}",
+        f"重要性：{merged.importance_tier or '未知'}",
+        "===== 正典档案（仅来自档案库，尚无在地状态）=====",
+    ]
+    _append_if(lines, "身份定位", cp.get("entity_role"))
+    _append_if(lines, "正典·核心驱动", cp.get("core_drive"))
+    _append_if(lines, "正典·表面伪装", cp.get("surface_mask"))
+    _append_if(lines, "正典·深层张力", cp.get("hidden_tension"))
+    _append_if(lines, "正典·关系概述", cp.get("relationship_summary"))
+    _append_if(lines, "Agent 行为提示", cp.get("agent_behavior_hint"))
+    lines.append("===== 正典档案结束 =====")
+    if merged.archetype_refs:
+        lines.append("\n【关联角色原型模板】")
+        for ref in merged.archetype_refs[:5]:
+            title = ref.get("title") or ref.get("asset_id") or ""
+            summary = ref.get("summary") or ""
+            line = f"  · {title}"
+            if summary:
+                line += f"：{summary}"
+            lines.append(line)
     return "\n".join(lines)
 
 
 def _query_relationship(params: dict, project_id: str) -> str:
     entity_a = params["entity_a"]
     entity_b = params["entity_b"]
-    repos = _get_repos()
-    # Resolve names to entity_ids
-    a_id = repos["entity"].resolve_entity_id(project_id, entity_a)
-    b_id = repos["entity"].resolve_entity_id(project_id, entity_b)
-    if not a_id or not b_id:
-        return f"未找到 {entity_a} 与 {entity_b} 之间的关系记录"
+    include_candidate = params.get("include_candidate")
+    if include_candidate is None:
+        include_candidate = True
+    include_candidate = bool(include_candidate)
 
-    # Bidirectional lookup: all relationships where (source, target) match
+    # Step 1: fuzzy-resolve both names. If either side has no hit, surface
+    # suggestions for it — the caller typically wants to retry with a
+    # corrected name rather than fail the whole query.
+    resolved_a = _resolve_entity_fuzzy(project_id, entity_a)
+    resolved_b = _resolve_entity_fuzzy(project_id, entity_b)
+
+    missing_blocks: list[str] = []
+    if not resolved_a.found:
+        missing_blocks.append(_format_suggestions(entity_a, resolved_a.suggestions))
+    if not resolved_b.found:
+        missing_blocks.append(_format_suggestions(entity_b, resolved_b.suggestions))
+    if missing_blocks:
+        return "\n\n".join(missing_blocks)
+
+    canonical_a = resolved_a.canonical_name or entity_a
+    canonical_b = resolved_b.canonical_name or entity_b
+    alias_note = ""
+    if canonical_a != entity_a or canonical_b != entity_b:
+        alias_note = (
+            f"注：查询已解析为「{canonical_a}」↔「{canonical_b}」"
+            f"（输入的「{entity_a}」/「{entity_b}」经别名重定向）。"
+            f"后续请直接用解析后的正式名。\n\n"
+        )
+
+    # Step 2: try the structured `relationships` table by entity_ids (richest).
     engine = get_engine()
-    from ...tables.novel import relationships as rel_tbl
-    with engine.connect() as conn:
-        rows = conn.execute(
-            select(rel_tbl).where(
-                and_(
-                    rel_tbl.c.project_id == project_id,
-                    or_(
-                        and_(rel_tbl.c.source_id == a_id, rel_tbl.c.target_id == b_id),
-                        and_(rel_tbl.c.source_id == b_id, rel_tbl.c.target_id == a_id),
-                    ),
+    rels: list[dict] = []
+    a_id = resolved_a.entity.get("entity_id") if resolved_a.entity else None
+    b_id = resolved_b.entity.get("entity_id") if resolved_b.entity else None
+    if a_id and b_id:
+        from ...tables.novel import relationships as rel_tbl
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(rel_tbl).where(
+                    and_(
+                        rel_tbl.c.project_id == project_id,
+                        or_(
+                            and_(rel_tbl.c.source_id == a_id, rel_tbl.c.target_id == b_id),
+                            and_(rel_tbl.c.source_id == b_id, rel_tbl.c.target_id == a_id),
+                        ),
+                    )
                 )
+            ).fetchall()
+            rels = [dict(r._mapping) for r in rows]
+
+    # Step 2b: candidate relationship memories from both archives.
+    # Surfaced regardless of whether canonical rels were found — worldline
+    # exploration often produces relationship hypotheses that never get
+    # promoted to canon, and the writer should still see them as
+    # "not-yet-settled" context.
+    candidate_block = ""
+    if include_candidate:
+        candidate_block = _collect_candidate_relationship_memories(
+            project_id,
+            resolved_a.merged,
+            resolved_b.merged,
+            canonical_a,
+            canonical_b,
+        )
+
+    if rels:
+        parts: list[str] = []
+        for r in rels:
+            lines = [
+                f"关系类型：{r.get('relation_type', '未知')}",
+                f"描述：{r.get('description') or '无'}",
+                f"信任度：{r.get('trust_level', '未知')}",
+                f"权力动态：{r.get('power_dynamic') or '无'}",
+                f"历史：{r.get('history') or '无'}",
+                f"冲突触发：{r.get('conflict_trigger') or '无'}",
+            ]
+            parts.append("\n".join(lines))
+        body = alias_note + "\n---\n".join(parts)
+        if candidate_block:
+            body += "\n\n" + candidate_block
+        return body
+
+    # Step 3: fall back to graph_edges between the resolved graph nodes.
+    # This matters when the project only has graph data (seed pipeline shape)
+    # — the old implementation would return "未找到关系记录" here even though
+    # edges clearly exist.
+    from ...repositories.graph_repo import GraphRepository
+
+    a_uuid = resolved_a.graph_node.get("uuid") if resolved_a.graph_node else None
+    b_uuid = resolved_b.graph_node.get("uuid") if resolved_b.graph_node else None
+    if a_uuid and b_uuid:
+        edge_rows = GraphRepository(engine).find_edges_between(
+            project_id, a_uuid, b_uuid, limit=15,
+        )
+        if edge_rows:
+            lines = [f"【图谱关系】{canonical_a} ↔ {canonical_b}（共 {len(edge_rows)} 条图谱边）"]
+            for e in edge_rows:
+                direction = "→" if e["source_node_uuid"] == a_uuid else "←"
+                head = (
+                    f"  {canonical_a} {direction} {canonical_b}"
+                    f"（{e['name']}, weight={e['weight']}）"
+                )
+                lines.append(head)
+                if e["fact"]:
+                    lines.append(f"    事实：{e['fact']}")
+            body = alias_note + "\n".join(lines)
+            if candidate_block:
+                body += "\n\n" + candidate_block
+            return body
+
+    tail = (
+        alias_note
+        + f"未在关系表或图谱边中找到「{canonical_a}」与「{canonical_b}」之间的直接关系。"
+        f"\n可尝试：① query_graph_neighbors('{canonical_a}') 看 {canonical_a} 的完整关系网络；"
+        f"② query_relationship_timeline 查关系事件时间线；"
+        f"③ query_entity('{canonical_a}') / query_entity('{canonical_b}') 看各自档案里是否提到对方。"
+    )
+    if candidate_block:
+        tail += "\n\n" + candidate_block
+    return tail
+
+
+def _collect_candidate_relationship_memories(
+    project_id: str,
+    merged_a: Any,
+    merged_b: Any,
+    canonical_a: str,
+    canonical_b: str,
+) -> str:
+    """Pull archive candidate memories that mention the opposite entity.
+
+    Match rule: return candidate rows where
+      - memory_type == 'relationship', OR
+      - normalized_subject / summary contains the opposite canonical name.
+
+    Returns empty string when no candidates found (caller decides whether to
+    emit a block).
+    """
+    try:
+        from ..agents.memory.long_term_store import LongTermMemoryStore
+    except Exception:
+        logger.warning("LongTermMemoryStore import failed", exc_info=True)
+        return ""
+
+    archive_ids: list[tuple[str, str, str]] = []  # (archive_id, owner_canonical, other_canonical)
+    if merged_a is not None and getattr(merged_a, "archive_id", None):
+        archive_ids.append((merged_a.archive_id, canonical_a, canonical_b))
+    if merged_b is not None and getattr(merged_b, "archive_id", None):
+        archive_ids.append((merged_b.archive_id, canonical_b, canonical_a))
+    if not archive_ids:
+        return ""
+
+    store = LongTermMemoryStore()
+    hits: list[dict] = []
+    for archive_id, owner, other in archive_ids:
+        try:
+            rows = store.list_active_memories(
+                archive_id, layers=("candidate",), limit=20,
             )
-        ).fetchall()
-        rels = [dict(r._mapping) for r in rows]
+        except Exception:
+            logger.warning(
+                "list candidate memories failed for archive=%s", archive_id, exc_info=True,
+            )
+            continue
+        for row in rows:
+            mtype = row.get("memory_type") or ""
+            subject = row.get("normalized_subject") or ""
+            summary = row.get("summary") or ""
+            if (
+                mtype == "relationship"
+                or other in subject
+                or other in summary
+            ):
+                hits.append({
+                    "owner": owner,
+                    "other": other,
+                    "memory_type": mtype,
+                    "subject": subject,
+                    "summary": summary,
+                    "salience": row.get("salience"),
+                })
+    if not hits:
+        return ""
 
-    if not rels:
-        return f"未找到 {entity_a} 与 {entity_b} 之间的关系记录"
-
-    parts: list[str] = []
-    for r in rels:
-        lines = [
-            f"关系类型：{r.get('relation_type', '未知')}",
-            f"描述：{r.get('description') or '无'}",
-            f"信任度：{r.get('trust_level', '未知')}",
-            f"权力动态：{r.get('power_dynamic') or '无'}",
-            f"历史：{r.get('history') or '无'}",
-            f"冲突触发：{r.get('conflict_trigger') or '无'}",
-        ]
-        parts.append("\n".join(lines))
-    return "\n---\n".join(parts)
+    lines = [
+        f"【候选关系假设（尚未采纳，仅供参考）】（共 {len(hits)} 条）",
+        "来源：archive candidate memory；世界线探索/自动演化产出但未被创作者采纳。",
+        "写作时可引用这些假设作为心理活动或暗示，但不要当作既定事实。",
+    ]
+    for h in hits:
+        meta = []
+        if h["memory_type"]:
+            meta.append(h["memory_type"])
+        if h["salience"] is not None:
+            try:
+                meta.append(f"salience={float(h['salience']):.2f}")
+            except (TypeError, ValueError):
+                meta.append(f"salience={h['salience']}")
+        meta_str = f"（{', '.join(meta)}）" if meta else ""
+        lines.append(f"  · [{h['owner']} → {h['other']}] {h['subject']}{meta_str}")
+        if h["summary"]:
+            lines.append(f"    摘要：{h['summary']}")
+    return "\n".join(lines)
 
 
 def _query_chapter(params: dict, project_id: str) -> str:
@@ -366,25 +1157,46 @@ def _search_settings(params: dict, project_id: str) -> str:
     limit = params.get("limit", 10)
     repos = _get_repos()
 
-    # Map scope to source filters for the global search index
-    source_map = {
-        "entities": ["entity"],
+    # Map scope to entity_type filters for the global search index.
+    # The global_index row has two independent filterable columns:
+    #   - source      ("novel_db", "archive", "assets", ...)  the silo
+    #   - entity_type ("entity", "chapter", "relationship", ...)  the kind
+    # We filter by entity_type here because scope is about what kind of
+    # data to search, not which silo. See unified_asset_view.read_novel_db
+    # for the indexer contract.
+    #
+    # Values are mixed-case because different silos settled on different
+    # conventions: archive/story_graph stamp TitleCase ("Character",
+    # "Relationship") while novel_db + seed use snake_case ("entity",
+    # "world_rule"). We list every known surface form for each scope so
+    # the writer doesn't care which silo a match lives in.
+    entity_type_map = {
+        "entities": [
+            "entity", "Entity", "Character", "Artifact",
+            "seed_character", "seed_agent_profile",
+        ],
         "chapters": ["chapter"],
         "scenes": ["scene"],
+        "relationships": ["relationship", "Relationship"],
+        "world_rules": ["world_rule", "seed_world_rule"],
+        "threads": ["plot_thread", "seed_plot_thread"],
+        "memory": ["agent_memory_candidate"],
     }
-    sources = source_map.get(scope)  # None means "all"
+    entity_types = entity_type_map.get(scope)  # None means "all"
     results = repos["search"].search(
-        query, project_id=project_id, sources=sources, limit=limit,
+        query, project_id=project_id, entity_types=entity_types, limit=limit,
     )
     if not results:
-        return f"未找到与「{query}」相关的设定"
+        return f"未找到与「{query}」相关的设定（scope={scope}）"
 
-    lines = [f"搜索「{query}」结果（{len(results)} 条）："]
+    lines = [f"搜索「{query}」结果（scope={scope}，{len(results)} 条）："]
     for i, r in enumerate(results, 1):
         source = r.get("source", "未知")
+        entity_type = r.get("entity_type", "")
         name = r.get("name") or r.get("title") or ""
         snippet = r.get("snippet", "")
-        lines.append(f"{i}. [{source}] {name}")
+        tag = f"{source}/{entity_type}" if entity_type else source
+        lines.append(f"{i}. [{tag}] {name}")
         if snippet:
             lines.append(f"   {snippet}")
     return "\n".join(lines)
@@ -699,11 +1511,33 @@ def _get_manuscript_stats(params: dict, project_id: str) -> str:
 
 def _get_character_voice(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
-    repos = _get_repos()
-    entity = repos["entity"].get_entity_by_name(project_id, name)
-    if not entity:
-        return f"未找到角色 {name}"
-    lines = [f"【角色语言风格】{entity.get('name', name)}"]
+    resolved = _resolve_entity_fuzzy(project_id, name)
+    if not resolved.found:
+        return _format_suggestions(name, resolved.suggestions)
+
+    entity = resolved.entity
+    canonical = resolved.canonical_name or name
+    alias_note = ""
+    if canonical != name:
+        alias_note = (
+            f"注：你查的「{name}」已通过 {resolved.matched_via} 解析为「{canonical}」。\n\n"
+        )
+
+    # Voice data lives in the `entities` row. If the entity table is empty
+    # (seed-stage projects), there is no structured voice — tell the agent
+    # exactly what to try instead, rather than returning a cryptic empty shell.
+    if entity is None:
+        return (
+            alias_note
+            + f"「{canonical}」在项目中存在（来源：{resolved.matched_via}），"
+            "但 entities 表中尚无结构化角色档案，因此无法提供 speech_style / verbal_habits 等字段。\n"
+            f"建议：① 用 query_entity('{canonical}') 看档案库里是否有说话风格描述；"
+            "② 用 query_character_timeline 看历史事件里的台词；"
+            "③ 用 manage_entity(action='update') 补充 speech_style、example_quotes 等字段。"
+        )
+
+    lines = [alias_note.rstrip()] if alias_note else []
+    lines.append(f"【角色语言风格】{entity.get('name', canonical)}")
     if entity.get("speech_style"):
         lines.append(f"说话风格：{entity['speech_style']}")
     if entity.get("personality_traits_json"):
@@ -754,14 +1588,25 @@ def _get_character_voice(inp: dict, project_id: str) -> str:
 def _query_relationship_timeline(inp: dict, project_id: str) -> str:
     a_name = inp.get("entity_a", "")
     b_name = inp.get("entity_b", "")
-    repos = _get_repos()
-    a = repos["entity"].get_entity_by_name(project_id, a_name)
-    b = repos["entity"].get_entity_by_name(project_id, b_name)
-    if not a or not b:
-        missing = a_name if not a else b_name
-        return f"未找到角色 {missing}"
-    a_id = a.get("entity_id", "")
-    b_id = b.get("entity_id", "")
+
+    resolved_a = _resolve_entity_fuzzy(project_id, a_name)
+    resolved_b = _resolve_entity_fuzzy(project_id, b_name)
+    missing_blocks: list[str] = []
+    if not resolved_a.found:
+        missing_blocks.append(_format_suggestions(a_name, resolved_a.suggestions))
+    if not resolved_b.found:
+        missing_blocks.append(_format_suggestions(b_name, resolved_b.suggestions))
+    if missing_blocks:
+        return "\n\n".join(missing_blocks)
+
+    canonical_a = resolved_a.canonical_name or a_name
+    canonical_b = resolved_b.canonical_name or b_name
+    # Timeline is keyed off entity_ids in `relationship_events`; if the
+    # entities table is empty we have no timeline records to show, so fall
+    # back to the name strings (they might match the older legacy schema
+    # where source_entity_id held a name rather than an id).
+    a_id = resolved_a.entity.get("entity_id") if resolved_a.entity else canonical_a
+    b_id = resolved_b.entity.get("entity_id") if resolved_b.entity else canonical_b
 
     engine = get_engine()
     with engine.connect() as conn:
@@ -779,12 +1624,12 @@ def _query_relationship_timeline(inp: dict, project_id: str) -> str:
                             relationship_events.c.target_entity_id == a_id,
                         ),
                         and_(
-                            relationship_events.c.source_entity_id == a_name,
-                            relationship_events.c.target_entity_id == b_name,
+                            relationship_events.c.source_entity_id == canonical_a,
+                            relationship_events.c.target_entity_id == canonical_b,
                         ),
                         and_(
-                            relationship_events.c.source_entity_id == b_name,
-                            relationship_events.c.target_entity_id == a_name,
+                            relationship_events.c.source_entity_id == canonical_b,
+                            relationship_events.c.target_entity_id == canonical_a,
                         ),
                     ),
                 )
@@ -795,9 +1640,19 @@ def _query_relationship_timeline(inp: dict, project_id: str) -> str:
         ).fetchall()
         results = [dict(r._mapping) for r in rows]
 
+    alias_note = ""
+    if canonical_a != a_name or canonical_b != b_name:
+        alias_note = (
+            f"注：查询已解析为「{canonical_a}」↔「{canonical_b}」。\n\n"
+        )
+
     if not results:
-        return f"未找到 {a_name} 与 {b_name} 之间的关系事件"
-    lines = [f"【关系时间线】{a_name} ↔ {b_name}（共 {len(results)} 条事件）"]
+        return (
+            alias_note
+            + f"未找到「{canonical_a}」与「{canonical_b}」之间的关系事件。"
+            "可改用 query_relationship 查当前关系状态或 query_graph_neighbors 看双方各自的关系网络。"
+        )
+    lines = [f"【关系时间线】{canonical_a} ↔ {canonical_b}（共 {len(results)} 条事件）"]
     for r in results:
         parts = []
         if r.get("segment_id"):
@@ -833,21 +1688,29 @@ def _query_relationship_timeline(inp: dict, project_id: str) -> str:
         lines.append("当前关系状态：")
         for rel in rels:
             lines.append(f"  {rel.get('relation_type', '?')}：{rel.get('description', '')}")
-    return "\n".join(lines)
+    return alias_note + "\n".join(lines)
 
 
 def _query_character_timeline(inp: dict, project_id: str) -> str:
     name = inp.get("name", "")
     event_type = inp.get("event_type", "all")
     limit = inp.get("limit", 20)
-    repos = _get_repos()
-    entity = repos["entity"].get_entity_by_name(project_id, name)
-    entity_id = entity.get("entity_id", name) if entity else name
+    resolved = _resolve_entity_fuzzy(project_id, name)
+    if not resolved.found:
+        return _format_suggestions(name, resolved.suggestions)
+    canonical = resolved.canonical_name or name
+    # Events may be keyed by entity_id (new data) or by name string (legacy),
+    # so try both. If we hit via graph-only, fall back to canonical name as id.
+    entity = resolved.entity
+    entity_id = entity.get("entity_id", canonical) if entity else canonical
 
     engine = get_engine()
     clauses = [
         character_events.c.project_id == project_id,
-        character_events.c.entity_id == entity_id,
+        or_(
+            character_events.c.entity_id == entity_id,
+            character_events.c.entity_id == canonical,
+        ),
     ]
     if event_type and event_type != "all":
         clauses.append(character_events.c.event_type == event_type)
@@ -860,14 +1723,23 @@ def _query_character_timeline(inp: dict, project_id: str) -> str:
         ).fetchall()
         results = [dict(r._mapping) for r in rows]
 
+    alias_note = ""
+    if canonical != name:
+        alias_note = f"注：你查的「{name}」已解析为「{canonical}」。\n\n"
+
     if not results:
-        return f"未找到 {name} 的事件记录"
-    lines = [f"【角色时间线】{name}（共 {len(results)} 条事件）"]
+        return (
+            alias_note
+            + f"未找到「{canonical}」的事件记录。"
+            f"可改用 query_entity('{canonical}') 看角色档案里是否包含近期事件字段，"
+            "或 get_story_overview / query_segment_summaries 看全局叙事。"
+        )
+    lines = [f"【角色时间线】{canonical}（共 {len(results)} 条事件）"]
     for r in results:
         prefix = f"[{r['event_type']}]" if r.get("event_type") else ""
         seg = f" ({r['segment_id']})" if r.get("segment_id") else ""
         lines.append(f"  {prefix} {r['summary']}{seg}")
-    return "\n".join(lines)
+    return alias_note + "\n".join(lines)
 
 
 def _query_thread_history(inp: dict, project_id: str) -> str:
@@ -948,34 +1820,54 @@ def _search_world_rules(inp: dict, project_id: str) -> str:
         ).fetchall()
         results = [dict(r._mapping) for r in rows]
 
-    if not results:
-        # Also search agent_memory world_rules
-        with engine.connect() as conn:
-            mem_rows = conn.execute(
-                select(agent_memory.c.summary, agent_memory.c.detail_json).where(
-                    and_(
-                        agent_memory.c.memory_type == "world_rule",
-                        agent_memory.c.summary.like(like_pattern),
-                    )
-                ).limit(limit)
-            ).fetchall()
-            if mem_rows:
-                lines = [f"搜索「{query}」世界观规则（{len(mem_rows)} 条）："]
-                for r in mem_rows:
-                    lines.append(f"  规则：{r.summary}")
-                return "\n".join(lines)
-        return f"未找到与「{query}」相关的世界观规则"
+    lines: list[str] = []
+    if results:
+        lines.append(f"搜索「{query}」世界观规则（{len(results)} 条）：")
+        for r in results:
+            lines.append(f"  规则：{r['fact_text']}")
+            if r.get("evidence_snippet"):
+                lines.append(f"    证据：{r['evidence_snippet']}")
+            if r.get("chapter_order"):
+                lines.append(f"    出处：第{r['chapter_order']}章")
+            eid = r.get("evidence_id")
+            if eid:
+                ents = repos["world_rule"].get_rule_entities(project_id, eid, limit=10)
+                if ents:
+                    lines.append(f"    关联实体：{_format_entity_names(ents)}")
 
-    lines = [f"搜索「{query}」世界观规则（{len(results)} 条）："]
-    for r in results:
-        lines.append(f"  规则：{r['fact_text']}")
-        if r.get("evidence_snippet"):
-            lines.append(f"    证据：{r['evidence_snippet']}")
-        eid = r.get("evidence_id")
-        if eid:
-            ents = repos["world_rule"].get_rule_entities(project_id, eid, limit=5)
-            if ents:
-                lines.append(f"    关联实体：{_format_entity_names(ents)}")
+    # Always try the agent_memory fallback too — worldline session agents
+    # emit world_rule observations that live here and never make it into
+    # world_rule_evidence; the writer still benefits from seeing them.
+    # NOTE: this is app.tables.novel.agent_memory (session-scoped), which
+    # does NOT have memory_layer / archive_id / normalized_subject columns —
+    # only the minimal set below.
+    with engine.connect() as conn:
+        mem_rows = conn.execute(
+            select(
+                agent_memory.c.memory_id,
+                agent_memory.c.summary,
+                agent_memory.c.detail_json,
+                agent_memory.c.source_kind,
+            ).where(
+                and_(
+                    agent_memory.c.memory_type == "world_rule",
+                    or_(
+                        agent_memory.c.summary.like(like_pattern),
+                        agent_memory.c.detail_json.like(like_pattern),
+                    ),
+                )
+            ).limit(limit)
+        ).fetchall()
+
+    if mem_rows:
+        lines.append("")
+        lines.append(f"【世界线 agent 观察记忆命中】（{len(mem_rows)} 条，尚未进入 world_rule_evidence）")
+        for r in mem_rows:
+            src = r.source_kind or "session"
+            lines.append(f"  [{src}] {r.summary}")
+
+    if not lines:
+        return f"未找到与「{query}」相关的世界观规则"
     return "\n".join(lines)
 
 
@@ -1327,7 +2219,17 @@ def _get_story_overview(params: dict, project_id: str) -> str:
             for v in vols:
                 lines.append(f"  - 第{v['volume_order'] + 1}卷: {v['summary']}")
 
-    return "\n".join(lines) if lines else "未找到故事概览数据"
+    if lines:
+        return "\n".join(lines)
+    # No rows anywhere — distinguish "tables empty" from "tool未实现" so the
+    # agent and the user can act on it instead of giving up silently.
+    return (
+        "未找到故事概览数据。\n"
+        "诊断：narrative_arcs / volume_summaries 表均为空。可能原因：\n"
+        "  ① 种子管线尚未完成 Stage 3 聚合（先在「总览」页跑完种子分析）；\n"
+        "  ② 本书尚未启用叙事弧线分析。\n"
+        "缺失该工具不致命，但 Agent 将无法感知全书阶段/弧线进度。"
+    )
 
 
 def _query_segment_summaries(params: dict, project_id: str) -> str:
@@ -1351,7 +2253,17 @@ def _query_segment_summaries(params: dict, project_id: str) -> str:
             for n in notes:
                 lines.append(f"  - [{n['segment_id']}] {n['note_text']}")
 
-    return "\n".join(lines) if summaries else "未找到段落摘要数据"
+    if summaries:
+        return "\n".join(lines)
+    # Same diagnostic pattern as get_story_overview — tell the agent what's
+    # missing so it can warn the user instead of silently falling back.
+    return (
+        "未找到段落摘要数据。\n"
+        "诊断：segment_summaries 表为空。可能原因：\n"
+        "  ① 种子管线尚未完成 Stage 2 / Stage 3（逐段精读 + 聚合）；\n"
+        "  ② 传入的 segment_ids 不在本项目中。\n"
+        "缺失该工具会让续写时的『前情回顾』不可用，请优先跑完种子分析。"
+    )
 
 
 def _get_story_ontology(params: dict, project_id: str) -> str:
@@ -1535,60 +2447,28 @@ def _query_graph_neighbors(params: dict, project_id: str) -> str:
     repo = _GraphRepo(_get_engine())
     if not repo.has_graph(project_id):
         return f"项目 {project_id} 暂无故事图谱"
-    from sqlalchemy import text as _text
-    with repo.engine.connect() as conn:
-        # 1) find node by exact name or alias
-        node_row = conn.execute(
-            _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND name = :name LIMIT 1"),
-            {"pid": project_id, "name": name},
-        ).mappings().first()
-        if not node_row:
-            alias_row = conn.execute(
-                _text("SELECT node_uuid FROM graph_aliases WHERE project_id = :pid AND alias = :name LIMIT 1"),
-                {"pid": project_id, "name": name},
-            ).mappings().first()
-            if alias_row:
-                node_row = conn.execute(
-                    _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND uuid = :uuid"),
-                    {"pid": project_id, "uuid": alias_row["node_uuid"]},
-                ).mappings().first()
-        if not node_row:
-            return f"故事图谱中未找到节点：{name}"
 
-        node_uuid = node_row["uuid"]
-        edges = conn.execute(
-            _text(
-                "SELECT * FROM graph_edges WHERE project_id = :pid "
-                "AND (source_node_uuid = :uuid OR target_node_uuid = :uuid) "
-                "ORDER BY weight DESC LIMIT :lim"
-            ),
-            {"pid": project_id, "uuid": node_uuid, "lim": limit},
-        ).mappings().all()
-        # gather neighbor info
-        neighbor_uuids = set()
-        for e in edges:
-            other = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
-            neighbor_uuids.add(other)
-        neighbor_map = {}
-        if neighbor_uuids:
-            placeholders = ",".join(f":u{i}" for i in range(len(neighbor_uuids)))
-            bind = {"pid": project_id}
-            bind.update({f"u{i}": u for i, u in enumerate(neighbor_uuids)})
-            for n in conn.execute(
-                _text(f"SELECT uuid, name, summary FROM graph_nodes WHERE project_id = :pid AND uuid IN ({placeholders})"),
-                bind,
-            ).mappings().all():
-                neighbor_map[n["uuid"]] = (n["name"], n["summary"])
+    node_info = repo.lookup_node_by_name_or_alias(project_id, name)
+    if node_info is None:
+        return f"故事图谱中未找到节点：{name}"
+    node_uuid = node_info["uuid"]
 
-    lines = [f"# 节点：{node_row['name']}", f"摘要：{node_row['summary'] or '(无)'}", "", f"## 邻居 / 关系（{len(edges)} 条）"]
-    for e in edges:
-        other_uuid = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
-        other_name, other_summary = neighbor_map.get(other_uuid, ("?", ""))
-        direction = "→" if e["source_node_uuid"] == node_uuid else "←"
+    # get_neighbors_with_labels already packs edge + neighbor into one row,
+    # ordered by weight DESC. We just render it.
+    neighbors = repo.get_neighbors_with_labels(project_id, node_uuid, limit=limit)
+    lines = [
+        f"# 节点：{node_info['name']}",
+        f"摘要：{node_info['summary'] or '(无)'}",
+        "",
+        f"## 邻居 / 关系（{len(neighbors)} 条）",
+    ]
+    for nb in neighbors:
+        direction = "→" if nb["direction"] == "outgoing" else "←"
         lines.append(
-            f"- {direction} {other_name} ({e['name']}, weight={e['weight']})\n"
-            f"    fact: {e['fact']}\n"
-            f"    对端摘要: {other_summary[:120] if other_summary else ''}"
+            f"- {direction} {nb['neighbor_name']} "
+            f"({nb['edge_name']}, weight={nb['edge_weight']})\n"
+            f"    fact: {nb['edge_fact']}\n"
+            f"    对端摘要: {(nb['neighbor_summary'] or '')[:120]}"
         )
     return "\n".join(lines)
 
@@ -1605,48 +2485,52 @@ def _query_event(params: dict, project_id: str) -> str:
     repo = _GraphRepo(_get_engine())
     if not repo.has_graph(project_id):
         return f"项目 {project_id} 暂无故事图谱"
-    from sqlalchemy import text as _text
-    with repo.engine.connect() as conn:
-        # Filter to PlotEvent label via graph_node_labels join
-        rows = conn.execute(
-            _text(
-                "SELECT n.* FROM graph_nodes n "
-                "JOIN graph_node_labels l ON l.project_id = n.project_id AND l.node_uuid = n.uuid "
-                "WHERE n.project_id = :pid AND l.label IN ('PlotEvent', 'Conflict') "
-                "ORDER BY n.name LIMIT 500"
-            ),
-            {"pid": project_id},
-        ).mappings().all()
+
+    # Pull nodes labeled PlotEvent or Conflict. The event_id filter lives inside
+    # attributes_json, so we fetch a wider bucket (500 each) and post-filter
+    # in Python — mirroring the legacy text()-based implementation.
+    bucket: list[dict] = []
+    seen_uuids: set[str] = set()
+    for label in ("PlotEvent", "Conflict"):
+        for row in repo.find_nodes_by_label(project_id, label, limit=500):
+            if row["uuid"] in seen_uuids:
+                continue
+            seen_uuids.add(row["uuid"])
+            bucket.append(row)
 
     matches: list[dict] = []
-    for r in rows:
-        try:
-            attrs = _json.loads(r["attributes_json"]) if r["attributes_json"] else {}
-        except _json.JSONDecodeError:
-            attrs = {}
+    for r in bucket:
+        attrs = r.get("attributes") or {}
         if event_id:
             if str(attrs.get("event_id", "")) != event_id:
                 continue
         elif name:
             if name not in (r["name"] or "") and name not in (r["summary"] or ""):
                 continue
-        try:
-            evidence = _json.loads(r["evidence_refs_json"]) if r["evidence_refs_json"] else []
-        except _json.JSONDecodeError:
-            evidence = []
-        matches.append({
-            "uuid": r["uuid"],
-            "name": r["name"],
-            "summary": r["summary"],
-            "attrs": attrs,
-            "evidence": evidence,
-        })
+        matches.append(
+            {
+                "uuid": r["uuid"],
+                "name": r["name"],
+                "summary": r["summary"],
+                "attrs": attrs,
+                # find_nodes_by_label doesn't surface evidence_refs; fall back
+                # to load_node for the matched entry to enrich with evidence.
+                "evidence": [],
+            }
+        )
         if len(matches) >= limit:
             break
 
     if not matches:
         target = event_id or name
         return f"未找到事件：{target}"
+
+    # Enrich with evidence via load_node (only for matches — cheap).
+    for m in matches:
+        node = repo.load_node(project_id, m["uuid"])
+        if node:
+            m["evidence"] = node.get("evidence_refs") or []
+
     lines = [f"找到 {len(matches)} 条事件："]
     for m in matches:
         attrs = m["attrs"]
@@ -1689,141 +2573,184 @@ def _query_relationship_network(params: dict, project_id: str) -> str:
     repo = _GraphRepo(_get_engine())
     if not repo.has_graph(project_id):
         return f"项目 {project_id} 暂无故事图谱"
-    from sqlalchemy import text as _text
-    with repo.engine.connect() as conn:
-        node_row = conn.execute(
-            _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND name = :name LIMIT 1"),
-            {"pid": project_id, "name": name},
-        ).mappings().first()
-        if not node_row:
-            alias_row = conn.execute(
-                _text("SELECT node_uuid FROM graph_aliases WHERE project_id = :pid AND alias = :name LIMIT 1"),
-                {"pid": project_id, "name": name},
-            ).mappings().first()
-            if alias_row:
-                node_row = conn.execute(
-                    _text("SELECT * FROM graph_nodes WHERE project_id = :pid AND uuid = :uuid"),
-                    {"pid": project_id, "uuid": alias_row["node_uuid"]},
-                ).mappings().first()
-        if not node_row:
-            return f"故事图谱中未找到节点：{name}"
-        node_uuid = node_row["uuid"]
-        # Restrict to character/organization/faction neighbors via label join when available
-        edges = conn.execute(
-            _text(
-                "SELECT * FROM graph_edges "
-                "WHERE project_id = :pid AND (source_node_uuid = :uuid OR target_node_uuid = :uuid) "
-                "ORDER BY weight DESC LIMIT :lim"
-            ),
-            {"pid": project_id, "uuid": node_uuid, "lim": limit * 2},
-        ).mappings().all()
-        neighbor_uuids = set()
-        for e in edges:
-            other = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
-            neighbor_uuids.add(other)
-        neighbor_map: dict[str, dict] = {}
-        if neighbor_uuids:
-            placeholders = ",".join(f":u{i}" for i in range(len(neighbor_uuids)))
-            bind = {"pid": project_id}
-            bind.update({f"u{i}": u for i, u in enumerate(neighbor_uuids)})
-            for n in conn.execute(
-                _text(
-                    f"SELECT n.uuid, n.name, n.summary, "
-                    f"  (SELECT GROUP_CONCAT(label) FROM graph_node_labels "
-                    f"   WHERE project_id = :pid AND node_uuid = n.uuid) AS labels "
-                    f"FROM graph_nodes n WHERE n.project_id = :pid AND n.uuid IN ({placeholders})"
-                ),
-                bind,
-            ).mappings().all():
-                neighbor_map[n["uuid"]] = {
-                    "name": n["name"],
-                    "summary": n["summary"],
-                    "labels": (n["labels"] or "").split(","),
-                }
 
-    # Filter to character-like neighbors
+    node_info = repo.lookup_node_by_name_or_alias(project_id, name)
+    if node_info is None:
+        return f"故事图谱中未找到节点：{name}"
+    node_uuid = node_info["uuid"]
+
+    # Over-fetch so the label filter has room to drop non-person neighbors.
+    neighbors = repo.get_neighbors_with_labels(project_id, node_uuid, limit=limit * 2)
+
     person_labels = {"Character", "Organization", "Faction", "Group"}
-    filtered = []
-    for e in edges:
-        other_uuid = e["target_node_uuid"] if e["source_node_uuid"] == node_uuid else e["source_node_uuid"]
-        info = neighbor_map.get(other_uuid)
-        if not info:
+    filtered: list[dict] = []
+    for nb in neighbors:
+        if not (set(nb["neighbor_labels"]) & person_labels):
             continue
-        if not (set(info["labels"]) & person_labels):
-            continue
-        filtered.append((e, info, other_uuid))
+        filtered.append(nb)
         if len(filtered) >= limit:
             break
 
     if not filtered:
-        return f"# {node_row['name']}\n暂无角色关系网络"
+        return f"# {node_info['name']}\n暂无角色关系网络"
     lines = [
-        f"# {node_row['name']} 的关系网络（{len(filtered)} 条）",
-        f"摘要: {node_row['summary'] or '(无)'}",
+        f"# {node_info['name']} 的关系网络（{len(filtered)} 条）",
+        f"摘要: {node_info['summary'] or '(无)'}",
         "",
     ]
-    for e, info, other_uuid in filtered:
-        direction = "→" if e["source_node_uuid"] == node_uuid else "←"
+    for nb in filtered:
+        direction = "→" if nb["direction"] == "outgoing" else "←"
         lines.append(
-            f"- {direction} {info['name']}  [{e['name']}, weight={e['weight']}]"
+            f"- {direction} {nb['neighbor_name']}  "
+            f"[{nb['edge_name']}, weight={nb['edge_weight']}]"
         )
-        if e["fact"]:
-            lines.append(f"    事实: {e['fact']}")
+        if nb["edge_fact"]:
+            lines.append(f"    事实: {nb['edge_fact']}")
     return "\n".join(lines)
 
 
 def _query_worldline_session(params: dict, project_id: str) -> str:
-    import os as _os
-    import json as _json
-    from ...config import Config
-    sid = (params.get("session_id") or "").strip()
-    sessions_dir = _os.path.join(
-        Config.UPLOAD_FOLDER, "projects", project_id, "worldlines", "sessions"
-    )
-    if not _os.path.isdir(sessions_dir):
-        return f"项目 {project_id} 暂无世界线推演记录"
-    files = [f for f in _os.listdir(sessions_dir) if f.endswith(".json")]
-    if not files:
-        return "暂无世界线 session"
-    if sid:
-        target = sid + ".json"
-        if target not in files:
-            return f"未找到 session: {sid}"
-        chosen = target
-    else:
-        # 取最近修改
-        files.sort(key=lambda f: _os.path.getmtime(_os.path.join(sessions_dir, f)), reverse=True)
-        chosen = files[0]
-    path = _os.path.join(sessions_dir, chosen)
-    try:
-        with open(path, "r", encoding="utf-8") as fp:
-            data = _json.load(fp)
-    except (OSError, _json.JSONDecodeError) as exc:
-        return f"读取 session 失败: {exc}"
+    """Read worldline session data from the unified DB via repositories.
 
-    chosen_id = chosen.removesuffix(".json")
+    Was file-based (``uploads/projects/{pid}/worldlines/sessions/*.json``) until
+    Phase D/E migrated sessions into ``worldline_sessions``. The payload we read
+    is the session's ``to_dict()`` (see :class:`WorldlineSession`): events live
+    inside ``branches[].timeline``, not at the top level — the old code's
+    ``data.get("events")`` was never populated against current payloads.
+    """
+    from ...repositories.worldline_session_repo import WorldlineSessionRepository
+
+    engine = get_engine()
+    session_repo = WorldlineSessionRepository(engine)
+
+    sid = (params.get("session_id") or "").strip()
+    summary: dict | None = None
+    if sid:
+        data = session_repo.load_session(sid)
+        if data is None:
+            return (
+                f"未找到 session: {sid}\n"
+                "诊断：该 session_id 在 worldline_sessions 表中不存在。"
+                "可能是 session 已删除，或 id 拼写错误。"
+            )
+        # Prevent cross-project leakage when a caller passes a sid from another project.
+        if data.get("project_id") and data.get("project_id") != project_id:
+            return f"session {sid} 不属于当前项目"
+    else:
+        recent = session_repo.list_sessions(project_id=project_id, limit=1)
+        if not recent:
+            return (
+                f"项目 {project_id} 暂无世界线推演记录。\n"
+                "诊断：worldline_sessions 表中没有本项目的条目。\n"
+                "如需使用世界线分支数据，请先在「世界线」页创建并推演一个 session；"
+                "如果本次写作不需要推演分支，忽略此工具即可。"
+            )
+        summary = recent[0]
+        sid = summary["session_id"]
+        data = session_repo.load_session(sid)
+        if data is None:
+            return f"session {sid} 数据缺失（有列表记录但无 session_data_json）"
+
+    title = data.get("label") or "(无)"
+    goal = (data.get("simulation_goal") or "").strip()
+    focus = (data.get("focus_question") or "").strip()
+    desc_parts: list[str] = []
+    if goal:
+        desc_parts.append(goal)
+    if focus and focus != goal:
+        desc_parts.append(f"焦点问题：{focus}")
+    description = " / ".join(desc_parts) or "(无)"
+    updated = data.get("updated_at") or (summary.get("updated_at") if summary else "(未知)")
+
     lines = [
-        f"# 世界线 Session: {chosen_id}",
-        f"标题: {data.get('title') or '(无)'}",
-        f"描述: {data.get('description') or data.get('summary') or '(无)'}",
-        f"更新时间: {data.get('updated_at') or '(未知)'}",
+        f"# 世界线 Session: {sid}",
+        f"标题: {title}",
+        f"描述: {description}",
+        f"状态: {data.get('status', '(未知)')}",
+        f"更新时间: {updated}",
     ]
-    variables = data.get("variables") or data.get("world_variables") or {}
+
+    variables = data.get("world_variables") or []
     if variables:
-        lines.append("\n## 世界变量")
-        lines.append(_json.dumps(variables, ensure_ascii=False, indent=2)[:1200])
-    agents = data.get("agents") or data.get("participants") or []
-    if agents:
-        lines.append(f"\n## 参与角色（{len(agents)}）")
-        for a in agents[:20]:
-            if isinstance(a, dict):
-                lines.append(f"- {a.get('name') or a.get('id') or '?'}")
-    events = data.get("events") or data.get("event_log") or []
-    if events:
-        lines.append(f"\n## 最近事件（共 {len(events)}，截取最新 10 条）")
-        for ev in events[-10:]:
-            if isinstance(ev, dict):
-                lines.append(f"- [{ev.get('step') or ev.get('time') or '?'}] {ev.get('summary') or ev.get('text') or ev.get('description') or ''}")
+        lines.append(f"\n## 世界变量（{len(variables)} 条）")
+        for v in variables[:20]:
+            if not isinstance(v, dict):
+                continue
+            name = v.get("name") or v.get("variable_id") or "?"
+            vdesc = v.get("description") or ""
+            impact = v.get("impact_axis") or ""
+            meta = f"（{impact}）" if impact else ""
+            lines.append(f"- {name}{meta}：{vdesc}" if vdesc else f"- {name}{meta}")
+
+    branches = data.get("branches") or []
+    if branches:
+        lines.append(f"\n## 分支（共 {len(branches)}）")
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            bid = branch.get("branch_id", "?")
+            btitle = branch.get("title", "")
+            core = branch.get("core_change", "")
+            step = branch.get("current_step", 0)
+            bstatus = branch.get("status", "")
+            lines.append(f"### 分支 {bid}: {btitle}")
+            if core:
+                lines.append(f"  核心变化: {core}")
+            lines.append(f"  当前步: {step} · 状态: {bstatus}")
+
+    # Collect agent identities across branches (dedup by id)
+    agent_ids: list[str] = []
+    seen_agents: set[str] = set()
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        for aid in branch.get("key_agents") or []:
+            if aid and aid not in seen_agents:
+                seen_agents.add(aid)
+                agent_ids.append(aid)
+        for aid in (branch.get("actor_states") or {}).keys():
+            if aid and aid not in seen_agents:
+                seen_agents.add(aid)
+                agent_ids.append(aid)
+    if agent_ids:
+        lines.append(f"\n## 参与角色（{len(agent_ids)}）")
+        for aid in agent_ids[:30]:
+            lines.append(f"- {aid}")
+
+    # Flatten timeline across branches, newest first
+    all_events: list[dict] = []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        bid = branch.get("branch_id", "?")
+        for ev in branch.get("timeline") or []:
+            if not isinstance(ev, dict):
+                continue
+            all_events.append(
+                {
+                    "branch_id": bid,
+                    "step": ev.get("step", 0),
+                    "title": ev.get("title", ""),
+                    "summary": ev.get("summary", ""),
+                }
+            )
+    if all_events:
+        all_events.sort(key=lambda e: e.get("step", 0), reverse=True)
+        shown = all_events[:10]
+        lines.append(f"\n## 最近事件（共 {len(all_events)}，最新 {len(shown)} 条）")
+        for ev in shown:
+            head = f"- [分支 {ev['branch_id']} · 步 {ev['step']}]"
+            title_line = ev["title"] or ""
+            summary_line = ev["summary"] or ""
+            if title_line and summary_line:
+                lines.append(f"{head} {title_line}：{summary_line}")
+            elif title_line:
+                lines.append(f"{head} {title_line}")
+            elif summary_line:
+                lines.append(f"{head} {summary_line}")
+            else:
+                lines.append(head)
+
     return "\n".join(lines)
 
 
@@ -1846,17 +2773,24 @@ def _block_chars(content: str | None) -> int:
     return count_cjk_chars(content)
 
 
-def _get_chapter_word_stats(params: dict, project_id: str) -> str:
+def _get_chapter_word_stats(params: dict, project_id: str) -> dict:
+    """Return chapter word-count breakdown with an optional WordBudgetRender.
+
+    Emits a two-part response: ``result`` (LLM-visible text) plus ``render``
+    (structured UI payload consumed by the WordBudgetGauge card).
+    """
     chapter_id = params.get("chapter_id") or ""
     if not chapter_id:
-        return "get_chapter_word_stats 需要 chapter_id"
+        return {"result": "get_chapter_word_stats 需要 chapter_id"}
     target = params.get("target_word_count")
     adapter = _get_manuscript_adapter(project_id)
     blocks = adapter.list_blocks(include_content=True, chapter_id=chapter_id)
     if not blocks:
-        return f"章节 {chapter_id} 暂无已提交稿件块"
+        return {"result": f"章节 {chapter_id} 暂无已提交稿件块"}
+
     lines: list[str] = []
     total = 0
+    block_payloads: list[dict] = []
     for b in blocks:
         c = _block_chars(b.get("content") or "")
         total += c
@@ -1864,7 +2798,19 @@ def _get_chapter_word_stats(params: dict, project_id: str) -> str:
         lines.append(
             f"- block_id={b['block_id']}  order={b.get('block_order')}  chars={c}  preview={preview!r}"
         )
+        block_payloads.append(
+            {
+                "block_id": b["block_id"],
+                "block_order": int(b.get("block_order") or 0),
+                "word_count": c,
+                "preview": preview,
+            }
+        )
+
     header = [f"章节 {chapter_id} 共 {len(blocks)} 块，总字数={total}"]
+    target_int: int | None = None
+    diff = 0
+    pct = 0.0
     if target is not None:
         try:
             target_int = int(target)
@@ -1872,8 +2818,53 @@ def _get_chapter_word_stats(params: dict, project_id: str) -> str:
             pct = (diff / target_int * 100) if target_int else 0.0
             header.append(f"目标={target_int}，差值={diff:+d}（{pct:+.1f}%）")
         except (TypeError, ValueError):
-            pass
-    return "\n".join(header + [""] + lines)
+            target_int = None
+
+    # Resolve chapter meta (order/title) for the render header.
+    chapter_order = 0
+    chapter_title = ""
+    try:
+        chapter_row = ChapterRepository(get_engine()).get_chapter(project_id, chapter_id)
+        if chapter_row:
+            chapter_order = int(chapter_row.get("chapter_order") or 0)
+            chapter_title = str(chapter_row.get("title") or "")
+    except Exception:  # noqa: BLE001
+        pass
+
+    result_text = "\n".join(header + [""] + lines)
+
+    # Only attach render when the caller supplied a target — without it we
+    # can't compute a budget status, which is the whole point of the card.
+    render_payload = None
+    if target_int is not None:
+        from ...schemas.writer_agent_schemas import WordBudgetRender
+
+        tolerance_pct = 10  # Card is read-only; backend default is fine here.
+        deficit_pct = abs(pct)
+        if deficit_pct <= tolerance_pct:
+            status = "on_target"
+        elif diff > 0:
+            status = "over"
+        else:
+            status = "under"
+
+        render_payload = WordBudgetRender(
+            data={
+                "chapter_id": chapter_id,
+                "chapter_order": chapter_order,
+                "chapter_title": chapter_title,
+                "target": target_int,
+                "total": total,
+                "diff": diff,
+                "tolerance_pct": tolerance_pct,
+                "blocks": block_payloads,
+                "status": status,
+            },
+            actions=[],
+            tool_call_id=params.get("_call_id"),
+        ).model_dump(mode="json")
+
+    return {"result": result_text, "render": render_payload}
 
 
 def _load_forbidden_lexicon_entries(
@@ -1891,12 +2882,12 @@ def _load_forbidden_lexicon_entries(
         assets: list[dict] = []
         for aid in lexicon_asset_ids:
             asset = svc.find(aid, project_id=project_id)
-            if asset and asset.get("enabled") and asset.get("asset_type") == "forbidden_lexicon":
+            if asset and asset.get("enabled") and asset.get("asset_type") == AssetType.FORBIDDEN_LEXICON.value:
                 assets.append(asset)
     else:
         assets = svc.list_merged(
             project_id=project_id,
-            asset_type="forbidden_lexicon",
+            asset_type=AssetType.FORBIDDEN_LEXICON.value,
             enabled_only=True,
             limit=50,
         )
@@ -2055,7 +3046,7 @@ def _list_forbidden_lexicon(params: dict, project_id: str) -> str:
     svc = _get_assets_service()
     assets = svc.list_merged(
         project_id=project_id,
-        asset_type="forbidden_lexicon",
+        asset_type=AssetType.FORBIDDEN_LEXICON.value,
         enabled_only=False,
         limit=50,
     )
@@ -2134,7 +3125,7 @@ def _upsert_forbidden_lexicon(params: dict, project_id: str) -> str:
     created = svc.create(
         scope="project",
         project_id=project_id,
-        asset_type="forbidden_lexicon",
+        asset_type=AssetType.FORBIDDEN_LEXICON.value,
         title=title,
         summary=f"{len(normalized)} 条禁用规则",
         payload=payload,
@@ -2241,6 +3232,468 @@ def _splice_block(params: dict, project_id: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# propose_* tools — draft render cards, never write DB. Users adopt by clicking
+# the card's [采纳] button which dispatches to the real API client by render.type.
+# ---------------------------------------------------------------------------
+
+
+def _propose_outline_scene(params: dict, project_id: str) -> dict:
+    """Draft a SceneProposalCard for a chapter gap. Never writes DB."""
+    from ...schemas.writer_agent_schemas import SceneProposalRender, ToolRenderAction
+
+    chapter_id = params.get("chapter_id") or ""
+    title = (params.get("title") or "").strip()
+    summary = (params.get("summary") or "").strip()
+    reason = (params.get("reason") or "").strip()
+    insert_after = params.get("insert_after_scene_order")
+    if not chapter_id or not title or not summary or not reason:
+        return {
+            "result": "propose_outline_scene 需要 chapter_id / title / summary / reason",
+        }
+    if insert_after is None:
+        return {"result": "propose_outline_scene 需要 insert_after_scene_order（0 表示章首）"}
+
+    try:
+        insert_after_int = int(insert_after)
+    except (TypeError, ValueError):
+        return {"result": f"insert_after_scene_order 必须是整数，收到 {insert_after!r}"}
+
+    chapter_row = ChapterRepository(get_engine()).get_chapter(project_id, chapter_id)
+    if not chapter_row:
+        return {"result": f"找不到章节 {chapter_id}"}
+    chapter_order = int(chapter_row.get("chapter_order") or 0)
+
+    scene_order = params.get("scene_order")
+    try:
+        scene_order_int = int(scene_order) if scene_order is not None else insert_after_int + 1
+    except (TypeError, ValueError):
+        scene_order_int = insert_after_int + 1
+
+    pov = (params.get("pov") or "").strip()
+    key_events_raw = params.get("key_events") or []
+    if isinstance(key_events_raw, str):
+        key_events = [key_events_raw]
+    elif isinstance(key_events_raw, list):
+        key_events = [str(x) for x in key_events_raw if x]
+    else:
+        key_events = []
+
+    target_wc = params.get("target_word_count")
+    try:
+        target_wc_int = int(target_wc) if target_wc is not None else None
+    except (TypeError, ValueError):
+        target_wc_int = None
+
+    data = {
+        "chapter_id": chapter_id,
+        "chapter_order": chapter_order,
+        "scene_order": scene_order_int,
+        "mode": "insert",
+        "insert_after_scene_order": insert_after_int,
+        "title": title,
+        "summary": summary,
+        "pov": pov,
+        "key_events": key_events,
+        "rationale": reason,
+        "reason": reason,
+    }
+    if target_wc_int is not None:
+        data["estimated_word_count"] = target_wc_int
+        data["target_word_count"] = target_wc_int
+
+    render = SceneProposalRender(
+        data=data,
+        actions=[
+            ToolRenderAction(label="采纳并创建场景", kind="create_scene", variant="primary"),
+        ],
+        tool_call_id=params.get("_call_id"),
+    ).model_dump(mode="json")
+
+    result_text = (
+        f"已草拟新场景提案：第 {chapter_order} 章 · {title}\n"
+        f"插入位置：#{insert_after_int} 之后 → #{scene_order_int}\n"
+        f"POV: {pov or '未指定'}；目标字数：{target_wc_int or '未指定'}\n"
+        f"理由：{reason}\n"
+        f"（尚未入库，等待用户采纳）"
+    )
+    return {"result": result_text, "render": render}
+
+
+def _propose_chapter_structure(params: dict, project_id: str) -> dict:
+    """Draft a ChapterStructureProposalCard with a batch of chapter stubs."""
+    from ...schemas.writer_agent_schemas import (
+        ChapterStructureProposalRender,
+        ToolRenderAction,
+    )
+
+    start_raw = params.get("start_chapter_order")
+    chapters_raw = params.get("chapters") or []
+    if not isinstance(chapters_raw, list) or not chapters_raw:
+        return {"result": "propose_chapter_structure 需要 chapters 数组（至少 1 项）"}
+    try:
+        start_order = int(start_raw) if start_raw is not None else 1
+    except (TypeError, ValueError):
+        return {"result": f"start_chapter_order 必须是整数，收到 {start_raw!r}"}
+
+    normalized: list[dict] = []
+    for idx, raw in enumerate(chapters_raw):
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip()
+        summary = str(raw.get("summary") or "").strip()
+        if not title or not summary:
+            continue
+        try:
+            order = int(raw.get("chapter_order") or (start_order + idx))
+        except (TypeError, ValueError):
+            order = start_order + idx
+        try:
+            word_target = int(raw.get("word_target") or 0)
+        except (TypeError, ValueError):
+            word_target = 0
+        threads_raw = raw.get("key_threads") or []
+        key_threads = (
+            [str(t) for t in threads_raw if t]
+            if isinstance(threads_raw, list)
+            else []
+        )
+        normalized.append(
+            {
+                "chapter_order": order,
+                "title": title,
+                "summary": summary,
+                "hook": str(raw.get("hook") or "").strip() or None,
+                "word_target": word_target,
+                "pov_character": str(raw.get("pov_character") or "").strip() or None,
+                "key_threads": key_threads,
+            }
+        )
+    if not normalized:
+        return {"result": "chapters 数组中没有有效的章节（需要 title + summary）"}
+
+    data = {
+        "plan_id": params.get("plan_id") or None,
+        "start_chapter_order": start_order,
+        "chapters": normalized,
+        "overall_arc": (params.get("overall_arc") or "").strip() or None,
+        "rationale": (params.get("rationale") or "").strip() or None,
+    }
+
+    render = ChapterStructureProposalRender(
+        data=data,
+        actions=[
+            ToolRenderAction(
+                label="采纳并批量建章",
+                kind="create_chapters",
+                variant="primary",
+            ),
+        ],
+        tool_call_id=params.get("_call_id"),
+    ).model_dump(mode="json")
+
+    titles = "、".join(f"#{c['chapter_order']} {c['title']}" for c in normalized[:5])
+    more = f"（共 {len(normalized)} 章）" if len(normalized) > 5 else ""
+    result_text = (
+        f"已草拟章节骨架提案：从第 {start_order} 章起 → {titles}{more}\n"
+        f"（尚未入库，等待用户采纳）"
+    )
+    return {"result": result_text, "render": render}
+
+
+def _propose_splice_block(params: dict, project_id: str) -> dict:
+    """Draft a ProseDiffCard (single-hunk expand/shrink). Never writes DB."""
+    from ...schemas.writer_agent_schemas import ProseDiffRender, ToolRenderAction
+
+    chapter_id = params.get("chapter_id") or ""
+    anchor_block_id = params.get("anchor_block_id") or ""
+    position = (params.get("position") or "").lower()
+    new_content = params.get("new_content") or ""
+    reason = (params.get("reason") or "").strip()
+    intent = (params.get("intent") or "").lower()
+    if not chapter_id or not anchor_block_id or not position:
+        return {"result": "propose_splice_block 需要 chapter_id / anchor_block_id / position"}
+    if position not in ("before", "after", "replace_range"):
+        return {"result": f"position 必须是 before|after|replace_range，收到 {position!r}"}
+    if not new_content and position != "replace_range":
+        return {"result": "propose_splice_block 在 before/after 模式下 new_content 不能为空"}
+    if not reason:
+        return {"result": "propose_splice_block 要求 reason 非空（让用户看到提案动机）"}
+    if intent not in ("expand", "shrink"):
+        return {"result": "propose_splice_block 要求 intent=expand|shrink"}
+
+    new_chars = _block_chars(new_content)
+    if new_chars > _SPLICE_MAX_DELTA_CHARS:
+        return {
+            "result": (
+                f"propose_splice_block 被拒绝：单次写入 {new_chars} 字超过上限 "
+                f"{_SPLICE_MAX_DELTA_CHARS}"
+            )
+        }
+
+    adapter = _get_manuscript_adapter(project_id)
+    anchor = adapter.get_block(anchor_block_id)
+    if not anchor:
+        return {"result": f"找不到锚点块 {anchor_block_id}"}
+    if anchor.get("chapter_id") != chapter_id:
+        return {"result": f"锚点块不属于章节 {chapter_id}"}
+
+    original_text = ""
+    old_chars = 0
+    if position == "replace_range":
+        end_anchor = params.get("end_anchor_block_id") or anchor_block_id
+        end_block = adapter.get_block(end_anchor)
+        if not end_block or end_block.get("chapter_id") != chapter_id:
+            return {"result": f"replace_range 的结束锚点 {end_anchor} 不合法"}
+        start_order = anchor.get("block_order") or 0
+        end_order = end_block.get("block_order") or 0
+        if end_order < start_order:
+            return {"result": "end_anchor_block_id 的顺序必须 ≥ anchor_block_id"}
+        blocks = adapter.list_blocks(include_content=True, chapter_id=chapter_id)
+        in_range = [
+            b for b in blocks
+            if (b.get("block_order") or 0) >= start_order
+            and (b.get("block_order") or 0) <= end_order
+        ]
+        original_text = "\n\n".join(b.get("content") or "" for b in in_range)
+        old_chars = sum(_block_chars(b.get("content") or "") for b in in_range)
+        delta = new_chars - old_chars
+        if abs(delta) > _SPLICE_MAX_DELTA_CHARS:
+            return {
+                "result": (
+                    f"propose_splice_block replace_range 被拒绝：净变化 {delta:+d} 字超过上限 "
+                    f"±{_SPLICE_MAX_DELTA_CHARS}"
+                )
+            }
+    word_delta = new_chars - old_chars
+
+    hunk = {
+        "hunk_id": f"splice_{uuid.uuid4().hex[:8]}",
+        "original": original_text,
+        "replacement": new_content,
+        "reason": reason,
+        "severity": "medium",
+        "category": f"{intent}_splice",
+        "location_hint": f"{position} of {anchor_block_id}",
+    }
+
+    data = {
+        "scope": "manuscript_block",
+        "target_id": anchor_block_id,
+        "chapter_label": params.get("chapter_label") or "",
+        "hunks": [hunk],
+        "word_delta": word_delta,
+        "source": "splice_block",
+    }
+
+    render = ProseDiffRender(
+        data=data,
+        actions=[
+            ToolRenderAction(label="采纳改写", kind="apply_hunks", variant="primary"),
+        ],
+        tool_call_id=params.get("_call_id"),
+    ).model_dump(mode="json")
+
+    label = "扩写" if intent == "expand" else "精简"
+    result_text = (
+        f"已草拟 {label} 提案：锚定 {anchor_block_id}（{position}）\n"
+        f"字数：{old_chars} → {new_chars}（Δ{word_delta:+d}）\n"
+        f"理由：{reason}\n（尚未入库，等待用户采纳）"
+    )
+    return {"result": result_text, "render": render}
+
+
+def _propose_rewrite_span(params: dict, project_id: str) -> dict:
+    """Draft a ProseDiffCard for a forbidden-lexicon rewrite. Never writes DB.
+
+    Hard-enforces:
+    - original_text unique within the block (so adoption can safely replace).
+    - new_text non-empty and reason non-empty (guard against silent drops).
+    - |Δchars| ≤ _REWRITE_MAX_DELTA_CHARS (same budget as real rewrite_span).
+    """
+    from ...schemas.writer_agent_schemas import ProseDiffRender, ToolRenderAction
+
+    block_id = params.get("block_id") or ""
+    original = params.get("original_text") or ""
+    new_text = params.get("new_text") or ""
+    reason = (params.get("reason") or "").strip()
+    if not block_id or not original:
+        return {"result": "propose_rewrite_span 需要 block_id 和 original_text"}
+    if not new_text:
+        return {"result": "propose_rewrite_span 要求 new_text 非空（防止误点采纳后语义塌陷）"}
+    if not reason:
+        return {"result": "propose_rewrite_span 要求 reason 非空"}
+
+    old_chars = _block_chars(original)
+    new_chars = _block_chars(new_text)
+    word_delta = new_chars - old_chars
+    if abs(word_delta) > _REWRITE_MAX_DELTA_CHARS:
+        return {
+            "result": (
+                f"propose_rewrite_span 被拒绝：字数变化 {word_delta:+d} 超过上限 "
+                f"±{_REWRITE_MAX_DELTA_CHARS}"
+            )
+        }
+
+    adapter = _get_manuscript_adapter(project_id)
+    block = adapter.get_block(block_id)
+    if not block:
+        return {"result": f"找不到 block_id={block_id}"}
+    content = block.get("content") or ""
+    occurrences = content.count(original)
+    if occurrences == 0:
+        return {
+            "result": (
+                f"original_text 未出现在块 {block_id} 中，请先 get_manuscript_context "
+                f"或 scan_forbidden_lexicon 核对实际文本"
+            )
+        }
+    if occurrences > 1:
+        return {
+            "result": (
+                f"original_text 在块 {block_id} 中出现 {occurrences} 次（不唯一），"
+                f"请扩展 original_text 使之唯一后重试"
+            )
+        }
+
+    hunk = {
+        "hunk_id": f"rewrite_{uuid.uuid4().hex[:8]}",
+        "original": original,
+        "replacement": new_text,
+        "reason": reason,
+        "severity": "high",
+        "category": "forbidden_lexicon",
+        "location_hint": f"block={block_id}",
+    }
+    data = {
+        "scope": "manuscript_block",
+        "target_id": block_id,
+        "chapter_label": params.get("chapter_label") or "",
+        "hunks": [hunk],
+        "word_delta": word_delta,
+        "source": "rewrite_span",
+    }
+
+    render = ProseDiffRender(
+        data=data,
+        actions=[
+            ToolRenderAction(label="采纳改写", kind="apply_hunks", variant="primary"),
+        ],
+        tool_call_id=params.get("_call_id"),
+    ).model_dump(mode="json")
+
+    result_text = (
+        f"已草拟禁词改写提案：块 {block_id}\n"
+        f"「{original}」→「{new_text}」（Δ{word_delta:+d} 字）\n"
+        f"理由：{reason}\n（尚未入库，等待用户采纳）"
+    )
+    return {"result": result_text, "render": render}
+
+
+def _propose_relationship(params: dict, project_id: str) -> dict:
+    """Draft a RelationshipProposalCard. Never writes DB."""
+    from ...schemas.writer_agent_schemas import (
+        RelationshipProposalRender,
+        ToolRenderAction,
+    )
+
+    a = (params.get("entity_a") or "").strip()
+    b = (params.get("entity_b") or "").strip()
+    rel_type = (params.get("relation_type") or "").strip()
+    description = (params.get("description") or "").strip()
+    evidence = (params.get("evidence_snippet") or "").strip()
+    if not a or not b or not rel_type:
+        return {"result": "propose_relationship 需要 entity_a / entity_b / relation_type"}
+    if a == b:
+        return {"result": "entity_a 与 entity_b 不能相同"}
+    if not description:
+        return {"result": "propose_relationship 要求 description 非空"}
+    if not evidence:
+        return {"result": "propose_relationship 要求 evidence_snippet 非空（避免无据生成）"}
+
+    trust_level = params.get("trust_level")
+    try:
+        trust_val = float(trust_level) if trust_level is not None else None
+    except (TypeError, ValueError):
+        trust_val = None
+    if trust_val is not None and not (0.0 <= trust_val <= 1.0):
+        return {"result": f"trust_level 需在 [0, 1] 区间，收到 {trust_level!r}"}
+
+    # Resolve entity IDs if possible (not required — frontend uses names for display)
+    repos = _get_repos()
+    entity_a_id = repos["entity"].resolve_entity_id(project_id, a)
+    entity_b_id = repos["entity"].resolve_entity_id(project_id, b)
+
+    source_scene_ids_raw = params.get("source_scene_ids") or []
+    source_scene_ids = (
+        [str(s) for s in source_scene_ids_raw if s]
+        if isinstance(source_scene_ids_raw, list)
+        else []
+    )
+
+    data = {
+        "entity_a": a,
+        "entity_b": b,
+        "entity_a_id": entity_a_id,
+        "entity_b_id": entity_b_id,
+        "relation_type": rel_type,
+        "description": description,
+        "trust_level": trust_val,
+        "power_dynamic": (params.get("power_dynamic") or "").strip() or None,
+        "conflict_trigger": (params.get("conflict_trigger") or "").strip() or None,
+        "evidence_snippet": evidence,
+        "source_scene_ids": source_scene_ids,
+    }
+
+    render = RelationshipProposalRender(
+        data=data,
+        actions=[
+            ToolRenderAction(label="采纳并落库", kind="update_world", variant="primary"),
+        ],
+        tool_call_id=params.get("_call_id"),
+    ).model_dump(mode="json")
+
+    result_text = (
+        f"已草拟关系提案：{a} ↔ {b}（{rel_type}）\n"
+        f"描述：{description}\n"
+        f"证据：{evidence[:80]}{'…' if len(evidence) > 80 else ''}\n"
+        f"（尚未入库，等待用户采纳）"
+    )
+    return {"result": result_text, "render": render}
+
+
+def _propose_prose_continuation(params: dict, project_id: str) -> dict:
+    """Declare that retrieval is done; signal the chapter_continuer runner to
+    hand off to WriterComposer. This tool does NOT produce a render payload —
+    the runner intercepts the tool call, runs the composer, and emits the
+    final ProseDiff card itself.
+
+    We still validate params here so the LLM gets a clear error if it calls
+    this with garbage; the runner trusts a successful result.
+    """
+    anchor_block_id = params.get("anchor_block_id") or ""
+    target_word_count = params.get("target_word_count")
+    writing_brief = params.get("writing_brief")
+
+    if not anchor_block_id:
+        return {"result": "propose_prose_continuation 需要 anchor_block_id"}
+    if not isinstance(writing_brief, dict) or not writing_brief:
+        return {"result": "propose_prose_continuation 需要非空 writing_brief (dict)"}
+    try:
+        target_int = int(target_word_count)
+    except (TypeError, ValueError):
+        return {"result": "target_word_count 必须是整数"}
+    if not (200 <= target_int <= 1200):
+        return {"result": f"target_word_count={target_int} 超出 [200, 1200] 区间"}
+
+    return {
+        "result": (
+            f"已收到续写检索结果：锚点={anchor_block_id}，目标={target_int} 字。"
+            f"WriterComposer 将开始流式生成。"
+        )
+    }
+
+
 def _rewrite_span(params: dict, project_id: str) -> str:
     block_id = params.get("block_id") or ""
     original = params.get("original_text") or ""
@@ -2327,4 +3780,11 @@ _EXECUTORS: dict[str, Any] = {
     "upsert_forbidden_lexicon": _upsert_forbidden_lexicon,
     "splice_block": _splice_block,
     "rewrite_span": _rewrite_span,
+    # propose_* tools (draft-only, never write DB)
+    "propose_outline_scene": _propose_outline_scene,
+    "propose_chapter_structure": _propose_chapter_structure,
+    "propose_splice_block": _propose_splice_block,
+    "propose_rewrite_span": _propose_rewrite_span,
+    "propose_relationship": _propose_relationship,
+    "propose_prose_continuation": _propose_prose_continuation,
 }

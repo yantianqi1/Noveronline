@@ -85,8 +85,17 @@ def test_archive_service_crud_uses_unified_db_only(tmp_path, monkeypatch):
     archive = service.get_archive("arc_hero")
     assert archive["entity_name"] == "Lin"
 
+    # Post-P5: archive rows live in ``assets`` with
+    # ``asset_type='archive_entity'``; the ``archive_library`` table
+    # was dropped by migration 20260419_0003.
     with engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM archive_library WHERE archive_id = :id"), {"id": "arc_hero"}).scalar()
+        count = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM assets "
+                "WHERE asset_id = :id AND asset_type = 'archive_entity'"
+            ),
+            {"id": "arc_hero"},
+        ).scalar()
     assert count == 1
     _assert_no_legacy_silos(tmp_path)
 

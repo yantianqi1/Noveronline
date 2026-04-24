@@ -10,6 +10,12 @@ import json
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
+from ..config import Settings
+
+
+def _recent_summaries_window() -> int:
+    return Settings().SEED_RECENT_SUMMARIES_WINDOW
+
 
 class ReadingNotesManager:
     """Manages a three-tier ReadingNotes structure during sequential reading.
@@ -314,15 +320,73 @@ class ReadingNotesManager:
     # Segment summaries
     # ------------------------------------------------------------------
 
-    def add_segment_summary(self, segment_id: str, summary: str) -> None:
-        """Add summary to all_segment_summaries; keep only last 2 in recent."""
-        entry = {"segment_id": segment_id, "summary": summary}
+    def add_segment_summary(
+        self,
+        segment_id: str,
+        summary: str,
+        *,
+        status: str = "completed",
+        error_class: str = "",
+        error_detail: str = "",
+    ) -> None:
+        """Add summary to all_segment_summaries; keep only last N in recent.
+
+        Optional ``status`` / ``error_class`` / ``error_detail`` let callers
+        record a failed segment that should be retried later. Default behaviour
+        is backward compatible. Window size is governed by
+        ``SEED_RECENT_SUMMARIES_WINDOW`` (default 5).
+        """
+        entry: Dict[str, Any] = {"segment_id": segment_id, "summary": summary}
+        if status != "completed":
+            entry["status"] = status
+        if error_class:
+            entry["error_class"] = error_class
+        if error_detail:
+            entry["error_detail"] = error_detail
         self.all_segment_summaries.append(entry)
         recent = self.notes["plot_state"]["recent_segment_summaries"]
         recent.append(entry)
-        # Keep rotating window of last 2
-        if len(recent) > 2:
-            self.notes["plot_state"]["recent_segment_summaries"] = recent[-2:]
+        window = _recent_summaries_window()
+        if len(recent) > window:
+            self.notes["plot_state"]["recent_segment_summaries"] = recent[-window:]
+
+    def update_segment_summary(
+        self,
+        segment_id: str,
+        summary: str,
+    ) -> bool:
+        """Patch an existing segment entry after a successful manual retry.
+
+        Clears status/error fields so downstream aggregators treat the entry
+        as normal completed data. Returns True if an entry was patched.
+        """
+        updated = False
+        for entry in self.all_segment_summaries:
+            if entry.get("segment_id") == segment_id:
+                entry["summary"] = summary
+                entry.pop("status", None)
+                entry.pop("error_class", None)
+                entry.pop("error_detail", None)
+                updated = True
+                break
+        if not updated:
+            return False
+        recent = self.notes["plot_state"]["recent_segment_summaries"]
+        for entry in recent:
+            if entry.get("segment_id") == segment_id:
+                entry["summary"] = summary
+                entry.pop("status", None)
+                entry.pop("error_class", None)
+                entry.pop("error_detail", None)
+        return True
+
+    def failed_segment_ids(self) -> List[str]:
+        """Segment IDs currently awaiting manual retry."""
+        return [
+            entry["segment_id"]
+            for entry in self.all_segment_summaries
+            if entry.get("status") == "retry_needed" and entry.get("segment_id")
+        ]
 
     # ------------------------------------------------------------------
     # Arc summaries
@@ -337,15 +401,33 @@ class ReadingNotesManager:
         """Return all segment summaries not yet covered by any arc."""
         return self.all_segment_summaries[self._arc_cursor:]
 
-    def add_arc_summary(self, arc_id: str, summary: str, covered_segments: List[Dict]) -> None:
-        """Record an arc summary and advance the cursor."""
-        self.notes["plot_state"]["arc_summaries"].append(
-            {
-                "arc_id": arc_id,
-                "summary": summary,
-                "covered_segments": covered_segments,
-            }
-        )
+    def add_arc_summary(
+        self,
+        arc_id: str,
+        summary: str,
+        covered_segments: List[Dict],
+        *,
+        status: str = "completed",
+        error_class: str = "",
+        error_detail: str = "",
+    ) -> None:
+        """Record an arc summary and advance the cursor.
+
+        Optional status/error fields mirror ``add_segment_summary`` so a
+        retry-needed arc can be persisted without blocking the pipeline.
+        """
+        entry: Dict[str, Any] = {
+            "arc_id": arc_id,
+            "summary": summary,
+            "covered_segments": covered_segments,
+        }
+        if status != "completed":
+            entry["status"] = status
+        if error_class:
+            entry["error_class"] = error_class
+        if error_detail:
+            entry["error_detail"] = error_detail
+        self.notes["plot_state"]["arc_summaries"].append(entry)
         self._arc_cursor += len(covered_segments)
 
     # ------------------------------------------------------------------
@@ -356,10 +438,40 @@ class ReadingNotesManager:
         """True when accumulated arcs reach volume_arc_threshold."""
         return len(self.notes["plot_state"]["arc_summaries"]) >= self.volume_arc_threshold
 
-    def add_volume_summary(self, volume_id: str, summary: str, covered_arcs: List[str]) -> None:
-        self.notes["plot_state"]["volume_summaries"].append(
-            {"volume_id": volume_id, "summary": summary, "covered_arcs": covered_arcs}
-        )
+    def add_volume_summary(
+        self,
+        volume_id: str,
+        summary: str,
+        covered_arcs: List[str],
+        *,
+        theme: Optional[str] = None,
+        main_arcs: Optional[List[Dict[str, Any]]] = None,
+        faction_changes: Optional[List[Dict[str, Any]]] = None,
+        cross_volume_threads: Optional[List[str]] = None,
+        status: str = "completed",
+        error_class: str = "",
+        error_detail: str = "",
+    ) -> None:
+        entry: Dict[str, Any] = {
+            "volume_id": volume_id,
+            "summary": summary,
+            "covered_arcs": covered_arcs,
+        }
+        if theme:
+            entry["theme"] = theme
+        if main_arcs:
+            entry["main_arcs"] = list(main_arcs)
+        if faction_changes:
+            entry["faction_changes"] = list(faction_changes)
+        if cross_volume_threads:
+            entry["cross_volume_threads"] = list(cross_volume_threads)
+        if status != "completed":
+            entry["status"] = status
+        if error_class:
+            entry["error_class"] = error_class
+        if error_detail:
+            entry["error_detail"] = error_detail
+        self.notes["plot_state"]["volume_summaries"].append(entry)
 
     # ------------------------------------------------------------------
     # Context assembly
@@ -386,18 +498,23 @@ class ReadingNotesManager:
                     parts.append(f"[{c['status']}]")
                 if c.get("identity"):
                     parts.append(c["identity"])
-                # Adaptive trait inclusion — always keep some voice fingerprint
+                # Adaptive trait inclusion — always keep some voice fingerprint.
+                # Phase E-6: short novel keeps all traits; medium/long keep more
+                # than the previous [:3]/[:5] caps so character voice fidelity
+                # survives the assemble_context summarisation step.
                 if total_segs < 10:
                     if c.get("personality_traits"):
-                        parts.append("traits: " + ", ".join(c["personality_traits"][:5]))
+                        parts.append("traits: " + ", ".join(c["personality_traits"]))
                     if c.get("speech_style"):
                         parts.append(f"voice: {c['speech_style']}")
                 elif total_segs < 50:
                     if c.get("personality_traits"):
-                        parts.append("traits: " + ", ".join(c["personality_traits"][:3]))
+                        parts.append("traits: " + ", ".join(c["personality_traits"][:8]))
                     if c.get("speech_style"):
                         parts.append(f"voice: {c['speech_style']}")
                 else:
+                    if c.get("personality_traits"):
+                        parts.append("traits: " + ", ".join(c["personality_traits"][:5]))
                     if c.get("speech_style"):
                         parts.append(f"voice: {c['speech_style']}")
                 lines.append("  " + " | ".join(parts))
@@ -450,20 +567,59 @@ class ReadingNotesManager:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Canonical entity table (for prompt hints)
+    # ------------------------------------------------------------------
+
+    def canonical_entity_table(self, top_n: int = 30) -> Dict[str, List[str]]:
+        """Return ``{canonical_name: [aliases]}`` for the most-mentioned entities.
+
+        Used to inject a "known entity table" into the segment-reading prompt so
+        the LLM uses canonical names instead of creating duplicate records when
+        an alias appears (e.g. "小李" should resolve to "李云" if "李云" is
+        already a known character with alias "小李").
+
+        Selection: top ``top_n`` entities by ``segments_seen`` count, across
+        characters and organizations combined. Only entities with at least one
+        recorded mention are returned.
+        """
+        ranked: List[tuple] = []
+        for name, data in self.notes["core_facts"]["characters"].items():
+            mentions = len(data.get("segments_seen", []))
+            if mentions <= 0:
+                continue
+            aliases = [a for a in data.get("aliases", []) if a and a != name]
+            ranked.append((mentions, name, aliases))
+        for name, data in self.notes["core_facts"]["organizations"].items():
+            mentions = len(data.get("segments_seen", []))
+            if mentions <= 0:
+                continue
+            ranked.append((mentions, name, []))
+
+        ranked.sort(key=lambda t: (-t[0], t[1]))
+        return {name: aliases for _, name, aliases in ranked[:top_n]}
+
+    # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 
-    def save(self, path: str) -> None:
-        """Serialise full state to JSON."""
-        state = {
+    def assemble_for_save(self) -> Dict[str, Any]:
+        """Return the serializable state dict — mirrors what ``save()`` writes to disk.
+
+        Used by callers that need to pass the payload to ProjectManager.save_project_json
+        for DB mirroring without a round-trip through the filesystem.
+        """
+        return {
             "arc_interval": self.arc_interval,
             "volume_arc_threshold": self.volume_arc_threshold,
             "all_segment_summaries": self.all_segment_summaries,
             "_arc_cursor": self._arc_cursor,
             "notes": self.notes,
         }
+
+    def save(self, path: str) -> None:
+        """Serialise full state to JSON."""
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            json.dump(self.assemble_for_save(), f, ensure_ascii=False, indent=2)
 
     @classmethod
     def load(cls, path: str) -> "ReadingNotesManager":

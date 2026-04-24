@@ -19,6 +19,20 @@ from sqlalchemy import Engine, and_, cast, delete, func, select, text, update, I
 
 from app.tables.assets import assets
 
+from ..schemas.asset_types import AssetType
+
+
+_BLOCK_TYPE = AssetType.MANUSCRIPT_BLOCK.value
+
+# One raw-SQL statement in this module embeds ``'manuscript_block'`` as a
+# literal inside a multi-line ``text()`` query (it also contains a JSON
+# literal ``'{}'`` that makes f-string / str.format interpolation fragile).
+# This assert couples that literal to the enum so any drift is caught at
+# import time.
+assert _BLOCK_TYPE == "manuscript_block", (
+    f"manuscript_repo raw SQL expects 'manuscript_block' but enum is {_BLOCK_TYPE!r}"
+)
+
 from .base import ProjectScopedRepository
 
 
@@ -41,7 +55,7 @@ _ALLOWED_PAYLOAD_FIELDS = {
 
 def _block_type_clause():
     """Filter predicate for manuscript blocks."""
-    return assets.c.asset_type == "manuscript_block"
+    return assets.c.asset_type == _BLOCK_TYPE
 
 
 def _block_order_expr():
@@ -74,7 +88,7 @@ class ManuscriptRepository(ProjectScopedRepository):
         populating ``payload_json`` (or individual payload fields that will be
         merged).
         """
-        values.setdefault("asset_type", "manuscript_block")
+        values.setdefault("asset_type", _BLOCK_TYPE)
         values.setdefault("scope", "project")
         self.upsert_by_keys(project_id, values, ("asset_id",))
 

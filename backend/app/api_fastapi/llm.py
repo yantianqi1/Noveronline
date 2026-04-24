@@ -89,13 +89,30 @@ async def delete_llm_module_binding(module_key: str):
 @router.get("/activity")
 async def get_llm_activity():
     try:
-        calls = await llm_activity_tracker.snapshot()
+        calls = llm_activity_tracker.snapshot()
         seen = {item["channel_key"] for item in calls if item["channel_key"]}
         seen.update(await llm_concurrency_service.channel_keys())
         channels = {}
         for key in seen:
-            if key:
-                channels[key] = await llm_concurrency_service.snapshot(key)
+            if not key:
+                continue
+            runtime = await llm_concurrency_service.snapshot(key)
+            # Frontend expects {active_count, limit}; the concurrency service
+            # exposes {limit, inflight, waiting} so we map inflight -> active_count.
+            channels[key] = {
+                "active_count": runtime.get("inflight", 0),
+                "limit": runtime.get("limit", 0),
+                "waiting": runtime.get("waiting", 0),
+            }
+        # Also surface activity-tracker-only channels (sync LLMClient path does
+        # not go through the async concurrency gate, so we still want the bar
+        # to show activity even with no channel runtime entry yet).
+        for call in calls:
+            ck = call["channel_key"]
+            if ck and ck not in channels:
+                channels[ck] = {"active_count": 0, "limit": 0, "waiting": 0}
+            if ck and channels[ck]["active_count"] < sum(1 for c in calls if c["channel_key"] == ck):
+                channels[ck]["active_count"] = sum(1 for c in calls if c["channel_key"] == ck)
         return ok({"calls": calls, "channels": channels, "total_active": len(calls)})
     except Exception as exc:
         return err(exc)

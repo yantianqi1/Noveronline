@@ -16,12 +16,16 @@ from .llm_router import LlmRouter
 from .reading_notes_manager import ReadingNotesManager
 from .step_trace_context import get_current_step, _current_step
 from .task_cancelled import TaskCancelledException
+from ..config import Settings
 from ..utils.llm_json import normalize_json_object
 
 logger = logging.getLogger(__name__)
 
 MODULE_KEY = "character_agent_profile"
-DEFAULT_IMPORTANCE_THRESHOLD = 2  # Minimum segment appearances
+# Kept as module-level constant for backward compatibility with existing
+# callers and tests. The runtime default is read from ``Settings`` at
+# construction time so deployments can raise or lower the bar via env.
+DEFAULT_IMPORTANCE_THRESHOLD = 2  # Minimum segment appearances (legacy default)
 
 
 class CharacterAgentProfileGenerator:
@@ -34,7 +38,7 @@ class CharacterAgentProfileGenerator:
         module key.  If *None*, a default :class:`LlmRouter` is created.
     importance_threshold:
         Minimum number of segments a character must appear in to be included.
-        Defaults to :data:`DEFAULT_IMPORTANCE_THRESHOLD`.
+        When ``None``, reads ``Settings().SEED_PROFILE_IMPORTANCE_THRESHOLD``.
     max_workers:
         Maximum threads for concurrent LLM calls.
     """
@@ -42,10 +46,12 @@ class CharacterAgentProfileGenerator:
     def __init__(
         self,
         llm_router: Optional[LlmRouter] = None,
-        importance_threshold: int = DEFAULT_IMPORTANCE_THRESHOLD,
+        importance_threshold: Optional[int] = None,
         max_workers: int = 10,
     ) -> None:
         self.llm_router = llm_router or LlmRouter()
+        if importance_threshold is None:
+            importance_threshold = Settings().SEED_PROFILE_IMPORTANCE_THRESHOLD
         self.importance_threshold = importance_threshold
         self.max_workers = max_workers
 
@@ -244,11 +250,14 @@ class CharacterAgentProfileGenerator:
     def _build_story_summary(manager: ReadingNotesManager) -> str:
         """Combine arc and recent segment summaries into a concise text block."""
         lines: List[str] = []
+        settings = Settings()
+        arc_window = settings.SEED_CHARACTER_PROFILE_ARC_WINDOW
+        vol_window = settings.SEED_CHARACTER_PROFILE_VOLUME_WINDOW
 
         arc_summaries = manager.notes["plot_state"].get("arc_summaries", [])
         if arc_summaries:
             lines.append("【弧线摘要】")
-            for arc in arc_summaries[-5:]:
+            for arc in arc_summaries[-arc_window:]:
                 lines.append(f"[{arc['arc_id']}] {arc['summary']}")
 
         recent = manager.notes["plot_state"].get("recent_segment_summaries", [])
@@ -260,7 +269,7 @@ class CharacterAgentProfileGenerator:
         vol_summaries = manager.notes["plot_state"].get("volume_summaries", [])
         if vol_summaries:
             lines.append("【卷摘要】")
-            for vol in vol_summaries[-3:]:
+            for vol in vol_summaries[-vol_window:]:
                 lines.append(f"[{vol['volume_id']}] {vol['summary']}")
 
         return "\n".join(lines)

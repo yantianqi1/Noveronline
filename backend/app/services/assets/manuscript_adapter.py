@@ -21,6 +21,19 @@ from typing import Any, Callable, Iterator
 
 from app.database import get_engine
 
+from ...schemas.asset_types import AssetType
+from .assets_service import AssetsService, PROJECT_SCOPE
+
+
+# SQL in this module hardcodes the string ``'manuscript_block'`` because
+# many statements also embed JSON literals (``'{}'``) that clash with
+# str.format / f-strings. The sanity check below couples those literals
+# to the enum: any drift fails at import with an explicit error.
+assert AssetType.MANUSCRIPT_BLOCK.value == "manuscript_block", (
+    "manuscript_adapter SQL expects 'manuscript_block' but enum is "
+    f"{AssetType.MANUSCRIPT_BLOCK.value!r} — update both in lockstep."
+)
+
 
 _BLOCK_ORDER_GAP = 10
 
@@ -81,6 +94,7 @@ class ManuscriptAssetAdapter:
         self.project_id = project_id
         self._engine = get_engine()
         self._chapter_lookup = chapter_lookup or (lambda _cid: None)
+        self._assets = AssetsService()
 
     @contextmanager
     def _connect(self) -> Iterator[Any]:
@@ -160,11 +174,11 @@ class ManuscriptAssetAdapter:
     ) -> dict[str, Any]:
         block_id = _new_block_id()
         now = _now()
-        word_count = len(content)
         chapter_tag = self._resolve_chapter_tag(chapter_id)
 
+        # block_order 计算依赖 json_extract 查询——保留直连 SQL。
+        # INSERT 本身走 AssetsService.create 以统一写入路径。
         with self._connect() as conn:
-            # Determine block_order
             if insert_after_block_id:
                 ref = conn.execute(
                     "SELECT CAST(json_extract(payload_json, '$.block_order') AS INTEGER) AS bo "
@@ -201,46 +215,35 @@ class ManuscriptAssetAdapter:
             else:
                 block_order = self._max_block_order(conn) + _BLOCK_ORDER_GAP
 
-            payload = {
-                "block_order": block_order,
-                "chapter_id": chapter_id,
-                "chapter_tag": chapter_tag,
-                "source_scene_id": source_scene_id,
-                "pov_entity_id": pov_entity_id,
-                "location": location,
-                "involved_entities_json": involved_entities_json,
-                "open_threads_json": None,
-                "narrative_note": None,
-            }
+        payload = {
+            "block_order": block_order,
+            "chapter_id": chapter_id,
+            "chapter_tag": chapter_tag,
+            "source_scene_id": source_scene_id,
+            "pov_entity_id": pov_entity_id,
+            "location": location,
+            "involved_entities_json": involved_entities_json,
+            "open_threads_json": None,
+            "narrative_note": None,
+        }
 
-            conn.execute(
-                """
-                INSERT INTO assets (
-                    asset_id, scope, project_id, asset_type, category, title,
-                    summary, content, payload_json, tags_json,
-                    source_kind, source_ref, enabled, pinned, word_count,
-                    created_at, updated_at
-                ) VALUES (?, 'project', ?, 'manuscript_block', '', ?, '', ?, ?, '[]',
-                          'writer_agent_commit', ?, 1, 0, ?, ?, ?)
-                """,
-                (
-                    block_id,
-                    self.project_id,
-                    f"块 #{block_order}",
-                    content,
-                    json.dumps(payload, ensure_ascii=False),
-                    source_scene_id or "",
-                    word_count,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
+        self._assets.create(
+            scope=PROJECT_SCOPE,
+            project_id=self.project_id,
+            asset_type=AssetType.MANUSCRIPT_BLOCK.value,
+            title=f"块 #{block_order}",
+            summary="",
+            content=content,
+            payload=payload,
+            source_kind="writer_agent_commit",
+            source_ref=source_scene_id or "",
+            asset_id=block_id,
+        )
 
         return {
             "block_id": block_id,
             "block_order": block_order,
-            "word_count": word_count,
+            "word_count": len(content),
             "chapter_id": chapter_id,
             "committed_at": now,
         }
@@ -284,51 +287,46 @@ class ManuscriptAssetAdapter:
         }
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT payload_json, content FROM assets WHERE asset_id = ?",
+                "SELECT payload_json FROM assets WHERE asset_id = ?",
                 (block_id,),
             ).fetchone()
-            if not row:
-                return
-            try:
-                payload = json.loads(row["payload_json"] or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+        if not row:
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
 
-            sets: list[str] = []
-            params: list[Any] = []
-            for k, v in kwargs.items():
-                if k in allowed_top:
-                    sets.append(f"{k} = ?")
-                    params.append(v if v is not None else "")
-                elif k in allowed_payload:
-                    payload[k] = v
+        top_updates: dict[str, Any] = {}
+        payload_touched = False
+        for k, v in kwargs.items():
+            if k in allowed_top:
+                top_updates[k] = v if v is not None else ""
+            elif k in allowed_payload:
+                payload[k] = v
+                payload_touched = True
 
-            # Auto-derive chapter_tag if chapter_id changed but tag not given
-            if "chapter_id" in kwargs and "chapter_tag" not in kwargs:
-                payload["chapter_tag"] = self._resolve_chapter_tag(kwargs.get("chapter_id"))
+        # Auto-derive chapter_tag if chapter_id changed but tag not given
+        if "chapter_id" in kwargs and "chapter_tag" not in kwargs:
+            payload["chapter_tag"] = self._resolve_chapter_tag(kwargs.get("chapter_id"))
+            payload_touched = True
 
-            if "content" in kwargs:
-                sets.append("word_count = ?")
-                params.append(len(kwargs["content"] or ""))
+        if not top_updates and not payload_touched:
+            return
 
-            sets.append("payload_json = ?")
-            params.append(json.dumps(payload, ensure_ascii=False))
-            sets.append("updated_at = ?")
-            params.append(_now())
-            params.append(block_id)
-            conn.execute(
-                f"UPDATE assets SET {', '.join(sets)} WHERE asset_id = ?",
-                params,
-            )
-            conn.commit()
+        update_kwargs: dict[str, Any] = dict(top_updates)
+        if payload_touched:
+            update_kwargs["payload"] = payload
+
+        self._assets.update(
+            block_id,
+            scope=PROJECT_SCOPE,
+            project_id=self.project_id,
+            **update_kwargs,
+        )
 
     def delete_block(self, block_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM assets WHERE asset_id = ? AND asset_type = 'manuscript_block'",
-                (block_id,),
-            )
-            conn.commit()
+        self._assets.delete(block_id, scope=PROJECT_SCOPE, project_id=self.project_id)
 
     def reorder(self, block_ids: list[str]) -> None:
         with self._connect() as conn:

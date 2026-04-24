@@ -21,7 +21,11 @@ entities = table(
     text_col("emotional_baseline"), text_col("cognitive_biases_json", default="'[]'"),
     text_col("agent_behavior_hint"), text_col("relationship_summary_text"),
     text_col("notable_risks_json", default="'[]'"), text_col("created_at", nullable=False),
-    text_col("updated_at", nullable=False), composite_pk("project_id", "entity_id"),
+    text_col("updated_at", nullable=False),
+    # Soft FK to archive.archive_library.archive_id (same project). Nullable
+    # because the in-story entity may predate archive generation.
+    text_col("archive_id"),
+    composite_pk("project_id", "entity_id"),
 )
 entity_aliases = table("entity_aliases", project_id(), text_col("alias", nullable=False), text_col("entity_id", nullable=False), composite_pk("project_id", "alias", "entity_id"))
 entity_labels = table("entity_labels", project_id(), text_col("entity_id", nullable=False), text_col("label", nullable=False), composite_pk("project_id", "entity_id", "label"))
@@ -114,4 +118,26 @@ book_plans = table(
     text_col("error_log", default="'[]'"),
     text_col("retrieval_summary", default="''"),
     text_col("created_at", nullable=False), text_col("updated_at", nullable=False),
+)
+
+# Per-project index of prose patterns already used (phrases, metaphors, scene
+# templates, action verbs, sentence starters). Populated by the LLM-based
+# DedupExtractor after each scene is committed, consumed by the writer agent
+# as a "anti-repetition constraints" block injected into writing_brief before
+# the next generation. UNIQUE(project_id, pattern_type, pattern_text) makes
+# re-inserts of the same pattern collapse into a count bump.
+dedup_index = table(
+    "dedup_index",
+    text_col("id", primary_key=True),
+    project_id(),
+    int_col("chapter_order", nullable=False),
+    text_col("scene_id"),
+    text_col("pattern_type", nullable=False),
+    text_col("pattern_text", nullable=False),
+    int_col("count", nullable=False, default="1"),
+    text_col("first_seen_at", nullable=False),
+    text_col("last_seen_at", nullable=False),
+    text_col("created_at", nullable=False),
+    text_col("updated_at", nullable=False),
+    UniqueConstraint("project_id", "pattern_type", "pattern_text", name="uq_dedup_project_type_text"),
 )

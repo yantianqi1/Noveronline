@@ -74,6 +74,8 @@ def test_seed_extract_returns_task_immediately(tmp_path):
 
 
 def test_async_seed_pipeline_generates_chapter_outputs(tmp_path, monkeypatch):
+    # Verify the full auto-link behavior end-to-end (seed → archive → graph → FTS).
+    monkeypatch.setenv("SEED_AUTO_LINK_GLOBAL_DATA", "true")
     ProjectManager.PROJECTS_DIR = str(tmp_path / "projects")
     Config.ZEP_API_KEY = None
     install_fake_seed_llm(monkeypatch)
@@ -123,7 +125,10 @@ def test_async_seed_pipeline_generates_chapter_outputs(tmp_path, monkeypatch):
     project_resp = client.get(f"/api/project/{project_id}")
     assert project_resp.status_code == 200, project_resp.get_json()
     project = project_resp.get_json()["data"]
-    assert project["status"] in {"seed_completed", "ontology_generated"}
+    # 种子管线末尾会自动跑 GlobalDataLinker (archive + graph + FTS),
+    # 成功即提升到 graph_completed;旧的 ontology_generated 只在 linker
+    # 被禁用或失败时出现。
+    assert project["status"] in {"seed_completed", "ontology_generated", "graph_completed"}
     assert project["ontology"]
 
 

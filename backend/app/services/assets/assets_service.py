@@ -328,6 +328,7 @@ class AssetsService:
             "src_asset_id": src_asset_id,
             "dst_asset_id": dst_asset_id,
             "relation": relation,
+            "project_id": project_id if scope == PROJECT_SCOPE else None,
             "created_at": _now(),
         })
 

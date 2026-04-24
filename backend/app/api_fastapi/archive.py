@@ -1,4 +1,18 @@
-"""Native FastAPI archive routes."""
+"""Native FastAPI archive routes.
+
+Deprecation note (2026-04-19, asset-library refactor P3):
+  The ``/api/archive/library/*`` URL space is slated for removal in P5
+  once ``archive_library`` merges into the ``assets`` table. Frontend
+  consumers now import from ``@/api/assets`` (archive.ts was deleted).
+  New code should not add routes here — use ``api_fastapi/assets.py``
+  or ``api_fastapi/unified_assets.py`` and accept a ``source=archive``
+  filter when needed.
+
+  The ``/library/reindex`` endpoint stays because tests
+  (``test_archive_library_api.py``) still use it to backfill legacy
+  ``narrative_archives.json`` artifacts into the DB. It will retire
+  together with the legacy JSON path in Phase G.
+"""
 
 from __future__ import annotations
 

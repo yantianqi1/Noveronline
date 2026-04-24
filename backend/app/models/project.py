@@ -134,11 +134,32 @@ class ProjectManager:
 
     @classmethod
     def save_project_json(cls, project_id: str, filename: str, payload: Dict[str, Any]) -> str:
+        """DEPRECATED dual-write path: JSON file + ``project_artifacts`` mirror.
+
+        New callers should use :meth:`save_project_artifact` which writes
+        only to the DB. Kept for backwards compatibility with older
+        services that still need the file-on-disk side-effect.
+        """
         path = cls._get_project_json_path(project_id, filename)
         with open(path, "w", encoding="utf-8") as file_obj:
             json.dump(payload, file_obj, ensure_ascii=False, indent=2)
         _mirror_artifact_to_db(project_id, filename, payload)
         return path
+
+    @classmethod
+    def save_project_artifact(cls, project_id: str, filename: str, payload: Any) -> None:
+        """DB-only persist of a project artifact (Phase G final cut).
+
+        Writes ``payload`` to ``project_artifacts`` keyed by
+        ``(project_id, artifact_key_from_filename(filename))``. Does not
+        touch the filesystem — runtime readers all go through
+        ``load_project_artifact`` / ``load_project_json`` (DB-first)
+        already, so disk copies are no longer needed.
+
+        ``filename`` may be either a legacy filename (``"seed_analysis.json"``)
+        or a bare artifact key (``"seed_analysis"``).
+        """
+        _mirror_artifact_to_db(project_id, filename, payload)
 
     @classmethod
     def load_project_json(cls, project_id: str, filename: str) -> Optional[Dict[str, Any]]:

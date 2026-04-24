@@ -54,50 +54,41 @@ export default function HeroPanel({
 
   return (
     <Card>
-      <CardContent className="p-4 space-y-3">
-        {/* Top row */}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <h1 className="font-serif text-xl font-bold text-foreground">总览</h1>
+      <CardContent className="px-3 py-2 space-y-1.5">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-baseline gap-2 min-w-0 flex-1">
+            <h1 className="font-serif text-sm font-bold text-foreground shrink-0">总览</h1>
             {projects.length === 0 ? (
-              <p className="mt-1 text-sm text-muted-foreground">
+              <p className="text-xs text-muted-foreground truncate">
                 上传一部小说，开始你的第一次分析。
               </p>
             ) : (
-              <p className="mt-1 text-sm text-muted-foreground">
-                共 <strong className="font-mono">{projects.length}</strong> 卷，焦点：
-                <strong>{latestProjectName}</strong>
+              <p className="text-xs text-muted-foreground truncate">
+                共 <strong className="font-mono">{projects.length}</strong> 卷 · 焦点
+                <strong className="ml-1">{latestProjectName}</strong>
               </p>
             )}
           </div>
 
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <Badge variant="secondary" className="text-xs">
-              <span className="font-mono mr-1 text-muted-foreground">状态</span>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <Badge variant="secondary" className="text-[11px] px-1.5 py-0 h-5">
               {latestProjectStatus}
             </Badge>
-            <Badge variant="secondary" className="text-xs">
-              <span className="font-mono mr-1 text-muted-foreground">阶段</span>
+            <Badge variant="secondary" className="text-[11px] px-1.5 py-0 h-5">
               {activeStageLabel || "等待启动"}
             </Badge>
+            <Button size="sm" className="h-6 px-2 text-xs" onClick={onStartNew}>
+              <Plus className="mr-1 h-3 w-3" />
+              新分析
+            </Button>
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onRefresh}>
+              <RefreshCw className="h-3 w-3" />
+            </Button>
           </div>
         </div>
 
-        {/* Action buttons */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button size="sm" onClick={onStartNew}>
-            <Plus className="mr-1.5 h-4 w-4" />
-            开始分析新小说
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onRefresh}>
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-            刷新
-          </Button>
-        </div>
-
-        {/* Error message */}
         {errorMessage && (
-          <p className="mt-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs font-mono text-destructive">
+          <p className="rounded bg-destructive/10 px-2 py-1 text-[11px] font-mono text-destructive">
             {errorMessage}
           </p>
         )}

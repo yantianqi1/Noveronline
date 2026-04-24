@@ -56,9 +56,14 @@ def _insert_sample_rows(engine, pid: str, now: str = "2026-04-16T10:00:00") -> N
     以便在同一 DB 里为多个项目并行插入不冲突。"""
     sfx = pid[-6:]  # 短后缀，保证跨项目 PK 不冲突
     with engine.begin() as conn:
-        # archive
-        conn.execute(insert(archive_tables.archive_library).values(
-            archive_id=f"arch_{sfx}", project_id=pid, project_name="T",
+        # archive entity (P5: merged into assets with asset_type='archive_entity')
+        conn.execute(insert(assets_tables.assets).values(
+            asset_id=f"arch_{sfx}", project_id=pid, scope="project",
+            asset_type="archive_entity", category="", title="张三",
+            summary="", content="", payload_json="{}", tags_json="[]",
+            source_kind="archive", source_ref=f"u_{sfx}",
+            enabled=1, pinned=0, word_count=0,
+            created_at=now, updated_at=now,
             entity_uuid=f"u_{sfx}", entity_name="张三", entity_type="character",
             agent_kind="generic", importance_tier="major",
             recommended_importance_tier="major", selected_importance_tier="major",
@@ -103,6 +108,20 @@ def _insert_sample_rows(engine, pid: str, now: str = "2026-04-16T10:00:00") -> N
             enabled=1, pinned=0, word_count=0,
             created_at=now, updated_at=now,
         ))
+        conn.execute(insert(assets_tables.assets).values(
+            asset_id=f"ast_other_{sfx}", project_id=pid, scope="project",
+            asset_type="note", category="", title="另一条笔记",
+            summary="", content="", payload_json="{}", tags_json="[]",
+            source_kind="manual", source_ref="",
+            enabled=1, pinned=0, word_count=0,
+            created_at=now, updated_at=now,
+        ))
+        # asset_links — 项目范围的链接必须带 project_id，才会被级联删除命中
+        conn.execute(insert(assets_tables.asset_links).values(
+            project_id=pid,
+            src_asset_id=f"ast_{sfx}", dst_asset_id=f"ast_other_{sfx}",
+            relation="references", created_at=now,
+        ))
 
         # novel
         conn.execute(insert(novel_tables.entities).values(
@@ -130,12 +149,10 @@ def _insert_sample_rows(engine, pid: str, now: str = "2026-04-16T10:00:00") -> N
             outline_json="[]", label="", created_at=now,
         ))
 
-        # global_index (unified search) — PK 是 (source, source_ref)
-        conn.execute(insert(search_tables.global_index).values(
-            source="archive", source_ref=f"arch_{sfx}", project_id=pid,
-            entity_type="character", title="张三", body="摘要", tags="",
-            updated_at=now, payload_json="{}",
-        ))
+        # global_index 的 'assets' / 'archive' 行由触发器
+        # (migration 20260419_0001) 在上面 assets / archive_library 写入时
+        # 自动物化，无需再手动插入。cascade_delete_project 覆盖
+        # global_index 的断言依赖这些触发器产出的行。
 
         # worldline runtime — agent_registry 的 PK 是 (project_id, session_id, branch_id, agent_id)
         conn.execute(insert(worldline_tables.agent_registry).values(
@@ -200,10 +217,13 @@ def test_cascade_delete_project_clears_all_tables(isolated_engine):
     stats = cascade_delete_project(pid)
 
     # 至少这些表应 >0
+    # stats["archive_library"] holds the count of archive_entity rows
+    # deleted via archive_repo.delete_archives_by_project (P5 compat).
     assert stats.get("archive_library", 0) >= 1
     assert stats.get("entities", 0) >= 1
     assert stats.get("scenes", 0) >= 1
     assert stats.get("assets", 0) >= 1
+    assert stats.get("asset_links", 0) >= 1
     assert stats.get("global_index", 0) >= 1
     assert stats.get("agent_registry", 0) >= 1
     assert stats.get("prepare_runs", 0) >= 1
@@ -220,7 +240,15 @@ def test_cascade_delete_project_clears_all_tables(isolated_engine):
 
     # other_pid 的数据未被误删
     assert _count(engine, novel_tables.entities, other_pid) == 1
-    assert _count(engine, archive_tables.archive_library, other_pid) == 1
+    # archive_entity now lives in assets; count it via asset_type filter
+    with engine.connect() as conn:
+        other_archive_count = conn.execute(
+            select(func.count()).select_from(assets_tables.assets).where(
+                (assets_tables.assets.c.asset_type == "archive_entity")
+                & (assets_tables.assets.c.project_id == other_pid),
+            ),
+        ).scalar_one()
+    assert other_archive_count == 1
 
     # 全局资产（scope=global, project_id=NULL）未被误删
     with engine.connect() as conn:

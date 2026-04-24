@@ -9,6 +9,7 @@
 import type {
   ActiveStage,
   SeedLlmActivity,
+  SequentialReadingRetry,
   TaskMetrics,
   TimelineEvent,
   StructuredView,
@@ -73,6 +74,9 @@ export function normalizeSeedTaskDetail(
     llmActivity: normalizeLlmActivity(detail.llm_activity),
     timeline: normalizeTimeline(detail.timeline),
     taskStartedAt: typeof task.created_at === "string" ? task.created_at : "",
+    sequentialReadingRetry: normalizeSequentialReadingRetry(
+      detail.sequential_reading_retry,
+    ),
   };
 }
 
@@ -197,6 +201,22 @@ function normalizeLlmActivity(raw: unknown): SeedLlmActivity {
     targetType: readString(value.target_type, "progress_detail.llm_activity.target_type"),
     targetLabel: readString(value.target_label, "progress_detail.llm_activity.target_label"),
   };
+}
+
+function normalizeSequentialReadingRetry(
+  raw: unknown,
+): SequentialReadingRetry | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const pending = value.pending_segments;
+  if (!Array.isArray(pending)) return undefined;
+  const segments = pending.filter((item): item is string => typeof item === "string");
+  const rawCount = value.count;
+  const count = typeof rawCount === "number" && !Number.isNaN(rawCount)
+    ? rawCount
+    : segments.length;
+  if (count <= 0) return undefined;
+  return { pendingSegments: segments, count };
 }
 
 function normalizeTimeline(raw: unknown): TimelineEvent[] {

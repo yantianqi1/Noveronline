@@ -140,8 +140,9 @@ def test_sequential_read_progress_callback():
     assert len(start_events) == 2, f"Expected 2 start events, got {len(start_events)}"
     assert len(end_events) == 2, f"Expected 2 end events, got {len(end_events)}"
 
-    # Verify total_segments is reported correctly
-    for e in events:
+    # Verify total_segments is reported correctly on segment-scoped events.
+    # Arc/volume events use different fields, so scope the assertion.
+    for e in start_events + end_events:
         assert e["total_segments"] == 2
 
 
@@ -188,6 +189,54 @@ def test_arc_summary_triggered():
 
 
 # ---------------------------------------------------------------------------
+# Periodic reading_notes checkpointing
+# ---------------------------------------------------------------------------
+
+def test_checkpoint_callback_fires_every_n_segments():
+    """6 段 + 每 2 段一次 checkpoint → 3 次 checkpoint，每次 manager
+    里的 summary 数逐步增长（1→3→5... 具体取决于段落摘要数量）。"""
+    segments = [_make_segment(i) for i in range(1, 7)]
+    reader = SequentialReader(llm_router=FakeRouterForReading(), arc_interval=100)
+
+    checkpoints = []
+
+    def capture(manager):
+        checkpoints.append(len(manager.all_segment_summaries))
+
+    reader.read(segments, use_llm=True, checkpoint_callback=capture, checkpoint_every=2)
+
+    # 6 段 / cadence 2 = 3 次 checkpoint
+    assert len(checkpoints) == 3, f"Expected 3 checkpoints, got {checkpoints}"
+    # 每次 checkpoint 时 manager 里的 summary 数是严格递增的
+    assert checkpoints == sorted(checkpoints)
+    assert checkpoints[0] >= 1
+    assert checkpoints[-1] >= checkpoints[0]
+
+
+def test_checkpoint_callback_failure_does_not_abort_read():
+    """checkpoint 回调抛异常（比如外置盘瞬时失败）时，整个顺序阅读
+    不应该崩溃——下一段照常继续，下次 checkpoint 也照常尝试。"""
+    segments = [_make_segment(i) for i in range(1, 5)]
+    reader = SequentialReader(llm_router=FakeRouterForReading(), arc_interval=100)
+
+    calls = {"n": 0}
+
+    def flaky(manager):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("transient disk error")
+
+    notes_mgr = reader.read(
+        segments, use_llm=True, checkpoint_callback=flaky, checkpoint_every=2,
+    )
+
+    # 4 段 / cadence 2 = 2 次 checkpoint，第一次抛、第二次成功
+    assert calls["n"] == 2
+    # 全部 4 段依然读完了
+    assert len(notes_mgr.all_segment_summaries) == 4
+
+
+# ---------------------------------------------------------------------------
 # Test 5: end-to-end with SmartNovelSegmenter
 # ---------------------------------------------------------------------------
 
@@ -219,3 +268,48 @@ def test_end_to_end_with_segmenter():
     assert "沈夜" in characters, (
         f"Expected '沈夜' in characters after end-to-end read; got {list(characters.keys())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase C: known_entities hint injected into segment prompt
+# ---------------------------------------------------------------------------
+
+def test_build_segment_prompt_injects_known_entities_block():
+    from app.services.sequential_reader_prompts import build_segment_reading_prompt
+
+    messages = build_segment_reading_prompt(
+        context="某些前情",
+        segment_text="林策走入院中。",
+        known_entities={"林策": ["小林"], "玄霄宗": []},
+    )
+    user_content = messages[1]["content"]
+    assert "【已知实体表】" in user_content
+    assert "林策（别名：小林）" in user_content
+    # No-alias entry should be present without parenthetical
+    assert "- 玄霄宗" in user_content
+    # The instruction in the system prompt should also mention canonical name
+    system_content = messages[0]["content"]
+    assert "canonical 名" in system_content
+
+
+def test_build_segment_prompt_omits_block_when_no_known_entities():
+    from app.services.sequential_reader_prompts import build_segment_reading_prompt
+
+    messages = build_segment_reading_prompt(
+        context="",
+        segment_text="林策走入院中。",
+        known_entities=None,
+    )
+    user_content = messages[1]["content"]
+    assert "【已知实体表】" not in user_content
+
+
+def test_build_segment_prompt_back_compat_without_known_entities_arg():
+    """Ensure existing callers that don't pass known_entities still work."""
+    from app.services.sequential_reader_prompts import build_segment_reading_prompt
+
+    messages = build_segment_reading_prompt("ctx", "text")
+    assert len(messages) == 2
+    assert "【前情上下文】" in messages[1]["content"]
+    assert "【本段正文】" in messages[1]["content"]
+    assert "【已知实体表】" not in messages[1]["content"]

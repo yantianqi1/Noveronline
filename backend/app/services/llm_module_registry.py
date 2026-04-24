@@ -67,6 +67,27 @@ MODULE_DEFINITIONS = (
         example_prompt="根据阅读笔记为指定角色生成 Agent 档案...",
         example_output="JSON: personality, speech, relationships, knowledge_boundary...",
     ),
+    LlmModuleDefinition(
+        module_key="writer_dedup_extractor",
+        label="写作去重抽取",
+        description="每章入库后从正文中抽取高重复风险的句式、比喻、场景模式与动作动词，写入 dedup_index，供下章作为反套路约束注入 writer。建议绑定低成本小模型。",
+        example_prompt="阅读下列章节正文，抽取本章最易在下一章被重复复用的开场短语、比喻、动作动词、句首模板、场景模板。",
+        example_output="JSON: {opening_phrases, figurative_phrases, action_verbs, sentence_starters, scene_templates}",
+    ),
+    LlmModuleDefinition(
+        module_key="writer_reviewer",
+        label="写作审校",
+        description="初稿完成后独立扫描比喻密度、场景雷同、POV 漂移、时间线冲突等问题，输出 JSON 问题清单与改写建议。用户决定是否采纳改写。",
+        example_prompt="审阅以下初稿，对照上下文与反重复清单，找出套路化、修辞过密、POV 漂移或时间线冲突的段落。",
+        example_output="JSON: {overall_score, summary, issues:[{id, severity, category, location, original, suggestion, reason}]}",
+    ),
+    LlmModuleDefinition(
+        module_key="graph_bond_generator",
+        label="图谱羁绊/支线生成",
+        description="基于故事图谱中用户选中的若干节点，生成人物间的羁绊（关系/情感/立场）与可展开的支线剧情线索。",
+        example_prompt="以下是 3 个图谱节点（角色/势力）的名字与摘要，请在这些节点之间构思 1-3 条羁绊与 1-2 条支线剧情。",
+        example_output="JSON: {bonds:[{source_name,target_name,relation_type,description,trust_level,power_dynamic,history,conflict_trigger}], plot_threads:[{thread_key,detail,status,involved_names}]}",
+    ),
 )
 
 STAGE_TO_MODULE_KEY = {

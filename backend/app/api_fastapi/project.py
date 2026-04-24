@@ -15,6 +15,7 @@ from app.services.seed_extract_task_service import SeedExtractTaskService
 from app.services.step_trace_writer import load_step_bundle
 
 from app.schemas.project_schemas import BuildGraphRequest, RerunSeedRequest
+from app.schemas.graph_generation_schemas import GraphBondGenerateRequest
 
 from .common import err, no_store, ok
 
@@ -163,6 +164,53 @@ async def rerun_seed_pipeline(project_id: str, body: RerunSeedRequest | None = N
         return err(exc)
 
 
+@router.post("/seed/retry-failed-segments/{project_id}")
+async def retry_failed_segments(project_id: str):
+    """手动重读 reading_notes.json 中仍标记为 retry_needed 的段落。"""
+    try:
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return err(f"项目不存在: {project_id}", status_code=404)
+        task_id = await SeedExtractTaskService().create_retry_task(project.project_id)
+        return ok(
+            {
+                "project_id": project.project_id,
+                "task_id": task_id,
+                "status": "processing",
+                "message": "正在重读失败段落。",
+            },
+            status_code=202,
+        )
+    except Exception as exc:
+        return err(exc)
+
+
+@router.post("/{project_id}/relink-data")
+async def relink_project_data(project_id: str):
+    """重新打通数据：再跑一次档案同步 / 图谱构建 / FTS 重建。"""
+    try:
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return err(f"项目不存在: {project_id}", status_code=404)
+        if project.seed_task_id:
+            return err(
+                "当前有进行中的种子或打通任务，请等它结束后再试。",
+                status_code=409,
+            )
+        task_id = await SeedExtractTaskService().create_relink_task(project.project_id)
+        return ok(
+            {
+                "project_id": project.project_id,
+                "task_id": task_id,
+                "status": "processing",
+                "message": "正在重新打通档案库 / 图谱 / 全局索引。",
+            },
+            status_code=202,
+        )
+    except Exception as exc:
+        return err(exc)
+
+
 @router.post("/build-graph")
 async def build_story_graph(body: BuildGraphRequest):
     try:
@@ -274,6 +322,31 @@ async def get_project_graph(project_id: str):
         "edge_count": len(edges),
     }
     return ok(data)
+
+
+@router.post("/{project_id}/graph/generate-bond")
+async def generate_graph_bond(project_id: str, body: GraphBondGenerateRequest):
+    try:
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return err(f"项目不存在: {project_id}", status_code=404)
+
+        from app.database import get_engine
+        from app.services.graph_bond_generator import GraphBondGenerator
+        from app.services.llm_router import LlmRouter
+
+        generator = GraphBondGenerator(get_engine(), LlmRouter())
+        result = generator.run(
+            project_id=project_id,
+            node_uuids=body.node_uuids,
+            generate_bonds=body.generate_bonds,
+            generate_threads=body.generate_threads,
+        )
+        return ok(result)
+    except ValueError as exc:
+        return err(str(exc), status_code=400)
+    except Exception as exc:
+        return err(exc)
 
 
 @router.get("/{project_id}")

@@ -139,7 +139,7 @@ class TestStepTraceWriter:
             "stage": "extract_text",
             "calls": [{"call_id": "c1", "model": "test"}],
         }
-        write_step_bundle("proj1", "task1", "step_abc123", bundle)
+        assert write_step_bundle("proj1", "task1", "step_abc123", bundle) is True
         loaded = load_step_bundle("proj1", "task1", "step_abc123")
         assert loaded is not None
         assert loaded["step_id"] == "step_abc123"
@@ -151,10 +151,22 @@ class TestStepTraceWriter:
 
     def test_overwrite(self, monkeypatch):
         self._override_upload_folder(monkeypatch)
-        write_step_bundle("p", "t", "s1", {"v": 1})
-        write_step_bundle("p", "t", "s1", {"v": 2})
+        assert write_step_bundle("p", "t", "s1", {"v": 1}) is True
+        assert write_step_bundle("p", "t", "s1", {"v": 2}) is True
         loaded = load_step_bundle("p", "t", "s1")
         assert loaded["v"] == 2
+
+    def test_write_failure_returns_false(self, monkeypatch):
+        """写磁盘失败时返回 False，不抛异常——调用方据此降级 has_trace。"""
+        self._override_upload_folder(monkeypatch)
+
+        def boom(*_a, **_kw):
+            raise OSError("disk exploded")
+
+        monkeypatch.setattr("app.services.step_trace_writer.tempfile.mkstemp", boom)
+        result = write_step_bundle("p", "t", "s_fail", {"v": 1})
+        assert result is False
+        assert load_step_bundle("p", "t", "s_fail") is None
 
 
 # ── Progress tracker step integration ──
@@ -222,5 +234,54 @@ class TestProgressTrackerSteps:
         note_events = [e for e in timeline if e["title"] == "文本提取完成"]
         assert len(note_events) == 1
         assert note_events[0]["meta"].get("step_id", "").startswith("step_")
+
+        TaskManager._instance = None
+
+    def test_end_step_has_trace_false_when_write_fails(self, monkeypatch, tmp_path):
+        """write_step_bundle 静默失败时，emit 的 has_trace 必须是 False，
+        否则前端拉取 trace bundle 时会得到误导性的 404 trace_unavailable。"""
+        import asyncio
+        from app.config import Config
+        from app.models.task import TaskManager
+        from app.services.seed_task_progress import SeedTaskProgressTracker
+        from app.services.step_trace_context import record_artifact
+
+        monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path / "uploads"))
+        # 让 writer 始终返回 False，模拟磁盘写失败
+        monkeypatch.setattr(
+            "app.services.seed_task_progress.write_step_bundle",
+            lambda *a, **kw: False,
+        )
+        TaskManager._instance = None
+
+        tm = TaskManager()
+        task_id = asyncio.run(tm.create_task(task_type="test", metadata={"project_id": "p1"}))
+        tracker = SeedTaskProgressTracker(tm, task_id, use_llm=False, project_id="p1")
+        tracker.enter_stage("sequential_reading", "深度阅读", 10)
+
+        sid = tracker.begin_step(
+            "sequential_reading",
+            "segment_reading",
+            "阅读段落 seg_001",
+            group_key="deep_reading",
+            group_label="深度阅读",
+        )
+        # 模拟段落读取里产生的 LLM 调用，让 has_content=True
+        record_artifact("segment_text", "a" * 100, kind="text")
+        tracker.end_step(sid)
+
+        task = asyncio.run(tm.get_task(task_id))
+        timeline = task.progress_detail.get("timeline", [])
+        complete = [
+            e for e in timeline
+            if e["status"] == "completed"
+            and e.get("meta", {}).get("step_id") == sid
+            and e.get("title", "").startswith("完成 ")
+        ]
+        assert complete, "end_step 没有 emit completed 事件"
+        assert complete[-1]["meta"]["has_trace"] is False, (
+            "写失败时 has_trace 必须降级为 False，前端才会走 NoTracePanel "
+            "而不是 trace_unavailable 错误提示。"
+        )
 
         TaskManager._instance = None

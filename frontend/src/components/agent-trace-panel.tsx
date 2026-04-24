@@ -14,6 +14,8 @@ import {
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import type { ToolRenderPayload } from "@/types/writer";
+import { ToolRenderHost } from "@/pages/writer/components/tool-render/tool-render-host";
 
 /* ---------- types ---------- */
 
@@ -23,6 +25,7 @@ export interface AgentToolCall {
   status: "pending" | "done" | "error";
   fullResult?: string;
   toolElapsedMs?: number;
+  render?: ToolRenderPayload | null;
 }
 
 export interface PromptMessage {
@@ -51,6 +54,24 @@ export interface OrchestratorSummary {
   tokenUsage?: { total_tokens?: number };
 }
 
+export interface ReviewerIssue {
+  id: string;
+  severity: "high" | "medium" | "low";
+  category: string;
+  location: string;
+  original: string;
+  suggestion: string;
+  reason: string;
+}
+
+export interface ReviewerFeedback {
+  status: string;
+  reason?: string;
+  overall_score: number | null;
+  summary: string;
+  issues: ReviewerIssue[];
+}
+
 export interface AgentTraceState {
   orchestrator: {
     status: "idle" | "running" | "done" | "error";
@@ -64,12 +85,33 @@ export interface AgentTraceState {
     wordCount: number;
     elapsedMs?: number;
   };
+  reviewer?: {
+    status: "idle" | "running" | "done" | "error";
+    feedback?: ReviewerFeedback;
+    sceneId?: string;
+    chapterId?: string;
+    chapterOrder?: number;
+    sceneOrder?: number;
+    elapsedMs?: number;
+  };
   error?: string;
 }
 
 export interface AgentTracePanelProps {
   state: AgentTraceState;
   className?: string;
+  /** Optional context passed to tool-render cards. When omitted, cards fall
+   * back to rendering the textual result. */
+  renderContext?: {
+    projectId: string;
+    chapterId?: string;
+    sceneId?: string;
+    onAdopted?: (payload: { type: string; result?: unknown }) => void;
+    onPrependToInput?: (text: string) => void;
+    onJumpToBlock?: (blockId: string) => void;
+    onOpenScene?: (sceneId: string) => void;
+    onOpenEntity?: (entityId: string) => void;
+  };
 }
 
 /* ---------- helpers ---------- */
@@ -94,20 +136,32 @@ function statusDotClass(status: string): string {
 
 /* ---------- sub-components ---------- */
 
-function ToolCallItem({ tc }: { tc: AgentToolCall }) {
+function ToolCallItem({
+  tc,
+  renderContext,
+}: {
+  tc: AgentToolCall;
+  renderContext?: AgentTracePanelProps["renderContext"];
+}) {
   const [expanded, setExpanded] = React.useState(false);
+  const hasRender = Boolean(tc.render && renderContext);
 
   return (
     <div className="flex flex-col">
       <button
         type="button"
         className="flex items-center gap-1.5 rounded px-1 py-0.5 transition-colors hover:bg-foreground/4"
-        onClick={() => tc.fullResult && setExpanded(!expanded)}
+        onClick={() => (tc.fullResult || hasRender) && setExpanded(!expanded)}
       >
         <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-blue-400" />
         <span className="min-w-0 flex-1 truncate text-left">
           {tc.display || tc.name}
         </span>
+        {hasRender && (
+          <Badge variant="secondary" className="h-4 px-1 text-[9px]">
+            卡片
+          </Badge>
+        )}
         <span className="shrink-0">
           {tc.status === "done" && (
             <Check className="h-3 w-3 text-green-400" />
@@ -122,7 +176,7 @@ function ToolCallItem({ tc }: { tc: AgentToolCall }) {
             {(tc.toolElapsedMs / 1000).toFixed(1)}s
           </span>
         )}
-        {tc.fullResult && (
+        {(tc.fullResult || hasRender) && (
           <span className="shrink-0 text-[10px] text-muted-foreground">
             {expanded ? (
               <ChevronDown className="h-3 w-3" />
@@ -132,11 +186,23 @@ function ToolCallItem({ tc }: { tc: AgentToolCall }) {
           </span>
         )}
       </button>
-      {expanded && tc.fullResult && (
-        <div className="ml-5 mt-1 max-h-[300px] overflow-y-auto rounded-md border border-border/40 bg-black/20">
-          <pre className="whitespace-pre-wrap break-all p-2 font-mono text-[11px] leading-relaxed">
-            {tc.fullResult}
-          </pre>
+      {expanded && (
+        <div className="ml-5 mt-1 max-h-[400px] overflow-y-auto rounded-md border border-border/40">
+          {hasRender ? (
+            <div className="p-2">
+              <ToolRenderHost
+                payload={tc.render!}
+                context={renderContext!}
+                fullResult={tc.fullResult}
+              />
+            </div>
+          ) : (
+            tc.fullResult && (
+              <pre className="whitespace-pre-wrap break-all bg-black/20 p-2 font-mono text-[11px] leading-relaxed">
+                {tc.fullResult}
+              </pre>
+            )
+          )}
         </div>
       )}
     </div>
@@ -225,7 +291,13 @@ function PromptSnapshotToggle({ snapshot }: { snapshot: PromptSnapshot }) {
   );
 }
 
-function RoundCard({ round }: { round: AgentRound }) {
+function RoundCard({
+  round,
+  renderContext,
+}: {
+  round: AgentRound;
+  renderContext?: AgentTracePanelProps["renderContext"];
+}) {
   return (
     <div
       className={cn(
@@ -252,7 +324,7 @@ function RoundCard({ round }: { round: AgentRound }) {
       {round.toolCalls.length > 0 && (
         <div className="flex flex-col gap-0.5">
           {round.toolCalls.map((tc, idx) => (
-            <ToolCallItem key={idx} tc={tc} />
+            <ToolCallItem key={idx} tc={tc} renderContext={renderContext} />
           ))}
         </div>
       )}
@@ -267,7 +339,7 @@ function RoundCard({ round }: { round: AgentRound }) {
 
 /* ---------- main component ---------- */
 
-export function AgentTracePanel({ state, className }: AgentTracePanelProps) {
+export function AgentTracePanel({ state, className, renderContext }: AgentTracePanelProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   // Auto-scroll when new content arrives
@@ -304,7 +376,7 @@ export function AgentTracePanel({ state, className }: AgentTracePanelProps) {
 
             {/* Rounds */}
             {state.orchestrator.rounds.map((round) => (
-              <RoundCard key={round.roundNum} round={round} />
+              <RoundCard key={round.roundNum} round={round} renderContext={renderContext} />
             ))}
 
             {/* Summary bar */}

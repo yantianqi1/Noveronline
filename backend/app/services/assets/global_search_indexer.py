@@ -44,7 +44,13 @@ class GlobalSearchIndexer:
         return self._repo.delete_project(project_id, source)
 
     def reindex_project(self, project_id: str) -> int:
-        """对单个项目全量重建索引。"""
+        """对单个项目全量重建索引。
+
+        触发器(migration 20260419_0001)已让 assets / archive_library
+        两个 silo 的 global_index 行随源表写入自动刷新；但 story_graph /
+        novel_db / worldline / seed 这四个 silo 分布在多张规范化表中,
+        没有单一的"源表"可挂触发器,所以仍然需要这个手动入口来全量物化。
+        """
         view = UnifiedAssetView()
         result = view.list(project_id=project_id, page=1, page_size=10000)
         items = result["items"]

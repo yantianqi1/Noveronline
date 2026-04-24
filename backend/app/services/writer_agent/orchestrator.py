@@ -10,14 +10,17 @@ from collections.abc import AsyncIterator
 from typing import Any, Dict, Optional
 
 from .agent_loop import AgentLoop
+from .dedup_extractor import DedupExtractor
 from .prompts import build_orchestrator_prompt
 from .retrieval_planner import RetrievalPlanner
+from .reviewer import WriterReviewer
 from .tools import NOVEL_TOOLS, MANUSCRIPT_TOOLS, ASSET_TOOLS, UNIFIED_TOOLS
 from .writer import WriterComposer
 from .post_processor import PostProcessor
 
 from ...database import get_engine
 from ...repositories.chapter_repo import ChapterRepository
+from ...repositories.dedup_index_repo import DedupIndexRepository
 from ...repositories.preset_repo import PresetRepository
 
 logger = logging.getLogger(__name__)
@@ -100,9 +103,28 @@ class WriterOrchestrator:
         orchestrator_model = orchestrator_client.model
         yield {"type": "orchestrator_status", "phase": "starting", **_stamp(), "message": "编排层启动中...", "model": orchestrator_model}
 
+        # --- Data health self-check ---
+        # Surface missing narrative / graph data before the agent even starts
+        # so the author knows why the writer might underperform (seed pipeline
+        # not run, graph build pending, etc.). This is purely informational —
+        # the run continues regardless.
+        try:
+            health_issues = await asyncio.to_thread(_collect_data_health_issues, project_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("data health check failed: %s", exc, exc_info=True)
+            health_issues = []
+        if health_issues:
+            yield {
+                "type": "data_health_warning",
+                **_stamp(),
+                "issues": health_issues,
+                "message": "本项目的部分设定数据缺失，写作 Agent 的上下文可能不完整。",
+            }
+
         # --- Phase 0: Retrieval Planner ---
         # 让一个轻量 LLM 先想清楚『正式写作前必须先调用哪些工具』，输出 JSON 计划，
-        # 注入 user message 顶端作为最低检索基线。失败显式抛错，不静默兜底。
+        # 注入 user message 顶端作为最低检索基线。失败降级为空计划 + warning 事件，
+        # AgentLoop 继续走启发式规则，不让请求硬死。
         retrieval_plan_text = ""
         try:
             yield {
@@ -114,25 +136,33 @@ class WriterOrchestrator:
             planner = RetrievalPlanner(self.router)
             plan_dict = await asyncio.to_thread(planner.plan, task_type, context)
             retrieval_plan_text = RetrievalPlanner.render_for_user_message(plan_dict)
-            yield {
-                "type": "retrieval_plan",
-                **_stamp(),
-                "plan": plan_dict,
-            }
-        except ValueError as exc:
-            yield {
-                "type": "error",
-                **_stamp(),
-                "message": f"LLM 模块未绑定 (writer_retrieval_planner): {exc}。请在 LLM 设施面板绑定通道。",
-            }
-            return
+            if plan_dict.get("degraded"):
+                yield {
+                    "type": "orchestrator_status",
+                    "phase": "retrieval_planning_degraded",
+                    **_stamp(),
+                    "message": (
+                        "检索规划员降级：" + (plan_dict.get("error") or "未知原因")
+                        + "。AgentLoop 将依靠 system prompt 启发式规则自主检索。"
+                    ),
+                }
+            else:
+                yield {
+                    "type": "retrieval_plan",
+                    **_stamp(),
+                    "plan": plan_dict,
+                }
         except Exception as exc:  # noqa: BLE001
+            # 理论上 RetrievalPlanner.plan 不再抛错；保留这个兜底避免一旦内部
+            # 有未预期的异常（例如 prompt 构造失败）让整个请求崩掉。
+            logger.warning("retrieval planner unexpected failure: %s", exc, exc_info=True)
             yield {
-                "type": "error",
+                "type": "orchestrator_status",
+                "phase": "retrieval_planning_degraded",
                 **_stamp(),
-                "message": f"检索规划员失败: {exc}",
+                "message": f"检索规划员意外失败：{exc}。AgentLoop 将依靠启发式规则继续。",
             }
-            return
+            retrieval_plan_text = ""
 
         # Asset tools always available; manuscript tools for continuation tasks.
         tools = NOVEL_TOOLS + ASSET_TOOLS + UNIFIED_TOOLS
@@ -152,10 +182,19 @@ class WriterOrchestrator:
         if retrieval_plan_text:
             user_msg = retrieval_plan_text + "\n\n" + user_msg
 
-        # Run agent loop, forwarding events directly
+        # Run agent loop, forwarding events directly.
+        # Dedup rationale: the agent sometimes re-issues the same tool call
+        # (e.g. query_entity("陈迹") twice in the same round), which would
+        # otherwise inject the identical result twice into the writer's
+        # "### 参考资料" block. The tool_result event doesn't carry the input
+        # args, so we fingerprint by (tool_name, first 256 chars of result) —
+        # different args typically produce different result bodies, so this
+        # key is both cheap and robust against false-positive dedup.
         brief_content = ""
         tool_count = 0
-        tool_results_raw: list[dict] = []  # Collect raw tool outputs
+        tool_results_raw: list[dict] = []
+        _seen_tool_fingerprints: set[str] = set()
+        _tool_results_dropped = 0
         async for event in agent_loop.run(user_msg):
             if event["type"] == "brief_ready":
                 brief_content = event.get("content", "")
@@ -163,14 +202,24 @@ class WriterOrchestrator:
                 if event["type"] == "tool_call":
                     tool_count += 1
                 if event["type"] == "tool_result":
-                    tool_results_raw.append({
-                        "tool": event.get("name", ""),
-                        "result": event.get("full_result", event.get("summary", "")),
-                    })
+                    name = event.get("name", "")
+                    result = event.get("full_result", event.get("summary", ""))
+                    fingerprint = f"{name}::{(result or '')[:256]}"
+                    if fingerprint in _seen_tool_fingerprints:
+                        _tool_results_dropped += 1
+                    else:
+                        _seen_tool_fingerprints.add(fingerprint)
+                        tool_results_raw.append({"tool": name, "result": result})
                 yield event
             elif event["type"] == "error":
                 yield event
                 return
+        if _tool_results_dropped:
+            logger.info(
+                "tool_results dedup: kept=%d, dropped=%d",
+                len(tool_results_raw),
+                _tool_results_dropped,
+            )
 
         # Phase summary
         yield {
@@ -244,6 +293,33 @@ class WriterOrchestrator:
                     len(cont_ctx.get("recent_summaries", [])),
                     len(cont_ctx.get("active_threads", [])),
                 )
+
+        # --- Anti-repetition constraints from prior chapters ---
+        # Pull high-frequency patterns already used in chapters < current and
+        # attach them to the brief; WriterComposer renders them as an
+        # "### 反重复约束" block in the system prompt. Soft enhancement — if
+        # the repo is unavailable or empty we continue without it.
+        _co_raw = context.get("chapter_order") or request.get("chapter_order") or 0
+        try:
+            _co_int = int(_co_raw)
+        except (TypeError, ValueError):
+            _co_int = 0
+        if _co_int > 0:
+            try:
+                dedup_repo = DedupIndexRepository(engine)
+                dedup_constraints = await asyncio.to_thread(
+                    dedup_repo.get_constraints,
+                    project_id,
+                    max(0, _co_int - 1),
+                )
+                if any(dedup_constraints.values()):
+                    writing_brief["dedup_constraints"] = dedup_constraints
+                    logger.info(
+                        "Injected dedup constraints: %s",
+                        {k: len(v) for k, v in dedup_constraints.items() if v},
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("dedup constraints injection failed: %s", exc)
 
         # --- Outline branch: skip Phase 2/3, save directly ---
         if task_type == "outline":
@@ -321,6 +397,61 @@ class WriterOrchestrator:
                 request.get("involved_entity_ids", []), ensure_ascii=False
             ),
         )
+
+        # Fire-and-forget: extract anti-repetition patterns from the committed
+        # prose and store them in dedup_index for the NEXT generation. We never
+        # await — the user sees `done` immediately; the extractor runs on the
+        # event loop in the background. Failures inside the extractor are
+        # swallowed there, so `create_task` can't propagate exceptions here.
+        chapter_order_for_dedup = request.get("chapter_order", 0) or 0
+        if chapter_order_for_dedup and full_text.strip():
+            try:
+                asyncio.create_task(
+                    DedupExtractor().extract_and_save(
+                        project_id=project_id,
+                        chapter_order=int(chapter_order_for_dedup),
+                        scene_id=scene_id,
+                        content=full_text,
+                        scene_order=scene_order,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("dedup extractor schedule failed: %s", exc)
+
+        # --- Phase 4: Reviewer ---
+        # Scene is already committed; reviewer produces a non-blocking quality
+        # report that the frontend surfaces as an action panel ("accept rewrite"
+        # vs "keep draft"). A missing/unbound reviewer module degrades to a
+        # "skipped" status and the run still yields `done` normally — the user
+        # sees the draft the same as before, just without a review panel.
+        review_t0 = time.monotonic()
+        yield {
+            "type": "reviewer_status",
+            **_stamp(),
+            "status": "running",
+            "message": "审校中...",
+        }
+        review_payload = await WriterReviewer().review(
+            draft=full_text,
+            writing_brief=writing_brief,
+            prev_narrative=writing_brief.get("recent_narrative", "") or "",
+            dedup_constraints=writing_brief.get("dedup_constraints") or {},
+        )
+        yield {
+            "type": "reviewer_feedback",
+            **_stamp(),
+            "feedback": review_payload,
+            "scene_id": scene_id,
+            "chapter_id": chapter_id,
+            "chapter_order": int(chapter_order_for_dedup) if chapter_order_for_dedup else 0,
+            "scene_order": result.get("scene_order", scene_order),
+        }
+        yield {
+            "type": "reviewer_complete",
+            **_stamp(),
+            "elapsed_ms": int((time.monotonic() - review_t0) * 1000),
+            "status": review_payload.get("status", "ok"),
+        }
 
         yield {"type": "done", **_stamp(), **result}
 
@@ -490,12 +621,102 @@ class WriterOrchestrator:
             if p.get("is_default"):
                 return p["system_prompt"]
 
-        # Hardcoded fallback
+        # Hardcoded fallback. Kept intentionally terse — the writer composer
+        # ALSO appends build_anti_cliche_constraints() to every system prompt,
+        # so the heavy anti-repetition + rhythm rules live there and don't
+        # need to be repeated here. These items are the baseline principles
+        # that make the difference between "LLM output" and "publishable".
         return (
             "你是一名资深小说家。根据提供的写作指令创作小说正文。\n\n"
-            "要求：\n"
-            "1. 只输出小说正文，不要输出元信息、注释或大纲。\n"
-            "2. 场景描写要有画面感，对话要贴合角色性格。\n"
-            "3. 严格遵守设定中的事实，不要与之矛盾。\n"
-            "4. 推进剧情时让角色的选择有因果逻辑。"
+            "基础要求：\n"
+            "1. 只输出小说正文，不要输出元信息、注释、大纲或元评论。\n"
+            "2. 场景要有画面感——具体的动作、感官细节、人物之间的张力；避免抒情化堆砌。\n"
+            "3. 对白贴合角色性格、教育背景与情境；每个角色的句子长度和词汇偏好应有辨识度。\n"
+            "4. 严格遵守设定事实；遇到设定冲突时优先牺牲新意，维持世界观一致。\n"
+            "5. 推进剧情时让角色的选择有因果逻辑，避免工具人式推动。\n"
+            "6. 节奏优先于修辞：宁用一个锋利的动作细节，勿用三个陈旧的比喻。\n"
+            "7. 续写时严格保留前文 POV 角色的说话风格、节奏与内心节拍；"
+            "禁止突然切换叙事视角或语言层级（如前文口语化，新章节突然改为书面语）。"
         )
+
+
+# ----------------------------------------------------------------------
+# Data health diagnostics
+# ----------------------------------------------------------------------
+
+
+def _collect_data_health_issues(project_id: str) -> list[dict]:
+    """Detect missing data that degrades the writer agent's context quality.
+
+    Runs a few cheap repository reads and returns a list of issue dicts with
+    ``{code, severity, title, hint}``. ``severity`` is ``"warning"`` (writer
+    can proceed, but output quality may suffer) or ``"info"`` (optional
+    feature not yet populated). Fatal conditions are not surfaced here — the
+    orchestrator's normal error paths handle those.
+    """
+    from ...database import get_engine
+    from ...repositories.graph_repo import GraphRepository
+    from ...repositories.narrative_repo import NarrativeRepository
+    from ...repositories.worldline_session_repo import WorldlineSessionRepository
+
+    engine = get_engine()
+    issues: list[dict] = []
+
+    # Narrative: arcs empty means no global story structure context.
+    try:
+        narrative_repo = NarrativeRepository(engine)
+        if not narrative_repo.list_narrative_arcs(project_id, limit=1):
+            issues.append(
+                {
+                    "code": "narrative_arcs_empty",
+                    "severity": "warning",
+                    "title": "叙事弧线数据为空",
+                    "hint": (
+                        "Agent 工具 `get_story_overview` 将返回空结果，"
+                        "Agent 难以把握全书叙事节奏。"
+                        "建议先在「总览」页跑完种子分析 Stage 3（聚合阶段）。"
+                    ),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("narrative health probe failed: %s", exc, exc_info=True)
+
+    # Graph: no graph means query_entity / query_graph_neighbors can't resolve.
+    try:
+        graph_repo = GraphRepository(engine)
+        if not graph_repo.has_graph(project_id):
+            issues.append(
+                {
+                    "code": "story_graph_missing",
+                    "severity": "warning",
+                    "title": "故事图谱尚未构建",
+                    "hint": (
+                        "`query_graph_neighbors` / `query_relationship_network` / "
+                        "`query_event` 将无结果；实体别名解析也会退化。"
+                        "建议先在「故事图谱」页触发图谱构建。"
+                    ),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("graph health probe failed: %s", exc, exc_info=True)
+
+    # Worldline: missing is normal for projects that don't use simulation;
+    # emit as "info" so the UI can distinguish it from a real warning.
+    try:
+        session_repo = WorldlineSessionRepository(engine)
+        if not session_repo.list_sessions(project_id=project_id, limit=1):
+            issues.append(
+                {
+                    "code": "worldline_sessions_empty",
+                    "severity": "info",
+                    "title": "暂无世界线推演会话",
+                    "hint": (
+                        "`query_worldline_session` 将返回「暂无世界线推演记录」。"
+                        "如果本次写作不需要推演分支数据，可忽略此提示。"
+                    ),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("worldline health probe failed: %s", exc, exc_info=True)
+
+    return issues

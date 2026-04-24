@@ -34,7 +34,18 @@ export const PIPELINE_CHAPTERS: readonly PipelineChapter[] = [
   {
     key: "agent_build",
     label: "角色构建",
-    stages: ["agent_profiles", "completed", "failed"],
+    stages: ["agent_profiles"],
+  },
+  {
+    key: "global_link",
+    label: "数据打通",
+    stages: [
+      "archive_sync",
+      "graph_build",
+      "index_rebuild",
+      "completed",
+      "failed",
+    ],
   },
 ];
 
@@ -54,7 +65,7 @@ export interface ChapterStep {
   title: string;
   detail: string;
   stage: string;
-  status: "active" | "completed";
+  status: "pending" | "active" | "completed";
   elapsedMs: number;
   llmCallCount: number;
   hasTrace: boolean;
@@ -70,6 +81,12 @@ export interface ChapterViewModel {
   elapsedMs: number;
   llmCallCount: number;
 }
+
+const STATUS_RANK: Record<ChapterStep["status"], number> = {
+  pending: 0,
+  active: 1,
+  completed: 2,
+};
 
 /**
  * Build chapter view models from timeline events, grouped by group_key.
@@ -142,19 +159,38 @@ export function buildChapterViewModel(
         hasTrace: false,
         timestamp: event.timestamp || "",
       });
+    } else if (event.status === "pending") {
+      chapter.steps.push({
+        stepId,
+        stepKind,
+        title: event.title || "",
+        detail: event.detail || "",
+        stage: event.stage || "",
+        status: "pending",
+        elapsedMs: 0,
+        llmCallCount: 0,
+        hasTrace: false,
+        timestamp: event.timestamp || "",
+      });
     }
   }
 
-  // De-duplicate (a step_id may appear as start + complete)
+  // De-duplicate (a step_id goes pending → active → completed). Keep the
+  // highest-rank status but preserve the order of first appearance so that
+  // pre-declared pending steps stay in their intended slot on the timeline.
   for (const chapter of chapterMap.values()) {
-    const seen = new Map<string, ChapterStep>();
+    const order: string[] = [];
+    const byId = new Map<string, ChapterStep>();
     for (const step of chapter.steps) {
-      const existing = seen.get(step.stepId);
-      if (!existing || step.status === "completed") {
-        seen.set(step.stepId, step);
+      const existing = byId.get(step.stepId);
+      if (!existing) {
+        order.push(step.stepId);
+        byId.set(step.stepId, step);
+      } else if (STATUS_RANK[step.status] >= STATUS_RANK[existing.status]) {
+        byId.set(step.stepId, step);
       }
     }
-    chapter.steps = Array.from(seen.values());
+    chapter.steps = order.map((id) => byId.get(id)!);
     chapter.stepCount = chapter.steps.length;
   }
 

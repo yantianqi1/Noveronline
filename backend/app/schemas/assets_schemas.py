@@ -67,3 +67,5 @@ class StyleExtractRequest(AllowExtraBase):
     tags: list[str] = []
     target_chunk_chars: int = 3000
     max_chunks: int = 30
+    scope: str = "global"
+    project_id: str | None = None

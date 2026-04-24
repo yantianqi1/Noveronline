@@ -1,4 +1,8 @@
 """Scene CRUD service layer."""
+from __future__ import annotations
+
+import uuid
+
 from app.database import get_engine
 from app.repositories.scene_repo import SceneRepository
 from app.repositories.chapter_repo import ChapterRepository
@@ -15,6 +19,42 @@ class SceneService:
 
     def get_scene(self, project_id: str, scene_id: str) -> dict:
         return self._scenes.get_scene(project_id, scene_id)
+
+    def create_scene(
+        self,
+        project_id: str,
+        chapter_id: str,
+        *,
+        title: str = "",
+        content: str = "",
+        scene_order: int | None = None,
+        pov_entity_id: str | None = None,
+        location: str | None = None,
+        involved_entities_json: str = "[]",
+        status: str = "draft",
+        writing_brief_json: str | None = None,
+    ) -> dict:
+        """Create a new scene under a chapter. Auto-assigns MAX(scene_order)+1 if omitted."""
+        if scene_order is None:
+            existing = self._scenes.list_scenes(project_id, chapter_id)
+            scene_order = max((int(s.get("scene_order") or 0) for s in existing), default=0) + 1
+        scene_id = f"sc_{uuid.uuid4().hex[:12]}"
+        self._scenes.upsert_scene(
+            project_id=project_id,
+            values={
+                "scene_id": scene_id,
+                "chapter_id": chapter_id,
+                "scene_order": int(scene_order),
+                "title": title,
+                "content": content,
+                "pov_entity_id": pov_entity_id,
+                "location": location,
+                "involved_entities_json": involved_entities_json,
+                "status": status,
+                "writing_brief_json": writing_brief_json,
+            },
+        )
+        return self._scenes.get_scene(project_id, scene_id) or {"scene_id": scene_id}
 
     def update_scene(self, project_id: str, scene_id: str, content: str = None, title: str = None) -> dict:
         scene = self._scenes.get_scene(project_id, scene_id)

@@ -50,6 +50,10 @@ class WorldlinePrepareService:
         self.engine = engine
         self.llm_router = llm_router or LlmRouter()
         self._repo = WorldlinePrepareRepository(get_engine())
+        # Hold strong refs to in-flight worker tasks — asyncio keeps only
+        # weak refs, so without this a task scheduled via create_task can
+        # be silently GC'd mid-run.
+        self._pending_tasks: set[asyncio.Task] = set()
 
     async def start_prepare(self, **payload) -> Dict[str, str]:
         resolved, container_dir, source, question, world_variables = self._resolve_prepare_context(payload)
@@ -81,6 +85,53 @@ class WorldlinePrepareService:
             "updated_at": now,
         }))
         self._append_event(prepare_id, STAGES[0], "info", "开始加载世界线源输入", {"graph_id": resolved["graph_id"]})
+        self._start_worker(task_id, prepare_id, container_dir)
+        return {"prepare_id": prepare_id, "task_id": task_id}
+
+    async def resume_prepare(self, prepare_id: str) -> Dict[str, str]:
+        """Resume a previously failed/interrupted prepare.
+
+        Reuses the existing prepare_id and all saved per-agent dossiers.
+        The worker skips any agent whose dossier is already persisted
+        (see ``_materialize_dossiers``), so resumes only pay for the
+        agents that weren't completed before the crash/reload.
+        """
+        run, container_dir = self._load_run(prepare_id, None, None)
+        if run["status"] == "ready" and run.get("can_start"):
+            # Already complete — return the last known task_id so the
+            # frontend polling loop sees a terminal state.
+            return {"prepare_id": prepare_id, "task_id": run.get("task_id", "")}
+        active_task_id = run.get("task_id") or ""
+        if run["status"] == "preparing" and active_task_id:
+            active = await TaskManager().get_task(active_task_id)
+            # Only block when the existing task is truly still alive. A
+            # PROCESSING row with no driver (typical after a reload-kill
+            # before _recover_stale_tasks swept it) is fair game to resume.
+            if active and active.status in {TaskStatus.PENDING, TaskStatus.PROCESSING}:
+                if any(not t.done() for t in self._pending_tasks):
+                    raise ValueError("prepare 正在进行中,请勿重复续传")
+
+        task_id = await TaskManager().create_task(
+            TASK_TYPE,
+            metadata={"prepare_id": prepare_id, "project_id": run.get("project_id"), "resumed": True},
+        )
+        now = self._now()
+        self._repo.save_run(self._encode_run(run | {
+            "task_id": task_id,
+            "status": "preparing",
+            "stage": STAGES[0],
+            "can_start": False,
+            "error": None,
+            "updated_at": now,
+        }))
+        dossier_count = len(self._repo.list_dossiers(prepare_id))
+        self._append_event(
+            prepare_id,
+            STAGES[0],
+            "info",
+            f"续传 prepare:已有 {dossier_count} 条 dossier,继续补齐剩余",
+            {"existing_dossiers": dossier_count},
+        )
         self._start_worker(task_id, prepare_id, container_dir)
         return {"prepare_id": prepare_id, "task_id": task_id}
 
@@ -163,17 +214,38 @@ class WorldlinePrepareService:
         }
 
     def _start_worker(self, task_id: str, prepare_id: str, container_dir: str) -> None:
-        asyncio.create_task(self._run_prepare(task_id, prepare_id, container_dir))
+        task = asyncio.create_task(self._run_prepare(task_id, prepare_id, container_dir))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def _run_prepare(self, task_id: str, prepare_id: str, container_dir: str) -> None:
         manager = TaskManager()
         try:
             run = self._decode_run(self._repo.get_run(prepare_id))
-            await self._update_task(manager, task_id, 10, "世界线 prepare：已加载源输入", STAGES[0], {})
+            await self._update_task(manager, task_id, 10, "世界线 prepare:已加载源输入", STAGES[0], {})
             branch = self._prepare_branch(run)
             agents = self.engine.runtime_service.registry.list_agents(branch)
+            existing_dossiers = {
+                d["agent_id"]: d for d in self._repo.list_dossiers(prepare_id)
+            }
+            # Move run into materialize stage so the event log / run row
+            # accurately report where a crash happened. Previously stage
+            # stayed at 'load_sources' forever which misled diagnostics.
+            self._repo.save_run(self._encode_run(
+                (self._decode_run(self._repo.get_run(prepare_id)) or {})
+                | {"stage": STAGES[1], "updated_at": self._now()}
+            ))
             client = self.llm_router.build_client(MODULE_KEY)
-            self._append_event(prepare_id, STAGES[1], "info", "开始物化 agent dossier", {"agent_count": len(agents)})
+            if existing_dossiers:
+                self._append_event(
+                    prepare_id,
+                    STAGES[1],
+                    "info",
+                    f"断点续传:已完成 {len(existing_dossiers)}/{len(agents)} 个 agent,继续处理剩余",
+                    {"completed": len(existing_dossiers), "total": len(agents)},
+                )
+            else:
+                self._append_event(prepare_id, STAGES[1], "info", "开始物化 agent dossier", {"agent_count": len(agents)})
             await self._materialize_dossiers(
                 manager,
                 task_id,
@@ -182,19 +254,20 @@ class WorldlinePrepareService:
                 branch,
                 agents,
                 client,
+                existing_dossiers,
             )
-            run = (self._decode_run(self._repo.get_run(prepare_id)) or {}) | {"status": "ready", "stage": STAGES[-1], "can_start": True, "updated_at": self._now()}
+            run = (self._decode_run(self._repo.get_run(prepare_id)) or {}) | {"status": "ready", "stage": STAGES[-1], "can_start": True, "error": None, "updated_at": self._now()}
             self._repo.save_run(self._encode_run(run))
             self._append_event(prepare_id, STAGES[2], "info", "所有 dossier 校验通过", {"agent_count": len(agents)})
             self._append_event(prepare_id, STAGES[3], "info", "已完成世界启动快照组装", {})
-            self._append_event(prepare_id, STAGES[4], "info", "prepare 已完成，可开始推演", {})
+            self._append_event(prepare_id, STAGES[4], "info", "prepare 已完成,可开始推演", {})
             await manager.update_task(task_id, status=TaskStatus.COMPLETED, progress=100, message="世界线 prepare 已完成", result={"prepare_id": prepare_id}, progress_detail={"stage": STAGES[-1], "prepare_id": prepare_id})
         except Exception as exc:
             run = self._decode_run(self._repo.get_run(prepare_id))
             if run:
                 self._repo.save_run(self._encode_run(run | {"status": "failed", "stage": run.get("stage", STAGES[0]), "can_start": False, "error": str(exc), "updated_at": self._now()}))
                 self._append_event(prepare_id, run.get("stage", STAGES[0]), "error", "prepare 失败", {"error": str(exc)})
-            await manager.update_task(task_id, status=TaskStatus.FAILED, progress=100, message="世界线 prepare 失败", error=str(exc), progress_detail={"stage": STAGES[0], "prepare_id": prepare_id})
+            await manager.update_task(task_id, status=TaskStatus.FAILED, progress=100, message="世界线 prepare 失败", error=str(exc), progress_detail={"stage": run.get("stage", STAGES[0]) if run else STAGES[0], "prepare_id": prepare_id})
 
     def _prepare_branch(self, run: Dict[str, Any]):
         variables = self.engine.branch_service.normalize_variables(
@@ -278,9 +351,15 @@ class WorldlinePrepareService:
         branch,
         agents: List[Dict[str, Any]],
         client,
+        existing_dossiers: Dict[str, Dict[str, Any]] | None = None,
     ) -> None:
-        completed = 0
-        max_workers = self._prepare_max_workers(client, len(agents))
+        existing_dossiers = existing_dossiers or {}
+        pending_agents = [a for a in agents if a["agent_id"] not in existing_dossiers]
+        total = len(agents)
+        completed = len(existing_dossiers)
+        if not pending_agents:
+            return
+        max_workers = self._prepare_max_workers(client, len(pending_agents))
         sem = asyncio.Semaphore(max_workers)
 
         async def _bounded(agent: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -290,30 +369,43 @@ class WorldlinePrepareService:
                 )
                 return agent, dossier
 
-        tasks = [_bounded(agent) for agent in agents]
-        for coro in asyncio.as_completed(tasks):
-            agent, dossier = await coro
-            completed += 1
-            self._repo.save_dossier(prepare_id, self._encode_dossier(dossier))
-            self._append_event(
-                prepare_id,
-                STAGES[1],
-                "info",
-                f"完成 agent 整备：{agent['display_name']}",
-                {"agent_id": agent["agent_id"]},
-            )
-            await self._update_task(
-                manager,
-                task_id,
-                10 + int((completed / max(len(agents), 1)) * 55),
-                "世界线 prepare：正在整备 agent",
-                STAGES[1],
-                {
-                    "current": completed,
-                    "total": len(agents),
-                    "agent_id": agent["agent_id"],
-                },
-            )
+        tasks = [asyncio.create_task(_bounded(agent)) for agent in pending_agents]
+        try:
+            for coro in asyncio.as_completed(tasks):
+                agent, dossier = await coro
+                completed += 1
+                self._repo.save_dossier(prepare_id, self._encode_dossier(dossier))
+                self._append_event(
+                    prepare_id,
+                    STAGES[1],
+                    "info",
+                    f"完成 agent 整备：{agent['display_name']}",
+                    {"agent_id": agent["agent_id"]},
+                )
+                await self._update_task(
+                    manager,
+                    task_id,
+                    10 + int((completed / max(total, 1)) * 55),
+                    "世界线 prepare：正在整备 agent",
+                    STAGES[1],
+                    {
+                        "current": completed,
+                        "total": total,
+                        "agent_id": agent["agent_id"],
+                    },
+                )
+        except BaseException:
+            # Cancel any still-pending dossier tasks so we don't keep
+            # spending LLM quota on agents we're about to mark failed.
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            for t in tasks:
+                try:
+                    await t
+                except BaseException:
+                    pass
+            raise
 
     def _build_dossier_for_agent(
         self,

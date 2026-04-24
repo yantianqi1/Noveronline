@@ -84,10 +84,12 @@ def test_new_pipeline_end_to_end(tmp_path, monkeypatch):
     task_result = wait_for_task(client, task_id)
     assert task_result["status"] == "completed", f"Task failed: {task_result.get('error', task_result)}"
 
-    # Verify project status
+    # Verify project status — 种子管线尾部会自动跑 GlobalDataLinker, 项目应
+    # 被提升到 GRAPH_COMPLETED;关掉 SEED_AUTO_LINK_GLOBAL_DATA 时保留
+    # ONTOLOGY_GENERATED。
     project = ProjectManager.get_project(project_id)
     assert project is not None
-    assert project.status == ProjectStatus.ONTOLOGY_GENERATED
+    assert project.status in {ProjectStatus.ONTOLOGY_GENERATED, ProjectStatus.GRAPH_COMPLETED}
 
     # Verify seed_analysis.json
     project_dir = ProjectManager._get_project_dir(project_id)

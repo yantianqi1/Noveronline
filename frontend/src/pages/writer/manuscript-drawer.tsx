@@ -26,6 +26,10 @@ interface ManuscriptDrawerProps {
   projectId: string;
   onClose: () => void;
   onUpdated?: () => void;
+  // Task 6: bump to force a reload. Parent flips this (e.g. after a commit)
+  // so the drawer shows fresh manuscript state without the user closing &
+  // reopening it.
+  refreshToken?: string | number;
 }
 
 export function ManuscriptDrawer({
@@ -33,6 +37,7 @@ export function ManuscriptDrawer({
   projectId,
   onClose,
   onUpdated,
+  refreshToken,
 }: ManuscriptDrawerProps) {
   const [blocks, setBlocks] = React.useState<ManuscriptBlockItem[]>([]);
   const [totalWords, setTotalWords] = React.useState(0);
@@ -43,7 +48,7 @@ export function ManuscriptDrawer({
       setSelectedTag(null);
       void loadBlocks();
     }
-  }, [visible, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visible, projectId, refreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadBlocks() {
     try {

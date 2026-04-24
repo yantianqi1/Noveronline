@@ -1,6 +1,8 @@
 """本地图谱构建服务。"""
 
 import asyncio
+import json
+import os
 from typing import Any, Callable, Dict, Optional
 
 from ..database import get_engine
@@ -134,10 +136,43 @@ class GraphBuilderService:
 
         payload = load_project_artifact(project_id, filename)
         if payload is None:
+            # Fallback: project may pre-date Phase G DB mirroring — read from filesystem.
+            # Only applies to reading_notes.json (the most likely pre-fix artifact).
+            if filename == "reading_notes.json":
+                path = self._filesystem_path(project_id, filename)
+                if path and os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    # Mirror to DB so future reads are DB-first.
+                    self._mirror_to_db(project_id, filename, payload)
+        if payload is None:
             raise ValueError(f"项目缺少构建本地图谱所需工件: {filename}")
         return payload
 
     def _optional_json(self, project_id: str, filename: str) -> Optional[Dict[str, Any]]:
         from ..repositories.project_artifact_repo import load_project_artifact
 
-        return load_project_artifact(project_id, filename)
+        payload = load_project_artifact(project_id, filename)
+        if payload is None:
+            # Fallback: pre-Phase-G filesystem read (DB first, filesystem last).
+            path = self._filesystem_path(project_id, filename)
+            if path and os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                self._mirror_to_db(project_id, filename, payload)
+        return payload
+
+    def _filesystem_path(self, project_id: str, filename: str) -> Optional[str]:
+        from ..models.project import ProjectManager
+
+        if not project_id:
+            return None
+        return ProjectManager._get_project_json_path(project_id, filename)
+
+    def _mirror_to_db(self, project_id: str, filename: str, payload: Any) -> None:
+        from ..models.project import ProjectManager
+
+        try:
+            ProjectManager.save_project_artifact(project_id, filename, payload)
+        except Exception:
+            pass  # Non-critical: DB mirror failure should not break graph building.

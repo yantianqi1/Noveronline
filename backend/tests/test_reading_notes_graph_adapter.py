@@ -206,3 +206,74 @@ def test_handles_notes_wrapped_format():
     assert len(story_memory["relationship_ledger"]) >= 1
     assert len(story_memory["world_rules"]) >= 1
     assert local_block_facts["block_count"] >= 1
+
+
+def test_location_state_changes_produce_location_entities():
+    """When sequential_reader never populates core_facts.key_locations but
+    does emit notes.location_state_changes, the adapter must still surface
+    locations as graph entities."""
+    notes = _sample_reading_notes()
+    notes["location_state_changes"] = [
+        {
+            "location": "青阳镇",
+            "change": "战后化为废墟，林家残部暂时安置于此。",
+            "segment_id": "seg_002",
+        },
+    ]
+    story_memory, _, _, _ = adapt_reading_notes_for_graph(
+        notes, _sample_seed_analysis()
+    )
+    registry = story_memory["entity_registry"]
+    assert "青阳镇" in registry
+    location_entry = registry["青阳镇"]
+    assert location_entry["entity_type"] == "location"
+    assert "废墟" in location_entry["summary"]
+    assert "seg_002" in location_entry["mention_blocks"]
+
+
+def test_location_merges_multiple_state_changes():
+    """Repeated location updates across segments merge into a single
+    entity, with evidence and mention_blocks accumulating."""
+    notes = _sample_reading_notes()
+    notes["location_state_changes"] = [
+        {"location": "青阳镇", "change": "繁华市集", "segment_id": "seg_001"},
+        {"location": "青阳镇", "change": "遭遇夜袭", "segment_id": "seg_002"},
+        {"location": "青阳镇", "change": "残余势力重建", "segment_id": "seg_003"},
+    ]
+    story_memory, _, _, _ = adapt_reading_notes_for_graph(
+        notes, _sample_seed_analysis()
+    )
+    registry = story_memory["entity_registry"]
+    entry = registry["青阳镇"]
+    assert entry["entity_type"] == "location"
+    # first change wins as summary
+    assert entry["summary"] == "繁华市集"
+    # mention_blocks aggregates unique segment_ids
+    assert set(entry["mention_blocks"]) == {"seg_001", "seg_002", "seg_003"}
+    # evidence contains every non-empty change text
+    assert "繁华市集" in entry["evidence"]
+    assert "遭遇夜袭" in entry["evidence"]
+    assert "残余势力重建" in entry["evidence"]
+
+
+def test_core_facts_key_locations_still_honored_when_present():
+    """If the pipeline ever does populate key_locations, its richer entries
+    should take precedence over location_state_changes augmentation."""
+    notes = _sample_reading_notes()
+    notes["core_facts"]["key_locations"] = {
+        "青阳镇": {
+            "description": "元素边陲小镇，林家世代居住之地。",
+            "segments_seen": ["seg_001"],
+        }
+    }
+    notes["location_state_changes"] = [
+        {"location": "青阳镇", "change": "遭遇夜袭", "segment_id": "seg_002"},
+    ]
+    story_memory, _, _, _ = adapt_reading_notes_for_graph(
+        notes, _sample_seed_analysis()
+    )
+    entry = story_memory["entity_registry"]["青阳镇"]
+    # initial description from key_locations is preserved as summary
+    assert entry["summary"].startswith("元素边陲")
+    # state changes still contribute segment_ids
+    assert "seg_002" in entry["mention_blocks"]

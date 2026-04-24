@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal, Union
+
+from pydantic import Field
 
 from ._base import AllowExtraBase
 
@@ -16,6 +18,34 @@ class WorldUpdateRequest(AllowExtraBase):
     project_id: str
     content: str
     chapter_order: int = 0
+
+
+class ApplyReviewerRequest(AllowExtraBase):
+    """Payload for ``POST /writer-agent/apply-reviewer``.
+
+    Triggered when the user clicks "采纳改写" on the reviewer panel. The
+    server re-runs :class:`WriterComposer` with the reviewer's accepted
+    suggestions injected as extra constraints, then upserts the scene in
+    place (same ``scene_id``) so the manuscript stays coherent.
+    """
+
+    project_id: str
+    scene_id: str
+    chapter_id: str = ""
+    chapter_order: int = 0
+    scene_order: int = 1
+    preset_id: str = ""
+    pov_entity_id: str = ""
+    involved_entity_ids: list[str] = []
+    # ``writing_brief`` is passed back from the original run so we don't need
+    # to re-run the orchestrator. Accepting it raw (dict) — frontend persists
+    # it from the initial ``prompt_snapshot`` / ``done`` events.
+    writing_brief: dict[str, Any] = {}
+    # Selected issues from the reviewer payload (frontend filters by user ticks).
+    accepted_issues: list[dict[str, Any]] = []
+    # Original draft — surfaced back to the composer as a rewrite source so
+    # the model has concrete text to operate on.
+    draft: str = ""
 
 
 class UpdateSceneRequest(AllowExtraBase):
@@ -138,8 +168,143 @@ class RunBookRunRequest(AllowExtraBase):
     plan_id: str
 
 
+class OneClickCompleteOutlineRequest(AllowExtraBase):
+    project_id: str
+    chapter_id: str
+    chapter_order: int = 0
+
+
+class OneClickAlignWordsRequest(AllowExtraBase):
+    project_id: str
+    chapter_id: str
+    chapter_order: int = 0
+    target_word_count: int
+    tolerance_pct: int = 10
+
+
+class OneClickScanLexiconRequest(AllowExtraBase):
+    project_id: str
+    chapter_id: str
+    chapter_order: int = 0
+    lexicon_asset_ids: list[str] = []
+
+
+class OneClickFillRelationshipsRequest(AllowExtraBase):
+    project_id: str
+    chapter_id: str
+    chapter_order: int = 0
+
+
+class OneClickContinueChapterRequest(AllowExtraBase):
+    project_id: str
+    chapter_id: str
+    chapter_order: int = 0
+    last_block_id: str = ""
+    target_word_count: int = 600
+    preset_id: str = ""
+
+
 class UpsertForbiddenLexiconRequest(AllowExtraBase):
     project_id: str
     asset_id: str | None = None
     title: str = ""
     entries: list[Any] = []
+
+
+# ---------------------------------------------------------------------
+# Tool render protocol (§2 of 2026-04-19 writer-workbench plan)
+#
+# Tools may return a `render` payload alongside their textual `result`. The
+# text is what the LLM sees; `render` is UI-only data that the frontend
+# dispatches to structured cards by `type`. `data` is intentionally kept as a
+# dict rather than nested Pydantic models so adding a card field doesn't
+# require syncing N classes — frontend TS types are the UI contract.
+# ---------------------------------------------------------------------
+
+
+class ToolRenderAction(AllowExtraBase):
+    """UI hint for how the user adopts a card. `endpoint` is a label for
+    debugging; the frontend routes by `kind` / `type` to the appropriate
+    API client function — no `fetch(endpoint)` happens on the frontend."""
+
+    label: str
+    endpoint: str = ""
+    kind: str | None = None
+    payload_ref: str = "data"
+    confirm: str | None = None
+    variant: str | None = None
+
+
+class _RenderEnvelope(AllowExtraBase):
+    version: int = 1
+    actions: list[ToolRenderAction] = []
+    tool_call_id: str | None = None
+
+
+class SceneProposalRender(_RenderEnvelope):
+    type: Literal["scene_proposal"] = "scene_proposal"
+    data: dict
+
+
+class ChapterStructureProposalRender(_RenderEnvelope):
+    type: Literal["chapter_structure_proposal"] = "chapter_structure_proposal"
+    data: dict
+
+
+class EntityCardRender(_RenderEnvelope):
+    type: Literal["entity_card"] = "entity_card"
+    data: dict
+
+
+class ProseDiffRender(_RenderEnvelope):
+    type: Literal["prose_diff"] = "prose_diff"
+    data: dict
+
+
+class WordBudgetRender(_RenderEnvelope):
+    type: Literal["word_budget"] = "word_budget"
+    data: dict
+
+
+class ThreadBoardRender(_RenderEnvelope):
+    type: Literal["thread_board"] = "thread_board"
+    data: dict
+
+
+class RelationSubgraphRender(_RenderEnvelope):
+    type: Literal["relation_subgraph"] = "relation_subgraph"
+    data: dict
+
+
+class SceneTimelineRender(_RenderEnvelope):
+    type: Literal["scene_timeline"] = "scene_timeline"
+    data: dict
+
+
+class RelationshipProposalRender(_RenderEnvelope):
+    type: Literal["relationship_proposal"] = "relationship_proposal"
+    data: dict
+
+
+ToolRenderPayload = Annotated[
+    Union[
+        SceneProposalRender,
+        ChapterStructureProposalRender,
+        EntityCardRender,
+        ProseDiffRender,
+        WordBudgetRender,
+        ThreadBoardRender,
+        RelationSubgraphRender,
+        SceneTimelineRender,
+        RelationshipProposalRender,
+    ],
+    Field(discriminator="type"),
+]
+
+
+class ToolExecResult(AllowExtraBase):
+    """Executors' dict return shape. `result` is what the LLM sees; `render`
+    is an optional UI payload surfaced via the `tool_result` SSE event."""
+
+    result: str
+    render: ToolRenderPayload | None = None

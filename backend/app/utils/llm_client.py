@@ -358,17 +358,31 @@ class LLMClient:
                 self._record_trace(step_ctx, captured_messages, "".join(collected), None, t0 or time.monotonic(), "chat_stream")
 
     # ── Activity tracking helpers ──
-    # The sync LLMClient no longer tracks activity since the tracker
-    # is now async-only.  AsyncLLMClient overrides these with await.
+    # The tracker uses threading.Lock so sync and async callers share the
+    # same in-memory registry. This is what powers the global
+    # `/api/llm/activity` monitor in the app header.
 
     def _track_register(self, call_type: str) -> Optional[str]:
-        return None
+        if not self.activity_tracker:
+            return None
+        return self.activity_tracker.register(
+            module_key=self.module_key or "",
+            module_label=self._module_label or self.module_key or "",
+            model=self.model or "",
+            channel_key=self.channel_key or "",
+            call_type=call_type,
+            status="waiting",
+        )
 
     def _track_running(self, call_id: Optional[str], status: str = "running") -> None:
-        pass
+        if not self.activity_tracker or not call_id:
+            return
+        self.activity_tracker.update_status(call_id, status)
 
     def _track_unregister(self, call_id: Optional[str]) -> None:
-        pass
+        if not self.activity_tracker or not call_id:
+            return
+        self.activity_tracker.unregister(call_id)
 
     # ── Token usage extraction ──
 
@@ -444,8 +458,13 @@ class AsyncLLMClient(LLMClient):
 
     async def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 4096, response_format: Optional[Dict] = None) -> str:
         kwargs = self._chat_kwargs(messages, temperature, max_tokens, response_format)
-        response = await self._chat_with_retry(kwargs)
-        return self._clean_content(response.choices[0].message.content)
+        call_id = self._track_register("chat")
+        try:
+            self._track_running(call_id)
+            response = await self._chat_with_retry(kwargs)
+            return self._clean_content(response.choices[0].message.content)
+        finally:
+            self._track_unregister(call_id)
 
     async def chat_json_value(self, messages: List[Dict[str, str]], temperature: float = 0.3, max_tokens: int = 4096) -> Any:
         content = await self.chat(messages, temperature, max_tokens, {"type": "json_object"})
@@ -464,20 +483,30 @@ class AsyncLLMClient(LLMClient):
         """Async version of chat_with_tools. Returns the raw response message."""
         kwargs = self._chat_kwargs(messages, temperature, max_tokens, None)
         kwargs["tools"] = tools
-        response = await self._chat_with_retry(kwargs)
-        usage = self._extract_usage(response)
-        msg = response.choices[0].message
-        msg._usage = usage
-        return msg
+        call_id = self._track_register("chat_with_tools")
+        try:
+            self._track_running(call_id)
+            response = await self._chat_with_retry(kwargs)
+            usage = self._extract_usage(response)
+            msg = response.choices[0].message
+            msg._usage = usage
+            return msg
+        finally:
+            self._track_unregister(call_id)
 
     async def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 4096) -> AsyncIterator[str]:
-        stream = await self.client.chat.completions.create(
-            **self._chat_kwargs(messages, temperature, max_tokens, None),
-            stream=True,
-        )
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        call_id = self._track_register("chat_stream")
+        try:
+            stream = await self.client.chat.completions.create(
+                **self._chat_kwargs(messages, temperature, max_tokens, None),
+                stream=True,
+            )
+            self._track_running(call_id, status="streaming")
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        finally:
+            self._track_unregister(call_id)
 
     def sync_chat(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 4096, response_format: Optional[Dict] = None) -> str:
         return asyncio.run(self.chat(messages, temperature, max_tokens, response_format))

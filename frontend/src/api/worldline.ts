@@ -73,6 +73,10 @@ export function startPreparedWorldlineSession(
   return post(`/api/worldline/session/prepare/${prepareId}/start`, payload);
 }
 
+export function resumeWorldlinePrepare(prepareId: string): Promise<ApiResponse> {
+  return post(`/api/worldline/session/prepare/${prepareId}/resume`, {});
+}
+
 export function startWorldlineAutoEvolve(payload: {
   session_id: string;
   branch_ids?: unknown;

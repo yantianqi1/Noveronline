@@ -168,15 +168,15 @@ def test_backward_compatible_fields():
             assert field in char, f"Character missing field: {field}"
 
 
-def test_beats_from_summaries_max_20():
-    """_beats_from_summaries should cap at 20 beats."""
+def test_beats_from_summaries_respects_chapter_beats_cap():
+    """_beats_from_summaries should cap at SEED_MAX_CHAPTER_BEATS (default 50)."""
     manager = ReadingNotesManager()
-    for i in range(25):
+    for i in range(60):
         manager.add_segment_summary(f"seg_{i}", f"summary {i}")
 
     agg = SeedAnalysisAggregator()
     result = agg.aggregate_from_reading_notes(manager, "test", "proj")
-    assert len(result["chapter_beats"]) == 20
+    assert len(result["chapter_beats"]) == 50
 
 
 def test_old_aggregate_still_works():
@@ -202,3 +202,67 @@ def test_old_aggregate_still_works():
     assert result["characters"][0]["name"] == "Alice"
     assert result["characters"][0]["importance_tier"] == "protagonist"
     assert result["chapter_beats"][0]["summary"] == "开场"
+
+
+# ---------------------------------------------------------------------------
+# Phase D: volume_themes exposed in seed_analysis output
+# ---------------------------------------------------------------------------
+
+def test_aggregate_exposes_volume_themes_when_present():
+    manager = ReadingNotesManager()
+    # Minimum viable manager: one segment + one structured volume
+    manager.add_segment_summary("seg_001", "summary")
+    manager.add_volume_summary(
+        "vol_001", "vol summary", ["arc_001"],
+        theme="信任与利用",
+        main_arcs=[{"character": "林策", "arc": "成长"}],
+        cross_volume_threads=["主君图谋"],
+    )
+    out = SeedAnalysisAggregator().aggregate_from_reading_notes(
+        manager, analysis_goal="X", project_name="P",
+    )
+    assert "volume_themes" in out
+    themes = out["volume_themes"]
+    assert len(themes) == 1
+    assert themes[0]["theme"] == "信任与利用"
+    assert themes[0]["main_arcs"] == [{"character": "林策", "arc": "成长"}]
+    # analysis_summary should mention the theme
+    assert "信任与利用" in out["analysis_summary"]
+
+
+def test_aggregate_volume_themes_empty_for_old_volumes_without_new_fields():
+    manager = ReadingNotesManager()
+    manager.add_segment_summary("seg_001", "summary")
+    # Old-style volume entry: no theme/main_arcs/etc
+    manager.add_volume_summary("vol_001", "vol summary", ["arc_001"])
+    out = SeedAnalysisAggregator().aggregate_from_reading_notes(
+        manager, analysis_goal="X", project_name="P",
+    )
+    # volume_themes should be present but empty (back-compat)
+    assert out["volume_themes"] == []
+    # analysis_summary should NOT contain the "卷主题：" prefix
+    assert "卷主题" not in out["analysis_summary"]
+
+
+# ----------------------------------------------------------------------
+# Phase E-2 — evidence cap honours SEED_MAX_EVIDENCE_PER_ITEM
+# ----------------------------------------------------------------------
+
+def test_evidence_cap_uses_settings(monkeypatch):
+    """character / relation evidence list lengths follow SEED_MAX_EVIDENCE_PER_ITEM."""
+    import app.services.seed_analysis_aggregator as agg_mod
+
+    monkeypatch.setattr(agg_mod, "_evidence_cap", lambda: 7)
+    manager = ReadingNotesManager()
+    manager.merge_character_updates(
+        [{
+            "name": "Hero",
+            "quote_examples": [f"quote_{i}" for i in range(15)],
+        }],
+        "seg_001",
+    )
+    out = agg_mod.SeedAnalysisAggregator().aggregate_from_reading_notes(
+        manager, "g", "p",
+    )
+    char = next(c for c in out["characters"] if c["name"] == "Hero")
+    assert len(char["evidence"]) == 7

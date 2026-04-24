@@ -228,7 +228,9 @@ def _repair_truncated_json(text: str) -> str:
     """激进修复被截断的 JSON（finish_reason='length'时使用）。
 
     比 _repair_container_closers 更激进：处理未闭合字符串、
-    尾部不完整 key-value、尾部逗号等。
+    尾部不完整 key-value、尾部逗号等。当尾部 key-value 被丢弃时
+    会通过 logger.warning 记录被弃尾的字段名，便于线上观测哪些字段
+    经常因 max_tokens 触顶而丢失（Phase E-1）。
     """
     text = text.rstrip()
     if not text:
@@ -250,7 +252,13 @@ def _repair_truncated_json(text: str) -> str:
         text += '"'
     # 移除尾部不完整的 key-value（如 "key":  或 "key": "val 被截断后已闭合）
     # 模式: 逗号后跟一个 key 但没有完整 value
-    text = re.sub(r',\s*"[^"]*"\s*:\s*$', "", text)
+    dropped_key_match = re.search(r',\s*"([^"]*)"\s*:\s*$', text)
+    if dropped_key_match:
+        logger.warning(
+            "LLM JSON truncated: dropped trailing field '%s' before closing brackets",
+            dropped_key_match.group(1),
+        )
+        text = re.sub(r',\s*"[^"]*"\s*:\s*$', "", text)
     # 移除尾部悬挂逗号（闭合括号前）
     text = re.sub(r",\s*$", "", text)
     # 最后用标准括号修复闭合

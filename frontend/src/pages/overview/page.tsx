@@ -6,7 +6,7 @@
  * 2. Processing: Hero + Workflow stream + Task focus card
  */
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -29,6 +29,7 @@ import HeroPanel from "./hero-panel";
 import RecentProjects from "./recent-projects";
 import TaskFocusCard from "./task-focus-card";
 import InlineWorkflowStream from "./inline-workflow-stream";
+import RetryFailedSegmentsBanner from "./retry-failed-segments-banner";
 import SeedUploadPanel from "./seed-upload-panel";
 import SeedAnalysisPanel from "./seed-analysis-panel";
 
@@ -92,6 +93,136 @@ export default function OverviewPage() {
     setDeleteTarget(project);
   }, []);
 
+  const handleRejoinProject = useCallback(
+    (project: Project) => {
+      if (!project.seed_task_id) {
+        toast.error("该项目未记录正在运行的任务 ID，无法重新接入。");
+        return;
+      }
+      void upload
+        .rejoinActiveTask({
+          taskId: project.seed_task_id,
+          projectId: project.id,
+          projectName: project.name,
+        })
+        .catch((err: unknown) => {
+          console.warn("[overview] rejoinActiveTask failed", err);
+        });
+    },
+    [upload],
+  );
+
+  /* ---- Workflow error recovery ---- */
+  const activeProject = useMemo(
+    () => projects.find((p) => p.id === upload.completedProjectId) ?? null,
+    [projects, upload.completedProjectId],
+  );
+
+  const handleDismissWorkflow = useCallback(() => {
+    upload.dismissError();
+  }, [upload]);
+
+  const handleContinueWorkflow = useCallback(() => {
+    const projectId = upload.completedProjectId || activeProject?.id || "";
+    if (!projectId) {
+      toast.error("无法定位项目 ID，无法继续分析。");
+      return;
+    }
+    const toastId = toast.loading("正在尝试断点续传...");
+    void upload
+      .continueFromCheckpoint({
+        projectId,
+        projectName: activeProject?.name || upload.projectName,
+        seedTaskId: activeProject?.seed_task_id || upload.taskId || null,
+      })
+      .then((result) => {
+        if (result === "nothing") {
+          toast.info("没有可继续的断点，请选择重新开始。", { id: toastId });
+        } else if (result === "rejoined") {
+          toast.success("已重新接入正在运行的后台任务。", { id: toastId });
+        } else if (result === "retried") {
+          toast.success("已触发对失败段落的断点续传。", { id: toastId });
+        } else {
+          toast.dismiss(toastId);
+        }
+      })
+      .catch((err: unknown) => {
+        console.warn("[overview] continueFromCheckpoint failed", err);
+        toast.error(err instanceof Error ? err.message : "断点续传失败", {
+          id: toastId,
+        });
+      });
+  }, [upload, activeProject]);
+
+  const handleRerunWorkflow = useCallback(() => {
+    const projectId = upload.completedProjectId || activeProject?.id || "";
+    if (!projectId) {
+      toast.error("无法定位项目 ID，无法重新开始。");
+      return;
+    }
+    const toastId = toast.loading("正在重新启动分析...");
+    void upload
+      .rerunSeed(projectId)
+      .then(() => {
+        toast.success("已提交重新开始请求，后台任务正在启动。", { id: toastId });
+      })
+      .catch((err: unknown) => {
+        console.warn("[overview] rerunSeed failed", err);
+        toast.error(err instanceof Error ? err.message : "重新开始失败", {
+          id: toastId,
+        });
+      });
+  }, [upload, activeProject]);
+
+  /* ---- Per-project continue / rerun (idle view project cards) ---- */
+  const handleContinueProject = useCallback(
+    (project: Project) => {
+      const toastId = toast.loading(`正在尝试断点续传「${project.name}」...`);
+      void upload
+        .continueFromCheckpoint({
+          projectId: project.id,
+          projectName: project.name,
+          seedTaskId: project.seed_task_id || null,
+        })
+        .then((result) => {
+          if (result === "nothing") {
+            toast.info("没有可继续的断点，请选择重新开始。", { id: toastId });
+          } else if (result === "rejoined") {
+            toast.success("已重新接入正在运行的后台任务。", { id: toastId });
+          } else if (result === "retried") {
+            toast.success("已触发对失败段落的断点续传。", { id: toastId });
+          } else {
+            toast.dismiss(toastId);
+          }
+        })
+        .catch((err: unknown) => {
+          console.warn("[overview] continueFromCheckpoint failed", err);
+          toast.error(err instanceof Error ? err.message : "断点续传失败", {
+            id: toastId,
+          });
+        });
+    },
+    [upload],
+  );
+
+  const handleRerunProject = useCallback(
+    (project: Project) => {
+      const toastId = toast.loading(`正在重新启动「${project.name}」...`);
+      void upload
+        .rerunSeed(project.id)
+        .then(() => {
+          toast.success("已提交重新开始请求。", { id: toastId });
+        })
+        .catch((err: unknown) => {
+          console.warn("[overview] rerunSeed failed", err);
+          toast.error(err instanceof Error ? err.message : "重新开始失败", {
+            id: toastId,
+          });
+        });
+    },
+    [upload],
+  );
+
   const confirmDelete = useCallback(() => {
     if (deleteTarget) {
       deleteMutation.mutate(deleteTarget.id);
@@ -145,6 +276,9 @@ export default function OverviewPage() {
           <RecentProjects
             projects={recentProjects}
             onDeleteProject={handleDeleteProject}
+            onRejoinProject={handleRejoinProject}
+            onContinueProject={handleContinueProject}
+            onRerunProject={handleRerunProject}
           />
 
           {/* Upload + Analysis */}
@@ -195,6 +329,18 @@ export default function OverviewPage() {
             onStartNew={scrollToUpload}
           />
 
+          <RetryFailedSegmentsBanner
+            retry={upload.sequentialReadingRetry}
+            projectId={upload.completedProjectId}
+            taskStatus={upload.taskStatus}
+            uploadBusy={upload.uploadBusy}
+            onRetry={(pid) => {
+              upload.retrySegments(pid).catch((err) => {
+                console.warn("[overview] retrySegments failed", err);
+              });
+            }}
+          />
+
           <section className="grid grid-cols-1 lg:grid-cols-[1fr_0.35fr] gap-2.5 items-start">
             <InlineWorkflowStream
               taskId={upload.taskId}
@@ -202,6 +348,12 @@ export default function OverviewPage() {
               activeStageKey={upload.activeStage.key}
               taskStatus={upload.taskStatus}
               uploadPhase={upload.uploadPhase}
+              taskMetrics={upload.taskMetrics}
+              errorMessage={upload.error}
+              canResume={!!(upload.completedProjectId || activeProject?.id)}
+              onDismiss={handleDismissWorkflow}
+              onContinue={handleContinueWorkflow}
+              onRerun={handleRerunWorkflow}
             />
             <div className="sticky top-4">
               <TaskFocusCard

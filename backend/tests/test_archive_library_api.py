@@ -137,6 +137,48 @@ def _create_legacy_archive_library_db(upload_root):
     connection.close()
 
 
+def test_archive_library_entity_type_filter_is_case_insensitive(tmp_path, monkeypatch):
+    """Archives are written with PascalCase entity_type (e.g. "Character")
+    but UI filters pass lowercase ("character"). The list endpoint must
+    match regardless of case."""
+    client = _create_app_client(tmp_path, monkeypatch)
+    project = _create_project("大小写项目", "验证大小写")
+    _save_archives(
+        project,
+        [
+            _make_archive("char_1", "沈夜", "Character", "protagonist", "查清真相"),
+            _make_archive("org_1", "玄霄宗", "Organization", "major", "维持秩序"),
+        ],
+    )
+    # Backfill legacy JSON archives into the unified DB (Phase 2 DB is SoT).
+    assert client.post("/api/archive/library/reindex").status_code == 200
+
+    lower_response = client.get(
+        f"/api/archive/library?project_id={project.project_id}&entity_type=character",
+    )
+    assert lower_response.status_code == 200, lower_response.get_json()
+    payload = lower_response.get_json()["data"]
+    assert payload["total"] == 1
+    assert payload["items"][0]["entity_name"] == "沈夜"
+
+    upper_response = client.get(
+        f"/api/archive/library?project_id={project.project_id}&entity_type=Organization",
+    )
+    assert upper_response.status_code == 200
+    assert upper_response.get_json()["data"]["total"] == 1
+
+    # Also cover the Python-side filter branch (q != "") used when a
+    # search keyword is present — it must use the same case-insensitive rule.
+    search_response = client.get(
+        f"/api/archive/library?project_id={project.project_id}"
+        "&q=秩序&entity_type=organization",
+    )
+    assert search_response.status_code == 200
+    search_data = search_response.get_json()["data"]
+    assert search_data["total"] == 1
+    assert search_data["items"][0]["entity_name"] == "玄霄宗"
+
+
 def test_archive_library_indexes_existing_project_archives(tmp_path, monkeypatch):
     client = _create_app_client(tmp_path, monkeypatch)
     project_a = _create_project("甲项目", "观察主角命运")

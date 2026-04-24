@@ -8,7 +8,7 @@ Three prompt sets:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -95,11 +95,32 @@ JSON 结构必须严格遵循以下格式：
   "narrative_phase": "当前叙事阶段（序章/铺垫/升级/高潮/转折/收束/尾声）"
 }
 
+## 输出示例（仅展示关键字段，实际输出需包含全部字段）
+
+【小说片段】
+"林策推门而入，沈无双已等候多时。'你来晚了。'她语气冷淡。林策淡淡一笑：'路上遇刺。'"
+
+【期望输出摘录】
+{
+  "segment_summary": "[承接] 林策依约赴会。[推进] 林策迟到并坦言路上遭遇刺杀，沈无双语气虽冷却未深究。[悬念] 刺客身份与幕后指使尚未揭开。",
+  "character_updates": [
+    {"name": "林策", "status": "alive", "key_actions": ["遭遇刺杀", "如约赴会"], "quote_examples": ["路上遇刺。"]},
+    {"name": "沈无双", "status": "alive", "personality_traits": ["冷峻"], "quote_examples": ["你来晚了。"]}
+  ],
+  "relationship_changes": [
+    {"source": "沈无双", "target": "林策", "relation": "盟友", "trigger": "约定会面", "evidence": "沈无双等候多时未离开", "emotional_shift": "无变化", "power_shift": "平衡"}
+  ],
+  "co_occurrence": [
+    {"a": "林策", "b": "沈无双", "scene": "约定地点夜会", "interaction_type": "对话"}
+  ]
+}
+
 注意：
 - 只分析本段正文，不要臆造未出现的内容
 - character_updates 只包含本段出现或被提及的角色
-- relationship_changes **必须列出本段内出现的所有两两互动关系，包括配角与配角之间**；不允许只记录主角相关的关系，也不允许省略配角彼此的互动
-- co_occurrence 强制记录本段中所有"同场出现并有任何互动"的角色对（不要求是关系剧变），用于构建角色互动网络；如果只出现了一个角色，留空数组
+- 如本段角色匹配【已知实体表】中的 canonical 名或别名，**name 字段必须填 canonical 名**，新发现的别名追加到 aliases；不要为同一实体创建新条目
+- **relationship_changes 必须列出本段所有有文本证据的互动关系**，包括：主角与配角、配角与配角、短暂同场的对手。只要有一句对话、一个动作、或一次明确的态度表露作为依据，就应记录。要求是"有文本证据"而非"戏份充足"——宁可把配角之间的短暂互动也记下，也不要漏掉。只有当本段完全是独白 / 景物描写 / 世界观陈述且毫无互动时，才返回空数组。
+- **co_occurrence 记录本段所有同场出现且至少有一次动作/对话接触的角色对**（含配角之间）；纯背景提及不算
 - organization_dynamics / location_state_changes 如无内容请留空数组 []
 - 所有字符串字段必须是字符串，不能为 null"""
 
@@ -135,9 +156,28 @@ ARC_SUMMARY_SYSTEM_PROMPT = """你是一名小说分析师，需要将多段阅�
   "world_rules_introduced": ["本弧线中首次揭示的世界观规则"]
 }
 
+## 输出示例（3 段输入摘要 → 弧线输出摘录）
+
+【输入摘要】
+[seg_001] 林策与沈无双在听风楼立约，约定铲除陆君言。
+[seg_002] 二人潜入陆府密室，盗取三十七人名册。
+[seg_003] 名册曝光，陆君言反扑，沈无双重伤撤退。
+
+【期望输出摘录】
+{
+  "arc_summary": "本弧线围绕\"潜入陆府\"展开...（约800字）",
+  "key_events": [
+    {"event_id": "ev_01", "title": "夜会结盟", "description": "林策与沈无双于听风楼定约...", "participants": ["林策", "沈无双"], "consequence": "联盟正式形成"},
+    {"event_id": "ev_02", "title": "潜入密室", "description": "二人深夜入陆府...", "participants": ["林策", "沈无双"], "consequence": "获取三十七人名册"},
+    {"event_id": "ev_03", "title": "反扑负伤", "description": "陆君言识破后反击...", "participants": ["陆君言", "沈无双"], "consequence": "沈无双重伤撤退"}
+  ],
+  "character_arcs": [{"name": "沈无双", "change": "从冷静策划者到身负重伤的复仇者"}],
+  "threads_opened": ["陆君言的反扑"]
+}
+
 注意：
-- key_events **必须至少包含 3 条**，把 arc 内的关键事件拆出来；title ≠ description；participants 必须列出真实参与者（含配角）
-- relationship_shifts **优先记录配角之间、阵营内部的关系变动**；主角参与的关系变动占比 ≤ 1/3
+- key_events 列出本弧线中确有的关键事件（通常 3-7 条；若本弧线事件较少，可少于 3 条，**宁少勿编**）；title ≠ description；participants 必须列出真实参与者（含配角）
+- relationship_shifts 优先记录配角之间、阵营内部的关系变动；主角参与的关系变动不强制配额
 - character_arcs 只包含本弧线中有显著变化的角色
 - 如果某个数组为空，输出空数组 []
 - 不要包含任何额外解释"""
@@ -147,24 +187,62 @@ VOLUME_SUMMARY_SYSTEM_PROMPT = """你是一名小说分析师，需要将多个�
 
 你会收到若干弧线摘要（按顺序排列）。
 
-请将这些弧线摘要整合为约 2000 字的卷摘要，聚焦于：
-- 本卷的主题与核心议题
-- 主要角色贯穿全卷的弧线发展
-- 世界观或势力格局的演变
-- 本卷在全书中的地位与承上启下作用
-
-输出严格有效的 JSON 对象，不要包含任何额外解释：
+请将这些弧线摘要整合为结构化卷摘要，输出严格有效的 JSON 对象，不要包含任何额外解释：
 
 {
-  "volume_summary": "约2000字的卷整合摘要"
-}"""
+  "volume_summary": "约2000字的卷整合摘要，聚焦本卷主题、主要角色弧线、世界格局演变、本卷在全书中的承上启下作用",
+  "theme": "本卷核心主题（一句话，30-60字，概括本卷在全书中的位置和母题）",
+  "main_arcs": [
+    {"character": "角色名", "arc": "本卷中该角色贯穿性的成长/转折/抉择"}
+  ],
+  "faction_changes": [
+    {"faction": "势力/组织名", "change": "本卷中该势力地位/格局/路线的变化"}
+  ],
+  "cross_volume_threads": [
+    "本卷未解决、需在后续卷继续推进的关键线索"
+  ]
+}
+
+## 输出示例（3 个弧线摘要 → 卷输出摘录）
+
+【输入弧线】
+[arc_001] 林策与沈无双结盟潜入陆府失败，沈无双重伤。
+[arc_002] 林策为救沈无双投奔白泽司，发现陆君言与朝廷勾结。
+[arc_003] 林策反间计成功，陆君言被罢官，但白泽司主君另有图谋。
+
+【期望输出摘录】
+{
+  "volume_summary": "本卷围绕\"林策对抗陆君言\"的明线展开...（约 2000 字）",
+  "theme": "本卷以\"信任与利用\"为母题，林策从孤身复仇到借势制敌，揭示朝堂背后的更大棋盘。",
+  "main_arcs": [
+    {"character": "林策", "arc": "从孤身复仇者成长为懂得借势的政治玩家"},
+    {"character": "沈无双", "arc": "重伤后从行动派转为林策的智囊"}
+  ],
+  "faction_changes": [
+    {"faction": "陆党", "change": "陆君言被罢官，陆党在朝中势力大幅削弱"},
+    {"faction": "白泽司", "change": "在本卷崛起为新的隐形棋手，但主君图谋未明"}
+  ],
+  "cross_volume_threads": ["白泽司主君的真实意图", "三十七人名册剩余成员的下落"]
+}
+
+注意：
+- volume_summary 力求 1500-2500 字，覆盖本卷整体脉络
+- theme 必须是一句话，避免泛化（如\"成长与救赎\"过于空泛）
+- main_arcs 只列本卷中有显著弧线变化的角色（通常 2-5 个，**宁少勿编**）
+- faction_changes 列本卷中地位/路线确有变化的组织（无则空数组）
+- cross_volume_threads 列后续卷需要继续推进的悬念（无则空数组）
+- 所有数组字段如无内容，请输出空数组 []，不要省略字段"""
 
 
 # ---------------------------------------------------------------------------
 # Prompt builder functions
 # ---------------------------------------------------------------------------
 
-def build_segment_reading_prompt(context: str, segment_text: str) -> List[Dict[str, str]]:
+def build_segment_reading_prompt(
+    context: str,
+    segment_text: str,
+    known_entities: Optional[Dict[str, List[str]]] = None,
+) -> List[Dict[str, str]]:
     """Build messages for per-segment LLM analysis.
 
     Parameters
@@ -174,19 +252,40 @@ def build_segment_reading_prompt(context: str, segment_text: str) -> List[Dict[s
         May be empty string for the first segment.
     segment_text:
         The raw text of the current segment (joined chapter contents).
+    known_entities:
+        Optional ``{canonical_name: [aliases]}`` mapping from
+        ``ReadingNotesManager.canonical_entity_table()``. When non-empty, an
+        explicit "known entity table" block is injected into the user message
+        so the LLM uses canonical names instead of creating duplicate records.
 
     Returns
     -------
     list
         [{"role": "system", ...}, {"role": "user", ...}]
     """
+    sections: List[str] = []
+
     if context.strip():
-        user_content = (
-            f"【前情上下文】\n{context}\n\n"
-            f"【本段正文】\n{segment_text}"
+        sections.append(f"【前情上下文】\n{context}")
+
+    if known_entities:
+        entity_lines = []
+        for canonical, aliases in known_entities.items():
+            if aliases:
+                entity_lines.append(f"- {canonical}（别名：{', '.join(aliases)}）")
+            else:
+                entity_lines.append(f"- {canonical}")
+        sections.append(
+            "【已知实体表】（本段如出现以下实体，请使用 canonical 名而非创建新实体；"
+            "新别名追加到对应 aliases 字段）\n" + "\n".join(entity_lines)
         )
+
+    if context.strip() or known_entities:
+        sections.append(f"【本段正文】\n{segment_text}")
     else:
-        user_content = f"【本段正文（首段，暂无前情）】\n{segment_text}"
+        sections.append(f"【本段正文（首段，暂无前情）】\n{segment_text}")
+
+    user_content = "\n\n".join(sections)
 
     return [
         {"role": "system", "content": SEGMENT_READING_SYSTEM_PROMPT},

@@ -13,7 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pin, PinOff } from "lucide-react";
 import type { ManuscriptChapter, ManuscriptBlockItem } from "./use-writer-state";
 
 interface ManuscriptTocPanelProps {
@@ -23,6 +23,11 @@ interface ManuscriptTocPanelProps {
   totalWords: number;
   totalBlocks: number;
   untaggedCount: number;
+  // Task 5: continuation anchor override. When set, the writer agent will
+  // continue from this block instead of the most-recent commit. Null means
+  // fall back to default (last committed block).
+  anchorBlockId?: string | null;
+  onSelectAnchor?: (blockId: string | null) => void;
   onJump: (chapterId: string | null) => void;
   onCreateChapter: (name: string) => void;
   onRenameChapter: (chapterId: string, newTitle: string) => void;
@@ -39,6 +44,8 @@ export function ManuscriptTocPanel({
   totalWords,
   totalBlocks,
   untaggedCount,
+  anchorBlockId,
+  onSelectAnchor,
   onJump,
   onCreateChapter,
   onRenameChapter,
@@ -234,19 +241,53 @@ export function ManuscriptTocPanel({
             {/* Expanded blocks */}
             {expandedChapters.has(ch.chapter_id) && (
               <div className="ml-2 border-l border-border/40">
-                {getBlocksForChapter(ch.chapter_id).map((block) => (
+                {getBlocksForChapter(ch.chapter_id).map((block) => {
+                  const isAnchor = anchorBlockId === block.block_id;
+                  return (
                   <div
                     key={block.block_id}
-                    className="group/block flex items-center gap-1.5 border-l-0 py-1 pl-8 pr-2 text-xs text-muted-foreground"
+                    className={
+                      "group/block flex items-center gap-1.5 border-l-0 py-1 pl-8 pr-2 text-xs " +
+                      (isAnchor
+                        ? "bg-amber-50 font-medium text-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
+                        : "text-muted-foreground")
+                    }
                     onClick={() => onJump(ch.chapter_id)}
                   >
                     <span className="min-w-0 flex-1 truncate">
                       {blockLabel(block)}
                     </span>
                     <div
-                      className="shrink-0 opacity-0 transition-opacity group-hover/block:opacity-100"
+                      className="flex shrink-0 items-center gap-1"
                       onClick={(e) => e.stopPropagation()}
                     >
+                      {onSelectAnchor && (
+                        <button
+                          type="button"
+                          title={
+                            isAnchor
+                              ? "取消续写锚点（恢复为最新段）"
+                              : "从这一段续写"
+                          }
+                          aria-label={isAnchor ? "取消续写锚点" : "从这一段续写"}
+                          onClick={() =>
+                            onSelectAnchor(isAnchor ? null : block.block_id)
+                          }
+                          className={
+                            "rounded px-1 py-0.5 " +
+                            (isAnchor
+                              ? "text-amber-700 dark:text-amber-300"
+                              : "text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/block:opacity-100")
+                          }
+                        >
+                          {isAnchor ? (
+                            <PinOff className="h-3 w-3" />
+                          ) : (
+                            <Pin className="h-3 w-3" />
+                          )}
+                        </button>
+                      )}
+                      <div className="shrink-0 opacity-0 transition-opacity group-hover/block:opacity-100">
                       <Select
                         value={ch.chapter_id}
                         onValueChange={(val) =>
@@ -264,9 +305,11 @@ export function ManuscriptTocPanel({
                           ))}
                         </SelectContent>
                       </Select>
+                      </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {getBlocksForChapter(ch.chapter_id).length === 0 && (
                   <div className="py-1 pl-8 text-[11px] italic text-muted-foreground">
                     暂无段落

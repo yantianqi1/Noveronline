@@ -9,6 +9,7 @@ export interface GraphNodeVM {
   entity_type: string;
   summary: string;
   attributes: Record<string, unknown>;
+  evidence_refs?: Array<string | { snippet?: string; chapter_id?: string; block_id?: string }>;
   normalizedType?: string;
 }
 
@@ -23,19 +24,19 @@ export interface GraphEdgeVM {
   weight: number;
 }
 
-const NODE_LABEL_THRESHOLD = 24;
-const LABEL_LIMIT = 18;
+const NODE_LABEL_THRESHOLD = 60;
+const LABEL_LIMIT = 40;
 
 export const DEFAULT_GRAPH_TYPE_VISIBILITY: Record<string, boolean> = {
   character: true,
   organization: true,
   faction: true,
   group: true,
-  artifact: false,
-  knowledgeitem: false,
-  plotevent: false,
-  location: false,
-  rulesystem: false,
+  artifact: true,
+  knowledgeitem: true,
+  plotevent: true,
+  location: true,
+  rulesystem: true,
   unknown: false,
 };
 

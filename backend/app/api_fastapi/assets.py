@@ -140,7 +140,7 @@ async def style_extract(body: StyleExtractRequest):
         title = (payload.get("title") or "").strip()
         if not text.strip() or not title:
             return err("text 与 title 必填", status_code=400)
-        task_id = await StyleExtractor().extract_background(text, title=title, category=payload.get("category", ""), tags=payload.get("tags") or [], target_chunk_chars=int(payload.get("target_chunk_chars") or 3000), max_chunks=int(payload.get("max_chunks") or 30))
+        task_id = await StyleExtractor().extract_background(text, title=title, category=payload.get("category", ""), tags=payload.get("tags") or [], target_chunk_chars=int(payload.get("target_chunk_chars") or 3000), max_chunks=int(payload.get("max_chunks") or 30), scope=_scope(payload.get("scope", GLOBAL_SCOPE)), project_id=payload.get("project_id"))
         return ok({"task_id": task_id})
     except Exception as exc:
         return err(exc)

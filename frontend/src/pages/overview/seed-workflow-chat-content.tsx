@@ -114,10 +114,19 @@ function StepItem({
   collapsed: boolean;
   onToggle: () => void;
 }) {
+  if (step.status === "pending") {
+    return (
+      <div className="seed-step-card rounded-lg border border-dashed border-border/60 bg-white/60 px-3 py-2 flex items-center gap-2 opacity-60">
+        <StatusDot status="pending" />
+        <span className="text-sm text-muted-foreground flex-1 min-w-0 truncate">{step.title}</span>
+        <span className="font-mono text-[11px] text-muted-foreground flex-shrink-0">待执行</span>
+      </div>
+    );
+  }
   return (
     <div className={cn("seed-step-card rounded-lg border border-border bg-white overflow-hidden transition-colors", step.status === "active" && "seed-current-ring border-red-700/50")}>
       <div className="flex items-center gap-2 px-3 py-2.5 cursor-pointer select-none hover:bg-zinc-50" onClick={onToggle}>
-        <StatusDot active={step.status === "active"} />
+        <StatusDot status={step.status} />
         <span className="text-sm text-foreground flex-1 min-w-0 truncate">{step.title}</span>
         {step.hasTrace && <TraceBadge />}
         {step.status === "completed" && <StepMetrics step={step} />}
@@ -145,8 +154,13 @@ function StepMetrics({ step }: { step: ChapterStep }) {
   );
 }
 
-function StatusDot({ active }: { active: boolean }) {
-  const className = active ? "bg-red-700 animate-pulse" : "bg-emerald-500";
+function StatusDot({ status }: { status: ChapterStep["status"] }) {
+  const className =
+    status === "active"
+      ? "bg-red-700 animate-pulse"
+      : status === "completed"
+      ? "bg-emerald-500"
+      : "bg-zinc-300";
   return <span className={cn("w-2 h-2 rounded-full flex-shrink-0", className)} />;
 }
 

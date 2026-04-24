@@ -19,7 +19,7 @@ import {
   getArchiveMemoryTimeline,
   adoptArchiveMemory,
   rejectArchiveMemory,
-} from "@/api/archive";
+} from "@/api/assets";
 import { useNotification } from "@/hooks/use-notification";
 
 import { Badge } from "@/components/ui/badge";

@@ -107,3 +107,49 @@ def test_extract_sync_with_mock_llm(isolated):
     assert "雨没有停。" in result["asset"]["content"]
     assert fake_router.build_client.called
     assert fake_client.chat_json.call_count >= 1
+
+
+def test_extract_sync_project_scope_persists_project_id(isolated):
+    """scope=project + project_id 时，产出资产必须落到该项目，
+    这样 cascade_delete_project 能随项目一起带走。"""
+    fake_payload = {
+        "narrative_pov": "第三人称",
+        "tense": "过去时",
+        "sentence_features": ["短句"],
+        "rhetoric": [],
+        "pacing": "紧凑",
+        "vocabulary": "通俗",
+        "dialogue_style": "直白",
+        "tone": "平静",
+        "distinctive_devices": [],
+        "example_snippets": ["他走了。"],
+    }
+    fake_client = MagicMock()
+    fake_client.chat_json.return_value = fake_payload
+    fake_router = MagicMock()
+    fake_router.build_client.return_value = fake_client
+
+    extractor = StyleExtractor(llm_router=fake_router, max_workers=2)
+    text = ("段落示例。" * 80 + "\n\n") * 3
+    result = asyncio.run(extractor.extract_sync(
+        text,
+        title="项目专属风格",
+        target_chunk_chars=200,
+        max_chunks=4,
+        scope="project",
+        project_id="proj_test_style",
+    ))
+    assert result["asset"]["scope"] == "project"
+    assert result["asset"]["project_id"] == "proj_test_style"
+
+
+def test_extract_sync_project_scope_requires_project_id(isolated):
+    fake_router = MagicMock()
+    extractor = StyleExtractor(llm_router=fake_router)
+    with pytest.raises(ValueError, match="project_id"):
+        asyncio.run(extractor.extract_sync(
+            "一点文本",
+            title="x",
+            scope="project",
+            project_id=None,
+        ))
