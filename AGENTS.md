@@ -1,198 +1,124 @@
 # AGENTS.md
 
 ## 目的
-这份文档是 `MiroFish-Novel` 的交接手册，目标是让后续 AI 在**暂时不看源码**时，也能先准确理解项目定位、当前进度、验证状态、在建功能和后续优先级。
-更新时间：`2026-03-25`
 
-## 一句话定位
-`MiroFish-Novel` 是从 `MiroFish` 迁移出来的小说多智能体平台，核心目标不是舆情分析，而是：
-- 读取小说文本、设定、大纲、角色卡
-- 提取角色 / 组织 / 关系 / 世界规则
-- 建立单世界 worldline 并持续推进
-- 支持角色对话、变量注入、剧情灵感生成
-- 为作者生成可直接消费的写作上下文与正文草稿
+这份文档给后续 AI coding agent 快速接手 `MiroFish-Novel` 使用。它应与 `README.md`、`CLAUDE.md` 和 `docs/database/database-source-of-truth-matrix.md` 保持一致。
 
-当前主链可概括为：
-`上传小说 -> seed analysis / ontology / 档案 -> worldline -> 推演 / 对话 / 记忆审核 -> writer -> 正文生成`
+更新时间：`2026-04-25`
 
-## 当前阶段判断
-- 项目已经越过“空壳/骨架”阶段，进入**可离线验证的功能建设期**
-- 核心主链已覆盖：上传、seed analysis、档案、worldline、writer、记忆审核、剧情灵感
-- 前端已有多个实际工作台，不是占位页
-- 后端测试体系已覆盖关键链路
-- 当前工作区存在未提交开发，重点在“多 Agent 正文生成”和“worldline 工作台重构”
+## 项目定位
 
-可以把当前状态定义为：
-**Phase 2.5：离线可跑，写作链路初步闭环，正在向真实作者协作工具推进。**
+`MiroFish-Novel` 是面向长篇小说创作的多智能体分析与写作平台。核心目标不是舆情分析，而是：
 
-## 已完成能力
+- 读取小说文本、设定、大纲、角色卡和自由素材
+- 提取角色、组织、关系、伏笔、世界规则与叙事阶段
+- 建立统一数据库中的故事图谱、档案库和资产库
+- 通过单世界 worldline 做剧情推演、变量注入和角色互动
+- 为 Writer Agent 提供可消费上下文，并产出正文、续写、审校和世界数据更新
 
-### 1. 小说上传与异步种子分析
-已具备：上传 TXT / MD / PDF、创建项目与文件持久化、异步章节切分与种子分析、任务状态查询与缺失任务恢复。
-代表接口：`POST /api/project/seed/extract`、`GET /api/project/task/<task_id>`、`GET /api/project/list`、`DELETE /api/project/<project_id>`
+主链：`上传小说 -> seed pipeline -> ontology / graph -> archives / assets -> worldline -> writer agent -> manuscript`。
 
-当前约束：
-- `seed/extract` 仅支持 `LLM` 模式
-- 未绑定模块应直接报错，不做静默兜底
+## 当前状态
 
-### 2. Seed Analysis / Ontology / 档案
-已具备：提取角色 / 组织 / 关系、生成 `seed_analysis.json`、从 graph 或 seed analysis 生成档案候选、生成 narrative archives 并同步档案库。
-代表接口：`POST /api/novel/seed-analysis`、`POST /api/novel/archives/candidates`、`POST /api/novel/archives/generate`、`GET /api/archive/library`
+- 后端已迁移到 `FastAPI + SQLAlchemy 2.0 + Alembic + Pydantic v2`。
+- 前端已迁移到 `React 19 + TypeScript + Vite 6 + React Router 7`。
+- 默认后端端口：`3888`；默认前端端口：`3999`。
+- 统一数据库默认位于 `backend/data/mirofish.db`，由 `DATABASE_URL` 决定。
+- LLM 渠道、模型、模块绑定都通过前端 LLM 设施面板写入统一数据库。
+- 当前是活跃开发仓库，工作区可能存在未提交功能分支改动；先看 `git status --short` 再动手。
 
-### 3. 单世界 Worldline
-已具备：session 创建、当前世界推进、自动演化、变量注入、timeline 查询、agent roster / action / dialogue / memory 查询。
-代表接口：`POST /api/worldline/session/create`、`GET /api/worldline/session/<session_id>/timeline`、`POST /api/worldline/session/<session_id>/step`、`POST /api/worldline/session/<session_id>/auto-evolve`、`POST /api/worldline/session/<session_id>/inject-variable`、`GET /api/worldline/session/<session_id>/agents`
+## 快速命令
 
-重要事实：
-- 当前仓库已转向**单世界** worldline
-- 旧的 `/branches`、`/comparison` 已主动废弃并返回 `410`
-- 当前前后端都围绕 `current_world` 组织
+```bash
+# 后端
+cd backend
+APP_PORT=3888 uv run python run.py
 
-### 4. Writer 工作流与 Chapter Context Pack
-已具备：`/writer` 页面、`project_chapter` / `worldline_branch` 两种范围、POV 选择、`Chapter Context Pack`、candidate 记忆时间线查看、candidate -> canon 审核。
-代表接口：`GET /api/novel/chapter-context/options`、`POST /api/novel/chapter-context`、`GET /api/archive/library/<archive_id>/memory/timeline`、`POST /api/archive/library/<archive_id>/memory/<memory_id>/adopt`
+# 无 uv 时
+cd backend
+APP_PORT=3888 .venv/bin/python run.py
 
-这说明项目已经从“分析工具”进入“作者可消费工具”阶段。
+# 前端
+cd frontend
+npm run dev
 
-### 5. 角色对话与剧情灵感
-已具备：世界线角色对话、角色历史 / 动作 / 对话 / 记忆查询、创作者灵感生成后续剧情建议。
-代表接口：`POST /api/worldline/session/<session_id>/agent-dialogue`、`GET /api/worldline/session/<session_id>/agent-history`、`GET /api/worldline/session/<session_id>/agent-memory`、`POST /api/novel/plot/inspiration`
+# 后端测试，中文路径环境建议显式 UTF-8
+cd backend
+env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest tests
 
-### 6. 全局 LLM 设施面板
-已具备：channel 配置、模型同步、模块绑定 / 解绑。
-关键原则：所有 LLM 调用统一走全局设施面板；不再使用旧项目单组环境变量；未绑定模块时应显式失败。
-代表接口：`GET /api/llm/settings`、`POST /api/llm/channels`、`POST /api/llm/channels/<channel_key>/sync-models`、`PUT /api/llm/module-bindings/<module_key>`
+# 前端检查
+cd frontend
+npm run lint
+npm run build
+npm run test
+```
 
-## 当前前端页面状态
-前端已有完整工作台路由：`/`、`/guide`、`/archive-library`、`/story-graph`、`/worldline`、`/writer`、`/character-console`、`/llm-facility`。
-当前判断：首页、writer、worldline、character-console 都已有明确产品语义，项目已从“先做后端”进入“前后端一起塑形”阶段。
+## 目录责任
 
-## 目录与责任划分
-Backend：Python 3.11、Flask、Pydantic、OpenAI-compatible client；核心目录是 `backend/app/api`、`backend/app/services`、`backend/app/models`、`backend/app/utils`、`backend/tests`；优先理解 `story_ontology_generator.py`、`novel_seed_analyzer.py`、`narrative_entity_archivist.py`、`chapter_context_pack_builder.py`、`archive_memory_review_service.py`、`worldline_engine.py`、`worldline_runtime_service.py`、`character_agent_service.py`、`plot_inspiration_engine.py`、`llm_router.py`。
-Frontend：Vue 3、Vue Router、Vite、D3；核心目录是 `frontend/src/views`、`frontend/src/components`、`frontend/src/api`、`frontend/src/composables`。
+- `backend/app/api_fastapi/`：FastAPI 路由，统一挂载 `/api`。
+- `backend/app/services/`：业务服务，包括 seed、graph、archive、assets、worldline、writer agent。
+- `backend/app/repositories/`：数据库访问层；新增业务读写优先新增或扩展 repository。
+- `backend/app/tables/`：SQLAlchemy 表定义；schema 变更必须通过 Alembic revision。
+- `backend/app/schemas/`：Pydantic 请求 / 响应 schema。
+- `backend/app/utils/llm_client.py`：OpenAI-compatible LLM 客户端与 JSON 调用工具。
+- `frontend/src/pages/`：路由页面，核心页面包括 `overview`、`asset-library`、`story-graph`、`worldline`、`writer`、`llm-facility`。
+- `frontend/src/api/`：TypeScript API 客户端和 SSE 客户端。
+- `frontend/src/stores/`：Zustand 状态。
+- `docs/`：设计、迁移和交接文档。
 
-## 数据存储与运行时事实
-- 项目文件和中间产物位于 `backend/uploads/projects/`
-- 本地图谱产物是 `story_graph.json` 与 `story_graph.sqlite3`
-- LLM 设施配置使用本地 SQLite
-- 档案库使用本地 SQLite
-- worldline 运行时状态使用文件系统持久化
-- 前端默认端口：`3891`
-- 后端默认端口：`5101`
-- 每次超过 50 行代码改动后，需要完整重启前后端
+## 关键产品事实
 
-## 本次已验证的状态
-前端已验证：
-- 命令：`cd /Users/项目/MiroFish-Novel/frontend && npm run build`
-- 结果：构建成功，产物正常，耗时约 `1.20s`
+### Seed Pipeline
 
-后端已验证：
-- 命令：`cd /Users/项目/MiroFish-Novel/backend && env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 /Users/项目/MiroFish-Novel/.venv/bin/python -m pytest tests/test_offline_novel_pipeline.py tests/test_worldline_engine.py tests/test_chapter_context_api.py tests/test_archive_memory_review_api.py tests/test_draft_agents.py`
-- 结果：`31 passed in 0.71s`
+上传 TXT / MD / PDF 后执行智能分段、顺序精读、全局聚合、ontology 生成、角色 Agent 档案生成。进度由 `SeedTaskProgressTracker` 与任务表追踪，步骤 trace 会记录 prompt 和 response。
 
-这次明确验证通过的链路：离线小说主链、worldline engine、chapter context API、archive memory review API、draft agents 基础逻辑。
+### Story Graph / Archives / Assets
 
-## 当前工作区里的在建功能
-当前 git 工作区不是干净状态，存在未提交改动，核心方向如下。
+故事图谱写入统一 `graph_*` 表。档案库、实体、关系、伏笔、世界规则、手稿块、自由素材统一进入资产视图，供检索和 Writer Agent 使用。
 
-### A. 多 Agent 正文生成正在并入主写作台
-已能确认：
-- 新增 `backend/app/services/draft_agents/`
-- 已有 `context_agent / memory_agent / style_agent / writer_agent / reviewer_agent / orchestrator`
-- `POST /api/novel/draft/generate` 已新增为 `SSE` 流式接口
-- 前端新增 `frontend/src/api/sse.js`
-- `/writer` 已被改造成“上下文 + Agent 进度 + 流式正文 + 审校报告”的形态
+### Worldline
 
-当前判断：
-- 这条链路已经进入主功能区，不再只是概念验证
-- 但仍属于**未提交中的在建功能**，不要把它当作完全稳定发布态
+当前产品语义是单世界 `current_world`。旧多分支接口不再扩展；遇到 `/branches`、`/comparison` 语义时要谨慎，不要恢复旧模型。
 
-### B. Worldline 工作台正在重构
-已能确认：
-- 新增 `WorldlineSelectionPanel.vue`
-- 新增 `WorldlineSimulationRoster.vue`
-- `WorldlineWorkbenchView.vue`、`WorldlineControlPanel.vue`、布局相关文件均有未提交修改
-- 方向是“选择栏 / 控制栏 / 导演台”的多栏工作台
+### Writer Agent
 
-当前判断：
-- 这是产品交互层重构，不是底层引擎重写
-- 目标是提升连续操作体验，而不是改变 worldline 基础语义
+Writer 工作台覆盖书籍计划、章节、场景、续写、正文生成、手稿编译、审校、去重约束和世界数据更新。`writer_reviewer` 是独立 LLM 审校模块，不是规则硬编码评分。
 
-### C. LLM 文本保真和模块注册仍在继续调整
-当前涉及：
-- `backend/app/services/llm_module_registry.py`
-- `backend/app/utils/llm_client.py`
+### LLM Facility
 
-判断：
-- 大概率是为 writer / draft agent / worldline 这些更复杂的生成链路服务
+所有 LLM 调用必须通过模块绑定。不要新增旧式单组环境变量 fallback。模块未绑定应显式失败或在 UI 中明确提示。
 
-## 当前最重要的已知问题
-### 1. 当前 shell 不保证有 `uv`
-本机直接运行 `uv` 会报 `command not found`，后续 AI 不要默认依赖 `uv run pytest`。
+## 开发硬约束
 
-### 2. 中文路径下虚拟环境可能触发编码问题
-仓库路径是：`/Users/项目/MiroFish-Novel`
-如果直接运行：
-- `/Users/项目/MiroFish-Novel/.venv/bin/python -m pytest ...`
-可能触发 `UnicodeDecodeError`。
+- 不添加 mock 成功、静默 fallback、吞错、隐式降级或伪数据路径。
+- 不为“跑通”新增随意边界、上限、硬截断；必要限制必须显式、可配置、可解释。
+- 不把 API Key、用户小说原文、数据库、上传产物或 LLM trace 泄露到 git。
+- 不直接拼接用户输入到 SQL 或 shell；数据库访问使用参数化查询和 repository。
+- 不在新代码中引入 Twitter / Reddit / 舆情分析等上游旧项目语义。
+- 不直接编辑已应用 Alembic revision；schema 变化新增 revision。
+- 后端单测建议加 60 秒超时，避免卡死。
 
-已验证可行的绕过方式：显式加 `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1`
+## 质量基线
 
-### 3. Writer 正文生成仍在收口中
-当前状态应理解为：
-- `Chapter Context Pack` 与记忆审核已是稳定主链
-- “多 Agent 直接产出正文”已开始落地
-- 但正文生成还不应被视为最终稳定形态
+- 函数保持短小，超过约 50 行优先拆分。
+- 文件按职责拆分，避免继续堆大文件。
+- 优先依赖注入，业务逻辑不要硬编码具体外部实现。
+- 参数过多时使用 options / config 对象。
+- 默认不可变，不修改入参或全局状态。
+- 修改超过约 50 行代码后，应完整重启前后端验证。
 
-## 与上游 `MiroFish` 的关系
-上游参考项目：本地路径 `/Users/项目/MiroFish`，GitHub `https://github.com/666ghj/MiroFish`。
-允许优先借鉴：文件上传与文本解析、项目持久化与任务状态管理、图谱构建、Zep 实体读取、LLM 封装、前后端工作流编排。
-不要照搬：Twitter / Reddit / 舆情语义、平台指标外壳、不匹配小说领域的 ontology、老旧前端 API 契约。
-迁移原则：先查当前仓库是否已有实现；有现成实现就不要回迁；真要迁移也必须先做“小说语义适配”。
+## 接手顺序
 
-## 后续 AI 的推荐阅读顺序
-如果时间有限，推荐按这个顺序建立上下文：
-1. 先读本文件 `AGENTS.md`
-2. 再读 `README.md`
-3. 再读 `docs/CODEX_HANDOFF_GUIDE.md`
-4. 再看 `git status --short`
-5. 最后才决定是否深入具体源码
+1. 读 `README.md`、本文件和 `CLAUDE.md`。
+2. 运行 `git status --short`，确认是否有用户未提交改动。
+3. 若涉及数据源，读 `docs/database/database-source-of-truth-matrix.md`。
+4. 若涉及 API，查 `docs/fastapi-route-manifest.md` 和对应 `api_fastapi` 路由。
+5. 若涉及 Writer，优先读 `backend/app/services/writer_agent/` 与 `frontend/src/pages/writer/`。
+6. 若涉及 Worldline，优先读 `backend/app/services/worldline_*`、`backend/app/services/agents/worldline/` 与 `frontend/src/pages/worldline/`。
 
-如果只想快速理解主链，优先聚焦：`project` 上传与任务、`novel` 的 seed / archive / chapter-context / draft、`worldline` 的 session / step / auto-evolve / interaction、`archive memory review`、前端的 `/writer`、`/worldline`、`/character-console`。
+## 开源维护约定
 
-## 后续开发建议
-### P0：把 Writer 正文生成链路收口
-原因：
-- 当前最接近产品价值闭环的是作者工作台
-- `Chapter Context Pack`、记忆审核、POV 选择已经齐了
-- 多 Agent draft 已开始接入，只差收尾和稳定化
-
-建议动作：明确 draft 请求契约和失败语义；补正文生成成功 / 失败 / 中断 / 重试的端到端测试；明确 revision mode 输入输出契约；把上下文条目点击与记忆时间线联动补完整。
-
-### P1：完成 Worldline 工作台重构并稳定交互
-原因：
-- worldline 是小说推演主场景
-- 结构重构已经开始，半途停下维护成本会更高
-
-建议动作：完成选择栏 / 控制栏 / 导演台三栏协作；保证 session 创建、自动演化、变量注入、timeline 刷新是一套稳定链路；提升角色 roster、当前世界摘要、关键事件摘要的视觉层级。
-
-### P1：补齐 Writer 与 Worldline 的桥
-建议动作：明确 worldline_branch -> writer 的默认上下文策略；区分 canon / candidate / experiment 在写作阶段的注入规则；让“为什么这条记忆进入当前 pack”更可解释。
-
-### P2：提高端到端回归测试代表性
-建议动作：增加 `/writer` 多 Agent 生成链路测试；增加 worldline -> inspiration -> writer 的集成测试；增加前端关键页面 smoke test。
-
-### P2：谨慎决定在线图谱能力是否继续推进
-建议动作：只有在真实需要 Zep 在线能力时再补端到端；在此之前优先打磨本地图谱 + 写作消费链。
-
-## 接手时的执行建议
-如果另一个 AI 接手后要直接开始做事，默认顺序建议是：
-1. 先确认当前 `git status`
-2. 判断这次是否要继续未提交中的 writer / draft / worldline 重构
-3. 如果是，就围绕 `/writer` 和 `draft_agents` 收口
-4. 如果不是，再回到已稳定主链继续推进
-
-不要默认大改：ontology 语义、社媒遗留抽象、多分支世界线设计。
-
-当前真正的价值中心已经转向：
-**作者工作流、单世界推演、记忆审核、正文生成。**
+- PR 必须说明动机、实现范围、验证方式和潜在破坏性。
+- issue 里不要粘贴私有 API Key、完整小说原文或敏感日志。
+- 新功能文档优先落在 `docs/`，用户入口文档更新 `README.md`。
+- Agent 专用接手信息更新本文件；Claude Code 专用导航更新 `CLAUDE.md`。

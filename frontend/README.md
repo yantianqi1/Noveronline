@@ -1,25 +1,63 @@
-# Frontend Placeholder
+# MiroFish-Novel Frontend
 
-前端尚未开始正式迁移。
+React + TypeScript + Vite 前端工作台，提供项目上传、种子分析进度、故事图谱、资产库、worldline、Writer Agent 和 LLM 设施面板。
 
-后续前端目标不是复制旧项目的舆情模拟界面，而是建立新的小说工作台，包含：
+## 技术栈
 
-- 小说项目主页
-- 角色 / 势力 / 关系图谱视图
-- 变量注入面板
-- 平行世界分支视图
-- 世界线演化时间轴
-- 角色 / 组织对话与控制面板
-- 创作灵感与剧情报告页
+- React 19
+- TypeScript
+- Vite 6
+- React Router 7
+- TanStack Query 5
+- Zustand
+- Tailwind CSS 4
+- D3.js
+- shadcn/ui、Base UI、Radix primitives
 
-在后续迁移中，优先复用旧项目的：
+## 启动
 
-- 图谱可视化思路
-- 多步骤工作流结构
-- 报告阅读与互动结构
+```bash
+npm install
+npm run dev
+```
 
-但不应原样复制旧项目的：
+默认访问地址：`http://localhost:3999`。开发服务器会把 `/api` 代理到 `http://127.0.0.1:3888`。
 
-- Twitter / Reddit 术语
-- 舆情传播界面
-- 社交平台导向的指标展示
+## 常用命令
+
+```bash
+npm run lint    # TypeScript 类型检查
+npm run build   # 生产构建
+npm run test    # Vitest
+```
+
+## 目录结构
+
+```text
+src/
+  pages/       路由页面和页面专属组件
+  components/ 共享业务组件与 ui primitives
+  api/         后端 API 客户端和 SSE 客户端
+  stores/      Zustand store
+  hooks/       共享 React hooks
+  lib/         工具函数
+  types/       TypeScript 类型
+  router.tsx   路由表
+```
+
+## 页面入口
+
+- `/`：项目概览、上传与 seed pipeline。
+- `/assets`：统一资产库。
+- `/story-graph`：故事图谱与图谱构建。
+- `/worldline`：单世界推演工作台。
+- `/writer`：写作工作台。
+- `/llm-facility`：LLM 渠道、模型和模块绑定。
+- `/archive-library`：兼容旧路径，重定向到 `/assets`。
+
+## 开发约定
+
+- API 类型优先放在 `src/types/`，请求封装放在 `src/api/`。
+- 新页面采用 `src/pages/<route>/page.tsx` 结构。
+- 长轮询或流式事件使用 `src/api/sse.ts`。
+- 不在前端源码中写入 API Key；LLM Key 由后端设施面板持久化并在 UI 中遮罩显示。
