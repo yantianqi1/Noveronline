@@ -1,0 +1,10 @@
+{
+  "name": "@mirofish/contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check:openapi": "echo \"Validate apps/api/openapi.yaml against the contract toolchain\"",
+    "generate:typescript": "echo \"Generate typed client into packages/contracts/typescript\""
+  }
+}

@@ -175,6 +175,18 @@ docs/
 - [手稿阅读模式设计](./docs/superpowers/specs/2026-04-04-manuscript-reading-mode-design.md)
 - [大纲版本管理设计](./docs/superpowers/specs/2026-04-05-outline-versioning-design.md)
 
+## 重构参考
+
+- [重构总控与并行执行总览](./重构方案/00-重构总控与并行执行总览.md)
+- [前端完整重构方案](./重构方案/13-前端完整重构方案.md)
+- [后端完整重构方案](./重构方案/14-后端完整重构方案.md)
+- [Codex 接手指南](./docs/CODEX_HANDOFF_GUIDE.md)
+- [迁移设计文档](./docs/plans/2026-03-19-mirofish-novel-design.md)
+- [迁移执行计划](./docs/plans/2026-03-19-mirofish-novel-migration-plan.md)
+- [整次换新栈重构设计](./docs/plans/2026-04-11-mirofish-novel-full-rebuild-design.md)
+- [整次换新栈重构实施计划](./docs/plans/2026-04-11-mirofish-novel-full-rebuild-plan.md)
+- [自动生成测试小说示例](./docs/examples/generated_parallel_world_novel.md)
+
 ## License
 
 Private repository.

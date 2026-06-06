@@ -1,0 +1,1283 @@
+openapi: 3.1.0
+info:
+  title: MiroFish-Novel API v2 Baseline
+  version: 0.1.0
+  description: |
+    Rebuild contract baseline for operation, error, and health resources.
+servers:
+  - url: http://127.0.0.1:5102
+tags:
+  - name: system
+  - name: operations
+  - name: workspaces
+  - name: llm
+  - name: graph
+  - name: archive
+  - name: writer
+  - name: worldline
+paths:
+  /api/v2/health:
+    get:
+      operationId: getHealth
+      tags: [system]
+      summary: API health probe
+      responses:
+        "200":
+          description: API is reachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /api/v2/operations/{operationId}:
+    get:
+      operationId: getOperation
+      tags: [operations]
+      summary: Query a durable operation
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Operation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/operations/{operationId}/steps/{stepId}:
+    get:
+      operationId: getOperationStepTrace
+      tags: [operations]
+      summary: Query a step trace by operation and step id
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+        - $ref: "#/components/parameters/StepId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Operation with step trace detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/operations/{operationId}/events:
+    get:
+      operationId: listOperationEvents
+      tags: [operations]
+      summary: Query a persisted operation event log
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Event log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OperationEvent"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/operations/{operationId}/stream:
+    get:
+      operationId: streamOperationEvents
+      tags: [operations]
+      summary: Subscribe to operation SSE events
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}/graph-builds:
+    post:
+      operationId: startGraphBuild
+      tags: [graph]
+      summary: Start a graph build workflow
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Graph build operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}/graph:
+    get:
+      operationId: getWorkspaceGraph
+      tags: [graph]
+      summary: Query the current graph projection
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Graph projection
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}/graph/nodes/{nodeId}:
+    get:
+      operationId: getGraphNode
+      tags: [graph]
+      summary: Query one graph node
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Graph node detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}/graph-template-configs/{templateKey}:
+    patch:
+      operationId: updateGraphTemplateConfig
+      tags: [graph]
+      summary: Update a graph template config
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TemplateKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Template config updated
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces:
+    get:
+      operationId: listWorkspaces
+      tags: [workspaces]
+      summary: List workspaces
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Workspace list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}:
+    get:
+      operationId: getWorkspace
+      tags: [workspaces]
+      summary: Query one workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Workspace detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}/ingests:
+    post:
+      operationId: createWorkspaceIngest
+      tags: [workspaces]
+      summary: Create one ingest workflow
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Ingest operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/llm/settings:
+    get:
+      operationId: getLlmSettings
+      tags: [llm]
+      summary: Query llm facility settings
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: LLM settings snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/llm/channels:
+    post:
+      operationId: createLlmChannel
+      tags: [llm]
+      summary: Create llm channel
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: LLM channel created
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/llm/channels/{channelKey}:
+    patch:
+      operationId: updateLlmChannel
+      tags: [llm]
+      summary: Update llm channel
+      parameters:
+        - $ref: "#/components/parameters/ChannelKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: LLM channel updated
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteLlmChannel
+      tags: [llm]
+      summary: Delete llm channel
+      parameters:
+        - $ref: "#/components/parameters/ChannelKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: LLM channel deleted
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/llm/channels/{channelKey}/model-syncs:
+    post:
+      operationId: syncLlmModels
+      tags: [llm]
+      summary: Start llm model sync
+      parameters:
+        - $ref: "#/components/parameters/ChannelKey"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Model sync accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/llm/module-bindings/{moduleKey}:
+    put:
+      operationId: bindLlmModule
+      tags: [llm]
+      summary: Bind module to llm channel/model
+      parameters:
+        - $ref: "#/components/parameters/ModuleKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Module binding updated
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteLlmModuleBinding
+      tags: [llm]
+      summary: Delete module binding
+      parameters:
+        - $ref: "#/components/parameters/ModuleKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Module binding deleted
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/llm/activity:
+    get:
+      operationId: getLlmActivity
+      tags: [llm]
+      summary: Query llm activity
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: LLM activity projection
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archives:
+    get:
+      operationId: listArchives
+      tags: [archive]
+      summary: List archives
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Archive list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archives/{archiveId}:
+    get:
+      operationId: getArchive
+      tags: [archive]
+      summary: Query one archive
+      parameters:
+        - $ref: "#/components/parameters/ArchiveId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Archive detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archives/{archiveId}/memories:
+    get:
+      operationId: listArchiveMemories
+      tags: [archive]
+      summary: List archive memories
+      parameters:
+        - $ref: "#/components/parameters/ArchiveId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Archive memories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archives/{archiveId}/memory-events:
+    get:
+      operationId: listArchiveMemoryEvents
+      tags: [archive]
+      summary: List archive memory events
+      parameters:
+        - $ref: "#/components/parameters/ArchiveId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Archive memory events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archives/{archiveId}/memory-adoptions:
+    post:
+      operationId: adoptArchiveMemory
+      tags: [archive]
+      summary: Adopt archive memory
+      parameters:
+        - $ref: "#/components/parameters/ArchiveId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Archive memory adopted
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archives/{archiveId}/memory-rejections:
+    post:
+      operationId: rejectArchiveMemory
+      tags: [archive]
+      summary: Reject archive memory
+      parameters:
+        - $ref: "#/components/parameters/ArchiveId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Archive memory rejected
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/archive-maintenance/reindex:
+    post:
+      operationId: reindexArchiveLibrary
+      tags: [archive]
+      summary: Reindex archive library
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "202":
+          description: Reindex accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/chapter-context/options:
+    get:
+      operationId: getChapterContextOptions
+      tags: [writer]
+      summary: Query chapter context options
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Chapter context options
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/chapter-context/builds:
+    post:
+      operationId: buildChapterContext
+      tags: [writer]
+      summary: Build chapter context
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Chapter context build accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/drafts:
+    post:
+      operationId: createDraft
+      tags: [writer]
+      summary: Start draft generation
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Draft generation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/drafts/{draftId}/revisions:
+    post:
+      operationId: reviseDraft
+      tags: [writer]
+      summary: Start draft revision
+      parameters:
+        - $ref: "#/components/parameters/DraftId"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Draft revision accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/drafts/{draftId}/finalizations:
+    post:
+      operationId: finalizeDraft
+      tags: [writer]
+      summary: Finalize one draft
+      parameters:
+        - $ref: "#/components/parameters/DraftId"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Draft finalized
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/workspaces/{workspaceId}/reviewer-rules:
+    get:
+      operationId: getReviewerRules
+      tags: [writer]
+      summary: Query reviewer rules
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Reviewer rules
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: saveReviewerRules
+      tags: [writer]
+      summary: Save reviewer rules
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                custom_prompt:
+                  type: string
+              required: [custom_prompt]
+      responses:
+        "200":
+          description: Reviewer rules saved
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/preparations:
+    post:
+      operationId: createPreparation
+      tags: [worldline]
+      summary: Create worldline preparation
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Preparation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/preparations/{preparationId}:
+    get:
+      operationId: getPreparation
+      tags: [worldline]
+      summary: Query worldline preparation
+      parameters:
+        - $ref: "#/components/parameters/PreparationId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Preparation detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/preparations/{preparationId}/agents:
+    get:
+      operationId: getPreparationAgents
+      tags: [worldline]
+      summary: Query preparation agents
+      parameters:
+        - $ref: "#/components/parameters/PreparationId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Preparation agents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/preparations/{preparationId}/start:
+    post:
+      operationId: startPreparation
+      tags: [worldline]
+      summary: Start session from preparation
+      parameters:
+        - $ref: "#/components/parameters/PreparationId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "202":
+          description: Preparation start accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions:
+    get:
+      operationId: listWorldlineSessions
+      tags: [worldline]
+      summary: List worldline sessions
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createWorldlineSession
+      tags: [worldline]
+      summary: Create worldline session
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Session accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}:
+    get:
+      operationId: getWorldlineSession
+      tags: [worldline]
+      summary: Query one worldline session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Session detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/timeline:
+    get:
+      operationId: getWorldlineTimeline
+      tags: [worldline]
+      summary: Query worldline timeline
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Timeline events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/commands/advance:
+    post:
+      operationId: advanceWorldline
+      tags: [worldline]
+      summary: Advance worldline
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "202":
+          description: Advance accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/commands/inject-variable:
+    post:
+      operationId: injectWorldlineVariable
+      tags: [worldline]
+      summary: Inject one worldline variable
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "202":
+          description: Variable injection accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/commands/agent-actions:
+    post:
+      operationId: createAgentAction
+      tags: [worldline]
+      summary: Submit agent action
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "202":
+          description: Agent action accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/commands/agent-dialogues:
+    post:
+      operationId: createAgentDialogue
+      tags: [worldline]
+      summary: Submit agent dialogue
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "202":
+          description: Agent dialogue accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/agents/{agentId}:
+    get:
+      operationId: getSessionAgent
+      tags: [worldline]
+      summary: Query one session agent
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/AgentId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Session agent detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/agent-history:
+    get:
+      operationId: getAgentHistory
+      tags: [worldline]
+      summary: Query agent history
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Agent history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/agent-actions:
+    get:
+      operationId: listAgentActions
+      tags: [worldline]
+      summary: Query agent actions
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Agent actions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/agent-memory:
+    get:
+      operationId: getAgentMemory
+      tags: [worldline]
+      summary: Query agent memory
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Agent memory
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/agent-memory-context:
+    get:
+      operationId: getAgentMemoryContext
+      tags: [worldline]
+      summary: Query agent memory context
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Agent memory context
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/agent-dialogues:
+    get:
+      operationId: listAgentDialogues
+      tags: [worldline]
+      summary: Query agent dialogues
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Agent dialogues
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/relations:
+    get:
+      operationId: getRelationHistory
+      tags: [worldline]
+      summary: Query relation history
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Relation history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/event-adoptions:
+    post:
+      operationId: adoptWorldlineEvents
+      tags: [worldline]
+      summary: Adopt or reject candidate events
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Event adoption updated
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/events/{eventId}:
+    patch:
+      operationId: editWorldlineEvent
+      tags: [worldline]
+      summary: Edit one worldline event
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/EventId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Event updated
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/events:
+    get:
+      operationId: listWorldlineEvents
+      tags: [worldline]
+      summary: Query worldline events
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Worldline events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/auto-evolutions:
+    post:
+      operationId: startAutoEvolution
+      tags: [worldline]
+      summary: Start auto evolution
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Auto evolution accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResource"
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v2/worldlines/sessions/{sessionId}/auto-evolutions/{autoEvolutionId}/events:
+    post:
+      operationId: streamAutoEvolution
+      tags: [worldline]
+      summary: Stream auto evolution events
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/AutoEvolutionId"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Auto evolution event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "501":
+          $ref: "#/components/responses/ErrorResponse"
+components:
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema:
+        type: string
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+    NodeId:
+      name: nodeId
+      in: path
+      required: true
+      schema:
+        type: string
+    ChannelKey:
+      name: channelKey
+      in: path
+      required: true
+      schema:
+        type: string
+    ModuleKey:
+      name: moduleKey
+      in: path
+      required: true
+      schema:
+        type: string
+    ArchiveId:
+      name: archiveId
+      in: path
+      required: true
+      schema:
+        type: string
+    DraftId:
+      name: draftId
+      in: path
+      required: true
+      schema:
+        type: string
+    PreparationId:
+      name: preparationId
+      in: path
+      required: true
+      schema:
+        type: string
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+    AgentId:
+      name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      schema:
+        type: string
+    AutoEvolutionId:
+      name: autoEvolutionId
+      in: path
+      required: true
+      schema:
+        type: string
+    StepId:
+      name: stepId
+      in: path
+      required: true
+      schema:
+        type: string
+    TemplateKey:
+      name: templateKey
+      in: path
+      required: true
+      schema:
+        type: string
+    TraceId:
+      name: X-Trace-Id
+      in: header
+      required: false
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+  responses:
+    ErrorResponse:
+      description: Stable error payload
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+        version:
+          type: string
+    ApiError:
+      type: object
+      required: [code, message, details, retryable]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        retryable:
+          type: boolean
+    ErrorResponse:
+      type: object
+      required: [trace_id, error]
+      properties:
+        trace_id:
+          type: string
+        error:
+          $ref: "#/components/schemas/ApiError"
+    OperationStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, cancelled]
+    OperationStepStatus:
+      type: string
+      enum: [pending, running, succeeded, failed, skipped]
+    OperationStep:
+      type: object
+      required: [step_id, stage, status, progress_percent]
+      properties:
+        step_id:
+          type: string
+        stage:
+          type: string
+        status:
+          $ref: "#/components/schemas/OperationStepStatus"
+        progress_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        elapsed_ms:
+          type: integer
+          nullable: true
+    OperationEvent:
+      type: object
+      required: [event_id, operation_id, type, emitted_at, payload]
+      properties:
+        event_id:
+          type: string
+        operation_id:
+          type: string
+        type:
+          type: string
+          enum:
+            - operation.started
+            - operation.progress
+            - operation.step.updated
+            - operation.completed
+            - operation.failed
+        emitted_at:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: true
+    OperationResource:
+      type: object
+      required:
+        - operation_id
+        - trace_id
+        - status
+        - progress_percent
+        - retryable
+        - steps
+      properties:
+        operation_id:
+          type: string
+        trace_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/OperationStatus"
+        progress_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+          nullable: true
+        retryable:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationStep"
