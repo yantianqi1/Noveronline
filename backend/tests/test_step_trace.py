@@ -237,6 +237,34 @@ class TestProgressTrackerSteps:
 
         TaskManager._instance = None
 
+    def test_sync_worker_updates_do_not_depend_on_cached_request_loop(self, monkeypatch, tmp_path):
+        """Seed worker progress writes must survive TestClient request-loop teardown."""
+        import asyncio
+        from app.config import Config
+        from app.models.task import TaskManager
+        from app.services.seed_task_progress import SeedTaskProgressTracker
+
+        monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path / "uploads"))
+        TaskManager._instance = None
+
+        tm = TaskManager()
+        task_id = asyncio.run(tm.create_task(task_type="test", metadata={}))
+        tracker = SeedTaskProgressTracker(tm, task_id, use_llm=False)
+
+        def cancelled_request_loop(_coro):
+            raise AssertionError("cached request loop was used")
+
+        monkeypatch.setattr(tm, "sync_bridge", cancelled_request_loop)
+
+        tracker.enter_stage("index_rebuild", "正在重建全局索引", 99)
+
+        task = asyncio.run(tm.get_task(task_id))
+        assert task.status.value == "processing"
+        assert task.progress == 99
+        assert task.message == "正在重建全局索引"
+
+        TaskManager._instance = None
+
     def test_end_step_has_trace_false_when_write_fails(self, monkeypatch, tmp_path):
         """write_step_bundle 静默失败时，emit 的 has_trace 必须是 False，
         否则前端拉取 trace bundle 时会得到误导性的 404 trace_unavailable。"""

@@ -107,6 +107,6 @@ def test_seed_runner_records_unified_db_ready_note(monkeypatch):
     assert captured == {
         "stage": "agent_profiles",
         "title": "统一数据库已就绪",
-        "detail": "后续写作与检索将直接使用主库，不再回填 legacy novel.sqlite3",
+        "detail": "后续写作与检索将直接使用主库，不再回填旧小说库",
         "meta": {"kind": "migration", "target": "unified_db"},
     }

@@ -1,5 +1,6 @@
 """本地图谱构建后台任务逻辑。"""
 
+import asyncio
 import traceback
 from typing import Any, Dict, List
 
@@ -17,6 +18,21 @@ _STAGE_FLOOR = {
     "persist": 92,
     "finalize": 100,
 }
+
+
+def _run_task_coro(task_manager, coro):
+    """Run TaskManager updates from the graph worker thread.
+
+    ``run_graph_build`` is dispatched through ``asyncio.to_thread``. Using the
+    request loop cached in ``TaskManager.sync_bridge`` makes these writes
+    vulnerable to TestClient/portal cancellation after the HTTP response
+    returns, so worker-thread updates get their own short-lived loop.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    return task_manager.sync_bridge(coro)
 
 
 def _build_progress_callback(service, task_id: str):
@@ -41,7 +57,7 @@ def _build_progress_callback(service, task_id: str):
             task.progress = progress
             task.message = stage  # 前端用 buildStageMeta 翻译
 
-        task_manager.sync_bridge(task_manager.mutate_task(task_id, _mutate))
+        _run_task_coro(task_manager, task_manager.mutate_task(task_id, _mutate))
 
     return _callback
 
@@ -58,7 +74,7 @@ def run_graph_build(
 ):
     """Sync worker — expected to run inside ``asyncio.to_thread``."""
     task_manager = service.task_manager
-    task_manager.sync_bridge(task_manager.update_task(
+    _run_task_coro(task_manager, task_manager.update_task(
         task_id,
         status=TaskStatus.PROCESSING,
         progress=0,
@@ -75,7 +91,7 @@ def run_graph_build(
         )
         graph_info = service.get_graph_info(snapshot.graph_id)
         _complete_graph_project(project_id, snapshot.graph_id)
-        task_manager.sync_bridge(task_manager.complete_task(task_id, {
+        _run_task_coro(task_manager, task_manager.complete_task(task_id, {
             "graph_id": snapshot.graph_id,
             "graph_info": graph_info.to_dict(),
             "node_count": snapshot.node_count,
@@ -97,9 +113,9 @@ def run_graph_build(
                 "failed_after": task.metadata.get("latest_stage", ""),
             })
             task.metadata["stages"] = stages
-        task_manager.sync_bridge(task_manager.mutate_task(task_id, _mutate_failed))
+        _run_task_coro(task_manager, task_manager.mutate_task(task_id, _mutate_failed))
         _fail_graph_project(project_id, error_msg)
-        task_manager.sync_bridge(task_manager.fail_task(task_id, error_msg))
+        _run_task_coro(task_manager, task_manager.fail_task(task_id, error_msg))
 
 
 def _complete_graph_project(project_id: str, graph_id: str) -> None:

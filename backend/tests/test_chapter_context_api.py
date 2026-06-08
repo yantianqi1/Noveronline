@@ -1,6 +1,10 @@
 from app import create_app
 from app.config import Config
+from app.database import get_engine
 from app.models.project import ProjectManager
+from app.repositories.narrative_repo import NarrativeRepository
+from app.repositories.world_rule_repo import WorldRuleRepository
+from app.services.chapter_meta_service import ChapterMetaService
 
 
 def _configure_storage(tmp_path, monkeypatch):
@@ -159,6 +163,51 @@ def _seed_writer_project(project):
             ],
         },
     )
+    ProjectManager.save_project_setting(
+        project.project_id,
+        "chapter_continuity_summary",
+        "沈夜逐步逼近镜湖真相。",
+    )
+    ChapterMetaService().replace_project_chapter_cards(
+        project.project_id,
+        [
+            {
+                "chapter_id": "chapter_0001",
+                "chapter_order": 1,
+                "title": "起疑",
+                "summary_text": "密信让沈夜转向废塔线索。",
+                "start_anchor": "沈夜刚拿到密信。",
+                "end_anchor": "秦昭现身。",
+                "key_events": [{"summary": "密信指向玄霄宗旧案。"}],
+                "open_threads": [
+                    {"thread_key": "镜湖真相", "summary": "顾行舟如何利用镜湖引擎仍未查明。"}
+                ],
+            },
+            {
+                "chapter_id": "chapter_0002",
+                "chapter_order": 2,
+                "title": "废塔",
+                "summary_text": "废塔残响把冲突推向镜湖谷。",
+                "start_anchor": "秦昭带沈夜潜入废塔。",
+                "end_anchor": "镜湖谷可能提前封锁。",
+                "key_events": [{"summary": "顾行舟已调整试炼顺序。"}],
+                "open_threads": [
+                    {"thread_key": "镜湖真相", "summary": "顾行舟如何利用镜湖引擎仍未查明。"}
+                ],
+            },
+        ],
+    )
+    WorldRuleRepository(get_engine()).upsert_world_rule(
+        project.project_id,
+        {
+            "evidence_id": "fixture_api_world_rule",
+            "fact_text": "镜湖引擎会记录修士识海残痕。",
+            "segment_id": "fixture",
+            "chapter_order": 2,
+            "evidence_snippet": "镜湖引擎会记录修士识海残痕。",
+            "created_at": "2026-04-25T00:00:00",
+        },
+    )
     ProjectManager.save_project_json(
         project.project_id,
         "consistency_report.json",
@@ -168,6 +217,16 @@ def _seed_writer_project(project):
             "conflicts": [],
             "ambiguities": [{"alias": "夜哥", "candidate_names": ["沈夜", "沈临川"], "reason": "别名歧义"}],
             "summary": "存在 1 条歧义。",
+        },
+    )
+    NarrativeRepository(get_engine()).upsert_consistency_note(
+        project.project_id,
+        {
+            "note_id": "fixture_api_consistency_ambiguity",
+            "segment_id": "fixture",
+            "chapter_order": 2,
+            "note_text": "夜哥 的指代存在歧义：别名歧义 候选：沈夜、沈临川",
+            "created_at": "2026-04-25T00:00:00",
         },
     )
     _save_archive_payload(project)

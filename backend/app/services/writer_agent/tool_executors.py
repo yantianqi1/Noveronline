@@ -18,6 +18,7 @@ from sqlalchemy import and_, insert, or_, select, update
 
 from ...config import Config
 from ...database import get_engine
+from ...models.project import ProjectManager
 from ...schemas.asset_types import AssetType
 from ...repositories import (
     ChapterRepository,
@@ -2267,13 +2268,10 @@ def _query_segment_summaries(params: dict, project_id: str) -> str:
 
 
 def _get_story_ontology(params: dict, project_id: str) -> str:
-    proj_dir = os.path.join(Config.UPLOAD_FOLDER, "projects", project_id)
-    proj_path = os.path.join(proj_dir, "project.json")
-    if not os.path.isfile(proj_path):
+    project = ProjectManager.get_project(project_id)
+    if not project:
         return "未找到项目本体论数据"
-    with open(proj_path, encoding="utf-8") as f:
-        project = json.load(f)
-    ontology = project.get("ontology", {})
+    ontology = project.ontology or {}
     if not ontology:
         return "未找到本体论定义"
     kind = params.get("kind", "all")
@@ -2555,12 +2553,6 @@ def _query_event(params: dict, project_id: str) -> str:
             if snippet:
                 lines.append(f"佐证: {snippet}")
     return "\n".join(lines)
-
-
-def _has_table(conn, name: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone() is not None
 
 
 def _query_relationship_network(params: dict, project_id: str) -> str:

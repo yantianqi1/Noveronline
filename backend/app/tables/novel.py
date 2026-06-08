@@ -75,8 +75,16 @@ agent_states = table("agent_states", text_col("state_id", primary_key=True), pro
 agent_memory = table("agent_memory", text_col("memory_id", primary_key=True), project_id(), text_col("session_id", nullable=False), text_col("branch_id", nullable=False, default="'main'"), text_col("entity_id", nullable=False), text_col("memory_type", nullable=False), text_col("summary", nullable=False), text_col("detail_json"), float_col("salience", default="0"), text_col("source_kind"), text_col("created_at", nullable=False))
 world_events = table("world_events", text_col("event_id", primary_key=True), project_id(), text_col("session_id", nullable=False), text_col("branch_id", nullable=False, default="'main'"), int_col("step", nullable=False), text_col("title", nullable=False), text_col("summary", nullable=False), text_col("event_type"), text_col("driving_entities_json", default="'[]'"), text_col("state_changes_json", default="'[]'"), text_col("status", default="'canon'"), text_col("created_at", nullable=False))
 plot_threads = table("plot_threads", text_col("thread_id", primary_key=True), project_id(), text_col("thread_key", nullable=False), text_col("status", nullable=False, default="'open'"), text_col("detail", nullable=False, default="''"), text_col("source_chapter"), text_col("created_at", nullable=False), text_col("updated_at", nullable=False))
-narrative_arcs = table("narrative_arcs", text_col("arc_id", primary_key=True), project_id(), text_col("summary", nullable=False), text_col("covered_segments_json", default="'[]'"), text_col("created_at", nullable=False))
-project_meta = table("project_meta", project_id(), text_col("narrative_phase"), int_col("total_segments", default="0"), text_col("updated_at", nullable=False), composite_pk("project_id"))
+narrative_arcs = table("narrative_arcs", project_id(), text_col("arc_id", nullable=False), text_col("summary", nullable=False), text_col("covered_segments_json", default="'[]'"), text_col("created_at", nullable=False), composite_pk("project_id", "arc_id"))
+project_meta = table(
+    "project_meta",
+    project_id(),
+    text_col("project_json"),
+    text_col("narrative_phase"),
+    int_col("total_segments", default="0"),
+    text_col("updated_at", nullable=False),
+    composite_pk("project_id"),
+)
 project_artifacts = table(
     "project_artifacts",
     project_id(),
@@ -92,7 +100,7 @@ relationship_events = table("relationship_events", text_col("event_id", primary_
 thread_lifecycle = table("thread_lifecycle", text_col("lifecycle_id", primary_key=True), project_id(), text_col("thread_key", nullable=False), text_col("segment_id", nullable=False, default="''"), int_col("chapter_order", default="0"), text_col("status", nullable=False, default="'open'"), text_col("detail", default="''"), text_col("resolution_detail", default="''"), text_col("created_at", nullable=False))
 world_rule_evidence = table("world_rule_evidence", text_col("evidence_id", primary_key=True), project_id(), text_col("fact_text", nullable=False), text_col("segment_id", nullable=False, default="''"), int_col("chapter_order", default="0"), text_col("evidence_snippet", default="''"), text_col("created_at", nullable=False))
 consistency_notes = table("consistency_notes", text_col("note_id", primary_key=True), project_id(), text_col("segment_id", nullable=False, default="''"), int_col("chapter_order", default="0"), text_col("note_text", nullable=False), text_col("created_at", nullable=False))
-volume_summaries = table("volume_summaries", text_col("volume_id", primary_key=True), project_id(), int_col("volume_order", nullable=False), text_col("summary", nullable=False), text_col("covered_arcs_json", default="'[]'"), text_col("created_at", nullable=False))
+volume_summaries = table("volume_summaries", project_id(), text_col("volume_id", nullable=False), int_col("volume_order", nullable=False), text_col("summary", nullable=False), text_col("covered_arcs_json", default="'[]'"), text_col("created_at", nullable=False), composite_pk("project_id", "volume_id"))
 segment_summaries = table("segment_summaries", project_id(), text_col("segment_id", nullable=False), int_col("segment_order", nullable=False, default="0"), text_col("summary", nullable=False), text_col("created_at", nullable=False), composite_pk("project_id", "segment_id"))
 outline_versions = table("outline_versions", text_col("version_id", primary_key=True), project_id(), text_col("chapter_id", nullable=False), text_col("outline_json", nullable=False), text_col("label", default="''"), text_col("created_at", nullable=False))
 thread_entity_links = table("thread_entity_links", project_id(), text_col("thread_id", nullable=False), text_col("entity_id", nullable=False), text_col("role", default="'involved'"), text_col("created_at", nullable=False), composite_pk("project_id", "thread_id", "entity_id"))

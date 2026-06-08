@@ -1,6 +1,7 @@
 """ChapterMetaService 单元测试。"""
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine
 
 from app.database import init_db
 from app.repositories.chapter_repo import ChapterRepository
+from app.repositories.world_rule_repo import WorldRuleRepository
 from app.services.chapter_meta_service import ChapterMetaService
 
 
@@ -84,6 +86,42 @@ class TestChapterMetaServiceWrite:
         assert result["summary_text"] == "新摘要"
         assert result["title"] == "更新后"
 
+    def test_replace_project_chapter_cards_persists_world_rules_to_db(
+        self, engine, service, monkeypatch
+    ):
+        """章节卡入口携带的世界规则应写入 world_rule_evidence。"""
+        from app.services import chapter_meta_service as service_module
+
+        service.replace_project_chapter_cards(
+            "proj_rules_from_cards",
+            [
+                {
+                    "chapter_id": "chapter_0001",
+                    "chapter_order": 1,
+                    "title": "镜湖旧祠",
+                    "summary_text": "沈夜进入旧祠。",
+                }
+            ],
+            world_rules=["镜湖城内夜间禁用传讯符。", "", "沈家血脉能感知旧案残响。"],
+        )
+
+        rows = WorldRuleRepository(engine).list_rules("proj_rules_from_cards")
+        assert [row["fact_text"] for row in rows] == [
+            "镜湖城内夜间禁用传讯符。",
+            "沈家血脉能感知旧案残响。",
+        ]
+
+        def fail_artifact_probe(_project_id: str, artifact_name: str):
+            raise AssertionError(f"chapter meta should not load artifact {artifact_name}")
+
+        monkeypatch.setattr(
+            service_module, "load_project_artifact", fail_artifact_probe, raising=False
+        )
+        assert service.get_world_rules("proj_rules_from_cards") == [
+            "镜湖城内夜间禁用传讯符。",
+            "沈家血脉能感知旧案残响。",
+        ]
+
     def test_multiple_chapters(self, service):
         """多章保存后按顺序取回。"""
         for i in range(5):
@@ -148,6 +186,38 @@ class TestChapterContinuityContext:
         assert "敌人身份不明" in anchor["open_threads"]
         assert anchor["timeline_note"] == "第一天清晨"
 
+    def test_prev_chapter_ending_uses_structured_end_anchor_without_artifact(
+        self, service, monkeypatch
+    ):
+        """无正文时，上一章结尾应来自 chapter_meta.end_anchor。"""
+        from app.services import chapter_meta_service as service_module
+
+        service.upsert_chapter_card(
+            "proj_prev_anchor",
+            {
+                "chapter_id": "chapter_0001",
+                "chapter_order": 1,
+                "title": "镜湖旧祠",
+                "summary_text": "沈夜进入旧祠。",
+                "start_anchor": "旧祠门前风铃无声。",
+                "end_anchor": "沈夜在香灰下摸到半枚镜湖令。",
+            },
+        )
+
+        def fail_artifact_probe(_project_id: str, artifact_name: str):
+            raise AssertionError(f"chapter meta should not load artifact {artifact_name}")
+
+        monkeypatch.setattr(
+            service_module, "load_project_artifact", fail_artifact_probe, raising=False
+        )
+
+        ctx = service.get_chapter_continuity_context("proj_prev_anchor", 2)
+
+        assert (
+            ctx["continuity_anchor"]["prev_chapter_ending"]
+            == "沈夜在香灰下摸到半枚镜湖令。"
+        )
+
     def test_lookback_limited_to_three(self, service):
         """回溯最多3章。"""
         for i in range(6):
@@ -195,3 +265,87 @@ class TestChapterContinuityContext:
         anchor = ctx["continuity_anchor"]
         assert anchor["prev_chapter_ending"] == ""
         assert anchor["chapter_summaries"] == []
+
+    def test_world_rules_read_from_structured_db_without_artifact(self, engine, service):
+        """世界规则应优先从 world_rule_evidence 表读取。"""
+        now = datetime.now().isoformat()
+        rules = WorldRuleRepository(engine)
+        rules.upsert_world_rule(
+            "proj_rules_db",
+            {
+                "evidence_id": "rule_001",
+                "fact_text": "镜湖城内夜间禁用传讯符。",
+                "segment_id": "seg_001",
+                "chapter_order": 1,
+                "evidence_snippet": "城规写明夜间禁符。",
+                "created_at": now,
+            },
+        )
+        rules.upsert_world_rule(
+            "proj_rules_db",
+            {
+                "evidence_id": "rule_002",
+                "fact_text": "沈家血脉能感知旧案残响。",
+                "segment_id": "seg_002",
+                "chapter_order": 2,
+                "evidence_snippet": "沈夜听见旧案残响。",
+                "created_at": now,
+            },
+        )
+
+        assert service.get_world_rules("proj_rules_db") == [
+            "镜湖城内夜间禁用传讯符。",
+            "沈家血脉能感知旧案残响。",
+        ]
+
+    def test_world_rules_do_not_fall_back_to_story_memory_artifact(
+        self, service, monkeypatch
+    ):
+        """无结构化世界规则时，运行时不应读取 story_memory artifact。"""
+        from app.services import chapter_meta_service as service_module
+
+        def fail_artifact_probe(_project_id: str, artifact_name: str):
+            raise AssertionError(f"chapter meta should not load artifact {artifact_name}")
+
+        monkeypatch.setattr(
+            service_module, "load_project_artifact", fail_artifact_probe, raising=False
+        )
+
+        assert service.get_world_rules("proj_no_rules") == []
+
+    def test_prev_chapter_ending_reads_from_chapter_content_without_artifact(
+        self, repo, service
+    ):
+        """上一章结尾应从 chapter_content.content 读取。"""
+        repo.create_chapter(
+            "proj_prev_db",
+            "chapter_0001",
+            chapter_order=1,
+            title="密信初现",
+        )
+        repo.update_chapter(
+            "proj_prev_db",
+            "chapter_0001",
+            content="沈夜翻开密信，发现落款早已被水浸花。线索最终指向镜湖旧祠。",
+            word_count=32,
+            status="draft",
+        )
+
+        assert service._get_prev_chapter_ending("proj_prev_db", 2).endswith(
+            "线索最终指向镜湖旧祠。"
+        )
+
+    def test_prev_chapter_ending_does_not_fall_back_to_chapter_segments_artifact(
+        self, service, monkeypatch
+    ):
+        """缺少上一章结构化正文/锚点时，运行时不应读取 chapter_segments artifact。"""
+        from app.services import chapter_meta_service as service_module
+
+        def fail_artifact_probe(_project_id: str, artifact_name: str):
+            raise AssertionError(f"chapter meta should not load artifact {artifact_name}")
+
+        monkeypatch.setattr(
+            service_module, "load_project_artifact", fail_artifact_probe, raising=False
+        )
+
+        assert service._get_prev_chapter_ending("proj_prev_missing", 2) == ""

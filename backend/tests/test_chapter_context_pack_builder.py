@@ -1,3 +1,5 @@
+from app.database import get_engine
+from app.repositories.narrative_repo import NarrativeRepository
 from app.config import Config
 from app.models.project import ProjectManager
 from app.services.chapter_context_pack_builder import ChapterContextPackBuilder
@@ -206,6 +208,27 @@ def _create_project_with_writer_artifacts():
                 }
             ],
             "summary": "发现 2 条连续性风险。",
+        },
+    )
+    narrative = NarrativeRepository(get_engine())
+    narrative.upsert_consistency_note(
+        project.project_id,
+        {
+            "note_id": "fixture_consistency_conflict",
+            "segment_id": "fixture",
+            "chapter_order": 2,
+            "note_text": "沈临川：残响中再次出现沈临川的声音。",
+            "created_at": "2026-04-25T00:00:00",
+        },
+    )
+    narrative.upsert_consistency_note(
+        project.project_id,
+        {
+            "note_id": "fixture_consistency_ambiguity",
+            "segment_id": "fixture",
+            "chapter_order": 2,
+            "note_text": "夜哥 的指代存在歧义：称呼可能混淆两代人。候选：沈夜、沈临川",
+            "created_at": "2026-04-25T00:00:00",
         },
     )
     ChapterMetaService().replace_project_chapter_cards(

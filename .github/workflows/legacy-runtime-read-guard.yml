@@ -1,0 +1,41 @@
+name: Legacy runtime read guard
+
+on:
+  pull_request:
+    paths:
+      - "backend/app/**"
+      - "backend/scripts/audit_legacy_runtime_reads.py"
+      - "backend/tests/test_legacy_runtime_read_guard.py"
+      - "docs/database/deprecation-checklist.md"
+      - ".github/workflows/legacy-runtime-read-guard.yml"
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - "backend/app/**"
+      - "backend/scripts/audit_legacy_runtime_reads.py"
+      - "backend/tests/test_legacy_runtime_read_guard.py"
+      - "docs/database/deprecation-checklist.md"
+      - ".github/workflows/legacy-runtime-read-guard.yml"
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend test dependencies
+        run: python -m pip install -e './backend[dev]'
+
+      - name: Scan for unauthorized legacy runtime reads
+        working-directory: backend
+        run: python scripts/audit_legacy_runtime_reads.py
+
+      - name: Run guard regression tests
+        working-directory: backend
+        run: python -m pytest tests/test_legacy_runtime_read_guard.py -q

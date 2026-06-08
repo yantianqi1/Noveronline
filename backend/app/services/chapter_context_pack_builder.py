@@ -6,10 +6,10 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ..models.project import ProjectManager
-from ..repositories.project_artifact_repo import load_project_artifact
 from .canon_history_retriever import CanonHistoryRetriever
 from .chapter_context_ranker import ChapterContextRanker, MAX_MUST_KNOW, MAX_SCENES, MAX_SHOULD_KNOW, MAX_WARNINGS
 from .memory_subject_utils import normalize_memory_subject
+from .seed_analysis_read_model import load_seed_analysis_for_project
 from .worldline_engine_factory import build_worldline_engine
 from .worldline_single_world import current_world, resolve_branch_id
 from .writer_prompt_formatter import WriterPromptFormatter
@@ -35,21 +35,21 @@ class ChapterContextPackBuilder:
 
     def build_options(self, project_id: str) -> Dict[str, Any]:
         project = self._require_project(project_id)
-        chapters = self._load_required_artifact(project_id, "chapter_segments")["chapters"]
-        continuity = self._load_required_artifact(project_id, "chapter_continuity")
-        seed_analysis = load_project_artifact(project_id, "seed_analysis") or {}
-        chapter_map = {item["chapter_id"]: item for item in continuity.get("chapters", [])}
-        chapter_options = []
-        for chapter in chapters:
-            chapter_options.append(
-                {
-                    "chapter_id": chapter["chapter_id"],
-                    "order": chapter["order"],
-                    "title": chapter.get("title", chapter["chapter_id"]),
-                    "head_context": chapter_map.get(chapter["chapter_id"], {}).get("head_context", ""),
-                }
-            )
-        pov_characters = [item.get("name", "") for item in seed_analysis.get("characters", []) if item.get("name")]
+        from .chapter_meta_service import ChapterMetaService
+
+        chapter_summaries = ChapterMetaService().get_chapter_summaries(project_id)
+        if chapter_summaries:
+            continuity = self._continuity_from_chapter_summaries(chapter_summaries)
+            chapter_options = self._chapter_options_from_summaries(chapter_summaries)
+        else:
+            chapter_options = []
+            continuity = {"chapter_count": 0, "global_summary": "", "chapters": []}
+        continuity_summary = ProjectManager.load_project_setting(
+            project_id, "chapter_continuity_summary"
+        )
+        if isinstance(continuity_summary, str) and continuity_summary.strip():
+            continuity["global_summary"] = continuity_summary.strip()
+        pov_characters = self._pov_characters(project_id)
         return {
             "project_id": project.project_id,
             "project_name": project.name,
@@ -58,6 +58,55 @@ class ChapterContextPackBuilder:
             "continuity_summary": continuity.get("global_summary", ""),
             "available_scope_types": ["project_chapter", "worldline_branch"],
         }
+
+    def _chapter_options_from_summaries(
+        self, chapter_summaries: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        options = []
+        for chapter in chapter_summaries:
+            chapter_id = chapter["chapter_id"]
+            options.append(
+                {
+                    "chapter_id": chapter_id,
+                    "order": chapter["chapter_order"],
+                    "title": chapter.get("title") or chapter_id,
+                    "head_context": (
+                        chapter.get("start_anchor")
+                        or chapter.get("summary_text")
+                        or ""
+                    ),
+                }
+            )
+        return options
+
+    def _pov_characters(self, project_id: str) -> List[str]:
+        from ..database import get_engine
+        from ..repositories.entity_repo import EntityRepository
+
+        tier_order = {"protagonist": 0, "major": 1, "supporting": 2, "minor": 3}
+        rows = EntityRepository(get_engine()).list_entities_by_type(
+            project_id, "character"
+        )
+        rows.sort(
+            key=lambda row: (
+                tier_order.get(str(row.get("importance_tier") or "").lower(), 99),
+                str(row.get("name") or ""),
+            )
+        )
+        names = [
+            str(row.get("name") or "").strip()
+            for row in rows
+            if str(row.get("name") or "").strip()
+        ]
+        if names:
+            return names
+
+        seed_analysis = load_seed_analysis_for_project(project_id) or {}
+        return [
+            item.get("name", "")
+            for item in seed_analysis.get("characters", [])
+            if item.get("name")
+        ]
 
     def _build_project(self, scope: Dict[str, Any]) -> Dict[str, Any]:
         project_id = scope["project_id"]
@@ -68,7 +117,7 @@ class ChapterContextPackBuilder:
         must_items = self._project_fact_items(scope, story_memory, chapter)
         should_items = self._project_should_items(scope, story_memory, prev_chapter, next_chapter)
         warnings = self._project_warnings(scope, consistency, story_memory)
-        scenes = self._project_scene_candidates(story_memory, chapter, prev_chapter, next_chapter)
+        scenes = self._project_scene_candidates(scope, story_memory, chapter, prev_chapter, next_chapter)
         pack = self._pack_shell(scope)
         pack["must_know"] = self.ranker.rank_items(must_items, scope, MAX_MUST_KNOW)
         pack["should_know"] = self.ranker.rank_items(should_items, scope, MAX_SHOULD_KNOW)
@@ -129,9 +178,17 @@ class ChapterContextPackBuilder:
         for rule in story_memory.get("world_rules", []):
             items.append(self._item("world_rule", rule, "这是写作时不能违背的世界规则。", "story_memory", "world_rules", [scope["pov_character"]], scope, scope_hit=True, scene_hit=self._contains_focus(scope, rule)))
         for event in story_memory.get("event_timeline", []):
-            if event.get("chapter_id") != chapter["chapter_id"]:
+            event_chapter_id = str(event.get("chapter_id") or "").strip()
+            event_chapter_order = int(event.get("chapter_order") or 0)
+            if event_chapter_id and event_chapter_id != chapter["chapter_id"]:
                 continue
-            items.append(self._item("event", event.get("summary", ""), "这是当前章节附近已发生的关键事件。", "story_memory", event.get("event_id", ""), event.get("characters", []), scope, scope_hit=True, pov_hit=scope["pov_character"] in event.get("characters", []), scene_hit=self._contains_focus(scope, event.get("summary", "")), salience=0.8))
+            if not event_chapter_id and event_chapter_order and event_chapter_order != int(chapter.get("order") or 0):
+                continue
+            if event.get("source_kind") == "world_events":
+                event_characters = event.get("characters", [])
+                if scope["pov_character"] not in event_characters and not self._contains_focus(scope, event.get("summary", "")):
+                    continue
+            items.append(self._item("event", event.get("summary", ""), "这是当前章节附近已发生的关键事件。", str(event.get("source_kind") or "story_memory"), event.get("event_id", ""), event.get("characters", []), scope, scope_hit=True, pov_hit=scope["pov_character"] in event.get("characters", []), scene_hit=self._contains_focus(scope, event.get("summary", "")), salience=0.8))
         return items
 
     def _project_scope_fact_items(self, scope: Dict[str, Any], story_memory: Dict[str, Any], continuity: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -176,27 +233,108 @@ class ChapterContextPackBuilder:
                 continue
             text = chapter.get("continuity_summary", "") or chapter.get("head_context", "")
             items.append(self._item("continuity_bridge", text, "帮助维持前后章节连贯。", "chapter_continuity", chapter["chapter_id"], chapter.get("key_characters", []), scope, chapter_distance=distance, pov_hit=scope["pov_character"] in chapter.get("key_characters", [])))
+        items.extend(self._project_pov_state_items(scope))
         for thread in story_memory.get("open_threads", []):
             items.append(self._item("open_thread", thread.get("summary", ""), "这是当前仍未回收的线索。", "story_memory", thread.get("thread_key", ""), [scope["pov_character"]], scope, thread_hit=True, scene_hit=self._contains_focus(scope, thread.get("summary", "")), salience=0.6))
         for relation in story_memory.get("relationship_ledger", []):
             related = [relation.get("source", ""), relation.get("target", "")]
             if scope["pov_character"] not in related:
                 continue
-            items.append(self._item("relationship", f"{relation.get('source', '')} 与 {relation.get('target', '')} 的关系仍在变化。", "人物关系会影响场景张力。", "story_memory", normalize_memory_subject(''.join(related)), related, scope, pov_hit=True, salience=0.7))
+            summary = str(relation.get("description") or relation.get("summary") or "").strip()
+            if not summary:
+                summary = f"{relation.get('source', '')} 与 {relation.get('target', '')} 的关系仍在变化。"
+            items.append(
+                self._item(
+                    "relationship",
+                    summary,
+                    "人物关系会影响场景张力。",
+                    str(relation.get("source_kind") or "story_memory"),
+                    str(relation.get("relation_id") or normalize_memory_subject("".join(related))),
+                    related,
+                    scope,
+                    pov_hit=True,
+                    salience=0.7,
+                )
+            )
         return items
+
+    def _project_pov_state_items(self, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        project_id = str(scope.get("project_id") or "").strip()
+        pov = str(scope.get("pov_character") or "").strip()
+        if not project_id or not pov:
+            return []
+
+        from sqlalchemy import select
+
+        from ..database import get_engine
+        from ..repositories.entity_repo import EntityRepository
+        from ..tables.novel import entity_evidence
+
+        engine = get_engine()
+        entity = EntityRepository(engine).get_entity_by_name(project_id, pov)
+        if not entity:
+            return []
+
+        snippets = []
+        stmt = (
+            select(entity_evidence.c.snippet)
+            .where(
+                (entity_evidence.c.project_id == project_id)
+                & (entity_evidence.c.owner_id == entity.get("entity_id"))
+            )
+            .order_by(entity_evidence.c.created_at.desc())
+            .limit(2)
+        )
+        with engine.connect() as conn:
+            snippets = [
+                str(row.snippet or "").strip()
+                for row in conn.execute(stmt).fetchall()
+                if str(row.snippet or "").strip()
+            ]
+
+        parts = []
+        if entity.get("core_drive"):
+            parts.append(f"核心驱动：{entity['core_drive']}")
+        if entity.get("current_objective"):
+            parts.append(f"当前目标：{entity['current_objective']}")
+        if entity.get("hidden_tension"):
+            parts.append(f"内在张力：{entity['hidden_tension']}")
+        if not parts and entity.get("summary"):
+            parts.append(str(entity["summary"]))
+        if snippets:
+            parts.append("原文证据：" + "；".join(snippets))
+        if not parts:
+            return []
+
+        return [
+            self._item(
+                "pov_state",
+                f"{pov} 当前状态：" + "；".join(parts),
+                "POV 的目标、矛盾和原文证据会约束场景行动。",
+                "entities",
+                str(entity.get("entity_id") or pov),
+                [pov],
+                scope,
+                scope_hit=True,
+                pov_hit=True,
+                salience=0.85,
+            )
+        ]
 
     def _project_warnings(self, scope: Dict[str, Any], consistency: Dict[str, Any], story_memory: Dict[str, Any]) -> List[Dict[str, Any]]:
         items = []
         for item in consistency.get("conflicts", []):
-            items.append(self._item("consistency_risk", f"{item.get('name', '')} 存在连续性冲突。", "需要避免把冲突当作既定事实直接写死。", "consistency_report", item.get("kind", ""), [item.get("name", "")], scope, scope_hit=True, salience=0.9))
+            summary = str(item.get("summary") or f"{item.get('name', '')} 存在连续性冲突。").strip()
+            why = str(item.get("reason") or "需要避免把冲突当作既定事实直接写死。").strip()
+            items.append(self._item("consistency_risk", summary, why, str(item.get("source_kind") or "consistency_report"), str(item.get("source_ref") or item.get("kind") or ""), [item.get("name", "")], scope, scope_hit=True, salience=0.9))
         for item in consistency.get("ambiguities", []):
             items.append(self._item("consistency_risk", f"{item.get('alias', '')} 的指代存在歧义。", item.get("reason", "需要消歧。"), "consistency_report", item.get("alias", ""), item.get("candidate_names", []), scope, scope_hit=True, salience=0.75))
         if story_memory.get("open_threads"):
             items.append(self._item("open_thread_risk", "仍有未回收线索悬置。", "新场景需要确认是否继续推进旧线索。", "story_memory", "open_threads", [scope["pov_character"]], scope, thread_hit=True, salience=0.4))
         return items
 
-    def _project_scene_candidates(self, story_memory: Dict[str, Any], chapter: Dict[str, Any], prev_chapter: Optional[Dict[str, Any]], next_chapter: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        scenes = []
+    def _project_scene_candidates(self, scope: Dict[str, Any], story_memory: Dict[str, Any], chapter: Dict[str, Any], prev_chapter: Optional[Dict[str, Any]], next_chapter: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        scenes = self._structured_scene_candidates(scope, chapter)
         for index, conflict in enumerate(chapter.get("core_conflicts", [])[:2], start=1):
             scenes.append(self._scene(f"场景 {index}", chapter.get("head_context", ""), conflict, "这是本章核心冲突。", [chapter["chapter_id"]]))
         for hook in chapter.get("tail_hooks", [])[:2]:
@@ -208,6 +346,94 @@ class ChapterContextPackBuilder:
         if next_chapter:
             scenes.append(self._scene("前瞻下一章", next_chapter.get("head_context", ""), "为后续章节留出转场。", "当前章节可以提前压入下章压力。", [next_chapter["chapter_id"]]))
         return scenes[:MAX_SCENES]
+
+    def _structured_scene_candidates(
+        self,
+        scope: Dict[str, Any],
+        chapter: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        project_id = str(scope.get("project_id") or "").strip()
+        chapter_id = str(chapter.get("chapter_id") or "").strip()
+        if not project_id or not chapter_id:
+            return []
+
+        from ..database import get_engine
+        from ..repositories.scene_repo import SceneRepository
+
+        repo = SceneRepository(get_engine())
+        candidates: List[Dict[str, Any]] = []
+        for row in repo.list_scenes(project_id, chapter_id)[:MAX_SCENES]:
+            scene = repo.get_scene(project_id, str(row.get("scene_id") or "")) or row
+            candidate = self._structured_scene_candidate(scene, chapter)
+            if candidate:
+                candidates.append(candidate)
+        return candidates
+
+    def _structured_scene_candidate(
+        self,
+        scene: Dict[str, Any],
+        chapter: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        brief = self._json_dict(scene.get("writing_brief_json"))
+        scene_order = int(scene.get("scene_order") or 0)
+        scene_id = str(scene.get("scene_id") or "").strip()
+        chapter_id = str(chapter.get("chapter_id") or "").strip()
+        content = str(scene.get("content") or "").strip()
+        content_excerpt = content[:120]
+        title = self._first_text(
+            scene.get("title"),
+            brief.get("title"),
+            brief.get("scene_focus"),
+            f"场景 {scene_order}" if scene_order else "",
+        )
+        setup = self._first_text(
+            brief.get("scene_focus"),
+            brief.get("setup"),
+            brief.get("summary"),
+            content_excerpt,
+            chapter.get("head_context"),
+        )
+        tension = self._first_text(
+            brief.get("tension"),
+            brief.get("conflict"),
+            brief.get("scene_tension"),
+            brief.get("obstacle"),
+            content_excerpt,
+        )
+        why_now = self._first_text(
+            brief.get("why_now"),
+            brief.get("reason"),
+            "这是已保存的章节场景。",
+        )
+        return self._scene(
+            title or "已保存场景",
+            setup,
+            tension,
+            why_now,
+            [item for item in (scene_id, chapter_id) if item],
+        )
+
+    @staticmethod
+    def _json_dict(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str) or not value.strip():
+            return {}
+        import json
+
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _first_text(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
 
     def _worldline_fact_items(self, scope: Dict[str, Any], branch, agent: Dict[str, Any], memory_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
         items = [self._item("worldline_state", branch.core_change or branch.title, "这是当前分支的主偏移。", "worldline_branch", branch.branch_id, [scope["pov_character"]], scope, scope_hit=True, pov_hit=True, salience=0.8)]
@@ -514,18 +740,301 @@ class ChapterContextPackBuilder:
             "selection_trace": [],
         }
 
-    def _load_required_artifact(self, project_id: str, artifact_key: str) -> Dict[str, Any]:
-        payload = load_project_artifact(project_id, artifact_key)
-        if payload is None:
-            raise ValueError(f"项目缺少必需产物: {artifact_key}.json")
-        return payload
-
     def _load_project_sources(self, project_id: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-        return (
-            self._load_required_artifact(project_id, "story_memory"),
-            self._load_required_artifact(project_id, "chapter_continuity"),
-            self._load_required_artifact(project_id, "consistency_report"),
+        from .chapter_meta_service import ChapterMetaService
+
+        chapter_meta = ChapterMetaService()
+        chapter_summaries = chapter_meta.get_chapter_summaries(project_id)
+        if chapter_summaries:
+            continuity = self._continuity_from_chapter_summaries(chapter_summaries)
+        else:
+            continuity = {"chapter_count": 0, "global_summary": "", "chapters": []}
+        continuity_summary = ProjectManager.load_project_setting(
+            project_id, "chapter_continuity_summary"
         )
+        if isinstance(continuity_summary, str) and continuity_summary.strip():
+            continuity["global_summary"] = continuity_summary.strip()
+
+        story_memory: Dict[str, Any] = {
+            "world_rules": self._world_rules_from_db(project_id),
+            "open_threads": self._open_threads_from_db(project_id),
+            "relationship_ledger": self._relationship_ledger_from_db(project_id),
+            "event_timeline": self._event_timeline_from_db(project_id, chapter_summaries),
+        }
+        if not story_memory.get("open_threads"):
+            story_memory["open_threads"] = self._open_threads_from_chapter_summaries(chapter_summaries)
+
+        consistency = self._consistency_from_db(project_id)
+        story_memory.setdefault("event_timeline", [])
+        story_memory.setdefault("relationship_ledger", [])
+        consistency.setdefault("conflicts", [])
+        consistency.setdefault("ambiguities", [])
+        return story_memory, continuity, consistency
+
+    def _continuity_from_chapter_summaries(self, chapters: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "chapter_count": len(chapters),
+            "global_summary": self._global_summary_from_chapters(chapters),
+            "chapters": [self._continuity_chapter_from_summary(chapter) for chapter in chapters],
+        }
+
+    def _continuity_chapter_from_summary(self, chapter: Dict[str, Any]) -> Dict[str, Any]:
+        chapter_id = chapter.get("chapter_id", "")
+        summary = str(chapter.get("summary_text") or "").strip()
+        start_anchor = str(chapter.get("start_anchor") or "").strip()
+        end_anchor = str(chapter.get("end_anchor") or "").strip()
+        return {
+            "chapter_id": chapter_id,
+            "order": int(chapter.get("chapter_order") or 0),
+            "title": chapter.get("title") or chapter_id,
+            "head_context": start_anchor or summary or chapter.get("title") or chapter_id,
+            "core_conflicts": [summary] if summary else [],
+            "key_characters": [],
+            "key_organizations": [],
+            "tail_hooks": [end_anchor] if end_anchor else [],
+            "continuity_summary": summary or end_anchor or start_anchor,
+        }
+
+    def _global_summary_from_chapters(self, chapters: List[Dict[str, Any]]) -> str:
+        summaries = []
+        for chapter in chapters[-5:]:
+            summary = str(chapter.get("summary_text") or "").strip()
+            if not summary:
+                continue
+            order = int(chapter.get("chapter_order") or 0)
+            title = str(chapter.get("title") or chapter.get("chapter_id") or "").strip()
+            prefix = f"第{order}章"
+            if title:
+                prefix = f"{prefix}《{title}》"
+            summaries.append(f"{prefix}：{summary}")
+        return "\n".join(summaries)
+
+    def _open_threads_from_chapter_summaries(self, chapters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        threads = []
+        seen = set()
+        for chapter in chapters:
+            for index, raw_thread in enumerate(chapter.get("open_threads", []), start=1):
+                if isinstance(raw_thread, dict):
+                    summary = str(raw_thread.get("summary") or raw_thread.get("thread_key") or "").strip()
+                    thread_key = str(raw_thread.get("thread_key") or summary).strip()
+                else:
+                    summary = str(raw_thread or "").strip()
+                    thread_key = summary
+                if not summary or summary in seen:
+                    continue
+                seen.add(summary)
+                threads.append(
+                    {
+                        "thread_key": thread_key or f"{chapter.get('chapter_id', '')}:thread:{index}",
+                        "status": "open",
+                        "summary": summary,
+                        "chapter_id": chapter.get("chapter_id", ""),
+                    }
+                )
+        return threads
+
+    def _open_threads_from_db(self, project_id: str) -> List[Dict[str, Any]]:
+        from ..database import get_engine
+        from ..repositories.thread_repo import ThreadRepository
+
+        threads = []
+        for row in ThreadRepository(get_engine()).get_open_threads(project_id):
+            detail = str(row.get("detail") or "").strip()
+            thread_key = str(row.get("thread_key") or row.get("thread_id") or "").strip()
+            summary = detail or thread_key
+            if not summary:
+                continue
+            threads.append(
+                {
+                    "thread_key": thread_key or str(row.get("thread_id") or ""),
+                    "status": row.get("status") or "open",
+                    "summary": summary,
+                    "chapter_id": str(row.get("source_chapter") or ""),
+                    "source_kind": "plot_threads",
+                }
+            )
+        return threads
+
+    def _world_rules_from_db(self, project_id: str) -> List[str]:
+        from ..database import get_engine
+        from ..repositories.world_rule_repo import WorldRuleRepository
+
+        rules = [
+            str(item.get("fact_text") or "").strip()
+            for item in WorldRuleRepository(get_engine()).list_rules(project_id, limit=500)
+        ]
+        return [rule for rule in rules if rule]
+
+    def _event_timeline_from_db(
+        self,
+        project_id: str,
+        chapters: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        import json
+
+        from ..database import get_engine
+        from ..repositories.entity_repo import EntityRepository
+        from ..repositories.event_repo import EventRepository
+        from ..tables.novel import world_events
+
+        engine = get_engine()
+        entity_names = {
+            str(entity.get("entity_id") or ""): str(entity.get("name") or "")
+            for entity in EntityRepository(engine).list_entities(project_id, limit=1000)
+        }
+        chapter_ids_by_order = {
+            int(chapter.get("chapter_order") or chapter.get("order") or 0): str(chapter.get("chapter_id") or "")
+            for chapter in chapters
+        }
+        events = []
+        for row in EventRepository(engine).list_character_events(project_id, limit=500):
+            summary = str(row.get("summary") or "").strip()
+            if not summary:
+                continue
+            chapter_order = int(row.get("chapter_order") or 0)
+            entity_id = str(row.get("entity_id") or "")
+            character = entity_names.get(entity_id) or entity_id
+            events.append(
+                {
+                    "event_id": row.get("event_id") or "",
+                    "chapter_id": chapter_ids_by_order.get(chapter_order, ""),
+                    "chapter_order": chapter_order,
+                    "summary": summary,
+                    "characters": [character] if character else [],
+                    "event_type": row.get("event_type") or "",
+                    "source_kind": "character_events",
+                }
+            )
+        stmt = (
+            world_events.select()
+            .where(
+                (world_events.c.project_id == project_id)
+                & (world_events.c.status == "canon")
+            )
+            .order_by(world_events.c.created_at.desc(), world_events.c.step.desc())
+            .limit(100)
+        )
+        with engine.connect() as conn:
+            world_rows = [dict(row._mapping) for row in conn.execute(stmt).fetchall()]
+        for row in world_rows:
+            summary = str(row.get("summary") or "").strip()
+            if not summary:
+                continue
+            try:
+                driving_entities = json.loads(row.get("driving_entities_json") or "[]")
+            except json.JSONDecodeError:
+                driving_entities = []
+            events.append(
+                {
+                    "event_id": row.get("event_id") or "",
+                    "chapter_id": "",
+                    "chapter_order": 0,
+                    "summary": summary,
+                    "characters": [
+                        str(item).strip()
+                        for item in driving_entities
+                        if str(item).strip()
+                    ],
+                    "event_type": row.get("event_type") or "",
+                    "source_kind": "world_events",
+                }
+            )
+        return sorted(
+            events,
+            key=lambda item: (int(item.get("chapter_order") or 0), str(item.get("event_id") or "")),
+        )
+
+    def _consistency_from_db(self, project_id: str) -> Dict[str, Any]:
+        from sqlalchemy import select
+
+        from ..database import get_engine
+        from ..tables.novel import consistency_notes
+
+        stmt = (
+            select(consistency_notes)
+            .where(consistency_notes.c.project_id == project_id)
+            .order_by(consistency_notes.c.chapter_order.desc(), consistency_notes.c.created_at.desc())
+            .limit(100)
+        )
+        with get_engine().connect() as conn:
+            rows = [dict(row._mapping) for row in conn.execute(stmt).fetchall()]
+        return {
+            "conflicts": [
+                {
+                    "name": row.get("note_text") or "",
+                    "kind": "consistency_note",
+                    "summary": row.get("note_text") or "",
+                    "source_kind": "consistency_notes",
+                    "source_ref": row.get("note_id") or "",
+                }
+                for row in rows
+                if str(row.get("note_text") or "").strip()
+            ],
+            "ambiguities": [],
+        }
+
+    def _relationship_ledger_from_db(self, project_id: str) -> List[Dict[str, Any]]:
+        from ..database import get_engine
+        from ..repositories.entity_repo import EntityRepository
+        from ..repositories.event_repo import EventRepository
+        from ..repositories.relationship_repo import RelationshipRepository
+
+        engine = get_engine()
+        entity_names = {
+            str(entity.get("entity_id") or ""): str(entity.get("name") or "")
+            for entity in EntityRepository(engine).list_entities(project_id, limit=1000)
+        }
+        ledger = []
+        for row in RelationshipRepository(engine).list_relationships(project_id, limit=500):
+            source_id = str(row.get("source_id") or "")
+            target_id = str(row.get("target_id") or "")
+            source = entity_names.get(source_id) or source_id
+            target = entity_names.get(target_id) or target_id
+            if not source or not target:
+                continue
+            ledger.append(
+                {
+                    "relation_id": row.get("relation_id") or normalize_memory_subject(source + target),
+                    "source": source,
+                    "target": target,
+                    "relation_type": row.get("relation_type") or "",
+                    "description": row.get("description") or "",
+                    "source_kind": "relationships",
+                }
+            )
+        for row in EventRepository(engine).list_relationship_events(project_id, limit=500):
+            source_id = str(row.get("source_entity_id") or "")
+            target_id = str(row.get("target_entity_id") or "")
+            source = entity_names.get(source_id) or source_id
+            target = entity_names.get(target_id) or target_id
+            if not source or not target:
+                continue
+            ledger.append(
+                {
+                    "relation_id": row.get("event_id") or normalize_memory_subject(source + target),
+                    "source": source,
+                    "target": target,
+                    "relation_type": row.get("relation_type") or row.get("new_state") or "",
+                    "description": self._relationship_event_description(row),
+                    "chapter_order": int(row.get("chapter_order") or 0),
+                    "source_kind": "relationship_events",
+                }
+            )
+        return ledger
+
+    def _relationship_event_description(self, row: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for key in ("trigger_event", "evidence", "emotional_shift", "power_shift"):
+            text = str(row.get(key) or "").strip()
+            if text and text not in parts:
+                parts.append(text)
+        if parts:
+            return "；".join(parts)
+        previous = str(row.get("previous_state") or "").strip()
+        current = self._first_text(row.get("new_state"), row.get("relation_type"))
+        if previous and current:
+            return f"{previous} -> {current}"
+        return current
 
     def _require_project(self, project_id: str):
         project = ProjectManager.get_project(project_id)

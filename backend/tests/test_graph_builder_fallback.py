@@ -25,10 +25,11 @@ def test_build_graph_falls_back_to_reading_notes():
 
     with patch("app.repositories.project_artifact_repo.load_project_artifact") as mock_load:
         def load_artifact(pid, filename):
+            if filename == "story_memory.json":
+                raise AssertionError("graph build should not probe story_memory when reading_notes is available")
             mapping = {
                 "local_block_facts.json": None,
                 "block_analyses.json": None,
-                "story_memory.json": None,
                 "chapter_continuity.json": None,
                 "reading_notes.json": reading_notes,
                 "seed_analysis.json": seed_analysis,

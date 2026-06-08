@@ -6,13 +6,12 @@ Phase E (2026-04-17):
     已迁入 ``worldline_sessions`` 表。本类的 ``save_session`` /
     ``load_session`` / ``list_sessions`` 都转调
     :class:`WorldlineSessionRepository`；``container_dir`` 参数保留是为
-    了兼容引擎里现有的调用签名（以及 ``load_json_if_exists`` 仍读取
-    项目目录下的其他 artefact 文件），但对 session 数据本身不再使用。
+    了兼容引擎里现有的调用签名，但对 session 数据本身不再使用。
+    兼容路径解析只返回路径字符串，并不会创建或读取 session 文件。
 """
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,9 +30,7 @@ class WorldStateStore:
 
     @property
     def global_root(self) -> str:
-        path = os.path.join(Config.UPLOAD_FOLDER, "system", "global_worldlines")
-        os.makedirs(path, exist_ok=True)
-        return path
+        return os.path.join(Config.UPLOAD_FOLDER, "system", "global_worldlines")
 
     # ------------------------------------------------------------------
     # Session persistence (DB-backed)
@@ -86,8 +83,8 @@ class WorldStateStore:
         return self._get_repo().list_sessions(project_id=project_id, graph_id=graph_id, limit=limit)
 
     # ------------------------------------------------------------------
-    # Container resolution (still filesystem-based: used by other
-    # worldline artefacts and for graph_id→project lookup)
+    # Container resolution (compatibility path strings only; no session
+    # files are created or read here)
     # ------------------------------------------------------------------
 
     def resolve_container(
@@ -104,25 +101,12 @@ class WorldStateStore:
             if not project:
                 raise ValueError(f"项目不存在: {project_id}")
             container_dir = ProjectManager._get_project_dir(project_id)
-            os.makedirs(container_dir, exist_ok=True)
             return project_id, container_dir
         match_project = self._find_project_by_graph_id(graph_id)
         if match_project:
             container_dir = ProjectManager._get_project_dir(match_project.project_id)
-            os.makedirs(container_dir, exist_ok=True)
             return match_project.project_id, container_dir
         return None, self._graph_container(graph_id)
-
-    def load_json_if_exists(self, container_dir: str, filename: str) -> Optional[Dict[str, Any]]:
-        """Read an adjacent JSON artefact (non-session) from the project
-        directory. Sessions are in the DB — this helper is for other
-        files like ``seed_analysis.json`` / ``reading_notes.json`` / etc.
-        that callers pass through ``resolve_container``'s returned path."""
-        path = os.path.join(container_dir, filename)
-        if not os.path.exists(path):
-            return None
-        with open(path, "r", encoding="utf-8") as file_obj:
-            return json.load(file_obj)
 
     # ------------------------------------------------------------------
     # Internal helpers retained for container path resolution
@@ -135,9 +119,7 @@ class WorldStateStore:
         return None
 
     def _candidate_containers(self, project_id: Optional[str], graph_id: Optional[str]) -> List[str]:
-        """Candidate filesystem directories when a caller still needs a
-        path to read non-session artefacts (e.g. ``seed_analysis.json``)
-        rather than a DB-backed session."""
+        """Candidate path strings for legacy-compatible scope lookup."""
         if project_id:
             return [ProjectManager._get_project_dir(project_id)]
         if graph_id:
@@ -150,7 +132,8 @@ class WorldStateStore:
         return self._dedupe(self._project_containers() + self._global_containers())
 
     def _project_containers(self) -> List[str]:
-        ProjectManager._ensure_projects_dir()
+        if not os.path.isdir(self.projects_dir):
+            return []
         return [
             os.path.join(self.projects_dir, item)
             for item in os.listdir(self.projects_dir)
@@ -160,11 +143,12 @@ class WorldStateStore:
     def _global_containers(self) -> List[str]:
         containers = [self._mixed_container()]
         graphs_root = self._graphs_root()
-        containers.extend(
-            os.path.join(graphs_root, item)
-            for item in os.listdir(graphs_root)
-            if os.path.isdir(os.path.join(graphs_root, item))
-        )
+        if os.path.isdir(graphs_root):
+            containers.extend(
+                os.path.join(graphs_root, item)
+                for item in os.listdir(graphs_root)
+                if os.path.isdir(os.path.join(graphs_root, item))
+            )
         return containers
 
     def _dedupe(self, values: List[str]) -> List[str]:
@@ -178,17 +162,11 @@ class WorldStateStore:
         return items
 
     def _mixed_container(self) -> str:
-        path = os.path.join(self.global_root, "mixed")
-        os.makedirs(path, exist_ok=True)
-        return path
+        return os.path.join(self.global_root, "mixed")
 
     def _graphs_root(self) -> str:
-        path = os.path.join(self.global_root, "graphs")
-        os.makedirs(path, exist_ok=True)
-        return path
+        return os.path.join(self.global_root, "graphs")
 
     def _graph_container(self, graph_id: str) -> str:
         safe_graph_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in graph_id)
-        path = os.path.join(self._graphs_root(), safe_graph_id)
-        os.makedirs(path, exist_ok=True)
-        return path
+        return os.path.join(self._graphs_root(), safe_graph_id)

@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router";
 import {
   LayoutDashboard,
@@ -26,7 +25,6 @@ import {
 } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { LlmActivityIndicator } from "@/components/llm-activity-indicator";
-import { useIsTablet } from "@/hooks/use-mobile";
 import { AppRoutes } from "./router";
 
 const mainNav = [
@@ -51,39 +49,6 @@ function AppSidebar() {
   const location = useLocation();
   const navigate = useNavigate();
   const { state, toggleSidebar } = useSidebar();
-  const autoCollapsedRef = useRef(false);
-  const prevPathRef = useRef(location.pathname);
-  const isTablet = useIsTablet();
-
-  // Auto-collapse sidebar on tablet-width viewports
-  useEffect(() => {
-    if (isTablet && state === "expanded") {
-      toggleSidebar();
-      autoCollapsedRef.current = true;
-    } else if (!isTablet && autoCollapsedRef.current && state === "collapsed") {
-      toggleSidebar();
-      autoCollapsedRef.current = false;
-    }
-  }, [isTablet]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Auto-collapse when entering workbench pages
-  useEffect(() => {
-    const newPath = location.pathname;
-    const oldPath = prevPathRef.current;
-    prevPathRef.current = newPath;
-
-    if (WORKBENCH_PATHS.has(newPath) && !WORKBENCH_PATHS.has(oldPath)) {
-      if (state === "expanded") {
-        toggleSidebar();
-        autoCollapsedRef.current = true;
-      }
-    } else if (!WORKBENCH_PATHS.has(newPath) && WORKBENCH_PATHS.has(oldPath) && autoCollapsedRef.current) {
-      if (state === "collapsed") {
-        toggleSidebar();
-      }
-      autoCollapsedRef.current = false;
-    }
-  }, [location.pathname, state, toggleSidebar]);
 
   return (
     <Sidebar collapsible="icon" className="border-r border-border">

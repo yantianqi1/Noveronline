@@ -9,9 +9,8 @@ Deprecation note (2026-04-19, asset-library refactor P3):
   filter when needed.
 
   The ``/library/reindex`` endpoint stays because tests
-  (``test_archive_library_api.py``) still use it to backfill legacy
-  ``narrative_archives.json`` artifacts into the DB. It will retire
-  together with the legacy JSON path in Phase G.
+  (``test_archive_library_api.py``) still use it to rebuild archive rows
+  from ``project_artifacts.narrative_archives``.
 """
 
 from __future__ import annotations

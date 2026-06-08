@@ -5,7 +5,6 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.models.project import ProjectManager
-from app.repositories.project_artifact_repo import load_project_artifact
 from app.services.archive_candidate_builder import ArchiveCandidateBuilder
 from app.services.archive_library_service import ArchiveLibraryService
 from app.services.chapter_context_pack_builder import ChapterContextPackBuilder
@@ -13,6 +12,10 @@ from app.services.narrative_entity_archivist import NarrativeEntityArchivist
 from app.services.parallel_world_config_generator import ParallelWorldConfigGenerator
 from app.services.plot_inspiration_engine import PlotInspirationEngine
 from app.services.reviewer_prompt import REVIEWER_SYSTEM_PROMPT
+from app.services.seed_analysis_read_model import (
+    load_agent_profiles_for_project,
+    load_seed_analysis_for_project,
+)
 from app.services.worldline_engine_factory import build_worldline_engine
 from app.services.worldline_single_world import current_world, resolve_branch_id
 from app.services.zep_entity_reader import EntityNode, ZepEntityReader
@@ -62,7 +65,15 @@ def _resolve_project_context(data: dict):
 
 
 def _load_seed_analysis(project):
-    return load_project_artifact(project.project_id, "seed_analysis") if project else None
+    if not project:
+        return None
+    return load_seed_analysis_for_project(project.project_id)
+
+
+def _load_agent_profiles(project) -> dict:
+    if not project:
+        return {}
+    return load_agent_profiles_for_project(project.project_id)
 
 
 def _build_entities_from_seed_analysis(seed_analysis):
@@ -116,8 +127,7 @@ async def generate_archives(body: GenerateArchivesRequest):
         payload = body.model_dump()
         graph_id, project = _resolve_project_context(payload)
         candidates, entity_lookup, types = _archive_candidates(graph_id, project, graph_entity_types(payload.get("entity_types"), graph_id))
-        raw = load_project_artifact(project.project_id, "agent_profiles") if project else None
-        archives = NarrativeEntityArchivist(candidate_builder=_get_archive_candidate_builder()).generate_archives_from_candidates(candidates, use_llm=payload.get("use_llm", True), tier_overrides=_candidate_override_map(payload), entity_lookup=entity_lookup, agent_profiles=(raw or {}).get("profiles", {}))
+        archives = NarrativeEntityArchivist(candidate_builder=_get_archive_candidate_builder()).generate_archives_from_candidates(candidates, use_llm=payload.get("use_llm", True), tier_overrides=_candidate_override_map(payload), entity_lookup=entity_lookup, agent_profiles=_load_agent_profiles(project))
         data = {"graph_id": graph_id, "project_id": project.project_id if project else None, "count": len(archives), "entity_types": types, "archives": [item.to_dict() for item in archives]}
         if project:
             # Phase 2 · DB-only write. No more narrative_archives.json —
@@ -145,7 +155,9 @@ async def generate_parallel_world_config(body: ParallelWorldConfigRequest):
             entities = _build_entities_from_seed_analysis(seed)
         config = ParallelWorldConfigGenerator().generate(analysis_goal=goal, entities=entities, variables=payload.get("variables", []), branch_count=payload.get("branch_count"), use_llm=payload.get("use_llm", True))
         if project:
-            ProjectManager.save_project_artifact(project.project_id, "parallel_world_config.json", config.to_dict())
+            ProjectManager.save_project_setting(
+                project.project_id, "parallel_world_config", config.to_dict()
+            )
         return ok({"project_id": project.project_id if project else None, "graph_id": graph_id, "config": config.to_dict()})
     except Exception as exc:
         return err(exc)
@@ -175,6 +187,9 @@ async def run_seed_analysis(body: SeedAnalysisRequest):
             from app.services.novel_seed_analyzer import NovelSeedAnalyzer
             seed = NovelSeedAnalyzer().analyze_text(text=text, analysis_goal=payload.get("analysis_goal") or project.analysis_goal or "", project_name=project.name)
             ProjectManager.save_project_artifact(project.project_id, "seed_analysis.json", seed)
+        if isinstance(seed, dict):
+            from app.services.seed_analysis_persister import SeedAnalysisPersister
+            SeedAnalysisPersister().persist(project.project_id, seed)
         return ok(seed)
     except Exception as exc:
         return err(exc)
@@ -244,7 +259,7 @@ async def build_chapter_context(body: ChapterContextRequest):
 async def get_reviewer_rules(project_id: str = ""):
     if not project_id:
         return err("需要 project_id", status_code=400)
-    data = load_project_artifact(project_id, "reviewer_rules")
+    data = ProjectManager.load_project_setting(project_id, "reviewer_rules")
     custom_prompt = (data or {}).get("custom_prompt", "")
     return ok({"custom_prompt": custom_prompt, "default_prompt": REVIEWER_SYSTEM_PROMPT, "is_custom": bool(custom_prompt)})
 
@@ -256,5 +271,15 @@ async def save_reviewer_rules(body: ReviewerRulesRequest):
     if not project_id:
         return err("需要 project_id", status_code=400)
     from datetime import datetime
-    ProjectManager.save_project_artifact(project_id, "reviewer_rules.json", {"custom_prompt": payload.get("custom_prompt", ""), "updated_at": datetime.now().isoformat()})
+    try:
+        ProjectManager.save_project_setting(
+            project_id,
+            "reviewer_rules",
+            {
+                "custom_prompt": payload.get("custom_prompt", ""),
+                "updated_at": datetime.now().isoformat(),
+            },
+        )
+    except ValueError as exc:
+        return err(exc, status_code=404)
     return ok(None)

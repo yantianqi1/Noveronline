@@ -36,6 +36,7 @@ from .prompts import (
     build_book_retrieval_planner_prompt,
     build_chapter_writer_prompt,
     build_lexicon_audit_prompt,
+    build_style_audit_prompt,
     build_word_audit_prompt,
 )
 from .tool_executors import _load_forbidden_lexicon_entries
@@ -75,6 +76,14 @@ _LEXICON_AUDIT_TOOL_NAMES = {
     "scan_forbidden_lexicon", "get_manuscript_context", "rewrite_span",
 }
 
+# Style audit has no scripted scanner — the LLM judges against
+# STYLE_AUDIT_CHECKLIST. It needs to enumerate blocks + read prose, then
+# rewrite_span the high-severity hits (same toolset shape as word/lexicon audit).
+_STYLE_AUDIT_TOOL_NAMES = {
+    "get_chapter_word_stats", "get_manuscript_context", "search_manuscript",
+    "query_scene", "rewrite_span",
+}
+
 
 def _filter_tools(all_tools: List[Dict], allowed_names: set[str]) -> List[Dict]:
     return [t for t in all_tools if t.get("function", {}).get("name") in allowed_names]
@@ -85,6 +94,7 @@ _ALL_TOOLS = NOVEL_TOOLS + ASSET_TOOLS + UNIFIED_TOOLS + MANUSCRIPT_TOOLS + BOOK
 _READ_ONLY_TOOLS = _filter_tools(_ALL_TOOLS, _READ_TOOL_NAMES)
 _WORD_AUDIT_TOOLS = _filter_tools(_ALL_TOOLS, _WORD_AUDIT_TOOL_NAMES)
 _LEXICON_AUDIT_TOOLS = _filter_tools(_ALL_TOOLS, _LEXICON_AUDIT_TOOL_NAMES)
+_STYLE_AUDIT_TOOLS = _filter_tools(_ALL_TOOLS, _STYLE_AUDIT_TOOL_NAMES)
 
 
 # Limits -----------------------------------------------------------------------
@@ -345,6 +355,30 @@ class BookRunOrchestrator:
                        **_stamp()}
                 break
 
+            # STYLE_AUDIT (anti-AI-flavor) — 来源：小说梦想家 SOUL/PITFALLS。
+            # 非阻塞：风格是主观判断，不因 verdict=fail 中止成书；可用 plan['enable_style_audit']=False 关闭。
+            if plan.get("enable_style_audit", True):
+                yield {"type": "book_run_stage", "stage": "STYLE_AUDIT",
+                       "chapter_order": chapter_order,
+                       "message": "启动风格审计（反 AI 味）", **_stamp()}
+                try:
+                    async for ev in self._run_style_audit(
+                        plan, project_id, chapter_order, chapter_id, orch_client, t0
+                    ):
+                        yield ev
+                except Exception as exc:
+                    logger.exception("STYLE_AUDIT failed (non-blocking)")
+                    self.plan_service.append_error(
+                        plan_id, {"chapter_order": chapter_order, "stage": "STYLE_AUDIT", "error": str(exc)}
+                    )
+                    yield {"type": "audit_hit", "kind": "style", "chapter_order": chapter_order,
+                           "details": {"error": str(exc)}, **_stamp()}
+                else:
+                    # style rewrites may shift word count; refresh for the commit record.
+                    stats = await asyncio.to_thread(
+                        self._scripted_word_stats, project_id, chapter_id, plan.get("per_chapter_word_target")
+                    )
+
             # CHAPTER_COMMIT
             await asyncio.to_thread(
                 chapter_repo.update_chapter, project_id, chapter_id,
@@ -593,6 +627,27 @@ class BookRunOrchestrator:
         loop = AgentLoop(
             llm_client=orch_client,
             tools=_LEXICON_AUDIT_TOOLS,
+            system_prompt=system_prompt,
+            project_id=project_id,
+            t0=t0,
+        )
+        loop.MAX_ROUNDS = _AUDIT_MAX_ROUNDS
+        async for ev in loop.run(user_msg):
+            if ev["type"] in ("tool_call", "tool_result", "thinking", "error", "brief_ready"):
+                yield ev
+
+    async def _run_style_audit(
+        self, plan: dict, project_id: str, chapter_order: int, chapter_id: str,
+        orch_client, t0: float,
+    ):
+        system_prompt = build_style_audit_prompt(plan, chapter_order, chapter_id)
+        user_msg = (
+            f"请对章节 {chapter_id} 做风格审计（反 AI 味）。先 get_chapter_word_stats 拿块清单，"
+            "读出可疑块正文，再对照死令清单逐条 rewrite_span 修复 high 级问题；无问题则输出 verdict=pass。"
+        )
+        loop = AgentLoop(
+            llm_client=orch_client,
+            tools=_STYLE_AUDIT_TOOLS,
             system_prompt=system_prompt,
             project_id=project_id,
             t0=t0,

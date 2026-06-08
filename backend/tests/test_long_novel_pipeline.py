@@ -60,13 +60,13 @@ def test_long_novel_pipeline_builds_anchors_and_adaptive_snapshots(tmp_path, mon
     task = wait_for_task(client, payload["task_id"])
     assert task["status"] == "completed", task
 
-    project_dir = ProjectManager._get_project_dir(payload["project_id"])
-    with open(f"{project_dir}/anchor_points.json", "r", encoding="utf-8") as file_obj:
-        anchors = json.load(file_obj)
-    with open(f"{project_dir}/story_memory.json", "r", encoding="utf-8") as file_obj:
-        story_memory = json.load(file_obj)
-    with open(f"{project_dir}/story_memory_snapshots.json", "r", encoding="utf-8") as file_obj:
-        snapshots = json.load(file_obj)["snapshots"]
+    anchors = ProjectManager.load_project_json(payload["project_id"], "anchor_points.json")
+    story_memory = ProjectManager.load_project_json(payload["project_id"], "story_memory.json")
+    snapshots_payload = ProjectManager.load_project_json(payload["project_id"], "story_memory_snapshots.json")
+    assert anchors is not None
+    assert story_memory is not None
+    assert snapshots_payload is not None
+    snapshots = snapshots_payload["snapshots"]
 
     final_snapshot = next(item for item in snapshots if item["block_id"] == "block_0012")
 

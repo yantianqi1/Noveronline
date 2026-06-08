@@ -66,7 +66,15 @@ def build_anti_cliche_constraints(brief: dict | None = None) -> str:
         "**场景模式**\n"
         "- 禁止本章与前三章使用相同的开场结构（例如都是『环境 + 角色发呆 + 心理揭示』）。\n"
         "- 禁止在相邻两章让 POV 做完全相同的行为（照例坐、目光穿过、凝视远方）。\n"
-        "- 若本场景主线是内心戏，必须安排至少一个外部事件/人物切入；反之，外部戏必须有一处内心反应。\n"
+        "- 若本场景主线是内心戏，必须安排至少一个外部事件/人物切入；反之，外部戏必须有一处内心反应。\n\n"
+        "**叙述范式（框架层 · 最高优先级 · 来源：小说梦想家 SOUL v3.4）**\n"
+        "- 经历式优先：信息从动作里漏出来，禁止『A 是 B』静态环境宣告开场（如『泥是湿的』『头顶是树冠』）；段首第一个有效字优先用动词。\n"
+        "- 叙述者＝主角的嘴：叙述本身带着 POV 角色的语气与判断，不要分裂成『客观描述层＋内心活动层』；删掉『他想 / 他觉得 / 他意识到』这类标记，思考内容直接进叙述流。\n"
+        "- 限知视角即时反应：只写 POV 角色此刻能看到 / 听到 / 闻到 / 身体感到的；严禁上帝视角解读、事后总结、剧透式旁白（如『他不知道，这一刻将改变一切』）。\n"
+        "- 内心 OS：每个关键动作后跟一句该角色的内心反应（吐槽 / 判断 / 联想皆可）；安静型角色外表安静，内心必须活跃。\n"
+        "- 灭杀『不是 X 是 Y』解释句：叙述中禁止『不是…而是…』『不是…是…』这类纠偏句式（仅对白可用），直接写『是』后面的内容。\n"
+        "- 灭杀因果连接词：删除刻意连接的『因为 / 所以 / 因此 / 于是』，逻辑靠语序自然呈现。\n"
+        "- 收尾不升华：场景 / 章节结尾定格在最后一个动作、未完对话或新悬念上，禁止『从此以后』『这意味着』式总结。\n"
     )
 
 
@@ -744,6 +752,88 @@ def build_lexicon_audit_prompt(plan: dict, chapter_order: int, chapter_id: str) 
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Style audit (anti-AI-flavor pass) — 注入自「小说梦想家」SOUL v3.4 / PITFALLS。
+#
+# 与 WORD_AUDIT / LEXICON_AUDIT 并列的第三类审计：没有确定性脚本扫描器，
+# 由 LLM 对照死令清单逐句判断 + 用 rewrite_span 局部修复 high 级问题。
+# 同一清单被三处复用：book_run STYLE_AUDIT（真改写）、一键风格清理（出提案卡）、
+# 单场景 auto_repair（落库前自动改写）。
+# ──────────────────────────────────────────────────────────────────────────
+
+STYLE_AUDIT_CHECKLIST = (
+    "- 经历式 vs 宣告式：以『A 是 B』静态宣告开场描述环境（如『泥是湿的』『头顶是树冠』）——改为从动作中带出。\n"
+    "- 不是 X 是 Y：叙述中『不是…而是…』『不是…是…』纠偏解释句（仅对白可保留），直接写『是』后面的内容。\n"
+    "- 因果连接词：刻意用『因为 / 所以 / 因此 / 于是』连接句子，逻辑应由语序自现。\n"
+    "- 解说员 / 上帝视角：『他意识到 / 他慢慢发现 / 他不知道的是 / 殊不知 / 实际上 / 真相是』等超出 POV 认知的旁白。\n"
+    "- 破折号旁白 + 升华收尾：—— 后接作者解读；『从此以后 / 这意味着 / 终于明白』式总结收束。\n"
+    "- 油腻 / 套板词：深情地 / 宠溺地 / 邪魅 / 不容置疑 / 勾勒 / 饱满的弧度 / 嘴角的弧度。\n"
+    "- 解剖学标签：锁骨 / 肩胛 / 腕骨 / 髂骨 / 四肢百骸 / 指节泛白。\n"
+    "- 声音 / 眼神解读：『声音里带着…』『嗓音听起来…』『眼神中闪过一丝…』『语气 + 形容词』。\n"
+    "- 程度副词堆砌：极其 / 非常 / 甚至 / 异常 / 一丝 / 一抹。\n"
+    "- 空洞类比：心如湖面 / 涟漪 / 石子击碎玻璃族；月牙形容眼睛。\n"
+    "- 模糊推测：似乎 / 仿佛 / 可能 / 大概 / 近乎。\n"
+    "- 对白回声复述（角色 B 复述角色 A 的话而非给出新反应）；对白后机械小动作（他笑了笑 / 她点点头）。\n"
+)
+
+
+def build_style_audit_prompt(plan: dict, chapter_order: int, chapter_id: str) -> str:
+    """System prompt for the STYLE_AUDIT inner loop (book_run).
+
+    Mirrors build_lexicon_audit_prompt but the "scan" is LLM judgement against
+    STYLE_AUDIT_CHECKLIST rather than a scripted matcher. Tool whitelist is
+    enforced by the orchestrator (read tools + rewrite_span).
+    """
+    return (
+        f"你是小说写作 agent 的「风格审计员」。第 {chapter_order} 章（{chapter_id}）"
+        "已落地全部正文。你的任务：对照下方反 AI 味死令清单扫描本章，"
+        "逐条用 rewrite_span 修复 high 级问题，不改情节骨架。\n"
+        "\n"
+        "## 执行顺序（必须）\n"
+        f"1. 先调 get_chapter_word_stats(chapter_id='{chapter_id}') 拿到本章所有 block_id + 预览；"
+        "再用 get_manuscript_context / search_manuscript / query_scene 读出可疑块的完整正文。\n"
+        "2. 对照死令清单逐句判断，找出 high 级问题。若没有，输出 `{\"verdict\": \"pass\"}` 并结束（不再调用任何工具）。\n"
+        "3. 对每个 high 级问题：rewrite_span(block_id=..., original_text=<含问题的块内唯一片段>, "
+        "new_text=<改写>, reason=<命中的死令>)。改写必须保留原意、POV 口吻、情节，字数变化 ±15% 内。\n"
+        "4. 所有 high 处理完毕后再扫一遍；仍有残留继续修复；最多 6 轮。\n"
+        "5. 6 轮后仍有残留则输出 `{\"verdict\": \"fail\", \"remaining\": N}`。\n"
+        "\n"
+        "## 反 AI 味死令清单（命中即 high）\n"
+        + STYLE_AUDIT_CHECKLIST +
+        "\n"
+        "## 允许的工具\n"
+        "- get_chapter_word_stats / get_manuscript_context / search_manuscript / query_scene（读，用于定位与读正文）\n"
+        "- rewrite_span（写，局部修复）\n"
+        "其他工具全部禁用。original_text 必须在块内唯一，否则先用 get_manuscript_context 扩上下文。\n"
+        "## 注意\n"
+        "- 只改命中死令的句子，不要顺手重写整段；不要改人名/设定/对白内容本身。\n"
+        "- 每次 rewrite_span 必填 reason（写明命中哪条死令）。"
+    )
+
+
+def build_style_repair_system_prompt() -> str:
+    """System prompt for the single-scene auto_repair rewrite call.
+
+    Unlike the book_run STYLE_AUDIT (which edits committed blocks via
+    rewrite_span), this runs BEFORE commit on the in-memory draft: it takes the
+    full draft + the reviewer's high-severity issues and returns a revised full
+    draft. Used by WriterOrchestrator when request['auto_repair'] is set.
+    """
+    return (
+        "你是一名小说润色编辑。下面给你一段刚写好的初稿，以及审校列出的死令级（high）问题。\n"
+        "请逐条改写问题所在的句子，消除这些 AI 味/套路问题，同时严格保持：\n"
+        "- 情节走向与事件顺序不变；\n"
+        "- POV 视角与人物说话口吻不变；\n"
+        "- 篇幅与原稿接近（字数 ±10% 内）；\n"
+        "- 未被点名的句子尽量不动。\n"
+        "\n"
+        "改写原则参照以下反 AI 味死令清单：\n"
+        + STYLE_AUDIT_CHECKLIST +
+        "\n"
+        "只输出修订后的完整正文，不要输出问题列表、解释、标注或任何元信息。"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Dedup extractor (writer_dedup_extractor module)
 #
 # Runs once after each scene/chapter is committed. Task: read the finished
@@ -822,6 +912,11 @@ def build_reviewer_prompt() -> str:
         "- figurative_density：比喻/拟人过密，每 200 字超过 1 处\n"
         "- redundant_modifier：『仿佛/似乎/好像/莫名』等软化修饰滥用\n"
         "- voice：POV 说话风格与角色档案不符\n"
+        "- not_x_is_y：叙述中出现『不是…而是…』『不是…是…』纠偏解释句（仅对白允许）——死令级，一律 high\n"
+        "- declarative_ab：以『A 是 B』静态宣告开场描述环境（如『泥是湿的』『头顶是树冠』）——死令级 high，应改为从动作中带出\n"
+        "- causal_connective：刻意用『因为 / 所以 / 因此 / 于是』连接句子（逻辑本可由语序自现）——high\n"
+        "- narrator_frame：解说员/上帝视角（『他意识到』『他慢慢发现』『他不知道的是』『殊不知』）或事后总结旁白——死令级 high\n"
+        "- em_dash_aside：破折号引导的作者旁白，或『从此以后』『这意味着』式升华收尾——死令级 high\n"
         "\n"
         "严格输出一个合法 JSON（不要 markdown、不要解释、不要在 JSON 外加任何字符）：\n"
         "{\n"

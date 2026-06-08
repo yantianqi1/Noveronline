@@ -22,6 +22,7 @@ def _seed_project_meta(project_dir: Path, project_id: str) -> None:
         json.dumps({"project_id": project_id, "name": "FullMigration Demo"}, ensure_ascii=False),
         encoding="utf-8",
     )
+    (project_dir / "extracted_text.txt").write_text("第一章\n旧项目正文", encoding="utf-8")
 
 
 def _seed_legacy_novel(project_dir: Path) -> None:
@@ -426,8 +427,11 @@ def _seed_all_legacy(upload_root: Path, project_id: str) -> None:
 
 
 def test_migrate_seed_json_mirrors_project_artifacts(tmp_path, monkeypatch):
-    """Phase G / Task 8: every ``*.json`` (except ``project.json``) in a legacy
-    project directory lands in ``project_artifacts`` keyed by filename stem."""
+    """Phase G / Task 8: legacy project metadata/text move into DB.
+
+    ``project.json`` lands in ``project_meta.project_json``. Other parseable
+    ``*.json`` files plus ``extracted_text.txt`` land in ``project_artifacts``.
+    """
     from scripts.migrate_legacy_data import migrate_legacy_data
 
     upload_root = tmp_path / "uploads"
@@ -461,13 +465,19 @@ def test_migrate_seed_json_mirrors_project_artifacts(tmp_path, monkeypatch):
     report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
 
     seed_scope = report[f"seed_json:{project_id}"]
+    assert seed_scope["project_meta"] == 1
     # chapter_segments counts as chapter_content + chapter_meta; artifact count
     # covers every successfully-parsed JSON (chapter_segments + seed_analysis
-    # + ontology + reviewer_rules = 4; broken.json is excluded).
-    assert seed_scope["project_artifacts"] == 4
+    # + ontology + reviewer_rules = 4; broken.json is excluded) plus
+    # extracted_text.
+    assert seed_scope["project_artifacts"] == 5
 
     engine = create_engine(f"sqlite:///{db_path}", future=True)
     with engine.connect() as connection:
+        project_row = connection.execute(
+            text("SELECT project_json FROM project_meta WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).fetchone()
         rows = connection.execute(
             text(
                 "SELECT artifact_key, payload_json FROM project_artifacts "
@@ -475,11 +485,471 @@ def test_migrate_seed_json_mirrors_project_artifacts(tmp_path, monkeypatch):
             ),
             {"pid": project_id},
         ).fetchall()
+    assert project_row is not None
+    assert json.loads(project_row[0])["name"] == "FullMigration Demo"
     keys = [row[0] for row in rows]
-    assert keys == ["chapter_segments", "ontology", "reviewer_rules", "seed_analysis"]
+    assert keys == ["chapter_segments", "extracted_text", "ontology", "reviewer_rules", "seed_analysis"]
     loaded = {row[0]: json.loads(row[1]) for row in rows}
+    assert loaded["extracted_text"] == "第一章\n旧项目正文"
     assert loaded["seed_analysis"]["characters"][0]["name"] == "Aria"
     assert loaded["reviewer_rules"] == {"custom_prompt": "be kind"}
+    project_payload = json.loads(project_row[0])
+    assert project_payload["settings"]["reviewer_rules"]["custom_prompt"] == "be kind"
+
+
+def test_migrate_seed_json_imports_parallel_world_config_to_project_settings(
+    tmp_path, monkeypatch
+):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_parallel_config"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "parallel_world_config.json").write_text(
+        json.dumps(
+            {
+                "simulation_goal": "观察密信提前泄露后的单世界演化",
+                "timeline_focus": ["起因暴露", "联盟重组"],
+                "agent_behavior_axes": ["信息差", "组织利益"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        project_row = connection.execute(
+            text("SELECT project_json FROM project_meta WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).fetchone()
+    assert project_row is not None
+    project_payload = json.loads(project_row[0])
+    config = project_payload["settings"]["parallel_world_config"]
+    assert config["simulation_goal"] == "观察密信提前泄露后的单世界演化"
+    assert config["timeline_focus"] == ["起因暴露", "联盟重组"]
+
+
+def test_migrate_seed_json_imports_agent_profiles_to_structured_entities(
+    tmp_path, monkeypatch
+):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_agent_profiles"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "agent_profiles.json").write_text(
+        json.dumps(
+            {
+                "profiles": {
+                    "沈夜": {
+                        "basic_info": {
+                            "name": "沈夜",
+                            "identity": "镜湖调查者",
+                            "aliases": ["夜行人", "沈先生"],
+                        },
+                        "speech": {
+                            "style": "冷静简短",
+                            "verbal_habits": ["先查证。"],
+                        },
+                        "motivation": {
+                            "ultimate_goal": "查清镜湖旧案",
+                            "current_objective": "打开地下档案",
+                        },
+                        "capabilities": {"skills": ["追踪线索", "解读旧档案"]},
+                    },
+                    "秦昭": {
+                        "basic_info": {"name": "秦昭", "identity": "旧盟友"},
+                        "motivation": {"current_objective": "隐藏证据"},
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    assert report[f"seed_json:{project_id}"]["agent_profiles"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT name, profile_json, speech_style, current_objective, skills_json "
+                "FROM entities WHERE project_id = :pid ORDER BY name"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+        aliases = connection.execute(
+            text(
+                "SELECT alias FROM entity_aliases "
+                "WHERE project_id = :pid ORDER BY alias"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+
+    assert [row[0] for row in rows] == ["沈夜", "秦昭"]
+    shenye = next(row for row in rows if row[0] == "沈夜")
+    profile = json.loads(shenye[1])
+    assert profile["basic_info"]["identity"] == "镜湖调查者"
+    assert shenye[2] == "冷静简短"
+    assert shenye[3] == "打开地下档案"
+    assert json.loads(shenye[4]) == ["追踪线索", "解读旧档案"]
+    assert [row[0] for row in aliases] == ["夜行人", "沈先生"]
+
+
+def test_migrated_chapter_context_options_preserve_legacy_continuity_without_artifact_reads(
+    tmp_path, monkeypatch
+):
+    from app.repositories.project_artifact_repo import ProjectArtifactRepository
+    from app.services.chapter_context_pack_builder import ChapterContextPackBuilder
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_chapter_continuity"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    _seed_chapter_segments_json(project_dir)
+    (project_dir / "chapter_continuity.json").write_text(
+        json.dumps(
+            {
+                "global_summary": "Lin follows the mirror clue into open danger.",
+                "chapters": [
+                    {
+                        "chapter_id": "chapter_0001",
+                        "head_context": "Lin wakes with a broken signal.",
+                        "continuity_summary": "Lin wakes and chooses to investigate.",
+                        "tail_hooks": ["A stranger leaves a mirror clue."],
+                    },
+                    {
+                        "chapter_id": "chapter_0002",
+                        "head_context": "Lin follows the mirror clue.",
+                        "continuity_summary": "Lin leaves home and enters the old road.",
+                        "tail_hooks": ["The old road answers with a name."],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    original_load = ProjectArtifactRepository.load
+
+    def fail_on_chapter_artifacts(self, project_id: str, artifact_key: str):
+        if artifact_key in {"chapter_segments", "chapter_continuity"}:
+            raise AssertionError("migrated chapter context options must not read artifacts")
+        return original_load(self, project_id, artifact_key)
+
+    monkeypatch.setattr(ProjectArtifactRepository, "load", fail_on_chapter_artifacts)
+    options = ChapterContextPackBuilder().build_options(project_id)
+
+    assert options["continuity_summary"] == "Lin follows the mirror clue into open danger."
+    assert [chapter["chapter_id"] for chapter in options["chapters"]] == [
+        "chapter_0001",
+        "chapter_0002",
+    ]
+    assert options["chapters"][0]["head_context"] == "Lin wakes with a broken signal."
+
+
+def test_migrate_seed_json_imports_story_memory_world_rules(tmp_path, monkeypatch):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_story_memory_rules"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "story_memory.json").write_text(
+        json.dumps(
+            {
+                "world_rules": [
+                    "镜湖城内夜间禁用传讯符。",
+                    "",
+                    "沈家血脉能感知旧案残响。",
+                    "镜湖城内夜间禁用传讯符。",
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    assert report[f"seed_json:{project_id}"]["world_rule_evidence"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT fact_text, segment_id, evidence_snippet "
+                "FROM world_rule_evidence "
+                "WHERE project_id = :pid ORDER BY evidence_id"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+
+    assert [row[0] for row in rows] == [
+        "镜湖城内夜间禁用传讯符。",
+        "沈家血脉能感知旧案残响。",
+    ]
+    assert {row[1] for row in rows} == {"story_memory"}
+    assert [row[2] for row in rows] == [
+        "镜湖城内夜间禁用传讯符。",
+        "沈家血脉能感知旧案残响。",
+    ]
+
+
+def test_migrate_seed_json_imports_story_memory_open_threads(tmp_path, monkeypatch):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_story_memory_threads"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "story_memory.json").write_text(
+        json.dumps(
+            {
+                "open_threads": [
+                    {
+                        "thread_key": "镜湖真相",
+                        "summary": "镜湖真相仍未查清。",
+                        "chapter_id": "chapter_0002",
+                    },
+                    {
+                        "thread_key": "地下档案密钥",
+                        "detail": "地下档案密钥来源尚未揭开。",
+                        "source_chapter": "3",
+                    },
+                    {"thread_key": "", "summary": ""},
+                    {"thread_key": "镜湖真相", "summary": "重复线索不应重复导入。"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    assert report[f"seed_json:{project_id}"]["plot_threads"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT thread_key, detail, status, source_chapter "
+                "FROM plot_threads "
+                "WHERE project_id = :pid ORDER BY thread_key"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [
+        ("地下档案密钥", "地下档案密钥来源尚未揭开。", "open", "3"),
+        ("镜湖真相", "镜湖真相仍未查清。", "open", "chapter_0002"),
+    ]
+
+
+def test_migrate_seed_json_imports_story_memory_relationship_ledger(
+    tmp_path, monkeypatch
+):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_story_memory_relationships"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "story_memory.json").write_text(
+        json.dumps(
+            {
+                "relationship_ledger": [
+                    {
+                        "source": "沈夜",
+                        "target": "秦昭",
+                        "relation_type": "ally",
+                        "description": "秦昭知道地下档案密钥，但尚未完全信任沈夜。",
+                    },
+                    {
+                        "source": "沈夜",
+                        "target": "顾行舟",
+                        "changes": [
+                            {
+                                "change": "rival",
+                                "evidence": ["顾行舟提前封锁镜湖谷。"],
+                            }
+                        ],
+                    },
+                    {"source": "", "target": "无效", "description": "缺 source 不导入"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    assert report[f"seed_json:{project_id}"]["relationships"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT source_id, target_id, relation_type, description "
+                "FROM relationships "
+                "WHERE project_id = :pid ORDER BY target_id"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [
+        ("沈夜", "秦昭", "ally", "秦昭知道地下档案密钥，但尚未完全信任沈夜。"),
+        ("沈夜", "顾行舟", "rival", "顾行舟提前封锁镜湖谷。"),
+    ]
+
+
+def test_migrate_seed_json_imports_story_memory_event_timeline(tmp_path, monkeypatch):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_story_memory_events"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "story_memory.json").write_text(
+        json.dumps(
+            {
+                "event_timeline": [
+                    {
+                        "event_id": "event_001",
+                        "summary": "沈夜发现地下档案密钥。",
+                        "characters": ["沈夜", "秦昭"],
+                        "chapter_order": 2,
+                    },
+                    {
+                        "summary": "顾行舟提前封锁镜湖谷。",
+                        "characters": ["顾行舟"],
+                        "chapter_id": "chapter_0003",
+                    },
+                    {"summary": ""},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    assert report[f"seed_json:{project_id}"]["world_events"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT event_id, session_id, branch_id, step, summary, driving_entities_json "
+                "FROM world_events "
+                "WHERE project_id = :pid ORDER BY event_id"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+
+    assert rows[0][0].endswith("0001")
+    assert rows[0][1] == "seed_story_memory"
+    assert rows[0][2] == "main"
+    assert rows[0][3] == 2
+    assert rows[0][4] == "沈夜发现地下档案密钥。"
+    assert json.loads(rows[0][5]) == ["沈夜", "秦昭"]
+    assert rows[1][3] == 3
+    assert rows[1][4] == "顾行舟提前封锁镜湖谷。"
+
+
+def test_migrate_seed_json_imports_consistency_report_notes(tmp_path, monkeypatch):
+    from scripts.migrate_legacy_data import migrate_legacy_data
+
+    upload_root = tmp_path / "uploads"
+    project_id = "proj_consistency_report"
+    project_dir = upload_root / "projects" / project_id
+    _seed_project_meta(project_dir, project_id)
+    (project_dir / "consistency_report.json").write_text(
+        json.dumps(
+            {
+                "conflicts": [
+                    {
+                        "kind": "post_death_activity",
+                        "name": "沈临川",
+                        "evidence": ["残响中再次出现沈临川的声音。"],
+                    }
+                ],
+                "ambiguities": [
+                    {
+                        "alias": "夜哥",
+                        "candidate_names": ["沈夜", "沈临川"],
+                        "reason": "称呼可能混淆两代人。",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "data" / "mirofish.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    report = migrate_legacy_data(upload_root, database_url=f"sqlite:///{db_path}")
+
+    assert report[f"seed_json:{project_id}"]["consistency_notes"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT note_text, segment_id "
+                "FROM consistency_notes "
+                "WHERE project_id = :pid ORDER BY note_id"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+
+    note_texts = [row[0] for row in rows]
+    assert any("沈临川" in text and "残响中再次出现沈临川的声音" in text for text in note_texts)
+    assert any("夜哥" in text and "沈夜" in text and "沈临川" in text for text in note_texts)
+    assert {row[1] for row in rows} == {"consistency_report"}
 
 
 def test_migrate_legacy_data_covers_all_domains(tmp_path, monkeypatch):

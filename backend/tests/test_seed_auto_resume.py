@@ -1,13 +1,13 @@
 """Auto-resume on server startup contract test (F4).
 
 Flow: _recover_stale_tasks flags zombie tasks as failed; _auto_resume_seed_tasks
-then schedules a fresh retry task for every project whose smart_segments.json
-is already on disk. Projects that never made it past stage 1 stay FAILED.
+then schedules a fresh retry task for every project whose smart_segments
+artifact is already in the unified DB. Projects that never made it past stage 1
+stay FAILED.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime
 
 import pytest
@@ -17,6 +17,7 @@ from app.database import get_engine
 from app.main import _auto_resume_seed_tasks, _recover_stale_tasks
 from app.models.project import Project, ProjectManager, ProjectStatus
 from app.models.task import TaskManager, TaskStatus
+from app.repositories.project_artifact_repo import ProjectArtifactRepository
 from app.repositories.task_repo import TaskRepository
 
 
@@ -44,7 +45,7 @@ def _seed_stale_task(task_id: str, task_type: str = "seed_extract") -> None:
 
 
 def _make_project_with_segments(tmp_path, monkeypatch, project_id: str) -> str:
-    """Make a project in SEED_PROCESSING + smart_segments.json on disk."""
+    """Make a project in SEED_PROCESSING + smart_segments artifact in DB."""
     upload_dir = tmp_path / "uploads"
     monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(upload_dir))
     monkeypatch.setattr(
@@ -63,12 +64,14 @@ def _make_project_with_segments(tmp_path, monkeypatch, project_id: str) -> str:
         seed_task_id="stale-seed-1",
     )
     ProjectManager.save_project(project)
-    (project_dir / "smart_segments.json").write_text(
-        json.dumps({"segments": [
+    ProjectArtifactRepository(get_engine()).save(
+        project_id,
+        "smart_segments",
+        {"segments": [
             {"segment_id": "seg_001", "chapters": []},
-        ]}, ensure_ascii=False),
-        encoding="utf-8",
+        ]},
     )
+    assert not (project_dir / "smart_segments.json").exists()
     return str(project_dir)
 
 
@@ -109,7 +112,7 @@ def test_auto_resume_enqueues_retry_for_resumable_project(tmp_path, monkeypatch)
 
 
 def test_auto_resume_skips_project_without_smart_segments(tmp_path, monkeypatch):
-    """Stage 1 还没完成（smart_segments.json 不存在）的项目没法断点续传，
+    """Stage 1 还没完成（smart_segments artifact 不存在）的项目没法断点续传，
     应当保持在 FAILED 让用户去点"重新开始"，不能给它挂一条 retry task。"""
     _reset_task_manager()
     project_id = "proj_auto_resume_stage1_only"

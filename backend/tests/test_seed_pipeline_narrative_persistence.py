@@ -127,6 +127,31 @@ def test_persist_narrative_data_is_idempotent_on_rerun():
     assert len(repo.list_segment_summaries(project_id)) == 3
 
 
+def test_persist_narrative_data_scopes_arc_and_volume_ids_by_project():
+    runner = _build_runner()
+    manager_a = _seed_manager_with_fixtures()
+    manager_b = _seed_manager_with_fixtures()
+
+    runner._persist_narrative_data("proj_narr_scope_a", manager_a)
+    runner._persist_narrative_data("proj_narr_scope_b", manager_b)
+
+    repo = NarrativeRepository(get_engine())
+    assert [a["arc_id"] for a in repo.list_narrative_arcs("proj_narr_scope_a")] == [
+        "arc_1",
+        "arc_2",
+    ]
+    assert [a["arc_id"] for a in repo.list_narrative_arcs("proj_narr_scope_b")] == [
+        "arc_1",
+        "arc_2",
+    ]
+    assert [v["volume_id"] for v in repo.list_volume_summaries("proj_narr_scope_a")] == [
+        "vol_1",
+    ]
+    assert [v["volume_id"] for v in repo.list_volume_summaries("proj_narr_scope_b")] == [
+        "vol_1",
+    ]
+
+
 def test_persist_narrative_data_handles_empty_manager():
     project_id = "proj_narr_empty"
     runner = _build_runner()

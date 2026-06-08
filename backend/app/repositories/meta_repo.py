@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Engine, and_, select, update
+from sqlalchemy import Engine, desc, select
 
 from app.tables.novel import project_meta, sessions
 
@@ -32,6 +33,52 @@ class MetaRepository(ProjectScopedRepository):
     def set_project_meta(self, project_id: str, values: dict[str, Any]) -> None:
         """Upsert project_meta keyed by project_id."""
         self.upsert_by_keys(project_id, values, ("project_id",))
+
+    def save_project_payload(self, project_id: str, payload: dict[str, Any]) -> None:
+        """Store the canonical Project payload in ``project_meta``."""
+        self.upsert_by_keys(
+            project_id,
+            {
+                "project_json": json.dumps(payload, ensure_ascii=False),
+                "updated_at": payload.get("updated_at") or _now(),
+            },
+            ("project_id",),
+        )
+
+    def load_project_payload(self, project_id: str) -> dict[str, Any] | None:
+        """Return the canonical Project payload or ``None`` if missing."""
+        if not project_id:
+            return None
+        stmt = (
+            select(project_meta.c.project_json)
+            .where(project_meta.c.project_id == project_id)
+            .limit(1)
+        )
+        with self.connect() as conn:
+            row = conn.execute(stmt).fetchone()
+        if row is None or not row[0]:
+            return None
+        return json.loads(row[0])
+
+    def list_project_payloads(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List canonical Project payloads ordered by metadata update time."""
+        stmt = (
+            select(project_meta.c.project_json)
+            .where(project_meta.c.project_json.is_not(None))
+            .order_by(desc(project_meta.c.updated_at))
+            .limit(limit)
+        )
+        with self.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            if row[0]:
+                payloads.append(json.loads(row[0]))
+        return payloads
+
+    def delete_project_payload(self, project_id: str) -> int:
+        """Delete the project_meta row for a project."""
+        return self.delete_one(project_id)
 
     # ------------------------------------------------------------------
     # Generic key-value on project_meta

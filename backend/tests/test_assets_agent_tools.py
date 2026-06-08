@@ -50,22 +50,24 @@ def test_search_assets_executor(env):
         {"query": "形容词堆叠", "asset_type": "writing_style"},
         "proj_demo",
     )
-    assert "冷峻第一人称样本" in out
-    assert "禁用的暖色风格" not in out  # disabled excluded
+    text = out["result"]
+    assert "冷峻第一人称样本" in text
+    assert "禁用的暖色风格" not in text  # disabled excluded
 
 
 def test_get_asset_executor_returns_payload(env):
     from app.services.writer_agent.tool_executors import execute_tool
     out = execute_tool("get_asset", {"asset_id": env["asset_id"]}, "proj_demo")
-    assert "冷峻第一人称样本" in out
-    assert "结构化数据" in out
-    assert '"pov"' in out
+    text = out["result"]
+    assert "冷峻第一人称样本" in text
+    assert "结构化数据" in text
+    assert '"pov"' in text
 
 
 def test_get_asset_blocks_disabled(env):
     from app.services.writer_agent.tool_executors import execute_tool
     out = execute_tool("get_asset", {"asset_id": env["disabled_id"]}, "proj_demo")
-    assert "禁用状态" in out
+    assert "禁用状态" in out["result"]
 
 
 def test_list_assets_executor(env):
@@ -73,7 +75,7 @@ def test_list_assets_executor(env):
     out = execute_tool(
         "list_assets", {"asset_type": "worldview"}, "proj_demo",
     )
-    assert "本项目世界观" in out
+    assert "本项目世界观" in out["result"]
 
 
 def test_tools_registered():

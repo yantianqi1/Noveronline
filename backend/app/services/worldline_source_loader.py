@@ -4,8 +4,10 @@
 
 from typing import Any, Dict, List, Optional
 
+from ..models.project import ProjectManager
 from ..repositories.project_artifact_repo import load_project_artifact
 from .archive_library_service import ArchiveLibraryService
+from .seed_analysis_read_model import load_seed_analysis_for_project
 from .world_state_store import WorldStateStore
 
 
@@ -49,15 +51,35 @@ class WorldlineSourceLoader:
         entity_types: Optional[List[str]] = None,
         config_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        config = self._load_config(container_dir, config_override)
-        seed_analysis = self._load_seed_analysis(project, container_dir)
+        project_id = project.project_id if project else None
+        config = self._load_config(project_id, config_override)
+        novel_entities = self._load_novel_entities(project_id)
         resolved_archives = self._load_archives(
-            container_dir, archives, project.project_id if project else None,
+            archives,
+            project_id,
+            allow_artifact=not bool(novel_entities),
         )
+        seed_analysis: Dict[str, Any] = {}
         entities = self._load_entities(graph_id, entity_types, resolved_archives, seed_analysis)
 
-        actors, organizations = self._build_actor_maps(project.project_id if project else None, resolved_archives, seed_analysis, entities)
-        relationships = self._build_relationships(resolved_archives, seed_analysis, actors, organizations)
+        actors, organizations = self._build_actor_maps(
+            project_id, resolved_archives, seed_analysis, entities, novel_entities,
+        )
+        if (not actors or not organizations) and project_id:
+            seed_analysis = self._load_seed_analysis(project_id)
+            if seed_analysis:
+                actors, organizations = self._build_actor_maps(
+                    project_id, resolved_archives, seed_analysis, entities, novel_entities,
+                )
+        relationships = self._build_relationships(
+            project_id, resolved_archives, seed_analysis, actors, organizations, novel_entities,
+        )
+        if not relationships and not seed_analysis and project_id:
+            seed_analysis = self._load_seed_analysis(project_id)
+            if seed_analysis:
+                relationships = self._build_relationships(
+                    project_id, resolved_archives, seed_analysis, actors, organizations, novel_entities,
+                )
         if not actors and not organizations:
             actors = {name: dict(state) for name, state in DEFAULT_ACTORS.items()}
 
@@ -73,6 +95,7 @@ class WorldlineSourceLoader:
                 "archives": len(resolved_archives),
                 "parallel_world_config": bool(config),
                 "graph_entities": len(entities),
+                "novel_entities": len(novel_entities),
                 "seed_analysis": bool(seed_analysis),
             },
             "config": config,
@@ -80,51 +103,57 @@ class WorldlineSourceLoader:
 
     def _load_config(
         self,
-        container_dir: str,
+        project_id: Optional[str],
         config_override: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         if config_override is not None:
             return config_override
-        return self.store.load_json_if_exists(container_dir, "parallel_world_config.json") or {}
+        if not project_id:
+            return {}
+        project_config = ProjectManager.load_project_setting(
+            project_id, "parallel_world_config",
+        )
+        if isinstance(project_config, dict):
+            return project_config
+        return {}
 
     def _load_seed_analysis(
         self,
-        project: Optional[Any],
-        container_dir: str,
+        project_id: Optional[str],
     ) -> Dict[str, Any]:
-        seed_analysis = self.store.load_json_if_exists(container_dir, "seed_analysis.json")
-        if seed_analysis or not project:
-            return seed_analysis or {}
-        return load_project_artifact(project.project_id, "seed_analysis") or {}
+        if not project_id:
+            return {}
+        seed_analysis = load_seed_analysis_for_project(project_id)
+        return seed_analysis if isinstance(seed_analysis, dict) else {}
 
     def _load_archives(
         self,
-        container_dir: str,
         archives: Optional[List[Dict[str, Any]]],
         project_id: Optional[str] = None,
+        *,
+        allow_artifact: bool = True,
     ) -> List[Dict[str, Any]]:
         if archives is not None:
             return archives
-        # 1) Snapshot path: a worldline run may carry its own pinned archive
-        # copy in the container dir (historic behaviour). Still supported so
-        # old runs keep working — but no new callers should rely on it.
-        archive_payload = self.store.load_json_if_exists(container_dir, "narrative_archives.json")
-        if archive_payload:
-            if isinstance(archive_payload.get("archives"), list):
-                return archive_payload["archives"]
-            if isinstance(archive_payload, list):
-                return archive_payload
-            raise ValueError("narrative_archives.json 结构无效")
-        # 2) Phase 2 · DB-native read. With the JSON write gone, the
-        # archive_library table is the live source of truth.
         if project_id:
             try:
                 result = ArchiveLibraryService().list_archives(
                     project_id=project_id, limit=1000,
                 )
-                return result.get("items", [])
+                items = result.get("items", [])
+                if items:
+                    return items
             except Exception:
+                pass
+            if not allow_artifact:
                 return []
+            archive_payload = load_project_artifact(project_id, "narrative_archives")
+            if isinstance(archive_payload, dict) and isinstance(archive_payload.get("archives"), list):
+                return archive_payload["archives"]
+            if isinstance(archive_payload, list):
+                return archive_payload
+            if archive_payload is not None:
+                raise ValueError("narrative_archives artifact 结构无效")
         return []
 
     def _load_entities(
@@ -146,15 +175,33 @@ class WorldlineSourceLoader:
         )
         return [entity.to_dict() for entity in filtered.entities[:120]]
 
+    def _load_novel_entities(self, project_id: Optional[str]) -> List[Dict[str, Any]]:
+        if not project_id:
+            return []
+        from ..database import get_engine
+        from ..repositories.entity_repo import EntityRepository
+
+        repo = EntityRepository(get_engine())
+        return [
+            repo.get_entity_with_details(project_id, item["entity_id"]) or item
+            for item in repo.list_entities(project_id, limit=1000)
+            if item.get("entity_id")
+        ]
+
     def _build_actor_maps(
         self,
         project_id: Optional[str],
         resolved_archives: List[Dict[str, Any]],
         seed_analysis: Dict[str, Any],
         entities: List[Dict[str, Any]],
+        novel_entities: List[Dict[str, Any]],
     ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         actors = self._actors_from_archives(project_id, resolved_archives)
         organizations = self._organizations_from_archives(project_id, resolved_archives)
+        if actors or organizations:
+            return actors, organizations
+        actors = self._actors_from_novel_entities(novel_entities)
+        organizations = self._organizations_from_novel_entities(novel_entities)
         if actors or organizations:
             return actors, organizations
         actors = self._actors_from_entities(entities)
@@ -253,6 +300,45 @@ class WorldlineSourceLoader:
     def _organizations_from_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         return self._states_from_entities(entities, want_org=True)
 
+    def _actors_from_novel_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        return self._states_from_novel_entities(entities, want_org=False)
+
+    def _organizations_from_novel_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        return self._states_from_novel_entities(entities, want_org=True)
+
+    def _states_from_novel_entities(
+        self,
+        entities: List[Dict[str, Any]],
+        want_org: bool,
+    ) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for entity in entities:
+            name = str(entity.get("name") or "").strip()
+            if not name:
+                continue
+            entity_type = str(entity.get("entity_type") or "").lower()
+            if self._is_organization(entity_type) != want_org:
+                continue
+            result[name] = {
+                "agent_kind": "organization" if want_org else "character",
+                "status": "active",
+                "drive": (
+                    entity.get("core_drive")
+                    or entity.get("current_objective")
+                    or entity.get("ultimate_goal")
+                    or entity.get("summary")
+                    or "根据主库 canon 推进目标"
+                ),
+                "tension": entity.get("hidden_tension") or "外部变量可能引发关系变化",
+                "role": entity_type or ("organization" if want_org else "character"),
+                "importance_tier": entity.get("importance_tier") or "supporting",
+                "entity_uuid": entity.get("entity_id"),
+                "archive_id": entity.get("archive_id") or "",
+                "state_source": "novel_db",
+                "last_event": "seed",
+            }
+        return result
+
     def _states_from_entities(
         self,
         entities: List[Dict[str, Any]],
@@ -284,13 +370,18 @@ class WorldlineSourceLoader:
 
     def _build_relationships(
         self,
+        project_id: Optional[str],
         archives: List[Dict[str, Any]],
         seed_analysis: Dict[str, Any],
         actors: Dict[str, Dict[str, Any]],
         organizations: Dict[str, Dict[str, Any]],
+        novel_entities: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         archived = self._relationships_from_archives(archives, actors, organizations)
-        return archived or self._relationships_from_seed(seed_analysis, actors, organizations)
+        if archived:
+            return archived
+        novel_relationships = self._relationships_from_novel_db(project_id, actors, organizations, novel_entities)
+        return novel_relationships or self._relationships_from_seed(seed_analysis, actors, organizations)
 
     def _timeline_focus(self, config: Dict[str, Any], seed_analysis: Dict[str, Any]) -> List[str]:
         if config.get("timeline_focus"):
@@ -363,6 +454,44 @@ class WorldlineSourceLoader:
             for item in seed_analysis.get("relations", [])[:120]
             if item.get("source") and item.get("target")
         ]
+
+    def _relationships_from_novel_db(
+        self,
+        project_id: Optional[str],
+        actors: Dict[str, Dict[str, Any]],
+        organizations: Dict[str, Dict[str, Any]],
+        novel_entities: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not project_id:
+            return []
+        from ..database import get_engine
+        from ..repositories.relationship_repo import RelationshipRepository
+
+        id_to_name = {
+            str(entity.get("entity_id") or ""): str(entity.get("name") or "")
+            for entity in novel_entities
+            if entity.get("entity_id") and entity.get("name")
+        }
+        items = []
+        for relationship in RelationshipRepository(get_engine()).list_relationships(project_id, limit=1000):
+            source = id_to_name.get(str(relationship.get("source_id") or ""))
+            target = id_to_name.get(str(relationship.get("target_id") or ""))
+            if not source or not target:
+                continue
+            if source not in actors and source not in organizations:
+                continue
+            if target not in actors and target not in organizations:
+                continue
+            items.append({
+                "source": source,
+                "target": target,
+                "change": relationship.get("relation_type") or "co_occurrence",
+                "note": relationship.get("description") or relationship.get("history") or "从统一小说库继承的关系",
+                "source_importance_tier": self._state_tier(source, actors, organizations),
+                "target_importance_tier": self._state_tier(target, actors, organizations),
+                "state_source": "novel_db",
+            })
+        return items[:120]
 
     def _state_tier(
         self,

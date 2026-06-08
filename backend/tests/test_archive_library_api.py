@@ -1,8 +1,12 @@
 import sqlite3
+import shutil
+from pathlib import Path
 
 from app import create_app
 from app.config import Config
+from app.database import get_engine
 from app.models.project import ProjectManager
+from app.repositories.project_artifact_repo import ProjectArtifactRepository
 
 
 def _configure_storage(tmp_path, monkeypatch):
@@ -109,7 +113,7 @@ def _create_app_client(tmp_path, monkeypatch):
 def _create_legacy_archive_library_db(upload_root):
     db_dir = upload_root / "system"
     db_dir.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_dir / Config.ARCHIVE_LIBRARY_DB_FILENAME)
+    connection = sqlite3.connect(db_dir / "archive_library.sqlite3")
     connection.execute(
         """
         CREATE TABLE archive_library (
@@ -219,6 +223,57 @@ def test_archive_library_indexes_existing_project_archives(tmp_path, monkeypatch
     reindex_response = client.post("/api/archive/library/reindex")
     assert reindex_response.status_code == 200, reindex_response.get_json()
     assert reindex_response.get_json()["data"]["count"] == 3
+
+
+def test_archive_library_reindex_reads_narrative_archives_from_db_artifact(tmp_path, monkeypatch):
+    client = _create_app_client(tmp_path, monkeypatch)
+    project = _create_project("DB 档案导入项目", "只从统一库导入")
+    archive_payload = _archive_payload(
+        project,
+        [_make_archive("char_1", "沈夜", "Character", "protagonist", "查清真相")],
+    )
+    ProjectArtifactRepository(get_engine()).save(
+        project.project_id,
+        "narrative_archives",
+        archive_payload,
+    )
+
+    assert not (
+        Path(ProjectManager._get_project_dir(project.project_id)) / "narrative_archives.json"
+    ).exists()
+
+    reindex_response = client.post("/api/archive/library/reindex")
+
+    assert reindex_response.status_code == 200, reindex_response.get_json()
+    assert reindex_response.get_json()["data"]["count"] == 1
+
+    list_response = client.get(f"/api/archive/library?project_id={project.project_id}")
+    assert list_response.status_code == 200, list_response.get_json()
+    assert list_response.get_json()["data"]["items"][0]["entity_name"] == "沈夜"
+
+
+def test_archive_library_reindex_finds_db_project_without_project_directory(tmp_path, monkeypatch):
+    client = _create_app_client(tmp_path, monkeypatch)
+    project = _create_project("无目录项目", "项目元数据来自 DB")
+    archive_payload = _archive_payload(
+        project,
+        [_make_archive("char_2", "秦昭", "Character", "major", "守住底线")],
+    )
+    ProjectArtifactRepository(get_engine()).save(
+        project.project_id,
+        "narrative_archives",
+        archive_payload,
+    )
+    shutil.rmtree(ProjectManager._get_project_dir(project.project_id))
+
+    reindex_response = client.post("/api/archive/library/reindex")
+
+    assert reindex_response.status_code == 200, reindex_response.get_json()
+    assert reindex_response.get_json()["data"]["count"] == 1
+
+    list_response = client.get(f"/api/archive/library?project_id={project.project_id}")
+    assert list_response.status_code == 200, list_response.get_json()
+    assert list_response.get_json()["data"]["items"][0]["entity_name"] == "秦昭"
 
 
 def test_archive_library_migrates_legacy_notable_risks_column(tmp_path, monkeypatch):

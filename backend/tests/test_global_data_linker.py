@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +13,9 @@ from app.config import Config
 from app.database import get_engine
 from app.models.project import ProjectManager, ProjectStatus
 from app.repositories.archive_repo import ArchiveRepository
+from app.repositories.entity_repo import EntityRepository
+from app.repositories.project_artifact_repo import ProjectArtifactRepository
+from app.repositories.relationship_repo import RelationshipRepository
 from app.services.global_data_linker import GlobalDataLinker
 from app.services.local_story_graph_models import GraphSnapshot
 
@@ -128,6 +133,76 @@ def test_link_project_populates_archive_library(tmp_path, monkeypatch):
     assert summary["stages"]["index_rebuild"]["indexed"] == 3
 
 
+def test_link_project_reads_seed_data_from_structured_tables_without_artifacts(
+    tmp_path, monkeypatch
+):
+    _configure_storage(tmp_path, monkeypatch)
+    create_app()
+    project = ProjectManager.create_project("DB-only 打通")
+    project.analysis_goal = "观察角色关系"
+    project.status = ProjectStatus.ONTOLOGY_GENERATED
+    project.ontology = {"entity_types": ["Character"], "edge_types": ["ally"]}
+    ProjectManager.save_project(project)
+    ProjectManager.save_extracted_text(project.project_id, "第一章：沈夜与秦昭潜入地下档案。\n" * 40)
+    now = datetime.now().isoformat()
+    profile = {
+        "basic_info": {"name": "沈夜", "identity": "镜湖调查者"},
+        "motivation": {"current_objective": "打开地下档案"},
+    }
+    entities = EntityRepository(get_engine())
+    entities.upsert_entity(
+        project.project_id,
+        {
+            "entity_id": "char_shenye",
+            "name": "沈夜",
+            "entity_type": "character",
+            "importance_tier": "protagonist",
+            "summary": "追查镜湖旧案的主角。",
+            "profile_json": json.dumps(profile, ensure_ascii=False),
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    entities.upsert_entity(
+        project.project_id,
+        {
+            "entity_id": "char_qinzhao",
+            "name": "秦昭",
+            "entity_type": "character",
+            "importance_tier": "major",
+            "summary": "掌握地下档案密钥的盟友。",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    RelationshipRepository(get_engine()).upsert_relationship(
+        project.project_id,
+        {
+            "relation_id": "rel_shenye_qinzhao",
+            "source_id": "char_shenye",
+            "target_id": "char_qinzhao",
+            "relation_type": "ally",
+            "description": "两人暂时联手潜入地下档案。",
+            "updated_at": now,
+        },
+    )
+
+    summary = GlobalDataLinker(
+        graph_service=_mock_graph_service(),
+        indexer=_mock_indexer(return_count=2),
+    ).link_project(project.project_id, use_llm=False)
+
+    repo = ArchiveRepository(get_engine())
+    archives = repo.list_archives(project_id=project.project_id, limit=20)
+    assert repo.count_archives(project_id=project.project_id) >= 3
+    shenye = next(item for item in archives if item["entity_name"] == "沈夜")
+    assert "agent_profile" in json.loads(shenye["template_sections_json"])
+    assert summary["stages"]["archive_sync"]["archive_count"] >= 3
+    artifact_repo = ProjectArtifactRepository(get_engine())
+    assert artifact_repo.load(project.project_id, "seed_analysis") is None
+    assert artifact_repo.load(project.project_id, "agent_profiles") is None
+
+
 def test_link_project_fails_without_seed_analysis(tmp_path, monkeypatch):
     _configure_storage(tmp_path, monkeypatch)
     create_app()
@@ -170,6 +245,34 @@ def test_find_missing_projects_skips_projects_with_active_task(tmp_path, monkeyp
 
     found = GlobalDataLinker().find_missing_projects()
     assert project.project_id not in found
+
+
+def test_find_missing_projects_includes_structured_seed_without_artifact(
+    tmp_path, monkeypatch
+):
+    _configure_storage(tmp_path, monkeypatch)
+    create_app()
+    project = ProjectManager.create_project("DB-only 待打通")
+    project.status = ProjectStatus.ONTOLOGY_GENERATED
+    ProjectManager.save_project(project)
+    now = datetime.now().isoformat()
+    EntityRepository(get_engine()).upsert_entity(
+        project.project_id,
+        {
+            "entity_id": "char_shenye",
+            "name": "沈夜",
+            "entity_type": "character",
+            "importance_tier": "protagonist",
+            "summary": "追查镜湖旧案的主角。",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+    found = GlobalDataLinker().find_missing_projects()
+
+    assert project.project_id in found
+    assert ProjectArtifactRepository(get_engine()).load(project.project_id, "seed_analysis") is None
 
 
 def test_backfill_missing_continues_after_failure(tmp_path, monkeypatch):

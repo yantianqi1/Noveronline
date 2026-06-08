@@ -29,10 +29,6 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "sqlite:///./data/mirofish.db"
     LLM_REQUEST_TIMEOUT_SECONDS: float = 120
-    LLM_FACILITY_DB_FILENAME: str = "llm_facility.sqlite3"
-    ARCHIVE_LIBRARY_DB_FILENAME: str = "archive_library.sqlite3"
-    ASSETS_GLOBAL_DB_FILENAME: str = "assets_library.sqlite3"
-    ASSETS_PROJECT_DB_FILENAME: str = "project_assets.sqlite3"
 
     ZEP_API_KEY: str | None = None
 
@@ -98,10 +94,6 @@ class Config:
     JSON_AS_ASCII = False
 
     LLM_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
-    LLM_FACILITY_DB_FILENAME = "llm_facility.sqlite3"
-    ARCHIVE_LIBRARY_DB_FILENAME = "archive_library.sqlite3"
-    ASSETS_GLOBAL_DB_FILENAME = "assets_library.sqlite3"
-    ASSETS_PROJECT_DB_FILENAME = "project_assets.sqlite3"
 
     ZEP_API_KEY = os.environ.get("ZEP_API_KEY")
 

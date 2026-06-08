@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models.project import ProjectManager, ProjectStatus
+from ..repositories.project_artifact_repo import load_project_artifact
 from ..utils.retry_policy import (
     ExhaustedLLMRetries,
     PermanentLLMError,
@@ -70,7 +70,7 @@ class SeedExtractRunner:
         self.progress.note(
             "agent_profiles",
             "统一数据库已就绪",
-            "后续写作与检索将直接使用主库，不再回填 legacy novel.sqlite3",
+            "后续写作与检索将直接使用主库，不再回填旧小说库",
             meta={"kind": "migration", "target": "unified_db"},
         )
 
@@ -90,6 +90,28 @@ class SeedExtractRunner:
             project_id,
             progress=self.progress,
             use_llm=self.use_llm,
+        )
+
+    def _load_reading_notes_manager(
+        self, project_id: str
+    ) -> Tuple[ReadingNotesManager, bool]:
+        """Load reading notes from the unified artifact store.
+
+        Returns ``(manager, fresh_start)``. ``fresh_start`` is true only when no
+        DB artifact exists, which means retry should rebuild from smart_segments.
+        """
+        state = load_project_artifact(project_id, "reading_notes")
+        if state is None:
+            return ReadingNotesManager(), True
+        if not isinstance(state, dict):
+            raise ValueError("reading_notes artifact 格式异常，无法执行重读。")
+        return ReadingNotesManager.from_state(state), False
+
+    def _save_reading_notes_manager(
+        self, project_id: str, manager: ReadingNotesManager
+    ) -> None:
+        ProjectManager.save_project_artifact(
+            project_id, "reading_notes.json", manager.assemble_for_save()
         )
 
     def _persist_narrative_data(
@@ -209,6 +231,35 @@ class SeedExtractRunner:
                 meta={"kind": "persist", "target": "narrative_tables"},
             )
 
+    def _persist_runtime_facts(
+        self, project_id: str, manager: ReadingNotesManager
+    ) -> dict[str, int]:
+        """Persist reading-note facts that context/graph/writer query directly."""
+        from .seed_runtime_facts_persister import SeedRuntimeFactsPersister
+
+        counts = SeedRuntimeFactsPersister().persist(project_id, manager)
+        total = sum(counts.values())
+        self._log(
+            "runtime_facts_persist",
+            (
+                "落库：剧情线={plot_threads} · 世界规则={world_rules} · "
+                "人物事件={character_events} · 关系事件={relationship_events} · "
+                "一致性备注={consistency_notes}"
+            ).format(**counts),
+        )
+        if total:
+            self.progress.note(
+                "global_integration",
+                "阅读事实落库",
+                f"已写入 {total} 条可供上下文、图谱和 Writer Agent 查询的结构化事实。",
+                meta={
+                    "kind": "persist",
+                    "target": "runtime_fact_tables",
+                    "structured_counts": counts,
+                },
+            )
+        return counts
+
     def run(
         self,
         project_id: str,
@@ -262,6 +313,7 @@ class SeedExtractRunner:
             )
             if self.task_logger:
                 self.task_logger.stage_end("global_integration", time.time() - t0, self._seed_counts_text(seed_analysis))
+            self._persist_runtime_facts(project_id, manager)
 
             self._check_cancelled()
 
@@ -551,14 +603,11 @@ class SeedExtractRunner:
                     kind="retry",
                 )
 
-        # 周期 checkpoint：每 5 段把 reading_notes.json 落盘一次，让 断点续传
+        # 周期 checkpoint：每 5 段把 reading_notes 写入统一库，让断点续传
         # 在任务被杀的情况下也能接着跑。checkpoint 失败不能让整个读阶段崩掉，
         # sequential_reader.read 内部已经 try/except 过，这里只需要提供 saver。
-        import os
-        notes_path = os.path.join(ProjectManager._get_project_dir(project_id), "reading_notes.json")
-
         def checkpoint_saver(mgr: ReadingNotesManager) -> None:
-            mgr.save(notes_path)
+            self._save_reading_notes_manager(project_id, mgr)
 
         manager = self.service.sequential_reader.read(
             segments=segments,
@@ -569,9 +618,8 @@ class SeedExtractRunner:
             checkpoint_every=5,
         )
 
-        # Save reading notes (filesystem + DB mirror for runtime reads)
-        manager.save(notes_path)
-        ProjectManager.save_project_artifact(project_id, "reading_notes.json", manager.assemble_for_save())
+        # Save reading notes to the unified artifact store.
+        self._save_reading_notes_manager(project_id, manager)
 
         # Save segment summaries
         ProjectManager.save_project_artifact(
@@ -783,6 +831,9 @@ class SeedExtractRunner:
             seed_analysis.setdefault("source_stats", {})["block_count"] = compatibility_block_count
             seed_analysis.setdefault("story_memory", {})["block_count"] = compatibility_block_count
         ProjectManager.save_project_artifact(project_id, "seed_analysis.json", seed_analysis)
+        from .seed_analysis_persister import SeedAnalysisPersister
+
+        persisted_counts = SeedAnalysisPersister().persist(project_id, seed_analysis)
         # 记录产物：聚合结果摘要
         chars = seed_analysis.get("characters", [])
         orgs = seed_analysis.get("organizations", [])
@@ -809,7 +860,11 @@ class SeedExtractRunner:
             "global_integration",
             "种子分析聚合完成",
             self._seed_counts_text(seed_analysis),
-            meta={"kind": "artifact", "artifact": "seed_analysis.json"},
+            meta={
+                "kind": "artifact",
+                "artifact": "seed_analysis.json",
+                "structured_counts": persisted_counts,
+            },
         )
 
         # ontology
@@ -887,11 +942,18 @@ class SeedExtractRunner:
         )
         self.progress.end_step(step_id)
         ProjectManager.save_project_artifact(project_id, "agent_profiles.json", agent_profiles)
+        from .agent_profile_persister import AgentProfilePersister
+
+        persisted_counts = AgentProfilePersister().persist(project_id, agent_profiles)
         self.progress.note(
             "agent_profiles",
             "角色代理档案生成完成",
             f"已生成 {agent_profiles['profile_count']} 个角色档案",
-            meta={"kind": "artifact", "artifact": "agent_profiles.json"},
+            meta={
+                "kind": "artifact",
+                "artifact": "agent_profiles.json",
+                "structured_counts": persisted_counts,
+            },
         )
         return agent_profiles
 
@@ -948,28 +1010,19 @@ class SeedExtractRunner:
         try:
             self._validate_llm_modules()
 
-            notes_path = os.path.join(
-                ProjectManager._get_project_dir(project_id), "reading_notes.json",
-            )
-            # 断点续传降级：第一遍任务在写出 reading_notes.json 之前就被杀的
+            # 断点续传降级：第一遍任务在写出 reading_notes artifact 之前就被杀的
             # 场景，用空 manager 把所有段落都当"未处理"重跑，而不是硬报错。
             # smart_segments.json 是下面判断"是否有段落可重跑"的前提，缺它
             # 才算真正无法恢复。
-            if os.path.exists(notes_path):
-                manager = ReadingNotesManager.load(notes_path)
-                fresh_start = False
-            else:
-                manager = ReadingNotesManager()
-                fresh_start = True
+            manager, fresh_start = self._load_reading_notes_manager(project_id)
+            if fresh_start:
                 self._log(
                     "retry_pipeline",
-                    "reading_notes.json 不存在，按空笔记重跑所有段落。",
+                    "reading_notes artifact 不存在，按空笔记重跑所有段落。",
                     "warning",
                 )
 
-            smart_segments = ProjectManager.load_project_json(
-                project_id, "smart_segments.json",
-            ) or {}
+            smart_segments = load_project_artifact(project_id, "smart_segments") or {}
             segments_by_id = {
                 seg.get("segment_id"): seg
                 for seg in smart_segments.get("segments", [])
@@ -1037,8 +1090,7 @@ class SeedExtractRunner:
 
             recovered, remaining = self._retry_reread_segments(targets, manager)
 
-            manager.save(notes_path)
-            ProjectManager.save_project_artifact(project_id, "reading_notes.json", manager.assemble_for_save())
+            self._save_reading_notes_manager(project_id, manager)
             ProjectManager.save_project_artifact(
                 project_id, "segment_summaries.json",
                 {"summaries": manager.all_segment_summaries},
@@ -1071,25 +1123,20 @@ class SeedExtractRunner:
 
             all_text = ProjectManager.get_extracted_text(project_id) or ""
             documents = [{"source_name": project.name, "text": all_text}]
-            story_memory = ProjectManager.load_project_json(
-                project_id, "story_memory.json",
-            ) or {}
-            block_analyses = ProjectManager.load_project_json(
-                project_id, "block_analyses.json",
-            ) or {}
+            story_memory = load_project_artifact(project_id, "story_memory") or {}
+            block_analyses = load_project_artifact(project_id, "block_analyses") or {}
             compatibility_artifacts = {
                 "story_memory": story_memory,
                 "block_analyses": block_analyses,
             }
-            chapter_segments = ProjectManager.load_project_json(
-                project_id, "chapter_segments.json",
-            ) or {}
+            chapter_segments = load_project_artifact(project_id, "chapter_segments") or {}
             chapter_count = chapter_segments.get("chapter_count", 0)
 
             seed_analysis, ontology = self._global_integration_and_ontology(
                 project_id, project_name, analysis_goal, additional_context,
                 documents, manager, compatibility_artifacts,
             )
+            self._persist_runtime_facts(project_id, manager)
 
             agent_profiles = self._generate_agent_profiles(project_id, manager)
 

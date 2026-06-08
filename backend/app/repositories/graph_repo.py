@@ -705,19 +705,6 @@ class GraphRepository(ProjectScopedRepository):
                 break
         return out
 
-
-# ----------------------------------------------------------------------
-# Module-level helpers
-# ----------------------------------------------------------------------
-
-
-def _is_cjk_char(ch: str) -> bool:
-    """Narrow CJK check — only Han Unified Ideographs + extension A."""
-    if not ch or len(ch) != 1:
-        return False
-    code = ord(ch)
-    return 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -741,3 +728,16 @@ def _is_cjk_char(ch: str) -> bool:
                     snippet=str(item.get("snippet") or ""),
                 )
             )
+
+
+# ----------------------------------------------------------------------
+# Module-level helpers
+# ----------------------------------------------------------------------
+
+
+def _is_cjk_char(ch: str) -> bool:
+    """Narrow CJK check — only Han Unified Ideographs + extension A."""
+    if not ch or len(ch) != 1:
+        return False
+    code = ord(ch)
+    return 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF

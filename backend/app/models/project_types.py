@@ -34,6 +34,7 @@ class Project:
     chunk_size: int = 500
     chunk_overlap: int = 50
     error: Optional[str] = None
+    settings: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -53,6 +54,7 @@ class Project:
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "error": self.error,
+            "settings": self.settings,
         }
 
     @classmethod
@@ -77,4 +79,5 @@ class Project:
             chunk_size=data.get("chunk_size", 500),
             chunk_overlap=data.get("chunk_overlap", 50),
             error=data.get("error"),
+            settings=data.get("settings") if isinstance(data.get("settings"), dict) else {},
         )

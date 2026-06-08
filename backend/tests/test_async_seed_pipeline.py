@@ -99,21 +99,15 @@ def test_async_seed_pipeline_generates_chapter_outputs(tmp_path, monkeypatch):
     assert task["status"] == "completed", task
 
     project_id = payload["project_id"]
-    project_dir = ProjectManager._get_project_dir(project_id)
-    segments_path = f"{project_dir}/chapter_segments.json"
-    continuity_path = f"{project_dir}/chapter_continuity.json"
-    chapter_cards_path = f"{project_dir}/chapter_cards.json"
-    seed_analysis_path = f"{project_dir}/seed_analysis.json"
+    segments = ProjectManager.load_project_json(project_id, "chapter_segments.json")
+    continuity = ProjectManager.load_project_json(project_id, "chapter_continuity.json")
+    chapter_cards = ProjectManager.load_project_json(project_id, "chapter_cards.json")
+    seed_analysis = ProjectManager.load_project_json(project_id, "seed_analysis.json")
 
-    with open(segments_path, "r", encoding="utf-8") as file_obj:
-        segments = json.load(file_obj)
-    with open(continuity_path, "r", encoding="utf-8") as file_obj:
-        continuity = json.load(file_obj)
-    with open(chapter_cards_path, "r", encoding="utf-8") as file_obj:
-        chapter_cards = json.load(file_obj)
-    with open(seed_analysis_path, "r", encoding="utf-8") as file_obj:
-        seed_analysis = json.load(file_obj)
-
+    assert segments is not None
+    assert continuity is not None
+    assert chapter_cards is not None
+    assert seed_analysis is not None
     assert len(segments["chapters"]) == 3
     assert chapter_cards["chapter_count"] == 3
     assert chapter_cards["chapters"][0]["summary_text"]
@@ -155,12 +149,9 @@ def test_async_seed_pipeline_uses_dynamic_char_based_analysis_blocks(tmp_path, m
     task = wait_for_task(client, payload["task_id"])
     assert task["status"] == "completed", task
 
-    project_dir = ProjectManager._get_project_dir(payload["project_id"])
-    analysis_blocks_path = f"{project_dir}/analysis_blocks.json"
+    analysis_blocks = ProjectManager.load_project_json(payload["project_id"], "analysis_blocks.json")
 
-    with open(analysis_blocks_path, "r", encoding="utf-8") as file_obj:
-        analysis_blocks = json.load(file_obj)
-
+    assert analysis_blocks is not None
     assert analysis_blocks["target_owned_char_count"] == 5000
     assert analysis_blocks["block_count"] == 3
     assert analysis_blocks["blocks"][0]["owned_chapter_ids"] == ["chapter_0001", "chapter_0002", "chapter_0003"]

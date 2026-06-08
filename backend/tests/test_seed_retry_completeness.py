@@ -19,8 +19,10 @@ from typing import Any, Dict, List
 import pytest
 
 from app.config import Config
+from app.database import get_engine
 from app.models.project import Project, ProjectManager, ProjectStatus
 from app.models.task import TaskManager
+from app.repositories.project_artifact_repo import ProjectArtifactRepository
 from app.services.reading_notes_manager import ReadingNotesManager
 from app.services.seed_extract_runner import SeedExtractRunner
 from app.services.seed_extract_task_service import SeedExtractTaskService
@@ -139,11 +141,27 @@ def _write_smart_segments(project_dir, count: int) -> List[Dict[str, Any]]:
             "chapter_range": str(i),
             "estimated_tokens": 20,
         })
-    (project_dir / "smart_segments.json").write_text(
-        json.dumps({"segments": segments}, ensure_ascii=False),
-        encoding="utf-8",
+    ProjectArtifactRepository(get_engine()).save(
+        project_dir.name,
+        "smart_segments",
+        {"segments": segments},
     )
+    assert not (project_dir / "smart_segments.json").exists()
     return segments
+
+
+def _save_reading_notes_artifact(project_id: str, manager: ReadingNotesManager) -> None:
+    ProjectArtifactRepository(get_engine()).save(
+        project_id,
+        "reading_notes",
+        manager.assemble_for_save(),
+    )
+
+
+def _load_reading_notes_artifact(project_id: str) -> ReadingNotesManager:
+    state = ProjectArtifactRepository(get_engine()).load(project_id, "reading_notes")
+    assert state is not None
+    return ReadingNotesManager.from_state(state)
 
 
 def _build_runner(service: _StubService, project_id: str, monkeypatch) -> SeedExtractRunner:
@@ -188,7 +206,8 @@ def test_retry_upserts_unprocessed_segments_and_orders_by_smart_segments(
     manager.add_segment_summary("seg_002", "老摘要 002")
     manager.add_segment_summary("seg_003", "", status="retry_needed", error_class="transient")
     manager.add_segment_summary("seg_004", "老摘要 004")
-    manager.save(str(project_dir / "reading_notes.json"))
+    _save_reading_notes_artifact(project_id, manager)
+    assert not (project_dir / "reading_notes.json").exists()
 
     client = _ScriptedClient()
     reader = SequentialReader(
@@ -202,7 +221,7 @@ def test_retry_upserts_unprocessed_segments_and_orders_by_smart_segments(
 
     runner.retry_failed_segments(project_id)
 
-    reloaded = ReadingNotesManager.load(str(project_dir / "reading_notes.json"))
+    reloaded = _load_reading_notes_artifact(project_id)
     ids = [e["segment_id"] for e in reloaded.all_segment_summaries]
 
     # 全 6 段都在，按时间序（F1 修好以后 seg_005 / seg_006 才会真的落盘）
@@ -222,6 +241,7 @@ def test_retry_upserts_unprocessed_segments_and_orders_by_smart_segments(
 
     # unprocessed 段的结构化字段也走了 _merge_structured_fields
     assert "沈夜" in reloaded.notes["core_facts"]["characters"]
+    assert not (project_dir / "reading_notes.json").exists()
 
 
 def test_retry_backfills_arc_and_volume_summaries(project_setup, monkeypatch):
@@ -233,7 +253,8 @@ def test_retry_backfills_arc_and_volume_summaries(project_setup, monkeypatch):
 
     # 首跑全挂 —— 所有 6 段都是 unprocessed。
     manager = ReadingNotesManager(arc_interval=2, volume_arc_threshold=2)
-    manager.save(str(project_dir / "reading_notes.json"))
+    _save_reading_notes_artifact(project_id, manager)
+    assert not (project_dir / "reading_notes.json").exists()
 
     client = _ScriptedClient()
     reader = SequentialReader(
@@ -248,7 +269,7 @@ def test_retry_backfills_arc_and_volume_summaries(project_setup, monkeypatch):
 
     runner.retry_failed_segments(project_id)
 
-    reloaded = ReadingNotesManager.load(str(project_dir / "reading_notes.json"))
+    reloaded = _load_reading_notes_artifact(project_id)
 
     # 6 段 / arc_interval=2 → 3 条 arc
     arc_summaries = reloaded.notes["plot_state"]["arc_summaries"]
@@ -270,6 +291,7 @@ def test_retry_backfills_arc_and_volume_summaries(project_setup, monkeypatch):
         f"{[v.get('volume_id') for v in volume_summaries]}"
     )
     assert [v["volume_id"] for v in volume_summaries] == ["vol_001", "vol_002"]
+    assert not (project_dir / "reading_notes.json").exists()
 
 
 def test_retry_skips_arc_backfill_when_nothing_new_to_cover(
@@ -289,7 +311,8 @@ def test_retry_skips_arc_backfill_when_nothing_new_to_cover(
             {"segment_id": "seg_001"}, {"segment_id": "seg_002"},
         ],
     )
-    manager.save(str(project_dir / "reading_notes.json"))
+    _save_reading_notes_artifact(project_id, manager)
+    assert not (project_dir / "reading_notes.json").exists()
 
     client = _ScriptedClient()
     reader = SequentialReader(
@@ -305,6 +328,7 @@ def test_retry_skips_arc_backfill_when_nothing_new_to_cover(
     # 没有 failed 也没有 unprocessed → retry 应该直接走 "没有需要重读的段落" 分支
     runner.retry_failed_segments(project_id)
 
-    reloaded = ReadingNotesManager.load(str(project_dir / "reading_notes.json"))
+    reloaded = _load_reading_notes_artifact(project_id)
     # 弧线数量保持 1，没有被 backfill 多造一条
     assert len(reloaded.notes["plot_state"]["arc_summaries"]) == 1
+    assert not (project_dir / "reading_notes.json").exists()

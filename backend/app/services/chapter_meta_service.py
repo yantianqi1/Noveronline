@@ -11,8 +11,8 @@ from sqlalchemy import and_, delete, desc, insert, select, update
 
 from ..database import get_engine
 from ..repositories.chapter_repo import ChapterRepository
-from ..repositories.project_artifact_repo import load_project_artifact
-from ..tables.novel import chapter_content, chapter_meta
+from ..repositories.world_rule_repo import WorldRuleRepository
+from ..tables.novel import chapter_content, chapter_meta, world_rule_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class ChapterMetaService:
             for card in cards:
                 self._write_card(conn, project_id, card)
             conn.commit()
+        self._persist_world_rules(project_id, world_rules)
 
     def upsert_chapter_card(
         self,
@@ -86,6 +87,7 @@ class ChapterMetaService:
         card = self._normalize_card(chapter_card)
         with self._repo.connect() as conn:
             self._write_card(conn, project_id, card)
+        self._persist_world_rules(project_id, world_rules)
 
     def get_chapter_summaries(
         self,
@@ -240,9 +242,52 @@ class ChapterMetaService:
         return items
 
     def get_world_rules(self, project_id: str) -> List[str]:
-        """Return world rules from the story_memory artifact."""
-        story_memory = load_project_artifact(project_id, "story_memory") or {}
-        return [str(item or "").strip() for item in story_memory.get("world_rules", []) if str(item or "").strip()]
+        """Return world rules from structured DB rows."""
+        db_rules = [
+            str(item.get("fact_text") or "").strip()
+            for item in WorldRuleRepository(self._repo.engine).list_rules(project_id, limit=500)
+        ]
+        return [rule for rule in db_rules if rule]
+
+    def _persist_world_rules(
+        self,
+        project_id: str,
+        world_rules: Optional[Sequence[str]],
+    ) -> None:
+        if world_rules is None:
+            return
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for item in world_rules:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+
+        prefix = "chapter_meta_world_rule:"
+        now = _now()
+        with self._repo.connect() as conn:
+            conn.execute(
+                delete(world_rule_evidence).where(
+                    and_(
+                        world_rule_evidence.c.project_id == project_id,
+                        world_rule_evidence.c.evidence_id.like(f"{prefix}%"),
+                    )
+                )
+            )
+            for index, text in enumerate(normalized, start=1):
+                conn.execute(
+                    insert(world_rule_evidence).values(
+                        project_id=project_id,
+                        evidence_id=f"{prefix}{index:04d}",
+                        fact_text=text,
+                        segment_id="chapter_meta",
+                        chapter_order=0,
+                        evidence_snippet=text,
+                        created_at=now,
+                    )
+                )
 
     def get_chapter_continuity_context(
         self,
@@ -341,13 +386,17 @@ class ChapterMetaService:
     def _get_prev_chapter_ending(self, project_id: str, current_chapter_order: int) -> str:
         if int(current_chapter_order) <= 1:
             return ""
-        chapters = (load_project_artifact(project_id, "chapter_segments") or {}).get("chapters", [])
         prev_order = int(current_chapter_order) - 1
-        for chapter in chapters:
-            if int(chapter.get("order") or 0) != prev_order:
-                continue
-            text = str(chapter.get("content") or chapter.get("text") or "").strip()
-            return text[-PREV_CHAPTER_ENDING_LENGTH:] if text else ""
+        chapter = self._repo.get_chapter_by_order(
+            project_id, prev_order, include_content=True,
+        )
+        if chapter:
+            text = str(chapter.get("content") or "").strip()
+            if text:
+                return text[-PREV_CHAPTER_ENDING_LENGTH:]
+            end_anchor = str(chapter.get("end_anchor") or "").strip()
+            if end_anchor:
+                return end_anchor[-PREV_CHAPTER_ENDING_LENGTH:]
         return ""
 
     def _normalize_card(self, card: Dict[str, Any]) -> Dict[str, Any]:

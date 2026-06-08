@@ -10,6 +10,7 @@ from .chapter_continuer import ChapterContinuerRunner
 from .lexicon_cleaner import LexiconCleanerRunner
 from .outline_completer import OutlineCompleterRunner
 from .relationship_filler import RelationshipFillerRunner
+from .style_cleaner import StyleCleanerRunner
 from .word_aligner import WordAlignerRunner
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "LexiconCleanerRunner",
     "OutlineCompleterRunner",
     "RelationshipFillerRunner",
+    "StyleCleanerRunner",
     "WordAlignerRunner",
 ]

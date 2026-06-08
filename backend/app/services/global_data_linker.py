@@ -20,12 +20,15 @@ from typing import Any, Dict, List, Optional
 from ..database import get_engine
 from ..models.project import ProjectManager, ProjectStatus
 from ..repositories.archive_repo import ArchiveRepository
-from ..repositories.project_artifact_repo import load_project_artifact
 from .archive_candidate_builder import ArchiveCandidateBuilder
 from .archive_library_service import ArchiveLibraryService
 from .assets.global_search_indexer import GlobalSearchIndexer
 from .graph_builder import GraphBuilderService
 from .narrative_entity_archivist import NarrativeEntityArchivist
+from .seed_analysis_read_model import (
+    load_agent_profiles_for_project,
+    load_seed_analysis_for_project,
+)
 from .seed_task_progress import SeedTaskProgressTracker
 
 logger = logging.getLogger(__name__)
@@ -128,13 +131,10 @@ class GlobalDataLinker:
                 "从种子分析与角色档案生成全局档案并写入档案库",
             )
 
-        seed_analysis = load_project_artifact(project_id, "seed_analysis")
+        seed_analysis = load_seed_analysis_for_project(project_id)
         if not seed_analysis:
             raise ValueError(f"项目缺少 seed_analysis，无法生成档案: {project_id}")
-        raw_profiles = load_project_artifact(project_id, "agent_profiles") or {}
-        agent_profiles = (
-            raw_profiles.get("profiles", {}) if isinstance(raw_profiles, dict) else {}
-        )
+        agent_profiles = load_agent_profiles_for_project(project_id)
 
         step_id = None
         if progress:
@@ -315,7 +315,7 @@ class GlobalDataLinker:
                 continue
             if project.seed_task_id:
                 continue
-            if not load_project_artifact(project.project_id, "seed_analysis"):
+            if not load_seed_analysis_for_project(project.project_id):
                 continue
             if archive_repo.count_archives(project_id=project.project_id) > 0:
                 continue

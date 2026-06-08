@@ -62,7 +62,6 @@ def test_async_seed_pipeline_generates_story_memory_artifacts(tmp_path, monkeypa
     task = wait_for_task(client, payload["task_id"])
     assert task["status"] == "completed", task
 
-    project_dir = ProjectManager._get_project_dir(payload["project_id"])
     artifact_names = [
         "analysis_blocks.json",
         "skeleton_timeline.json",
@@ -78,8 +77,9 @@ def test_async_seed_pipeline_generates_story_memory_artifacts(tmp_path, monkeypa
 
     loaded = {}
     for name in artifact_names:
-        with open(f"{project_dir}/{name}", "r", encoding="utf-8") as file_obj:
-            loaded[name] = json.load(file_obj)
+        payload_json = ProjectManager.load_project_json(payload["project_id"], name)
+        assert payload_json is not None, f"{name} artifact not found"
+        loaded[name] = payload_json
 
     blocks = loaded["analysis_blocks.json"]["blocks"]
     skeleton = loaded["skeleton_timeline.json"]

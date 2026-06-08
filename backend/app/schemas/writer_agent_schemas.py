@@ -189,6 +189,12 @@ class OneClickScanLexiconRequest(AllowExtraBase):
     lexicon_asset_ids: list[str] = []
 
 
+class OneClickScanStyleRequest(AllowExtraBase):
+    project_id: str
+    chapter_id: str
+    chapter_order: int = 0
+
+
 class OneClickFillRelationshipsRequest(AllowExtraBase):
     project_id: str
     chapter_id: str

@@ -2,14 +2,14 @@
 
 将以下 6 个数据源以 **只读** 方式聚合为统一的「资产条目」DTO：
 
-- ``assets``      —— 现有 ``AssetsService`` (assets_library.sqlite3 + 项目层)
-- ``archive``     —— ``ArchiveLibraryService`` (archive_library.sqlite3)
+- ``assets``      —— 现有 ``AssetsService`` 统一资产表
+- ``archive``     —— ``ArchiveLibraryService`` / archive asset view
 - ``story_graph`` —— ``LocalStoryGraphStorage`` (story_graph.json/.sqlite3)
 - ``novel_db``    —— ``EntityRepository`` / ``ThreadRepository`` /
                      ``WorldRuleRepository`` / ``SceneRepository`` 中的
                      entities / plot_threads / world_rule_evidence / scenes
-- ``worldline``   —— ``backend/uploads/projects/<pid>/worldlines/`` 文件系统
-- ``seed``        —— ``narrative_archives.json`` / ``agent_profiles.json``
+- ``worldline``   —— ``worldline_sessions`` 与 runtime worldline 主库表
+- ``seed``        —— seed artifacts + structured entities/threads/rules fallback
 
 设计目标：
 - 不复制数据；不写入任何 silo。
@@ -31,7 +31,9 @@ from ...config import Config
 from ...database import get_engine
 from ...repositories.archive_repo import ArchiveRepository
 from ...repositories.entity_repo import EntityRepository
+from ...repositories.event_repo import EventRepository
 from ...repositories.graph_repo import GraphRepository
+from ...repositories.narrative_repo import NarrativeRepository
 from ...repositories.relationship_repo import RelationshipRepository
 from ...repositories.thread_repo import ThreadRepository
 from ...repositories.world_rule_repo import WorldRuleRepository
@@ -135,6 +137,11 @@ CATEGORY_MAP: dict[tuple[str, str], str] = {
     (SOURCE_SEED, "seed_character"): CATEGORY_CHARACTERS,
     (SOURCE_SEED, "seed_world_rule"): CATEGORY_WORLD,
     (SOURCE_SEED, "seed_plot_thread"): CATEGORY_PLOT,
+    (SOURCE_SEED, "seed_arc_summary"): CATEGORY_PLOT,
+    (SOURCE_SEED, "seed_volume_summary"): CATEGORY_PLOT,
+    (SOURCE_SEED, "seed_segment_summary"): CATEGORY_PLOT,
+    (SOURCE_SEED, "seed_key_event"): CATEGORY_PLOT,
+    (SOURCE_SEED, "seed_ontology_entity"): CATEGORY_WORLD,
     # seed_agent_profile 在用户认知里就是"角色"。
     (SOURCE_SEED, "seed_agent_profile"): CATEGORY_CHARACTERS,
     # 资产库 / 创作素材
@@ -350,6 +357,11 @@ ENTITY_TYPE_LABELS: dict[str, str] = {
     "seed_character":       "种子角色",
     "seed_world_rule":      "种子设定",
     "seed_plot_thread":     "种子线索",
+    "seed_arc_summary":     "叙事弧摘要",
+    "seed_volume_summary":  "分卷摘要",
+    "seed_segment_summary": "分段摘要",
+    "seed_key_event":       "关键事件",
+    "seed_ontology_entity": "本体实体类型",
     "seed_agent_profile":   "Agent 档案",
     # assets
     "writing_style":        "文风",
@@ -428,6 +440,8 @@ class Readers:
         self._rule_repo = WorldRuleRepository(engine)
         self._scene_repo = SceneRepository(engine)
         self._relationship_repo = RelationshipRepository(engine)
+        self._event_repo = EventRepository(engine)
+        self._narrative_repo = NarrativeRepository(engine)
 
     # -- assets --------------------------------------------------------
     def read_assets(self, project_id: str | None) -> list[UnifiedAsset]:
@@ -780,14 +794,87 @@ class Readers:
             return []
         from ...repositories.project_artifact_repo import load_project_artifact
 
+        out = self._seed_assets_from_structured_tables(project_id, [])
+        structured_seed_types = {item.entity_type for item in out}
+        existing_keys = {(item.entity_type, item.source_ref) for item in out}
+
+        def has_type(entity_type: str) -> bool:
+            return any(item.entity_type == entity_type for item in out)
+
+        def add_gap_assets(items: list[UnifiedAsset]) -> None:
+            for item in items:
+                key = (item.entity_type, item.source_ref)
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                out.append(item)
+
+        archive_types = {"seed_character", "seed_world_rule", "seed_plot_thread"}
+        missing_archive_types = {t for t in archive_types if not has_type(t)}
+        has_structured_archive_seed = any(has_type(t) for t in archive_types)
+        if missing_archive_types and not has_structured_archive_seed:
+            archives = load_project_artifact(project_id, "narrative_archives") or {}
+            add_gap_assets(
+                self._seed_assets_from_archives_payload(
+                    project_id,
+                    archives,
+                    allowed_types=missing_archive_types,
+                )
+            )
+
+        reading_note_artifact_types = {"seed_arc_summary", "seed_key_event"}
+        reading_note_seed_types = {
+            "seed_arc_summary",
+            "seed_volume_summary",
+            "seed_segment_summary",
+            "seed_key_event",
+        }
+        missing_reading_note_types = {
+            t for t in reading_note_artifact_types if not has_type(t)
+        }
+        has_structured_reading_note_seed = any(
+            has_type(t) for t in reading_note_seed_types
+        )
+        if missing_reading_note_types and not has_structured_reading_note_seed:
+            reading_notes = load_project_artifact(project_id, "reading_notes") or {}
+            add_gap_assets(
+                self._seed_assets_from_reading_notes_payload(
+                    project_id,
+                    reading_notes,
+                    allowed_types=missing_reading_note_types,
+                )
+            )
+
+        if not has_type("seed_ontology_entity"):
+            ontology = self._project_ontology_from_db(project_id)
+            if not ontology and not structured_seed_types:
+                ontology = load_project_artifact(project_id, "ontology")
+            add_gap_assets(self._seed_assets_from_ontology_payload(project_id, ontology or {}))
+
+        if (
+            not has_type("seed_agent_profile")
+            and "seed_character" not in structured_seed_types
+        ):
+            profiles_payload = load_project_artifact(project_id, "agent_profiles") or {}
+            add_gap_assets(self._seed_assets_from_profiles_payload(project_id, profiles_payload))
+        return out
+
+    def _seed_assets_from_archives_payload(
+        self,
+        project_id: str,
+        archives: Any,
+        *,
+        allowed_types: set[str] | None = None,
+    ) -> list[UnifiedAsset]:
+        if not isinstance(archives, dict):
+            return []
         out: list[UnifiedAsset] = []
-        archives = load_project_artifact(project_id, "narrative_archives") or {}
-        if isinstance(archives, dict):
-            characters = archives.get("characters") or {}
-            if isinstance(characters, dict):
-                items = characters.values()
-            else:
-                items = characters
+        characters = archives.get("characters") or {}
+        if isinstance(characters, dict):
+            items = characters.values()
+        else:
+            items = characters
+        if allowed_types is None or "seed_character" in allowed_types:
             for ch in items:
                 if not isinstance(ch, dict):
                     continue
@@ -808,6 +895,7 @@ class Readers:
                         origin_link=f"/overview?character={name}",
                     )
                 )
+        if allowed_types is None or "seed_world_rule" in allowed_types:
             for rule in archives.get("world_rules") or []:
                 if not isinstance(rule, dict):
                     continue
@@ -825,6 +913,7 @@ class Readers:
                         origin_link=f"/overview?rule={title}",
                     )
                 )
+        if allowed_types is None or "seed_plot_thread" in allowed_types:
             for thread in archives.get("plot_threads") or []:
                 if not isinstance(thread, dict):
                     continue
@@ -842,33 +931,46 @@ class Readers:
                         origin_link=f"/overview?thread={title}",
                     )
                 )
-        # Reading notes — expose arc_summaries and key_events as searchable
-        # entries so the writer agent (and global FTS) can pull them.
-        reading_notes = load_project_artifact(project_id, "reading_notes") or {}
-        if isinstance(reading_notes, dict):
-            notes_inner = reading_notes.get("notes", reading_notes)
-            plot_state = notes_inner.get("plot_state", {}) if isinstance(notes_inner, dict) else {}
-            for arc in plot_state.get("arc_summaries", []) or []:
-                if not isinstance(arc, dict):
-                    continue
-                arc_id = arc.get("arc_id") or ""
-                summary = arc.get("summary") or ""
-                if not arc_id or not summary:
-                    continue
-                out.append(
-                    UnifiedAsset(
-                        source=SOURCE_SEED,
-                        source_ref=f"arc:{arc_id}",
-                        entity_type="seed_arc_summary",
-                        title=arc_id,
-                        summary=summary,
-                        scope="project",
-                        project_id=project_id,
-                        payload=arc,
-                        origin_link=f"/overview?arc={arc_id}",
+        return out
+
+    def _seed_assets_from_reading_notes_payload(
+        self,
+        project_id: str,
+        reading_notes: Any,
+        *,
+        allowed_types: set[str] | None = None,
+    ) -> list[UnifiedAsset]:
+        if not isinstance(reading_notes, dict):
+            return []
+        out: list[UnifiedAsset] = []
+        notes_inner = reading_notes.get("notes", reading_notes)
+        if not isinstance(notes_inner, dict):
+            return out
+        plot_state = notes_inner.get("plot_state", {})
+        if allowed_types is None or "seed_arc_summary" in allowed_types:
+            if isinstance(plot_state, dict):
+                for arc in plot_state.get("arc_summaries", []) or []:
+                    if not isinstance(arc, dict):
+                        continue
+                    arc_id = arc.get("arc_id") or ""
+                    summary = arc.get("summary") or ""
+                    if not arc_id or not summary:
+                        continue
+                    out.append(
+                        UnifiedAsset(
+                            source=SOURCE_SEED,
+                            source_ref=f"arc:{arc_id}",
+                            entity_type="seed_arc_summary",
+                            title=arc_id,
+                            summary=summary,
+                            scope="project",
+                            project_id=project_id,
+                            payload=arc,
+                            origin_link=f"/overview?arc={arc_id}",
+                        )
                     )
-                )
-            for ev in notes_inner.get("key_events", []) if isinstance(notes_inner, dict) else []:
+        if allowed_types is None or "seed_key_event" in allowed_types:
+            for ev in notes_inner.get("key_events", []) or []:
                 if not isinstance(ev, dict):
                     continue
                 ev_id = ev.get("event_id") or ""
@@ -888,49 +990,346 @@ class Readers:
                         origin_link=f"/overview?event={ev_id}",
                     )
                 )
-
-        # Ontology — expose entity_types so writer agent can introspect labels.
-        ontology = load_project_artifact(project_id, "ontology") or {}
-        if isinstance(ontology, dict):
-            for entity_type in ontology.get("entity_types", []) or []:
-                if not isinstance(entity_type, dict):
-                    continue
-                name = entity_type.get("name") or ""
-                if not name:
-                    continue
-                out.append(
-                    UnifiedAsset(
-                        source=SOURCE_SEED,
-                        source_ref=f"ontology:entity:{name}",
-                        entity_type="seed_ontology_entity",
-                        title=name,
-                        summary=entity_type.get("description") or "",
-                        scope="project",
-                        project_id=project_id,
-                        payload=entity_type,
-                        origin_link=f"/overview?ontology={name}",
-                    )
-                )
-
-        profiles = load_project_artifact(project_id, "agent_profiles") or {}
-        if isinstance(profiles, dict):
-            for key, prof in profiles.items():
-                if not isinstance(prof, dict):
-                    continue
-                out.append(
-                    UnifiedAsset(
-                        source=SOURCE_SEED,
-                        source_ref=f"profile:{key}",
-                        entity_type="seed_agent_profile",
-                        title=prof.get("name") or key,
-                        summary=prof.get("summary") or prof.get("role") or "",
-                        scope="project",
-                        project_id=project_id,
-                        payload=prof,
-                        origin_link=f"/overview?profile={key}",
-                    )
-                )
         return out
+
+    def _seed_assets_from_ontology_payload(
+        self,
+        project_id: str,
+        ontology: Any,
+    ) -> list[UnifiedAsset]:
+        if not isinstance(ontology, dict):
+            return []
+        out: list[UnifiedAsset] = []
+        for entity_type in ontology.get("entity_types", []) or []:
+            if not isinstance(entity_type, dict):
+                continue
+            name = entity_type.get("name") or ""
+            if not name:
+                continue
+            out.append(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"ontology:entity:{name}",
+                    entity_type="seed_ontology_entity",
+                    title=name,
+                    summary=entity_type.get("description") or "",
+                    scope="project",
+                    project_id=project_id,
+                    payload=entity_type,
+                    origin_link=f"/overview?ontology={name}",
+                )
+            )
+        return out
+
+    def _seed_assets_from_profiles_payload(
+        self,
+        project_id: str,
+        profiles_payload: Any,
+    ) -> list[UnifiedAsset]:
+        if not isinstance(profiles_payload, dict):
+            return []
+        profiles = profiles_payload.get("profiles", profiles_payload)
+        if not isinstance(profiles, dict):
+            return []
+        out: list[UnifiedAsset] = []
+        for key, prof in profiles.items():
+            if not isinstance(prof, dict):
+                continue
+            title, summary = self._profile_title_and_summary(key, prof)
+            out.append(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"profile:{key}",
+                    entity_type="seed_agent_profile",
+                    title=title,
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    payload=prof,
+                    origin_link=f"/overview?profile={key}",
+                )
+            )
+        return out
+
+    @staticmethod
+    def _project_ontology_from_db(project_id: str) -> dict[str, Any] | None:
+        from ...models.project import ProjectManager
+
+        project = ProjectManager.get_project(project_id)
+        ontology = project.ontology if project else None
+        return ontology if isinstance(ontology, dict) else None
+
+    def _seed_assets_from_structured_tables(
+        self,
+        project_id: str,
+        existing: list[UnifiedAsset],
+    ) -> list[UnifiedAsset]:
+        existing_keys = {(item.entity_type, item.source_ref) for item in existing}
+        out: list[UnifiedAsset] = []
+
+        def add(asset: UnifiedAsset) -> None:
+            key = (asset.entity_type, asset.source_ref)
+            if key in existing_keys:
+                return
+            existing_keys.add(key)
+            out.append(asset)
+
+        for row in self._entity_repo.list_entities(project_id, limit=500):
+            entity_id = row.get("entity_id") or row.get("name") or ""
+            name = row.get("name") or entity_id
+            if not name:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"character:{entity_id}",
+                    entity_type="seed_character",
+                    title=name,
+                    summary=row.get("summary") or row.get("core_drive") or "",
+                    scope="project",
+                    project_id=project_id,
+                    importance=row.get("importance_tier") or "",
+                    updated_at=row.get("updated_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?character={name}",
+                )
+            )
+            profile = self._profile_from_entity_row(row)
+            if profile:
+                title, summary = self._profile_title_and_summary(name, profile)
+                add(
+                    UnifiedAsset(
+                        source=SOURCE_SEED,
+                        source_ref=f"profile:{entity_id}",
+                        entity_type="seed_agent_profile",
+                        title=title,
+                        summary=summary or row.get("summary") or row.get("core_drive") or "",
+                        scope="project",
+                        project_id=project_id,
+                        importance=row.get("importance_tier") or "",
+                        updated_at=row.get("updated_at") or "",
+                        payload=profile,
+                        origin_link=f"/overview?profile={entity_id}",
+                    )
+                )
+
+        for row in self._rule_repo.list_rules(project_id, limit=500):
+            evidence_id = row.get("evidence_id") or row.get("fact_text") or ""
+            fact_text = row.get("fact_text") or evidence_id
+            if not fact_text:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"rule:{evidence_id}",
+                    entity_type="seed_world_rule",
+                    title=fact_text[:60],
+                    summary=row.get("evidence_snippet") or fact_text,
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?rule={evidence_id}",
+                )
+            )
+
+        for row in self._thread_repo.list_threads(project_id, limit=500):
+            thread_id = row.get("thread_id") or row.get("thread_key") or ""
+            title = row.get("thread_key") or thread_id
+            if not title:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"thread:{thread_id}",
+                    entity_type="seed_plot_thread",
+                    title=title,
+                    summary=row.get("detail") or "",
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("updated_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?thread={thread_id}",
+                )
+            )
+
+        for row in self._narrative_repo.list_narrative_arcs(project_id, limit=500):
+            arc_id = row.get("arc_id") or ""
+            summary = row.get("summary") or ""
+            if not arc_id or not summary:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"arc:{arc_id}",
+                    entity_type="seed_arc_summary",
+                    title=arc_id,
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?arc={arc_id}",
+                )
+            )
+
+        for row in self._narrative_repo.list_volume_summaries(project_id, limit=500):
+            volume_id = row.get("volume_id") or ""
+            summary = row.get("summary") or ""
+            if not volume_id or not summary:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"volume:{volume_id}",
+                    entity_type="seed_volume_summary",
+                    title=volume_id,
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?volume={volume_id}",
+                )
+            )
+
+        for row in self._narrative_repo.list_segment_summaries(project_id, limit=500):
+            segment_id = row.get("segment_id") or ""
+            summary = row.get("summary") or ""
+            if not segment_id or not summary:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"segment:{segment_id}",
+                    entity_type="seed_segment_summary",
+                    title=segment_id,
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?segment={segment_id}",
+                )
+            )
+
+        for row in self._event_repo.list_character_events(project_id, limit=500):
+            event_id = row.get("event_id") or ""
+            summary = row.get("summary") or ""
+            if not event_id or not summary:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"event:{event_id}",
+                    entity_type="seed_key_event",
+                    title=summary[:40],
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?event={event_id}",
+                )
+            )
+
+        for row in self._event_repo.list_relationship_events(project_id, limit=500):
+            event_id = row.get("event_id") or ""
+            summary = self._relationship_event_summary(row)
+            if not event_id or not summary:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"event:{event_id}",
+                    entity_type="seed_key_event",
+                    title=summary[:40],
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    updated_at=row.get("created_at") or "",
+                    payload=row,
+                    origin_link=f"/overview?event={event_id}",
+                )
+            )
+
+        from ..chapter_meta_service import ChapterMetaService
+
+        for item in ChapterMetaService().get_history_items(project_id, 1_000_000):
+            if item.get("item_type") != "event":
+                continue
+            source_ref = item.get("source_ref") or item.get("subject_key") or ""
+            summary = item.get("summary_text") or ""
+            if not source_ref or not summary:
+                continue
+            add(
+                UnifiedAsset(
+                    source=SOURCE_SEED,
+                    source_ref=f"event:{source_ref}",
+                    entity_type="seed_key_event",
+                    title=summary[:40],
+                    summary=summary,
+                    scope="project",
+                    project_id=project_id,
+                    payload=item,
+                    origin_link=f"/overview?event={source_ref}",
+                )
+            )
+        return out
+
+    @staticmethod
+    def _relationship_event_summary(row: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ("trigger_event", "evidence", "emotional_shift", "power_shift"):
+            text = str(row.get(key) or "").strip()
+            if text and text not in parts:
+                parts.append(text)
+        if parts:
+            return "；".join(parts)
+        previous = str(row.get("previous_state") or "").strip()
+        current = str(row.get("new_state") or row.get("relation_type") or "").strip()
+        if previous and current:
+            return f"{previous} -> {current}"
+        return current
+
+    @staticmethod
+    def _profile_from_entity_row(row: dict[str, Any]) -> dict[str, Any] | None:
+        raw = row.get("profile_json")
+        if not raw:
+            return None
+        if isinstance(raw, dict):
+            profile = raw
+        else:
+            text = str(raw).strip()
+            if text in {"{}", "[]", "null", "None", "'{}'", '"{}"', "'[]'", '"[]"'}:
+                return None
+            try:
+                profile = json.loads(text)
+            except json.JSONDecodeError as exc:
+                entity_id = row.get("entity_id") or row.get("name") or "<unknown>"
+                raise ValueError(f"entities.profile_json 不是合法 JSON: {entity_id}") from exc
+        if not isinstance(profile, dict) or not profile:
+            return None
+        return profile
+
+    @staticmethod
+    def _profile_title_and_summary(key: str, profile: dict[str, Any]) -> tuple[str, str]:
+        basic = profile.get("basic_info") if isinstance(profile.get("basic_info"), dict) else {}
+        motivation = profile.get("motivation") if isinstance(profile.get("motivation"), dict) else {}
+        title = (
+            basic.get("name")
+            or profile.get("name")
+            or key
+        )
+        summary = (
+            profile.get("summary")
+            or profile.get("role")
+            or basic.get("identity")
+            or motivation.get("current_objective")
+            or motivation.get("ultimate_goal")
+            or ""
+        )
+        return str(title), str(summary)
 
 
 # ----------------------------------------------------------------------

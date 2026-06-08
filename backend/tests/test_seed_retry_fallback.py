@@ -1,23 +1,24 @@
 """断点续传在 reading_notes.json 缺失时的降级路径契约测试。
 
 场景：第一遍 seed_extract 在写出 reading_notes.json 之前就被杀（比如用户
-提前关后端 / 外置盘掉线 / 进程被 reload），只剩 smart_segments.json。之前
+提前关后端 / 外置盘掉线 / 进程被 reload），统一库仍保留 smart_segments
+artifact。之前
 retry_failed_segments 会直接抛 "项目尚未生成 reading_notes.json"，用户看不
 到任何恢复路径。修复后应当用空 ReadingNotesManager 把所有段落当未处理重跑；
-只有连 smart_segments.json 都没有时才真正放弃。
+只有连 smart_segments artifact 都没有时才真正放弃。
 """
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pytest
 
 from app.config import Config
+from app.database import get_engine
 from app.models.project import Project, ProjectManager, ProjectStatus
 from app.models.task import TaskManager
+from app.repositories.project_artifact_repo import ProjectArtifactRepository
 from app.services.reading_notes_manager import ReadingNotesManager
 from app.services.seed_extract_runner import SeedExtractRunner
 from app.services.seed_extract_task_service import SeedExtractTaskService
@@ -48,7 +49,7 @@ class _StubService(SeedExtractTaskService):
 
 @pytest.fixture
 def project_setup(tmp_path, monkeypatch):
-    """Create a project dir + DB task, with smart_segments.json present and
+    """Create a project dir + DB task, with smart_segments artifact present and
     reading_notes.json absent — the exact scenario that used to break."""
     upload_dir = tmp_path / "uploads"
     monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(upload_dir))
@@ -76,16 +77,15 @@ def project_setup(tmp_path, monkeypatch):
     )
     ProjectManager.save_project(project)
 
-    # Write smart_segments.json with 3 segments directly to disk — 不走
-    # ProjectManager.save_project_json，避免 DB 镜像把删掉的文件"复活"。
     segments = [
         {"segment_id": f"seg_{i:03d}", "text": f"段落 {i} 正文"} for i in (1, 2, 3)
     ]
-    smart_path = project_dir / "smart_segments.json"
-    smart_path.write_text(
-        json.dumps({"segments": segments}, ensure_ascii=False),
-        encoding="utf-8",
+    ProjectArtifactRepository(get_engine()).save(
+        project_id,
+        "smart_segments",
+        {"segments": segments},
     )
+    assert not (project_dir / "smart_segments.json").exists()
 
     yield project_id, project_dir
 
@@ -136,17 +136,93 @@ def test_retry_missing_reading_notes_falls_back_to_empty_manager(
     )
     assert [sid for sid, _ in captured["targets"]] == ["seg_001", "seg_002", "seg_003"]
 
-    # retry 成功后应当把 reading_notes.json 落盘，下次 断点续传 就能接上
-    assert (project_dir / "reading_notes.json").exists()
+    # retry 成功后应当写回统一库 artifact，而不是重新创建项目目录 JSON。
+    saved = ProjectArtifactRepository(get_engine()).load(project_id, "reading_notes")
+    assert saved is not None
+    assert [e["segment_id"] for e in saved["all_segment_summaries"]] == [
+        "seg_001",
+        "seg_002",
+    ]
+    assert not (project_dir / "reading_notes.json").exists()
+
+
+def test_retry_uses_reading_notes_artifact_when_file_missing(
+    project_setup, monkeypatch
+):
+    """DB artifact 中已有 reading_notes 时，retry 应从统一库恢复状态。
+
+    项目目录里没有 reading_notes.json 不能被解释成空 manager；否则已完成段
+    会被重复重读，断点续传状态也会丢失。
+    """
+    project_id, project_dir = project_setup
+    assert not (project_dir / "reading_notes.json").exists()
+
+    manager = ReadingNotesManager()
+    manager.add_segment_summary("seg_001", "已完成 001")
+    manager.add_segment_summary(
+        "seg_002",
+        "",
+        status="retry_needed",
+        error_class="transient",
+    )
+    ProjectArtifactRepository(get_engine()).save(
+        project_id,
+        "reading_notes",
+        manager.assemble_for_save(),
+    )
+
+    import asyncio
+
+    service = _StubService()
+    task_id = asyncio.run(
+        service.task_manager.create_task(
+            task_type="seed_retry_segments",
+            metadata={"project_id": project_id},
+        )
+    )
+
+    runner = SeedExtractRunner(service, task_id, use_llm=True, project_id=project_id)
+    monkeypatch.setattr(runner, "_validate_llm_modules", lambda: None)
+
+    captured: Dict[str, Any] = {}
+
+    def fake_retry(targets, manager):
+        captured["targets"] = list(targets)
+        captured["initial_ids"] = [
+            entry["segment_id"] for entry in manager.all_segment_summaries
+        ]
+        for seg_id, _seg in targets:
+            if not manager.update_segment_summary(seg_id, f"{seg_id} 已恢复"):
+                manager.add_segment_summary(seg_id, f"{seg_id} 已恢复")
+        # 留一个 remaining，让测试停在 retry 持久化分支，不进入下游 LLM finalize。
+        return max(len(targets) - 1, 0), 1
+
+    monkeypatch.setattr(runner, "_retry_reread_segments", fake_retry)
+
+    runner.retry_failed_segments(project_id)
+
+    assert captured["initial_ids"] == ["seg_001", "seg_002"]
+    assert [sid for sid, _ in captured["targets"]] == ["seg_002", "seg_003"]
+
+    saved = ProjectArtifactRepository(get_engine()).load(project_id, "reading_notes")
+    assert saved is not None
+    summaries = {
+        entry["segment_id"]: entry["summary"]
+        for entry in saved["all_segment_summaries"]
+    }
+    assert summaries["seg_001"] == "已完成 001"
+    assert summaries["seg_002"] == "seg_002 已恢复"
+    assert summaries["seg_003"] == "seg_003 已恢复"
+    assert not (project_dir / "reading_notes.json").exists()
 
 
 def test_retry_missing_smart_segments_raises_value_error(project_setup, monkeypatch):
-    """连 smart_segments.json 都没有的话，retry 确实没法恢复。应该抛
+    """连 smart_segments artifact 都没有的话，retry 确实没法恢复。应该抛
     ValueError，由上层 ``_run_retry_worker`` 的 except 转为用户可见的
     "请点击重新开始" 提示——而不是像以前那样只说 reading_notes.json
     不存在，让用户误以为继续点 断点续传 就能解决。"""
     project_id, project_dir = project_setup
-    (project_dir / "smart_segments.json").unlink()
+    ProjectArtifactRepository(get_engine()).delete(project_id, "smart_segments")
 
     import asyncio
 

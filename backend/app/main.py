@@ -128,6 +128,7 @@ async def _auto_resume_seed_tasks(stale_ids: list[str]) -> None:
     """
     from .models.project import ProjectManager, ProjectStatus
     from .models.task import TaskManager
+    from .repositories.project_artifact_repo import load_project_artifact
     from .services.seed_extract_task_service import SeedExtractTaskService
 
     if not stale_ids:
@@ -146,9 +147,7 @@ async def _auto_resume_seed_tasks(stale_ids: list[str]) -> None:
             # 已经触发了 retry，不要再抢。
             if project.seed_task_id and project.seed_task_id not in stale_set:
                 continue
-            segments = ProjectManager.load_project_json(
-                project.project_id, "smart_segments.json",
-            )
+            segments = load_project_artifact(project.project_id, "smart_segments")
             if not segments or not segments.get("segments"):
                 continue
             try:
@@ -223,9 +222,10 @@ def _register_core_routes(app: FastAPI) -> None:
 
 
 def _register_api_routes(app: FastAPI) -> None:
-    from .api_fastapi import api_router
+    from .api_fastapi import api_router, api_v2_router
 
     app.include_router(api_router)
+    app.include_router(api_v2_router)
 
 
 app = create_app()

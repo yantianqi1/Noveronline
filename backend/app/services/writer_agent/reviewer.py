@@ -35,6 +35,11 @@ _ALLOWED_CATEGORIES = {
     "figurative_density",
     "redundant_modifier",
     "voice",
+    "not_x_is_y",
+    "declarative_ab",
+    "causal_connective",
+    "narrator_frame",
+    "em_dash_aside",
 }
 
 

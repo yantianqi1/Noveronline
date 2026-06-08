@@ -411,13 +411,13 @@ function DetailSheet({
 
   return (
     <Sheet open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
-      <SheetContent side="right" className="w-[560px] max-w-[90vw]">
+      <SheetContent side="right" className="h-svh w-[560px] max-w-[90vw] overflow-hidden">
         <SheetHeader>
           <SheetTitle>{item.title || item.name || "(无标题)"}</SheetTitle>
           <SheetDescription>资产详情</SheetDescription>
         </SheetHeader>
 
-        <ScrollArea className="flex-1 px-4 pb-4">
+        <ScrollArea className="min-h-0 flex-1 px-4 pb-4">
           <div className="flex flex-col gap-3">
             {/* Metadata */}
             <div className="flex flex-col gap-2 text-sm">

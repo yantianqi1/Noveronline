@@ -13,7 +13,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +38,26 @@ def test_alembic_upgrade_from_empty_creates_all_expected_tables(tmp_path):
     table_names = set(inspect(engine).get_table_names())
     # Spot-check representative tables from each domain.
     assert {"project_meta", "chapter_content", "assets", "agent_registry"}.issubset(table_names)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT entity_type, category, lifecycle "
+                "FROM classification_map "
+                "WHERE source='seed' "
+                "AND entity_type IN ("
+                "'seed_arc_summary', 'seed_key_event', 'seed_ontology_entity', "
+                "'seed_volume_summary', 'seed_segment_summary'"
+                ") "
+                "ORDER BY entity_type"
+            )
+        ).all()
+    assert rows == [
+        ("seed_arc_summary", "plot", "seed"),
+        ("seed_key_event", "plot", "seed"),
+        ("seed_ontology_entity", "world", "seed"),
+        ("seed_segment_summary", "plot", "seed"),
+        ("seed_volume_summary", "plot", "seed"),
+    ]
 
 
 def test_alembic_downgrade_then_upgrade_round_trips(tmp_path):
@@ -78,3 +98,73 @@ def test_init_db_can_run_via_alembic(tmp_path):
     table_names = set(inspect(engine).get_table_names())
     assert "alembic_version" in table_names
     assert "project_meta" in table_names
+
+
+def test_alembic_upgrade_scopes_existing_narrative_ids_by_project(tmp_path):
+    db_path = tmp_path / "alembic_narrative_scope.db"
+    db_url = f"sqlite:///{db_path}"
+    engine = create_engine(db_url, future=True)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE narrative_arcs ("
+            "arc_id VARCHAR NOT NULL PRIMARY KEY, "
+            "project_id VARCHAR NOT NULL, "
+            "summary VARCHAR NOT NULL, "
+            "covered_segments_json VARCHAR DEFAULT '''[]''', "
+            "created_at VARCHAR NOT NULL)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE volume_summaries ("
+            "volume_id VARCHAR NOT NULL PRIMARY KEY, "
+            "project_id VARCHAR NOT NULL, "
+            "volume_order INTEGER NOT NULL, "
+            "summary VARCHAR NOT NULL, "
+            "covered_arcs_json VARCHAR DEFAULT '''[]''', "
+            "created_at VARCHAR NOT NULL)"
+        ))
+        conn.execute(text(
+            "INSERT INTO narrative_arcs "
+            "(arc_id, project_id, summary, covered_segments_json, created_at) "
+            "VALUES ('arc_1', 'proj_a', 'A arc', '[]', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO volume_summaries "
+            "(volume_id, project_id, volume_order, summary, covered_arcs_json, created_at) "
+            "VALUES ('vol_1', 'proj_a', 1, 'A volume', '[]', '2026-01-01')"
+        ))
+
+    cfg = _make_alembic_config(db_url)
+    command.stamp(cfg, "20260419_0004")
+    command.upgrade(cfg, "head")
+
+    inspector = inspect(create_engine(db_url, future=True))
+    assert inspector.get_pk_constraint("narrative_arcs")["constrained_columns"] == [
+        "project_id",
+        "arc_id",
+    ]
+    assert inspector.get_pk_constraint("volume_summaries")["constrained_columns"] == [
+        "project_id",
+        "volume_id",
+    ]
+
+    engine = create_engine(db_url, future=True)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO narrative_arcs "
+            "(arc_id, project_id, summary, covered_segments_json, created_at) "
+            "VALUES ('arc_1', 'proj_b', 'B arc', '[]', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO volume_summaries "
+            "(volume_id, project_id, volume_order, summary, covered_arcs_json, created_at) "
+            "VALUES ('vol_1', 'proj_b', 1, 'B volume', '[]', '2026-01-01')"
+        ))
+        arc_projects = conn.execute(
+            text("SELECT project_id FROM narrative_arcs WHERE arc_id='arc_1' ORDER BY project_id")
+        ).scalars().all()
+        volume_projects = conn.execute(
+            text("SELECT project_id FROM volume_summaries WHERE volume_id='vol_1' ORDER BY project_id")
+        ).scalars().all()
+
+    assert arc_projects == ["proj_a", "proj_b"]
+    assert volume_projects == ["proj_a", "proj_b"]

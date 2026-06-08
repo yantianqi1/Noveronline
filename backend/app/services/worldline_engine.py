@@ -359,7 +359,7 @@ class WorldlineEngine:
         return session
 
     # ------------------------------------------------------------------
-    # Sync worldline data to novel.sqlite3 for writer agent access
+    # Sync worldline data to the unified writer-facing tables
     # ------------------------------------------------------------------
 
     def _sync_to_novel_db(self, session: WorldlineSession) -> None:

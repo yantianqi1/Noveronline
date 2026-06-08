@@ -6,10 +6,10 @@ Validates the read/write contract that Phase G service layers rely on:
    - save upserts (second save overwrites the first, both timestamps move
      forward on the row)
    - list_keys / delete work as documented
-   - ``ProjectManager.save_project_json`` mirrors every written JSON into
+   - ``ProjectManager.save_project_json`` writes only into
      ``project_artifacts`` keyed by the filename stem
-   - ``ProjectManager.load_project_json`` prefers the DB when present and
-     falls back to the filesystem for legacy data
+   - ``ProjectManager.load_project_json`` reads only the DB row; legacy
+     filesystem imports are handled by migration scripts.
 """
 
 from __future__ import annotations
@@ -94,8 +94,8 @@ def test_delete_removes_row(engine):
     assert repo.delete("proj_a", "seed_analysis") == 0
 
 
-def test_save_project_json_mirrors_to_project_artifacts(tmp_path, monkeypatch):
-    """Every ``ProjectManager.save_project_json`` write hits ``project_artifacts``."""
+def test_save_project_json_writes_project_artifacts_without_filesystem_json(tmp_path, monkeypatch):
+    """``ProjectManager.save_project_json`` is DB-only despite the legacy name."""
     projects_dir = tmp_path / "uploads" / "projects"
     projects_dir.mkdir(parents=True)
     monkeypatch.setattr(ProjectManager, "PROJECTS_DIR", str(projects_dir))
@@ -104,20 +104,16 @@ def test_save_project_json_mirrors_to_project_artifacts(tmp_path, monkeypatch):
     payload = {"characters": [{"name": "秦昭"}], "meta": {"schema": 1}}
     ProjectManager.save_project_json(project.project_id, "seed_analysis.json", payload)
 
-    # Filesystem JSON is still written (authoritative for import/export).
     json_path = Path(projects_dir) / project.project_id / "seed_analysis.json"
-    assert json_path.exists()
-    assert json.loads(json_path.read_text(encoding="utf-8")) == payload
+    assert not json_path.exists()
 
-    # DB mirror is populated.
     from app.database import get_engine
     repo = ProjectArtifactRepository(get_engine())
     assert repo.load(project.project_id, "seed_analysis") == payload
 
 
-def test_load_project_json_prefers_db_over_filesystem(tmp_path, monkeypatch):
-    """When the DB has a row, ``load_project_json`` returns the DB value even if
-    the filesystem JSON has drifted to a stale value."""
+def test_load_project_json_reads_db_even_if_filesystem_has_stale_value(tmp_path, monkeypatch):
+    """``load_project_json`` returns the DB value even if stale JSON exists."""
     projects_dir = tmp_path / "uploads" / "projects"
     projects_dir.mkdir(parents=True)
     monkeypatch.setattr(ProjectManager, "PROJECTS_DIR", str(projects_dir))
@@ -133,8 +129,8 @@ def test_load_project_json_prefers_db_over_filesystem(tmp_path, monkeypatch):
     assert loaded == {"version": "db"}
 
 
-def test_load_project_json_falls_back_to_filesystem(tmp_path, monkeypatch):
-    """Legacy projects with no DB row still work through the filesystem fallback."""
+def test_load_project_json_does_not_fallback_to_filesystem(tmp_path, monkeypatch):
+    """Legacy JSON files must be migrated before runtime can read them."""
     projects_dir = tmp_path / "uploads" / "projects"
     projects_dir.mkdir(parents=True)
     monkeypatch.setattr(ProjectManager, "PROJECTS_DIR", str(projects_dir))
@@ -145,8 +141,7 @@ def test_load_project_json_falls_back_to_filesystem(tmp_path, monkeypatch):
         json.dumps({"custom_prompt": "legacy"}), encoding="utf-8"
     )
 
-    loaded = ProjectManager.load_project_json(project.project_id, "reviewer_rules.json")
-    assert loaded == {"custom_prompt": "legacy"}
+    assert ProjectManager.load_project_json(project.project_id, "reviewer_rules.json") is None
 
 
 def test_load_project_json_returns_none_when_absent(tmp_path, monkeypatch):

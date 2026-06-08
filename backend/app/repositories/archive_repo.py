@@ -129,7 +129,9 @@ class ArchiveRepository(BaseRepository):
         ).limit(limit).offset(offset)
         with self.connect() as conn:
             rows = conn.execute(stmt).fetchall()
-        return [self._legacy_shape(r) for r in rows]
+            items = [self._legacy_shape(r) for r in rows]
+            self._hydrate_project_names(conn, items)
+            return items
 
     def count_archives(
         self,
@@ -163,7 +165,11 @@ class ArchiveRepository(BaseRepository):
         )
         with self.connect() as conn:
             row = conn.execute(stmt).fetchone()
-        return self._legacy_shape(row) if row else None
+            if not row:
+                return None
+            item = self._legacy_shape(row)
+            self._hydrate_project_names(conn, [item])
+            return item
 
     def upsert_archive(self, values: dict[str, Any]) -> None:
         """INSERT OR REPLACE an archive row. ``values`` uses legacy keys
@@ -231,7 +237,9 @@ class ArchiveRepository(BaseRepository):
         )
         with self.connect() as conn:
             rows = conn.execute(stmt).fetchall()
-        return [self._legacy_shape(r) for r in rows]
+            items = [self._legacy_shape(r) for r in rows]
+            self._hydrate_project_names(conn, items)
+            return items
 
     def resolve_archives(self, archive_ids: list[str]) -> list[dict[str, Any]]:
         if not archive_ids:
@@ -241,7 +249,9 @@ class ArchiveRepository(BaseRepository):
         )
         with self.connect() as conn:
             rows = conn.execute(stmt).fetchall()
-        by_id = {r._mapping["asset_id"]: self._legacy_shape(r) for r in rows}
+            items = [self._legacy_shape(r) for r in rows]
+            self._hydrate_project_names(conn, items)
+        by_id = {item["archive_id"]: item for item in items}
         return [by_id[aid] for aid in archive_ids if aid in by_id]
 
     # ------------------------------------------------------------------
@@ -510,9 +520,8 @@ class ArchiveRepository(BaseRepository):
     def _legacy_shape(row: Any) -> dict[str, Any]:
         """Return a dict matching the pre-P5 ``archive_library`` row shape.
 
-        The ``asset_id`` PK is exposed as ``archive_id``; ``project_name``
-        (a denormalized column on the legacy table) is emitted as ''
-        because post-merge we don't track it.
+        The ``asset_id`` PK is exposed as ``archive_id``; callers hydrate
+        ``project_name`` from ``archive_sources`` after shaping rows.
         """
         m = dict(row._mapping)
         m["archive_id"] = m.pop("asset_id")
@@ -525,6 +534,22 @@ class ArchiveRepository(BaseRepository):
         ):
             m.pop(col, None)
         return m
+
+    @staticmethod
+    def _hydrate_project_names(conn: Any, items: list[dict[str, Any]]) -> None:
+        project_ids = sorted(
+            {item.get("project_id") for item in items if item.get("project_id")}
+        )
+        if not project_ids:
+            return
+        rows = conn.execute(
+            select(archive_sources.c.project_id, archive_sources.c.project_name).where(
+                archive_sources.c.project_id.in_(project_ids),
+            ),
+        ).fetchall()
+        names = {row._mapping["project_id"]: row._mapping["project_name"] for row in rows}
+        for item in items:
+            item["project_name"] = names.get(item.get("project_id"), "")
 
     @staticmethod
     def _build_asset_row(values: dict[str, Any]) -> dict[str, Any]:

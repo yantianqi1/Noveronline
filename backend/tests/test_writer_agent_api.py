@@ -284,4 +284,4 @@ def test_migrate_endpoint_returns_gone_for_legacy_sqlite_backfill(tmp_path, monk
     assert resp.status_code == 410
     payload = resp.json()
     assert payload["success"] is False
-    assert "legacy novel.sqlite3" in payload["error"]
+    assert "旧写作库回填接口已废弃" in payload["error"]

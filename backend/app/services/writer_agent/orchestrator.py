@@ -378,6 +378,21 @@ class WriterOrchestrator:
             yield {"type": "error", **_stamp(), "message": f"LLM 模块未绑定 (writer_composer): {exc}"}
             return
 
+        # --- Phase 2.5: 写后自动修订（opt-in；来源：小说梦想家 写→审→修闭环 + InkOS writer-repair）---
+        # 默认关闭。request['auto_repair']=True 时：落库前用 writer_reviewer 审一遍，
+        # 若有 high 级问题就让 writer_composer 按问题清单改写，最多 auto_repair_max_rounds 轮，
+        # 直到无 high 或达上限再落库。非 auto_repair 路径行为完全不变。
+        if request.get("auto_repair") and full_text.strip():
+            async for ev in self._auto_repair(
+                full_text, writing_brief,
+                max_rounds=int(request.get("auto_repair_max_rounds") or 2),
+                t0=t0,
+            ):
+                if ev.get("type") == "_auto_repair_result":
+                    full_text = ev.get("text") or full_text
+                else:
+                    yield ev
+
         # --- Phase 3: Post-Processing ---
         scene_id = request.get("scene_id") or f"sc_{uuid.uuid4().hex[:12]}"
 
@@ -454,6 +469,72 @@ class WriterOrchestrator:
         }
 
         yield {"type": "done", **_stamp(), **result}
+
+    async def _auto_repair(self, draft: str, writing_brief: dict, *, max_rounds: int, t0: float):
+        """写后自动修订（opt-in）。审 → 改 → 重审，最多 max_rounds 轮。
+
+        作为 async generator：yield SSE 状态事件（style_repair_status / style_repair_done），
+        最后 yield 一个 {"type": "_auto_repair_result", "text": <最终稿>} 哨兵供调用方取回。
+        审校复用 writer_reviewer 模块；改写复用 writer_composer 模块。任何失败都降级为
+        保留上一版并继续落库，绝不抛出阻断主流程。来源：小说梦想家 写→审→修闭环。
+        """
+        from .prompts import build_style_repair_system_prompt
+        from .reviewer import WriterReviewer
+
+        def _st():
+            return {"ts": time.strftime("%H:%M:%S"), "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+
+        text = draft
+        reviewer = WriterReviewer(self.router)
+        try:
+            repair_client = await self.router.build_async_client("writer_composer")
+        except Exception as exc:  # noqa: BLE001
+            yield {"type": "style_repair_status", **_st(), "status": "skipped",
+                   "message": f"修订模型未就绪，跳过自动修订：{exc}"}
+            yield {"type": "_auto_repair_result", "text": text}
+            return
+
+        rounds = 0
+        while rounds < max_rounds:
+            review = await reviewer.review(
+                draft=text,
+                writing_brief=writing_brief,
+                prev_narrative=writing_brief.get("recent_narrative", "") or "",
+                dedup_constraints=writing_brief.get("dedup_constraints") or {},
+            )
+            highs = [i for i in (review.get("issues") or []) if i.get("severity") == "high"]
+            if review.get("status") != "ok" or not highs:
+                yield {"type": "style_repair_status", **_st(), "status": "pass", "round": rounds,
+                       "message": ("写后审校无 high 级问题" if review.get("status") == "ok"
+                                   else f"审校未执行（{review.get('reason', '')}）")}
+                break
+            rounds += 1
+            yield {"type": "style_repair_status", **_st(), "status": "repairing", "round": rounds,
+                   "high_issues": len(highs),
+                   "message": f"第 {rounds} 轮：修订 {len(highs)} 处死令级问题"}
+            issues_text = "\n".join(
+                f"- [{i.get('category', '')}] 原文：{i.get('original', '')}｜建议：{i.get('suggestion', '')}"
+                for i in highs
+            )
+            messages = [
+                {"role": "system", "content": build_style_repair_system_prompt()},
+                {"role": "user",
+                 "content": f"【死令级问题】\n{issues_text}\n\n【初稿全文】\n{text}\n\n请输出修订后的完整正文。"},
+            ]
+            try:
+                revised = ""
+                async for chunk in repair_client.chat_stream(messages, temperature=0.6, max_tokens=8192):
+                    revised += chunk
+            except Exception as exc:  # noqa: BLE001
+                yield {"type": "style_repair_status", **_st(), "status": "error", "round": rounds,
+                       "message": f"修订调用失败，保留上一版：{exc}"}
+                break
+            revised = re.sub(r"<think>[\s\S]*?</think>", "", revised or "").strip()
+            if revised:
+                text = revised
+
+        yield {"type": "style_repair_done", **_st(), "rounds": rounds}
+        yield {"type": "_auto_repair_result", "text": text}
 
     def _build_orchestrator_user_message(self, task_type: str, context: dict) -> str:
         """Build the initial user message for the orchestrator agent."""

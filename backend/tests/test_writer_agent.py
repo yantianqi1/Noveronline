@@ -271,7 +271,7 @@ class TestToolDefinitions:
     def test_all_tools_defined(self):
         from app.services.writer_agent.tools import NOVEL_TOOLS, TOOL_NAME_SET
 
-        assert len(NOVEL_TOOLS) == 24
+        assert len(NOVEL_TOOLS) == 30
         expected_names = {
             "query_entity", "query_relationship", "query_chapter",
             "query_scene", "search_settings", "get_recent_scenes",
@@ -286,6 +286,9 @@ class TestToolDefinitions:
             "manage_entity", "manage_thread",
             "manage_world_rule", "manage_relationship",
             "record_character_event",
+            "propose_chapter_structure", "propose_outline_scene",
+            "propose_prose_continuation", "propose_relationship",
+            "propose_rewrite_span", "propose_splice_block",
         }
         assert TOOL_NAME_SET == expected_names
 
@@ -339,33 +342,75 @@ class TestToolExecutors:
         from app.services.writer_agent.tool_executors import execute_tool
 
         result = execute_tool("query_entity", {"name": "林远"}, self.TEST_PROJECT)
-        assert "林远" in result
-        assert "主角" in result or "protagonist" in result
+        text = result["result"]
+        assert "林远" in text
+        assert "主角" in text or "protagonist" in text
 
     def test_execute_query_entity_not_found(self):
         from app.services.writer_agent.tool_executors import execute_tool
 
         result = execute_tool("query_entity", {"name": "不存在的角色"}, self.TEST_PROJECT)
-        assert "未找到" in result
+        assert "未找到" in result["result"]
 
     def test_execute_query_chapter(self):
         from app.services.writer_agent.tool_executors import execute_tool
 
         result = execute_tool("query_chapter", {"chapter_order": 1}, self.TEST_PROJECT)
-        assert "第一章" in result
+        assert "第一章" in result["result"]
 
     def test_execute_unknown_tool(self):
         from app.services.writer_agent.tool_executors import execute_tool
 
         result = execute_tool("nonexistent_tool", {}, self.TEST_PROJECT)
-        assert "未知" in result or "Unknown" in result
+        assert "未知" in result["result"] or "Unknown" in result["result"]
 
     def test_result_truncation(self):
         from app.services.writer_agent.tool_executors import TOOL_RESULT_MAX_CHARS, execute_tool
 
         # This should not crash even with large data
         result = execute_tool("search_settings", {"query": "林远", "scope": "all"}, self.TEST_PROJECT)
-        assert len(result) <= TOOL_RESULT_MAX_CHARS + 100  # small margin
+        assert len(result["result"]) <= TOOL_RESULT_MAX_CHARS + 100  # small margin
+
+    def test_story_ontology_reads_project_metadata_from_db(self, tmp_path, monkeypatch):
+        from app.models.project import Project, ProjectManager, ProjectStatus
+        from app.services.writer_agent.tool_executors import execute_tool
+
+        projects_dir = tmp_path / "uploads" / "projects"
+        projects_dir.mkdir(parents=True)
+        monkeypatch.setattr(ProjectManager, "PROJECTS_DIR", str(projects_dir))
+        project = Project(
+            project_id=self.TEST_PROJECT,
+            name="工具项目",
+            status=ProjectStatus.CREATED,
+            created_at="2026-06-07T00:00:00",
+            updated_at="2026-06-07T00:00:00",
+            ontology={
+                "entity_types": [
+                    {
+                        "name": "Character",
+                        "description": "人物",
+                        "attributes": [{"name": "drive"}],
+                    }
+                ],
+                "edge_types": [
+                    {
+                        "name": "ally",
+                        "description": "同盟",
+                        "attributes": [{"name": "trust"}],
+                    }
+                ],
+            },
+        )
+        ProjectManager.save_project(project)
+        assert not (projects_dir / project.project_id / "project.json").exists()
+
+        result = execute_tool("get_story_ontology", {"kind": "all"}, self.TEST_PROJECT)
+
+        text = result["result"]
+        assert "Character" in text
+        assert "drive" in text
+        assert "ally" in text
+        assert "trust" in text
 
 
 # ---------------------------------------------------------------------------

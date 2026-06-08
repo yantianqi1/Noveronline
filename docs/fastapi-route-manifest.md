@@ -16,6 +16,63 @@ The worldline `/session/{id}/timeline` and `/session/{id}/branch/{bid}/timeline`
 
 Two endpoints (`branches`, `comparison`) return HTTP 410 Gone — intentionally deprecated for the single-world architecture.
 
+## V2 Migration Progress
+
+> Updated 2026-06-07. The legacy-compatible `/api/*` surface remains active. New `/api/v2/*`
+> routes are being added incrementally against the rebuild plan's target API shape.
+
+| Method | Path | Router | Status | Has Test |
+|---|---|---|---|---|
+| GET | `/api/v2/llm/settings` | llm | live | yes |
+| POST | `/api/v2/llm/channels` | llm | live | yes |
+| PATCH | `/api/v2/llm/channels/{channel_key}` | llm | live | yes |
+| DELETE | `/api/v2/llm/channels/{channel_key}` | llm | live | yes |
+| POST | `/api/v2/llm/channels/{channel_key}/sync-models` | llm | live | yes |
+| PUT | `/api/v2/llm/module-bindings/{module_key}` | llm | live | yes |
+| DELETE | `/api/v2/llm/module-bindings/{module_key}` | llm | live | yes |
+| GET | `/api/v2/llm/activity` | llm | live | yes |
+| GET | `/api/v2/archives` | archive_v2 | live | yes |
+| GET | `/api/v2/archives/{archive_id}` | archive_v2 | live | yes |
+| POST | `/api/v2/archive-maintenance/reindex` | archive_v2 | live | yes |
+| GET | `/api/v2/archives/{archive_id}/memories` | archive_v2 | live | yes |
+| GET | `/api/v2/archives/{archive_id}/memory-events` | archive_v2 | live | yes |
+| POST | `/api/v2/archives/{archive_id}/memory-adoptions` | archive_v2 | live | yes |
+| POST | `/api/v2/archives/{archive_id}/memory-rejections` | archive_v2 | live | yes |
+| GET | `/api/v2/chapter-context/options` | chapter_context_v2 | live | yes |
+| POST | `/api/v2/chapter-context/builds` | chapter_context_v2 | live | yes |
+| POST | `/api/v2/drafts` | draft_v2 | live | yes |
+| POST | `/api/v2/drafts/{draft_id}/events` | draft_v2 | live | yes |
+| POST | `/api/v2/drafts/{draft_id}/revisions` | draft_v2 | live | yes |
+| POST | `/api/v2/drafts/{draft_id}/revisions/{revision_id}/events` | draft_v2 | live | yes |
+| POST | `/api/v2/drafts/{draft_id}/finalizations` | draft_v2 | live | yes |
+| POST | `/api/v2/worldlines/preparations` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/preparations/{prepare_id}` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/preparations/{prepare_id}/agents` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/preparations/{prepare_id}/start` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/timeline` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/events?status=candidate` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/events?status=canon` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/event-adoptions` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/events/{event_id}` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/auto-evolutions` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/auto-evolutions/{auto_evolution_id}/events` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/commands/advance` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/commands/inject-variable` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/commands/agent-actions` | worldline_v2 | live | yes |
+| POST | `/api/v2/worldlines/sessions/{session_id}/commands/agent-dialogues` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/agents/{agent_id}` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/agent-history` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/agent-actions` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/agent-dialogues` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/agent-memory` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/agent-memory-context` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/relations` | worldline_v2 | live | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/branches` | worldline_v2 | 410 | yes |
+| GET | `/api/v2/worldlines/sessions/{session_id}/comparison` | worldline_v2 | 410 | yes |
+
 ## Route Table
 
 | # | Method | Path | Router | Status | Has Schema | Has Test |
@@ -32,10 +89,10 @@ Two endpoints (`branches`, `comparison`) return HTTP 410 Gone — intentionally 
 | 9 | GET | `/api/project/{project_id}` | project | live | - | - |
 | 10 | DELETE | `/api/project/{project_id}` | project | live | - | yes |
 | **novel.py** (10 routes) |
-| 11 | POST | `/api/novel/archives/candidates` | novel | live | planned | - |
-| 12 | POST | `/api/novel/archives/generate` | novel | live | planned | - |
+| 11 | POST | `/api/novel/archives/candidates` | novel | live | planned | yes |
+| 12 | POST | `/api/novel/archives/generate` | novel | live | planned | yes |
 | 13 | POST | `/api/novel/parallel-world/config` | novel | live | planned | - |
-| 14 | GET | `/api/novel/seed-analysis/{project_id}` | novel | live | - | - |
+| 14 | GET | `/api/novel/seed-analysis/{project_id}` | novel | live | - | yes |
 | 15 | POST | `/api/novel/seed-analysis` | novel | live | planned | - |
 | 16 | POST | `/api/novel/plot/inspiration` | novel | live | planned | - |
 | 17 | GET | `/api/novel/chapter-context/options` | novel | live | - | yes |

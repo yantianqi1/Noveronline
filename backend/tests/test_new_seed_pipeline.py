@@ -91,34 +91,71 @@ def test_new_pipeline_end_to_end(tmp_path, monkeypatch):
     assert project is not None
     assert project.status in {ProjectStatus.ONTOLOGY_GENERATED, ProjectStatus.GRAPH_COMPLETED}
 
-    # Verify seed_analysis.json
-    project_dir = ProjectManager._get_project_dir(project_id)
-    seed_path = os.path.join(project_dir, "seed_analysis.json")
-    assert os.path.exists(seed_path), "seed_analysis.json not found"
-    with open(seed_path, "r", encoding="utf-8") as f:
-        seed_analysis = json.load(f)
+    # Verify seed_analysis artifact
+    seed_analysis = ProjectManager.load_project_json(project_id, "seed_analysis.json")
+    assert seed_analysis is not None, "seed_analysis artifact not found"
     character_names = [c["name"] for c in seed_analysis.get("characters", [])]
     assert len(character_names) >= 3, f"Expected >= 3 characters, got {character_names}"
     assert "沈夜" in character_names
+    from app.database import get_engine
+    from app.repositories.entity_repo import EntityRepository
+    from app.repositories.event_repo import EventRepository
+    from app.repositories.relationship_repo import RelationshipRepository
+    from app.repositories.thread_repo import ThreadRepository
+    from app.repositories.world_rule_repo import WorldRuleRepository
 
-    # Verify reading_notes.json
-    notes_path = os.path.join(project_dir, "reading_notes.json")
-    assert os.path.exists(notes_path), "reading_notes.json not found"
-    with open(notes_path, "r", encoding="utf-8") as f:
-        reading_notes = json.load(f)
+    entities = EntityRepository(get_engine()).list_entities(project_id)
+    entity_names = {item.get("name") for item in entities}
+    assert "沈夜" in entity_names
+    assert "玄霄宗" in entity_names
+    relationships = RelationshipRepository(get_engine()).list_relationships(project_id)
+    assert any(
+        relation.get("source_id")
+        and relation.get("target_id")
+        and relation.get("relation_type")
+            for relation in relationships
+    )
+    threads = ThreadRepository(get_engine()).list_threads(project_id)
+    assert any(thread.get("thread_key") == "镜湖旧案" for thread in threads)
+    world_rules = WorldRuleRepository(get_engine()).list_rules(project_id)
+    assert any(rule.get("fact_text") == "五大宗门体系" for rule in world_rules)
+    character_events = EventRepository(get_engine()).list_character_events(project_id, limit=100)
+    assert any(
+        event.get("summary") == "进入镜湖谷"
+        and next((item for item in entities if item.get("entity_id") == event.get("entity_id")), {}).get("name") == "沈夜"
+        for event in character_events
+    )
+    relationship_events = EventRepository(get_engine()).list_relationship_events(project_id, limit=100)
+    assert any(
+        event.get("new_state") == "冲突"
+        and event.get("evidence") == "对峙升级"
+        for event in relationship_events
+    )
+
+    # Verify reading_notes artifact
+    reading_notes = ProjectManager.load_project_json(project_id, "reading_notes.json")
+    assert reading_notes is not None, "reading_notes artifact not found"
     notes_characters = reading_notes.get("notes", {}).get("core_facts", {}).get("characters", {})
     assert "沈夜" in notes_characters, f"沈夜 not found in reading notes characters: {list(notes_characters.keys())}"
 
-    # Verify agent_profiles.json
-    profiles_path = os.path.join(project_dir, "agent_profiles.json")
-    assert os.path.exists(profiles_path), "agent_profiles.json not found"
-    with open(profiles_path, "r", encoding="utf-8") as f:
-        agent_profiles = json.load(f)
-    # Short test novel has only 1 segment, so characters may not meet the
-    # importance threshold (default=2). Profile generation is tested separately
-    # in test_character_agent_profile_generator.py. Here we just verify the
-    # artifact is produced.
+    # Verify agent_profiles artifact
+    agent_profiles = ProjectManager.load_project_json(project_id, "agent_profiles.json")
+    assert agent_profiles is not None, "agent_profiles artifact not found"
     assert "profile_count" in agent_profiles
+    assert agent_profiles.get("profile_count", 0) >= 1
+    assert agent_profiles.get("profiles", {}).get("沈夜") is not None
+
+    shen_ye = EntityRepository(get_engine()).get_entity_by_name(project_id, "沈夜")
+    assert shen_ye is not None
+    assert shen_ye["speech_style"] == "简练"
+    assert json.loads(shen_ye["personality_traits_json"]) == ["坚毅"]
+    assert json.loads(shen_ye["verbal_habits_json"]) == []
+    assert json.loads(shen_ye["knowledge_boundary_json"]) == {
+        "knows": [],
+        "does_not_know": [],
+        "believes_wrongly": [],
+    }
+    assert json.loads(shen_ye["profile_json"])["basic_info"]["name"] == "沈夜"
 
 
 def test_new_pipeline_only_calls_active_llm_modules(tmp_path, monkeypatch):
@@ -207,18 +244,14 @@ def test_new_pipeline_offline(tmp_path, monkeypatch):
         assert task is not None
         assert task.status == "completed", f"Task failed: {task.error}"
 
-        # Verify seed_analysis.json exists
-        seed_path = os.path.join(project_dir, "seed_analysis.json")
-        assert os.path.exists(seed_path), "seed_analysis.json not found"
-        with open(seed_path, "r", encoding="utf-8") as f:
-            seed_analysis = json.load(f)
+        # Verify seed_analysis artifact exists
+        seed_analysis = ProjectManager.load_project_json(project_id, "seed_analysis.json")
+        assert seed_analysis is not None, "seed_analysis artifact not found"
         # Offline mode produces minimal data but should still complete
         assert "characters" in seed_analysis
 
-        # Verify reading_notes.json exists
-        notes_path = os.path.join(project_dir, "reading_notes.json")
-        assert os.path.exists(notes_path), "reading_notes.json not found"
+        # Verify reading_notes artifact exists
+        assert ProjectManager.load_project_json(project_id, "reading_notes.json") is not None
 
-        # Verify agent_profiles.json exists
-        profiles_path = os.path.join(project_dir, "agent_profiles.json")
-        assert os.path.exists(profiles_path), "agent_profiles.json not found"
+        # Verify agent_profiles artifact exists
+        assert ProjectManager.load_project_json(project_id, "agent_profiles.json") is not None

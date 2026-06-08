@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from ..database import get_engine
 from ..models.project import ProjectManager
 from ..repositories.archive_repo import ArchiveRepository
+from ..repositories.project_artifact_repo import load_project_artifact
 
 
 SEARCH_FIELDS = (
@@ -35,8 +35,8 @@ def _bool_to_int(value: Any) -> int:
     return 1 if bool(value) else 0
 
 
-def _archive_path(project_id: str) -> str:
-    return ProjectManager._get_project_json_path(project_id, "narrative_archives.json")
+def _archive_source_ref(project_id: str) -> str:
+    return f"db://project_artifacts/{project_id}/narrative_archives"
 
 
 def _row_to_archive(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -157,29 +157,27 @@ class ArchiveLibraryService:
         return [records[archive_id] for archive_id in archive_ids]
 
     def reindex(self) -> int:
-        """One-time reindex: drops all DB rows + re-imports from legacy JSON.
+        """One-time reindex: drops all DB rows + re-imports archive artifacts.
 
-        Only useful when recovering a DB from scratch against a filesystem
-        that still has ``narrative_archives.json`` files. Runtime writers
-        go through ``write_archives_for_project`` instead.
+        Only useful when recovering a DB from stored project artifacts.
+        Runtime writers go through ``write_archives_for_project`` instead.
         """
-        # Delete all archives and sources, then re-import from legacy JSON
+        # Delete all archives and sources, then re-import from project artifacts.
         for source in self._repo.list_sources():
             self._repo.delete_archives_by_project(source["project_id"])
             self._repo.delete_source(source["project_id"])
-        return self.import_from_legacy_json(force=True)
+        return self.import_from_project_artifacts(force=True)
 
     # ------------------------------------------------------------------
-    # Phase 2 · one-time JSON → DB backfill utilities
+    # Phase 2 · one-time project artifact → DB backfill utilities
     # ------------------------------------------------------------------
-    # These are NOT on any runtime hot path after Phase 2. They exist only
-    # to bring legacy projects (pre-2026-04-18) that still have a
-    # ``narrative_archives.json`` artifact into the unified DB.
+    # These are NOT on any runtime hot path after Phase 2. They exist to
+    # rebuild archive rows from the project_artifacts mirror.
 
-    def import_project_from_legacy_json(
+    def import_project_from_project_artifacts(
         self, project_id: str, force: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Import a single project's archive JSON into the DB (one-shot).
+        """Import a single project's archive artifact into the DB (one-shot).
 
         Prefer ``write_archives_for_project`` for live writes.
         """
@@ -191,25 +189,35 @@ class ArchiveLibraryService:
             raise ValueError("档案同步失败")
         return self.list_archives(project_id=project_id, limit=500)["items"]
 
-    def import_from_legacy_json(self, force: bool = False) -> int:
-        """Import every project's archive JSON into the DB (one-shot)."""
+    def import_from_project_artifacts(self, force: bool = False) -> int:
+        """Import every project's archive artifact into the DB (one-shot)."""
         return self._sync_projects(self._iter_projects(), force=force)
 
     # -- Deprecated aliases kept for backwards compatibility --------------
     # Old callers may still reach for these names; both are now thin
     # wrappers that delegate to the explicit ``import_*_from_legacy_json``
     # entry points. New code should use ``write_archives_for_project`` for
-    # live writes or ``import_*_from_legacy_json`` for migrations.
+    # live writes or ``import_*_from_project_artifacts`` for rebuilds.
+
+    def import_project_from_legacy_json(
+        self, project_id: str, force: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """DEPRECATED: use ``import_project_from_project_artifacts``."""
+        return self.import_project_from_project_artifacts(project_id, force=force)
+
+    def import_from_legacy_json(self, force: bool = False) -> int:
+        """DEPRECATED: use ``import_from_project_artifacts``."""
+        return self.import_from_project_artifacts(force=force)
 
     def sync_project_archives(self, project_id: str, force: bool = False) -> List[Dict[str, Any]]:
         """DEPRECATED: use ``write_archives_for_project`` (live) or
-        ``import_project_from_legacy_json`` (one-shot JSON import).
+        ``import_project_from_project_artifacts`` (one-shot rebuild).
         """
-        return self.import_project_from_legacy_json(project_id, force=force)
+        return self.import_project_from_project_artifacts(project_id, force=force)
 
     def sync_incremental(self, force: bool = False) -> int:
-        """DEPRECATED: use ``import_from_legacy_json``."""
-        return self.import_from_legacy_json(force=force)
+        """DEPRECATED: use ``import_from_project_artifacts``."""
+        return self.import_from_project_artifacts(force=force)
 
     # ------------------------------------------------------------------
     # Phase 2 · DB-native write entry point
@@ -283,27 +291,21 @@ class ArchiveLibraryService:
         return self.write_archives(project_id, name, payload)
 
     def _iter_projects(self) -> List[Any]:
-        ProjectManager._ensure_projects_dir()
-        projects: List[Any] = []
-        for project_id in os.listdir(ProjectManager.PROJECTS_DIR):
-            project = ProjectManager.get_project(project_id)
-            if project:
-                projects.append(project)
-        return projects
+        return ProjectManager.list_projects(limit=1000)
 
     def _sync_projects(self, projects: Iterable[Any], force: bool) -> int:
         known_ids = set()
         for project in projects:
-            path = _archive_path(project.project_id)
             known_ids.add(project.project_id)
-            if not os.path.exists(path):
+            payload = load_project_artifact(project.project_id, "narrative_archives")
+            if not isinstance(payload, dict):
                 self._delete_project_records(project.project_id)
                 continue
-            file_mtime = os.path.getmtime(path)
+            file_mtime = _now_ts()
             if not force and self._is_unchanged(project.project_id, file_mtime):
                 continue
-            payload = ProjectManager.load_project_json(project.project_id, "narrative_archives.json") or {}
-            self._replace_project_archives(project, payload, path, file_mtime)
+            file_path = _archive_source_ref(project.project_id)
+            self._replace_project_archives(project, payload, file_path, file_mtime)
         self._prune_deleted_sources(known_ids)
         return self._repo.count_archives()
 

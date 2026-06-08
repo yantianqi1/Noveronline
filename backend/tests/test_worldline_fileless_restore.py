@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 from sqlalchemy import text
@@ -157,3 +158,40 @@ def test_save_session_does_not_require_container_dir_to_exist(tmp_path):
 
     assert not os.path.exists(imaginary)
     assert store.load_session("sess_imag") is not None
+
+
+def test_resolve_project_container_does_not_recreate_project_directory(tmp_path):
+    project = _make_project(tmp_path)
+    store = WorldStateStore()
+    project_dir = Path(ProjectManager._get_project_dir(project.project_id))
+    shutil.rmtree(project_dir)
+
+    resolved_project_id, container_dir = store.resolve_container(
+        project.project_id,
+        project.graph_id,
+    )
+
+    assert resolved_project_id == project.project_id
+    assert container_dir == str(project_dir)
+    assert not project_dir.exists(), (
+        "resolve_container should not recreate filesystem project directories"
+    )
+
+
+def test_resolve_graph_container_does_not_create_global_worldline_dirs(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path / "uploads"))
+    store = WorldStateStore()
+    global_worldlines = Path(Config.UPLOAD_FOLDER) / "system" / "global_worldlines"
+
+    resolved_project_id, container_dir = store.resolve_container(
+        project_id=None,
+        graph_id="local_graph:mirror-lake",
+    )
+
+    assert resolved_project_id is None
+    assert container_dir.endswith("local_graph_mirror-lake")
+    assert not global_worldlines.exists(), (
+        "resolve_container should return graph compatibility paths without creating global_worldlines"
+    )

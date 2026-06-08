@@ -190,6 +190,7 @@ class ReadingNotesManager:
                 "target": change.get("target", ""),
                 "relation": change.get("relation", ""),
                 "previous_state": change.get("previous_state", ""),
+                "new_state": change.get("new_state", ""),
                 "trigger": change.get("trigger", ""),
                 "evidence": change.get("evidence", ""),
                 "segment_id": segment_id,
@@ -622,10 +623,8 @@ class ReadingNotesManager:
             json.dump(self.assemble_for_save(), f, ensure_ascii=False, indent=2)
 
     @classmethod
-    def load(cls, path: str) -> "ReadingNotesManager":
-        """Deserialise from JSON, restoring all state."""
-        with open(path, "r", encoding="utf-8") as f:
-            state = json.load(f)
+    def from_state(cls, state: Dict[str, Any]) -> "ReadingNotesManager":
+        """Restore a manager from a serialized state dict."""
         mgr = cls(
             arc_interval=state.get("arc_interval", 5),
             volume_arc_threshold=state.get("volume_arc_threshold", 10),
@@ -634,3 +633,10 @@ class ReadingNotesManager:
         mgr._arc_cursor = state.get("_arc_cursor", 0)
         mgr.notes = state.get("notes", cls._empty_notes())
         return mgr
+
+    @classmethod
+    def load(cls, path: str) -> "ReadingNotesManager":
+        """Deserialise from JSON, restoring all state."""
+        with open(path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        return cls.from_state(state)

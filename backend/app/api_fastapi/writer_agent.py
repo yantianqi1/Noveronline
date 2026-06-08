@@ -556,7 +556,7 @@ async def get_continuation_context(project_id: str, token_budget: int = 8000, la
 async def migrate_project(project_id: str):
     del project_id
     return err(
-        "legacy novel.sqlite3 回填接口已废弃；请改用统一数据库迁移脚本与 verify_project_migration 校验工具。",
+        "旧写作库回填接口已废弃；请改用统一数据库迁移脚本与 verify_project_migration 校验工具。",
         status_code=410,
         debug=False,
     )
