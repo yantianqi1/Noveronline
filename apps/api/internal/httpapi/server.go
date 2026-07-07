@@ -984,11 +984,11 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/reviews"):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/assets/") && strings.HasSuffix(path, "/adoptions"):
+	case request.Method == http.MethodPost && isAssetAdoptionPath(path):
 		return true
-	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/assets/"):
+	case request.Method == http.MethodPatch && isAssetMutationPath(path):
 		return true
-	case request.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/assets/"):
+	case request.Method == http.MethodDelete && isAssetMutationPath(path):
 		return true
 	case request.Method == http.MethodGet && isAssetDetailPath(path):
 		return true
@@ -1006,15 +1006,31 @@ func isActorSensitiveRoute(request *http.Request) bool {
 }
 
 func isAssetDetailPath(path string) bool {
+	return singleAssetPathPart(path) != ""
+}
+
+func isAssetMutationPath(path string) bool {
+	return singleAssetPathPart(path) != ""
+}
+
+func isAssetAdoptionPath(path string) bool {
+	return assetAdoptionPathPart(path) != ""
+}
+
+func singleAssetPathPart(path string) string {
 	assetID := strings.TrimSpace(strings.TrimPrefix(path, "/v1/assets/"))
-	if assetID == "" || assetID == path || strings.Contains(assetID, "/") {
-		return false
+	if assetID == "" || assetID == path || strings.Contains(assetID, "/") || isReservedAssetPathPart(assetID) {
+		return ""
 	}
+	return assetID
+}
+
+func isReservedAssetPathPart(assetID string) bool {
 	switch assetID {
 	case "search", "bulk-actions":
-		return false
-	default:
 		return true
+	default:
+		return false
 	}
 }
 
@@ -1410,6 +1426,23 @@ func (s *Server) authorizeProjectRead(response http.ResponseWriter, request *htt
 
 func (s *Server) authorizeAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionAssetManage)
+}
+
+func (s *Server) authorizeSingleAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, assetID string) bool {
+	record, err := s.assetReader.GetAsset(request.Context(), assets.GetAssetInput{
+		TenantID: tenantID,
+		AssetID:  assetID,
+	})
+	if err != nil {
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetOwnerPreflightPublicErrorMessage(code), nil)
+		return false
+	}
+	if strings.TrimSpace(record.ProjectID) == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return s.authorizeAssetManage(response, request, tenantID, record.ProjectID)
 }
 
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
@@ -1867,7 +1900,8 @@ func (s *Server) handleListAssets(response http.ResponseWriter, request *http.Re
 		ProjectID: projectID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[assets.Record]{Items: items})
@@ -1892,7 +1926,8 @@ func (s *Server) handleListAssetFacets(response http.ResponseWriter, request *ht
 		ProjectID: projectID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, facets)
@@ -3312,7 +3347,8 @@ func (s *Server) handleGetAsset(response http.ResponseWriter, request *http.Requ
 		AssetID:  assetID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
 	if strings.TrimSpace(record.ProjectID) == "" {
@@ -3334,6 +3370,9 @@ func (s *Server) handleAdoptAsset(response http.ResponseWriter, request *http.Re
 	assetID := assetAdoptionPathPart(request.URL.Path)
 	if assetID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "asset adoption route not found", nil)
+		return
+	}
+	if !s.authorizeSingleAssetManage(response, request, tenantID, assetID) {
 		return
 	}
 	var payload adoptAssetRequest
@@ -3366,6 +3405,9 @@ func (s *Server) handlePatchAsset(response http.ResponseWriter, request *http.Re
 	assetID := assetPathPart(request.URL.Path)
 	if assetID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "asset route not found", nil)
+		return
+	}
+	if !s.authorizeSingleAssetManage(response, request, tenantID, assetID) {
 		return
 	}
 	var payload patchAssetRequest
@@ -3421,6 +3463,9 @@ func (s *Server) handleDeleteAsset(response http.ResponseWriter, request *http.R
 	assetID := assetPathPart(request.URL.Path)
 	if assetID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "asset route not found", nil)
+		return
+	}
+	if !s.authorizeSingleAssetManage(response, request, tenantID, assetID) {
 		return
 	}
 	result, err := s.assetMutationStore.DeleteAsset(request.Context(), assets.DeleteAssetInput{
@@ -4678,20 +4723,20 @@ func styleExtractionRunPathPart(path string) string {
 }
 
 func assetAdoptionPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/assets/")
-	assetID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "adoptions" {
+	if !strings.HasPrefix(path, "/v1/assets/") {
 		return ""
 	}
-	return strings.TrimSpace(assetID)
-}
-
-func assetPathPart(path string) string {
-	assetID := strings.TrimSpace(strings.TrimPrefix(path, "/v1/assets/"))
-	if assetID == "" || strings.Contains(assetID, "/") {
+	remainder := strings.TrimPrefix(path, "/v1/assets/")
+	assetID, suffix, ok := strings.Cut(remainder, "/")
+	assetID = strings.TrimSpace(assetID)
+	if !ok || suffix != "adoptions" || assetID == "" || strings.Contains(assetID, "/") || isReservedAssetPathPart(assetID) {
 		return ""
 	}
 	return assetID
+}
+
+func assetPathPart(path string) string {
+	return singleAssetPathPart(path)
 }
 
 func archiveAssetPathPart(path string, suffix string) string {
@@ -5526,6 +5571,19 @@ func statusForAppCode(code string) int {
 		return http.StatusConflict
 	default:
 		return http.StatusServiceUnavailable
+	}
+}
+
+func assetOwnerPreflightPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "asset was not found"
+	case "ASSET_BACKEND_UNCONFIGURED":
+		return "asset backend is not configured"
+	case "ASSET_QUERY_FAILED":
+		return "asset query failed"
+	default:
+		return "asset request failed"
 	}
 }
 

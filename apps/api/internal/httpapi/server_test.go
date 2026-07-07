@@ -842,6 +842,7 @@ type recordingAssetAdoptionStore struct {
 	input  assets.AdoptAssetInput
 	record assets.Record
 	err    error
+	called bool
 }
 
 type recordingArchiveMemoryReviewStore struct {
@@ -852,12 +853,14 @@ type recordingArchiveMemoryReviewStore struct {
 }
 
 type recordingAssetMutationStore struct {
-	createInput assets.CreateAssetInput
-	patchInput  assets.PatchAssetInput
-	deleteInput assets.DeleteAssetInput
-	record      assets.Record
-	deleted     assets.DeleteResult
-	err         error
+	createInput  assets.CreateAssetInput
+	patchInput   assets.PatchAssetInput
+	deleteInput  assets.DeleteAssetInput
+	record       assets.Record
+	deleted      assets.DeleteResult
+	err          error
+	patchCalled  bool
+	deleteCalled bool
 }
 
 type recordingAssetBulkActionStore struct {
@@ -916,6 +919,7 @@ func (r *recordingArchiveMemoryReader) ListMemoryEvents(ctx context.Context, inp
 
 func (s *recordingAssetAdoptionStore) AdoptAsset(ctx context.Context, input assets.AdoptAssetInput) (assets.Record, error) {
 	s.input = input
+	s.called = true
 	if s.err != nil {
 		return assets.Record{}, s.err
 	}
@@ -1020,6 +1024,7 @@ func (s *recordingAssetMutationStore) CreateAsset(ctx context.Context, input ass
 
 func (s *recordingAssetMutationStore) PatchAsset(ctx context.Context, input assets.PatchAssetInput) (assets.Record, error) {
 	s.patchInput = input
+	s.patchCalled = true
 	if s.err != nil {
 		return assets.Record{}, s.err
 	}
@@ -1048,6 +1053,7 @@ func (s *recordingAssetMutationStore) PatchAsset(ctx context.Context, input asse
 
 func (s *recordingAssetMutationStore) DeleteAsset(ctx context.Context, input assets.DeleteAssetInput) (assets.DeleteResult, error) {
 	s.deleteInput = input
+	s.deleteCalled = true
 	if s.err != nil {
 		return assets.DeleteResult{}, s.err
 	}
@@ -5262,22 +5268,25 @@ func TestGetAssetDeniesProjectReadWithoutLeakingAssetMetadata(t *testing.T) {
 
 func TestGetAssetReaderErrorsDoNotCallAuthorizer(t *testing.T) {
 	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-		wantCode   string
+		name        string
+		err         error
+		wantStatus  int
+		wantCode    string
+		wantMessage string
 	}{
 		{
-			name:       "not found",
-			err:        &assets.AppError{Code: "NOT_FOUND", Message: "asset was not found"},
-			wantStatus: http.StatusNotFound,
-			wantCode:   "NOT_FOUND",
+			name:        "not found",
+			err:         &assets.AppError{Code: "NOT_FOUND", Message: "asset was not found"},
+			wantStatus:  http.StatusNotFound,
+			wantCode:    "NOT_FOUND",
+			wantMessage: "asset was not found",
 		},
 		{
-			name:       "backend error",
-			err:        &assets.AppError{Code: "ASSET_QUERY_FAILED", Message: "database prompt api_key failure"},
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "ASSET_QUERY_FAILED",
+			name:        "backend error",
+			err:         &assets.AppError{Code: "ASSET_QUERY_FAILED", Message: "database prompt api_key credential_ref object_key draft manuscript raw_body failure"},
+			wantStatus:  http.StatusServiceUnavailable,
+			wantCode:    "ASSET_QUERY_FAILED",
+			wantMessage: "asset query failed",
 		},
 	}
 
@@ -5305,6 +5314,15 @@ func TestGetAssetReaderErrorsDoNotCallAuthorizer(t *testing.T) {
 			}
 			if body.Error.Code != tt.wantCode {
 				t.Fatalf("unexpected error body: %#v", body)
+			}
+			if body.Error.Message != tt.wantMessage {
+				t.Fatalf("expected stable reader error message %q, got %#v", tt.wantMessage, body)
+			}
+			rawBody := response.Body.String()
+			for _, forbidden := range []string{"database", "prompt", "api_key", "credential_ref", "object_key", "draft", "manuscript", "raw_body"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("asset detail reader error leaked forbidden detail %q: %s", forbidden, rawBody)
+				}
 			}
 		})
 	}
@@ -5626,11 +5644,12 @@ func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredStore(t *testing.T) {
 
 func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 	tests := []struct {
-		name      string
-		method    string
-		path      string
-		message   string
-		requestID string
+		name            string
+		method          string
+		path            string
+		message         string
+		requestID       string
+		needsAssetOwner bool
 	}{
 		{
 			name:      "asset create",
@@ -5696,24 +5715,30 @@ func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			requestID: "req-story-graph-bond-validation",
 		},
 		{
-			name:      "asset adoption",
-			method:    http.MethodPost,
-			path:      "/v1/assets/asset-1/adoptions",
-			message:   "invalid asset adoption payload",
-			requestID: "req-asset-adoption-validation",
+			name:            "asset adoption",
+			method:          http.MethodPost,
+			path:            "/v1/assets/asset-1/adoptions",
+			message:         "invalid asset adoption payload",
+			requestID:       "req-asset-adoption-validation",
+			needsAssetOwner: true,
 		},
 		{
-			name:      "asset patch",
-			method:    http.MethodPatch,
-			path:      "/v1/assets/asset-1",
-			message:   "invalid asset patch payload",
-			requestID: "req-asset-patch-validation",
+			name:            "asset patch",
+			method:          http.MethodPatch,
+			path:            "/v1/assets/asset-1",
+			message:         "invalid asset patch payload",
+			requestID:       "req-asset-patch-validation",
+			needsAssetOwner: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+			config := Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}}
+			if tt.needsAssetOwner {
+				config.AssetReader = &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
+			}
+			server := NewServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{
 				"api_key":"sk-hidden",
 				"prompt":"private",
@@ -5758,8 +5783,10 @@ func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 }
 
 func TestAdoptAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 	store := &recordingAssetAdoptionStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetAdoptionStore: store})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/assets/asset-1/adoptions", strings.NewReader(`{"target_lifecycle":"canon"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5772,6 +5799,10 @@ func TestAdoptAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.AssetID != "asset-1" {
+		t.Fatalf("reader lost adoption owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-adopt")
 	if store.input.TenantID != "tenant-123" || store.input.AssetID != "asset-1" || store.input.TargetLifecycle != "canon" {
 		t.Fatalf("store lost adoption scope: %#v", store.input)
 	}
@@ -5790,7 +5821,8 @@ func TestAdoptAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 }
 
 func TestAdoptAssetFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/assets/asset-1/adoptions", strings.NewReader(`{"target_lifecycle":"canon"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5807,6 +5839,497 @@ func TestAdoptAssetFailsClosedWithoutConfiguredStore(t *testing.T) {
 	}
 	if body.Error.Code != "ASSET_ADOPTION_BACKEND_UNCONFIGURED" {
 		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestAssetManageRBACSingleAssetMutationsUseReaderProjectBeforeDecodeAndSideEffects(t *testing.T) {
+	deniedErr := &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "no asset access title=灵气规则 summary=公开摘要 prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=objects/private.txt draft=private manuscript=private actor=user-123",
+	}
+	cases := []struct {
+		name         string
+		method       string
+		path         string
+		body         string
+		assertNoCall func(*testing.T, *recordingAssetMutationStore, *recordingAssetAdoptionStore)
+	}{
+		{
+			name:   "patch_asset",
+			method: http.MethodPatch,
+			path:   "/v1/assets/asset-1",
+			body:   `{"tenant_id":"tenant-body","title":"新标题","prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if mutations.patchCalled {
+					t.Fatalf("patch store ran after RBAC denial: %#v", mutations.patchInput)
+				}
+			},
+		},
+		{
+			name:   "delete_asset",
+			method: http.MethodDelete,
+			path:   "/v1/assets/asset-1",
+			body:   `{"prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if mutations.deleteCalled {
+					t.Fatalf("delete store ran after RBAC denial: %#v", mutations.deleteInput)
+				}
+			},
+		},
+		{
+			name:   "adopt_asset",
+			method: http.MethodPost,
+			path:   "/v1/assets/asset-1/adoptions",
+			body:   `{"target_lifecycle":"canon","prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if adoptions.called {
+					t.Fatalf("adoption store ran after RBAC denial: %#v", adoptions.input)
+				}
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingAssetReader{
+				asset: assets.Record{
+					AssetID:   "asset-1",
+					ProjectID: "project-from-reader",
+					Title:     "灵气规则",
+					Summary:   "公开摘要",
+					Payload: map[string]any{
+						"prompt":         "must not leak prompt",
+						"provider":       "must not leak provider",
+						"response":       "must not leak response",
+						"raw_body":       "must not leak raw body",
+						"content":        "must not leak content",
+						"api_key":        "must not leak api key",
+						"credential_ref": "must not leak credential",
+						"object_key":     "must not leak object key",
+						"draft":          "must not leak draft",
+						"manuscript":     "must not leak manuscript",
+					},
+				},
+			}
+			authorizer := &recordingAuthorizer{err: deniedErr}
+			mutations := &recordingAssetMutationStore{}
+			adoptions := &recordingAssetAdoptionStore{}
+			server := NewServer(Config{
+				WriterStarter:      &recordingStarter{},
+				AssetReader:        reader,
+				Authorizer:         authorizer,
+				AssetMutationStore: mutations,
+				AssetAdoptionStore: adoptions,
+			})
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-single-asset-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 before decode, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.getInput.TenantID != "tenant-123" || reader.getInput.AssetID != "asset-1" {
+				t.Fatalf("reader lost asset lookup scope: %#v", reader.getInput)
+			}
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].UserID != "user-123" ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != "project-from-reader" ||
+				authorizer.inputs[0].Permission != auth.PermissionAssetManage ||
+				authorizer.inputs[0].RequestID != "req-single-asset-denied" {
+				t.Fatalf("unexpected asset_manage authorizer inputs: %#v", authorizer.inputs)
+			}
+			tt.assertNoCall(t, mutations, adoptions)
+			rawBody := response.Body.String()
+			var body errorEnvelope
+			if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied ||
+				body.Error.Message != "current user access is denied" ||
+				body.Error.RequestID != "req-single-asset-denied" {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+			for _, forbidden := range []string{
+				"VALIDATION_FAILED",
+				"asset-1",
+				"灵气规则",
+				"公开摘要",
+				"payload",
+				"prompt",
+				"provider",
+				"response",
+				"raw_body",
+				"content",
+				"api_key",
+				"credential_ref",
+				"object_key",
+				"objects/private.txt",
+				"draft",
+				"manuscript",
+				"user-123",
+				"no asset access",
+				"must not leak",
+			} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("auth denial leaked forbidden payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestAssetManageRBACSingleAssetMutationsReaderErrorsDoNotAuthorizeOrMutate(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "not_found",
+			err:         &assets.AppError{Code: "NOT_FOUND", Message: "asset was not found"},
+			wantStatus:  http.StatusNotFound,
+			wantCode:    "NOT_FOUND",
+			wantMessage: "asset was not found",
+		},
+		{
+			name:        "backend_error",
+			err:         &assets.AppError{Code: "ASSET_QUERY_FAILED", Message: "select payload_jsonb prompt api_key credential_ref object_key draft manuscript content raw_body from private_table"},
+			wantStatus:  http.StatusServiceUnavailable,
+			wantCode:    "ASSET_QUERY_FAILED",
+			wantMessage: "asset query failed",
+		},
+	}
+	routes := []struct {
+		name         string
+		method       string
+		path         string
+		body         string
+		assertNoCall func(*testing.T, *recordingAssetMutationStore, *recordingAssetAdoptionStore)
+	}{
+		{
+			name:   "patch_asset",
+			method: http.MethodPatch,
+			path:   "/v1/assets/asset-1",
+			body:   `{"title":"新标题","prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if mutations.patchCalled {
+					t.Fatalf("patch store ran after reader error: %#v", mutations.patchInput)
+				}
+			},
+		},
+		{
+			name:   "delete_asset",
+			method: http.MethodDelete,
+			path:   "/v1/assets/asset-1",
+			body:   `{"prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if mutations.deleteCalled {
+					t.Fatalf("delete store ran after reader error: %#v", mutations.deleteInput)
+				}
+			},
+		},
+		{
+			name:   "adopt_asset",
+			method: http.MethodPost,
+			path:   "/v1/assets/asset-1/adoptions",
+			body:   `{"target_lifecycle":"canon","prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if adoptions.called {
+					t.Fatalf("adoption store ran after reader error: %#v", adoptions.input)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		for _, route := range routes {
+			t.Run(tt.name+"_"+route.name, func(t *testing.T) {
+				reader := &recordingAssetReader{err: tt.err}
+				authorizer := &recordingAuthorizer{}
+				mutations := &recordingAssetMutationStore{}
+				adoptions := &recordingAssetAdoptionStore{}
+				server := NewServer(Config{
+					WriterStarter:      &recordingStarter{},
+					AssetReader:        reader,
+					Authorizer:         authorizer,
+					AssetMutationStore: mutations,
+					AssetAdoptionStore: adoptions,
+				})
+				request := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("X-Tenant-Id", "tenant-123")
+				request.Header.Set("X-User-Id", "user-123")
+				response := httptest.NewRecorder()
+
+				server.ServeHTTP(response, request)
+
+				if response.Code != tt.wantStatus {
+					t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+				}
+				if reader.getInput.TenantID != "tenant-123" || reader.getInput.AssetID != "asset-1" {
+					t.Fatalf("reader lost asset lookup scope: %#v", reader.getInput)
+				}
+				if authorizer.called {
+					t.Fatalf("reader error should not call authorizer: %#v", authorizer.inputs)
+				}
+				route.assertNoCall(t, mutations, adoptions)
+				var body errorEnvelope
+				rawBody := response.Body.String()
+				if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&body); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if body.Error.Code != tt.wantCode {
+					t.Fatalf("unexpected error body: %#v", body)
+				}
+				if body.Error.Message != tt.wantMessage {
+					t.Fatalf("expected stable public message %q, got %#v", tt.wantMessage, body)
+				}
+				for _, forbidden := range []string{
+					"select",
+					"payload_jsonb",
+					"prompt",
+					"api_key",
+					"credential_ref",
+					"object_key",
+					"draft",
+					"manuscript",
+					"content",
+					"raw_body",
+					"private_table",
+				} {
+					if strings.Contains(rawBody, forbidden) {
+						t.Fatalf("reader preflight error leaked forbidden detail %q: %s", forbidden, rawBody)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReservedAssetMutationPathsPreserveNotFoundWithInvalidBearerAndNoSideEffects(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "patch search", method: http.MethodPatch, path: "/v1/assets/search", body: `{"title":"hidden"}`},
+		{name: "patch bulk actions", method: http.MethodPatch, path: "/v1/assets/bulk-actions", body: `{"title":"hidden"}`},
+		{name: "delete search", method: http.MethodDelete, path: "/v1/assets/search"},
+		{name: "delete bulk actions", method: http.MethodDelete, path: "/v1/assets/bulk-actions"},
+		{name: "adopt search", method: http.MethodPost, path: "/v1/assets/search/adoptions", body: `{"target_lifecycle":"canon"}`},
+		{name: "adopt bulk actions", method: http.MethodPost, path: "/v1/assets/bulk-actions/adoptions", body: `{"target_lifecycle":"canon"}`},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingAssetReader{}
+			authorizer := &recordingAuthorizer{}
+			mutations := &recordingAssetMutationStore{}
+			adoptions := &recordingAssetAdoptionStore{}
+			server := NewServer(Config{
+				SessionAuthSecret:  "test-secret",
+				AssetReader:        reader,
+				Authorizer:         authorizer,
+				AssetMutationStore: mutations,
+				AssetAdoptionStore: adoptions,
+			})
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Authorization", "Bearer v1:asset-user:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected reserved asset path to preserve 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.getInput.TenantID != "" || reader.getInput.AssetID != "" || authorizer.called {
+				t.Fatalf("reserved asset path should not call reader or authorizer: reader=%#v authorizer=%#v", reader.getInput, authorizer.inputs)
+			}
+			if mutations.patchCalled || mutations.deleteCalled || adoptions.called {
+				t.Fatalf("reserved asset path should not call stores: mutations=%#v adoptions=%#v", mutations, adoptions)
+			}
+			rawBody := response.Body.String()
+			if !strings.Contains(rawBody, `"code":"NOT_FOUND"`) {
+				t.Fatalf("expected not found body, got %s", rawBody)
+			}
+			for _, forbidden := range []string{"asset-user", "fallback-user", "deadbeef", "hidden", "canon"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("reserved asset path response leaked forbidden payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestAssetManageRBACSingleAssetMutationsBlankProjectFailsClosedBeforeAuthorizeDecodeOrMutate(t *testing.T) {
+	routes := []struct {
+		name         string
+		method       string
+		path         string
+		body         string
+		assertNoCall func(*testing.T, *recordingAssetMutationStore, *recordingAssetAdoptionStore)
+	}{
+		{
+			name:   "patch_asset",
+			method: http.MethodPatch,
+			path:   "/v1/assets/asset-1",
+			body:   `{"title":"新标题","prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if mutations.patchCalled {
+					t.Fatalf("patch store ran after blank project denial: %#v", mutations.patchInput)
+				}
+			},
+		},
+		{
+			name:   "delete_asset",
+			method: http.MethodDelete,
+			path:   "/v1/assets/asset-1",
+			body:   `{"prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if mutations.deleteCalled {
+					t.Fatalf("delete store ran after blank project denial: %#v", mutations.deleteInput)
+				}
+			},
+		},
+		{
+			name:   "adopt_asset",
+			method: http.MethodPost,
+			path:   "/v1/assets/asset-1/adoptions",
+			body:   `{"target_lifecycle":"canon","prompt":"private"`,
+			assertNoCall: func(t *testing.T, mutations *recordingAssetMutationStore, adoptions *recordingAssetAdoptionStore) {
+				t.Helper()
+				if adoptions.called {
+					t.Fatalf("adoption store ran after blank project denial: %#v", adoptions.input)
+				}
+			},
+		},
+	}
+
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			reader := &recordingAssetReader{
+				asset: assets.Record{
+					AssetID: "asset-1",
+					Title:   "灵气规则",
+					Summary: "公开摘要",
+					Payload: map[string]any{
+						"prompt":     "must not leak prompt",
+						"api_key":    "must not leak api key",
+						"object_key": "must not leak object key",
+						"draft":      "must not leak draft",
+						"manuscript": "must not leak manuscript",
+					},
+				},
+			}
+			authorizer := &recordingAuthorizer{}
+			mutations := &recordingAssetMutationStore{}
+			adoptions := &recordingAssetAdoptionStore{}
+			server := NewServer(Config{
+				WriterStarter:      &recordingStarter{},
+				AssetReader:        reader,
+				Authorizer:         authorizer,
+				AssetMutationStore: mutations,
+				AssetAdoptionStore: adoptions,
+			})
+			request := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("blank project should fail before authorizer: %#v", authorizer.inputs)
+			}
+			route.assertNoCall(t, mutations, adoptions)
+			rawBody := response.Body.String()
+			var body errorEnvelope
+			if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+				t.Fatalf("unexpected auth error body: %#v", body)
+			}
+			for _, forbidden := range []string{
+				"VALIDATION_FAILED",
+				"asset-1",
+				"灵气规则",
+				"公开摘要",
+				"payload",
+				"prompt",
+				"api_key",
+				"object_key",
+				"draft",
+				"manuscript",
+				"must not leak",
+				"user-123",
+			} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("blank project response leaked forbidden payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestDisabledAssetReaderPreflightsSingleAssetMutationsBeforeDisabledStores(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "patch", method: http.MethodPatch, path: "/v1/assets/asset-1", body: `{"title":"新标题"}`},
+		{name: "delete", method: http.MethodDelete, path: "/v1/assets/asset-1"},
+		{name: "adopt", method: http.MethodPost, path: "/v1/assets/asset-1/adoptions", body: `{"target_lifecycle":"canon"}`},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.Error.Code != "ASSET_BACKEND_UNCONFIGURED" || body.Error.Message != "asset backend is not configured" {
+				t.Fatalf("expected disabled reader preflight error before mutation/adoption store errors, got %#v", body)
+			}
+		})
 	}
 }
 
@@ -5966,8 +6489,10 @@ func TestCreateAssetUsesTenantProjectActorRequestAndReturnsSanitizedAsset(t *tes
 }
 
 func TestPatchAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 	store := &recordingAssetMutationStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetMutationStore: store})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetMutationStore: store})
 	request := httptest.NewRequest(
 		http.MethodPatch,
 		"/v1/assets/asset-1",
@@ -5983,6 +6508,10 @@ func TestPatchAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.AssetID != "asset-1" {
+		t.Fatalf("reader lost patch owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-patch")
 	if store.patchInput.TenantID != "tenant-123" || store.patchInput.AssetID != "asset-1" || store.patchInput.ActorID != "user-123" || store.patchInput.RequestID != "req-patch" {
 		t.Fatalf("unexpected patch context: %#v", store.patchInput)
 	}
@@ -6005,8 +6534,10 @@ func TestPatchAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 }
 
 func TestDeleteAssetUsesTenantActorRequestAndReturnsSanitizedResult(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 	store := &recordingAssetMutationStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetMutationStore: store})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetMutationStore: store})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/assets/asset-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -6018,6 +6549,10 @@ func TestDeleteAssetUsesTenantActorRequestAndReturnsSanitizedResult(t *testing.T
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.AssetID != "asset-1" {
+		t.Fatalf("reader lost delete owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-delete")
 	if store.deleteInput.TenantID != "tenant-123" || store.deleteInput.AssetID != "asset-1" || store.deleteInput.ActorID != "user-123" || store.deleteInput.RequestID != "req-delete" {
 		t.Fatalf("unexpected delete context: %#v", store.deleteInput)
 	}
@@ -6034,7 +6569,8 @@ func TestDeleteAssetUsesTenantActorRequestAndReturnsSanitizedResult(t *testing.T
 }
 
 func TestAssetMutationsFailClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: &recordingAuthorizer{}})
 	cases := []struct {
 		method string
 		path   string
