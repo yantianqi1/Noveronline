@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam 和 W2-S4d 首批 project-scoped read RBAC expansion 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle、browser cookie transport、remaining mutation/global-detail RBAC 与 route predicate 收敛待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion 和 W2-S4e actor-sensitive route predicate hardening 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle、browser cookie transport、remaining mutation/global-detail RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,48 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、browser cookie transport、remaining mutation/global-detail RBAC、route predicate 收敛 |
-| 本轮开发 slice | W2-S4d first project-scoped read RBAC expansion：Go HTTP 对首批 project-scoped GET read endpoints 和 LLM module binding resolution 加入 `project_read` gate，并把这些 actor-sensitive reads 纳入 invalid presented credential fail-closed predicate |
-| 推荐下一步 | W2-S4e 继续收敛 route-wide RBAC/permission matrix：优先把 remaining sensitive mutations、owner-aware global/detail reads 和 route predicate helper/registry 收紧；或进入完整 login/JWT/session lifecycle。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4d 不声明完整 Auth/RBAC、注册登录或 JWT/session 生命周期完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、browser cookie transport、remaining mutation/global-detail RBAC |
+| 本轮开发 slice | W2-S4e actor-sensitive route predicate hardening：Go HTTP 对 nested actor-sensitive route predicate 和对应 dispatcher 使用 shape helpers，拒绝 project/resource id 中的额外 path segment，保证 malformed paths 携带 invalid credential 时仍保持 404 且不调用 authorizer/reader/store/resolver/auditor |
+| 推荐下一步 | W2-S4f 继续 route-wide RBAC/permission matrix：优先把 remaining sensitive mutations 和 owner-aware global/detail reads 纳入权限矩阵；或进入完整 login/JWT/session lifecycle。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4e 不声明完整 Auth/RBAC、注册登录或 JWT/session 生命周期完成 |
+
+## Wave 2 W2-S4e Actor-sensitive route predicate hardening
+
+Context:
+
+- W2-S4d 的 quality reviewer 指出 `projectActorSensitiveRoute` 中部分 nested route predicate 使用 `strings.Contains`，可能把 malformed route-shaped paths 误判为 actor-sensitive，从而让 invalid presented credential 把应为 404 的未知路由改成 401。
+- 本 slice 只硬化 HTTP route shape matching，不新增权限、不实现 login/JWT/session/browser transport、不扩展 mutation/global-detail RBAC。
+
+TDD / Review:
+
+- Implementer subagent Godel 先补 RED：`go test ./internal/httpapi -run 'ActorSensitive' -count=1` 失败，malformed story graph view/node/layout 和 module binding PUT paths 带 invalid bearer 时返回 401 而不是 404。
+- Spec reviewer Anscombe 初审 FAIL，发现首版只覆盖尾部 extra segment，parser 仍允许 project id 吞掉 pre-route extra segment，例如 `/v1/projects/project-123/extra/story-graph/views/world`。Coordinator 追加 RED 覆盖 pre-route extra segment 并收紧 helpers。
+- `projectActorSensitiveRoute` 现在用 shape helpers 识别 project suffix 和 nested story graph / LLM / trace routes；这些 helpers 要求 project id、module key、channel id、trace id、story graph item id 是单 path segment。
+- `ServeHTTP` 对同一批 nested story graph、story graph evidence、LLM resolution/module-binding/channel models、trace events/export 也改用同一 shape helpers，避免 malformed pre-route extra segment 进入 handler 并以 bogus project id 调用 authorizer/backend。
+- Malformed trailing/pre-route extra segment paths 携带 invalid bearer 时返回稳定 404，不调用 authorizer、story graph reader、LLM resolver/binding/catalog reader、trace access/reader/auditor，也不泄露 bearer user id、fallback user id 或签名片段。Canonical protected nested routes 携带 invalid bearer 时仍返回稳定 `UNAUTHENTICATED` 401，并在 fallback/side effects 前停止。
+- Spec reviewer Anscombe 复审 PASS；quality reviewer Peirce PASS。残余风险：malformed-route table 采样修改过的 nested family，未穷举 edge evidence、DELETE binding、trace events 等每个变体，但共享 helper 覆盖这些 shape。
+
+Verification:
+
+- `cd apps/api && go test ./internal/httpapi -run 'TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBearer|TestActorSensitiveCanonicalNestedProjectRoutesRejectInvalidBearerBeforeFallbackAndSideEffects' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'AuthSubject|ActorSensitive|NotFound|LLMResolution|TraceExport|StoryGraph|LLMModuleBinding' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Auth|Session|RBAC|Trace' -count=1` 通过。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `git diff --check` 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+
+Next:
+
+- W2-S4f：remaining sensitive mutations 与 owner-aware global/detail reads 纳入权限矩阵。
+- 完整注册登录、JWT claim parsing、session cookie issuance/rotation/revocation、CSRF、browser cookie transport 仍 pending。
 
 ## Wave 2 W2-S4d Project-scoped Read RBAC expansion
 

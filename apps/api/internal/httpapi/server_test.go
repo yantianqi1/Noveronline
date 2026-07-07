@@ -1323,6 +1323,260 @@ func TestUnknownRoutePreservesNotFoundWithMalformedPresentedAuthCredentials(t *t
 	}
 }
 
+func TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBearer(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "story graph view extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/story-graph/views/world/extra",
+		},
+		{
+			name:   "story graph view pre route extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/extra/story-graph/views/world",
+		},
+		{
+			name:   "story graph node extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/story-graph/nodes/node-1/extra",
+		},
+		{
+			name:   "story graph node pre route extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/extra/story-graph/nodes/node-1",
+		},
+		{
+			name:   "story graph layout extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/story-graph/layouts/world/extra",
+		},
+		{
+			name:   "story graph layout pre route extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/extra/story-graph/layouts/world",
+		},
+		{
+			name:   "llm resolution extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/llm/module-bindings/writer_composer/resolution/extra",
+		},
+		{
+			name:   "llm resolution pre route extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/extra/llm/module-bindings/writer_composer/resolution",
+		},
+		{
+			name:   "llm channel models extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/llm/channels/channel-1/models/extra",
+		},
+		{
+			name:   "llm channel models pre route extra segment",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/extra/llm/channels/channel-1/models",
+		},
+		{
+			name:   "module binding put extra segment",
+			method: http.MethodPut,
+			path:   "/v1/projects/project-123/llm/module-bindings/writer_composer/extra",
+			body:   `{"channel_id":"channel-1","model_id":"model-1","settings":{}}`,
+		},
+		{
+			name:   "module binding put pre route extra segment",
+			method: http.MethodPut,
+			path:   "/v1/projects/project-123/extra/llm/module-bindings/writer_composer",
+			body:   `{"channel_id":"channel-1","model_id":"model-1","settings":{}}`,
+		},
+		{
+			name:   "trace export extra segment",
+			method: http.MethodPost,
+			path:   "/v1/projects/project-123/agent-traces/trace-1/export/extra",
+			body:   `{"include_full":true}`,
+		},
+		{
+			name:   "trace export pre route extra segment",
+			method: http.MethodPost,
+			path:   "/v1/projects/project-123/extra/agent-traces/trace-1/export",
+			body:   `{"include_full":true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			storyReader := &recordingStoryGraphReader{}
+			resolver := &recordingLLMResolver{}
+			bindingStore := &recordingLLMBindingStore{}
+			catalogReader := &recordingLLMCatalogReader{}
+			traceReader := &recordingTraceReader{}
+			traceAccess := &allowTraceAccessChecker{}
+			traceAuditor := &recordingTraceExportAuditor{}
+			server := NewServer(Config{
+				Authorizer:         authorizer,
+				StoryGraphReader:   storyReader,
+				LLMResolver:        resolver,
+				LLMBindingStore:    bindingStore,
+				LLMCatalogReader:   catalogReader,
+				TraceReader:        traceReader,
+				TraceAccessChecker: traceAccess,
+				TraceExportAuditor: traceAuditor,
+				SessionAuthSecret:  "test-secret",
+			})
+			body := strings.NewReader(tt.body)
+			request := httptest.NewRequest(tt.method, tt.path, body)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Authorization", "Bearer v1:route-user:deadbeef")
+			if tt.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected malformed route to preserve status %d, got %d: %s", http.StatusNotFound, response.Code, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("malformed route should not call authorizer: %#v", authorizer.inputs)
+			}
+			if !reflect.DeepEqual(*storyReader, recordingStoryGraphReader{}) {
+				t.Fatalf("malformed route should not call story graph reader: %#v", storyReader)
+			}
+			if resolver.called {
+				t.Fatalf("malformed route should not call llm resolver: %#v", resolver.input)
+			}
+			if !reflect.DeepEqual(*bindingStore, recordingLLMBindingStore{}) {
+				t.Fatalf("malformed route should not call binding store: %#v", bindingStore)
+			}
+			if !reflect.DeepEqual(*catalogReader, recordingLLMCatalogReader{}) {
+				t.Fatalf("malformed route should not call catalog reader: %#v", catalogReader)
+			}
+			if traceAccess.called || traceReader.called || traceAuditor.called {
+				t.Fatalf("malformed route should not call trace backends: access=%#v reader=%#v auditor=%#v", traceAccess.input, traceReader.input, traceAuditor.input)
+			}
+			rawBody := response.Body.String()
+			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("not found response leaked credential payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestActorSensitiveCanonicalNestedProjectRoutesRejectInvalidBearerBeforeFallbackAndSideEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "story graph view",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/story-graph/views/world",
+		},
+		{
+			name:   "llm resolution",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/llm/module-bindings/writer_composer/resolution",
+		},
+		{
+			name:   "llm channel models",
+			method: http.MethodGet,
+			path:   "/v1/projects/project-123/llm/channels/channel-1/models",
+		},
+		{
+			name:   "module binding put",
+			method: http.MethodPut,
+			path:   "/v1/projects/project-123/llm/module-bindings/writer_composer",
+			body:   `{"channel_id":"channel-1","model_id":"model-1","settings":{}}`,
+		},
+		{
+			name:   "trace export",
+			method: http.MethodPost,
+			path:   "/v1/projects/project-123/agent-traces/trace-1/export",
+			body:   `{"include_full":true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			storyReader := &recordingStoryGraphReader{}
+			resolver := &recordingLLMResolver{}
+			bindingStore := &recordingLLMBindingStore{}
+			catalogReader := &recordingLLMCatalogReader{}
+			traceReader := &recordingTraceReader{}
+			traceAccess := &allowTraceAccessChecker{}
+			traceAuditor := &recordingTraceExportAuditor{}
+			server := NewServer(Config{
+				Authorizer:         authorizer,
+				StoryGraphReader:   storyReader,
+				LLMResolver:        resolver,
+				LLMBindingStore:    bindingStore,
+				LLMCatalogReader:   catalogReader,
+				TraceReader:        traceReader,
+				TraceAccessChecker: traceAccess,
+				TraceExportAuditor: traceAuditor,
+				SessionAuthSecret:  "test-secret",
+			})
+			body := strings.NewReader(tt.body)
+			request := httptest.NewRequest(tt.method, tt.path, body)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Authorization", "Bearer v1:route-user:deadbeef")
+			if tt.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("expected canonical route to fail closed with status %d, got %d: %s", http.StatusUnauthorized, response.Code, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("invalid bearer should stop before authorizer: %#v", authorizer.inputs)
+			}
+			if !reflect.DeepEqual(*storyReader, recordingStoryGraphReader{}) {
+				t.Fatalf("invalid bearer should stop before story graph reader: %#v", storyReader)
+			}
+			if resolver.called {
+				t.Fatalf("invalid bearer should stop before llm resolver: %#v", resolver.input)
+			}
+			if !reflect.DeepEqual(*bindingStore, recordingLLMBindingStore{}) {
+				t.Fatalf("invalid bearer should stop before binding store: %#v", bindingStore)
+			}
+			if !reflect.DeepEqual(*catalogReader, recordingLLMCatalogReader{}) {
+				t.Fatalf("invalid bearer should stop before catalog reader: %#v", catalogReader)
+			}
+			if traceAccess.called || traceReader.called || traceAuditor.called {
+				t.Fatalf("invalid bearer should stop before trace backends: access=%#v reader=%#v auditor=%#v", traceAccess.input, traceReader.input, traceAuditor.input)
+			}
+			rawBody := response.Body.String()
+			var errorBody errorEnvelope
+			if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&errorBody); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if errorBody.Error.Code != auth.CodeUnauthenticated || errorBody.Error.Message != "user context is required" {
+				t.Fatalf("unexpected auth error body: %#v", errorBody)
+			}
+			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("auth response leaked credential payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
 func TestGetCurrentUserRequiresTrustedUserContextBeforeReader(t *testing.T) {
 	reader := &recordingAuthReader{}
 	server := NewServer(Config{AuthReader: reader})

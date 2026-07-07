@@ -1009,93 +1009,140 @@ func projectActorSensitiveRoute(request *http.Request) bool {
 		return false
 	}
 	switch {
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/overview"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "overview"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/readiness"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "readiness"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/source-files"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "source-files"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/assets"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "assets"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/assets/facets"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "assets/facets"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/worldline/saved-paths"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "worldline/saved-paths"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/worldline-sessions"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "worldline-sessions"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/character-interactions"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "character-interactions"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/story-graph/current"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "story-graph/current"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/views/"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "views"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/nodes/") && !strings.HasSuffix(path, "/evidence"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "nodes"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/edges/") && !strings.HasSuffix(path, "/evidence"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "edges"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/layouts/"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "layouts"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/story-graph/clusters"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "story-graph/clusters"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/modules"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/modules"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/module-bindings"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/module-bindings"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/llm/module-bindings/") && strings.HasSuffix(path, "/resolution"):
+	case request.Method == http.MethodGet && hasLLMResolutionPathShape(path):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/channels"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/channels"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/llm/channels/") && strings.HasSuffix(path, "/models"):
+	case request.Method == http.MethodGet && hasLLMChannelModelsPathShape(path):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/activity"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/activity"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/usage"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/usage"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/manuscript"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "manuscript"):
 		return true
-	case request.Method == http.MethodGet && strings.HasSuffix(path, "/manuscript/export"):
+	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "manuscript/export"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/seed-runs"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "seed-runs"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/uploads"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "uploads"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/worldline-sessions"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "worldline-sessions"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/worldlines/preparations"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "worldlines/preparations"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/character-interactions"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "character-interactions"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/writer-runs"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "writer-runs"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/agent-runtime/hello-runs"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "agent-runtime/hello-runs"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/assets"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "assets"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/asset-ingestions"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "asset-ingestions"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/style-extractions"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "style-extractions"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/assets/reindex"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "assets/reindex"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/story-graph/builds"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "story-graph/builds"):
 		return true
-	case request.Method == http.MethodPost && strings.HasSuffix(path, "/story-graph/bond-generations"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "story-graph/bond-generations"):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/nodes/") && strings.HasSuffix(path, "/evidence"):
+	case request.Method == http.MethodGet && hasStoryGraphEvidencePathShape(path):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/edges/") && strings.HasSuffix(path, "/evidence"):
+	case request.Method == http.MethodPut && hasLLMModuleBindingPathShape(path):
 		return true
-	case request.Method == http.MethodPut && strings.Contains(path, "/llm/module-bindings/"):
+	case request.Method == http.MethodDelete && hasLLMModuleBindingPathShape(path):
 		return true
-	case request.Method == http.MethodDelete && strings.Contains(path, "/llm/module-bindings/"):
+	case request.Method == http.MethodGet && hasTraceEventsPathShape(path):
 		return true
-	case request.Method == http.MethodGet && strings.Contains(path, "/agent-traces/") && strings.HasSuffix(path, "/events"):
-		return true
-	case request.Method == http.MethodPost && strings.Contains(path, "/agent-traces/") && strings.HasSuffix(path, "/export"):
+	case request.Method == http.MethodPost && hasTraceExportPathShape(path):
 		return true
 	default:
 		return false
 	}
+}
+
+func hasStoryGraphPathShape(path string, kind string) bool {
+	projectID, itemID := storyGraphPathParts(path, kind)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(itemID)
+}
+
+func hasStoryGraphEvidencePathShape(path string) bool {
+	projectID, ownerType, ownerID := storyGraphEvidencePathParts(path)
+	return isSinglePathSegment(projectID) && (ownerType == "node" || ownerType == "edge") && isSinglePathSegment(ownerID)
+}
+
+func hasStoryGraphEvidencePathShapeFor(path string, expectedOwnerType string) bool {
+	projectID, ownerType, ownerID := storyGraphEvidencePathParts(path)
+	return isSinglePathSegment(projectID) && ownerType == expectedOwnerType && isSinglePathSegment(ownerID)
+}
+
+func hasLLMResolutionPathShape(path string) bool {
+	projectID, moduleKey := llmResolutionPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(moduleKey)
+}
+
+func hasLLMModuleBindingPathShape(path string) bool {
+	projectID, moduleKey := llmModuleBindingPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(moduleKey)
+}
+
+func hasLLMChannelModelsPathShape(path string) bool {
+	projectID, channelID := llmChannelModelsPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(channelID)
+}
+
+func hasTraceEventsPathShape(path string) bool {
+	projectID, traceID := traceEventsPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(traceID)
+}
+
+func hasTraceExportPathShape(path string) bool {
+	projectID, traceID := traceExportPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(traceID)
+}
+
+func hasProjectSuffixPathShape(path string, suffix string) bool {
+	return isSinglePathSegment(projectIDFromPathWithSuffix(path, suffix))
+}
+
+func isSinglePathSegment(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && !strings.Contains(value, "/")
 }
 
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -1165,19 +1212,19 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartStoryGraphBondGeneration(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/story-graph/current"):
 		s.handleGetStoryGraphCurrent(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/story-graph/views/"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(request.URL.Path, "views"):
 		s.handleGetStoryGraphView(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/story-graph/nodes/") && strings.HasSuffix(request.URL.Path, "/evidence"):
+	case request.Method == http.MethodGet && hasStoryGraphEvidencePathShapeFor(request.URL.Path, "node"):
 		s.handleGetStoryGraphEvidence(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/story-graph/edges/") && strings.HasSuffix(request.URL.Path, "/evidence"):
+	case request.Method == http.MethodGet && hasStoryGraphEvidencePathShapeFor(request.URL.Path, "edge"):
 		s.handleGetStoryGraphEvidence(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/story-graph/layouts/"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(request.URL.Path, "layouts"):
 		s.handleGetStoryGraphLayout(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/story-graph/clusters"):
 		s.handleListStoryGraphClusters(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/story-graph/nodes/"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(request.URL.Path, "nodes"):
 		s.handleGetStoryGraphNode(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/story-graph/edges/"):
+	case request.Method == http.MethodGet && hasStoryGraphPathShape(request.URL.Path, "edges"):
 		s.handleGetStoryGraphEdge(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/asset-ingestions"):
 		s.handleStartAssetIngestion(response, request)
@@ -1267,17 +1314,17 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetWriterRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/agent-runtime/hello-runs"):
 		s.handleStartHelloAgent(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/llm/module-bindings/") && strings.HasSuffix(request.URL.Path, "/resolution"):
+	case request.Method == http.MethodGet && hasLLMResolutionPathShape(request.URL.Path):
 		s.handleResolveLLMModuleBinding(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/modules"):
 		s.handleListLLMModules(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/module-bindings"):
 		s.handleListLLMModuleBindings(response, request)
-	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/llm/module-bindings/"):
+	case request.Method == http.MethodPut && hasLLMModuleBindingPathShape(request.URL.Path):
 		s.handleUpsertLLMModuleBinding(response, request)
-	case request.Method == http.MethodDelete && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/llm/module-bindings/"):
+	case request.Method == http.MethodDelete && hasLLMModuleBindingPathShape(request.URL.Path):
 		s.handleDeleteLLMModuleBinding(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/llm/channels/") && strings.HasSuffix(request.URL.Path, "/models"):
+	case request.Method == http.MethodGet && hasLLMChannelModelsPathShape(request.URL.Path):
 		s.handleListLLMModels(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/channels"):
 		s.handleListLLMChannels(response, request)
@@ -1295,9 +1342,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListLLMActivity(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/usage"):
 		s.handleListLLMUsage(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/agent-traces/") && strings.HasSuffix(request.URL.Path, "/events"):
+	case request.Method == http.MethodGet && hasTraceEventsPathShape(request.URL.Path):
 		s.handleListAgentTraceEvents(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.Contains(request.URL.Path, "/agent-traces/") && strings.HasSuffix(request.URL.Path, "/export"):
+	case request.Method == http.MethodPost && hasTraceExportPathShape(request.URL.Path):
 		s.handleExportAgentTrace(response, request)
 	default:
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
