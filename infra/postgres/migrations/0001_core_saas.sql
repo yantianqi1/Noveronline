@@ -1128,6 +1128,42 @@ CREATE TABLE IF NOT EXISTS writer_drafts (
   FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS draft_reviews (
+  tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+  review_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id UUID NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+  draft_id UUID NOT NULL REFERENCES writer_drafts(draft_id) ON DELETE CASCADE,
+  project_id UUID NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+  module_key TEXT NOT NULL DEFAULT 'writer_reviewer',
+  note TEXT,
+  options_jsonb JSONB NOT NULL DEFAULT '{}'::JSONB,
+  error_code TEXT,
+  error_message TEXT,
+  created_by UUID REFERENCES users(user_id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE,
+  UNIQUE (tenant_id, project_id, draft_id, review_id)
+);
+
+CREATE TABLE IF NOT EXISTS draft_review_issues (
+  tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+  issue_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  review_id UUID NOT NULL REFERENCES draft_reviews(review_id) ON DELETE CASCADE,
+  draft_id UUID NOT NULL REFERENCES writer_drafts(draft_id) ON DELETE CASCADE,
+  project_id UUID NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+  category TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  suggestion TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'accepted', 'dismissed', 'resolved')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, project_id, draft_id, review_id) REFERENCES draft_reviews(tenant_id, project_id, draft_id, review_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS manuscript_blocks (
   tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
   block_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1247,6 +1283,8 @@ CREATE INDEX IF NOT EXISTS idx_llm_module_bindings_tenant_project ON llm_module_
 CREATE INDEX IF NOT EXISTS idx_llm_activity_tenant_project_run ON llm_activity (tenant_id, project_id, run_id, module_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_writer_runs_tenant_project ON writer_runs (tenant_id, project_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_writer_drafts_run ON writer_drafts (tenant_id, run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_draft_reviews_draft ON draft_reviews (tenant_id, draft_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_draft_review_issues_review ON draft_review_issues (tenant_id, review_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_manuscript_blocks_project_order ON manuscript_blocks (tenant_id, project_id, block_order);
 CREATE INDEX IF NOT EXISTS idx_resource_locks_expiry ON resource_locks (tenant_id, expires_at);
 
@@ -1847,6 +1885,24 @@ ALTER TABLE writer_drafts FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_writer_drafts ON writer_drafts;
 CREATE POLICY tenant_isolation_writer_drafts
 ON writer_drafts
+FOR ALL
+USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+
+ALTER TABLE draft_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE draft_reviews FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_draft_reviews ON draft_reviews;
+CREATE POLICY tenant_isolation_draft_reviews
+ON draft_reviews
+FOR ALL
+USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+
+ALTER TABLE draft_review_issues ENABLE ROW LEVEL SECURITY;
+ALTER TABLE draft_review_issues FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_draft_review_issues ON draft_review_issues;
+CREATE POLICY tenant_isolation_draft_review_issues
+ON draft_review_issues
 FOR ALL
 USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
 WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);

@@ -28,6 +28,7 @@ type Config struct {
 	WriterEventReader               workflows.WriterEventReader
 	WriterCanceller                 workflows.WriterCanceller
 	DraftAdoptionStore              workflows.DraftAdoptionStore
+	DraftReviewStore                workflows.DraftReviewStore
 	WorkflowReader                  workflows.WorkflowReader
 	WorkflowEventReader             workflows.WorkflowEventReader
 	WorkflowCanceller               workflows.WorkflowCanceller
@@ -85,6 +86,7 @@ type Server struct {
 	writerEventReader               workflows.WriterEventReader
 	writerCanceller                 workflows.WriterCanceller
 	draftAdoptionStore              workflows.DraftAdoptionStore
+	draftReviewStore                workflows.DraftReviewStore
 	workflowReader                  workflows.WorkflowReader
 	workflowEventReader             workflows.WorkflowEventReader
 	workflowCanceller               workflows.WorkflowCanceller
@@ -165,6 +167,14 @@ type adoptDraftRequest struct {
 	ChapterID    string `json:"chapter_id"`
 	SceneID      string `json:"scene_id"`
 	BlockOrder   int    `json:"block_order"`
+}
+
+type startDraftReviewRequest struct {
+	BodyTenantID  string         `json:"tenant_id"`
+	BodyProjectID string         `json:"project_id"`
+	RunID         string         `json:"run_id"`
+	Note          string         `json:"note"`
+	Options       map[string]any `json:"options"`
 }
 
 type startHelloAgentResponse struct {
@@ -525,6 +535,10 @@ func NewServer(config Config) *Server {
 	if draftAdoptionStore == nil {
 		draftAdoptionStore = workflows.NewDisabledDraftAdoptionStore()
 	}
+	draftReviewStore := config.DraftReviewStore
+	if draftReviewStore == nil {
+		draftReviewStore = workflows.NewDisabledDraftReviewStore()
+	}
 	workflowReader := config.WorkflowReader
 	if workflowReader == nil {
 		workflowReader = workflows.NewDisabledWorkflowReader()
@@ -727,6 +741,7 @@ func NewServer(config Config) *Server {
 		writerEventReader:               writerEventReader,
 		writerCanceller:                 writerCanceller,
 		draftAdoptionStore:              draftAdoptionStore,
+		draftReviewStore:                draftReviewStore,
 		workflowReader:                  workflowReader,
 		workflowEventReader:             workflowEventReader,
 		workflowCanceller:               workflowCanceller,
@@ -924,6 +939,10 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCancelWriterRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
 		s.handleAdoptDraft(response, request)
+	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
+		s.handleStartDraftReview(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
+		s.handleListDraftReviews(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
 		s.handleListWriterRunEvents(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/"):
@@ -3770,6 +3789,83 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 	writeJSON(response, http.StatusAccepted, adoption)
 }
 
+func (s *Server) handleStartDraftReview(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	draftID := draftReviewPathPart(request.URL.Path)
+	if draftID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft review route not found", nil)
+		return
+	}
+	var payload startDraftReviewRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid draft review payload", nil)
+		return
+	}
+	projectID := strings.TrimSpace(payload.BodyProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "project_id is required for draft review", nil)
+		return
+	}
+	moduleKey := "writer_reviewer"
+	_, err := s.llmResolver.ResolveModuleBinding(request.Context(), llm.ResolveModuleInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		ModuleKey: moduleKey,
+	})
+	if err != nil {
+		writeLLMError(response, request, err)
+		return
+	}
+	options := sanitizeWorkflowOptions(payload.Options)
+	options["module_key"] = moduleKey
+	admission, err := s.draftReviewStore.StartDraftReview(request.Context(), workflows.StartDraftReviewInput{
+		TenantID:    tenantID,
+		ProjectID:   projectID,
+		DraftID:     draftID,
+		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		RequestID:   requestID(request),
+		RunID:       strings.TrimSpace(payload.RunID),
+		Note:        strings.TrimSpace(payload.Note),
+		ModuleKey:   moduleKey,
+		Options:     options,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftReviewErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, admission)
+}
+
+func (s *Server) handleListDraftReviews(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	draftID := draftReviewPathPart(request.URL.Path)
+	if draftID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft review route not found", nil)
+		return
+	}
+	reviews, err := s.draftReviewStore.ListDraftReviews(request.Context(), workflows.ListDraftReviewsInput{
+		TenantID: tenantID,
+		DraftID:  draftID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftReviewErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, sanitizeDraftReviewList(reviews))
+}
+
 func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -4076,6 +4172,69 @@ func sanitizeCharacterInteractionTurns(records []characterconsole.TurnRecord) []
 	return clean
 }
 
+func sanitizeDraftReviewList(list workflows.DraftReviewList) workflows.DraftReviewList {
+	clean := workflows.DraftReviewList{
+		DraftID:   strings.TrimSpace(list.DraftID),
+		ProjectID: strings.TrimSpace(list.ProjectID),
+		Reviews:   make([]workflows.DraftReviewRecord, 0, len(list.Reviews)),
+	}
+	for _, review := range list.Reviews {
+		cleanReview := workflows.DraftReviewRecord{
+			ReviewID:  strings.TrimSpace(review.ReviewID),
+			RunID:     strings.TrimSpace(review.RunID),
+			DraftID:   strings.TrimSpace(review.DraftID),
+			ProjectID: strings.TrimSpace(review.ProjectID),
+			Status:    sanitizePublicMetadataText(review.Status),
+			CreatedAt: strings.TrimSpace(review.CreatedAt),
+			UpdatedAt: strings.TrimSpace(review.UpdatedAt),
+			Issues:    make([]workflows.DraftReviewIssue, 0, len(review.Issues)),
+		}
+		for _, issue := range review.Issues {
+			cleanReview.Issues = append(cleanReview.Issues, workflows.DraftReviewIssue{
+				IssueID:    strings.TrimSpace(issue.IssueID),
+				Severity:   sanitizePublicMetadataText(issue.Severity),
+				Category:   sanitizePublicMetadataText(issue.Category),
+				Summary:    sanitizePublicMetadataText(issue.Summary),
+				Suggestion: sanitizePublicMetadataText(issue.Suggestion),
+				Status:     sanitizePublicMetadataText(issue.Status),
+				CreatedAt:  strings.TrimSpace(issue.CreatedAt),
+				UpdatedAt:  strings.TrimSpace(issue.UpdatedAt),
+			})
+		}
+		clean.Reviews = append(clean.Reviews, cleanReview)
+	}
+	return clean
+}
+
+func sanitizePublicMetadataText(value string) string {
+	value = strings.TrimSpace(value)
+	lowered := strings.ToLower(value)
+	for _, marker := range []string{
+		"api_key",
+		"apikey",
+		"encrypted_api_key",
+		"credential_ref",
+		"credential-ref",
+		"sk-",
+		"prompt",
+		"response",
+		"body_text",
+		"content_text",
+		"source_text",
+		"source_material",
+		"raw_text",
+		"raw_body",
+		"raw_content",
+		"draft",
+		"manuscript",
+	} {
+		if strings.Contains(lowered, marker) {
+			return ""
+		}
+	}
+	return value
+}
+
 func characterInteractionTurnsWithSummaryMaterial(records []characterconsole.TurnRecord) []characterconsole.TurnRecord {
 	clean := make([]characterconsole.TurnRecord, 0, len(records))
 	for _, record := range records {
@@ -4372,6 +4531,15 @@ func draftAdoptionPathPart(path string) string {
 	return strings.TrimSpace(draftID)
 }
 
+func draftReviewPathPart(path string) string {
+	remainder := strings.TrimPrefix(path, "/v1/drafts/")
+	draftID, suffix, ok := strings.Cut(remainder, "/")
+	if !ok || suffix != "reviews" {
+		return ""
+	}
+	return strings.TrimSpace(draftID)
+}
+
 func characterInteractionNestedPathPart(path string, expectedSuffix string) string {
 	remainder := strings.TrimPrefix(path, "/v1/character-interactions/")
 	interactionID, suffix, ok := strings.Cut(remainder, "/")
@@ -4523,6 +4691,23 @@ func publicDraftAdoptionErrorMessage(code string) string {
 		return "invalid draft adoption request"
 	default:
 		return "draft adoption failed"
+	}
+}
+
+func publicDraftReviewErrorMessage(code string) string {
+	switch code {
+	case "WRITER_REVIEW_BACKEND_UNCONFIGURED":
+		return "writer review backend is not configured"
+	case "WRITER_REVIEW_ADMISSION_FAILED":
+		return "writer review admission failed"
+	case "WRITER_REVIEW_QUERY_FAILED":
+		return "writer review query failed"
+	case "NOT_FOUND":
+		return "draft review not found"
+	case "VALIDATION_FAILED":
+		return "invalid draft review request"
+	default:
+		return "writer review failed"
 	}
 }
 

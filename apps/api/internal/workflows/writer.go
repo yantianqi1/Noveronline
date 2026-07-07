@@ -13,6 +13,7 @@ import (
 )
 
 const WriterWorkflowType = "writer_run"
+const WriterReviewWorkflowType = "writer_review"
 const PiWriterWorkflowName = "PiWriterRunWorkflow"
 const WriterTaskQueue = "writer-streaming"
 
@@ -54,6 +55,23 @@ type DraftAdoptionInput struct {
 	BlockOrder  int
 }
 
+type StartDraftReviewInput struct {
+	TenantID    string
+	ProjectID   string
+	DraftID     string
+	ActorUserID string
+	RequestID   string
+	RunID       string
+	Note        string
+	ModuleKey   string
+	Options     map[string]any
+}
+
+type ListDraftReviewsInput struct {
+	TenantID string
+	DraftID  string
+}
+
 type WriterRun struct {
 	RunID     string
 	TraceID   string
@@ -70,6 +88,43 @@ type DraftAdoptionResult struct {
 	ChapterID  string `json:"chapter_id,omitempty"`
 	SceneID    string `json:"scene_id,omitempty"`
 	BlockOrder int    `json:"block_order"`
+}
+
+type DraftReviewAdmission struct {
+	ReviewID     string `json:"review_id"`
+	RunID        string `json:"run_id"`
+	DraftID      string `json:"draft_id"`
+	ProjectID    string `json:"project_id"`
+	Status       string `json:"status"`
+	WorkflowType string `json:"workflow_type"`
+}
+
+type DraftReviewList struct {
+	DraftID   string              `json:"draft_id"`
+	ProjectID string              `json:"project_id,omitempty"`
+	Reviews   []DraftReviewRecord `json:"reviews"`
+}
+
+type DraftReviewRecord struct {
+	ReviewID  string             `json:"review_id"`
+	RunID     string             `json:"run_id"`
+	DraftID   string             `json:"draft_id"`
+	ProjectID string             `json:"project_id"`
+	Status    string             `json:"status"`
+	CreatedAt string             `json:"created_at,omitempty"`
+	UpdatedAt string             `json:"updated_at,omitempty"`
+	Issues    []DraftReviewIssue `json:"issues"`
+}
+
+type DraftReviewIssue struct {
+	IssueID    string `json:"issue_id"`
+	Severity   string `json:"severity"`
+	Category   string `json:"category"`
+	Summary    string `json:"summary"`
+	Suggestion string `json:"suggestion,omitempty"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
 type WriterRunCancellation struct {
@@ -105,6 +160,11 @@ type WriterCanceller interface {
 
 type DraftAdoptionStore interface {
 	AdoptDraft(context.Context, DraftAdoptionInput) (DraftAdoptionResult, error)
+}
+
+type DraftReviewStore interface {
+	StartDraftReview(context.Context, StartDraftReviewInput) (DraftReviewAdmission, error)
+	ListDraftReviews(context.Context, ListDraftReviewsInput) (DraftReviewList, error)
 }
 
 type WriterAdmissionStore interface {
@@ -289,6 +349,26 @@ func (s *DisabledDraftAdoptionStore) AdoptDraft(context.Context, DraftAdoptionIn
 	return DraftAdoptionResult{}, &AppError{
 		Code:    "DRAFT_ADOPTION_BACKEND_UNCONFIGURED",
 		Message: "draft adoption backend is not configured",
+	}
+}
+
+type DisabledDraftReviewStore struct{}
+
+func NewDisabledDraftReviewStore() *DisabledDraftReviewStore {
+	return &DisabledDraftReviewStore{}
+}
+
+func (s *DisabledDraftReviewStore) StartDraftReview(context.Context, StartDraftReviewInput) (DraftReviewAdmission, error) {
+	return DraftReviewAdmission{}, &AppError{
+		Code:    "WRITER_REVIEW_BACKEND_UNCONFIGURED",
+		Message: "writer review backend is not configured",
+	}
+}
+
+func (s *DisabledDraftReviewStore) ListDraftReviews(context.Context, ListDraftReviewsInput) (DraftReviewList, error) {
+	return DraftReviewList{}, &AppError{
+		Code:    "WRITER_REVIEW_BACKEND_UNCONFIGURED",
+		Message: "writer review backend is not configured",
 	}
 }
 

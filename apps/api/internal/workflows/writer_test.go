@@ -415,6 +415,11 @@ func TestTemporalWriterStarterPersistsAdmissionBeforeStartingWorkflow(t *testing
 			"module_key": "writer_composer",
 			"llm_resolution": map[string]any{
 				"credential_ref": "llm_credential:secret",
+				"provider":       "openai-compatible",
+				"base_url":       "https://llm.example.test/v1",
+				"channel_id":     "channel-secret",
+				"model_id":       "model-secret",
+				"settings":       map[string]any{"temperature": 0.7},
 			},
 		},
 	})
@@ -818,6 +823,127 @@ func TestSQLDraftAdoptionStoreRollsBackWhenReturningRowCannotScan(t *testing.T) 
 	}
 	if !rows.rolledBack {
 		t.Fatal("draft adoption should roll back after scan failure")
+	}
+}
+
+func TestSQLDraftReviewStoreAdmitsReviewerWorkflowWithoutDraftTextOrCredentialRefs(t *testing.T) {
+	execer := &recordingWriterAdmissionExecer{}
+	store := NewSQLDraftReviewStore(SQLDraftReviewStoreConfig{Execer: execer})
+
+	result, err := store.StartDraftReview(context.Background(), StartDraftReviewInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		ProjectID:   "22222222-2222-4222-8222-222222222222",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+		RequestID:   "req-review",
+		Note:        "public note",
+		Options: map[string]any{
+			"severity_floor": "medium",
+			"prompt":         "private prompt",
+			"draft":          "private draft",
+			"manuscript":     "private manuscript",
+			"llm_resolution": map[string]any{
+				"credential_ref": "llm_credential:secret",
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("start draft review: %v", err)
+	}
+	requireUUIDRunID(t, result.RunID)
+	requireUUIDRunID(t, result.ReviewID)
+	if result.DraftID != "33333333-3333-4333-8333-333333333333" ||
+		result.ProjectID != "22222222-2222-4222-8222-222222222222" ||
+		result.WorkflowType != WriterReviewWorkflowType ||
+		result.Status != "queued" {
+		t.Fatalf("unexpected review admission result: %#v", result)
+	}
+	if !strings.Contains(execer.query, "FROM writer_drafts") ||
+		!strings.Contains(execer.query, "INSERT INTO draft_reviews") ||
+		!strings.Contains(execer.query, "INSERT INTO workflow_runs") ||
+		!strings.Contains(execer.query, "INSERT INTO workflow_events") ||
+		!strings.Contains(execer.query, "project_id::text = $11") ||
+		strings.Contains(execer.query, "content_text") {
+		t.Fatalf("review admission SQL did not use metadata-only draft workflow admission: %s", execer.query)
+	}
+	joinedArgs := strings.Join(argsAsStrings(execer.args), "\n")
+	for _, forbidden := range []string{"credential_ref", "llm_credential:secret", "private prompt", "private draft", "private manuscript", "public note", "openai-compatible", "llm.example.test", "channel-secret", "model-secret", "temperature"} {
+		if strings.Contains(joinedArgs, forbidden) {
+			t.Fatalf("review admission SQL args leaked high-risk value %q: %s", forbidden, joinedArgs)
+		}
+	}
+	if !strings.Contains(joinedArgs, "severity_floor") {
+		t.Fatalf("expected public review metadata to remain, got %s", joinedArgs)
+	}
+}
+
+func TestSQLDraftReviewStoreRequiresProjectScope(t *testing.T) {
+	store := NewSQLDraftReviewStore(SQLDraftReviewStoreConfig{Execer: &recordingWriterAdmissionExecer{}})
+
+	_, err := store.StartDraftReview(context.Background(), StartDraftReviewInput{
+		TenantID: "11111111-1111-4111-8111-111111111111",
+		DraftID:  "33333333-3333-4333-8333-333333333333",
+	})
+
+	if code := ErrorCode(err); code != "VALIDATION_FAILED" {
+		t.Fatalf("expected project scope validation failure, got %s (%v)", code, err)
+	}
+}
+
+func TestSQLDraftReviewStoreListsReviewMetadataAndIssuesWithoutBodies(t *testing.T) {
+	queryer := &recordingWriterEventQueryer{
+		rows: &fakeWriterEventRows{
+			values: [][]any{{
+				"55555555-5555-4555-8555-555555555555",
+				"66666666-6666-4666-8666-666666666666",
+				"33333333-3333-4333-8333-333333333333",
+				"22222222-2222-4222-8222-222222222222",
+				"completed",
+				"99999999-9999-4999-8999-999999999999",
+				"medium",
+				"pov",
+				"public summary",
+				"public suggestion",
+				"open",
+				"2026-07-07T01:02:03Z",
+				"2026-07-07T01:03:03Z",
+			}},
+		},
+	}
+	store := NewSQLDraftReviewStore(SQLDraftReviewStoreConfig{Queryer: queryer})
+
+	result, err := store.ListDraftReviews(context.Background(), ListDraftReviewsInput{
+		TenantID: "11111111-1111-4111-8111-111111111111",
+		DraftID:  "33333333-3333-4333-8333-333333333333",
+	})
+
+	if err != nil {
+		t.Fatalf("list draft reviews: %v", err)
+	}
+	if len(result.Reviews) != 1 || len(result.Reviews[0].Issues) != 1 {
+		t.Fatalf("unexpected review list: %#v", result)
+	}
+	issue := result.Reviews[0].Issues[0]
+	if issue.Summary != "public summary" || issue.Suggestion != "public suggestion" || issue.Category != "pov" {
+		t.Fatalf("unexpected issue metadata: %#v", issue)
+	}
+	if !strings.Contains(queryer.query, "FROM draft_reviews") ||
+		!strings.Contains(queryer.query, "LEFT JOIN draft_review_issues") ||
+		!strings.Contains(queryer.query, "issues.project_id = reviews.project_id") ||
+		!strings.Contains(queryer.query, "issues.draft_id = reviews.draft_id") ||
+		strings.Contains(queryer.query, "content_text") ||
+		strings.Contains(queryer.query, "prompt") {
+		t.Fatalf("review read SQL should be metadata-only, got %s", queryer.query)
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	for _, forbidden := range []string{"content_text", "private draft", "prompt", "credential_ref", "api_key", "manuscript"} {
+		if strings.Contains(string(resultJSON), forbidden) {
+			t.Fatalf("review read result leaked forbidden field %q: %s", forbidden, resultJSON)
+		}
 	}
 }
 

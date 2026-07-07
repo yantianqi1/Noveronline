@@ -183,6 +183,33 @@ func (s *recordingDraftAdoptionStore) AdoptDraft(ctx context.Context, input work
 	return s.result, nil
 }
 
+type recordingDraftReviewStore struct {
+	startInput workflows.StartDraftReviewInput
+	listInput  workflows.ListDraftReviewsInput
+	result     workflows.DraftReviewAdmission
+	reviews    workflows.DraftReviewList
+	startErr   error
+	listErr    error
+	called     bool
+}
+
+func (s *recordingDraftReviewStore) StartDraftReview(ctx context.Context, input workflows.StartDraftReviewInput) (workflows.DraftReviewAdmission, error) {
+	s.startInput = input
+	s.called = true
+	if s.startErr != nil {
+		return workflows.DraftReviewAdmission{}, s.startErr
+	}
+	return s.result, nil
+}
+
+func (s *recordingDraftReviewStore) ListDraftReviews(ctx context.Context, input workflows.ListDraftReviewsInput) (workflows.DraftReviewList, error) {
+	s.listInput = input
+	if s.listErr != nil {
+		return workflows.DraftReviewList{}, s.listErr
+	}
+	return s.reviews, nil
+}
+
 type recordingWorkflowCanceller struct {
 	input  workflows.CancelWorkflowRunInput
 	err    error
@@ -1271,6 +1298,245 @@ func TestStartWriterRunValidationErrorDoesNotEchoSensitiveUnknownField(t *testin
 	}
 	if starter.input.TenantID != "" {
 		t.Fatalf("validation failure should stop before writer starter: %#v", starter.input)
+	}
+}
+
+func TestStartDraftReviewResolvesReviewerBindingAndAdmitsMetadataOnlyWorkflow(t *testing.T) {
+	store := &recordingDraftReviewStore{
+		result: workflows.DraftReviewAdmission{
+			ReviewID:     "review-123",
+			RunID:        "run-123",
+			DraftID:      "draft-123",
+			ProjectID:    "project-123",
+			WorkflowType: workflows.WriterReviewWorkflowType,
+			Status:       "queued",
+		},
+	}
+	resolver := &recordingLLMResolver{
+		result: llm.ModuleResolution{
+			TenantID:      "tenant-123",
+			ProjectID:     "project-123",
+			ModuleKey:     "writer_reviewer",
+			ChannelID:     "channel-reviewer",
+			ModelID:       "model-reviewer",
+			Provider:      "openai-compatible",
+			BaseURL:       "https://llm.example.test/v1",
+			CredentialRef: "credref-reviewer",
+			Settings:      map[string]any{"temperature": 0.2},
+		},
+	}
+	server := NewServer(Config{
+		DraftReviewStore: store,
+		LLMResolver:      resolver,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{
+		"tenant_id":"evil-tenant",
+		"project_id":"project-123",
+		"run_id":"body-run-ignored",
+		"note":"public reviewer note",
+		"options":{
+			"severity_floor":"medium",
+			"prompt":"hidden prompt",
+			"draft":"hidden draft",
+			"manuscript":"hidden manuscript",
+			"credential_ref":"hidden-ref"
+		}
+	}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-review")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", response.Code, response.Body.String())
+	}
+	if !resolver.called ||
+		resolver.input.TenantID != "tenant-123" ||
+		resolver.input.ProjectID != "project-123" ||
+		resolver.input.ModuleKey != "writer_reviewer" {
+		t.Fatalf("reviewer binding was not resolved with tenant/project scope: %#v", resolver.input)
+	}
+	if store.startInput.TenantID != "tenant-123" ||
+		store.startInput.DraftID != "draft-123" ||
+		store.startInput.ProjectID != "project-123" ||
+		store.startInput.ActorUserID != "user-123" ||
+		store.startInput.RequestID != "req-review" ||
+		store.startInput.ModuleKey != "writer_reviewer" {
+		t.Fatalf("review admission lost trusted context or used body context: %#v", store.startInput)
+	}
+	if store.startInput.Note != "public reviewer note" {
+		t.Fatalf("review note was not preserved as public metadata: %#v", store.startInput)
+	}
+	if store.startInput.Options["severity_floor"] != "medium" ||
+		store.startInput.Options["module_key"] != "writer_reviewer" {
+		t.Fatalf("review options lost public metadata: %#v", store.startInput.Options)
+	}
+	for _, forbidden := range []string{"prompt", "draft", "manuscript", "credential_ref", "llm_resolution", "provider", "base_url", "channel_id", "model_id", "settings"} {
+		if _, exists := store.startInput.Options[forbidden]; exists {
+			t.Fatalf("review options retained forbidden field %q: %#v", forbidden, store.startInput.Options)
+		}
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"review_id":"review-123"`, `"run_id":"run-123"`, `"draft_id":"draft-123"`, `"workflow_type":"writer_review"`, `"status":"queued"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("review admission response missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"hidden prompt", "hidden draft", "hidden manuscript", "credential_ref", "api_key"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("review admission response leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestStartDraftReviewRequiresReviewerBindingBeforeAdmission(t *testing.T) {
+	store := &recordingDraftReviewStore{}
+	server := NewServer(Config{
+		DraftReviewStore: store,
+		LLMResolver:      llm.NewStaticResolver(nil),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{"project_id":"project-123","note":"review"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected missing reviewer binding to fail closed, got %d: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "LLM_MODULE_UNBOUND") {
+		t.Fatalf("expected LLM binding failure, got %s", response.Body.String())
+	}
+	if store.called {
+		t.Fatalf("review admission must not start without reviewer binding: %#v", store.startInput)
+	}
+}
+
+func TestStartDraftReviewRequiresProjectScopeBeforeReviewerBindingResolution(t *testing.T) {
+	store := &recordingDraftReviewStore{}
+	resolver := &recordingLLMResolver{}
+	server := NewServer(Config{
+		DraftReviewStore: store,
+		LLMResolver:      resolver,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{"note":"review"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing project scope to fail validation, got %d: %s", response.Code, response.Body.String())
+	}
+	if resolver.called {
+		t.Fatalf("reviewer binding should not resolve before project scope is known: %#v", resolver.input)
+	}
+	if store.called {
+		t.Fatalf("review admission must not start without project scope: %#v", store.startInput)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"code":"VALIDATION_FAILED"`) {
+		t.Fatalf("expected validation error, got %s", body)
+	}
+	for _, forbidden := range []string{"prompt", "api_key", "credential_ref", "draft=private", "manuscript=private"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("project-scope validation leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestListDraftReviewsReturnsSanitizedMetadataOnly(t *testing.T) {
+	store := &recordingDraftReviewStore{
+		reviews: workflows.DraftReviewList{
+			DraftID:   "draft-123",
+			ProjectID: "project-123",
+			Reviews: []workflows.DraftReviewRecord{{
+				ReviewID:  "review-123",
+				RunID:     "run-123",
+				DraftID:   "draft-123",
+				ProjectID: "project-123",
+				Status:    "completed",
+				Issues: []workflows.DraftReviewIssue{{
+					IssueID:    "issue-1",
+					Severity:   "medium",
+					Category:   "pov",
+					Summary:    "public summary",
+					Suggestion: "public suggestion",
+					Status:     "open",
+				}},
+			}},
+		},
+	}
+	server := NewServer(Config{DraftReviewStore: store})
+	request := httptest.NewRequest(http.MethodGet, "/v1/drafts/draft-123/reviews", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if store.listInput.TenantID != "tenant-123" || store.listInput.DraftID != "draft-123" {
+		t.Fatalf("review list lost tenant/draft scope: %#v", store.listInput)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"draft_id":"draft-123"`, `"review_id":"review-123"`, `"issue_id":"issue-1"`, `"summary":"public summary"`, `"suggestion":"public suggestion"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("review list missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"content_text", "private draft", "prompt", "credential_ref", "api_key", "manuscript"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("review list leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestListDraftReviewsSanitizesStoreReturnedIssueTextAtHTTPBoundary(t *testing.T) {
+	store := &recordingDraftReviewStore{
+		reviews: workflows.DraftReviewList{
+			DraftID:   "draft-123",
+			ProjectID: "project-123",
+			Reviews: []workflows.DraftReviewRecord{{
+				ReviewID:  "review-123",
+				RunID:     "run-123",
+				DraftID:   "draft-123",
+				ProjectID: "project-123",
+				Status:    "completed prompt=hidden",
+				Issues: []workflows.DraftReviewIssue{{
+					IssueID:    "issue-1",
+					Severity:   "medium api_key",
+					Category:   "credential_ref=hidden",
+					Summary:    "prompt=hidden draft=private",
+					Suggestion: "manuscript=private sk-hidden",
+					Status:     "open content_text",
+				}},
+			}},
+		},
+	}
+	server := NewServer(Config{DraftReviewStore: store})
+	request := httptest.NewRequest(http.MethodGet, "/v1/drafts/draft-123/reviews", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"draft_id":"draft-123"`, `"review_id":"review-123"`, `"issue_id":"issue-1"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("review list lost safe metadata %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"prompt=hidden", "api_key", "credential_ref", "draft=private", "manuscript=private", "sk-hidden", "content_text"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("review list leaked store-returned forbidden value %q: %s", forbidden, body)
+		}
 	}
 }
 
@@ -8087,6 +8353,22 @@ func (r failingLLMResolver) ResolveModuleBinding(context.Context, llm.ResolveMod
 	return llm.ModuleResolution{}, r.err
 }
 
+type recordingLLMResolver struct {
+	input  llm.ResolveModuleInput
+	result llm.ModuleResolution
+	err    error
+	called bool
+}
+
+func (r *recordingLLMResolver) ResolveModuleBinding(_ context.Context, input llm.ResolveModuleInput) (llm.ModuleResolution, error) {
+	r.input = input
+	r.called = true
+	if r.err != nil {
+		return llm.ModuleResolution{}, r.err
+	}
+	return r.result, nil
+}
+
 func (s *recordingLLMBindingStore) ListModuleBindings(ctx context.Context, input llm.ListModuleBindingsInput) ([]llm.ModuleBindingRecord, error) {
 	s.listInput = input
 	if s.err != nil {
@@ -8233,6 +8515,23 @@ func boundWriterComposerResolver() *llm.StaticResolver {
 			SupportsTools: true,
 			SupportsJSON:  true,
 			Settings:      map[string]any{"temperature": 0.7},
+		},
+	})
+}
+
+func boundWriterReviewerResolver() *llm.StaticResolver {
+	return llm.NewStaticResolver([]llm.ModuleResolution{
+		{
+			TenantID:      "tenant-123",
+			ModuleKey:     "writer_reviewer",
+			ChannelID:     "channel-reviewer",
+			ModelID:       "model-reviewer",
+			Provider:      "openai-compatible",
+			BaseURL:       "https://llm.example.test/v1",
+			CredentialRef: "credref-reviewer",
+			SupportsTools: false,
+			SupportsJSON:  true,
+			Settings:      map[string]any{"temperature": 0.2},
 		},
 	})
 }

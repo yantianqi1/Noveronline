@@ -65,10 +65,10 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration 已提交；Phase/Wave 总纲、coverage matrix、handoff provenance 和任务看板已重新对齐 |
-| 当前未完成重点 | Writer draft adoption API/service、reviewer path、manuscript export、真实 LLM-bound E2E、trace/replay browser verification |
-| 本轮开发 slice | W1-S1 explicit draft adoption：`POST /v1/drafts/{draftId}/adoptions` + Go service/HTTP fail-closed boundary |
-| 推荐下一步 | 完成 W1-S1 RED -> GREEN -> focused regression，经 spec/quality reviewer 通过后再进入 reviewer 或 manuscript/export slice |
+| 最近完成重点 | Wave 0 governance calibration 已提交；W1-S1 explicit draft adoption 已提交并通过 spec / quality reviewer |
+| 当前未完成重点 | reviewer path、manuscript export、真实 LLM-bound E2E、trace/replay browser verification |
+| 本轮开发 slice | W1-S2 writer reviewer admission/read：`POST /v1/drafts/{draftId}/reviews` / `GET /v1/drafts/{draftId}/reviews` fail-closed metadata path |
+| 推荐下一步 | 完成 W1-S2 RED -> GREEN -> focused regression，经 spec/quality reviewer 通过后再进入 manuscript/export 或 live E2E slice |
 
 ## P6-002 Character Console 当前状态
 
@@ -134,6 +134,43 @@ GREEN:
 - 修正后 focused regression：`cd apps/api && go test ./internal/workflows -count=1`、`cd apps/api && go test ./internal/httpapi -count=1`、`cd apps/api && go test ./cmd/api -count=1` 通过。
 - Broader verification：`cd apps/api && go test ./... -count=1`、`git diff --check`、touched-file trailing whitespace scan 均通过。
 - Review gate：quality reviewer Darwin re-review `APPROVED`；原 spec reviewer Singer 超时后关闭，replacement spec reviewer Banach `APPROVED`，并复跑 focused adoption/spec checks 与 `git diff --check`。
+
+### 2026-07-07 当前会话：Wave 1 W1-S2 writer reviewer admission/read
+
+Context:
+
+- W1-S1 已提交：`32a304a feat: add explicit writer draft adoption`。
+- Wave 1 剩余 gaps 里，`writer_reviewer` route 已在 `15-api-contracts.md` / `11-writer-workbench.md` 冻结，但 `apps/api` 尚无 `POST /v1/drafts/{draftId}/reviews` / `GET /v1/drafts/{draftId}/reviews` 实现。
+- 本 slice 目标是 fail-closed、metadata-only 的 review admission/read path；不得生成 fake review issues，不得读取或公开 draft/manuscript 正文。
+
+Planned TDD:
+
+- RED：补 Go workflows / HTTP / cmd wiring tests，证明当前 review route/store/backend 不存在或 fail-closed contract 未实现。
+- Implementation：通过 `writer_reviewer` LLM Facility binding 做 review admission，缺 binding / 缺 backend 显式失败；read side 只返回 public review metadata/issues。
+- GREEN：聚焦 `go test` 覆盖 Review / Writer 路径，再由 spec reviewer 与 quality reviewer 审查。
+
+RED:
+
+- Implementer subagent 先运行 `cd apps/api && go test ./internal/workflows -run 'Review|Writer' -count=1`，失败于缺 `NewSQLDraftReviewStore`、`StartDraftReviewInput`、`WriterReviewWorkflowType`。
+- Implementer subagent 先运行 `cd apps/api && go test ./internal/httpapi -run 'Review|Draft|Writer' -count=1`，失败于缺 draft review workflow types。
+- Implementer subagent 先运行 `cd apps/api && go test ./cmd/api -run 'Review|Writer' -count=1`，失败于缺 `newDraftReviewStore`。
+
+Implementation:
+
+- 新增 `DraftReviewStore` / `DisabledDraftReviewStore` / `SQLDraftReviewStore`；无 DB/backend 显式 `WRITER_REVIEW_BACKEND_UNCONFIGURED`。
+- 新增 `POST /v1/drafts/{draftId}/reviews`，只信任 `X-Tenant-Id` 和 route draft id，先解析 `writer_reviewer` LLM Facility binding；缺 binding 返回 `LLM_MODULE_UNBOUND`，不会 admission。
+- 新增 `GET /v1/drafts/{draftId}/reviews`，只返回 review / issue public metadata。
+- target Postgres baseline 新增 `draft_reviews` / `draft_review_issues`、索引和 tenant RLS；DB-backed POST 只写 `workflow_runs`、sanitized `workflow.queued` event 和 `draft_reviews.status = queued` metadata，不生成 fake issues、不采用 manuscript。
+- Coordinator 追加 hardening：HTTP response boundary 对 review issue text/status/category 再清洗，防止替换 store 或未来 reader 返回 prompt/API key/`credential_ref`/draft/manuscript 类字符串。
+- Spec reviewer 初审指出 3 个必须修正点：review admission 不能在缺 project scope 时解析 tenant/platform binding、public workflow event 不能包含 user note text、issue row 不能脱离同一 review/draft/project。Coordinator 已修正为 body `project_id` required before LLM resolution、queued event/persistence 不带 note、SQL read join 加 project/draft 条件，并在 schema 上为 `draft_review_issues` 添加 `(tenant_id, project_id, draft_id, review_id)` 复合外键。
+- Quality reviewer 初审指出 review admission 不应把 `llm_resolution` / provider routing metadata 持久化到 `draft_reviews.options_jsonb`。Coordinator 已保留 `writer_reviewer` binding preflight，但移除 review store input 中的 `llm_resolution`，并在 SQL store 侧防御性剥离 provider/base URL/channel/model/settings 等 routing metadata。
+
+GREEN:
+
+- Implementer subagent：`cd apps/api && go test ./internal/workflows -run 'Review|Writer' -count=1`、`cd apps/api && go test ./internal/httpapi -run 'Review|Draft|Writer' -count=1`、`cd apps/api && go test ./cmd/api -run 'Review|Writer' -count=1`、`git diff --check` 通过。
+- Coordinator focused regression：`cd apps/api && go test ./internal/workflows -run 'Review|Writer' -count=1`、`cd apps/api && go test ./internal/httpapi -run 'Review|Draft|Writer' -count=1`、`cd apps/api && go test ./cmd/api -run 'Review|Writer' -count=1` 通过。
+- Broader verification：`cd apps/api && go test ./... -count=1`、`PYTHONUTF8=1 backend/.venv/bin/python -m pytest backend/tests/test_saas_phase3_rls_schema.py -q -k 'core_saas or writer or draft_review'`、`git diff --check`、touched-file trailing whitespace scan 均通过。
+- Review gate：spec reviewer Kierkegaard re-review `APPROVED`；quality reviewer Russell re-review `APPROVED`。
 
 ### 2026-07-07 当前会话：refactor-saas-gpt55 Wave 1 subagent implementation
 
