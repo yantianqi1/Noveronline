@@ -41,6 +41,44 @@ export type WriterRunEventsSummary =
     }
   | ApiFailure;
 
+export type ManuscriptBlockMetadata = {
+  block_id: string;
+  chapter_id: string;
+  source_draft_id: string;
+  block_order: number;
+  status: string;
+  word_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProjectManuscriptSummary =
+  | {
+      ok: true;
+      project_id: string;
+      blocks: ManuscriptBlockMetadata[];
+    }
+  | ApiFailure;
+
+export type ManuscriptExportManifestBlock = {
+  block_id: string;
+  block_order: number;
+  word_count: number;
+};
+
+export type ProjectManuscriptExportManifestSummary =
+  | {
+      ok: true;
+      project_id: string;
+      format: string;
+      status: string;
+      block_count: number;
+      total_word_count: number;
+      generated_at: string;
+      blocks: ManuscriptExportManifestBlock[];
+    }
+  | ApiFailure;
+
 export type WorkflowRunSummary =
   | {
       ok: true;
@@ -1242,6 +1280,36 @@ export async function getWriterRunEvents(
     return await decodeWriterRunEventsResponse(response, input.runId, input.afterEventId ?? "");
   } catch (error) {
     return networkFailure(error, "WRITER_EVENTS_QUERY_FAILED");
+  }
+}
+
+export async function getProjectManuscript(
+  input: ApiContext & { projectId: string },
+): Promise<ProjectManuscriptSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+
+    return await decodeProjectManuscriptResponse(response);
+  } catch (error) {
+    return networkFailure(error, "MANUSCRIPT_QUERY_FAILED");
+  }
+}
+
+export async function getProjectManuscriptExportManifest(
+  input: ApiContext & { projectId: string },
+): Promise<ProjectManuscriptExportManifestSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript/export`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+
+    return await decodeProjectManuscriptExportManifestResponse(response);
+  } catch (error) {
+    return networkFailure(error, "MANUSCRIPT_EXPORT_QUERY_FAILED");
   }
 }
 
@@ -2754,6 +2822,55 @@ async function decodeWriterRunEventsResponse(
   };
 }
 
+async function decodeProjectManuscriptResponse(response: Response): Promise<ProjectManuscriptSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "MANUSCRIPT_QUERY_FAILED");
+  }
+
+  const projectId = requiredString(payload, "project_id");
+  if (!projectId || !Array.isArray(payload.blocks)) {
+    return invalidApiResponse("manuscript response missing required metadata fields");
+  }
+
+  return {
+    ok: true,
+    project_id: projectId,
+    blocks: payload.blocks.map((item) => decodeManuscriptBlockMetadata(item)),
+  };
+}
+
+async function decodeProjectManuscriptExportManifestResponse(
+  response: Response,
+): Promise<ProjectManuscriptExportManifestSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "MANUSCRIPT_EXPORT_QUERY_FAILED");
+  }
+
+  const projectId = requiredString(payload, "project_id");
+  if (!projectId) {
+    return invalidApiResponse("manuscript export manifest response missing project_id");
+  }
+
+  return {
+    ok: true,
+    project_id: projectId,
+    format: requiredString(payload, "format"),
+    status: requiredString(payload, "status"),
+    block_count: numberFromUnknown(payload.block_count),
+    total_word_count: numberFromUnknown(payload.total_word_count),
+    generated_at: requiredString(payload, "generated_at"),
+    blocks: arrayFromUnknown(payload.blocks).map((item) => decodeManuscriptExportManifestBlock(item)),
+  };
+}
+
 async function decodeWorkflowRunResponse(response: Response): Promise<WorkflowRunSummary> {
   const payload = await readLLMPayload(response);
   if (isApiFailure(payload)) {
@@ -4111,6 +4228,29 @@ function decodeWriterRunEvent(item: unknown): WriterRunEvent {
     event_type: requiredString(value, "event_type"),
     payload,
     created_at: requiredString(value, "created_at"),
+  };
+}
+
+function decodeManuscriptBlockMetadata(item: unknown): ManuscriptBlockMetadata {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  return {
+    block_id: requiredString(value, "block_id"),
+    chapter_id: requiredString(value, "chapter_id"),
+    source_draft_id: requiredString(value, "source_draft_id"),
+    block_order: numberFromUnknown(value.block_order),
+    status: requiredString(value, "status"),
+    word_count: numberFromUnknown(value.word_count),
+    created_at: requiredString(value, "created_at"),
+    updated_at: requiredString(value, "updated_at"),
+  };
+}
+
+function decodeManuscriptExportManifestBlock(item: unknown): ManuscriptExportManifestBlock {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  return {
+    block_id: requiredString(value, "block_id"),
+    block_order: numberFromUnknown(value.block_order),
+    word_count: numberFromUnknown(value.word_count),
   };
 }
 

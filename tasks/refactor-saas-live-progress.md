@@ -65,10 +65,10 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest 均已通过 spec / quality reviewer |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels 均已通过 spec / quality reviewer |
 | 当前未完成重点 | 真实 LLM-bound E2E、trace/replay browser verification、真正内容导出 artifact service |
-| 本轮开发 slice | W1-S3 manuscript metadata/export admission：`GET /v1/projects/{projectId}/manuscript` / `GET /v1/projects/{projectId}/manuscript/export` metadata-only public path |
-| 推荐下一步 | W1-S3 提交后进入 live LLM-bound E2E 或 trace/replay browser verification slice |
+| 本轮开发 slice | W1-S4 Writer UI manuscript metadata panels：Next writer page/client/shell 加载并展示 metadata-only manuscript 与 export manifest |
+| 推荐下一步 | W1-S4 提交后进入 live LLM-bound E2E 或 trace/replay browser verification slice |
 
 ## P6-002 Character Console 当前状态
 
@@ -1392,6 +1392,58 @@ Docs synced:
 Next:
 
 - W1 剩余重点转向真实 LLM-bound writer E2E、trace/replay browser verification 和真正内容导出 artifact service。
+
+### 2026-07-07 当前会话：W1-S4 Writer UI manuscript metadata panels
+
+Context:
+
+- W1-S3 已提交 metadata-only manuscript / export manifest Go API。
+- 本轮继续 Wave 1 Writer UI Agent，接入 Next Writer client/page/shell，不触碰 Go API 或真正内容导出。
+
+Scope:
+
+- 目标：`apps/web` typed API client 新增 `getProjectManuscript` / `getProjectManuscriptExportManifest`，Writer page 并行加载 summaries，Writer shell 渲染 manuscript metadata 和 export manifest panels。
+- 边界：只展示 public metadata 和显式 backend/query errors；不显示 draft/manuscript 正文、`content_text`、prompt/provider response、API key、encrypted credential、`credential_ref`、object key、`exported_at` 或 PDF/DOCX/TXT 内容导出语义。
+
+RED:
+
+- `cd apps/web && npm run test -- --test-name-pattern='Writer|writer|manuscript|Manuscript'` 失败，缺 manuscript client types/routes、Writer page load 和 shell panels。
+- Spec review 后追加 RED：Character Console no-`draft_id` guard 被 `source_draft_id` 全局放宽，需改为 scoped slice。
+- Quality review 后追加 RED：web manifest type/UI/tests 暴露 backend 不提供的 `block_ids`，且 manuscript client assertions 未 scoped 到新函数。
+
+GREEN:
+
+- Web client 新增 metadata-only manuscript/export manifest types、routes、decoders，使用 `contextHeaders(input)` 和现有 failure decode path。
+- Writer page 将 manuscript/export manifest 与 assets/graph/worldline picker data 一起加载并传给 shell。
+- Writer shell 新增 `Manuscript metadata` 与 `Export manifest` panels，显示 block id、chapter/source draft id、order、status、word count、timestamps、manifest format/status/counts/generated metadata 和 explicit backend errors。
+- Tests 改为 manuscript-specific source slices；Character Console guard 恢复为 scoped strict no-`draft_id`；移除未契合 backend contract 的 `block_ids` type/UI。
+- `cd apps/web && npm run test -- --test-name-pattern='Writer|writer|manuscript|Manuscript'` 通过，38 tests。
+- `cd apps/web && npm run typecheck` 通过。
+- `cd apps/web && npm run test` 通过，38 tests。
+
+Reviews:
+
+- Spec reviewer 首轮要求 scoped Character Console guard；修复后 spec re-review approved。
+- Quality reviewer 首轮要求移除 `block_ids` 并 scope manuscript tests；修复后 quality re-review approved。
+
+Broader verification:
+
+- `cd apps/api && go test ./internal/workflows ./internal/httpapi -run 'Writer|Draft|Trace|LLM|Workflow|Manuscript' -count=1` 通过。
+- `cd apps/pi-agent-runtime && npm run test && npm run typecheck` 通过，7 files / 38 tests。
+- `cd apps/web && npm run test -- --test-name-pattern='Writer|writer|manuscript|Manuscript'` 通过，38 tests。
+- `cd apps/web && npm run typecheck` 通过。
+- `cd apps/web && npm run test` 通过，38 tests。
+- `git diff --check` 通过。
+
+Docs synced:
+
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `tasks/refactor-saas-live-progress.md`
+
+Next:
+
+- W1 剩余重点仍是真实 LLM-bound writer E2E、trace/replay browser verification 和真正内容导出 artifact service。
 
 ### 2026-07-07 当前会话：Wave 0 governance and acceptance matrix calibration
 

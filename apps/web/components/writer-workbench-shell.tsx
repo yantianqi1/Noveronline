@@ -1,6 +1,8 @@
 import type {
   AgentTraceEventsSummary,
   AssetListSummary,
+  ProjectManuscriptExportManifestSummary,
+  ProjectManuscriptSummary,
   StoryGraphViewSummary,
   WorldlineSavedPathsSummary,
   WriterRunEvent,
@@ -17,6 +19,8 @@ type WriterWorkbenchShellProps = {
   assets: AssetListSummary;
   graphView: StoryGraphViewSummary;
   worldlineSavedPaths: WorldlineSavedPathsSummary;
+  manuscript: ProjectManuscriptSummary;
+  manuscriptExportManifest: ProjectManuscriptExportManifestSummary;
   writerRunStatus: ActionStatus | null;
   traceExportStatus: TraceExportStatus | null;
   writerRunAction?: (formData: FormData) => Promise<void>;
@@ -40,6 +44,8 @@ export function WriterWorkbenchShell({
   assets,
   graphView,
   worldlineSavedPaths,
+  manuscript,
+  manuscriptExportManifest,
   writerRunStatus,
   traceExportStatus,
   writerRunAction,
@@ -95,6 +101,24 @@ export function WriterWorkbenchShell({
             ) : (
               <p className="form-hint">Writer run start action is not configured.</p>
             )}
+          </section>
+
+          <section
+            className={`panel ${manuscript.ok ? "" : "error-box"}`}
+            aria-labelledby="manuscript-metadata-heading"
+          >
+            <p className="eyebrow">Manuscript</p>
+            <h2 id="manuscript-metadata-heading">Manuscript metadata</h2>
+            <ManuscriptMetadataPanel manuscript={manuscript} />
+          </section>
+
+          <section
+            className={`panel ${manuscriptExportManifest.ok ? "" : "error-box"}`}
+            aria-labelledby="manuscript-export-heading"
+          >
+            <p className="eyebrow">Manifest</p>
+            <h2 id="manuscript-export-heading">Export manifest</h2>
+            <ManuscriptExportManifestPanel manifest={manuscriptExportManifest} />
           </section>
 
           <section className="panel" aria-labelledby="draft-heading">
@@ -175,6 +199,86 @@ export function WriterWorkbenchShell({
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function ManuscriptMetadataPanel({ manuscript }: { manuscript: ProjectManuscriptSummary }) {
+  if (!manuscript.ok) {
+    return <p>{apiErrorLine(manuscript, "MANUSCRIPT_BACKEND_UNCONFIGURED")}</p>;
+  }
+
+  if (manuscript.blocks.length === 0) {
+    return <p className="form-hint">No manuscript metadata blocks returned.</p>;
+  }
+
+  return (
+    <div>
+      <dl>
+        <dt>Project</dt>
+        <dd>{manuscript.project_id}</dd>
+        <dt>Blocks</dt>
+        <dd>{manuscript.blocks.length}</dd>
+      </dl>
+      <div className="compact-action-list">
+        {manuscript.blocks.slice(0, 8).map((block) => (
+          <article className="tool-result-item" key={block.block_id}>
+            <strong>{block.block_id}</strong>
+            <span>
+              Chapter {block.chapter_id || "unassigned"} / order {block.block_order}
+            </span>
+            <small>
+              Source draft {block.source_draft_id || "not linked"} / {block.status || "unknown"} / words{" "}
+              {block.word_count}
+            </small>
+            <small>
+              Created {block.created_at || "unknown"} / Updated {block.updated_at || "unknown"}
+            </small>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ManuscriptExportManifestPanel({
+  manifest,
+}: {
+  manifest: ProjectManuscriptExportManifestSummary;
+}) {
+  if (!manifest.ok) {
+    return <p>{apiErrorLine(manifest, "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED")}</p>;
+  }
+
+  return (
+    <div>
+      <dl>
+        <dt>Project</dt>
+        <dd>{manifest.project_id}</dd>
+        <dt>Format</dt>
+        <dd>{manifest.format || "unknown"}</dd>
+        <dt>Status</dt>
+        <dd>{manifest.status || "unknown"}</dd>
+        <dt>Blocks</dt>
+        <dd>{manifest.block_count}</dd>
+        <dt>Total words</dt>
+        <dd>{manifest.total_word_count}</dd>
+        <dt>Generated</dt>
+        <dd>{manifest.generated_at || "not generated"}</dd>
+      </dl>
+      {manifest.blocks.length === 0 ? (
+        <p className="form-hint">No manifest block metadata returned.</p>
+      ) : (
+        <div className="compact-action-list">
+          {manifest.blocks.slice(0, 8).map((manifestBlock) => (
+            <article className="tool-result-item" key={`${manifestBlock.block_id}-${manifestBlock.block_order}`}>
+              <strong>{manifestBlock.block_id}</strong>
+              <span>Order {manifestBlock.block_order}</span>
+              <small>Words {manifestBlock.word_count}</small>
+            </article>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -318,6 +422,10 @@ function StatusLine({ status }: { status: ActionStatus }) {
       {status.code}: {status.message}
     </p>
   );
+}
+
+function apiErrorLine(status: { code: string; message: string }, fallbackCode: string) {
+  return `API error ${status.code || fallbackCode}: ${status.message}`;
 }
 
 type ToolCompletedEvent = {

@@ -9,12 +9,96 @@ async function fileText(relativePath) {
   return readFile(path.join(root, relativePath), "utf8");
 }
 
+function sourceSlice(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  assert.notEqual(start, -1, `missing source slice start marker: ${startMarker}`);
+  assert.notEqual(end, -1, `missing source slice end marker: ${endMarker}`);
+  return source.slice(start, end);
+}
+
 test("Next app shell declares tenant/project writer route", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx");
 
   assert.match(page, /params:\s*Promise<\{\s*tenantSlug:\s*string;\s*projectId:\s*string;?\s*\}>/);
   assert.match(page, /getWriterRunSummary/);
   assert.match(page, /WriterWorkbenchShell/);
+});
+
+test("writer API client exposes metadata-only manuscript endpoints with tenant headers", async () => {
+  const client = await fileText("lib/api.ts");
+  const manuscriptClient = [
+    sourceSlice(client, "export type ManuscriptBlockMetadata", "export type WorkflowRunSummary"),
+    sourceSlice(client, "export async function getProjectManuscript", "export async function getWorkflowRunSummary"),
+    sourceSlice(client, "async function decodeProjectManuscriptResponse", "async function decodeWorkflowRunResponse"),
+    sourceSlice(client, "function decodeManuscriptBlockMetadata", "function decodeWorkflowRunEvent"),
+  ].join("\n");
+
+  assert.match(manuscriptClient, /ManuscriptBlockMetadata/);
+  assert.match(manuscriptClient, /ProjectManuscriptSummary/);
+  assert.match(manuscriptClient, /ManuscriptExportManifestBlock/);
+  assert.match(manuscriptClient, /ProjectManuscriptExportManifestSummary/);
+  assert.match(manuscriptClient, /getProjectManuscript/);
+  assert.match(manuscriptClient, /getProjectManuscriptExportManifest/);
+  assert.match(manuscriptClient, /\/v1\/projects\/\$\{input\.projectId\}\/manuscript`/);
+  assert.match(manuscriptClient, /\/v1\/projects\/\$\{input\.projectId\}\/manuscript\/export`/);
+  assert.match(manuscriptClient, /headers:\s*contextHeaders\(input\)/);
+  assert.equal((manuscriptClient.match(/headers:\s*contextHeaders\(input\)/g) ?? []).length, 2);
+  assert.match(manuscriptClient, /block_id/);
+  assert.match(manuscriptClient, /chapter_id/);
+  assert.match(manuscriptClient, /source_draft_id/);
+  assert.match(manuscriptClient, /block_order/);
+  assert.match(manuscriptClient, /word_count/);
+  assert.match(manuscriptClient, /generated_at/);
+  assert.doesNotMatch(manuscriptClient, /block_ids/);
+  assert.doesNotMatch(manuscriptClient, /content_text:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /draft_text:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /manuscript_text:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /raw_body:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /exported_at:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /credential_ref:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /encrypted_api_key:\s*string/);
+  assert.doesNotMatch(manuscriptClient, /api_key:\s*string/);
+});
+
+test("writer page loads manuscript summaries alongside picker data", async () => {
+  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx");
+
+  assert.match(page, /getProjectManuscript/);
+  assert.match(page, /getProjectManuscriptExportManifest/);
+  assert.match(page, /const\s*\[\s*assets,\s*graphView,\s*worldlineSavedPaths,\s*manuscript,\s*manuscriptExportManifest\s*\]\s*=\s*await\s+Promise\.all/);
+  assert.match(page, /getProjectManuscript\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
+  assert.match(page, /getProjectManuscriptExportManifest\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
+  assert.match(page, /manuscript=\{manuscript\}/);
+  assert.match(page, /manuscriptExportManifest=\{manuscriptExportManifest\}/);
+});
+
+test("Writer shell renders metadata-only manuscript and export panels", async () => {
+  const shell = await fileText("components/writer-workbench-shell.tsx");
+
+  assert.match(shell, /ProjectManuscriptSummary/);
+  assert.match(shell, /ProjectManuscriptExportManifestSummary/);
+  assert.match(shell, /manuscript\.ok/);
+  assert.match(shell, /manuscriptExportManifest\.ok/);
+  assert.match(shell, /Manuscript metadata/);
+  assert.match(shell, /Export manifest/);
+  assert.match(shell, /MANUSCRIPT_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /block\.block_id/);
+  assert.match(shell, /block\.chapter_id/);
+  assert.match(shell, /block\.source_draft_id/);
+  assert.match(shell, /block\.word_count/);
+  assert.match(shell, /manifestBlock\.block_id/);
+  assert.match(shell, /manifestBlock\.word_count/);
+  assert.match(shell, /generated_at/);
+  assert.doesNotMatch(shell, /block_ids/);
+  assert.doesNotMatch(shell, /content_text/);
+  assert.doesNotMatch(shell, /draft_text/);
+  assert.doesNotMatch(shell, /manuscript_text/);
+  assert.doesNotMatch(shell, /raw_body/);
+  assert.doesNotMatch(shell, /exported_at/);
+  assert.doesNotMatch(shell, /credential_ref|encrypted_api_key|api_key/i);
+  assert.doesNotMatch(shell, /PDF|DOCX|TXT/);
 });
 
 test("project navigation includes writer and LLM Facility routes with active path state", async () => {
@@ -652,6 +736,12 @@ test("Character Console route exposes create interaction metadata form and actio
 
 test("character console API client exposes metadata-only interaction endpoints", async () => {
   const client = await fileText("lib/api.ts");
+  const characterClient = [
+    sourceSlice(client, "export type CharacterInteractionRecord", "export type AssetSummary"),
+    sourceSlice(client, "export async function listCharacterInteractions", "export async function createWorldlinePreparation"),
+    sourceSlice(client, "async function decodeCharacterInteractionsResponse", "async function decodeAssetFacetsResponse"),
+    sourceSlice(client, "function decodeCharacterInteractionRecord", "function decodeAssetFacetBucket"),
+  ].join("\n");
 
   assert.match(client, /CharacterInteractionRecord/);
   assert.match(client, /CharacterInteractionTurnRecord/);
@@ -691,13 +781,13 @@ test("character console API client exposes metadata-only interaction endpoints",
   assert.match(client, /workflow_type:\s*requiredString\(payload,\s*"workflow_type"\)/);
   assert.match(client, /X-Tenant-Id/);
   assert.match(client, /X-User-Id/);
-  assert.doesNotMatch(client, /draft_id/);
-  assert.doesNotMatch(client, /input_text:\s*string/);
-  assert.doesNotMatch(client, /output_text:\s*string/);
-  assert.doesNotMatch(client, /body_text:\s*string/);
-  assert.doesNotMatch(client, /content_text:\s*string/);
-  assert.doesNotMatch(client, /credential_ref:\s*string/);
-  assert.doesNotMatch(client, /encrypted_api_key:\s*string/);
+  assert.doesNotMatch(characterClient, /draft_id/);
+  assert.doesNotMatch(characterClient, /input_text:\s*string/);
+  assert.doesNotMatch(characterClient, /output_text:\s*string/);
+  assert.doesNotMatch(characterClient, /body_text:\s*string/);
+  assert.doesNotMatch(characterClient, /content_text:\s*string/);
+  assert.doesNotMatch(characterClient, /credential_ref:\s*string/);
+  assert.doesNotMatch(characterClient, /encrypted_api_key:\s*string/);
 });
 
 test("Next app shell declares tenant/project Guide route with explicit onboarding states", async () => {

@@ -2,6 +2,8 @@ import { WriterWorkbenchShell } from "../../../../../../components/writer-workbe
 import {
   exportAgentTrace,
   getAgentTraceEvents,
+  getProjectManuscript,
+  getProjectManuscriptExportManifest,
   getProjectAssets,
   getStoryGraphView,
   getWorldlineSavedPaths,
@@ -58,7 +60,7 @@ export default async function WriterPage({
         traceId,
       })
     : null;
-  const [assets, graphView, worldlineSavedPaths] = await Promise.all([
+  const [assets, graphView, worldlineSavedPaths, manuscript, manuscriptExportManifest] = await Promise.all([
     getProjectAssets({
       ...apiContext,
       projectId,
@@ -71,6 +73,14 @@ export default async function WriterPage({
       includeEdges: false,
     }),
     getWorldlineSavedPaths({
+      ...apiContext,
+      projectId,
+    }),
+    getProjectManuscript({
+      ...apiContext,
+      projectId,
+    }),
+    getProjectManuscriptExportManifest({
       ...apiContext,
       projectId,
     }),
@@ -151,6 +161,8 @@ export default async function WriterPage({
       assets={assets}
       graphView={graphView}
       worldlineSavedPaths={worldlineSavedPaths}
+      manuscript={manuscript}
+      manuscriptExportManifest={manuscriptExportManifest}
       writerRunStatus={
         query.writerRunStatus
           ? {
