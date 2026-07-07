@@ -29,6 +29,7 @@ type Config struct {
 	WriterCanceller                 workflows.WriterCanceller
 	DraftAdoptionStore              workflows.DraftAdoptionStore
 	DraftReviewStore                workflows.DraftReviewStore
+	ManuscriptReader                workflows.ManuscriptReader
 	WorkflowReader                  workflows.WorkflowReader
 	WorkflowEventReader             workflows.WorkflowEventReader
 	WorkflowCanceller               workflows.WorkflowCanceller
@@ -87,6 +88,7 @@ type Server struct {
 	writerCanceller                 workflows.WriterCanceller
 	draftAdoptionStore              workflows.DraftAdoptionStore
 	draftReviewStore                workflows.DraftReviewStore
+	manuscriptReader                workflows.ManuscriptReader
 	workflowReader                  workflows.WorkflowReader
 	workflowEventReader             workflows.WorkflowEventReader
 	workflowCanceller               workflows.WorkflowCanceller
@@ -539,6 +541,10 @@ func NewServer(config Config) *Server {
 	if draftReviewStore == nil {
 		draftReviewStore = workflows.NewDisabledDraftReviewStore()
 	}
+	manuscriptReader := config.ManuscriptReader
+	if manuscriptReader == nil {
+		manuscriptReader = workflows.NewDisabledManuscriptReader()
+	}
 	workflowReader := config.WorkflowReader
 	if workflowReader == nil {
 		workflowReader = workflows.NewDisabledWorkflowReader()
@@ -742,6 +748,7 @@ func NewServer(config Config) *Server {
 		writerCanceller:                 writerCanceller,
 		draftAdoptionStore:              draftAdoptionStore,
 		draftReviewStore:                draftReviewStore,
+		manuscriptReader:                manuscriptReader,
 		workflowReader:                  workflowReader,
 		workflowEventReader:             workflowEventReader,
 		workflowCanceller:               workflowCanceller,
@@ -817,6 +824,10 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetProjectReadiness(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/overview"):
 		s.handleGetProjectOverview(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/manuscript/export"):
+		s.handleGetManuscriptExport(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/manuscript"):
+		s.handleGetManuscript(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
 		s.handleListSeedRunEvents(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
@@ -3866,6 +3877,53 @@ func (s *Server) handleListDraftReviews(response http.ResponseWriter, request *h
 	writeJSON(response, http.StatusOK, sanitizeDraftReviewList(reviews))
 }
 
+func (s *Server) handleGetManuscript(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "manuscript")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project manuscript route not found", nil)
+		return
+	}
+	manuscript, err := s.manuscriptReader.GetManuscript(request.Context(), workflows.GetManuscriptInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicManuscriptErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, sanitizeManuscript(manuscript, projectID))
+}
+
+func (s *Server) handleGetManuscriptExport(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "manuscript/export")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project manuscript export route not found", nil)
+		return
+	}
+	manifest, err := s.manuscriptReader.GetManuscriptExport(request.Context(), workflows.GetManuscriptExportInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		Format:    sanitizeManuscriptExportFormat(request.URL.Query().Get("format")),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicManuscriptExportErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, sanitizeManuscriptExportManifest(manifest, projectID))
+}
+
 func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -4204,6 +4262,130 @@ func sanitizeDraftReviewList(list workflows.DraftReviewList) workflows.DraftRevi
 		clean.Reviews = append(clean.Reviews, cleanReview)
 	}
 	return clean
+}
+
+func sanitizeManuscript(manuscript workflows.Manuscript, projectID string) workflows.Manuscript {
+	clean := workflows.Manuscript{
+		ProjectID: sanitizePublicIdentifier(firstNonEmpty(manuscript.ProjectID, projectID)),
+		Blocks:    make([]workflows.ManuscriptBlock, 0, len(manuscript.Blocks)),
+	}
+	for _, block := range manuscript.Blocks {
+		clean.Blocks = append(clean.Blocks, sanitizeManuscriptBlock(block))
+	}
+	if metadata := sanitizeManuscriptMetadata(manuscript.Metadata); len(metadata) > 0 {
+		clean.Metadata = metadata
+	}
+	return clean
+}
+
+func sanitizeManuscriptBlock(block workflows.ManuscriptBlock) workflows.ManuscriptBlock {
+	return workflows.ManuscriptBlock{
+		BlockID:       sanitizePublicIdentifier(block.BlockID),
+		ProjectID:     sanitizePublicIdentifier(block.ProjectID),
+		ChapterID:     sanitizePublicIdentifier(block.ChapterID),
+		SourceDraftID: sanitizePublicIdentifier(block.SourceDraftID),
+		BlockOrder:    block.BlockOrder,
+		Status:        sanitizePublicMetadataText(block.Status),
+		WordCount:     block.WordCount,
+		CreatedAt:     sanitizePublicMetadataText(block.CreatedAt),
+		UpdatedAt:     sanitizePublicMetadataText(block.UpdatedAt),
+	}
+}
+
+func sanitizeManuscriptExportManifest(manifest workflows.ManuscriptExportManifest, projectID string) workflows.ManuscriptExportManifest {
+	clean := workflows.ManuscriptExportManifest{
+		ProjectID:      sanitizePublicIdentifier(firstNonEmpty(manifest.ProjectID, projectID)),
+		Format:         sanitizeManuscriptExportFormat(manifest.Format),
+		Status:         sanitizePublicMetadataText(manifest.Status),
+		BlockCount:     manifest.BlockCount,
+		TotalWordCount: manifest.TotalWordCount,
+		GeneratedAt:    sanitizePublicMetadataText(manifest.GeneratedAt),
+		Blocks:         make([]workflows.ManuscriptExportBlock, 0, len(manifest.Blocks)),
+	}
+	for _, block := range manifest.Blocks {
+		clean.Blocks = append(clean.Blocks, workflows.ManuscriptExportBlock{
+			BlockID:    sanitizePublicIdentifier(block.BlockID),
+			BlockOrder: block.BlockOrder,
+			WordCount:  block.WordCount,
+		})
+	}
+	return clean
+}
+
+func sanitizeManuscriptExportFormat(format string) string {
+	if strings.EqualFold(strings.TrimSpace(format), "metadata_manifest") {
+		return "metadata_manifest"
+	}
+	return "metadata_manifest"
+}
+
+func sanitizeManuscriptMetadata(metadata map[string]any) map[string]any {
+	clean := map[string]any{}
+	for key, value := range metadata {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if isHighRiskAssetField(normalizedKey) {
+			continue
+		}
+		clean[key] = sanitizeManuscriptMetadataValue(value)
+	}
+	return clean
+}
+
+func sanitizeManuscriptMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return sanitizePublicMetadataText(typed)
+	case map[string]any:
+		return sanitizeManuscriptMetadata(typed)
+	case []any:
+		values := make([]any, 0, len(typed))
+		for _, item := range typed {
+			values = append(values, sanitizeManuscriptMetadataValue(item))
+		}
+		return values
+	default:
+		return typed
+	}
+}
+
+func sanitizePublicIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	lowered := strings.ToLower(value)
+	for _, marker := range []string{
+		"api_key",
+		"apikey",
+		"encrypted_api_key",
+		"credential_ref",
+		"credential-ref",
+		"credential",
+		"sk-",
+		"prompt",
+		"response",
+		"body_text",
+		"content_text",
+		"source_text",
+		"source_material",
+		"raw_text",
+		"raw_body",
+		"raw_content",
+		"draft=",
+		"manuscript",
+		"private",
+	} {
+		if strings.Contains(lowered, marker) {
+			return ""
+		}
+	}
+	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func sanitizePublicMetadataText(value string) string {
@@ -4708,6 +4890,32 @@ func publicDraftReviewErrorMessage(code string) string {
 		return "invalid draft review request"
 	default:
 		return "writer review failed"
+	}
+}
+
+func publicManuscriptErrorMessage(code string) string {
+	switch code {
+	case "MANUSCRIPT_BACKEND_UNCONFIGURED":
+		return "manuscript backend is not configured"
+	case "MANUSCRIPT_QUERY_FAILED":
+		return "manuscript query failed"
+	case "VALIDATION_FAILED":
+		return "invalid manuscript request"
+	default:
+		return "manuscript request failed"
+	}
+}
+
+func publicManuscriptExportErrorMessage(code string) string {
+	switch code {
+	case "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED":
+		return "manuscript export backend is not configured"
+	case "MANUSCRIPT_EXPORT_QUERY_FAILED":
+		return "manuscript export query failed"
+	case "VALIDATION_FAILED":
+		return "invalid manuscript export request"
+	default:
+		return "manuscript export request failed"
 	}
 }
 

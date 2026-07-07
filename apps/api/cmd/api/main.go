@@ -188,6 +188,17 @@ func main() {
 			}
 		}()
 	}
+	manuscriptReader, closeManuscriptReader, err := newManuscriptReader(databaseURL)
+	if err != nil {
+		log.Fatalf("configure manuscript reader: %v", err)
+	}
+	if closeManuscriptReader != nil {
+		defer func() {
+			if err := closeManuscriptReader(); err != nil {
+				log.Printf("close manuscript reader: %v", err)
+			}
+		}()
+	}
 	writerEventReader, closeWriterEvents, err := newWriterEventReader(databaseURL)
 	if err != nil {
 		log.Fatalf("configure writer event reader: %v", err)
@@ -611,6 +622,7 @@ func main() {
 		WriterCanceller:                 writerCanceller,
 		DraftAdoptionStore:              draftAdoptionStore,
 		DraftReviewStore:                draftReviewStore,
+		ManuscriptReader:                manuscriptReader,
 		WorkflowReader:                  workflowReader,
 		WorkflowEventReader:             workflowEventReader,
 		WorkflowCanceller:               workflowCanceller,
@@ -880,6 +892,19 @@ func newWriterReader(databaseURL string) (workflows.WriterReader, func() error, 
 		return nil, nil, err
 	}
 	return workflows.NewSQLWriterReader(workflows.SQLWriterReaderConfig{
+		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
+	}), db.Close, nil
+}
+
+func newManuscriptReader(databaseURL string) (workflows.ManuscriptReader, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewSQLManuscriptReader(workflows.SQLManuscriptReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
 	}), db.Close, nil
 }

@@ -65,10 +65,10 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration 已提交；W1-S1 explicit draft adoption 已提交并通过 spec / quality reviewer |
-| 当前未完成重点 | reviewer path、manuscript export、真实 LLM-bound E2E、trace/replay browser verification |
-| 本轮开发 slice | W1-S2 writer reviewer admission/read：`POST /v1/drafts/{draftId}/reviews` / `GET /v1/drafts/{draftId}/reviews` fail-closed metadata path |
-| 推荐下一步 | 完成 W1-S2 RED -> GREEN -> focused regression，经 spec/quality reviewer 通过后再进入 manuscript/export 或 live E2E slice |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest 均已通过 spec / quality reviewer |
+| 当前未完成重点 | 真实 LLM-bound E2E、trace/replay browser verification、真正内容导出 artifact service |
+| 本轮开发 slice | W1-S3 manuscript metadata/export admission：`GET /v1/projects/{projectId}/manuscript` / `GET /v1/projects/{projectId}/manuscript/export` metadata-only public path |
+| 推荐下一步 | W1-S3 提交后进入 live LLM-bound E2E 或 trace/replay browser verification slice |
 
 ## P6-002 Character Console 当前状态
 
@@ -1337,6 +1337,61 @@ Next:
 
 - 继续推进 Go API upload/complete -> Temporal cluster -> Python worker parse/segment 的真实 live E2E。
 - Browser upload/complete、sequential-reading provider/live LLM、扫描/OCR PDF、更完整语义分段、retry failed segments 和真实 ontology/entity resolution/profile/finalize runners 仍 pending。
+
+### 2026-07-07 当前会话：W1-S3 manuscript metadata/export manifest
+
+Context:
+
+- Wave 0 已 verified；W1-S1 explicit draft adoption 和 W1-S2 writer review admission/read metadata 已提交。
+- 本轮继续 Wave 1 Writer live closure 的剩余 manuscript/export control-plane gap；仍只在 `/Users/yantianqi/Documents/Noveronline-saas-mainline` 开发。
+
+Scope:
+
+- 目标：新增 `GET /v1/projects/{projectId}/manuscript` 和 `GET /v1/projects/{projectId}/manuscript/export` metadata-only public path。
+- 边界：不返回 draft/manuscript 正文、不读取 `content_text`、不生成 fake PDF/DOCX/TXT、不开启旧 LLM env fallback、不声明 live LLM-bound E2E 完成。
+
+RED:
+
+- `cd apps/api && go test ./internal/workflows -run 'Manuscript' -count=1` 失败于缺少 manuscript reader/types。
+- `cd apps/api && go test ./internal/httpapi -run 'Manuscript' -count=1` 失败于缺少 HTTP manuscript API types/routes。
+- `cd apps/api && go test ./cmd/api -run 'Manuscript|Draft' -count=1` 失败于缺少 `newManuscriptReader`。
+- Spec review 后追加 RED：injected metadata/id value 可泄露 private manuscript/prompt，且 `format=pdf/docx/txt` 与 `exported_at` 会暗示 fake content export。
+
+GREEN:
+
+- 新增 `SQLManuscriptReader` / `DisabledManuscriptReader`，DB-backed path 在 tenant context 下只选择 `manuscript_blocks` public metadata，query/scan/rows/close failure 收敛为 `MANUSCRIPT_QUERY_FAILED` 或 `MANUSCRIPT_EXPORT_QUERY_FAILED`。
+- 新增 HTTP routes：`GET /v1/projects/{projectId}/manuscript` 和 `/manuscript/export`；无 backend 分别 fail closed 为 `MANUSCRIPT_BACKEND_UNCONFIGURED` / `MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED`。
+- HTTP response boundary 对 replacement store 返回的 metadata、ids、status、timestamps、manifest fields 做二次清洗；content-looking formats 全部规范化为 `metadata_manifest`，metadata-only manifest 不设置 `exported_at`。
+- `cd apps/api && go test ./internal/workflows ./internal/httpapi -run 'Manuscript|Writer|Draft' -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Manuscript|Draft' -count=1` 通过。
+
+Reviews:
+
+- Spec reviewer 首轮要求修复 value-level leakage 和 fake export implication；实现修复后 spec re-review approved。
+- Quality reviewer approved；补充提醒 staging 时包含 untracked `apps/api/internal/workflows/writer_manuscript_reader.go`。
+
+Broader verification:
+
+- `cd apps/api && go test ./internal/workflows ./internal/httpapi -run 'Writer|Draft|Trace|LLM|Workflow|Manuscript' -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Manuscript|Draft' -count=1` 通过。
+- `cd apps/pi-agent-runtime && npm run test && npm run typecheck` 通过，7 files / 38 tests。
+- `cd apps/web && npm run test -- --test-name-pattern='Writer|writer'` 通过，35 tests。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `git diff --check` 通过。
+- `rg -n '[[:blank:]]$' apps/api/internal/workflows/writer.go apps/api/internal/workflows/writer_manuscript_reader.go apps/api/internal/workflows/writer_test.go apps/api/internal/httpapi/server.go apps/api/internal/httpapi/server_test.go apps/api/cmd/api/main.go apps/api/cmd/api/main_test.go docs/refactor-saas/11-writer-workbench.md docs/refactor-saas/14-data-model.md docs/refactor-saas/15-api-contracts.md docs/refactor-saas/18-legacy-coverage-matrix.md tasks/refactor-saas-parallel-board.md tasks/refactor-saas-live-progress.md` 未发现尾随空白。
+
+Docs synced:
+
+- `docs/refactor-saas/11-writer-workbench.md`
+- `docs/refactor-saas/14-data-model.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `tasks/refactor-saas-live-progress.md`
+
+Next:
+
+- W1 剩余重点转向真实 LLM-bound writer E2E、trace/replay browser verification 和真正内容导出 artifact service。
 
 ### 2026-07-07 当前会话：Wave 0 governance and acceptance matrix calibration
 

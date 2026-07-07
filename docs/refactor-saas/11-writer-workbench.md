@@ -367,6 +367,8 @@ POST /v1/drafts/{draftId}/reviews
 GET /v1/projects/{projectId}/manuscript/export
 ```
 
+当前 SaaS API 只实现 metadata-only export manifest/readiness。该 endpoint 返回 project id、`metadata_manifest` format、block count、total word count、generated timestamp 和 block id/order/word count metadata；它不返回正文、不生成 fake PDF/DOCX/TXT、不设置 `exported_at` artifact 成功状态。真正内容导出仍需后续显式 artifact/export service，并必须继续遵守 draft/manuscript 正文不进入公共 API/UI/events/logs 的边界。
+
 ## 旧功能映射
 
 | 旧功能 | 新功能 |

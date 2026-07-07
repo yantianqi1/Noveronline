@@ -72,12 +72,59 @@ type ListDraftReviewsInput struct {
 	DraftID  string
 }
 
+type GetManuscriptInput struct {
+	TenantID  string
+	ProjectID string
+}
+
+type GetManuscriptExportInput struct {
+	TenantID  string
+	ProjectID string
+	Format    string
+}
+
 type WriterRun struct {
 	RunID     string
 	TraceID   string
 	TenantID  string
 	ProjectID string
 	Status    string
+}
+
+type Manuscript struct {
+	ProjectID string            `json:"project_id"`
+	Blocks    []ManuscriptBlock `json:"blocks"`
+	Metadata  map[string]any    `json:"metadata,omitempty"`
+}
+
+type ManuscriptBlock struct {
+	BlockID       string `json:"block_id"`
+	ProjectID     string `json:"project_id"`
+	ChapterID     string `json:"chapter_id,omitempty"`
+	SourceDraftID string `json:"source_draft_id,omitempty"`
+	BlockOrder    int    `json:"block_order"`
+	Status        string `json:"status,omitempty"`
+	WordCount     int    `json:"word_count"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+}
+
+type ManuscriptExportManifest struct {
+	ProjectID       string                  `json:"project_id"`
+	Format          string                  `json:"format"`
+	Status          string                  `json:"status"`
+	BlockCount      int                     `json:"block_count"`
+	TotalWordCount  int                     `json:"total_word_count"`
+	GeneratedAt     string                  `json:"generated_at"`
+	ExportedAt      string                  `json:"exported_at,omitempty"`
+	Blocks          []ManuscriptExportBlock `json:"blocks,omitempty"`
+	PrivateMetadata map[string]any          `json:"-"`
+}
+
+type ManuscriptExportBlock struct {
+	BlockID    string `json:"block_id"`
+	BlockOrder int    `json:"block_order"`
+	WordCount  int    `json:"word_count"`
 }
 
 type DraftAdoptionResult struct {
@@ -165,6 +212,11 @@ type DraftAdoptionStore interface {
 type DraftReviewStore interface {
 	StartDraftReview(context.Context, StartDraftReviewInput) (DraftReviewAdmission, error)
 	ListDraftReviews(context.Context, ListDraftReviewsInput) (DraftReviewList, error)
+}
+
+type ManuscriptReader interface {
+	GetManuscript(context.Context, GetManuscriptInput) (Manuscript, error)
+	GetManuscriptExport(context.Context, GetManuscriptExportInput) (ManuscriptExportManifest, error)
 }
 
 type WriterAdmissionStore interface {

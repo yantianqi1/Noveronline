@@ -210,6 +210,31 @@ func (s *recordingDraftReviewStore) ListDraftReviews(ctx context.Context, input 
 	return s.reviews, nil
 }
 
+type recordingManuscriptReader struct {
+	getInput    workflows.GetManuscriptInput
+	exportInput workflows.GetManuscriptExportInput
+	manuscript  workflows.Manuscript
+	manifest    workflows.ManuscriptExportManifest
+	getErr      error
+	exportErr   error
+}
+
+func (r *recordingManuscriptReader) GetManuscript(ctx context.Context, input workflows.GetManuscriptInput) (workflows.Manuscript, error) {
+	r.getInput = input
+	if r.getErr != nil {
+		return workflows.Manuscript{}, r.getErr
+	}
+	return r.manuscript, nil
+}
+
+func (r *recordingManuscriptReader) GetManuscriptExport(ctx context.Context, input workflows.GetManuscriptExportInput) (workflows.ManuscriptExportManifest, error) {
+	r.exportInput = input
+	if r.exportErr != nil {
+		return workflows.ManuscriptExportManifest{}, r.exportErr
+	}
+	return r.manifest, nil
+}
+
 type recordingWorkflowCanceller struct {
 	input  workflows.CancelWorkflowRunInput
 	err    error
@@ -6482,6 +6507,237 @@ func TestCancelWriterRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 	}
 }
 
+func TestGetManuscriptReturnsMetadataOnlyWithinTenantProject(t *testing.T) {
+	reader := &recordingManuscriptReader{
+		manuscript: workflows.Manuscript{
+			ProjectID: "project-123",
+			Blocks: []workflows.ManuscriptBlock{{
+				BlockID:       "block-1",
+				ProjectID:     "project-123",
+				ChapterID:     "chapter-1",
+				SourceDraftID: "draft-1",
+				BlockOrder:    1,
+				Status:        "accepted",
+				WordCount:     456,
+				CreatedAt:     "2026-07-04T01:00:00Z",
+				UpdatedAt:     "2026-07-04T01:10:00Z",
+			}},
+			Metadata: map[string]any{
+				"status":       "ready",
+				"prompt":       "private prompt",
+				"content_text": "private manuscript prose",
+				"nested": map[string]any{
+					"api_key": "sk-private",
+					"kept":    "public metadata",
+				},
+			},
+		},
+	}
+	server := NewServer(Config{ManuscriptReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.ProjectID != "project-123" {
+		t.Fatalf("manuscript reader lost tenant/project scope: %#v", reader.getInput)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"project_id":"project-123"`, `"block_id":"block-1"`, `"source_draft_id":"draft-1"`, `"word_count":456`, `"kept":"public metadata"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("manuscript response missing %s: %s", expected, body)
+		}
+	}
+	assertHTTPBodyOmitsManuscriptPrivateFields(t, body)
+}
+
+func TestGetManuscriptSanitizesInjectedValuesAtHTTPBoundary(t *testing.T) {
+	reader := &recordingManuscriptReader{
+		manuscript: workflows.Manuscript{
+			ProjectID: "project-123 prompt=hidden",
+			Blocks: []workflows.ManuscriptBlock{{
+				BlockID:       "block-1 prompt=hidden",
+				ProjectID:     "project-123",
+				ChapterID:     "chapter-1 content_text=private",
+				SourceDraftID: "draft-1",
+				BlockOrder:    1,
+				Status:        "ready manuscript=private",
+				WordCount:     456,
+				CreatedAt:     "2026-07-04T01:00:00Z api_key=sk-private",
+				UpdatedAt:     "2026-07-04T01:10:00Z",
+			}},
+			Metadata: map[string]any{
+				"safe": "private manuscript prose prompt=hidden",
+				"nested": map[string]any{
+					"safe_child": "credential_ref=cred-private",
+					"kept":       "public metadata",
+				},
+				"list": []any{"public item", "content_text=private"},
+			},
+		},
+	}
+	server := NewServer(Config{ManuscriptReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"source_draft_id":"draft-1"`, `"updated_at":"2026-07-04T01:10:00Z"`, `"kept":"public metadata"`, `"public item"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("manuscript sanitizer dropped safe value %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{
+		"project-123 prompt=hidden",
+		"block-1 prompt=hidden",
+		"chapter-1 content_text=private",
+		"ready manuscript=private",
+		"2026-07-04T01:00:00Z api_key=sk-private",
+		"private manuscript prose",
+		"credential_ref=cred-private",
+		"content_text=private",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("manuscript response leaked injected value %q: %s", forbidden, body)
+		}
+	}
+	assertHTTPBodyOmitsManuscriptPrivateFields(t, body)
+}
+
+func TestGetManuscriptRequiresTenantContext(t *testing.T) {
+	reader := &recordingManuscriptReader{}
+	server := NewServer(Config{ManuscriptReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusUnauthorized, response.Code, response.Body.String())
+	}
+	if reader.getInput.ProjectID != "" {
+		t.Fatalf("manuscript reader should not be called without tenant context: %#v", reader.getInput)
+	}
+}
+
+func TestGetManuscriptFailsClosedWithoutConfiguredStore(t *testing.T) {
+	server := NewServer(Config{})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "MANUSCRIPT_BACKEND_UNCONFIGURED" || body.Error.Message != "manuscript backend is not configured" {
+		t.Fatalf("expected explicit manuscript backend error, got %#v", body)
+	}
+}
+
+func TestGetManuscriptSanitizesStoreErrorMessagesAtHTTPBoundary(t *testing.T) {
+	reader := &recordingManuscriptReader{
+		getErr: &workflows.AppError{
+			Code:    "MANUSCRIPT_QUERY_FAILED",
+			Message: "driver leaked content_text=private prompt=hidden api_key=sk-hidden credential_ref=cred draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{ManuscriptReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"code":"MANUSCRIPT_QUERY_FAILED"`) || !strings.Contains(body, `"message":"manuscript query failed"`) {
+		t.Fatalf("expected stable manuscript query error, got %s", body)
+	}
+	assertHTTPBodyOmitsManuscriptPrivateFields(t, body)
+}
+
+func TestGetManuscriptExportReturnsManifestMetadataOnly(t *testing.T) {
+	reader := &recordingManuscriptReader{
+		manifest: workflows.ManuscriptExportManifest{
+			ProjectID:       "project-123",
+			Format:          "pdf",
+			Status:          "ready prompt=hidden",
+			BlockCount:      2,
+			TotalWordCount:  1000,
+			GeneratedAt:     "2026-07-04T02:00:00Z",
+			ExportedAt:      "2026-07-04T02:00:00Z",
+			PrivateMetadata: map[string]any{"prompt": "private prompt", "manuscript": "private prose"},
+			Blocks: []workflows.ManuscriptExportBlock{{
+				BlockID:    "block-1 manuscript=private",
+				BlockOrder: 1,
+				WordCount:  400,
+			}},
+		},
+	}
+	server := NewServer(Config{ManuscriptReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export?format=metadata_manifest", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.exportInput.TenantID != "tenant-123" || reader.exportInput.ProjectID != "project-123" || reader.exportInput.Format != "metadata_manifest" {
+		t.Fatalf("manuscript export reader lost public scope: %#v", reader.exportInput)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"format":"metadata_manifest"`, `"block_count":2`, `"total_word_count":1000`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("export manifest missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{`"format":"pdf"`, `"exported_at"`, "ready prompt=hidden", "block-1 manuscript=private"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("export manifest leaked content-export semantics or private value %q: %s", forbidden, body)
+		}
+	}
+	assertHTTPBodyOmitsManuscriptPrivateFields(t, body)
+}
+
+func TestGetManuscriptExportFailsClosedWithoutConfiguredStore(t *testing.T) {
+	server := NewServer(Config{})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED" || body.Error.Message != "manuscript export backend is not configured" {
+		t.Fatalf("expected explicit manuscript export backend error, got %#v", body)
+	}
+}
+
 func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t *testing.T) {
 	store := &recordingDraftAdoptionStore{
 		result: workflows.DraftAdoptionResult{
@@ -8555,4 +8811,25 @@ func derefMap(value *map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return *value
+}
+
+func assertHTTPBodyOmitsManuscriptPrivateFields(t *testing.T, body string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"private prompt",
+		"private manuscript prose",
+		"private prose",
+		"sk-private",
+		"prompt",
+		"api_key",
+		"credential_ref",
+		"content_text",
+		`"draft":`,
+		"private draft",
+		"manuscript=private",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("HTTP manuscript response leaked %q: %s", forbidden, body)
+		}
+	}
 }

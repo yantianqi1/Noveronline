@@ -158,6 +158,41 @@ func TestNewWriterReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestNewManuscriptReaderUsesNilReaderWithoutDatabaseURL(t *testing.T) {
+	reader, closeReader, err := newManuscriptReader("")
+
+	if err != nil {
+		t.Fatalf("new manuscript reader: %v", err)
+	}
+	if closeReader != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if reader != nil {
+		t.Fatalf("expected nil manuscript reader without database URL, got %T", reader)
+	}
+}
+
+func TestNewManuscriptReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
+	reader, closeReader, err := newManuscriptReader("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeReader != nil {
+		defer func() {
+			if err := closeReader(); err != nil {
+				t.Fatalf("close manuscript reader: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new manuscript reader: %v", err)
+	}
+	if _, ok := reader.(*workflows.SQLManuscriptReader); !ok {
+		t.Fatalf("expected SQL manuscript reader, got %T", reader)
+	}
+	if closeReader == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestNewWorkflowReaderUsesDisabledReaderWithoutDatabaseURL(t *testing.T) {
 	reader, closeReader, err := newWorkflowReader("")
 

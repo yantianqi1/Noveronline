@@ -135,6 +135,232 @@ func TestSQLWriterReaderReturnsNotFoundForMissingRun(t *testing.T) {
 	}
 }
 
+func TestDisabledManuscriptReaderFailsClosed(t *testing.T) {
+	reader := NewDisabledManuscriptReader()
+
+	_, err := reader.GetManuscript(context.Background(), GetManuscriptInput{
+		TenantID:  "tenant-1",
+		ProjectID: "project-1",
+	})
+	if code := ErrorCode(err); code != "MANUSCRIPT_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected manuscript unconfigured error, got %s (%v)", code, err)
+	}
+
+	_, err = reader.GetManuscriptExport(context.Background(), GetManuscriptExportInput{
+		TenantID:  "tenant-1",
+		ProjectID: "project-1",
+	})
+	if code := ErrorCode(err); code != "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected manuscript export unconfigured error, got %s (%v)", code, err)
+	}
+}
+
+func TestSQLManuscriptReaderListsMetadataWithoutPrivateColumns(t *testing.T) {
+	queryer := &recordingWriterEventQueryer{
+		rows: &fakeWriterEventRows{
+			values: [][]any{{
+				"block-1",
+				"project-1",
+				"chapter-1",
+				"draft-1",
+				2,
+				"accepted",
+				1200,
+				"2026-07-04T01:00:00Z",
+				"2026-07-04T01:10:00Z",
+			}},
+		},
+	}
+	reader := NewSQLManuscriptReader(SQLManuscriptReaderConfig{Queryer: queryer})
+
+	manuscript, err := reader.GetManuscript(context.Background(), GetManuscriptInput{
+		TenantID:  " tenant-1 ",
+		ProjectID: " project-1 ",
+	})
+
+	if err != nil {
+		t.Fatalf("get manuscript: %v", err)
+	}
+	if manuscript.ProjectID != "project-1" || len(manuscript.Blocks) != 1 {
+		t.Fatalf("unexpected manuscript: %#v", manuscript)
+	}
+	block := manuscript.Blocks[0]
+	if block.BlockID != "block-1" || block.ChapterID != "chapter-1" || block.SourceDraftID != "draft-1" || block.BlockOrder != 2 || block.WordCount != 1200 {
+		t.Fatalf("unexpected manuscript block: %#v", block)
+	}
+	if !strings.Contains(queryer.query, "FROM manuscript_blocks") || !strings.Contains(queryer.query, "project_id::text = $2") {
+		t.Fatalf("expected tenant/project manuscript_blocks query, got %s", queryer.query)
+	}
+	assertManuscriptQueryOmitsPrivateColumns(t, queryer.query)
+	if !reflect.DeepEqual(queryer.args, []any{"tenant-1", "project-1"}) {
+		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+}
+
+func TestSQLManuscriptReaderBuildsExportManifestWithoutPrivateColumns(t *testing.T) {
+	queryer := &recordingWriterEventQueryer{
+		rows: &fakeWriterEventRows{
+			values: [][]any{
+				{"block-1", "project-1", nil, "draft-1", 1, "accepted", 500, "2026-07-04T01:00:00Z", "2026-07-04T01:10:00Z"},
+				{"block-2", "project-1", "chapter-2", nil, 2, "accepted", 700, "2026-07-04T01:20:00Z", "2026-07-04T01:30:00Z"},
+			},
+		},
+	}
+	reader := NewSQLManuscriptReader(SQLManuscriptReaderConfig{Queryer: queryer})
+
+	manifest, err := reader.GetManuscriptExport(context.Background(), GetManuscriptExportInput{
+		TenantID:  "tenant-1",
+		ProjectID: "project-1",
+		Format:    "docx",
+	})
+
+	if err != nil {
+		t.Fatalf("get manuscript export: %v", err)
+	}
+	if manifest.ProjectID != "project-1" || manifest.Format != "metadata_manifest" || manifest.BlockCount != 2 || manifest.TotalWordCount != 1200 || manifest.Status != "ready" {
+		t.Fatalf("unexpected export manifest: %#v", manifest)
+	}
+	if manifest.ExportedAt != "" {
+		t.Fatalf("metadata-only export manifest should not claim exported artifact timestamp: %#v", manifest)
+	}
+	if len(manifest.Blocks) != 2 || manifest.Blocks[1].BlockID != "block-2" || manifest.Blocks[1].BlockOrder != 2 {
+		t.Fatalf("unexpected manifest blocks: %#v", manifest.Blocks)
+	}
+	assertManuscriptQueryOmitsPrivateColumns(t, queryer.query)
+}
+
+func TestSQLManuscriptReaderNormalizesContentExportFormats(t *testing.T) {
+	for _, format := range []string{"docx", "txt", "pdf"} {
+		t.Run(format, func(t *testing.T) {
+			queryer := &recordingWriterEventQueryer{
+				rows: &fakeWriterEventRows{
+					values: [][]any{{
+						"block-1",
+						"project-1",
+						nil,
+						nil,
+						1,
+						"available",
+						100,
+						"2026-07-04T01:00:00Z",
+						"2026-07-04T01:10:00Z",
+					}},
+				},
+			}
+			reader := NewSQLManuscriptReader(SQLManuscriptReaderConfig{Queryer: queryer})
+
+			manifest, err := reader.GetManuscriptExport(context.Background(), GetManuscriptExportInput{
+				TenantID:  "tenant-1",
+				ProjectID: "project-1",
+				Format:    format,
+			})
+
+			if err != nil {
+				t.Fatalf("get manuscript export: %v", err)
+			}
+			if manifest.Format != "metadata_manifest" {
+				t.Fatalf("content export format %q should normalize to metadata_manifest: %#v", format, manifest)
+			}
+			if manifest.ExportedAt != "" {
+				t.Fatalf("metadata-only manifest should not have exported_at for %q: %#v", format, manifest)
+			}
+		})
+	}
+}
+
+func TestSQLManuscriptReaderSanitizesQueryFailures(t *testing.T) {
+	sensitiveErr := errors.New("driver leaked content_text=private prompt=hidden api_key=sk-hidden credential_ref=cred-1 draft=secret manuscript=secret")
+	tests := []struct {
+		name string
+		run  func(*SQLManuscriptReader) error
+		code string
+		msg  string
+	}{
+		{
+			name: "manuscript query error",
+			run: func(reader *SQLManuscriptReader) error {
+				_, err := reader.GetManuscript(context.Background(), GetManuscriptInput{TenantID: "tenant-1", ProjectID: "project-1"})
+				return err
+			},
+			code: "MANUSCRIPT_QUERY_FAILED",
+			msg:  "manuscript query failed",
+		},
+		{
+			name: "export query error",
+			run: func(reader *SQLManuscriptReader) error {
+				_, err := reader.GetManuscriptExport(context.Background(), GetManuscriptExportInput{TenantID: "tenant-1", ProjectID: "project-1"})
+				return err
+			},
+			code: "MANUSCRIPT_EXPORT_QUERY_FAILED",
+			msg:  "manuscript export query failed",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := NewSQLManuscriptReader(SQLManuscriptReaderConfig{
+				Queryer: &recordingWriterEventQueryer{err: sensitiveErr},
+			})
+
+			err := test.run(reader)
+
+			if code := ErrorCode(err); code != test.code {
+				t.Fatalf("expected %s, got %s (%v)", test.code, code, err)
+			}
+			if err.Error() != test.msg {
+				t.Fatalf("expected stable public message %q, got %q", test.msg, err.Error())
+			}
+			assertManuscriptErrorSanitized(t, err)
+		})
+	}
+
+	t.Run("scan error", func(t *testing.T) {
+		reader := NewSQLManuscriptReader(SQLManuscriptReaderConfig{
+			Queryer: &recordingWriterEventQueryer{
+				rows: &fakeWriterEventRows{
+					values:  [][]any{{}},
+					scanErr: sensitiveErr,
+				},
+			},
+		})
+
+		_, err := reader.GetManuscript(context.Background(), GetManuscriptInput{TenantID: "tenant-1", ProjectID: "project-1"})
+
+		if code := ErrorCode(err); code != "MANUSCRIPT_QUERY_FAILED" {
+			t.Fatalf("expected stable scan failure code, got %s (%v)", code, err)
+		}
+		assertManuscriptErrorSanitized(t, err)
+	})
+
+	t.Run("close commit error", func(t *testing.T) {
+		reader := NewSQLManuscriptReader(SQLManuscriptReaderConfig{
+			Queryer: &recordingWriterEventQueryer{
+				rows: &fakeWriterEventRows{
+					values: [][]any{{
+						"block-1",
+						"project-1",
+						nil,
+						nil,
+						1,
+						"available",
+						12,
+						"2026-07-04T01:00:00Z",
+						"2026-07-04T01:10:00Z",
+					}},
+					closeErr: sensitiveErr,
+				},
+			},
+		})
+
+		_, err := reader.GetManuscript(context.Background(), GetManuscriptInput{TenantID: "tenant-1", ProjectID: "project-1"})
+
+		if code := ErrorCode(err); code != "MANUSCRIPT_QUERY_FAILED" {
+			t.Fatalf("expected stable close failure code, got %s (%v)", code, err)
+		}
+		assertManuscriptErrorSanitized(t, err)
+	})
+}
+
 func TestSQLWriterEventReaderListsEventsAfterCursor(t *testing.T) {
 	queryer := &recordingWriterEventQueryer{
 		rows: &fakeWriterEventRows{
@@ -169,6 +395,36 @@ func TestSQLWriterEventReaderListsEventsAfterCursor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-1", "run-1", "evt-1", 25}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+}
+
+func assertManuscriptQueryOmitsPrivateColumns(t *testing.T, query string) {
+	t.Helper()
+	lowered := strings.ToLower(query)
+	for _, forbidden := range []string{
+		"content_text",
+		"draft_text",
+		"manuscript_text",
+		"prompt",
+		"response",
+		"credential",
+		"object_key",
+		"raw_body",
+		"raw_content",
+	} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("manuscript query selected private column %q: %s", forbidden, query)
+		}
+	}
+}
+
+func assertManuscriptErrorSanitized(t *testing.T, err error) {
+	t.Helper()
+	message := err.Error()
+	for _, forbidden := range []string{"content_text", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript=secret", "private"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("manuscript error leaked %q: %s", forbidden, message)
+		}
 	}
 }
 
@@ -1028,6 +1284,7 @@ type fakeWriterEventRows struct {
 	index      int
 	err        error
 	scanErr    error
+	closeErr   error
 	committed  bool
 	rolledBack bool
 }
@@ -1073,7 +1330,7 @@ func (r *fakeWriterEventRows) Scan(dest ...any) error {
 }
 
 func (r *fakeWriterEventRows) Close() error {
-	return nil
+	return r.closeErr
 }
 
 func (r *fakeWriterEventRows) Err() error {
