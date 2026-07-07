@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"mirofish-novel/apps/api/internal/assets"
+	"mirofish-novel/apps/api/internal/auth"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/llm"
 	"mirofish-novel/apps/api/internal/projectoverview"
@@ -23,6 +24,7 @@ import (
 )
 
 type Config struct {
+	AuthReader                      auth.Reader
 	WriterStarter                   workflows.WriterStarter
 	WriterReader                    workflows.WriterReader
 	WriterEventReader               workflows.WriterEventReader
@@ -82,6 +84,7 @@ type Config struct {
 }
 
 type Server struct {
+	authReader                      auth.Reader
 	writerStarter                   workflows.WriterStarter
 	writerReader                    workflows.WriterReader
 	writerEventReader               workflows.WriterEventReader
@@ -509,6 +512,10 @@ type startStoryGraphBondGenerationResponse struct {
 }
 
 func NewServer(config Config) *Server {
+	authReader := config.AuthReader
+	if authReader == nil {
+		authReader = auth.NewDisabledReader()
+	}
 	starter := config.WriterStarter
 	if starter == nil {
 		starter = workflows.NewLocalWriterStarter()
@@ -742,6 +749,7 @@ func NewServer(config Config) *Server {
 		characterConsoleStore = characterconsole.NewDisabledStore()
 	}
 	return &Server{
+		authReader:                      authReader,
 		writerStarter:                   starter,
 		writerReader:                    reader,
 		writerEventReader:               writerEventReader,
@@ -808,6 +816,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 			"status":  "ok",
 			"service": "mirofish-api",
 		})
+	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
+		s.handleGetCurrentUser(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
 		s.handleListWorkflowRunEvents(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
@@ -995,6 +1005,24 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 	default:
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
 	}
+}
+
+func (s *Server) handleGetCurrentUser(response http.ResponseWriter, request *http.Request) {
+	userID := strings.TrimSpace(request.Header.Get("X-User-Id"))
+	if userID == "" {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, "user context is required", nil)
+		return
+	}
+	currentUser, err := s.authReader.GetCurrentUser(request.Context(), auth.GetCurrentUserInput{
+		UserID:    userID,
+		RequestID: requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, currentUser)
 }
 
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
@@ -4916,6 +4944,54 @@ func publicManuscriptExportErrorMessage(code string) string {
 		return "invalid manuscript export request"
 	default:
 		return "manuscript export request failed"
+	}
+}
+
+func statusForAuthCode(code string) int {
+	switch code {
+	case auth.CodeUnauthenticated:
+		return http.StatusUnauthorized
+	case auth.CodeValidationFailed:
+		return http.StatusBadRequest
+	case auth.CodeUserNotFound:
+		return http.StatusNotFound
+	case auth.CodeAccessDenied:
+		return http.StatusForbidden
+	default:
+		return http.StatusServiceUnavailable
+	}
+}
+
+func publicAuthCode(code string) string {
+	switch code {
+	case auth.CodeUnauthenticated,
+		auth.CodeBackendUnconfigured,
+		auth.CodeUserNotFound,
+		auth.CodeAccessDenied,
+		auth.CodeLookupFailed,
+		auth.CodeValidationFailed:
+		return code
+	default:
+		return auth.CodeLookupFailed
+	}
+}
+
+func authPublicErrorMessage(code string) string {
+	switch code {
+	case auth.CodeUnauthenticated:
+		return "user context is required"
+	case auth.CodeBackendUnconfigured:
+		return "auth backend is not configured"
+	case auth.CodeUserNotFound:
+		return "current user was not found"
+	case auth.CodeAccessDenied:
+		return "current user access is denied"
+	case auth.CodeValidationFailed:
+		return "invalid auth request"
+	case auth.CodeLookupFailed:
+		return "auth lookup failed"
+	default:
+		return "auth request failed"
 	}
 }
 

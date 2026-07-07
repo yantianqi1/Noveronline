@@ -30,6 +30,8 @@ usage_events
 resource_locks
 ```
 
+Wave 2 W2-S1 已新增 `/v1/me` 的 Go auth reader seam，但尚未新增 schema。该 endpoint 的目标数据源仍是既有 `users`、`tenants`、`tenant_memberships`、`projects` 和 `project_members`：返回 current user public metadata、active tenant membership summaries，以及 active project membership summaries。当前实现只通过注入 `auth.Reader` 暴露 fail-closed API contract；未配置 reader 时返回 `AUTH_BACKEND_UNCONFIGURED`，不会从 `X-Tenant-Id`、body 或 route params 伪造 tenant/project membership。后续 DB-backed auth reader 必须读取 active user/membership/project public columns，设置明确 tenant/auth context 或使用受控 service-role lookup，并把 query/scan/rows failure 稳定为 `AUTH_LOOKUP_FAILED`，不得公开 prompt/body/content、API key、encrypted credential、`credential_ref`、object key、draft、manuscript 或底层 driver 文本。
+
 ## Project / File Tables
 
 ```text

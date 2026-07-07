@@ -32,6 +32,10 @@
 常见 code：
 
 - `UNAUTHENTICATED`
+- `AUTH_BACKEND_UNCONFIGURED`
+- `AUTH_USER_NOT_FOUND`
+- `AUTH_ACCESS_DENIED`
+- `AUTH_LOOKUP_FAILED`
 - `FORBIDDEN`
 - `NOT_FOUND`
 - `VALIDATION_FAILED`
@@ -63,6 +67,8 @@ GET /v1/tenants/{tenantSlug}/members
 POST /v1/tenants/{tenantSlug}/invites
 PATCH /v1/tenants/{tenantSlug}/members/{userId}
 ```
+
+`GET /v1/me` is the Wave 2 W2-S1 current-user seam. It requires a trusted actor context from `X-User-Id` in the current development transport; missing or blank user context returns `UNAUTHENTICATED` before the auth reader is called. It does not require `X-Tenant-Id`, does not trust body tenant fields, and must not fabricate tenant/project memberships from request headers. The endpoint uses an injected auth reader and defaults to `AUTH_BACKEND_UNCONFIGURED` / HTTP 503 when no real auth backend is configured. Successful responses contain only public user metadata plus active tenant and project membership summaries: user id, email, display name, avatar URL, tenant id/name/role/status, and project tenant id/project id/name/role/status. Reader errors are mapped to stable public messages such as `AUTH_USER_NOT_FOUND`, `AUTH_ACCESS_DENIED`, `AUTH_LOOKUP_FAILED`, or `VALIDATION_FAILED`; HTTP responses must not echo reader exception text containing prompt/body/content, API keys, encrypted credential material, `credential_ref`, object keys, raw/source text, drafts, or manuscripts. DB-backed membership lookup, session cookies/JWT, tenant/project picker, and route-wide RBAC enforcement remain follow-up Wave 2 work.
 
 ## Projects
 

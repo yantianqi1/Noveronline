@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"mirofish-novel/apps/api/internal/assets"
+	"mirofish-novel/apps/api/internal/auth"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/llm"
 	"mirofish-novel/apps/api/internal/projectoverview"
@@ -27,6 +28,22 @@ import (
 type recordingStarter struct {
 	input workflows.StartWriterRunInput
 	err   error
+}
+
+type recordingAuthReader struct {
+	input  auth.GetCurrentUserInput
+	result auth.CurrentUser
+	err    error
+	called bool
+}
+
+func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.GetCurrentUserInput) (auth.CurrentUser, error) {
+	r.input = input
+	r.called = true
+	if r.err != nil {
+		return auth.CurrentUser{}, r.err
+	}
+	return r.result, nil
 }
 
 func (s *recordingStarter) StartWriterRun(ctx context.Context, input workflows.StartWriterRunInput) (workflows.WriterRun, error) {
@@ -1171,6 +1188,182 @@ func TestUnknownRouteReturnsStableErrorEnvelope(t *testing.T) {
 	}
 	if body.Error.RequestID != "req_test" {
 		t.Fatalf("expected request id to round-trip, got %#v", body.Error.RequestID)
+	}
+}
+
+func TestGetCurrentUserRequiresTrustedUserContextBeforeReader(t *testing.T) {
+	reader := &recordingAuthReader{}
+	server := NewServer(Config{AuthReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("X-Request-Id", "req_me_missing_user")
+	request.Header.Set("X-Tenant-Id", "tenant-header-must-not-matter")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called {
+		t.Fatal("auth reader was called without trusted user context")
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "UNAUTHENTICATED" ||
+		body.Error.Message != "user context is required" ||
+		body.Error.RequestID != "req_me_missing_user" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestGetCurrentUserFailsClosedWhenAuthReaderIsDisabled(t *testing.T) {
+	server := NewServer(Config{})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_me_disabled")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "AUTH_BACKEND_UNCONFIGURED" ||
+		body.Error.Message != "auth backend is not configured" ||
+		body.Error.RequestID != "req_me_disabled" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestGetCurrentUserUsesInjectedReaderAndReturnsOnlyPublicSummary(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{
+				UserID:      "user-123",
+				Email:       "author@example.test",
+				DisplayName: "Author",
+				AvatarURL:   "https://cdn.example.test/avatar.png",
+			},
+			ActiveTenants: []auth.TenantMembershipSummary{{
+				TenantID: "tenant-123",
+				Name:     "Studio",
+				Role:     "owner",
+				Status:   "active",
+			}},
+			ActiveProjects: []auth.ProjectMembershipSummary{{
+				TenantID:  "tenant-123",
+				ProjectID: "project-123",
+				Name:      "Long Novel",
+				Role:      "editor",
+				Status:    "active",
+			}},
+		},
+	}
+	server := NewServer(Config{AuthReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("X-User-Id", " user-123 ")
+	request.Header.Set("X-Request-Id", "req_me_success")
+	request.Header.Set("X-Tenant-Id", "evil-header-tenant")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.input.UserID != "user-123" || reader.input.RequestID != "req_me_success" {
+		t.Fatalf("reader did not receive trusted user/request context: %#v", reader.input)
+	}
+	rawBody := response.Body.String()
+	var body map[string]any
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if _, ok := body["tenant_id"]; ok {
+		t.Fatalf("/v1/me fabricated top-level tenant_id from headers: %#v", body)
+	}
+	if _, ok := body["project_id"]; ok {
+		t.Fatalf("/v1/me fabricated top-level project_id from headers: %#v", body)
+	}
+	for _, forbidden := range []string{
+		"evil-header-tenant",
+		"prompt",
+		"body",
+		"content_text",
+		"api_key",
+		"encrypted_credential",
+		"credential_ref",
+		"object_key",
+		"draft",
+		"manuscript",
+	} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("/v1/me response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+	user := body["user"].(map[string]any)
+	if user["user_id"] != "user-123" || user["email"] != "author@example.test" || user["display_name"] != "Author" {
+		t.Fatalf("unexpected user summary: %#v", user)
+	}
+	tenants := body["active_tenants"].([]any)
+	tenant := tenants[0].(map[string]any)
+	if tenant["tenant_id"] != "tenant-123" || tenant["role"] != "owner" {
+		t.Fatalf("unexpected tenant summary: %#v", tenant)
+	}
+	projects := body["active_projects"].([]any)
+	project := projects[0].(map[string]any)
+	if project["project_id"] != "project-123" || project["tenant_id"] != "tenant-123" || project["role"] != "editor" {
+		t.Fatalf("unexpected project summary: %#v", project)
+	}
+}
+
+func TestGetCurrentUserSanitizesReaderErrorsAtHTTPBoundary(t *testing.T) {
+	reader := &recordingAuthReader{
+		err: &auth.AppError{
+			Code:    "AUTH_USER_NOT_FOUND",
+			Message: "prompt body api_key encrypted_credential credential_ref object_key draft manuscript must not leak",
+		},
+	}
+	server := NewServer(Config{AuthReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_me_error")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "AUTH_USER_NOT_FOUND" ||
+		body.Error.Message != "current user was not found" ||
+		body.Error.RequestID != "req_me_error" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+	for _, forbidden := range []string{
+		"prompt",
+		"body",
+		"api_key",
+		"encrypted_credential",
+		"credential_ref",
+		"object_key",
+		"draft",
+		"manuscript",
+	} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("/v1/me error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
 	}
 }
 

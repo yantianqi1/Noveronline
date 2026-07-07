@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；完整 compose health、真实 Temporal handoff、Auth/project picker 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam 已 fail-closed 接入；完整 compose health、真实 Temporal handoff、DB-backed auth/project picker 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -64,11 +64,51 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation 均已通过对应验收记录 |
-| 当前未完成重点 | 真实 LLM-bound E2E 执行、真正内容导出 artifact service |
-| 本轮开发 slice | W1-S7 Writer browser verification evidence documentation：记录 coordinator 已完成的 Writer browser fail-closed / replay / no-leak / responsive 验证证据；不改 app code |
-| 推荐下一步 | 提供 resolved live/local provider handoff env 后执行 W1-S6 live smoke，或继续推进真实 LLM-bound Writer E2E；W1-S7 只记录 browser verification evidence，不声明 live provider E2E 或内容导出完成 |
+| 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 DB-backed auth reader、tenant/project picker、RBAC enforcement |
+| 本轮开发 slice | W2-S1 `/v1/me` auth reader seam：新增 fail-closed current-user API 契约，默认不伪造 header-derived tenant/project memberships |
+| 推荐下一步 | W2-S2 实现 DB-backed auth reader / tenant/project membership read side，或提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S1 不声明完整 Auth/RBAC 或 project picker 完成 |
+
+## Wave 2 W2-S1 `/v1/me` auth reader seam
+
+Context:
+
+- Wave 1 browser verification 已记录；本机未配置 `MIROFISH_PI_WRITER_LIVE_RESOLVED_*`，因此不能诚实执行真实 provider E2E。
+- Wave 2 入口先补最小 Auth API seam，让后续 DB-backed membership、tenant/project picker 和 RBAC enforcement 有可测试边界。
+- Scope 限定在 `apps/api/internal/auth/**` 与 `apps/api/internal/httpapi/**`；不改前端、不改 schema、不替换现有业务路由的 `X-Tenant-Id` 兼容路径。
+
+TDD / Review:
+
+- Implementer subagent Rawls 先跑 RED：`cd apps/api && go test ./internal/httpapi -run 'Auth|CurrentUser|Me' -count=1`，失败原因是 `mirofish-novel/apps/api/internal/auth` 尚不存在。
+- Rawls 新增 `auth.Reader`、public current-user/membership summary types、`DisabledReader`、`AppError` / `ErrorCode`，并把 `AuthReader` 注入 `httpapi.Config` / `Server`。
+- `GET /v1/me` 只要求 trimmed `X-User-Id`，缺失时返回 `UNAUTHENTICATED` 且不调用 reader；不要求 `X-Tenant-Id`，也不从 header 伪造 tenant/project membership。
+- 默认无 reader 时 fail closed 为 `AUTH_BACKEND_UNCONFIGURED` / HTTP 503；reader error 在 HTTP boundary 映射为稳定 public message，不回显 reader message 中的 prompt/body/content、API key、encrypted credential、`credential_ref`、object key、draft 或 manuscript。
+- Spec reviewer Kant APPROVED：确认 exact `/v1/me` route、缺用户上下文先失败、不伪造 header-derived membership，并额外跑 `go test ./...`。
+- Quality reviewer Gibbs APPROVED：确认 scope 窄、测试覆盖缺用户/disabled backend/injected reader/sanitized error、无生产 mock success，并确认 `go test ./... -count=1`、`git diff --check`、`gofmt -l` clean。
+
+Verification:
+
+- `cd apps/api && go test ./internal/auth ./internal/httpapi -run 'Auth|CurrentUser|Me' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'Auth|CurrentUser|Me|Writer|Draft|Trace|LLM|Workflow' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -count=1` 通过。
+- Reviewer 侧额外跑过 `cd apps/api && go test ./... -count=1` 通过。
+- `git diff --check` 和触达 Go 文件尾随空白扫描通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+
+Next:
+
+- W2-S2：DB-backed auth reader，读取 `users` / active `tenant_memberships` / active `projects` + project role summary，并在 app-role/RLS 或 service-role boundary 上保持稳定 public errors。
+- W2-S3：Next tenant/project picker 消费 `/v1/me`，仍不在 UI 暴露 prompt/provider/raw/body/content/API key/credential/object key/draft/manuscript。
+- W2-S4：RBAC enforcement，把 viewer/editor/admin/writer/analyst 权限接入关键 mutation/read gates。
 
 ## Wave 1 W1-S7 Writer browser verification evidence documentation
 
