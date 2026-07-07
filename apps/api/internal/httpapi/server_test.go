@@ -88,6 +88,18 @@ func projectReadAllowedConfig(config Config) Config {
 	return config
 }
 
+func assertSingleAssetManageAuthorization(t *testing.T, authorizer *recordingAuthorizer, requestID string) {
+	t.Helper()
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionAssetManage ||
+		authorizer.inputs[0].RequestID != requestID {
+		t.Fatalf("unexpected asset_manage authorizer inputs: %#v", authorizer.inputs)
+	}
+}
+
 func (s *recordingStarter) StartWriterRun(ctx context.Context, input workflows.StartWriterRunInput) (workflows.WriterRun, error) {
 	s.input = input
 	if s.err != nil {
@@ -5446,7 +5458,7 @@ func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{WriterStarter: &recordingStarter{}})
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{
 				"api_key":"sk-hidden",
 				"prompt":"private",
@@ -5456,6 +5468,7 @@ func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
 			request.Header.Set("X-Request-Id", tt.requestID)
 			response := httptest.NewRecorder()
 
@@ -5542,9 +5555,124 @@ func TestAdoptAssetFailsClosedWithoutConfiguredStore(t *testing.T) {
 	}
 }
 
+func TestAssetManageRBACProjectAssetMutationsDenyBeforeDecodeAndSideEffects(t *testing.T) {
+	deniedErr := &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "no asset access prompt=hidden api_key=sk-hidden credential_ref=cred-hidden draft=private manuscript=private",
+	}
+	cases := []struct {
+		name  string
+		path  string
+		build func(*recordingAuthorizer) (Config, func(*testing.T))
+	}{
+		{
+			name: "create_asset",
+			path: "/v1/projects/project-123/assets",
+			build: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingAssetMutationStore{}
+				return Config{Authorizer: authorizer, AssetMutationStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.createInput.ProjectID != "" {
+						t.Fatalf("create asset store ran after RBAC denial: %#v", store.createInput)
+					}
+				}
+			},
+		},
+		{
+			name: "asset_ingestion",
+			path: "/v1/projects/project-123/asset-ingestions",
+			build: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingAssetIngestionStarter{}
+				return Config{Authorizer: authorizer, AssetIngestionStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.ProjectID != "" {
+						t.Fatalf("asset ingestion starter ran after RBAC denial: %#v", starter.input)
+					}
+				}
+			},
+		},
+		{
+			name: "style_extraction",
+			path: "/v1/projects/project-123/style-extractions",
+			build: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingStyleExtractionStarter{}
+				return Config{Authorizer: authorizer, StyleExtractionStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.ProjectID != "" {
+						t.Fatalf("style extraction starter ran after RBAC denial: %#v", starter.input)
+					}
+				}
+			},
+		},
+		{
+			name: "asset_reindex",
+			path: "/v1/projects/project-123/assets/reindex",
+			build: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingAssetReindexStarter{}
+				return Config{Authorizer: authorizer, AssetReindexStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.ProjectID != "" {
+						t.Fatalf("asset reindex starter ran after RBAC denial: %#v", starter.input)
+					}
+				}
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{err: deniedErr}
+			config, assertNoSideEffect := tt.build(authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(
+				http.MethodPost,
+				tt.path,
+				strings.NewReader(`{"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","object_key":"objects/private.txt","draft":"private","manuscript":"private"`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-asset-manage-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 before decode, got %d: %s", response.Code, response.Body.String())
+			}
+			assertSingleAssetManageAuthorization(t, authorizer, "req-asset-manage-denied")
+			assertNoSideEffect(t)
+			rawBody := response.Body.String()
+			if strings.Contains(rawBody, "VALIDATION_FAILED") ||
+				strings.Contains(rawBody, "no asset access") ||
+				strings.Contains(rawBody, "api_key") ||
+				strings.Contains(rawBody, "sk-hidden") ||
+				strings.Contains(rawBody, "prompt") ||
+				strings.Contains(rawBody, "credential_ref") ||
+				strings.Contains(rawBody, "object_key") ||
+				strings.Contains(rawBody, "objects/private.txt") ||
+				strings.Contains(rawBody, "user-123") ||
+				strings.Contains(rawBody, "draft") ||
+				strings.Contains(rawBody, "manuscript") {
+				t.Fatalf("auth denial leaked validation or sensitive detail: %s", rawBody)
+			}
+			var body errorEnvelope
+			if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied ||
+				body.Error.Message != "current user access is denied" ||
+				body.Error.RequestID != "req-asset-manage-denied" {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+		})
+	}
+}
+
 func TestCreateAssetUsesTenantProjectActorRequestAndReturnsSanitizedAsset(t *testing.T) {
 	store := &recordingAssetMutationStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetMutationStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetMutationStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/assets",
@@ -5560,6 +5688,7 @@ func TestCreateAssetUsesTenantProjectActorRequestAndReturnsSanitizedAsset(t *tes
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, response.Code, response.Body.String())
 	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-create")
 	if store.createInput.TenantID != "tenant-123" || store.createInput.ProjectID != "project-123" || store.createInput.ActorID != "user-123" || store.createInput.RequestID != "req-create" {
 		t.Fatalf("unexpected create context: %#v", store.createInput)
 	}
@@ -5650,7 +5779,7 @@ func TestDeleteAssetUsesTenantActorRequestAndReturnsSanitizedResult(t *testing.T
 }
 
 func TestAssetMutationsFailClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	cases := []struct {
 		method string
 		path   string
@@ -5663,6 +5792,7 @@ func TestAssetMutationsFailClosedWithoutConfiguredStore(t *testing.T) {
 	for _, testCase := range cases {
 		request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader(testCase.body))
 		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
 		response := httptest.NewRecorder()
 
 		server.ServeHTTP(response, request)
@@ -5789,7 +5919,8 @@ func TestBulkAssetActionFailsClosedWithoutConfiguredStore(t *testing.T) {
 
 func TestStartAssetIngestionCarriesTenantProjectActorRequestAndMaterialContext(t *testing.T) {
 	starter := &recordingAssetIngestionStarter{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetIngestionStarter: starter})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetIngestionStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/asset-ingestions",
@@ -5806,6 +5937,7 @@ func TestStartAssetIngestionCarriesTenantProjectActorRequestAndMaterialContext(t
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-ingest")
 	if starter.input.TenantID != "tenant-123" || starter.input.ProjectID != "project-123" {
 		t.Fatalf("starter lost tenant/project context: %#v", starter.input)
 	}
@@ -5833,10 +5965,11 @@ func TestStartAssetIngestionCarriesTenantProjectActorRequestAndMaterialContext(t
 }
 
 func TestStartAssetIngestionFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/asset-ingestions", strings.NewReader(`{"material_text":"素材","hint_type":"note"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5894,7 +6027,8 @@ func TestGetAssetIngestionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testing
 
 func TestStartStyleExtractionCarriesTenantProjectActorRequestAndSourceContext(t *testing.T) {
 	starter := &recordingStyleExtractionStarter{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StyleExtractionStarter: starter})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, StyleExtractionStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/style-extractions",
@@ -5911,6 +6045,7 @@ func TestStartStyleExtractionCarriesTenantProjectActorRequestAndSourceContext(t 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-style")
 	if starter.input.TenantID != "tenant-123" || starter.input.ProjectID != "project-123" {
 		t.Fatalf("starter lost tenant/project context: %#v", starter.input)
 	}
@@ -5938,10 +6073,11 @@ func TestStartStyleExtractionCarriesTenantProjectActorRequestAndSourceContext(t 
 }
 
 func TestStartStyleExtractionFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/style-extractions", strings.NewReader(`{"material_text":"风格样本"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5999,7 +6135,8 @@ func TestGetStyleExtractionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testin
 
 func TestStartAssetReindexCarriesTenantProjectActorRequestAndOptionsContext(t *testing.T) {
 	starter := &recordingAssetReindexStarter{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReindexStarter: starter})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetReindexStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/assets/reindex",
@@ -6016,6 +6153,7 @@ func TestStartAssetReindexCarriesTenantProjectActorRequestAndOptionsContext(t *t
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-reindex")
 	if starter.input.TenantID != "tenant-123" || starter.input.ProjectID != "project-123" {
 		t.Fatalf("starter lost tenant/project context: %#v", starter.input)
 	}
@@ -6046,10 +6184,11 @@ func TestStartAssetReindexCarriesTenantProjectActorRequestAndOptionsContext(t *t
 }
 
 func TestStartAssetReindexFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/assets/reindex", strings.NewReader(`{"scope":"project","mode":"keyword"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)

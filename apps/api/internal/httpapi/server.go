@@ -1393,6 +1393,10 @@ func (s *Server) authorizeProjectRead(response http.ResponseWriter, request *htt
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionProjectRead)
 }
 
+func (s *Server) authorizeAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
+	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionAssetManage)
+}
+
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -2614,6 +2618,9 @@ func (s *Server) handleCreateAsset(response http.ResponseWriter, request *http.R
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project asset route not found", nil)
 		return
 	}
+	if !s.authorizeAssetManage(response, request, tenantID, projectID) {
+		return
+	}
 	var payload createAssetRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2820,6 +2827,9 @@ func (s *Server) handleStartAssetIngestion(response http.ResponseWriter, request
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project asset ingestion route not found", nil)
 		return
 	}
+	if !s.authorizeAssetManage(response, request, tenantID, projectID) {
+		return
+	}
 	var payload startAssetIngestionRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2882,6 +2892,9 @@ func (s *Server) handleStartStyleExtraction(response http.ResponseWriter, reques
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project style extraction route not found", nil)
 		return
 	}
+	if !s.authorizeAssetManage(response, request, tenantID, projectID) {
+		return
+	}
 	var payload startStyleExtractionRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2942,6 +2955,9 @@ func (s *Server) handleStartAssetReindex(response http.ResponseWriter, request *
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "assets/reindex")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project asset reindex route not found", nil)
+		return
+	}
+	if !s.authorizeAssetManage(response, request, tenantID, projectID) {
 		return
 	}
 	var payload startAssetReindexRequest
