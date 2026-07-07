@@ -1445,6 +1445,24 @@ func (s *Server) authorizeSingleAssetManage(response http.ResponseWriter, reques
 	return s.authorizeAssetManage(response, request, tenantID, record.ProjectID)
 }
 
+func (s *Server) authorizeWorldlineSessionCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, sessionID string) bool {
+	record, err := s.worldlineSessionReader.GetSession(request.Context(), worldline.GetSessionInput{
+		TenantID:  tenantID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
+		return false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite)
+}
+
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -2323,6 +2341,9 @@ func (s *Server) handleStartWorldlineStep(response http.ResponseWriter, request 
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline step route not found", nil)
 		return
 	}
+	if !s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID) {
+		return
+	}
 	var payload startWorldlineStepRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2559,6 +2580,9 @@ func (s *Server) handleInjectWorldlineVariable(response http.ResponseWriter, req
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline variable route not found", nil)
 		return
 	}
+	if !s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID) {
+		return
+	}
 	var payload injectWorldlineVariableRequest
 	decoder := json.NewDecoder(request.Body)
 	if err := decoder.Decode(&payload); err != nil {
@@ -2594,6 +2618,9 @@ func (s *Server) handleCreateWorldlineSavedPath(response http.ResponseWriter, re
 	sessionID = strings.TrimSpace(strings.Trim(sessionID, "/"))
 	if sessionID == "" || strings.Contains(sessionID, "/") {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline saved path route not found", nil)
+		return
+	}
+	if !s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID) {
 		return
 	}
 	var payload createWorldlineSavedPathRequest
@@ -5649,6 +5676,21 @@ func assetOwnerPreflightPublicErrorMessage(code string) string {
 		return "asset query failed"
 	default:
 		return "asset request failed"
+	}
+}
+
+func worldlineSessionOwnerPreflightPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "worldline session was not found"
+	case "VALIDATION_FAILED":
+		return "invalid worldline session lookup"
+	case "WORLDLINE_SESSION_BACKEND_UNCONFIGURED":
+		return "worldline session backend is not configured"
+	case "WORLDLINE_QUERY_FAILED":
+		return "worldline session lookup failed"
+	default:
+		return "worldline session lookup failed"
 	}
 }
 

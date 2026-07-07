@@ -112,6 +112,18 @@ func assertSingleCreativeWriteAuthorization(t *testing.T, authorizer *recordingA
 	}
 }
 
+func assertSingleCreativeWriteAuthorizationForProject(t *testing.T, authorizer *recordingAuthorizer, userID string, projectID string, requestID string) {
+	t.Helper()
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != userID ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != projectID ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+		authorizer.inputs[0].RequestID != requestID {
+		t.Fatalf("unexpected creative_write authorizer inputs: %#v", authorizer.inputs)
+	}
+}
+
 func (s *recordingStarter) StartWriterRun(ctx context.Context, input workflows.StartWriterRunInput) (workflows.WriterRun, error) {
 	s.input = input
 	if s.err != nil {
@@ -3250,6 +3262,9 @@ func TestListWorldlineSavedPathsUsesTenantProjectScopeAndSanitizedRows(t *testin
 }
 
 func TestCreateWorldlineSavedPathCarriesTenantSessionActorContextAndSanitizesPayload(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
 	store := &recordingWorldlineSavedPathStore{
 		path: worldline.SavedPathRecord{
 			PathID:            "path-1",
@@ -3264,7 +3279,8 @@ func TestCreateWorldlineSavedPathCarriesTenantSessionActorContextAndSanitizesPay
 			UpdatedAt:         "2026-07-05T00:01:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlineSavedPathStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineSavedPathStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/saved-paths", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"title":"雨夜谈判路线",
@@ -3284,6 +3300,10 @@ func TestCreateWorldlineSavedPathCarriesTenantSessionActorContextAndSanitizesPay
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+		t.Fatalf("session reader lost saved path owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
 	if store.input.TenantID != "tenant-123" ||
 		store.input.SessionID != "session-1" ||
 		store.input.ActorUserID != "user-456" ||
@@ -3311,7 +3331,10 @@ func TestCreateWorldlineSavedPathCarriesTenantSessionActorContextAndSanitizesPay
 }
 
 func TestCreateWorldlineSavedPathFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/saved-paths", strings.NewReader(`{
 		"title":"雨夜谈判路线",
 		"selected_event_ids":["event-1"]
@@ -3338,6 +3361,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 		message   string
 		requestID string
 		allowAuth bool
+		ownerAuth bool
 	}{
 		{
 			name:      "session unknown field",
@@ -3355,6 +3379,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			body:      `{"mode":"director","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid worldline step payload",
 			requestID: "req-worldline-step-validation",
+			ownerAuth: true,
 		},
 		{
 			name:      "preparation unknown field",
@@ -3388,6 +3413,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			body:      `{"name":"变量","locked":"yes","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid worldline variable payload",
 			requestID: "req-worldline-variable-validation",
+			ownerAuth: true,
 		},
 		{
 			name:      "saved path type error",
@@ -3396,6 +3422,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			body:      `{"title":"路线","selected_event_ids":"event-1","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid worldline saved path payload",
 			requestID: "req-worldline-saved-path-validation",
+			ownerAuth: true,
 		},
 	}
 
@@ -3404,6 +3431,12 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			config := Config{WriterStarter: &recordingStarter{}}
 			if tt.allowAuth {
 				config.Authorizer = &recordingAuthorizer{}
+			}
+			if tt.ownerAuth {
+				config.Authorizer = &recordingAuthorizer{}
+				config.WorldlineSessionReader = &recordingWorldlineSessionReader{
+					session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+				}
 			}
 			server := NewServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
@@ -3558,6 +3591,310 @@ func TestCreativeWriteRBACDeniesProjectMutationsBeforeDecodeAndSideEffects(t *te
 	}
 }
 
+func TestWorldlineSessionOwnerCreativeWriteDeniesBeforeDecodeAndSideEffects(t *testing.T) {
+	deniedErr := &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "denied user-123 prompt provider_response api_key encrypted_api_key credential_ref object_key draft manuscript",
+	}
+	for _, tt := range []struct {
+		name        string
+		path        string
+		buildConfig func(*recordingWorldlineSessionReader, *recordingAuthorizer) (Config, func(*testing.T))
+	}{
+		{
+			name: "step",
+			path: "/v1/worldline-sessions/session-1/steps",
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingWorldlineStepStarter{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineStepStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.SessionID != "" {
+						t.Fatalf("worldline step starter ran after owner RBAC denial: %#v", starter.input)
+					}
+				}
+			},
+		},
+		{
+			name: "variable",
+			path: "/v1/worldline-sessions/session-1/variables",
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlineVariableStore{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineVariableStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.input.SessionID != "" {
+						t.Fatalf("worldline variable store ran after owner RBAC denial: %#v", store.input)
+					}
+				}
+			},
+		},
+		{
+			name: "saved path",
+			path: "/v1/worldline-sessions/session-1/saved-paths",
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlineSavedPathStore{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineSavedPathStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.input.SessionID != "" {
+						t.Fatalf("worldline saved path store ran after owner RBAC denial: %#v", store.input)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorldlineSessionReader{
+				session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+			}
+			authorizer := &recordingAuthorizer{err: deniedErr}
+			config, assertNoSideEffect := tt.buildConfig(reader, authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{
+				"mode":,
+				"api_key":"sk-hidden",
+				"prompt":"private prompt",
+				"provider_response":"raw provider",
+				"credential_ref":"cred-hidden",
+				"object_key":"private/object",
+				"draft":"private draft",
+				"manuscript":"private manuscript"
+			}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-worldline-owner-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+				t.Fatalf("session reader lost owner lookup scope: %#v", reader.getInput)
+			}
+			assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-worldline-owner-denied")
+			assertNoSideEffect(t)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied ||
+				body.Error.Message != "current user access is denied" ||
+				body.Error.RequestID != "req-worldline-owner-denied" {
+				t.Fatalf("unexpected owner RBAC denial body: %#v", body)
+			}
+			assertWorldlineSessionMutationErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestWorldlineSessionOwnerLookupErrorDoesNotAuthorizeOrMutateAndSanitizesMessage(t *testing.T) {
+	lookupErr := errors.New("driver raw prompt sk-hidden credential_ref draft manuscript provider_response object_key actor-user")
+	for _, tt := range []struct {
+		name        string
+		path        string
+		body        string
+		buildConfig func(*recordingWorldlineSessionReader, *recordingAuthorizer) (Config, func(*testing.T))
+	}{
+		{
+			name: "step",
+			path: "/v1/worldline-sessions/session-1/steps",
+			body: `{"mode":"director","options":{"max_turns":2}}`,
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingWorldlineStepStarter{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineStepStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.SessionID != "" {
+						t.Fatalf("worldline step starter ran after owner lookup error: %#v", starter.input)
+					}
+				}
+			},
+		},
+		{
+			name: "variable",
+			path: "/v1/worldline-sessions/session-1/variables",
+			body: `{"name":"变量","locked":true}`,
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlineVariableStore{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineVariableStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.input.SessionID != "" {
+						t.Fatalf("worldline variable store ran after owner lookup error: %#v", store.input)
+					}
+				}
+			},
+		},
+		{
+			name: "saved path",
+			path: "/v1/worldline-sessions/session-1/saved-paths",
+			body: `{"title":"路线","selected_event_ids":["event-1"]}`,
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlineSavedPathStore{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineSavedPathStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.input.SessionID != "" {
+						t.Fatalf("worldline saved path store ran after owner lookup error: %#v", store.input)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorldlineSessionReader{err: lookupErr}
+			authorizer := &recordingAuthorizer{}
+			config, assertNoSideEffect := tt.buildConfig(reader, authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-user")
+			request.Header.Set("X-Request-Id", "req-worldline-owner-lookup")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+				t.Fatalf("session reader lost owner lookup scope: %#v", reader.getInput)
+			}
+			if len(authorizer.inputs) != 0 {
+				t.Fatalf("authorizer ran after owner lookup error: %#v", authorizer.inputs)
+			}
+			assertNoSideEffect(t)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != "WORLDLINE_QUERY_FAILED" ||
+				body.Error.Message != "worldline session lookup failed" ||
+				body.Error.RequestID != "req-worldline-owner-lookup" {
+				t.Fatalf("unexpected owner lookup error body: %#v", body)
+			}
+			assertWorldlineSessionMutationErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestWorldlineSessionOwnerBlankProjectFailsClosedBeforeAuthDecodeAndSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		path        string
+		buildConfig func(*recordingWorldlineSessionReader, *recordingAuthorizer) (Config, func(*testing.T))
+	}{
+		{
+			name: "step",
+			path: "/v1/worldline-sessions/session-1/steps",
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingWorldlineStepStarter{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineStepStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.SessionID != "" {
+						t.Fatalf("worldline step starter ran after blank owner project: %#v", starter.input)
+					}
+				}
+			},
+		},
+		{
+			name: "variable",
+			path: "/v1/worldline-sessions/session-1/variables",
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlineVariableStore{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineVariableStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.input.SessionID != "" {
+						t.Fatalf("worldline variable store ran after blank owner project: %#v", store.input)
+					}
+				}
+			},
+		},
+		{
+			name: "saved path",
+			path: "/v1/worldline-sessions/session-1/saved-paths",
+			buildConfig: func(reader *recordingWorldlineSessionReader, authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlineSavedPathStore{}
+				return Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader, Authorizer: authorizer, WorldlineSavedPathStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.input.SessionID != "" {
+						t.Fatalf("worldline saved path store ran after blank owner project: %#v", store.input)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorldlineSessionReader{
+				session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "  "},
+			}
+			authorizer := &recordingAuthorizer{}
+			config, assertNoSideEffect := tt.buildConfig(reader, authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{
+				"mode":,
+				"api_key":"sk-hidden",
+				"prompt":"private prompt",
+				"credential_ref":"cred-hidden",
+				"draft":"private draft",
+				"manuscript":"private manuscript"
+			}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-worldline-owner-blank")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+				t.Fatalf("session reader lost owner lookup scope: %#v", reader.getInput)
+			}
+			if len(authorizer.inputs) != 0 {
+				t.Fatalf("authorizer ran for blank owner project: %#v", authorizer.inputs)
+			}
+			assertNoSideEffect(t)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied ||
+				body.Error.Message != "current user access is denied" ||
+				body.Error.RequestID != "req-worldline-owner-blank" {
+				t.Fatalf("unexpected blank owner project body: %#v", body)
+			}
+			assertWorldlineSessionMutationErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func assertWorldlineSessionMutationErrorHasNoPrivateLeaks(t *testing.T, body string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"user-123",
+		"actor-user",
+		"private prompt",
+		"raw provider",
+		"api_key",
+		"sk-hidden",
+		"prompt",
+		"provider_response",
+		"encrypted_api_key",
+		"credential_ref",
+		"cred-hidden",
+		"object_key",
+		"private/object",
+		"draft",
+		"manuscript",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("worldline session mutation error leaked forbidden detail %q: %s", forbidden, body)
+		}
+	}
+}
+
 func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 	starter := &recordingWorldlineSessionStarter{
 		run: worldline.SessionRun{
@@ -3663,6 +4000,9 @@ func TestStartWorldlineSessionFailsClosedWithoutStarter(t *testing.T) {
 }
 
 func TestStartWorldlineStepCarriesTenantSessionActorContextAndSanitizesOptions(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
 	starter := &recordingWorldlineStepStarter{
 		run: worldline.StepRun{
 			RunID:        "run-step-1",
@@ -3672,7 +4012,8 @@ func TestStartWorldlineStepCarriesTenantSessionActorContextAndSanitizesOptions(t
 			Status:       "queued",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlineStepStarter: starter})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineStepStarter: starter})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/steps", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"mode":"director",
@@ -3688,6 +4029,10 @@ func TestStartWorldlineStepCarriesTenantSessionActorContextAndSanitizesOptions(t
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+		t.Fatalf("session reader lost step owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
 	if starter.input.TenantID != "tenant-123" ||
 		starter.input.SessionID != "session-1" ||
 		starter.input.ActorUserID != "user-456" ||
@@ -3717,7 +4062,10 @@ func TestStartWorldlineStepCarriesTenantSessionActorContextAndSanitizesOptions(t
 }
 
 func TestStartWorldlineStepFailsClosedWithoutStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/steps", strings.NewReader(`{"mode":"director"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -4238,6 +4586,9 @@ func TestUpdateWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
 }
 
 func TestInjectWorldlineVariableCarriesTenantSessionActorContextAndSanitizesPayload(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
 	store := &recordingWorldlineVariableStore{
 		variable: worldline.VariableRecord{
 			VariableID:  "variable-1",
@@ -4253,7 +4604,8 @@ func TestInjectWorldlineVariableCarriesTenantSessionActorContextAndSanitizesPayl
 			UpdatedAt:   "2026-07-05T00:01:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlineVariableStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineVariableStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/variables", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"name":"主角亲族提前失踪",
@@ -4274,6 +4626,10 @@ func TestInjectWorldlineVariableCarriesTenantSessionActorContextAndSanitizesPayl
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+		t.Fatalf("session reader lost variable owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
 	if store.input.TenantID != "tenant-123" ||
 		store.input.SessionID != "session-1" ||
 		store.input.ActorUserID != "user-456" ||
@@ -4302,7 +4658,10 @@ func TestInjectWorldlineVariableCarriesTenantSessionActorContextAndSanitizesPayl
 }
 
 func TestInjectWorldlineVariableFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/variables", strings.NewReader(`{"name":"变量"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
