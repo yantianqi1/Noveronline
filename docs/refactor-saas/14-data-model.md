@@ -310,6 +310,8 @@ reviewer_issues
 reviewer_rules
 ```
 
+当前 SaaS baseline 已在 `infra/postgres/migrations/0001_core_saas.sql` 落地 `writer_runs`、`writer_drafts` 和 `manuscript_blocks`。Pi Writer Runtime 只写 `writer_drafts.status = candidate` 的私有 draft content；draft -> manuscript 只能通过 `POST /v1/drafts/{draftId}/adoptions` 这类显式作者动作完成。DB-backed adoption store 在 app-role tenant context 下锁定 tenant-scoped candidate draft，内部把 `writer_drafts.content_text` 写入 `manuscript_blocks.content_text`，随后把 draft 标记为 `adopted` 并记录 `adopted_block_id`；公开 API 只返回 draft/block/project/status/order 等 metadata，不返回 draft/manuscript 正文、`content_text`、prompt/response、credential、object key 或 raw body/content。缺 backend、缺 candidate、已 adopted/rejected 或跨租户 draft 必须 fail closed，不得伪造 manuscript block。
+
 旧 `chapter_content` / `chapter_meta` 可以合并为 `chapters + chapter_versions`，或继续拆分。目标文档推荐合并核心字段，历史进入 versions。
 
 Writer start HTTP 边界会在调用 `WriterStarter` 前递归清洗用户提交的 `options`，移除 body-provided `tenant_id` / `project_id` 以及 credential/API key、prompt/response、body/content、source/material/raw payload、candidate/event body、draft 和 manuscript 字段；随后才补入服务端解析出的 `module_key` 与 internal `llm_resolution`。DB-backed Writer admission 还会在写入 `writer_runs.options_jsonb` 前执行同类 high-risk option 清洗，只保留 `module_key`、public ids、public turn summaries 等可审计 metadata。内部 runtime payload 仍可携带 worker 所需的 private instruction/LLM resolution，但 public read side 和 admission metadata 不返回 `options_jsonb`、prompt/body text、credential refs、draft 或 manuscript。

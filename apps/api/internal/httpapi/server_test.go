@@ -167,6 +167,22 @@ func (c *recordingWriterCanceller) CancelWriterRun(ctx context.Context, input wo
 	}, nil
 }
 
+type recordingDraftAdoptionStore struct {
+	input  workflows.DraftAdoptionInput
+	result workflows.DraftAdoptionResult
+	err    error
+	called bool
+}
+
+func (s *recordingDraftAdoptionStore) AdoptDraft(ctx context.Context, input workflows.DraftAdoptionInput) (workflows.DraftAdoptionResult, error) {
+	s.input = input
+	s.called = true
+	if s.err != nil {
+		return workflows.DraftAdoptionResult{}, s.err
+	}
+	return s.result, nil
+}
+
 type recordingWorkflowCanceller struct {
 	input  workflows.CancelWorkflowRunInput
 	err    error
@@ -6197,6 +6213,166 @@ func TestCancelWriterRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 	}
 	if canceller.input.ActorUserID != "user-123" || canceller.input.RequestID != "req-cancel" {
 		t.Fatalf("canceller lost actor/request context: %#v", canceller.input)
+	}
+}
+
+func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t *testing.T) {
+	store := &recordingDraftAdoptionStore{
+		result: workflows.DraftAdoptionResult{
+			DraftID:    "draft-123",
+			BlockID:    "block-456",
+			ProjectID:  "project-789",
+			Status:     "adopted",
+			ChapterID:  "chapter-1",
+			BlockOrder: 12,
+		},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{
+		"tenant_id":"tenant-from-body",
+		"chapter_id":"chapter-override",
+		"block_order":12,
+		"prompt":"private prompt",
+		"api_key":"sk-private",
+		"content_text":"private draft text",
+		"draft":"private draft",
+		"manuscript":"private manuscript"
+	}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "reqadopt")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	if store.input.TenantID != "tenant-123" ||
+		store.input.DraftID != "draft-123" ||
+		store.input.ActorUserID != "user-123" ||
+		store.input.RequestID != "reqadopt" ||
+		store.input.ChapterID != "chapter-override" ||
+		store.input.BlockOrder != 12 {
+		t.Fatalf("draft adoption store lost public context: %#v", store.input)
+	}
+	if store.input.TenantID == "tenant-from-body" {
+		t.Fatalf("draft adoption trusted body tenant: %#v", store.input)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		`"draft_id":"draft-123"`,
+		`"block_id":"block-456"`,
+		`"project_id":"project-789"`,
+		`"status":"adopted"`,
+		`"block_order":12`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("adoption response missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{
+		"tenant-from-body",
+		"private prompt",
+		"sk-private",
+		"private draft text",
+		"private draft",
+		"private manuscript",
+		"prompt",
+		"api_key",
+		"content_text",
+		"body_text",
+		"credential_ref",
+		"manuscript",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("draft adoption response leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdoptDraftRejectsSceneOverrideUntilManuscriptBlocksSupportScenes(t *testing.T) {
+	store := &recordingDraftAdoptionStore{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"scene_id":"scene-123"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, response.Code, response.Body.String())
+	}
+	if store.called {
+		t.Fatalf("adoption store should not be called for unsupported scene override: %#v", store.input)
+	}
+	if strings.Contains(response.Body.String(), "scene-123") {
+		t.Fatalf("adoption validation leaked unsupported scene value: %s", response.Body.String())
+	}
+}
+
+func TestAdoptDraftSanitizesStoreErrorMessagesAtHTTPBoundary(t *testing.T) {
+	store := &recordingDraftAdoptionStore{
+		err: &workflows.AppError{
+			Code:    "DRAFT_ADOPTION_WRITE_FAILED",
+			Message: "driver leaked prompt=hidden api_key=sk-hidden credential_ref=cred draft=private manuscript=private content_text=secret",
+		},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"block_order":1}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"code":"DRAFT_ADOPTION_WRITE_FAILED"`) || !strings.Contains(body, `"message":"draft adoption write failed"`) {
+		t.Fatalf("expected stable draft adoption error, got %s", body)
+	}
+	for _, forbidden := range []string{"prompt=hidden", "api_key", "sk-hidden", "credential_ref", "draft=private", "manuscript=private", "content_text", "driver leaked"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("draft adoption error leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdoptDraftRequiresTenantContext(t *testing.T) {
+	store := &recordingDraftAdoptionStore{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{}`))
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusUnauthorized, response.Code, response.Body.String())
+	}
+	if store.called {
+		t.Fatalf("adoption store should not be called without tenant context: %#v", store.input)
+	}
+}
+
+func TestAdoptDraftFailsClosedWithoutConfiguredStore(t *testing.T) {
+	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"block_order":1}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-Request-Id", "reqadopt")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "DRAFT_ADOPTION_BACKEND_UNCONFIGURED" || body.Error.RequestID != "reqadopt" {
+		t.Fatalf("expected explicit draft adoption backend error, got %#v", body)
 	}
 }
 

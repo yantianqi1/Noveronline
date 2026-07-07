@@ -406,6 +406,41 @@ func TestNewWriterAdmissionStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestNewDraftAdoptionStoreUsesNilStoreWithoutDatabaseURL(t *testing.T) {
+	store, closeStore, err := newDraftAdoptionStore("")
+
+	if err != nil {
+		t.Fatalf("new draft adoption store: %v", err)
+	}
+	if closeStore != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if store != nil {
+		t.Fatalf("expected nil draft adoption store without database URL, got %T", store)
+	}
+}
+
+func TestNewDraftAdoptionStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
+	store, closeStore, err := newDraftAdoptionStore("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeStore != nil {
+		defer func() {
+			if err := closeStore(); err != nil {
+				t.Fatalf("close draft adoption store: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new draft adoption store: %v", err)
+	}
+	if _, ok := store.(*workflows.SQLDraftAdoptionStore); !ok {
+		t.Fatalf("expected SQL draft adoption store, got %T", store)
+	}
+	if closeStore == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestNewSeedAdmissionStoreUsesNilStoreWithoutDatabaseURL(t *testing.T) {
 	store, closeStore, err := newSeedAdmissionStore("")
 

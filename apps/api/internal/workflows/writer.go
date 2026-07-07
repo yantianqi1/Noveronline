@@ -45,12 +45,31 @@ type CancelWriterRunInput struct {
 	RequestID   string
 }
 
+type DraftAdoptionInput struct {
+	TenantID    string
+	DraftID     string
+	ActorUserID string
+	RequestID   string
+	ChapterID   string
+	BlockOrder  int
+}
+
 type WriterRun struct {
 	RunID     string
 	TraceID   string
 	TenantID  string
 	ProjectID string
 	Status    string
+}
+
+type DraftAdoptionResult struct {
+	DraftID    string `json:"draft_id"`
+	BlockID    string `json:"block_id"`
+	ProjectID  string `json:"project_id"`
+	Status     string `json:"status"`
+	ChapterID  string `json:"chapter_id,omitempty"`
+	SceneID    string `json:"scene_id,omitempty"`
+	BlockOrder int    `json:"block_order"`
 }
 
 type WriterRunCancellation struct {
@@ -82,6 +101,10 @@ type WriterEventReader interface {
 
 type WriterCanceller interface {
 	CancelWriterRun(context.Context, CancelWriterRunInput) (WriterRunCancellation, error)
+}
+
+type DraftAdoptionStore interface {
+	AdoptDraft(context.Context, DraftAdoptionInput) (DraftAdoptionResult, error)
 }
 
 type WriterAdmissionStore interface {
@@ -253,6 +276,19 @@ func (c *DisabledWriterCanceller) CancelWriterRun(_ context.Context, _ CancelWri
 	return WriterRunCancellation{}, &AppError{
 		Code:    "WORKFLOW_CANCEL_BACKEND_UNCONFIGURED",
 		Message: "writer cancellation backend is not configured",
+	}
+}
+
+type DisabledDraftAdoptionStore struct{}
+
+func NewDisabledDraftAdoptionStore() *DisabledDraftAdoptionStore {
+	return &DisabledDraftAdoptionStore{}
+}
+
+func (s *DisabledDraftAdoptionStore) AdoptDraft(context.Context, DraftAdoptionInput) (DraftAdoptionResult, error) {
+	return DraftAdoptionResult{}, &AppError{
+		Code:    "DRAFT_ADOPTION_BACKEND_UNCONFIGURED",
+		Message: "draft adoption backend is not configured",
 	}
 }
 

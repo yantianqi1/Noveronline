@@ -686,6 +686,141 @@ func TestSQLWriterAdmissionStoreUsesTenantContextForAdmissionWrites(t *testing.T
 	}
 }
 
+func TestSQLDraftAdoptionStoreAdoptsTenantScopedCandidateIntoManuscriptMetadataOnly(t *testing.T) {
+	queryer := &recordingDraftAdoptionQueryer{
+		rows: &fakeWriterEventRows{
+			values: [][]any{{
+				"33333333-3333-4333-8333-333333333333",
+				"55555555-5555-4555-8555-555555555555",
+				"22222222-2222-4222-8222-222222222222",
+				"adopted",
+				"66666666-6666-4666-8666-666666666666",
+				"77777777-7777-4777-8777-777777777777",
+				8,
+			}},
+		},
+	}
+	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
+
+	result, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+		RequestID:   "req-adopt",
+		BlockOrder:  8,
+	})
+
+	if err != nil {
+		t.Fatalf("adopt draft: %v", err)
+	}
+	if result.DraftID != "33333333-3333-4333-8333-333333333333" ||
+		result.BlockID != "55555555-5555-4555-8555-555555555555" ||
+		result.ProjectID != "22222222-2222-4222-8222-222222222222" ||
+		result.Status != "adopted" ||
+		result.BlockOrder != 8 {
+		t.Fatalf("unexpected adoption result: %#v", result)
+	}
+	if !strings.Contains(queryer.query, "FROM writer_drafts") ||
+		!strings.Contains(queryer.query, "status = 'candidate'") ||
+		!strings.Contains(queryer.query, "INSERT INTO manuscript_blocks") ||
+		!strings.Contains(queryer.query, "source_draft_id") ||
+		!strings.Contains(queryer.query, "UPDATE writer_drafts") ||
+		!strings.Contains(queryer.query, "adopted_block_id") ||
+		!strings.Contains(queryer.query, "COALESCE(MAX(block_order), 0) + 1") ||
+		!strings.Contains(queryer.query, "FOR UPDATE") {
+		t.Fatalf("adoption SQL did not express candidate-to-manuscript transition: %s", queryer.query)
+	}
+	if !reflect.DeepEqual(queryer.args, []any{
+		"11111111-1111-4111-8111-111111111111",
+		"33333333-3333-4333-8333-333333333333",
+		"44444444-4444-4444-8444-444444444444",
+		"req-adopt",
+		8,
+		"",
+	}) {
+		t.Fatalf("unexpected adoption args: %#v", queryer.args)
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	for _, forbidden := range []string{"content_text", "body", "private draft", "manuscript"} {
+		if strings.Contains(string(resultJSON), forbidden) {
+			t.Fatalf("adoption result leaked forbidden field %q: %s", forbidden, resultJSON)
+		}
+	}
+}
+
+func TestSQLDraftAdoptionStoreFailsClosedForMissingCandidateDraft(t *testing.T) {
+	queryer := &recordingDraftAdoptionQueryer{rows: &fakeWriterEventRows{}}
+	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
+
+	_, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
+		TenantID: "11111111-1111-4111-8111-111111111111",
+		DraftID:  "33333333-3333-4333-8333-333333333333",
+	})
+
+	if code := ErrorCode(err); code != "NOT_FOUND" {
+		t.Fatalf("expected missing candidate draft to fail closed, got %s (%v)", code, err)
+	}
+	if !strings.Contains(queryer.query, "status = 'candidate'") {
+		t.Fatalf("expected candidate-only adoption query, got %s", queryer.query)
+	}
+}
+
+func TestSQLDraftAdoptionStoreUsesTenantContextForAdoptionWrites(t *testing.T) {
+	queryer := &recordingDraftAdoptionQueryer{
+		rows: &fakeWriterEventRows{
+			values: [][]any{{
+				"33333333-3333-4333-8333-333333333333",
+				"55555555-5555-4555-8555-555555555555",
+				"22222222-2222-4222-8222-222222222222",
+				"adopted",
+				nil,
+				nil,
+				1,
+			}},
+		},
+	}
+	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
+
+	_, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
+		TenantID: "11111111-1111-4111-8111-111111111111",
+		DraftID:  "33333333-3333-4333-8333-333333333333",
+	})
+
+	if err != nil {
+		t.Fatalf("adopt draft: %v", err)
+	}
+	if queryer.tenantID != "11111111-1111-4111-8111-111111111111" || queryer.query == "" {
+		t.Fatalf("adoption query did not use tenant context: %#v", queryer)
+	}
+}
+
+func TestSQLDraftAdoptionStoreRollsBackWhenReturningRowCannotScan(t *testing.T) {
+	rows := &fakeWriterEventRows{
+		values:  [][]any{{"bad-row"}},
+		scanErr: errors.New("scan failed after write CTE"),
+	}
+	queryer := &recordingDraftAdoptionQueryer{rows: rows}
+	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
+
+	_, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
+		TenantID: "11111111-1111-4111-8111-111111111111",
+		DraftID:  "33333333-3333-4333-8333-333333333333",
+	})
+
+	if code := ErrorCode(err); code != "DRAFT_ADOPTION_WRITE_FAILED" {
+		t.Fatalf("expected write failure, got %s (%v)", code, err)
+	}
+	if rows.committed {
+		t.Fatal("draft adoption should not commit after scan failure")
+	}
+	if !rows.rolledBack {
+		t.Fatal("draft adoption should roll back after scan failure")
+	}
+}
+
 func requireUUIDRunID(t *testing.T, runID string) {
 	t.Helper()
 	if !uuidPattern.MatchString(runID) {
@@ -714,11 +849,61 @@ func (q *recordingWriterEventQueryer) QueryContext(ctx context.Context, query st
 	return q.rows, nil
 }
 
+type recordingTenantWriterEventQueryer struct {
+	tenantID    string
+	query       string
+	args        []any
+	rows        *fakeWriterEventRows
+	err         error
+	plainCalled bool
+}
+
+func (q *recordingTenantWriterEventQueryer) QueryContext(context.Context, string, ...any) (WriterEventSQLRows, error) {
+	q.plainCalled = true
+	return nil, errors.New("plain QueryContext should not be used for tenant-scoped writer queries")
+}
+
+func (q *recordingTenantWriterEventQueryer) QueryTenantContext(_ context.Context, tenantID string, query string, args ...any) (WriterEventSQLRows, error) {
+	q.tenantID = tenantID
+	q.query = query
+	q.args = append([]any(nil), args...)
+	if q.err != nil {
+		return nil, q.err
+	}
+	if q.rows == nil {
+		return nil, errors.New("no rows configured")
+	}
+	return q.rows, nil
+}
+
+type recordingDraftAdoptionQueryer struct {
+	tenantID string
+	query    string
+	args     []any
+	rows     *fakeWriterEventRows
+	err      error
+}
+
+func (q *recordingDraftAdoptionQueryer) QueryDraftAdoptionContext(_ context.Context, tenantID string, query string, args ...any) (DraftAdoptionSQLRows, error) {
+	q.tenantID = tenantID
+	q.query = query
+	q.args = append([]any(nil), args...)
+	if q.err != nil {
+		return nil, q.err
+	}
+	if q.rows == nil {
+		return nil, errors.New("no rows configured")
+	}
+	return q.rows, nil
+}
+
 type fakeWriterEventRows struct {
-	values  [][]any
-	index   int
-	err     error
-	scanErr error
+	values     [][]any
+	index      int
+	err        error
+	scanErr    error
+	committed  bool
+	rolledBack bool
 }
 
 func (r *fakeWriterEventRows) Next() bool {
@@ -767,6 +952,16 @@ func (r *fakeWriterEventRows) Close() error {
 
 func (r *fakeWriterEventRows) Err() error {
 	return r.err
+}
+
+func (r *fakeWriterEventRows) Commit() error {
+	r.committed = true
+	return nil
+}
+
+func (r *fakeWriterEventRows) Rollback() error {
+	r.rolledBack = true
+	return nil
 }
 
 type recordingWriterAdmissionStore struct {

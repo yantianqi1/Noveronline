@@ -27,6 +27,7 @@ type Config struct {
 	WriterReader                    workflows.WriterReader
 	WriterEventReader               workflows.WriterEventReader
 	WriterCanceller                 workflows.WriterCanceller
+	DraftAdoptionStore              workflows.DraftAdoptionStore
 	WorkflowReader                  workflows.WorkflowReader
 	WorkflowEventReader             workflows.WorkflowEventReader
 	WorkflowCanceller               workflows.WorkflowCanceller
@@ -83,6 +84,7 @@ type Server struct {
 	writerReader                    workflows.WriterReader
 	writerEventReader               workflows.WriterEventReader
 	writerCanceller                 workflows.WriterCanceller
+	draftAdoptionStore              workflows.DraftAdoptionStore
 	workflowReader                  workflows.WorkflowReader
 	workflowEventReader             workflows.WorkflowEventReader
 	workflowCanceller               workflows.WorkflowCanceller
@@ -156,6 +158,13 @@ type startWriterRunResponse struct {
 	TraceID   string `json:"trace_id"`
 	ProjectID string `json:"project_id"`
 	Status    string `json:"status"`
+}
+
+type adoptDraftRequest struct {
+	BodyTenantID string `json:"tenant_id"`
+	ChapterID    string `json:"chapter_id"`
+	SceneID      string `json:"scene_id"`
+	BlockOrder   int    `json:"block_order"`
 }
 
 type startHelloAgentResponse struct {
@@ -512,6 +521,10 @@ func NewServer(config Config) *Server {
 	if writerCanceller == nil {
 		writerCanceller = workflows.NewDisabledWriterCanceller()
 	}
+	draftAdoptionStore := config.DraftAdoptionStore
+	if draftAdoptionStore == nil {
+		draftAdoptionStore = workflows.NewDisabledDraftAdoptionStore()
+	}
 	workflowReader := config.WorkflowReader
 	if workflowReader == nil {
 		workflowReader = workflows.NewDisabledWorkflowReader()
@@ -713,6 +726,7 @@ func NewServer(config Config) *Server {
 		writerReader:                    reader,
 		writerEventReader:               writerEventReader,
 		writerCanceller:                 writerCanceller,
+		draftAdoptionStore:              draftAdoptionStore,
 		workflowReader:                  workflowReader,
 		workflowEventReader:             workflowEventReader,
 		workflowCanceller:               workflowCanceller,
@@ -908,6 +922,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartWriterRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
 		s.handleCancelWriterRun(response, request)
+	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
+		s.handleAdoptDraft(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
 		s.handleListWriterRunEvents(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/"):
@@ -3717,6 +3733,43 @@ func (s *Server) handleCancelWriterRun(response http.ResponseWriter, request *ht
 	})
 }
 
+func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	draftID := draftAdoptionPathPart(request.URL.Path)
+	if draftID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft adoption route not found", nil)
+		return
+	}
+	var payload adoptDraftRequest
+	decoder := json.NewDecoder(request.Body)
+	if err := decoder.Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid draft adoption payload", nil)
+		return
+	}
+	if strings.TrimSpace(payload.SceneID) != "" {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "draft adoption scene override is not supported", nil)
+		return
+	}
+	adoption, err := s.draftAdoptionStore.AdoptDraft(request.Context(), workflows.DraftAdoptionInput{
+		TenantID:    tenantID,
+		DraftID:     draftID,
+		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		RequestID:   requestID(request),
+		ChapterID:   strings.TrimSpace(payload.ChapterID),
+		BlockOrder:  payload.BlockOrder,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftAdoptionErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, adoption)
+}
+
 func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -4310,6 +4363,15 @@ func writerRunCancelPathPart(path string) string {
 	return strings.TrimSpace(runID)
 }
 
+func draftAdoptionPathPart(path string) string {
+	remainder := strings.TrimPrefix(path, "/v1/drafts/")
+	draftID, suffix, ok := strings.Cut(remainder, "/")
+	if !ok || suffix != "adoptions" {
+		return ""
+	}
+	return strings.TrimSpace(draftID)
+}
+
 func characterInteractionNestedPathPart(path string, expectedSuffix string) string {
 	remainder := strings.TrimPrefix(path, "/v1/character-interactions/")
 	interactionID, suffix, ok := strings.Cut(remainder, "/")
@@ -4447,6 +4509,21 @@ func workflowRunToResponse(run workflows.WorkflowRun) workflowRunResponse {
 
 func statusForWorkflowError(err error) int {
 	return statusForAppCode(workflows.ErrorCode(err))
+}
+
+func publicDraftAdoptionErrorMessage(code string) string {
+	switch code {
+	case "DRAFT_ADOPTION_BACKEND_UNCONFIGURED":
+		return "draft adoption backend is not configured"
+	case "DRAFT_ADOPTION_WRITE_FAILED":
+		return "draft adoption write failed"
+	case "NOT_FOUND":
+		return "candidate draft not found"
+	case "VALIDATION_FAILED":
+		return "invalid draft adoption request"
+	default:
+		return "draft adoption failed"
+	}
 }
 
 func statusForAppCode(code string) int {

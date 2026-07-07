@@ -64,11 +64,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前主线 | Phase 5 Wave 1：Seed live parse/segment、Writer live LLM hardening、Asset search metadata、Story Graph bond runner |
-| 最近完成重点 | 4 个 subagent slice 已合入同一 SaaS worktree：A1 Seed opt-in live E2E harness、A2 Writer/Pi runtime RLS + event hardening、A3 Asset search version/collection metadata、A4 Graph bond candidate-only runner |
-| 当前未完成重点 | browser upload/complete、扫描/OCR PDF、更完整语义分段、Seed LLM live provider E2E、retry failed segments、profile/finalize runners、vector/hybrid search、Graph candidate adoption/live browser check |
-| 本轮开发 slice | refactor-saas-gpt55 subagent Wave 1 integration（verified by focused suites; opt-in live harness skips locally without live env） |
-| 推荐下一步 | 进入 Wave 2：优先补 Seed browser/cluster E2E 或 Asset vector/hybrid search 的真实 provider path |
+| 当前主线 | Wave 1：Writer live closure |
+| 最近完成重点 | Wave 0 governance calibration 已提交；Phase/Wave 总纲、coverage matrix、handoff provenance 和任务看板已重新对齐 |
+| 当前未完成重点 | Writer draft adoption API/service、reviewer path、manuscript export、真实 LLM-bound E2E、trace/replay browser verification |
+| 本轮开发 slice | W1-S1 explicit draft adoption：`POST /v1/drafts/{draftId}/adoptions` + Go service/HTTP fail-closed boundary |
+| 推荐下一步 | 完成 W1-S1 RED -> GREEN -> focused regression，经 spec/quality reviewer 通过后再进入 reviewer 或 manuscript/export slice |
 
 ## P6-002 Character Console 当前状态
 
@@ -91,6 +91,49 @@
 - 不自动采用 worldline candidate 为 canon。
 
 ## 工作日志
+
+### 2026-07-07 当前会话：Wave 1 W1-S1 explicit draft adoption
+
+Context:
+
+- Wave 0 governance calibration 已完成并单独提交。
+- 根据 `tasks/refactor-saas-100-percent-subagent-development-plan.md`，Wave 1 从 Writer live closure 继续推进。
+- 本 slice 聚焦 docs 已列出的 `POST /v1/drafts/{draftId}/adoptions`：candidate draft 只能通过显式作者动作进入 manuscript，不允许 Writer runtime 自动采用。
+
+Scope:
+
+- Implementer subagent 负责 Go API slice，写 scope 限定为 `apps/api/internal/workflows/`、`apps/api/internal/httpapi/` 和必要的 `apps/api/cmd/api/` DB wiring。
+- Coordinator 不在同一代码 scope 并行编辑，避免冲突；只同步任务/文档和后续整体验证。
+- 本 slice 不触碰 Pi runtime、Worldline、Web UI、migrations 或旧主仓库。
+
+Planned TDD:
+
+- RED：先补 workflows SQL draft adoption store 和 HTTP route tests，证明当前缺 `POST /v1/drafts/{draftId}/adoptions` / store。
+- Implementation：新增 explicit adoption store、fail-closed disabled store、HTTP route，并在 DB 配置下接入 SQL store。
+- GREEN：聚焦 `go test` 覆盖 writer adoption tests。
+- Regression：跑相关 Writer/Workflow HTTP 和 cmd wiring tests，再由 spec reviewer 与 quality reviewer 审查。
+
+RED:
+
+- Implementer subagent 先运行 `cd apps/api && go test ./internal/workflows -run 'TestSQLDraftAdoptionStore' -count=1`，失败于缺 `NewSQLDraftAdoptionStore`、config 和 adoption types。
+- Implementer subagent 先运行 `cd apps/api && go test ./internal/httpapi -run 'TestAdoptDraft' -count=1`，失败于缺 workflow adoption types 和 `DraftAdoptionStore` config field。
+
+Implementation:
+
+- 新增 `DraftAdoptionStore` / `DisabledDraftAdoptionStore` / `SQLDraftAdoptionStore`，默认无 backend 显式 `DRAFT_ADOPTION_BACKEND_UNCONFIGURED`。
+- 新增 `POST /v1/drafts/{draftId}/adoptions`，只信任 `X-Tenant-Id` 和 route draft id，携带 actor/request context，公开响应只返回 adoption metadata。
+- `cmd/api` 在 `DATABASE_URL` 配置时接入 DB-backed draft adoption store；无 DB 时保持 fail-closed disabled store。
+- Coordinator 追加 hardening：candidate draft SQL selection 使用 `FOR UPDATE` 锁定 row，避免并发 adoption 在内部 manuscript insert 周围留下竞态；同时补 `cmd/api` store wiring tests。
+- Quality reviewer 初审指出 3 个必须修正点：HTTP 边界不得透传 store 底层错误文本、SQL result scan 失败不得通过 read-side rows `Close()` 间接 commit、`scene_id` override 在 `manuscript_blocks` 无目标列前不得静默忽略。Coordinator 已修正为稳定公开错误 message、显式 `Commit()` / deferred `Rollback()` 的 write rows 协议，并在 HTTP 层拒绝 `scene_id` override。
+
+GREEN:
+
+- `cd apps/api && go test ./internal/workflows -run 'TestSQLDraftAdoptionStore' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'TestAdoptDraft' -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Writer|Draft|Admission' -count=1` 通过。
+- 修正后 focused regression：`cd apps/api && go test ./internal/workflows -count=1`、`cd apps/api && go test ./internal/httpapi -count=1`、`cd apps/api && go test ./cmd/api -count=1` 通过。
+- Broader verification：`cd apps/api && go test ./... -count=1`、`git diff --check`、touched-file trailing whitespace scan 均通过。
+- Review gate：quality reviewer Darwin re-review `APPROVED`；原 spec reviewer Singer 超时后关闭，replacement spec reviewer Banach `APPROVED`，并复跑 focused adoption/spec checks 与 `git diff --check`。
 
 ### 2026-07-07 当前会话：refactor-saas-gpt55 Wave 1 subagent implementation
 

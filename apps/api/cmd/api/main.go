@@ -52,6 +52,17 @@ func main() {
 			}
 		}()
 	}
+	draftAdoptionStore, closeDraftAdoption, err := newDraftAdoptionStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure draft adoption store: %v", err)
+	}
+	if closeDraftAdoption != nil {
+		defer func() {
+			if err := closeDraftAdoption(); err != nil {
+				log.Printf("close draft adoption store: %v", err)
+			}
+		}()
+	}
 	seedAdmissionStore, closeSeedAdmission, err := newSeedAdmissionStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure seed admission store: %v", err)
@@ -587,6 +598,7 @@ func main() {
 		WriterReader:                    writerReader,
 		WriterEventReader:               writerEventReader,
 		WriterCanceller:                 writerCanceller,
+		DraftAdoptionStore:              draftAdoptionStore,
 		WorkflowReader:                  workflowReader,
 		WorkflowEventReader:             workflowEventReader,
 		WorkflowCanceller:               workflowCanceller,
@@ -739,6 +751,19 @@ func newWriterAdmissionStore(databaseURL string) (workflows.WriterAdmissionStore
 	}
 	return workflows.NewSQLWriterAdmissionStore(workflows.SQLWriterAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
+	}), db.Close, nil
+}
+
+func newDraftAdoptionStore(databaseURL string) (workflows.DraftAdoptionStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewSQLDraftAdoptionStore(workflows.SQLDraftAdoptionStoreConfig{
+		Queryer: workflows.NewSQLDBWriterDraftAdoptionQueryer(db),
 	}), db.Close, nil
 }
 
