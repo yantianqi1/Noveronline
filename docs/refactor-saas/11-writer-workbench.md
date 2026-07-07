@@ -351,6 +351,8 @@ Accept: text/event-stream
 
 Next Writer Workbench must expose replay as an explicit recovered-stream cursor action. The current SaaS shell submits `after_event_id` together with selected run/trace metadata through a GET form so refresh/reopen keeps the chosen replay window. Public Writer Events / Trace Events panels display event metadata and payload key counts only; raw workflow or trace payload JSON, draft/manuscript prose, prompt/provider response, credentials, `credential_ref`, and object keys must stay out of the UI.
 
+2026-07-07 W1-S7 browser verification recorded this contract in fail-closed mode at `/demo/projects/demo-project/writer?runId=run-browser-check&traceId=trace-browser-check&after_event_id=evt-browser-check` with API `127.0.0.1:3888` and Next `127.0.0.1:3999`. Desktop `1280x720` showed `Writer Workbench`, `Manuscript metadata`, `Export manifest`, `Recovered stream`, and `Event stream`; the replay form submitted GET to `/demo/projects/demo-project/writer` with run/trace/cursor preserved. Desktop and mobile `390x844` scans found no credential markers, raw payload markers, private draft/manuscript markers, or prose/body field names, had no horizontal overflow, and browser console errors were none. This is browser-surface evidence only; live provider E2E and content export artifacts remain separate pending work.
+
 ### Adopt Draft
 
 ```http

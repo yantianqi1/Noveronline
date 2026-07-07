@@ -65,10 +65,40 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness 均已通过 spec / quality reviewer |
-| 当前未完成重点 | 真实 LLM-bound E2E 执行、browser verification、真正内容导出 artifact service |
-| 本轮开发 slice | W1-S6 Pi compose live/local provider opt-in smoke harness：新增 `createPiAIComposeDraft` resolved LLM Facility handoff live smoke，默认无 env 显式 skip，partial env 显式失败，不新增生产 fallback |
-| 推荐下一步 | 提供 resolved live/local provider handoff env 后执行 W1-S6 live smoke，或进入 Writer browser verification slice；当前切片只新增验收入口，不声明真实 provider E2E 已执行完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation 均已通过对应验收记录 |
+| 当前未完成重点 | 真实 LLM-bound E2E 执行、真正内容导出 artifact service |
+| 本轮开发 slice | W1-S7 Writer browser verification evidence documentation：记录 coordinator 已完成的 Writer browser fail-closed / replay / no-leak / responsive 验证证据；不改 app code |
+| 推荐下一步 | 提供 resolved live/local provider handoff env 后执行 W1-S6 live smoke，或继续推进真实 LLM-bound Writer E2E；W1-S7 只记录 browser verification evidence，不声明 live provider E2E 或内容导出完成 |
+
+## Wave 1 W1-S7 Writer browser verification evidence documentation
+
+Context:
+
+- Coordinator 已在 API `127.0.0.1:3888` 与 Next `127.0.0.1:3999` 下完成 Writer browser verification。
+- 验证 URL：`/demo/projects/demo-project/writer?runId=run-browser-check&traceId=trace-browser-check&after_event_id=evt-browser-check`。
+- 本 slice 仅记录证据并同步 board/coverage；不修改应用代码、不新增测试、不声明真实 provider E2E 或内容导出 artifact service 完成。
+
+Browser evidence recorded:
+
+- Desktop `1280x720`：页面 title 为 `MiroFish Novel`；可见 headings 包含 `Writer Workbench`、`Manuscript metadata`、`Export manifest`、`Recovered stream`、`Event stream`。
+- Desktop fail-closed states：显式显示 `MANUSCRIPT_BACKEND_UNCONFIGURED`、`MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED`、`NOT_FOUND`、`AGENT_TRACE_BACKEND_UNCONFIGURED`。
+- Desktop replay form：action 为 `/demo/projects/demo-project/writer`，method 为 `get`，并保留 `runId = run-browser-check`、`traceId = trace-browser-check`、`after_event_id = evt-browser-check`。
+- Desktop no-leak scan：visible text 与 HTML 中均未出现 `api_key`、`encrypted_api_key`、`credential_ref`、`sk-`、`content_text`、`body_text`、`raw payload`、`JSON.stringify` 或 private draft/manuscript markers；无水平溢出。
+- Mobile `390x844`：`Recovered stream` / replay button 可见，run/trace/cursor query metadata 保留；同一 forbidden-string scan 为空；无水平溢出。
+- Browser console error logs：none。
+- Browser session 已 reset/finalized after verification。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/11-writer-workbench.md`
+
+Next:
+
+- 继续推进真实 LLM-bound Writer E2E，需 resolved provider handoff env / live-local provider 执行证据。
+- 真正 PDF/DOCX/TXT 或对象存储内容导出 artifact service 仍 pending；当前 export manifest 仍是 metadata-only / fail-closed browser evidence。
 
 ## Wave 1 W1-S6 Pi compose live/local provider opt-in smoke harness
 
