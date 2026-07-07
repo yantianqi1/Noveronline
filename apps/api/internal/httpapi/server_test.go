@@ -833,9 +833,12 @@ type recordingAssetReader struct {
 type recordingArchiveMemoryReader struct {
 	memoriesInput assets.ListArchiveMemoriesInput
 	eventsInput   assets.ListArchiveMemoryEventsInput
+	getInput      assets.GetArchiveMemoryInput
 	memories      []assets.ArchiveMemoryRecord
 	events        []assets.ArchiveMemoryEventRecord
+	memory        assets.ArchiveMemoryRecord
 	err           error
+	getCalled     bool
 }
 
 type recordingAssetAdoptionStore struct {
@@ -850,6 +853,7 @@ type recordingArchiveMemoryReviewStore struct {
 	rejectInput assets.ArchiveMemoryReviewInput
 	record      assets.ArchiveMemoryRecord
 	err         error
+	called      bool
 }
 
 type recordingAssetMutationStore struct {
@@ -918,6 +922,31 @@ func (r *recordingArchiveMemoryReader) ListMemoryEvents(ctx context.Context, inp
 	return r.events, nil
 }
 
+func (r *recordingArchiveMemoryReader) GetMemory(ctx context.Context, input assets.GetArchiveMemoryInput) (assets.ArchiveMemoryRecord, error) {
+	r.getInput = input
+	r.getCalled = true
+	if r.err != nil {
+		return assets.ArchiveMemoryRecord{}, r.err
+	}
+	if r.memory.MemoryID != "" {
+		return r.memory, nil
+	}
+	return assets.ArchiveMemoryRecord{
+		MemoryID:   input.MemoryID,
+		AssetID:    "asset-1",
+		ProjectID:  "project-123",
+		MemoryType: "relationship",
+		Status:     "candidate",
+		Summary:    "公开记忆摘要",
+		Payload:    map[string]any{"relationship_id": "rel-1"},
+		SourceKind: "asset_ingestion",
+		SourceRef:  "run-1:1",
+		Enabled:    true,
+		CreatedAt:  "2026-07-05T00:00:00Z",
+		UpdatedAt:  "2026-07-05T00:00:00Z",
+	}, nil
+}
+
 func (s *recordingAssetAdoptionStore) AdoptAsset(ctx context.Context, input assets.AdoptAssetInput) (assets.Record, error) {
 	s.input = input
 	s.called = true
@@ -949,6 +978,7 @@ func (s *recordingAssetAdoptionStore) AdoptAsset(ctx context.Context, input asse
 
 func (s *recordingArchiveMemoryReviewStore) AdoptMemory(ctx context.Context, input assets.ArchiveMemoryReviewInput) (assets.ArchiveMemoryRecord, error) {
 	s.adoptInput = input
+	s.called = true
 	if s.err != nil {
 		return assets.ArchiveMemoryRecord{}, s.err
 	}
@@ -973,6 +1003,7 @@ func (s *recordingArchiveMemoryReviewStore) AdoptMemory(ctx context.Context, inp
 
 func (s *recordingArchiveMemoryReviewStore) RejectMemory(ctx context.Context, input assets.ArchiveMemoryReviewInput) (assets.ArchiveMemoryRecord, error) {
 	s.rejectInput = input
+	s.called = true
 	if s.err != nil {
 		return assets.ArchiveMemoryRecord{}, s.err
 	}
@@ -5559,10 +5590,81 @@ func TestListArchiveMemoriesWithoutReaderFailsExplicitly(t *testing.T) {
 	}
 }
 
-func TestAdoptArchiveMemoryUsesTenantProjectActorRequestAndReturnsSanitizedMemory(t *testing.T) {
+func assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t *testing.T, body string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"memory-secret", "memory-1-title", "memory-1-summary", "body-project", "malicious-project", "project-body", "body-tenant",
+		"user-123", "fallback-user", "denied for user-123", "asset-1",
+		"private prompt", "prompt", "provider_response", "raw_body", "raw provider", "secret content", "secret-key",
+		"api_key", "encrypted_credential", "encrypted_api_key", "ciphertext", "credential_ref", "cred-1",
+		"object_key", "object-key", "obj-1", "draft text", "draft", "manuscript text", "manuscript",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("archive memory review response leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestArchiveMemoryReviewRequiresBodyProjectBeforeOwnerLookup(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing project", body: `{}`},
+		{name: "blank project", body: `{"project_id":"   "}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingArchiveMemoryReader{}
+			store := &recordingArchiveMemoryReviewStore{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+			request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, response.Code, response.Body.String())
+			}
+			if reader.getCalled || authorizer.called || store.called {
+				t.Fatalf("side effect ran after invalid archive memory review payload: reader=%#v authorizer=%#v store=%#v", reader, authorizer.input, store)
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != "VALIDATION_FAILED" || body.Error.Message != "invalid archive memory review payload" {
+				t.Fatalf("unexpected validation body: %#v", body)
+			}
+		})
+	}
+}
+
+func TestAdoptArchiveMemoryUsesOwnerProjectForRBACAndStoreIgnoringBodyProject(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{
+		memory: assets.ArchiveMemoryRecord{
+			MemoryID:   "memory-1",
+			AssetID:    "asset-1",
+			ProjectID:  "project-owner",
+			MemoryType: "relationship",
+			Status:     "candidate",
+			Summary:    "memory-1-summary",
+			Payload:    map[string]any{"prompt": "private prompt"},
+			SourceKind: "asset_ingestion",
+			SourceRef:  "run-1:1",
+			Enabled:    true,
+			CreatedAt:  "2026-07-05T00:00:00Z",
+			UpdatedAt:  "2026-07-05T00:00:00Z",
+		},
+	}
 	store := &recordingArchiveMemoryReviewStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReviewStore: store})
-	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"project-123"}`))
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -5574,7 +5676,18 @@ func TestAdoptArchiveMemoryUsesTenantProjectActorRequestAndReturnsSanitizedMemor
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
-	if store.adoptInput.TenantID != "tenant-123" || store.adoptInput.ProjectID != "project-123" || store.adoptInput.MemoryID != "memory-1" {
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.MemoryID != "memory-1" {
+		t.Fatalf("reader lost owner lookup context: %#v", reader.getInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-owner" ||
+		authorizer.inputs[0].Permission != auth.PermissionAssetManage ||
+		authorizer.inputs[0].RequestID != "req-memory-adopt" {
+		t.Fatalf("unexpected archive memory owner authorization: %#v", authorizer.inputs)
+	}
+	if store.adoptInput.TenantID != "tenant-123" || store.adoptInput.ProjectID != "project-owner" || store.adoptInput.MemoryID != "memory-1" {
 		t.Fatalf("store lost archive memory adoption context: %#v", store.adoptInput)
 	}
 	if store.adoptInput.ActorID != "user-123" || store.adoptInput.RequestID != "req-memory-adopt" {
@@ -5591,10 +5704,27 @@ func TestAdoptArchiveMemoryUsesTenantProjectActorRequestAndReturnsSanitizedMemor
 	}
 }
 
-func TestRejectArchiveMemoryUsesTenantProjectActorRequestAndReturnsSanitizedMemory(t *testing.T) {
+func TestRejectArchiveMemoryUsesOwnerProjectForRBACAndStoreIgnoringBodyProject(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{
+		memory: assets.ArchiveMemoryRecord{
+			MemoryID:   "memory-1",
+			AssetID:    "asset-1",
+			ProjectID:  "project-owner",
+			MemoryType: "relationship",
+			Status:     "candidate",
+			Summary:    "memory-1-summary",
+			Payload:    map[string]any{"prompt": "private prompt"},
+			SourceKind: "asset_ingestion",
+			SourceRef:  "run-1:1",
+			Enabled:    true,
+			CreatedAt:  "2026-07-05T00:00:00Z",
+			UpdatedAt:  "2026-07-05T00:00:00Z",
+		},
+	}
 	store := &recordingArchiveMemoryReviewStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReviewStore: store})
-	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/rejections", strings.NewReader(`{"project_id":"project-123"}`))
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/rejections", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -5606,7 +5736,18 @@ func TestRejectArchiveMemoryUsesTenantProjectActorRequestAndReturnsSanitizedMemo
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
-	if store.rejectInput.TenantID != "tenant-123" || store.rejectInput.ProjectID != "project-123" || store.rejectInput.MemoryID != "memory-1" {
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.MemoryID != "memory-1" {
+		t.Fatalf("reader lost owner lookup context: %#v", reader.getInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-owner" ||
+		authorizer.inputs[0].Permission != auth.PermissionAssetManage ||
+		authorizer.inputs[0].RequestID != "req-memory-reject" {
+		t.Fatalf("unexpected archive memory owner authorization: %#v", authorizer.inputs)
+	}
+	if store.rejectInput.TenantID != "tenant-123" || store.rejectInput.ProjectID != "project-owner" || store.rejectInput.MemoryID != "memory-1" {
 		t.Fatalf("store lost archive memory rejection context: %#v", store.rejectInput)
 	}
 	if store.rejectInput.ActorID != "user-123" || store.rejectInput.RequestID != "req-memory-reject" {
@@ -5623,11 +5764,188 @@ func TestRejectArchiveMemoryUsesTenantProjectActorRequestAndReturnsSanitizedMemo
 	}
 }
 
-func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+func TestArchiveMemoryReviewDeniedAssetManageAfterOwnerLookupDoesNotCallStoreOrLeak(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: "project-owner", Summary: "memory-1-summary"}}
+	store := &recordingArchiveMemoryReviewStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied for user-123 malicious-project memory-secret private prompt raw provider secret-key credential_ref draft manuscript"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-secret/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-memory-denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.MemoryID != "memory-secret" {
+		t.Fatalf("owner lookup did not use header tenant/path memory: %#v", reader.getInput)
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-owner" || authorizer.inputs[0].Permission != auth.PermissionAssetManage {
+		t.Fatalf("unexpected archive memory owner authorization: %#v", authorizer.inputs)
+	}
+	if store.called {
+		t.Fatalf("review store ran after denied asset_manage authorization: %#v %#v", store.adoptInput, store.rejectInput)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected denied error body: %#v", body)
+	}
+	assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t, response.Body.String())
+}
+
+func TestArchiveMemoryReviewOwnerLookupFailureDoesNotAuthorizeStoreOrLeak(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{
+		err: &assets.AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: "query failed memory-secret malicious-project user-123 private prompt raw provider secret-key credential_ref object_key draft manuscript"},
+	}
+	store := &recordingArchiveMemoryReviewStore{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-secret/rejections", strings.NewReader(`{"project_id":"malicious-project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if !reader.getCalled {
+		t.Fatal("expected owner lookup before archive memory review")
+	}
+	if authorizer.called || store.called {
+		t.Fatalf("side effect ran after owner lookup failure: authorizer=%#v store=%#v", authorizer.input, store)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "ARCHIVE_MEMORY_QUERY_FAILED" || body.Error.Message != "archive memory lookup failed" {
+		t.Fatalf("unexpected owner lookup failure body: %#v", body)
+	}
+	assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t, response.Body.String())
+}
+
+func TestArchiveMemoryReviewBlankOwnerProjectFailsClosedBeforeAuthorizeStore(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: ""}}
+	store := &recordingArchiveMemoryReviewStore{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if authorizer.called || store.called {
+		t.Fatalf("side effect ran after blank owner project: authorizer=%#v store=%#v", authorizer.input, store)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected blank owner project error body: %#v", body)
+	}
+	assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t, response.Body.String())
+}
+
+func TestArchiveMemoryReviewStoreFailureReturnsPublicMessageAfterOwnerAuthorization(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: "project-owner"}}
+	store := &recordingArchiveMemoryReviewStore{
+		err: &assets.AppError{Code: "ARCHIVE_MEMORY_REVIEW_FAILED", Message: "failed memory-secret malicious-project user-123 private prompt raw provider secret-key credential_ref object_key draft manuscript"},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-secret/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-memory-store-failure")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-owner" || authorizer.inputs[0].RequestID != "req-memory-store-failure" {
+		t.Fatalf("unexpected archive memory owner authorization: %#v", authorizer.inputs)
+	}
+	if !store.called || store.adoptInput.ProjectID != "project-owner" || store.adoptInput.MemoryID != "memory-secret" {
+		t.Fatalf("store did not use owner project/path memory after authorization: %#v", store.adoptInput)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "ARCHIVE_MEMORY_REVIEW_FAILED" || body.Error.Message != "archive memory review failed" {
+		t.Fatalf("unexpected review store failure body: %#v", body)
+	}
+	assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t, response.Body.String())
+}
+
+func TestAuthSubjectArchiveMemoryReviewRejectsInvalidBearerBeforeReaderAuthorizerStore(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{}
+	store := &recordingArchiveMemoryReviewStore{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{
+		ArchiveMemoryReader:      reader,
+		ArchiveMemoryReviewStore: store,
+		SessionAuthSecret:        "test-secret",
+		Authorizer:               authorizer,
+	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"project-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer v1:memory-user:deadbeef")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.getCalled || authorizer.called || store.called {
+		t.Fatalf("side effect ran after invalid bearer: reader=%#v authorizer=%#v store=%#v", reader, authorizer.input, store)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"memory-user", "fallback-user", "deadbeef", "memory-1", "project-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("auth error leaked forbidden credential/request payload %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredStore(t *testing.T) {
+	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: "project-owner"}}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"project-123"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-memory-no-store")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5642,6 +5960,41 @@ func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredStore(t *testing.T) {
 	if body.Error.Code != "ARCHIVE_MEMORY_REVIEW_BACKEND_UNCONFIGURED" {
 		t.Fatalf("unexpected error body: %#v", body)
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.MemoryID != "memory-1" {
+		t.Fatalf("reader lost owner lookup context: %#v", reader.getInput)
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-owner" || authorizer.inputs[0].Permission != auth.PermissionAssetManage {
+		t.Fatalf("unexpected archive memory owner authorization: %#v", authorizer.inputs)
+	}
+	assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t, response.Body.String())
+}
+
+func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredReaderBeforeReviewStore(t *testing.T) {
+	store := &recordingArchiveMemoryReviewStore{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"project-123"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if authorizer.called || store.called {
+		t.Fatalf("side effect ran after disabled owner reader: authorizer=%#v store=%#v", authorizer.input, store)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "ARCHIVE_MEMORY_BACKEND_UNCONFIGURED" || body.Error.Message != "archive memory backend is not configured" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+	assertArchiveMemoryReviewResponseHasNoPrivateLeaks(t, response.Body.String())
 }
 
 func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {

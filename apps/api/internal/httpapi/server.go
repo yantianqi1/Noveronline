@@ -2802,27 +2802,72 @@ func (s *Server) handleReviewArchiveMemory(response http.ResponseWriter, request
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid archive memory review payload", nil)
 		return
 	}
+	if strings.TrimSpace(payload.ProjectID) == "" {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid archive memory review payload", nil)
+		return
+	}
+	owner, err := s.archiveMemoryReader.GetMemory(request.Context(), assets.GetArchiveMemoryInput{
+		TenantID: tenantID,
+		MemoryID: memoryID,
+	})
+	if err != nil {
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, archiveMemoryOwnerPreflightPublicErrorMessage(code), nil)
+		return
+	}
+	projectID := strings.TrimSpace(owner.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	if !s.authorizeAssetManage(response, request, tenantID, projectID) {
+		return
+	}
 	input := assets.ArchiveMemoryReviewInput{
 		TenantID:  tenantID,
-		ProjectID: strings.TrimSpace(payload.ProjectID),
+		ProjectID: projectID,
 		MemoryID:  memoryID,
 		ActorID:   s.actorUserID(request),
 		RequestID: requestID(request),
 	}
-	var (
-		record assets.ArchiveMemoryRecord
-		err    error
-	)
+	var record assets.ArchiveMemoryRecord
 	if action == "adoptions" {
 		record, err = s.archiveMemoryReviewStore.AdoptMemory(request.Context(), input)
 	} else {
 		record, err = s.archiveMemoryReviewStore.RejectMemory(request.Context(), input)
 	}
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, archiveMemoryReviewPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, record)
+}
+
+func archiveMemoryOwnerPreflightPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "archive memory was not found"
+	case "ARCHIVE_MEMORY_BACKEND_UNCONFIGURED":
+		return "archive memory backend is not configured"
+	case "ARCHIVE_MEMORY_QUERY_FAILED":
+		return "archive memory lookup failed"
+	default:
+		return "archive memory lookup failed"
+	}
+}
+
+func archiveMemoryReviewPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "archive memory was not found"
+	case "ARCHIVE_MEMORY_REVIEW_BACKEND_UNCONFIGURED":
+		return "archive memory review backend is not configured"
+	case "VALIDATION_FAILED":
+		return "invalid archive memory review request"
+	default:
+		return "archive memory review failed"
+	}
 }
 
 func (s *Server) handleBulkAssetAction(response http.ResponseWriter, request *http.Request) {

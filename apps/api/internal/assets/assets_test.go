@@ -479,6 +479,95 @@ func TestSQLArchiveMemoryReaderListsSanitizedMemories(t *testing.T) {
 	}
 }
 
+func TestSQLArchiveMemoryReaderGetsSanitizedMemoryByID(t *testing.T) {
+	queryer := &recordingSQLQueryer{
+		rows: &fakeSQLRows{
+			values: [][]any{{
+				"memory-1",
+				"asset-1",
+				"project-owner",
+				"relationship",
+				"candidate",
+				"公开记忆摘要",
+				`{"relationship_id":"rel-1","prompt":"hidden","nested":{"safe":"visible","raw_body":"hidden"}}`,
+				"seed_pipeline",
+				"memory-ref-1",
+				true,
+				"2026-07-05T00:00:00Z",
+				"2026-07-05T00:00:00Z",
+			}},
+		},
+	}
+	reader := NewSQLArchiveMemoryReader(SQLArchiveMemoryReaderConfig{Queryer: queryer})
+
+	memory, err := reader.GetMemory(context.Background(), GetArchiveMemoryInput{
+		TenantID: "tenant-123",
+		MemoryID: "memory-1",
+	})
+
+	if err != nil {
+		t.Fatalf("get archive memory: %v", err)
+	}
+	if memory.MemoryID != "memory-1" || memory.AssetID != "asset-1" || memory.ProjectID != "project-owner" || memory.Summary != "公开记忆摘要" {
+		t.Fatalf("unexpected archive memory: %#v", memory)
+	}
+	if memory.Payload["relationship_id"] != "rel-1" {
+		t.Fatalf("expected decoded sanitized payload, got %#v", memory.Payload)
+	}
+	if _, ok := memory.Payload["prompt"]; ok {
+		t.Fatalf("archive memory payload leaked prompt: %#v", memory.Payload)
+	}
+	nested, ok := memory.Payload["nested"].(map[string]any)
+	if !ok || nested["safe"] != "visible" {
+		t.Fatalf("expected nested safe payload, got %#v", memory.Payload)
+	}
+	if _, ok := nested["raw_body"]; ok {
+		t.Fatalf("archive memory payload leaked nested raw body: %#v", nested)
+	}
+	lowerQuery := strings.ToLower(queryer.query)
+	if !strings.Contains(lowerQuery, "from archive_memories") ||
+		!strings.Contains(lowerQuery, "join assets") ||
+		!strings.Contains(lowerQuery, "memory.memory_id::text = $2") ||
+		!strings.Contains(lowerQuery, "asset.project_id::text") {
+		t.Fatalf("expected tenant/memory owner lookup query, got %s", queryer.query)
+	}
+	forbidden := []string{"content_text", "body_text", "prompt", "response", "api_key", "encrypted_api_key", "credential_ref", "object_key", "draft", "manuscript"}
+	for _, field := range forbidden {
+		if strings.Contains(lowerQuery, field) {
+			t.Fatalf("archive memory owner query selected forbidden field %q: %s", field, queryer.query)
+		}
+	}
+	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "memory-1"}) {
+		t.Fatalf("unexpected memory lookup args: %#v", queryer.args)
+	}
+}
+
+func TestSQLArchiveMemoryReaderGetMemoryMissingReturnsNotFound(t *testing.T) {
+	reader := NewSQLArchiveMemoryReader(SQLArchiveMemoryReaderConfig{Queryer: &recordingSQLQueryer{rows: &fakeSQLRows{}}})
+
+	_, err := reader.GetMemory(context.Background(), GetArchiveMemoryInput{
+		TenantID: "tenant-123",
+		MemoryID: "missing-memory",
+	})
+
+	if ErrorCode(err) != "NOT_FOUND" {
+		t.Fatalf("expected NOT_FOUND, got %v", err)
+	}
+}
+
+func TestDisabledArchiveMemoryReaderGetMemoryFailsExplicitly(t *testing.T) {
+	reader := NewDisabledArchiveMemoryReader()
+
+	_, err := reader.GetMemory(context.Background(), GetArchiveMemoryInput{
+		TenantID: "tenant-123",
+		MemoryID: "memory-1",
+	})
+
+	if ErrorCode(err) != "ARCHIVE_MEMORY_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected ARCHIVE_MEMORY_BACKEND_UNCONFIGURED, got %v", err)
+	}
+}
+
 func TestSQLArchiveMemoryReaderListsSanitizedMemoryEvents(t *testing.T) {
 	queryer := &recordingSQLQueryer{
 		rows: &fakeSQLRows{

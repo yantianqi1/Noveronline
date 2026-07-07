@@ -41,6 +41,11 @@ type ListArchiveMemoryEventsInput struct {
 	AssetID   string
 }
 
+type GetArchiveMemoryInput struct {
+	TenantID string
+	MemoryID string
+}
+
 type ArchiveMemoryReviewInput struct {
 	TenantID  string
 	ProjectID string
@@ -231,6 +236,7 @@ type Reader interface {
 type ArchiveMemoryReader interface {
 	ListMemories(context.Context, ListArchiveMemoriesInput) ([]ArchiveMemoryRecord, error)
 	ListMemoryEvents(context.Context, ListArchiveMemoryEventsInput) ([]ArchiveMemoryEventRecord, error)
+	GetMemory(context.Context, GetArchiveMemoryInput) (ArchiveMemoryRecord, error)
 }
 
 type ArchiveMemoryReviewStore interface {
@@ -359,6 +365,13 @@ func (DisabledArchiveMemoryReader) ListMemories(context.Context, ListArchiveMemo
 
 func (DisabledArchiveMemoryReader) ListMemoryEvents(context.Context, ListArchiveMemoryEventsInput) ([]ArchiveMemoryEventRecord, error) {
 	return nil, &AppError{
+		Code:    "ARCHIVE_MEMORY_BACKEND_UNCONFIGURED",
+		Message: "archive memory backend is not configured",
+	}
+}
+
+func (DisabledArchiveMemoryReader) GetMemory(context.Context, GetArchiveMemoryInput) (ArchiveMemoryRecord, error) {
+	return ArchiveMemoryRecord{}, &AppError{
 		Code:    "ARCHIVE_MEMORY_BACKEND_UNCONFIGURED",
 		Message: "archive memory backend is not configured",
 	}
@@ -930,6 +943,56 @@ LIMIT $4`
 		return nil, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
 	}
 	return records, nil
+}
+
+func (r *SQLArchiveMemoryReader) GetMemory(ctx context.Context, input GetArchiveMemoryInput) (ArchiveMemoryRecord, error) {
+	if err := validateArchiveMemoryLookupInput(input.TenantID, input.MemoryID); err != nil {
+		return ArchiveMemoryRecord{}, err
+	}
+	if r.queryer == nil {
+		return ArchiveMemoryRecord{}, &AppError{Code: "ARCHIVE_MEMORY_BACKEND_UNCONFIGURED", Message: "archive memory backend is not configured"}
+	}
+	query := `SELECT
+  memory.memory_id::text,
+  memory.asset_id::text,
+  asset.project_id::text,
+  memory.memory_type,
+  memory.status,
+  COALESCE(memory.summary, ''),
+  memory.payload_jsonb::text,
+  memory.source_kind,
+  memory.source_ref,
+  memory.enabled,
+  memory.created_at::text,
+  memory.updated_at::text
+FROM archive_memories memory
+JOIN assets asset
+  ON asset.tenant_id = memory.tenant_id
+ AND asset.asset_id = memory.asset_id
+ AND asset.project_id = memory.project_id
+WHERE memory.tenant_id::text = $1
+  AND memory.memory_id::text = $2
+LIMIT 1`
+	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.MemoryID))
+	if err != nil {
+		return ArchiveMemoryRecord{}, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return ArchiveMemoryRecord{}, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
+		}
+		return ArchiveMemoryRecord{}, &AppError{Code: "NOT_FOUND", Message: "archive memory was not found"}
+	}
+	record, err := scanArchiveMemoryRecord(rows)
+	if err != nil {
+		return ArchiveMemoryRecord{}, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
+	}
+	if err := rows.Err(); err != nil {
+		return ArchiveMemoryRecord{}, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
+	}
+	return record, nil
 }
 
 func (s *SQLArchiveMemoryReviewStore) AdoptMemory(ctx context.Context, input ArchiveMemoryReviewInput) (ArchiveMemoryRecord, error) {
@@ -1703,6 +1766,13 @@ func validateProjectInput(tenantID string, projectID string) error {
 func validateArchiveMemoryInput(tenantID string, projectID string, assetID string) error {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(projectID) == "" || strings.TrimSpace(assetID) == "" {
 		return &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, project_id, and asset_id are required"}
+	}
+	return nil
+}
+
+func validateArchiveMemoryLookupInput(tenantID string, memoryID string) error {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(memoryID) == "" {
+		return &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and memory_id are required"}
 	}
 	return nil
 }
