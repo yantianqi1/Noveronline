@@ -65,10 +65,46 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels 均已通过 spec / quality reviewer |
-| 当前未完成重点 | 真实 LLM-bound E2E、trace/replay browser verification、真正内容导出 artifact service |
-| 本轮开发 slice | W1-S4 Writer UI manuscript metadata panels：Next writer page/client/shell 加载并展示 metadata-only manuscript 与 export manifest |
-| 推荐下一步 | W1-S4 提交后进入 live LLM-bound E2E 或 trace/replay browser verification slice |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening 均已通过 spec / quality reviewer |
+| 当前未完成重点 | 真实 LLM-bound E2E、browser verification、真正内容导出 artifact service |
+| 本轮开发 slice | W1-S5 Writer replay cursor / raw payload UI hardening：Next writer page/shell 显式保留 `after_event_id` replay cursor 与 query run/trace metadata，并停止公开渲染 writer/trace event raw payload JSON |
+| 推荐下一步 | W1-S5 提交后进入 live/local LLM-bound E2E 或浏览器验收 slice；当前切片不声明真实 provider E2E 或内容 export artifact 完成 |
+
+## Wave 1 W1-S5 Writer replay cursor / raw payload UI hardening
+
+Context:
+
+- W1-S4 已提交并让 Writer page 加载 metadata-only manuscript/export manifest panels。
+- Wave 1 剩余验收包含页面刷新后恢复 run/events/draft，以及 trace/replay browser verification；本 slice 先补 explicit replay cursor UI contract 和 public UI raw payload hardening。
+- Scope 限定在 `apps/web` Writer page/shell/static tests；不改 Go API、Pi runtime、draft adoption、manuscript export 或 provider path。
+
+TDD / Review:
+
+- Implementer subagent Bohr 先补 `apps/web/tests/web-shell.test.mjs` RED/GREEN，证明 Writer shell 有 `after_event_id` replay cursor form，保留 run/trace query metadata，且 replay slice 不含 credential/body/draft/manuscript 字段。
+- Spec reviewer Poincare 初审要求修正 Trace Events raw `JSON.stringify(event.payload)` 泄露风险，并要求在 run summary 失败时保留 query `runId` / `traceId`。Coordinator 将测试扩展到禁止 writer shell public render path 中的 raw event payload JSON，并新增 `selectedRunId` / `selectedTraceId` props。
+- Quality reviewer Hooke 初审要求修正 trace 优先级：页面用 `selectedTraceId || runSummary.trace_id` 读取 trace events，shell/export/replay form 也必须同样 query trace 优先。Coordinator 先把测试改为 `selectedTraceId || traceId` RED，再修正 shell。
+- Final reviewer Einstein 要求补强测试覆盖 `replayTraceId` assignment、display 和 export hidden field，Coordinator 补测后复跑通过；Einstein re-review APPROVED。
+
+Implementation:
+
+- `apps/web/app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx` 规范化 `after_event_id` / `afterEventId`，并将 query `runId` / `traceId` 作为 selected metadata 传入 shell。
+- `apps/web/components/writer-workbench-shell.tsx` 在 Recovered stream 面板新增 GET replay cursor form，提交 `runId`、`traceId`、`after_event_id`；run summary 失败时仍保留 query metadata，trace 优先级与 page fetch 保持一致。
+- Writer Events 和 Trace Events 不再渲染 arbitrary raw payload JSON，只显示 event type/order/id/time/redaction 与 payload metadata key count；typed tool result cards 继续使用 sanitized event payload 派生专用卡片。
+- 不新增 fake success、adoption/export side effects、旧式 LLM env fallback 或 provider call。
+
+Verification so far:
+
+- RED: `cd apps/web && npm run test -- --test-name-pattern='Writer shell exposes recovered stream replay cursor'` 先失败于缺 selected run/trace props。
+- GREEN: 同命令通过，39 passed。
+- RED: quality 修正测试先失败于错误 `traceId || selectedTraceId` priority。
+- GREEN: 同命令通过，39 passed。
+- `cd apps/web && npm run test` 通过，39 passed。
+- `cd apps/web && npm run typecheck` 通过。
+- Wave 1 acceptance：`cd apps/api && go test ./internal/workflows ./internal/httpapi -run 'Writer|Draft|Trace|LLM|Workflow|Manuscript' -count=1` 通过。
+- Wave 1 acceptance：`cd apps/pi-agent-runtime && npm run test && npm run typecheck` 通过，7 files / 38 tests。
+- Wave 1 acceptance：`cd apps/web && npm run test -- --test-name-pattern='Writer|writer|replay|Recovered stream' && npm run typecheck` 通过，39 tests。
+- `git diff --check` 通过。
+- `rg -n '[[:blank:]]$' 'apps/web/app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx' apps/web/components/writer-workbench-shell.tsx apps/web/tests/web-shell.test.mjs docs/refactor-saas/11-writer-workbench.md docs/refactor-saas/13-agent-runtime.md docs/refactor-saas/15-api-contracts.md docs/refactor-saas/18-legacy-coverage-matrix.md tasks/refactor-saas-live-progress.md tasks/refactor-saas-parallel-board.md` 无输出，目标文件尾随空白扫描通过。
 
 ## P6-002 Character Console 当前状态
 

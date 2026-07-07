@@ -21,6 +21,9 @@ type WriterWorkbenchShellProps = {
   worldlineSavedPaths: WorldlineSavedPathsSummary;
   manuscript: ProjectManuscriptSummary;
   manuscriptExportManifest: ProjectManuscriptExportManifestSummary;
+  afterEventId: string;
+  selectedRunId: string;
+  selectedTraceId: string;
   writerRunStatus: ActionStatus | null;
   traceExportStatus: TraceExportStatus | null;
   writerRunAction?: (formData: FormData) => Promise<void>;
@@ -46,6 +49,9 @@ export function WriterWorkbenchShell({
   worldlineSavedPaths,
   manuscript,
   manuscriptExportManifest,
+  afterEventId,
+  selectedRunId,
+  selectedTraceId,
   writerRunStatus,
   traceExportStatus,
   writerRunAction,
@@ -54,6 +60,8 @@ export function WriterWorkbenchShell({
   const statusLabel =
     runSummary?.ok === true ? runSummary.status : runSummary?.ok === false ? "error" : "idle";
   const traceId = runSummary?.ok === true ? runSummary.trace_id : "";
+  const replayRunId = runSummary?.ok === true ? runSummary.run_id : selectedRunId;
+  const replayTraceId = selectedTraceId || traceId;
 
   return (
     <div>
@@ -153,9 +161,9 @@ export function WriterWorkbenchShell({
                 <dt>Project</dt>
                 <dd>{projectId}</dd>
                 <dt>Run</dt>
-                <dd>{runSummary?.ok === true ? runSummary.run_id : "not selected"}</dd>
+                <dd>{replayRunId || "not selected"}</dd>
                 <dt>Trace</dt>
-                <dd>{traceId || "not selected"}</dd>
+                <dd>{replayTraceId || "not selected"}</dd>
               </dl>
             )}
             {traceExportStatus ? (
@@ -163,9 +171,9 @@ export function WriterWorkbenchShell({
                 {traceExportStatus.code}: {traceExportStatus.message}
               </p>
             ) : null}
-            {traceId && exportTraceAction ? (
+            {replayTraceId && exportTraceAction ? (
               <form action={exportTraceAction} className="inline-action-form">
-                <input name="traceId" type="hidden" value={traceId} />
+                <input name="traceId" type="hidden" value={replayTraceId} />
                 <button type="submit">Export redacted trace</button>
               </form>
             ) : null}
@@ -186,6 +194,26 @@ export function WriterWorkbenchShell({
           >
             <p className="eyebrow">Writer Events</p>
             <h2 id="workflow-events-heading">Recovered stream</h2>
+            <form
+              action={writerHref(tenantSlug, projectId)}
+              className="binding-form"
+              method="get"
+            >
+              <input
+                name="runId"
+                type="hidden"
+                value={runSummary?.ok === true ? runSummary.run_id : selectedRunId}
+              />
+              <input name="traceId" type="hidden" value={selectedTraceId || traceId} />
+              <label htmlFor="writer-event-cursor">Event cursor</label>
+              <input
+                id="writer-event-cursor"
+                name="after_event_id"
+                defaultValue={afterEventId}
+                placeholder="evt_..."
+              />
+              <button type="submit">Request replay events</button>
+            </form>
             <WriterEvents workflowEvents={workflowEvents} />
           </section>
 
@@ -486,6 +514,10 @@ function ToolResultCard({ toolEvent }: { toolEvent: ToolCompletedEvent }) {
   return <UnknownToolResultCard toolEvent={toolEvent} />;
 }
 
+function writerHref(tenantSlug: string, projectId: string) {
+  return `/${tenantSlug}/projects/${projectId}/writer`;
+}
+
 function AssetToolResultCard({ toolEvent }: { toolEvent: ToolCompletedEvent }) {
   const items = arrayOfRecords(toolEvent.result.items);
 
@@ -569,7 +601,7 @@ function UnknownToolResultCard({ toolEvent }: { toolEvent: ToolCompletedEvent })
   return (
     <article className="tool-result-card">
       <ToolCardHeader toolEvent={toolEvent} label="Tool result" count={Object.keys(toolEvent.result).length} />
-      <p className="trace-meta">Result shape is not yet typed. Raw payload remains available in Writer Events.</p>
+      <p className="trace-meta">Result shape is not yet typed. Only event metadata is shown here.</p>
     </article>
   );
 }
@@ -674,7 +706,9 @@ function WriterEvents({ workflowEvents }: { workflowEvents: WriterRunEventsSumma
           <p className="trace-meta">
             {event.event_id} / {event.created_at}
           </p>
-          <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+          <p className="trace-meta">
+            Payload metadata keys: {Object.keys(event.payload).length}
+          </p>
         </article>
       ))}
     </div>
@@ -712,7 +746,9 @@ function TraceEvents({ traceEvents }: { traceEvents: AgentTraceEventsSummary | n
               #{event.event_order} / {event.created_at}
             </p>
             {payloadKeys.length > 0 ? (
-              <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+              <p className="trace-meta">
+                Payload metadata keys: {payloadKeys.length}
+              </p>
             ) : (
               <p className="trace-meta">Payload redacted.</p>
             )}

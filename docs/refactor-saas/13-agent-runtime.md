@@ -351,6 +351,7 @@ Writer 和 worldline 可以流式输出：
 - Temporal activity 事件写入 `workflow_events`。
 - Go SSE 读取事件表或订阅 channel。
 - Writer stream 恢复必须以持久化 `workflow_events` 为准：`GET /v1/writer-runs/{runId}/events` 支持 `after_event_id` query cursor 和 SSE `Last-Event-ID`，只返回 cursor 之后的事件；cursor 不存在时返回显式错误，不静默从头重放或吞错。
+- Next Writer Workbench 的 recovered stream UI 必须把 `after_event_id` 作为显式用户 cursor 提交，并保留当前 query 选择的 run/trace metadata；公共 Writer/Trace event panels 不得渲染 raw event payload JSON，只能展示事件 metadata 和 payload key counts，避免替换 reader 或历史 unsafe payload 通过 UI 泄露 prompt、provider response、credential、object key、draft 或 manuscript 正文。
 - Go writer admission 在启动 `PiWriterRunWorkflow` 前必须先写入目标 `workflow_runs` / `writer_runs` 父行；写入失败返回 `WORKFLOW_ADMISSION_FAILED` 且不得启动 worker，避免 Pi runtime 后续写 `workflow_events` / `writer_drafts` 时依赖缺失父行或伪造 queued success。
 - `GET /v1/writer-runs/{runId}` 在 SaaS Postgres backend 配置后必须从持久化 `writer_runs` 读取 public run status，不能依赖 Go 进程内存作为恢复真相源；读侧仍按 `X-Tenant-Id` 隔离并只返回公开 metadata。
 - Pi Writer Runtime 的 DB-backed activity 写入 `writer.run.started`、`writer.draft.saved`、`writer.run.completed` 和 `writer.run.failed` 到 `workflow_events`，供 Go API replay 读侧恢复 stream。

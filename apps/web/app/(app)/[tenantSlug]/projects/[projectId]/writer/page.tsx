@@ -35,24 +35,27 @@ export default async function WriterPage({
 }) {
   const { tenantSlug, projectId } = await params;
   const query = searchParams ? await searchParams : {};
+  const afterEventId = query.after_event_id ?? query.afterEventId ?? "";
+  const selectedRunId = query.runId ?? "";
+  const selectedTraceId = query.traceId ?? "";
   const apiContext = {
     tenantId: tenantSlug,
     actorUserId: "web-shell",
   };
-  const runSummary = query.runId
+  const runSummary = selectedRunId
     ? await getWriterRunSummary({
         ...apiContext,
-        runId: query.runId,
+        runId: selectedRunId,
       })
     : null;
   const workflowEvents = runSummary !== null && runSummary.ok === true
     ? await getWriterRunEvents({
         ...apiContext,
         runId: runSummary.run_id,
-        afterEventId: query.after_event_id ?? query.afterEventId,
+        afterEventId: afterEventId,
       })
     : null;
-  const traceId = query.traceId ?? (runSummary !== null && runSummary.ok === true ? runSummary.trace_id : "");
+  const traceId = selectedTraceId || (runSummary !== null && runSummary.ok === true ? runSummary.trace_id : "");
   const traceEvents = traceId
     ? await getAgentTraceEvents({
         ...apiContext,
@@ -163,6 +166,9 @@ export default async function WriterPage({
       worldlineSavedPaths={worldlineSavedPaths}
       manuscript={manuscript}
       manuscriptExportManifest={manuscriptExportManifest}
+      afterEventId={afterEventId}
+      selectedRunId={selectedRunId}
+      selectedTraceId={selectedTraceId}
       writerRunStatus={
         query.writerRunStatus
           ? {

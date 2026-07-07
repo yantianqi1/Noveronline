@@ -1012,6 +1012,41 @@ test("writer API client can replay workflow events after a resume cursor", async
   assert.match(client, /\/v1\/writer-runs\/\$\{input\.runId\}\/events/);
 });
 
+test("Writer shell exposes recovered stream replay cursor without sensitive content", async () => {
+  const shell = await fileText("components/writer-workbench-shell.tsx");
+  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx");
+  const replaySlice = sourceSlice(shell, "Recovered stream", "Trace Events");
+
+  assert.match(page, /const\s+afterEventId\s*=\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
+  assert.match(page, /const\s+selectedRunId\s*=\s*query\.runId\s*\?\?\s*""/);
+  assert.match(page, /const\s+selectedTraceId\s*=\s*query\.traceId\s*\?\?\s*""/);
+  assert.match(page, /afterEventId:\s*afterEventId/);
+  assert.match(page, /selectedRunId=\{selectedRunId\}/);
+  assert.match(page, /selectedTraceId=\{selectedTraceId\}/);
+  assert.match(page, /afterEventId=\{afterEventId\}/);
+  assert.match(shell, /afterEventId:\s*string/);
+  assert.match(shell, /selectedRunId:\s*string/);
+  assert.match(shell, /selectedTraceId:\s*string/);
+  assert.match(shell, /const\s+replayRunId\s*=\s*runSummary\?\.ok === true \? runSummary\.run_id : selectedRunId/);
+  assert.match(shell, /const\s+replayTraceId\s*=\s*selectedTraceId \|\| traceId/);
+  assert.match(shell, /<dd>\{replayRunId \|\| "not selected"\}<\/dd>/);
+  assert.match(shell, /<dd>\{replayTraceId \|\| "not selected"\}<\/dd>/);
+  assert.match(shell, /value=\{replayTraceId\}/);
+  assert.match(replaySlice, /action=\{writerHref\(tenantSlug,\s*projectId\)\}/);
+  assert.match(replaySlice, /method="get"/);
+  assert.match(replaySlice, /name="runId"/);
+  assert.match(replaySlice, /value=\{runSummary\?\.ok === true \? runSummary\.run_id : selectedRunId\}/);
+  assert.match(replaySlice, /name="traceId"/);
+  assert.match(replaySlice, /value=\{selectedTraceId \|\| traceId\}/);
+  assert.match(replaySlice, /name="after_event_id"/);
+  assert.match(replaySlice, /defaultValue=\{afterEventId\}/);
+  assert.match(replaySlice, /Request replay events/);
+  assert.match(replaySlice, /Event cursor/);
+  assert.doesNotMatch(shell, /JSON\.stringify\(event\.payload/);
+  assert.doesNotMatch(replaySlice, /api_key|encrypted_api_key|credential_ref/i);
+  assert.doesNotMatch(replaySlice, /content_text|body_text|draft|manuscript/i);
+});
+
 test("writer API client reads sanitized worldline saved path picker data", async () => {
   const client = await fileText("lib/api.ts");
 

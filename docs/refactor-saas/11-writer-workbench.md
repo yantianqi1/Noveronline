@@ -349,6 +349,8 @@ GET /v1/writer-runs/{runId}/events
 Accept: text/event-stream
 ```
 
+Next Writer Workbench must expose replay as an explicit recovered-stream cursor action. The current SaaS shell submits `after_event_id` together with selected run/trace metadata through a GET form so refresh/reopen keeps the chosen replay window. Public Writer Events / Trace Events panels display event metadata and payload key counts only; raw workflow or trace payload JSON, draft/manuscript prose, prompt/provider response, credentials, `credential_ref`, and object keys must stay out of the UI.
+
 ### Adopt Draft
 
 ```http
