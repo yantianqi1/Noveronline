@@ -1,0 +1,69 @@
+import type { ToolExecutionMode } from "@earendil-works/pi-agent-core";
+
+export interface WriterRunInput {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  trace_id: string;
+  requested_by: string;
+  mode: "draft" | "continue" | "outline";
+  chapter_id?: string;
+  scene_id?: string;
+  instruction: string;
+  selected_asset_ids: string[];
+  worldline_path_ids: string[];
+  options: {
+    module_key: "writer_composer" | "writer_orchestrator";
+    thinking_level?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+    tool_execution?: ToolExecutionMode;
+    target_words?: number;
+    review_after_write?: boolean;
+    llm_resolution?: {
+      module_key: string;
+      channel_id: string;
+      model_id: string;
+      provider: string;
+      base_url: string;
+      credential_ref: string;
+      supports_tools: boolean;
+      supports_json: boolean;
+      settings: Record<string, unknown>;
+    };
+  };
+}
+
+export interface RuntimeContext {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  trace_id: string;
+  requested_by: string;
+  permissions: {
+    tools: string[];
+    can_write_draft: boolean;
+  };
+}
+
+export function runtimeContextFromInput(input: WriterRunInput): RuntimeContext {
+  return {
+    tenant_id: input.tenant_id,
+    project_id: input.project_id,
+    run_id: input.run_id,
+    trace_id: input.trace_id,
+    requested_by: input.requested_by,
+    permissions: {
+      tools: [
+        "query_project_context",
+        "query_chapter_scene",
+        "query_assets",
+        "query_world_rules",
+        "query_character_profile",
+        "query_graph_neighbors",
+        "query_worldline_paths",
+        "query_manuscript_context",
+        "save_draft_revision"
+      ],
+      can_write_draft: true
+    }
+  };
+}

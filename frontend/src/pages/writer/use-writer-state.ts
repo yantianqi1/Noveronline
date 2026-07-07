@@ -21,7 +21,9 @@ import {
   rejectArchiveMemory,
 } from "@/api/assets";
 import {
-  runWriterAgent,
+  adoptWriterDraftV1,
+  createWriterRunV1,
+  streamWriterRunEventsV1,
   getScenes,
   updateScene as updateSceneApi,
   deleteScene as deleteSceneApi,
@@ -51,7 +53,9 @@ import { useNotification } from "@/hooks/use-notification";
 import type { SSEEvent } from "@/api/sse";
 
 import {
+  buildSaasWriterRunPayload,
   deriveWriterDefaults,
+  parseWriterReferenceInput,
   resolveWriterPovOptions,
 } from "./writer-workbench-state";
 import type {
@@ -171,6 +175,12 @@ export function useWriterState() {
   const [authorInstruction, setAuthorInstruction] = useState("");
   const [taskType, setTaskType] = useState<TaskType>("write_scene");
   const [viewMode, setViewMode] = useState<ViewMode>("writing");
+  const [selectedAssetIdsInput, setSelectedAssetIdsInput] = useState("");
+  const [worldlinePathIdsInput, setWorldlinePathIdsInput] = useState("");
+  const [characterNamesInput, setCharacterNamesInput] = useState("");
+  const [graphNodeNamesInput, setGraphNodeNamesInput] = useState("");
+  const [assetQuery, setAssetQuery] = useState("");
+  const [worldRuleQuery, setWorldRuleQuery] = useState("");
 
   /* ─── Data lists ─── */
   const [chapterOptions, setChapterOptions] = useState<ChapterOption[]>([]);
@@ -245,6 +255,7 @@ export function useWriterState() {
   const [selectedAnchorBlockId, setSelectedAnchorBlockId] = useState<string | null>(null);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitDone, setCommitDone] = useState(false);
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [commitTargetChapterId, setCommitTargetChapterId] = useState("");
   const [worldUpdateBusy, setWorldUpdateBusy] = useState(false);
   const [worldUpdateDone, setWorldUpdateDone] = useState(false);
@@ -397,6 +408,9 @@ export function useWriterState() {
       } else if (event.type === "outline_ready") {
         setDraftPhase("done");
         setOutlineData(event.outline as OutlineScene[]);
+      } else if (event.type === "draft_saved") {
+        setActiveDraftId((event.draft_id as string) || null);
+        setMessage("草稿已保存，等待采用");
       } else if (event.type === "error") {
         setError((event.message as string) || "生成失败");
         setAgentStreaming(false);
@@ -851,6 +865,7 @@ export function useWriterState() {
     setDataHealthIssues([]);
     setDataHealthDismissed(false);
     setCommitDone(false);
+    setActiveDraftId(null);
     if (worldUpdateAbortRef.current) {
       worldUpdateAbortRef.current.abort();
       worldUpdateAbortRef.current = null;
@@ -859,74 +874,68 @@ export function useWriterState() {
     setWorldUpdateDone(false);
     setWorldUpdateSummary("");
 
-    const chapter = chapterOptions.find((c) => c.chapter_id === chapterId);
-    const currentSceneOrder =
-      scenes.find((s) => s.scene_id === selectedSceneId)?.scene_order || 1;
-
-    const payload = {
-      project_id: projectId,
-      task_type: taskType,
-      chapter_id: chapterId,
-      chapter_order: chapter?.order || chapterOrder,
-      scene_order: currentSceneOrder,
-      pov_entity_id: povCharacter,
-      involved_entity_ids: involvedEntityIds,
-      scene_focus: sceneFocus,
-      user_instruction: authorInstruction,
-      preset_id: selectedPresetId,
-      session_id: sessionId,
-      selected_text: "",
-      scene_id: selectedSceneId,
-      last_block_id:
-        taskType === "continue"
-          ? (selectedAnchorBlockId || lastCommittedBlockId)
-          : "",
-    };
-
     if (draftAbortControllerRef.current) {
       draftAbortControllerRef.current.abort();
     }
     draftAbortControllerRef.current = new AbortController();
 
-    await runWriterAgent(
-      payload,
-      {
-        onEvent: handleTraceEvent,
-        onDone: handleTraceDone,
-        onError(event) {
-          setAgentStreaming(false);
-          // When the stream fails mid-generation, prose collected so far is
-          // almost always truncated and useless. Keeping it on-screen only
-          // invites the user to hit "generate" again and see the broken head
-          // prepended to the new output, so we drop it and reset the editor.
-          contentRef.current = "";
-          setAgentSceneContent("");
-          setDraftPhase("idle");
-          const msg =
-            (event as SSEEvent)?.message ??
-            (event as Error)?.toString?.() ??
-            "生成失败";
-          setError(msg as string);
+    try {
+      const runResponse = await createWriterRunV1(
+        projectId,
+        buildSaasWriterRunPayload({
+          taskType,
+          chapterId,
+          selectedSceneId,
+          authorInstruction,
+          sceneFocus,
+          moduleKey: "writer_composer",
+          selectedAssetIds: parseWriterReferenceInput(selectedAssetIdsInput),
+          worldlinePathIds: parseWriterReferenceInput(worldlinePathIdsInput),
+          characterNames: parseWriterReferenceInput(characterNamesInput),
+          graphNodeNames: parseWriterReferenceInput(graphNodeNamesInput),
+          assetQuery,
+          worldRuleQuery,
+        }),
+      );
+      const runId = runResponse.data?.run_id;
+      if (!runId) throw new Error("writer run did not return run_id");
+      await streamWriterRunEventsV1(
+        runId,
+        {
+          onEvent: handleTraceEvent,
+          onDone: handleTraceDone,
+          onError(event) {
+            setAgentStreaming(false);
+            contentRef.current = "";
+            setAgentSceneContent("");
+            setDraftPhase("idle");
+            const msg =
+              (event as SSEEvent)?.message ??
+              (event as Error)?.toString?.() ??
+              "生成失败";
+            setError(msg as string);
+          },
         },
-      },
-      draftAbortControllerRef.current.signal,
-    );
+        draftAbortControllerRef.current.signal,
+      );
+    } catch (err: unknown) {
+      setAgentStreaming(false);
+      setDraftPhase("idle");
+      setError((err as Error).message || "生成失败");
+    }
   }, [
     projectId,
     chapterId,
-    chapterOptions,
-    chapterOrder,
     taskType,
-    scenes,
     selectedSceneId,
-    povCharacter,
-    involvedEntityIds,
     sceneFocus,
     authorInstruction,
-    selectedPresetId,
-    sessionId,
-    lastCommittedBlockId,
-    selectedAnchorBlockId,
+    selectedAssetIdsInput,
+    worldlinePathIdsInput,
+    characterNamesInput,
+    graphNodeNamesInput,
+    assetQuery,
+    worldRuleQuery,
     resetAgentTrace,
     handleTraceEvent,
     handleTraceDone,
@@ -1108,15 +1117,17 @@ export function useWriterState() {
         : undefined;
       try {
         setCommitBusy(true);
-        const commitResult = await commitToManuscript(projectId, {
-          content: text,
-          source_scene_id: selectedSceneId || undefined,
-          chapter_id: targetId || undefined,
-          pov_entity_id: povCharacter || undefined,
-          involved_entities_json: involvedEntityIds.length
-            ? JSON.stringify(involvedEntityIds)
-            : undefined,
-        });
+        const commitResult = activeDraftId
+          ? await adoptWriterDraftV1(activeDraftId)
+          : await commitToManuscript(projectId, {
+              content: text,
+              source_scene_id: selectedSceneId || undefined,
+              chapter_id: targetId || undefined,
+              pov_entity_id: povCharacter || undefined,
+              involved_entities_json: involvedEntityIds.length
+                ? JSON.stringify(involvedEntityIds)
+                : undefined,
+            });
         const blockData = (commitResult?.data ?? commitResult) as Record<string, string>;
         if (blockData?.block_id) {
           setLastCommittedBlockId(blockData.block_id);
@@ -1141,6 +1152,7 @@ export function useWriterState() {
       selectedSceneId,
       povCharacter,
       involvedEntityIds,
+      activeDraftId,
     ],
   );
 
@@ -1503,6 +1515,18 @@ export function useWriterState() {
     taskType,
     setTaskType,
     viewMode,
+    selectedAssetIdsInput,
+    setSelectedAssetIdsInput,
+    worldlinePathIdsInput,
+    setWorldlinePathIdsInput,
+    characterNamesInput,
+    setCharacterNamesInput,
+    graphNodeNamesInput,
+    setGraphNodeNamesInput,
+    assetQuery,
+    setAssetQuery,
+    worldRuleQuery,
+    setWorldRuleQuery,
 
     /* options */
     chapterOptions,

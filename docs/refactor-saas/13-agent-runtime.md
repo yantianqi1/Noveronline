@@ -1,0 +1,398 @@
+# 13. Agent Runtime
+
+更新时间：`2026-07-07`
+
+## 模块定位
+
+Agent Runtime 是所有智能体能力的执行层。它不直接面向公网，而是通过 workflow/worker 执行 Go Control Plane 提交的任务。
+
+当前实现顺序采用双 runtime：
+
+- **Pi Writer Runtime**：第一阶段负责 Writer Agent loop、tool calling、流式正文和 draft 保存。
+- **Python Agent Runtime**：继续负责 seed、graph、asset ingestion、worldline 等 Python 领域逻辑。
+
+旧系统里 Agent 逻辑分散在：
+
+- seed services。
+- graph builder。
+- asset ingestion agent。
+- worldline services。
+- writer_agent。
+- llm_router。
+- step trace。
+
+新系统要把它们整理为统一运行规范，保留旧能力并增强可观测、可恢复和可审计。Writer loop 不再从零自研，详见 `21-pi-writer-agent-runtime.md`。
+
+## 运行形态
+
+```text
+Go API starts workflow
+  -> Temporal or compatibility runner queues work
+  -> Pi Writer Runtime or Python Agent Worker picks activity
+  -> Runtime loads tenant/project/run context
+  -> LLM Facility adapter resolves module binding
+  -> Agent executes prompt/tool loop or domain activity
+  -> Trace events persisted
+  -> Result written to Postgres/Object Storage
+```
+
+Python worker 和 Pi Writer Runtime 都不直接接收公网请求。
+
+Python Temporal worker 注册的 Seed / Asset / Graph / Worldline activity 当前是同步函数，worker 入口必须为 Temporal `Worker` 提供 `ThreadPoolExecutor`；否则真实 worker 在启动时会拒绝同步 activity。Seed workflow 文件中的 `pypdf` import 仅供 activity PDF extraction 使用，必须作为 Temporal sandbox passthrough import，避免 workflow sandbox 重新导入 `pypdf/cryptography` 时失败。Seed activity 的 workflow event writer 和 workflow run status writer 也必须在 activity 内部从环境解析，不能只依赖 local runner 显式注入；真实 Temporal worker 只传 payload，parse/segment/sequential 等 stage event 持久化以及 running/terminal `workflow_runs` 状态回写需要 activity 自行解析 `DATABASE_URL` backed writer。本地 `run_seed_workflow_locally` harness 可显式注入同一个 workflow status writer 并复用于 seed admission、sequential terminal failure 和 finalize terminal success，用于验证 `running -> failed/completed` 状态交接，但这不替代真实 worker 的环境解析要求。
+
+Seed worker 的 workflow event persistence 失败也属于 public runtime 边界。`seed_pipeline_activity` 解析 workflow event writer 或写 `seed.stage.pending` 失败时必须返回稳定 `WORKFLOW_EVENT_WRITE_FAILED` / `workflow event write failed`，不得把 workflow event writer factory / writer exception 中可能夹带的 prompt、API key、`credential_ref`、object key、source path、draft 或 manuscript 透出到 activity result、workflow status 或 API read side。
+
+同一边界适用于后续 Seed stages。`parse_file_activity`、`segment_text_activity`、`sequential_reading_activity`、`persist_runtime_facts_activity`、`global_aggregation_activity`、`ontology_activity`、`entity_resolution_activity`、`agent_profile_activity`、`archive_candidate_activity`、`index_assets_activity` 和 `finalize_seed_activity` 在解析 workflow event writer 失败时必须返回稳定 `WORKFLOW_EVENT_WRITE_FAILED` / `workflow event write failed`，公开 result 只保留 stage/source-file/module public metadata，不能让 writer factory exception 变成未结构化 activity crash、被误归类为 object storage/LLM/runtime/index/finalize failure，或泄露 prompt、API key、`credential_ref`、object key、source path、draft/manuscript。
+
+Seed `parse_file_activity` 和 `segment_text_activity` 的 terminal failure 也必须通过 workflow run status writer 回写 admitted `seed_pipeline` run 的 failed 状态，避免早期 parse/segment 失败后 `workflow_runs` 停留在 `running`。真实 worker path 可从 `DATABASE_URL` 装配 status writer；装配或写入失败必须返回稳定 `WORKFLOW_STATUS_WRITE_FAILED` / `seed workflow status write failed`，不得把 status writer factory / DB exception 中可能夹带的 prompt、API key、`credential_ref`、object key、draft 或 manuscript 写入 activity result、workflow event 或 API read side。
+
+Seed parse source-status writer env-resolution failure 也属于 public runtime 边界。`parse_file_activity` 解析 DB-backed source parse-status writer 时如果遇到环境或 writer factory 异常，必须返回稳定 `SOURCE_FILE_PARSE_STATUS_UPDATE_FAILED` / `source file parse status update failed`，写 sanitized `seed.stage.failed` parse event，并在 workflow status writer 可用时把 admitted run 标为 `failed`；不得把底层 exception 文本透出到 activity result、workflow event/status 或 API read side。
+
+Seed parse text-artifact writer env-resolution failure 同样必须 fail closed。`parse_file_activity` 解析 DB-backed text artifact writer 时如果遇到环境或 writer factory 异常，必须返回稳定 `TEXT_ARTIFACT_WRITE_FAILED` / `text artifact write failed`，尝试把 source row 标为 `failed`，写 sanitized parse failed event，并在 workflow status writer 可用时把 admitted run 标为 `failed`；不得读取 source object、写 extracted artifact 或把底层 exception 文本透出到公共面。
+
+Seed segment text-segment writer env-resolution failure 同样必须 fail closed。`segment_text_activity` 解析 DB-backed text segment writer 时如果遇到环境或 writer factory 异常，必须返回稳定 `TEXT_SEGMENT_WRITE_FAILED` / `text segment write failed`，写 sanitized segment failed event，并在 workflow status writer 可用时把 admitted run 标为 `failed`；不得读取 extracted artifact、写 segment object 或把底层 exception 文本透出到公共面。
+
+Seed parse/segment object-store env-resolution failure 同样属于 public runtime 边界。`parse_file_activity` 与 `segment_text_activity` 解析 MinIO/S3-compatible object store 时如果遇到环境或 factory 普通异常，必须返回稳定 `OBJECT_STORAGE_BACKEND_MISCONFIGURED` / `object storage backend is misconfigured`；parse 路径还要尝试把 source row 标为 `failed`，两个路径都必须写 sanitized failed stage event，并在 workflow status writer 可用时把 admitted run 标为 `failed`。不得读取 source/extracted artifact、写 extracted artifact/segment object，或把底层 exception、object credential、object key、prompt、API key、`credential_ref`、draft/manuscript 透出到 activity result、workflow event/status 或 API read side。
+
+Seed sequential-reading 默认 reader 的 object-store env-resolution failure 也必须 fail closed。`sequential_reading_activity` 在装配 DB-backed `LLMFacilitySequentialReader` 时，如果 segment text object store 环境或 factory 普通异常，会返回稳定 `OBJECT_STORAGE_BACKEND_MISCONFIGURED` / `object storage backend is misconfigured`，写 sanitized sequential-reading failed event，并在 workflow status writer 可用时把 admitted run 标为 `failed`。该路径不得调用 LLM、不得写 reading notes，也不得把底层 exception、segment object key、prompt/API key、`credential_ref`、draft/manuscript 透出到 activity result、workflow event/status 或 API read side。
+
+当前 Phase 5 skeleton 已新增 Python `asset-light` task queue 的 `AssetIngestionWorkflow` / `asset_ingestion_activity`。Go control plane 在配置 `TEMPORAL_ADDRESS` 与 `DATABASE_URL` 时会先写 tenant/project scoped `workflow_runs` 和 sanitized `workflow.queued` event，再启动 Temporal `AssetIngestionWorkflow`；admission 失败必须返回 `WORKFLOW_ADMISSION_FAILED` 且不得启动 worker。该 activity 要求 `AgentContext` 携带 `tenant_id`、`project_id`、`run_id`、`trace_id`、`workflow_type = asset_ingestion`、`module_key = asset_ingestion` 和 `asset_ingestion:run` permission；缺少 runner 时以 `ASSET_INGESTION_RUNNER_UNCONFIGURED` fail-closed，并只写 sanitized `asset.stage.failed` workflow event。配置 `DATABASE_URL` 与显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时，默认 runner 会解析 `asset_ingestion` LLM Facility module binding、解密 tenant-scoped channel credential、调用 JSON-capable OpenAI-compatible provider，并将 schema-valid candidates 通过 `PostgresAssetCandidateWriter` upsert 到 `assets.lifecycle = candidate`。公开 result/event 只暴露 candidate batch/count/type metadata 和可选 model id，不公开素材正文、prompt、candidate body、credential 或 API key；candidate 采用为 canon/material 仍必须走后续明确用户动作。
+
+同一 `asset-light` 队列也注册 `StyleExtractionWorkflow` / `style_extraction_activity`。该 activity 要求 `workflow_type = style_extraction`、`module_key = style_extractor`、`style_extractor:run` permission，以及 tenant/project/run/trace context；缺少 runner 时以 `STYLE_EXTRACTION_RUNNER_UNCONFIGURED` fail-closed。配置 `DATABASE_URL` 与显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时，默认 runner 会解析 `style_extractor` module binding、解密 credential、调用 JSON-capable provider、schema-validate `style_profile`，并通过 `PostgresAssetCandidateWriter(source_kind = style_extraction)` 写入 lifecycle=`candidate` 的 `style_profile` asset。若请求只提供 `source_asset_id`，默认 runner 通过 tenant/project/source asset scoped `PostgresStyleSourceMaterialLoader` 私下读取 enabled `assets.content_text`；缺失、跨租户/项目或空内容以 `STYLE_SOURCE_MATERIAL_UNAVAILABLE` fail-closed。公开 result/event 只暴露 batch/count/type/model metadata，不公开素材正文、source asset content、prompt、提取 body、credential 或 API key。
+
+同一 `asset-light` 队列也注册 `AssetReindexWorkflow` / `asset_reindex_activity`。Go control plane 在配置 `TEMPORAL_ADDRESS` 与 `DATABASE_URL` 时先写 tenant/project scoped `workflow_runs` 和 sanitized `workflow.queued` event，再启动 Temporal `AssetReindexWorkflow`；admission 失败必须返回 `WORKFLOW_ADMISSION_FAILED` 且不得启动 worker。该 activity 要求 `workflow_type = asset_reindex`、`module_key = asset_reindex`、`asset_reindex:run` permission，以及 tenant/project/run/trace context；缺少 DB-backed reindexer 时以 `ASSET_REINDEXER_UNCONFIGURED` fail-closed。配置 `DATABASE_URL` 时，默认 `PostgresAssetReindexer` 执行 project/keyword reindex，从 tenant/project-scoped `assets` 重建 `global_search_index` 的 `asset` 文档。公开 result/event 只暴露 `reindex_batch_id`、asset/search document counts 和 `embedding_count = 0`，不公开 `content_text`、search body、embedding chunk、prompt、credential 或 API key。
+
+Seed `seed-heavy` 队列中的 `parse_file_activity` 现在会在读取 source object bytes 后、文本/PDF extraction 前，使用 Go control plane handoff payload 中可选的 `source_size_bytes` / `source_sha256` 复核对象内容。字段缺省时兼容旧 payload；字段存在但类型、格式、size 或 SHA-256 不匹配时以 `SOURCE_FILE_OBJECT_INTEGRITY_MISMATCH` / `source object integrity check failed` fail closed，并走 source parse-status failed 与 sanitized `seed.stage.failed` event path。公开 result/event 不返回 expected/actual hash、source object key、raw text、prompt、API key、`credential_ref`、draft 或 manuscript。
+
+Go `TemporalSeedRunStarter` 在启动 `SeedPipelineWorkflow` 前会递归清洗 user options，移除 body-provided tenant/project authority、prompt/response/body/content/raw/source/material/candidate/event text、API key、credential refs、draft 和 manuscript；Python worker 只能把保留下来的 safe public analysis options 当作配置参考。HTTP Seed start handler 仍执行前置 options 清洗，starter 级清洗是内部 Go -> Temporal -> Python handoff 的第二道防线，防止绕过 HTTP 边界的调用把私密正文或 credential material 带入 runtime payload。
+
+Seed `seed-heavy` 队列中的 `archive_candidate_activity` 现在可在配置 `DATABASE_URL` 与显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时装配 `LLMFacilityArchiveCandidateRunner`。该 runner 解析 `narrative_archives` module binding、解密 tenant-scoped credential、调用 JSON-capable OpenAI-compatible provider、schema-validate archive entity / memory candidates，并通过 `PostgresArchiveCandidateWriter` 写入 candidate `archive_entity` assets、candidate `archive_memories` 和 `memory.candidate.generated` events。writer 在写入前设置 app-role tenant context，业务 SQL/commit failure 会 rollback 并稳定为 `ARCHIVE_CANDIDATE_WRITE_FAILED` / `archive candidate write failed`。缺少 runner、binding、credential key 或 schema-valid 输出时 fail closed，不生成 mock archive candidates；公开 result/event 只暴露 batch/count/model metadata，不公开 archive candidate body、memory body、profile/seed analysis body、prompt/response 或 credential。
+
+Seed `seed-heavy` 队列中的 `story_ontology` stage 现在有 DB-backed `LLMFacilityOntologyRunner` 装配路径。该 runner 只接受 `story_ontology` module key，解析 LLM Facility binding、校验 JSON-capable resolution、使用显式 credential 调用 JSON client、校验 `seed_ontology.entity_types` / `relationship_types` / `world_rule_types` 数组，并通过 `PostgresOntologySnapshotWriter` 写入私有 `seed_ontology_snapshots` 后才返回 completed public metadata。writer 先设置 app-role tenant context，清洗 prompt/API key/`credential_ref`/raw content 等高风险字段，DB/commit failure 会 rollback 并稳定为 `ONTOLOGY_SNAPSHOT_WRITE_FAILED` / `ontology snapshot write failed`。公开 result/event 只暴露 `ontology_snapshot_id`、model 和类型 counts，不公开 ontology body、prompt/response、API key、`credential_ref`、raw text、draft 或 manuscript。live provider E2E、entity resolution/profile/finalize runner 仍 pending。
+
+Seed `seed-heavy` 队列中的 `entity_resolution` stage 现在有 DB-backed `LLMFacilityEntityResolutionRunner` 装配路径。该 runner 只接受 `entity_resolution` module key，解析 LLM Facility binding、校验 JSON-capable resolution、使用显式 credential 调用 JSON client、校验 `entity_resolution.merged_entities` / `aliases` / `conflicts` 数组，并通过 `PostgresEntityResolutionSnapshotWriter` 写入私有 `seed_entity_resolution_snapshots` 后才返回 completed public metadata。writer 先设置 app-role tenant context，清洗 prompt/API key/`credential_ref`/raw content 等高风险字段，DB/commit failure 会 rollback 并稳定为 `ENTITY_RESOLUTION_SNAPSHOT_WRITE_FAILED` / `entity resolution snapshot write failed`。公开 result/event 只暴露 `resolution_snapshot_id`、model 和 merged/alias/conflict counts，不公开 resolution body、prompt/response、API key、`credential_ref`、raw text、draft 或 manuscript。live provider E2E、agent profile/finalize runner 仍 pending。
+
+Seed `seed-heavy` 队列中的 `finalize_seed_activity` 现在可在配置 `DATABASE_URL` 时装配 `PostgresProjectReadinessUpdater`。该 updater 在 app-role/RLS context 下读取同一 tenant/project/run 的 Seed asset projection 与 structured canon counts，upsert `project_readiness_snapshots`，并只返回 `project_readiness_snapshot_id` 与 ready asset/entity/relationship/world-rule counts。缺少 updater 时仍以 `PROJECT_READINESS_UPDATER_UNCONFIGURED` fail closed，不伪造 project ready；DB/commit failure 会 rollback 并稳定为 `PROJECT_READINESS_UPDATE_FAILED` / `project readiness update failed`，不公开 readiness report body、prompt、raw text 或 credential。配置 workflow status writer 时，`seed_pipeline_activity` 会在 worker 接受 run 后把 admitted Seed `workflow_runs` 标为 `running`；finalize 成功还会标为 `completed`，result 仅包含 readiness public metadata；terminal failure path 也用稳定 public error 标记 `failed`，不会把底层 writer exception 或私密正文写入 status。
+
+## 包结构
+
+```text
+apps/agent-runtime/
+  mirofish_agents/
+    common/
+      context.py
+      errors.py
+      json_repair.py
+      tracing.py
+      schemas.py
+    llm/
+      router.py
+      clients.py
+      module_registry.py
+      usage.py
+    seed/
+      workflows.py
+      activities.py
+      segmenter.py
+      sequential_reader.py
+      ontology.py
+      profile_generator.py
+    graph/
+      workflows.py
+      builder.py
+      layout.py
+      bond_generator.py
+    assets/
+      workflows.py
+      ingestion_agent.py
+      style_extractor.py
+    worldline/
+      workflows.py
+      prepare.py
+      director.py
+      agents.py
+      memory.py
+    character_console/
+      workflows.py
+      interaction.py
+      rewrite.py
+    writer/
+      workflows.py
+      retrieval_planner.py
+      orchestrator.py
+      agent_loop.py
+      tools.py
+      composer.py
+      reviewer.py
+      dedup.py
+    temporal/
+      worker.py
+      task_queues.py
+```
+
+Writer-first Pi runtime 的包结构见 `21-pi-writer-agent-runtime.md`。
+
+## Context
+
+所有 Agent 调用必须使用 `AgentContext`：
+
+```python
+class AgentContext(BaseModel):
+    tenant_id: str
+    project_id: str | None = None
+    run_id: str
+    workflow_type: str
+    actor_user_id: str | None = None
+    module_key: str | None = None
+    trace_id: str
+    permissions: dict = {}
+```
+
+禁止：
+
+- 从环境变量猜 project。
+- Worker 自己枚举所有 tenant。
+- LLM 调用缺少 module_key。
+
+`AgentContext.to_trace_payload()` 必须保留 `tenant_id`、`project_id`、`run_id`、`workflow_type`、`actor_user_id`、`trace_id` 和 `module_key`。这些字段是 runtime result、workflow event/status、trace 和审计链路的最小公共上下文；公开 payload 仍不得包含 prompt、source text、API key、`credential_ref` 或正文草稿。
+
+## LLM Router
+
+职责：
+
+- 调 Go API 或读取安全缓存获得 module binding。
+- 选择 channel/model。
+- 执行并发控制。
+- 调用 OpenAI-compatible Chat Completions 或 Responses API 兼容层。
+- 记录 usage。
+- 写 trace。
+
+缺少绑定时必须抛出显式错误：
+
+```text
+LLM_MODULE_UNBOUND: writer_reviewer
+```
+
+DB-backed module binding resolver 和 credential provider 的 query failure 属于隐私边界。底层 driver/SQL 异常文本不得进入公开 `LLMFacilityError.message`，因为异常可能夹带 `api_key`、`encrypted_api_key`、`credential_ref`、prompt 或 source text。`PostgresModuleBindingResolver` 的普通 query exception 必须返回稳定 `LLM_BINDING_QUERY_FAILED` / `LLM module binding query failed`；`PostgresCredentialProvider` 的普通 query exception 必须返回稳定 `LLM_CREDENTIAL_QUERY_FAILED` / `LLM credential query failed`。内部 exception chaining 可保留给 worker 日志/调试，但 public runner result、workflow event/status、LLM Activity 和 API response 不得透出底层异常文本。
+
+LLM Facility resolution 结果必须包含可用 `provider`。Python shared `LLMFacilitySequentialReader` 和 Worldline `LLMFacilityWorldlineStepRunner` 会把空 provider 视为无效 binding，并在 credential decrypt、provider call、candidate/event persistence 之前以 `LLM_PROVIDER_ERROR` / `resolved LLM module is missing provider` fail closed。该校验与 `channel_id`、`model_id`、`base_url`、`credential_ref` 同级，避免 runtime 在无法审计 provider identity 的情况下继续调用模型或写候选数据。
+
+DB-backed Python LLM Facility resolver/credential provider、Seed parse/segment/sequential-reading/runtime-facts/global-aggregation/entity-resolution/archive-candidates/index-assets/finalize 的 Postgres workflow event / text artifact / text segment / reading notes / canon writers / aggregate source / seed analysis writer / entity resolution snapshot writer / archive candidate writer / asset indexer / readiness updater，以及 Worldline Postgres source loader、candidate writer、telemetry writer、workflow event writer 和 workflow status writer，在使用 app-role / RLS connection 前必须设置 tenant context：`app_set_tenant_context(tenant_id, project_id_or_null, false)`。Seed public metadata、canon writers、seed analysis writer、entity resolution snapshot writer、archive candidate writer、asset indexer 和 readiness updater 在 SQL/commit failure 时还必须 rollback 当前 connection，并继续 fail closed，不把 DB failure 当作成功 persistence；Seed aggregate source 普通 query failure 也必须稳定为 public `SEED_AGGREGATE_SOURCE_QUERY_FAILED`，entity resolution snapshot writer 普通 DB/driver failure 必须稳定为 public `ENTITY_RESOLUTION_SNAPSHOT_WRITE_FAILED`，archive candidate writer 普通 DB/driver failure 必须稳定为 public `ARCHIVE_CANDIDATE_WRITE_FAILED`，readiness updater 普通 DB/driver failure 必须稳定为 public `PROJECT_READINESS_UPDATE_FAILED`，不得公开 driver exception 文本。Go LLM Activity/Usage SQL read side 在真实 `*sql.DB` 上也必须用 read-only transaction 设置同一 tenant context 后再查询。这样 runtime 与 API read side 可以在 `mirofish_app` / app-role 权限下通过 RLS，而不是依赖 owner connection 或绕过策略。
+
+## Trace 模型
+
+统一 trace 覆盖旧 step trace、writer prompt snapshot、tool trace、LLM activity。
+
+```text
+agent_traces
+  tenant_id
+  trace_id
+  run_id
+  project_id
+  module_key
+  agent_name
+  status
+  started_at
+  completed_at
+
+agent_trace_events
+  tenant_id
+  trace_id
+  event_id
+  event_order
+  event_type
+  payload_json
+  redaction_level
+  created_at
+```
+
+event_type：
+
+- prompt_snapshot。
+- llm_call_started。
+- llm_call_completed。
+- llm_json_repair。
+- tool_call。
+- tool_result。
+- schema_validation。
+- artifact_written。
+- error。
+
+读取规则：
+
+- 默认 `GET /v1/projects/{projectId}/agent-traces/{traceId}/events` 只返回 `public` / `summary` payload；`full` payload 在 SQL reader 层替换为空对象。
+- `include_full=true` 必须先通过 full trace 权限检查，否则返回 `TRACE_ACCESS_DENIED`。
+- `POST /v1/projects/{projectId}/agent-traces/{traceId}/export` 会写 `audit_logs`，审计失败时不得返回导出内容；`include_full=true` 同样必须先通过 full trace 权限检查。
+- `POST /v1/projects/{projectId}/agent-traces/{traceId}/export` 的 JSON decode validation failure 只返回稳定 `VALIDATION_FAILED` message 和空 details；decoder 原始错误、unknown field 名称、Go struct 字段名、`api_key`、prompt、`credential_ref`、draft 或 manuscript 不得进入公开错误响应。LLM Facility module binding/channel mutation 的 validation failure 也遵守同一边界。
+- Pi Writer Runtime 写入 `prompt_snapshot`、`llm_call_started`、`llm_call_completed`、`artifact_written` 和 `error`；其中 prompt snapshot 标记为 `full`，默认读侧不得泄露用户小说原文或 prompt。
+- LLM Activity 读侧必须把 `llm_activity.error_jsonb` 和 reader 返回的 `error` map 都当作不可信 payload 递归清洗，移除 `api_key`、`encrypted_api_key`、`credential_ref`、`prompt`、`response`、`body`、`content`、`candidate_body`、`event_body`、`source_material`、`source_text`、`draft`、`manuscript` 等高风险字段；解析失败时返回稳定摘要，不把原始错误字符串透传给前端。清洗同时发生在 SQL reader 和 HTTP response 边界，避免替换 reader 实现后绕过隐私防线。Activity / Usage SQL query、scan 或 rows error 也必须收敛为稳定 `LLM_ACTIVITY_QUERY_FAILED` / `LLM activity query failed`，HTTP 边界不得把 driver/SQL 异常文本透出到公开响应。LLM Usage 读侧只聚合 `usage_events.usage_type = llm_tokens`，并继续按 tenant/project/run/module 过滤；不得把 storage、workflow、import 或其他非 LLM billing events 暴露为 LLM Facility usage。Runtime 写入侧也要在入库前清洗错误 payload；Worldline `PostgresLLMTelemetryWriter` 已对 `llm_activity.error_jsonb` 执行同一类递归 key 清洗，避免未来调用方把 credential/prompt/source 字段写进 telemetry 表。
+- Worldline step runner 在 provider 调用、schema validation 和 completed `llm_activity` / optional `usage_events` 写入成功后，如果 `worldline_events.status = candidate` metadata persistence 失败，必须返回 candidate persistence 的明确错误，但不得追加一条 failed LLM activity；Activity/Usage read side 应保持对同一 `run_id` 的 provider-call 事实一致性。即使 candidate writer 抛出非规范普通异常，runner 也必须把它收敛为稳定 `WORLDLINE_CANDIDATE_EVENT_WRITE_FAILED`，不得误报为 `LLM_PROVIDER_ERROR` 或把底层异常文本透出。
+- Worldline candidate event writer 的 DB/driver 异常文本不得进入公开 `LLMFacilityError.message`；普通 insert 异常必须 rollback 并返回稳定 `WORLDLINE_CANDIDATE_EVENT_WRITE_FAILED` / `worldline candidate event write failed`，避免异常消息夹带 prompt、source text、API key 或 `credential_ref`。`INSERT ... SELECT` 未命中 admitted session 时返回 `WORLDLINE_SESSION_NOT_FOUND` 的显式失败路径也必须 rollback，避免 batch 中部分 candidate event 停留在未清理事务里。
+- Worldline LLM telemetry writer boundary 必须把注入式 writer、非 Postgres writer 或 driver wrapper 抛出的普通异常也视为不可信异常：completed telemetry 普通异常必须收敛为 `LLM_TELEMETRY_WRITE_FAILED` / `worldline completed telemetry write failed`，failed telemetry 普通异常必须收敛为 `LLM_TELEMETRY_WRITE_FAILED` / `worldline LLM activity write failed`。这些路径不得把底层异常文本、prompt、source text、API key 或 `credential_ref` 暴露到 runner result、workflow event/status 或公开 API，也不得在 completed telemetry 失败后继续写 candidate event。
+- Worldline DB-backed success chain 现在有 integration-like 和 opt-in live Postgres/app-role local-provider E2E 覆盖：`worldline_step_activity` 通过 DB-backed module binding resolver、AES-GCM credential decrypt、JSON provider response、atomic completed `llm_activity` + `usage_events` write、tenant/project/session-scoped `worldline_events.status = candidate` persistence、admitted `workflow_runs.workflow_type = worldline_step` completed event/status 写入同一 `run_id` 链路。live E2E 使用真实 migration、`mirofish_live_app` app role/RLS、local OpenAI-compatible JSON provider 和同一 `run_id` 校验 provider request、`llm_activity`、token-only `usage_events`、candidate event、workflow event/status 关联；Go read-side live test 也用同一 RLS tenant context 读取 `worldline_director` Activity/Usage。公开 result、persisted public payload 和 provider-facing recorded data 不包含 provider API key、candidate event body、用户 prompt 或 `credential_ref`。
+- Worldline source loader 已接入 `LLMFacilityWorldlineStepRunner`：当 `options.source_refs` 非空但 runner 未装配授权 source loader 时，必须在 binding/credential/provider 调用前以 `WORLDLINE_SOURCE_LOADER_UNCONFIGURED` fail closed，不写 telemetry/candidate event。配置 `DATABASE_URL` 时默认装配 `PostgresWorldlineSourceLoader`，只从 tenant/project/session scoped `assets` public metadata 与同 session `worldline_events` public metadata 读取 summary，不选择 `content_text`、event body、prompt 或 credential 字段；只允许把 sanitized public source summaries 注入 provider message。如果提供了 `source_refs` 但 loader 返回空 summaries，runner 必须在 binding/credential/provider/telemetry/candidate 之前以 `WORLDLINE_SOURCE_NOT_FOUND` / `worldline source_refs did not resolve to public summaries` fail closed。DB query exception 收敛为 `WORLDLINE_SOURCE_LOAD_FAILED` / `worldline source load failed`，不得透出底层异常文本。richer director tools、外部 provider/cluster E2E 和 Character Console runtime 仍是后续 Phase 6 工作。
+- Character Console 当前只落地 Go/API/Web metadata skeleton，不启动角色对话 runtime、不调用 `worldline_agent_dialogue` / `character_interaction_director` 等 module binding。Next `/character-console` 已通过 API client/server action/form 接入 `POST /v1/projects/{projectId}/character-interactions`，只提交 worldline/session/anchor/POV/mode/title/summary 等 public metadata，并用显式 success/error query state 回到列表；同页也通过 server action/form 接入 `POST /v1/character-interactions/{interactionId}/turns`，只记录显式提交的 actor/kind/summary/action/world-state-delta/trace public turn metadata。Go HTTP append route 会先按当前 tenant scope 读取 parent interaction，缺失、跨租户或无 backend 时返回稳定错误并停止，不把任意 interaction id 写成 fake created turn。Go store 在 SQL 前校验 interaction anchor type/mode 和 turn actor/kind enum，非法值以 `VALIDATION_FAILED` fail closed，避免任意字符串被当成 runtime action、runtime anchor 或 fake agent reply metadata；读侧也把 DB 中已有的 `metadata` / `action` / `world_state_delta` JSON 当作不可信 payload，返回前递归移除 prompt/body/content/credential/draft/manuscript 类 key。HTTP response boundary 会在写出 create/list/detail/append/turn replay 响应前再次清洗 interaction/turn record，使注入 store、替换 store 或 alternate writer 返回 unsafe map 时也不会绕过公开 API 隐私边界；SQL store 会把 query、scan、`rows.Err()`、rows close 和 transaction commit failure 收敛为稳定 `CHARACTER_INTERACTION_QUERY_FAILED`，store 层 scan 错误使用固定 interaction/turn query failed 文案，同一 HTTP 边界会把公开 message 固定为 `character interaction query failed`，避免普通 store/driver exception 文本夹带 prompt、API key、`credential_ref`、正文或 draft/manuscript。Next replay read side 现在可用 `selected_interaction_id` 调 `GET /v1/character-interactions/{interactionId}`，展示 selected interaction 和 saved turn metadata；独立 turn replay store/read side 会先确认 parent interaction 在当前 tenant 下存在，缺失或跨租户时返回 `NOT_FOUND`，不会把无效 interaction 当成空历史。Next create interaction form 也读取真实 `GET /v1/projects/{projectId}/worldline-sessions` public metadata；有 session 时作为 worldline/session anchor 下拉选择，无 DB/backend 时显式显示 `WORLDLINE_SESSION_BACKEND_UNCONFIGURED`，不伪造可选 session。Next 同时读取 `GET /v1/projects/{projectId}/worldline/saved-paths` public metadata，作为 saved path anchor choices 和侧栏预览；缺 DB/backend 时显式显示 `WORLDLINE_BACKEND_UNCONFIGURED`，不伪造 saved path。Next 还读取 `GET /v1/projects/{projectId}/story-graph/views/current` 的 public graph node metadata，把 character/organization/location/plot_thread 节点作为 graph node anchor choices 和侧栏预览；缺 Story Graph backend 时显式显示 `STORY_GRAPH_BACKEND_UNCONFIGURED` 或等价查询错误，不伪造 graph node。若作者通过 `anchor_session_id` 选择了已 admission 的 worldline session，Next 会读取 `GET /v1/worldline-sessions/{sessionId}/events` public candidate/canon event metadata，作为 `anchor_id` event selector；未选择或 event read side 失败只显示明确状态，不生成 worldline event、不采用 canon、不保存 path。若作者通过 `prepare_id` 选择了已 admission 的 worldline preparation，Next 还会读取 `GET /v1/worldline-preparations/{prepareId}/agents` public prepared-agent metadata，作为 POV agent selector 和 roster preview；未选择或 backend 失败只显示明确状态，不生成 playable agent。Next typed API client 和 server actions 现在接入两个不同边界：`GET /v1/character-interactions/{interactionId}/events` 仍只回显 `CHARACTER_CONSOLE_RUNTIME_PENDING` / 稳定错误状态，Go pending endpoint 会先按当前 tenant 读取 interaction，缺失/跨租户或无 backend 直接返回对应稳定错误，不把任意 id 报成 pending；`POST /v1/character-interactions/{interactionId}/chapter-drafts` 则是明确用户动作，会读取 tenant-scoped interaction/public turns、通过 LLM Facility 解析 `writer_composer`，并调用既有 Writer runtime admission 创建真实 `writer_run`，UI 只显示 Writer run queued，不合成 `draft_id`、正文、manuscript 或 Character Console runtime event。角色对话 runtime 仍必须 fail closed，直到具备 tenant/project/session/interaction/run context、权限检查、trace、错误状态和可审计记录。未来 runtime 产生的世界反馈仍只能写 candidate/public metadata；Writer draft persistence 仍由 Writer pipeline 负责。
+- Character Console HTTP error boundary 现在还会把 coded `NOT_FOUND` / `CHARACTER_INTERACTION_BACKEND_UNCONFIGURED` store error 映射为固定安全文案；即使替换 store 或 injected store 把 prompt、API key、`credential_ref`、draft/manuscript 文本塞进 error message，公开 API 也不能回显该文本。
+- Character Console create/append route 的 JSON decode validation error 不再回显 decoder 原始错误详情；unknown field 名称如果包含 `api_key`、`prompt`、`credential_ref`、draft/manuscript 等敏感词，也不能进入公开 error details。
+- Character Console -> Writer handoff 现在还有空材料防护：`POST /v1/character-interactions/{interactionId}/chapter-drafts` 必须先读到至少一条带非空 public summary 的 saved turn；空 public turn history 或只有空白 summary 的 turn history 都以 `CHARACTER_INTERACTION_TURNS_REQUIRED` fail closed，并且发生在 `writer_composer` binding 解析和 `WriterStarter` admission 之前。
+
+## Tool Calling
+
+### 工具分类
+
+Read tools：
+
+- query_entity。
+- query_relationship。
+- query_graph_neighbors。
+- global_search。
+- query_asset。
+- query_worldline_session。
+- query_manuscript。
+
+Write tools：
+
+- manage_entity。
+- manage_relationship。
+- manage_thread。
+- manage_world_rule。
+- record_character_event。
+- update_scene。
+- commit_manuscript。
+
+Proposal tools：
+
+- propose_outline_scene。
+- propose_chapter_structure。
+- propose_relationship。
+- propose_prose_continuation。
+- propose_rewrite_span。
+
+### 执行规则
+
+- read tools 可并行。
+- write tools 串行。
+- proposal tools 不写 canon。
+- 每个工具执行前检查权限。
+- 每个工具结果写 trace。
+- 工具失败返回结构化错误，不让整个 Agent 无解释中断，除非是必需工具。
+
+## Schema Validation
+
+所有 Agent 输出都要定义 schema：
+
+- Pydantic v2。
+- JSON schema 导出给 prompt。
+- validation error 写 trace。
+- repair 有次数上限。
+
+不允许：
+
+- 未校验 dict 直接落库。
+- 解析失败变空对象继续。
+
+## 工作流与 Activity
+
+### Task Queues
+
+```text
+seed-heavy
+graph-heavy
+asset-light
+worldline-interactive
+writer-streaming
+reviewer
+maintenance
+```
+
+不同队列可独立扩容。
+
+`graph-heavy` 当前注册 `StoryGraphBuildWorkflow` / `story_graph_build_activity`。入口 payload 必须携带 `tenant_id`、`project_id`、`run_id`、`workflow_type=story_graph_build`、`module_key=story_graph_build`、`trace_id` 和 `story_graph_build:run` permission；缺权限、module mismatch 或缺少 DB-backed graph builder 时写 sanitized `graph.stage.failed` event 并返回结构化错误。默认缺 builder 必须 fail closed 为 `STORY_GRAPH_BUILDER_UNCONFIGURED`，不得生成 mock graph snapshot、节点或边。配置 `DATABASE_URL` 时，Python runtime 会默认装配 `PostgresStoryGraphBuilder`，从结构化 canon/assets 表生成 `story_graph_snapshots`、nodes、edges、public evidence metadata、layout 和 clusters，并通过 `PostgresWorkflowRunStatusWriter` 同步更新 tenant/project scoped `workflow_runs` public status：成功置为 `completed`、`progress = 100`、`result_jsonb` 仅包含 graph id/counts；失败置为 `failed` 并记录稳定 error code/message。公开 result/completed event/status 只包含 graph id 与 counts，builder 持久化路径不写 evidence snippet、raw source text、prompt、`content_text` 或 credential 字段到公开 payload。
+
+同一 `graph-heavy` 队列也注册 `GraphBondGenerationWorkflow` / `graph_bond_generation_activity`。Go control plane 在配置 `TEMPORAL_ADDRESS` 与 `DATABASE_URL` 时会先写 tenant/project scoped `workflow_runs` 和 sanitized `workflow.queued` event，再启动 `GraphBondGenerationWorkflow`；admission 失败必须返回 `WORKFLOW_ADMISSION_FAILED` 且不得启动 worker。该 activity 要求 `workflow_type = story_graph_bond_generation`、`module_key = graph_bond_generator`、`graph_bond_generator:run` permission，以及 tenant/project/run/trace context；缺少真实 runner 时以 `GRAPH_BOND_RUNNER_UNCONFIGURED` fail-closed，并只写 sanitized `graph.stage.failed` workflow event / failed run status。配置 `DATABASE_URL` 与显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时，默认 runner 会通过 LLM Facility 解析 `graph_bond_generator` module binding、解密 tenant-scoped credential、调用 JSON-capable provider、schema-validate bonds / plot threads / conflict triggers，并通过 candidate writer 只写 lifecycle=`candidate` assets。它不写 relationships、plot_threads 或 canon，不生成 mock output，candidate -> canon 仍必须是明确用户动作。公开 result/event/status 不得包含 selected node ids、focus text、prompt/response、evidence snippet、candidate body、API key、encrypted credential 或 `credential_ref`。
+
+`worldline-interactive` 当前注册 `WorldlineStepWorkflow` / `worldline_step_activity`，用于承接 Go `POST /v1/worldline-sessions/{sessionId}/steps` admission 后的单世界 step execution。该 activity 要求 payload 携带 `tenant_id`、`project_id`、`run_id`、`trace_id`、`session_id`、`workflow_type = worldline_step`、`module_key = worldline_director` 和 `worldline_director:run` permission；缺权限、module mismatch 或缺少真实 `WorldlineStepRunner` 时必须 fail closed。默认未装配 runner 时返回 `WORLDLINE_STEP_RUNNER_UNCONFIGURED`，并在配置 writer/status writer 时只写 sanitized `worldline.stage.failed` workflow event 和 failed `workflow_runs` public status；runner 直接抛出的 `LLMFacilityError` 会保留原始 code/message 写入 failed result/event/status，不能被泛化成 `WORLDLINE_STEP_FAILED` 或伪成功。未装配 runner 时不能调用 LLM，不能生成 mock candidate event、timeline event、saved path、canon event、draft 或 manuscript。配置 `DATABASE_URL` 后，默认 `LLMFacilityWorldlineStepRunner` 会先验证 `context.run_id` 是有效 UUID；非法 run id 以 `VALIDATION_FAILED` fail closed，且不会解析 module binding、解密 credential、调用 provider、写 telemetry 或写 candidate event，避免破坏 candidate event 与 Activity/Usage telemetry 的同 run 关联。run id 合法后，runner 才会通过 LLM Facility 解析 `worldline_director` module binding；resolution 必须包含 `provider`、`channel_id`、`model_id`、`base_url` 和 `credential_ref`，缺 provider 会在 credential decrypt/provider call/candidate write 前以 `LLM_PROVIDER_ERROR` fail closed。resolution 合法后才用显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 解密 tenant-scoped credential、调用 JSON-capable OpenAI-compatible provider、schema-validate `candidate_events`，并通过 `PostgresWorldlineCandidateEventWriter` 只写 `worldline_events.status = candidate` / `lifecycle = simulation` 的 public metadata；candidate insert 先通过 `worldline_sessions` 校验当前 tenant/project/session 已 admission，缺失或跨租户/项目 session 以 `WORLDLINE_SESSION_NOT_FOUND` fail closed 并 rollback；普通 DB/driver insert exception 会 rollback 并返回稳定 `WORLDLINE_CANDIDATE_EVENT_WRITE_FAILED`，不透传底层异常文本；`source_run_id` 使用规范化后的 UUID run id，不能静默写成 NULL。该 runner 现在也会通过 `PostgresLLMTelemetryWriter` 写入 completed/failed `llm_activity`；completed activity 和 token usage 必须在 provider `candidate_events` schema validation 通过后写入，当 provider 返回 token usage 时写 `usage_events.usage_type = llm_tokens`，同时支持 `prompt_tokens` / `completion_tokens` breakdown 和仅 `total_tokens` 的 OpenAI-compatible 返回；Postgres completed path 必须把 completed `llm_activity` 与可选 `usage_events` 放入同一个 DB transaction/commit，避免 activity 与 usage 半成功拆裂；若 completed transaction 内的 usage insert 或其他 DB 写入失败，必须显式 rollback、返回 `LLM_TELEMETRY_WRITE_FAILED`，并且不写 candidate event。provider/schema/credential 类失败只写 failed activity、不写 usage event，activity error payload 入库前会清除 credential/prompt/source/body/draft/manuscript 类高风险 key；单条 `llm_activity` 或 `usage_events` 写入失败也必须显式 rollback 后再返回稳定 `LLM_TELEMETRY_WRITE_FAILED`，不能留下未清理事务。telemetry 写入失败必须以 `LLM_TELEMETRY_WRITE_FAILED` fail closed，不能写 candidate event，也不能通过二次 failed telemetry 写入把异常抛到调用方；如果 candidate metadata persistence 在 completed telemetry 成功后失败，runner 返回该 candidate persistence 错误，但不追加 failed `llm_activity`，避免同一 `run_id` 的 provider call 出现 completed/failed 双重 telemetry。普通 provider/SDK exception 不得把 `str(exc)` 透传到公开 result/event/status；当前统一返回 `LLM_PROVIDER_ERROR` / `worldline provider call failed`，避免 SDK 错误消息泄露 API key、prompt 或 source material；Go LLM Activity read side 还会在 SQL reader 和 HTTP response 边界递归清洗 activity error payload，避免历史或外部写入的错误对象泄露 credential/prompt/source 字段。成功后 activity 还会写 sanitized `worldline.stage.completed` workflow event 并更新 admitted `workflow_runs` public status；completed payload 只包含 session/mode/step/model/count 等公开字段。candidate -> canon、saved path、writer draft 仍必须是明确用户动作。公开 result/event/status 不得包含 prompt/response、source text、event body、draft/manuscript、API key、encrypted credential 或 `credential_ref`。
+
+Worldline Postgres workflow event/status writer 也属于 runtime public persistence 边界：`PostgresWorkflowEventWriter` 和 `PostgresWorkflowRunStatusWriter` 的 DB/driver 异常路径必须显式 rollback，并只抛稳定 `WORKFLOW_EVENT_WRITE_FAILED` / `WORKFLOW_STATUS_WRITE_FAILED` 文本，避免 prompt、API key 或 `credential_ref` 从底层异常泄露到 runtime failure。
+当 `PostgresWorkflowEventWriter` 写 `workflow_events` 或 `PostgresWorkflowRunStatusWriter` 更新 `workflow_runs` 未命中已 admission 的 `worldline_step` parent row 时，必须在 commit 前 rollback，并以 `WORKFLOW_RUN_NOT_FOUND` 显式失败；不能创建 orphan workflow event，也不能把缺失 admission 当作成功状态更新。
+`worldline_step_activity` 的 completed persistence 边界也必须结构化这些失败：当 runner 已完成但 `worldline.stage.completed` 事件写入失败时，activity 返回 `WORKFLOW_EVENT_WRITE_FAILED` / `WORKFLOW_RUN_NOT_FOUND` 的 failed result，并尝试把 admitted run 标记为 failed；当 completed status update 失败时，activity 返回稳定 `WORKFLOW_STATUS_WRITE_FAILED` / `WORKFLOW_RUN_NOT_FOUND`，不得让 writer exception 直接冒出为未结构化 activity crash。activity 层不得信任 writer exception message，即使异常文本以稳定 code 开头，公开 message 也必须按 code 映射为固定安全文案，不得把 prompt、API key 或 `credential_ref` 透出到 result/event/status。
+
+### Activity Timeout
+
+必须显式设置：
+
+- start_to_close_timeout。
+- schedule_to_close_timeout。
+- heartbeat_timeout。
+
+长 LLM activity 要 heartbeat：
+
+- 当前 segment。
+- 当前 entity。
+- token stream position。
+
+### Cancellation
+
+Workflow cancellation 必须传递到：
+
+- LLM call abort。
+- file parse。
+- DB write stage boundary。
+- SSE close event。
+- Go API 的 `POST /v1/writer-runs/{runId}/cancel` 是 fail-closed cancellation 入口：必须有 tenant context，并把 actor/request metadata 传给配置的 backend；没有 backend 时返回 `WORKFLOW_CANCEL_BACKEND_UNCONFIGURED`，不得伪造取消成功。配置 Temporal 后必须取消 `writer_run_{runId}` workflow；同时配置 SaaS Postgres 后，只有 Temporal 接受取消后才可把 `writer_runs` / `workflow_runs` 置为 `cancelled` 并追加 `writer.run.cancelled` 事件。
+
+## Streaming
+
+Writer 和 worldline 可以流式输出：
+
+- Python activity 产出事件。
+- Temporal activity 事件写入 `workflow_events`。
+- Go SSE 读取事件表或订阅 channel。
+- Writer stream 恢复必须以持久化 `workflow_events` 为准：`GET /v1/writer-runs/{runId}/events` 支持 `after_event_id` query cursor 和 SSE `Last-Event-ID`，只返回 cursor 之后的事件；cursor 不存在时返回显式错误，不静默从头重放或吞错。
+- Go writer admission 在启动 `PiWriterRunWorkflow` 前必须先写入目标 `workflow_runs` / `writer_runs` 父行；写入失败返回 `WORKFLOW_ADMISSION_FAILED` 且不得启动 worker，避免 Pi runtime 后续写 `workflow_events` / `writer_drafts` 时依赖缺失父行或伪造 queued success。
+- `GET /v1/writer-runs/{runId}` 在 SaaS Postgres backend 配置后必须从持久化 `writer_runs` 读取 public run status，不能依赖 Go 进程内存作为恢复真相源；读侧仍按 `X-Tenant-Id` 隔离并只返回公开 metadata。
+- Pi Writer Runtime 的 DB-backed activity 写入 `writer.run.started`、`writer.draft.saved`、`writer.run.completed` 和 `writer.run.failed` 到 `workflow_events`，供 Go API replay 读侧恢复 stream。
+- Pi Writer Runtime 的 DB-backed activity 同步更新 `writer_runs` / `workflow_runs` 状态：started 后置为 `running`，成功后置为 `completed` 并记录 `draft_id` result，失败后置为 `failed` 并记录稳定错误 code/message；状态回写不得包含 credential、prompt 或明文正文，并且必须验证 admission 父行确实存在，未命中 `writer_runs` 或 `workflow_runs` 时以 `WORKFLOW_RUN_NOT_FOUND` 显式失败。
+- 当 Pi worker 配置了 `DATABASE_URL` 但缺少 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时，仍必须使用 DB-backed activity path 记录 `writer.run.started`、failed `llm_activity`、`error` trace、`writer.run.failed` 和 failed run status；credential 解密以 `LLM_CREDENTIAL_KEY_UNCONFIGURED` 显式失败，不回退到无 DB 写入的基础 activity。
+
+不要让浏览器直接连接 Python worker。
+
+## Human-in-the-loop
+
+以下步骤需要用户采用：
+
+- archive candidate -> canon archive。
+- graph bond candidate -> relationship/plot_thread。
+- worldline candidate event -> canon/saved path。
+- writer draft -> manuscript。
+- reviewer suggestion -> applied revision。
+
+Agent 只生成 candidate，除非用户明确配置 auto-adopt policy。
+
+## 旧模块映射
+
+| 旧模块 | 新位置 |
+|---|---|
+| `llm_router.py` | `mirofish_agents.llm.router` |
+| `novel_seed_analyzer.py` | `seed.activities` |
+| `sequential_reader.py` | `seed.sequential_reader` |
+| `story_ontology_generator.py` | `seed.ontology` |
+| `character_agent_profile_generator.py` | `seed.profile_generator` |
+| `graph_builder.py` | `graph.workflows` + `graph.builder` |
+| `assets/ingestion_agent` | `assets.ingestion_agent` |
+| `worldline_prepare_service.py` | `worldline.prepare` |
+| `worldline_engine.py` | `worldline.workflows` + `worldline.director` |
+| `writer_agent/orchestrator.py` | `writer.orchestrator` |
+| `writer_agent/agent_loop.py` | `writer.agent_loop` |
+| `writer_agent/tool_executors.py` | `writer.tools` |
+
+## 验收清单
+
+- 每个 Agent 调用都有 tenant/project/run context。
+- LLM 未绑定显式失败。
+- trace 可按 run 查询。
+- tool call 有权限检查。
+- worker 崩溃后 workflow 可恢复。
+- writer token stream 可断线恢复。
+- candidate/adopt 边界清晰。
+- Agent Runtime 不暴露公网。

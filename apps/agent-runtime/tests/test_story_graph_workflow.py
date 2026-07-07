@@ -1,0 +1,1092 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from mirofish_agents.common.context import AgentContext
+from mirofish_agents.temporal.graph import (
+    GRAPH_BOND_GENERATION_MODULE_KEY,
+    GRAPH_TASK_QUEUE,
+    PostgresGraphBondCandidateWriter,
+    PostgresStoryGraphBuilder,
+    PostgresWorkflowRunStatusWriter,
+    STORY_GRAPH_BUILD_MODULE_KEY,
+    _story_graph_builder_from_env,
+    graph_bond_generation_activity,
+    story_graph_build_activity,
+    worker_spec,
+)
+from mirofish_agents.temporal.worker import worker_components_for_task_queue
+
+
+class RecordingWorkflowEventWriter:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def write_event(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str | None,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self.events.append(
+            {
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "payload": payload,
+            }
+        )
+
+
+class RecordingWorkflowRunStatusWriter:
+    def __init__(self) -> None:
+        self.completed: list[dict[str, Any]] = []
+        self.failed: list[dict[str, Any]] = []
+
+    def mark_completed(
+        self,
+        *,
+        context: AgentContext,
+        result: dict[str, Any],
+    ) -> None:
+        self.completed.append({"context": context, "result": result})
+
+    def mark_failed(
+        self,
+        *,
+        context: AgentContext,
+        code: str,
+        message: str,
+    ) -> None:
+        self.failed.append({"context": context, "code": code, "message": message})
+
+
+class RecordingStoryGraphBuilder:
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    def build(
+        self,
+        *,
+        context: AgentContext,
+        mode: str,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append({"context": context, "mode": mode, "options": options})
+        return self.result
+
+
+class RecordingBindingResolver:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def resolve_module_binding(self, *, context: AgentContext, module_key: str) -> Any:
+        self.calls.append({"context": context, "module_key": module_key})
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+class RecordingCredentialProvider:
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+        self.calls: list[dict[str, Any]] = []
+
+    def resolve_api_key(self, *, context: AgentContext, credential_ref: str) -> str:
+        self.calls.append({"context": context, "credential_ref": credential_ref})
+        return self.api_key
+
+
+class RecordingJSONChatClient:
+    def __init__(self, response_json: dict[str, Any]) -> None:
+        self.response_json = response_json
+        self.calls: list[dict[str, Any]] = []
+
+    def complete_json(
+        self,
+        *,
+        context: AgentContext,
+        resolution: Any,
+        api_key: str,
+        messages: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "context": context,
+                "resolution": resolution,
+                "api_key": api_key,
+                "messages": messages,
+            }
+        )
+        return self.response_json
+
+
+class RecordingGraphBondCandidateWriter:
+    def __init__(self, result: dict[str, Any] | None = None) -> None:
+        self.result = result or {}
+        self.calls: list[dict[str, Any]] = []
+
+    def write_candidates(
+        self,
+        *,
+        context: AgentContext,
+        candidate_batch_id: str,
+        model_id: str | None,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "context": context,
+                "candidate_batch_id": candidate_batch_id,
+                "model_id": model_id,
+                "candidates": candidates,
+            }
+        )
+        return self.result
+
+
+class RecordingGraphBondRunner:
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(
+        self,
+        *,
+        context: AgentContext,
+        graph_id: str | None,
+        node_ids: list[str],
+        focus: str | None,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append({"context": context, "graph_id": graph_id, "node_ids": node_ids, "focus": focus, "options": options})
+        return self.result
+
+
+def _context() -> AgentContext:
+    return AgentContext(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        run_id="run-story-graph-1",
+        workflow_type="story_graph_build",
+        actor_user_id="user-1",
+        module_key=STORY_GRAPH_BUILD_MODULE_KEY,
+        trace_id="trace-story-graph-1",
+        permissions={STORY_GRAPH_BUILD_MODULE_KEY: ["run"]},
+    )
+
+
+def _payload(options: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "context": _context().model_dump(),
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "run_id": "run-story-graph-1",
+        "workflow_type": "story_graph_build",
+        "trace_id": "trace-story-graph-1",
+        "mode": "full",
+        "options": options or {},
+    }
+
+
+def _bond_context() -> AgentContext:
+    return AgentContext(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        run_id="run-story-graph-bond-1",
+        workflow_type="story_graph_bond_generation",
+        actor_user_id="user-1",
+        module_key=GRAPH_BOND_GENERATION_MODULE_KEY,
+        trace_id="trace-story-graph-bond-1",
+        permissions={GRAPH_BOND_GENERATION_MODULE_KEY: ["run"]},
+    )
+
+
+def _bond_payload(options: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "context": _bond_context().model_dump(),
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "run_id": "run-story-graph-bond-1",
+        "workflow_type": "story_graph_bond_generation",
+        "trace_id": "trace-story-graph-bond-1",
+        "module_key": GRAPH_BOND_GENERATION_MODULE_KEY,
+        "graph_id": "graph-1",
+        "node_ids": ["node-1", "node-2"],
+        "focus": "rain treaty",
+        "options": options or {},
+    }
+
+
+def test_story_graph_build_activity_fails_closed_without_builder() -> None:
+    writer = RecordingWorkflowEventWriter()
+
+    result = story_graph_build_activity(
+        _payload({"source": "seed_canon", "prompt": "hidden"}),
+        graph_builder=None,
+        workflow_event_writer=writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["workflow_type"] == "story_graph_build"
+    assert result["module_key"] == STORY_GRAPH_BUILD_MODULE_KEY
+    assert result["error"]["code"] == "STORY_GRAPH_BUILDER_UNCONFIGURED"
+    assert writer.events[0]["event_type"] == "graph.stage.failed"
+    assert writer.events[0]["payload"]["stage"] == "story_graph_build"
+    joined = json.dumps([result, writer.events], ensure_ascii=False)
+    for forbidden in ["prompt", "response", "body", "content", "raw_text", "snippet", "credential_ref", "api_key"]:
+        assert forbidden not in joined
+
+
+def test_graph_bond_generation_activity_fails_closed_without_runner() -> None:
+    writer = RecordingWorkflowEventWriter()
+
+    result = graph_bond_generation_activity(
+        _bond_payload({"generate_bonds": True, "prompt": "hidden", "nested": {"content": "secret"}}),
+        bond_runner=None,
+        workflow_event_writer=writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["workflow_type"] == "story_graph_bond_generation"
+    assert result["module_key"] == GRAPH_BOND_GENERATION_MODULE_KEY
+    assert result["error"]["code"] == "GRAPH_BOND_RUNNER_UNCONFIGURED"
+    assert writer.events[0]["event_type"] == "graph.stage.failed"
+    assert writer.events[0]["payload"]["stage"] == "graph_bond_generation"
+    joined = json.dumps([result, writer.events], ensure_ascii=False)
+    for forbidden in [
+        "prompt",
+        "hidden",
+        "secret",
+        "response",
+        "body",
+        "content",
+        "raw_text",
+        "snippet",
+        "credential_ref",
+        "api_key",
+        "node-1",
+        "node-2",
+        "rain treaty",
+    ]:
+        assert forbidden not in joined
+
+
+def test_graph_bond_generation_activity_requires_module_permission() -> None:
+    writer = RecordingWorkflowEventWriter()
+    payload = _bond_payload()
+    payload["context"] = _bond_context().model_copy(update={"permissions": {}}).model_dump()
+
+    result = graph_bond_generation_activity(payload, bond_runner=None, workflow_event_writer=writer)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "FORBIDDEN"
+    assert writer.events[0]["payload"]["error_code"] == "FORBIDDEN"
+
+
+def test_graph_bond_generation_activity_requires_admitted_bond_workflow_context() -> None:
+    cases = [
+        (
+            "workflow_type",
+            _bond_context().model_copy(update={"workflow_type": "story_graph_build"}).model_dump(),
+            "workflow_type must be story_graph_bond_generation",
+        ),
+        (
+            "project_id",
+            _bond_context().model_copy(update={"project_id": None}).model_dump(),
+            "project_id is required",
+        ),
+        (
+            "module_key",
+            _bond_context().model_copy(update={"module_key": None}).model_dump(),
+            f"module_key must be {GRAPH_BOND_GENERATION_MODULE_KEY}",
+        ),
+    ]
+
+    for field_name, context_payload, expected_message in cases:
+        writer = RecordingWorkflowEventWriter()
+        status_writer = RecordingWorkflowRunStatusWriter()
+        payload = _bond_payload()
+        payload["context"] = context_payload
+
+        result = graph_bond_generation_activity(
+            payload,
+            bond_runner=RecordingGraphBondRunner({"status": "completed"}),
+            workflow_event_writer=writer,
+            workflow_status_writer=status_writer,
+        )
+
+        assert result["status"] == "failed", field_name
+        assert result["error"]["code"] == "VALIDATION_FAILED", field_name
+        assert result["error"]["message"] == expected_message
+        assert status_writer.completed == []
+        assert status_writer.failed[-1]["code"] == "VALIDATION_FAILED"
+        assert writer.events[-1]["event_type"] == "graph.stage.failed"
+
+
+def test_graph_bond_generation_activity_marks_failed_when_runner_returns_failed_status() -> None:
+    writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+    runner = RecordingGraphBondRunner(
+        {
+            "status": "failed",
+            "module_key": GRAPH_BOND_GENERATION_MODULE_KEY,
+            "error": {"code": "SCHEMA_VALIDATION_FAILED", "message": "unsafe graph bond output"},
+            "candidate_batch_id": "graph-bond:run-story-graph-bond-1",
+        }
+    )
+
+    result = graph_bond_generation_activity(
+        _bond_payload(),
+        bond_runner=runner,
+        workflow_event_writer=writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "SCHEMA_VALIDATION_FAILED"
+    assert status_writer.completed == []
+    assert status_writer.failed == [
+        {
+            "context": _bond_context(),
+            "code": "SCHEMA_VALIDATION_FAILED",
+            "message": "unsafe graph bond output",
+        }
+    ]
+    assert writer.events[-1]["event_type"] == "graph.stage.failed"
+    joined = json.dumps([result, writer.events, status_writer.failed], ensure_ascii=False, default=str)
+    assert "candidate_batch_id" not in joined
+    assert "graph.stage.completed" not in joined
+
+
+def test_llm_facility_graph_bond_runner_persists_schema_valid_candidate_metadata_without_public_secrets() -> None:
+    from mirofish_agents.temporal import graph as graph_module
+    from mirofish_agents.seed.sequential_reader import ModuleBindingResolution
+
+    LLMFacilityGraphBondGenerationRunner = getattr(graph_module, "LLMFacilityGraphBondGenerationRunner")
+    resolution = ModuleBindingResolution(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        module_key=GRAPH_BOND_GENERATION_MODULE_KEY,
+        channel_id="channel-1",
+        model_id="model-graph",
+        provider="openai-compatible",
+        base_url="https://llm.example/v1",
+        credential_ref="channel-1",
+        supports_json=True,
+        settings={"temperature": 0.3},
+    )
+    resolver = RecordingBindingResolver(resolution)
+    credentials = RecordingCredentialProvider(api_key="sk-graph-secret")
+    chat_client = RecordingJSONChatClient(
+        {
+            "bonds": [
+                {
+                    "title": "雨约同盟",
+                    "summary": "两名角色在雨夜密约中形成互相制衡的短期同盟。",
+                    "kind": "alliance",
+                    "confidence": 0.82,
+                    "node_ids": ["node-1", "node-2"],
+                    "selected_node_ids": ["node-1", "node-2"],
+                    "selectedNodeIds": ["node-1", "node-2"],
+                    "involved_node_ids": ["node-1", "node-2"],
+                    "evidence_assumptions": [
+                        {"summary": "共同目标来自公开图谱关系，而不是原文片段。", "snippet": "不得持久化"}
+                    ],
+                    "prompt": "不得持久化",
+                }
+            ],
+            "plot_threads": [
+                {
+                    "title": "白塔反制线",
+                    "summary": "组织开始利用同盟裂缝设置反制支线。",
+                    "thread_type": "subplot",
+                    "body": "不得持久化",
+                }
+            ],
+            "conflict_triggers": [
+                {
+                    "title": "信物失窃",
+                    "summary": "关键物件失踪触发两方互疑。",
+                    "trigger_type": "artifact_loss",
+                    "credential_ref": "secret-ref",
+                }
+            ],
+        }
+    )
+    candidate_writer = RecordingGraphBondCandidateWriter(
+        {
+            "candidate_count": 3,
+            "bond_candidate_count": 1,
+            "plot_thread_candidate_count": 1,
+            "conflict_trigger_count": 1,
+        }
+    )
+    runner = LLMFacilityGraphBondGenerationRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        candidate_writer=candidate_writer,
+    )
+
+    result = runner.generate(
+        context=_bond_context(),
+        graph_id="graph-1",
+        node_ids=["node-1", "node-2"],
+        focus="rain treaty with raw focus text",
+        options={"mode": "bonds_and_threads", "prompt": "remove me"},
+    )
+
+    assert result == {
+        "status": "completed",
+        "module_key": GRAPH_BOND_GENERATION_MODULE_KEY,
+        "model_id": "model-graph",
+        "candidate_batch_id": "graph-bond:run-story-graph-bond-1",
+        "candidate_count": 3,
+        "bond_candidate_count": 1,
+        "plot_thread_candidate_count": 1,
+        "conflict_trigger_count": 1,
+    }
+    assert resolver.calls[0]["module_key"] == GRAPH_BOND_GENERATION_MODULE_KEY
+    assert credentials.calls[0]["credential_ref"] == "channel-1"
+    assert chat_client.calls[0]["api_key"] == "sk-graph-secret"
+    assert candidate_writer.calls[0]["candidate_batch_id"] == "graph-bond:run-story-graph-bond-1"
+    persisted_candidates = candidate_writer.calls[0]["candidates"]
+    assert [candidate["asset_type"] for candidate in persisted_candidates] == [
+        "graph_bond",
+        "plot_thread",
+        "conflict_trigger",
+    ]
+    joined_public = json.dumps([result, candidate_writer.calls], ensure_ascii=False, default=str)
+    for forbidden in [
+        "sk-graph-secret",
+        "credential_ref",
+        "secret-ref",
+        "prompt",
+        "remove me",
+        "不得持久化",
+        "rain treaty with raw focus text",
+        "node-1",
+        "node-2",
+    ]:
+        assert forbidden not in joined_public
+
+
+def test_llm_facility_graph_bond_runner_rejects_sensitive_candidate_values_before_persistence() -> None:
+    from mirofish_agents.temporal import graph as graph_module
+    from mirofish_agents.seed.sequential_reader import ModuleBindingResolution
+
+    LLMFacilityGraphBondGenerationRunner = getattr(graph_module, "LLMFacilityGraphBondGenerationRunner")
+    resolution = ModuleBindingResolution(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        module_key=GRAPH_BOND_GENERATION_MODULE_KEY,
+        channel_id="channel-1",
+        model_id="model-graph",
+        provider="openai-compatible",
+        base_url="https://llm.example/v1",
+        credential_ref="channel-1",
+        supports_json=True,
+        settings={"temperature": 0.3},
+    )
+    candidate_writer = RecordingGraphBondCandidateWriter()
+    runner = LLMFacilityGraphBondGenerationRunner(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-graph-secret"),
+        chat_client=RecordingJSONChatClient(
+            {
+                "bonds": [
+                    {
+                        "title": "雨约同盟 node-1",
+                        "summary": "rain treaty with raw focus text",
+                        "kind": "alliance",
+                        "tags": ["story_graph", "sk-live-secret"],
+                        "notes": "selected ids node-1 node-2 and prompt: leak this",
+                    }
+                ]
+            }
+        ),
+        candidate_writer=candidate_writer,
+    )
+
+    result = runner.generate(
+        context=_bond_context(),
+        graph_id="graph-1",
+        node_ids=["node-1", "node-2"],
+        focus="rain treaty with raw focus text",
+        options={},
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "SCHEMA_VALIDATION_FAILED"
+    assert candidate_writer.calls == []
+    joined = json.dumps(result, ensure_ascii=False)
+    for forbidden in ["node-1", "node-2", "rain treaty with raw focus text", "sk-live-secret", "prompt: leak this"]:
+        assert forbidden not in joined
+
+
+def test_postgres_graph_bond_candidate_writer_persists_candidate_assets_without_public_node_ids_or_credentials() -> None:
+    connection = FakeStoryGraphConnection({})
+    writer = PostgresGraphBondCandidateWriter(connect=lambda: connection)
+    context = _bond_context().model_copy(
+        update={
+            "tenant_id": "11111111-1111-1111-1111-111111111111",
+            "actor_user_id": "22222222-2222-2222-2222-222222222222",
+        }
+    )
+
+    result = writer.write_candidates(
+        context=context,
+        candidate_batch_id="graph-bond:run-story-graph-bond-1",
+        model_id="model-graph",
+        candidates=[
+            {
+                "asset_type": "graph_bond",
+                "category": "relationship",
+                "title": "雨约同盟",
+                "summary": "两名角色在雨夜密约中形成互相制衡的短期同盟。",
+                "tags": ["story_graph", "graph_bond"],
+                "payload": {
+                    "proposal_type": "graph_bond",
+                    "kind": "alliance",
+                    "node_ids": ["node-1", "node-2"],
+                    "prompt": "hidden prompt",
+                    "credential_ref": "secret-ref",
+                    "evidence_assumptions": [{"summary": "公开假设", "snippet": "hidden evidence"}],
+                },
+            },
+            {
+                "asset_type": "plot_thread",
+                "category": "plot",
+                "title": "白塔反制线",
+                "summary": "组织开始利用同盟裂缝设置反制支线。",
+                "tags": ["story_graph", "plot_thread"],
+                "payload": {"proposal_type": "plot_thread"},
+            },
+        ],
+    )
+
+    assert result == {
+        "status": "completed",
+        "candidate_batch_id": "graph-bond:run-story-graph-bond-1",
+        "candidate_count": 2,
+        "bond_candidate_count": 1,
+        "plot_thread_candidate_count": 1,
+        "conflict_trigger_count": 0,
+    }
+    executed_sql = "\n".join(query for query, _params in connection.cursor_instance.executed)
+    assert "app_set_tenant_context" in executed_sql
+    assert "INSERT INTO assets" in executed_sql
+    assert "'candidate'" in executed_sql
+    joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
+    assert "graph_bond_generation" in joined_params
+    assert "graph-bond:run-story-graph-bond-1" in joined_params
+    for forbidden in [
+        "node-1",
+        "node-2",
+        "hidden prompt",
+        "credential_ref",
+        "secret-ref",
+        "hidden evidence",
+    ]:
+        assert forbidden not in joined_params
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_graph_bond_candidate_writer_scrubs_sensitive_candidate_values_in_safe_looking_fields() -> None:
+    connection = FakeStoryGraphConnection({})
+    writer = PostgresGraphBondCandidateWriter(connect=lambda: connection)
+    context = _bond_context().model_copy(
+        update={
+            "tenant_id": "11111111-1111-1111-1111-111111111111",
+            "actor_user_id": "22222222-2222-2222-2222-222222222222",
+        }
+    )
+
+    result = writer.write_candidates(
+        context=context,
+        candidate_batch_id="graph-bond:run-story-graph-bond-1",
+        model_id="model-graph",
+        candidates=[
+            {
+                "asset_type": "graph_bond",
+                "category": "relationship",
+                "title": "雨约同盟",
+                "summary": "公开摘要",
+                "tags": ["story_graph", "node-1", "sk-live-secret"],
+                "payload": {
+                    "proposal_type": "graph_bond",
+                    "kind": "alliance",
+                    "notes": "node-1 node-2 should not persist",
+                    "public_hint": "prompt: reveal hidden chain",
+                    "summary_hint": "公开非敏感标签",
+                },
+            }
+        ],
+    )
+
+    assert result["status"] == "completed"
+    joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
+    assert "公开非敏感标签" in joined_params
+    for forbidden in ["node-1", "node-2", "sk-live-secret", "prompt: reveal hidden chain"]:
+        assert forbidden not in joined_params
+
+
+def test_story_graph_build_activity_marks_workflow_run_failed_without_builder() -> None:
+    writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+
+    result = story_graph_build_activity(
+        _payload({"prompt": "hidden"}),
+        graph_builder=None,
+        workflow_event_writer=writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["workflow_status_persisted"] is True
+    assert status_writer.failed == [
+        {
+            "context": _context(),
+            "code": "STORY_GRAPH_BUILDER_UNCONFIGURED",
+            "message": "story graph builder requires DB-backed canon source configuration",
+        }
+    ]
+    joined = json.dumps([result, status_writer.failed, writer.events], ensure_ascii=False, default=str)
+    assert "prompt" not in joined
+    assert "hidden" not in joined
+
+
+def test_story_graph_build_activity_marks_workflow_run_completed_with_public_result() -> None:
+    writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+    builder = RecordingStoryGraphBuilder(
+        {
+            "status": "completed",
+            "graph_id": "graph-1",
+            "node_count": 2,
+            "edge_count": 1,
+            "layout_count": 1,
+            "cluster_count": 1,
+            "body": "hidden body",
+            "api_key": "sk-hidden",
+        }
+    )
+
+    result = story_graph_build_activity(
+        _payload({"prompt": "hidden"}),
+        graph_builder=builder,
+        workflow_event_writer=writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "completed"
+    assert result["workflow_status_persisted"] is True
+    assert status_writer.completed == [
+        {
+            "context": _context(),
+            "result": {
+                "graph_id": "graph-1",
+                "node_count": 2,
+                "edge_count": 1,
+                "layout_count": 1,
+                "cluster_count": 1,
+            },
+        }
+    ]
+    assert status_writer.failed == []
+    assert writer.events[-1]["event_type"] == "graph.stage.completed"
+    joined = json.dumps([result, status_writer.completed, writer.events], ensure_ascii=False, default=str)
+    for forbidden in ["prompt", "hidden body", "api_key", "sk-hidden"]:
+        assert forbidden not in joined
+
+
+def test_postgres_story_graph_builder_requires_project_context() -> None:
+    builder = PostgresStoryGraphBuilder(connect=lambda: FakeStoryGraphConnection({}))
+    context = _context().model_copy(update={"project_id": None})
+
+    try:
+        builder.build(context=context, mode="full", options={})
+    except ValueError as exc:
+        assert "project_id" in str(exc)
+    else:  # pragma: no cover - guard for explicit failure
+        raise AssertionError("expected project_id validation failure")
+
+
+def test_postgres_workflow_run_status_writer_updates_workflow_runs_with_sanitized_result() -> None:
+    connection = FakeWorkflowStatusConnection([{"workflow_updated": "1"}])
+    writer = PostgresWorkflowRunStatusWriter(connect=lambda: connection)
+
+    writer.mark_completed(
+        context=_context(),
+        result={
+            "graph_id": "graph-1",
+            "node_count": 2,
+            "edge_count": 1,
+            "layout_count": 1,
+            "cluster_count": 1,
+            "body": "hidden body",
+            "api_key": "sk-hidden",
+        },
+    )
+
+    query, params = connection.cursor_instance.executed[0]
+    assert "UPDATE workflow_runs" in query
+    assert params[0] == "completed"
+    assert params[1] == "completed"
+    assert "story graph ready" in params[2]
+    assert params[-4:] == ("tenant-1", "project-1", "run-story-graph-1", "story_graph_build")
+    joined = json.dumps(params, ensure_ascii=False)
+    assert "graph-1" in joined
+    assert "hidden body" not in joined
+    assert "api_key" not in joined
+    assert "sk-hidden" not in joined
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_workflow_run_status_writer_describes_completed_graph_bond_generation() -> None:
+    connection = FakeWorkflowStatusConnection([{"workflow_updated": "1"}])
+    writer = PostgresWorkflowRunStatusWriter(connect=lambda: connection)
+
+    writer.mark_completed(
+        context=_bond_context(),
+        result={
+            "candidate_batch_id": "graph-bond:run-story-graph-bond-1",
+            "candidate_count": 4,
+            "bond_candidate_count": 2,
+            "plot_thread_candidate_count": 1,
+            "conflict_trigger_count": 1,
+            "body": "hidden body",
+            "api_key": "sk-hidden",
+        },
+    )
+
+    query, params = connection.cursor_instance.executed[0]
+    assert "UPDATE workflow_runs" in query
+    assert params[0] == "completed"
+    assert params[1] == "completed"
+    assert params[2] == "graph bond candidates ready: 4 candidates, 2 bonds, 1 threads, 1 triggers"
+    assert params[-4:] == (
+        "tenant-1",
+        "project-1",
+        "run-story-graph-bond-1",
+        "story_graph_bond_generation",
+    )
+    joined = json.dumps(params, ensure_ascii=False)
+    assert "graph-bond:run-story-graph-bond-1" in joined
+    assert "hidden body" not in joined
+    assert "api_key" not in joined
+    assert "sk-hidden" not in joined
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_workflow_run_status_writer_updates_bond_workflow_type_for_failed_runs() -> None:
+    connection = FakeWorkflowStatusConnection([{"workflow_updated": "1"}])
+    writer = PostgresWorkflowRunStatusWriter(connect=lambda: connection)
+
+    writer.mark_failed(
+        context=_bond_context(),
+        code="SCHEMA_VALIDATION_FAILED",
+        message="graph bond generation failed",
+    )
+
+    query, params = connection.cursor_instance.executed[0]
+    assert "UPDATE workflow_runs" in query
+    assert "workflow_type = %s" in query
+    assert "workflow_type = 'story_graph_build'" not in query
+    assert params[-4:] == (
+        "tenant-1",
+        "project-1",
+        "run-story-graph-bond-1",
+        "story_graph_bond_generation",
+    )
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_story_graph_builder_persists_snapshot_nodes_edges_evidence_layout_and_clusters() -> None:
+    rows = {
+        "fetch_entities": [
+            {
+                "entity_id": "entity-a",
+                "canonical_name": "林澈",
+                "entity_type": "character",
+                "importance": "high",
+                "state_summary": "雨夜谈判者。",
+                "first_seen_segment_id": "segment-1",
+                "metadata_jsonb": {"body": "hidden raw body", "role": "protagonist"},
+            },
+            {
+                "entity_id": "entity-b",
+                "canonical_name": "白塔会",
+                "entity_type": "organization",
+                "importance": "medium",
+                "state_summary": "秘密组织。",
+                "first_seen_segment_id": "segment-2",
+                "metadata_jsonb": {"api_key": "sk-hidden", "alignment": "rival"},
+            },
+        ],
+        "fetch_aliases": [
+            {"entity_id": "entity-a", "alias": "小林"},
+            {"entity_id": "entity-b", "alias": "白塔"},
+        ],
+        "fetch_labels": [
+            {"entity_id": "entity-a", "label": "主角", "label_type": "role"},
+            {"entity_id": "entity-b", "label": "势力", "label_type": "kind"},
+        ],
+        "fetch_relationships": [
+            {
+                "relationship_id": "relationship-1",
+                "source_entity_name": "林澈",
+                "target_entity_name": "白塔会",
+                "relationship_type": "opposes",
+                "summary": "林澈调查白塔会。",
+                "first_seen_segment_id": "segment-3",
+                "evidence_text": "这段关系原文不得出现在公开结果。",
+                "metadata_jsonb": {"prompt": "hidden"},
+            }
+        ],
+        "fetch_plot_threads": [
+            {
+                "thread_id": "thread-1",
+                "title": "雨夜密约",
+                "status": "open",
+                "summary": "主线冲突开始收束。",
+                "first_seen_segment_id": "segment-4",
+                "evidence_text": "伏笔原文不得公开。",
+                "metadata_jsonb": {"content": "hidden"},
+            }
+        ],
+        "fetch_world_rules": [
+            {
+                "rule_evidence_id": "rule-1",
+                "rule_text": "灵气守恒",
+                "category": "magic",
+                "confidence": 0.9,
+                "segment_id": "segment-5",
+                "evidence_text": "规则原文不得公开。",
+                "metadata_jsonb": {"snippet": "hidden"},
+            }
+        ],
+        "fetch_assets": [
+            {
+                "asset_id": "asset-1",
+                "asset_type": "archive_entity",
+                "category": "archive",
+                "lifecycle": "canon",
+                "title": "林澈档案",
+                "summary": "可公开摘要。",
+                "payload_jsonb": {"content_text": "hidden", "tier": "major"},
+                "tags_jsonb": ["archive"],
+            }
+        ],
+        "fetch_version": [{"next_version": 7}],
+    }
+    connection = FakeStoryGraphConnection(rows)
+    builder = PostgresStoryGraphBuilder(connect=lambda: connection)
+
+    result = builder.build(
+        context=_context(),
+        mode="full",
+        options={"prompt": "remove me", "view_id": "world"},
+    )
+
+    assert result["status"] == "completed"
+    assert result["graph_id"]
+    assert result["node_count"] == 5
+    assert result["edge_count"] == 1
+    assert result["layout_count"] == 1
+    assert result["cluster_count"] >= 1
+    executed_sql = "\n".join(query for query, _params in connection.cursor_instance.executed)
+    for table_name in [
+        "story_graph_snapshots",
+        "story_graph_nodes",
+        "story_graph_edges",
+        "story_graph_evidence",
+        "story_graph_layouts",
+        "story_graph_clusters",
+    ]:
+        assert table_name in executed_sql
+    executed_params = [params for _query, params in connection.cursor_instance.executed]
+    joined = json.dumps([result, executed_params], ensure_ascii=False, default=str)
+    for forbidden in [
+        "这段关系原文",
+        "伏笔原文",
+        "规则原文",
+        "hidden raw body",
+        "content_text",
+        "prompt",
+        "api_key",
+        "snippet",
+        "credential_ref",
+    ]:
+        assert forbidden not in joined
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_story_graph_build_activity_uses_env_db_builder_when_configured(monkeypatch: Any) -> None:
+    connection = FakeStoryGraphConnection(
+        {
+            "fetch_entities": [],
+            "fetch_aliases": [],
+            "fetch_labels": [],
+            "fetch_relationships": [],
+            "fetch_plot_threads": [],
+            "fetch_world_rules": [],
+            "fetch_assets": [],
+            "fetch_version": [{"next_version": 1}],
+        }
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgres://example")
+    monkeypatch.setattr(
+        PostgresStoryGraphBuilder,
+        "from_database_url",
+        classmethod(lambda cls, database_url: cls(connect=lambda: connection)),
+    )
+    monkeypatch.setattr(
+        PostgresWorkflowRunStatusWriter,
+        "from_database_url",
+        classmethod(lambda cls, database_url: RecordingWorkflowRunStatusWriter()),
+    )
+
+    result = story_graph_build_activity(_payload(), graph_builder=None, workflow_event_writer=RecordingWorkflowEventWriter())
+
+    assert result["status"] == "completed"
+    assert result["node_count"] == 0
+    assert result["edge_count"] == 0
+    assert _story_graph_builder_from_env() is not None
+
+
+def test_graph_worker_spec_registers_temporal_workflow_and_activity() -> None:
+    spec = worker_spec()
+
+    assert spec["task_queue"] == GRAPH_TASK_QUEUE
+    assert "StoryGraphBuildWorkflow" in spec["workflows"]
+    assert "GraphBondGenerationWorkflow" in spec["workflows"]
+    assert "story_graph_build_activity" in spec["activities"]
+    assert "graph_bond_generation_activity" in spec["activities"]
+
+
+def test_temporal_graph_worker_registers_story_graph_activity() -> None:
+    components = worker_components_for_task_queue(GRAPH_TASK_QUEUE)
+
+    assert [workflow.__name__ for workflow in components["workflows"]] == [
+        "StoryGraphBuildWorkflow",
+        "GraphBondGenerationWorkflow",
+    ]
+    assert [activity.__name__ for activity in components["activities"]] == [
+        "story_graph_build_activity",
+        "graph_bond_generation_activity",
+    ]
+
+
+class FakeStoryGraphCursor:
+    def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
+        self.rows = {key: list(value) for key, value in rows.items()}
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        self.current_key: str | None = None
+
+    def execute(self, query: str, params: tuple[Any, ...]) -> None:
+        self.executed.append((query, params))
+        self.current_key = self._query_key(query)
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        if self.current_key is None:
+            return []
+        return list(self.rows.get(self.current_key, []))
+
+    def fetchone(self) -> dict[str, Any] | None:
+        if self.current_key is None:
+            return None
+        rows = self.rows.get(self.current_key, [])
+        if rows:
+            return rows.pop(0)
+        return None
+
+    def __enter__(self) -> "FakeStoryGraphCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def _query_key(self, query: str) -> str | None:
+        if "max(version)" in query:
+            return "fetch_version"
+        if "FROM entities" in query:
+            return "fetch_entities"
+        if "FROM entity_aliases" in query:
+            return "fetch_aliases"
+        if "FROM entity_labels" in query:
+            return "fetch_labels"
+        if "FROM relationships" in query:
+            return "fetch_relationships"
+        if "FROM plot_threads" in query:
+            return "fetch_plot_threads"
+        if "FROM world_rule_evidence" in query:
+            return "fetch_world_rules"
+        if "FROM assets" in query:
+            return "fetch_assets"
+        return None
+
+
+class FakeStoryGraphConnection:
+    def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
+        self.cursor_instance = FakeStoryGraphCursor(rows)
+        self.committed = False
+        self.closed = False
+
+    def cursor(self) -> FakeStoryGraphCursor:
+        return self.cursor_instance
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeWorkflowStatusCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = list(rows)
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    def execute(self, query: str, params: tuple[Any, ...]) -> None:
+        self.executed.append((query, params))
+
+    def fetchone(self) -> dict[str, Any] | None:
+        if not self.rows:
+            return None
+        return self.rows.pop(0)
+
+    def __enter__(self) -> "FakeWorkflowStatusCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+
+class FakeWorkflowStatusConnection:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.cursor_instance = FakeWorkflowStatusCursor(rows)
+        self.committed = False
+        self.closed = False
+
+    def cursor(self) -> FakeWorkflowStatusCursor:
+        return self.cursor_instance
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def close(self) -> None:
+        self.closed = True

@@ -14,6 +14,7 @@ from .unified_assets import router as unified_assets_router
 from .worldline import router as worldline_router
 from .worldline_v2 import router as worldline_v2_router
 from .writer_agent import router as writer_agent_router
+from .writer_runs_v1 import router as writer_runs_v1_router
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(project_router)
@@ -32,4 +33,10 @@ api_v2_router.include_router(chapter_context_v2_router)
 api_v2_router.include_router(draft_v2_router)
 api_v2_router.include_router(worldline_v2_router)
 
-__all__ = ["api_router", "api_v2_router"]
+api_v1_router = APIRouter(prefix="/api/v1")
+api_v1_router.include_router(writer_runs_v1_router)
+
+public_v1_router = APIRouter(prefix="/v1")
+public_v1_router.include_router(writer_runs_v1_router)
+
+__all__ = ["api_router", "api_v2_router", "api_v1_router", "public_v1_router"]

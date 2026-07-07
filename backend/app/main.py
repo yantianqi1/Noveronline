@@ -222,10 +222,12 @@ def _register_core_routes(app: FastAPI) -> None:
 
 
 def _register_api_routes(app: FastAPI) -> None:
-    from .api_fastapi import api_router, api_v2_router
+    from .api_fastapi import api_router, api_v1_router, api_v2_router, public_v1_router
 
     app.include_router(api_router)
+    app.include_router(api_v1_router)
     app.include_router(api_v2_router)
+    app.include_router(public_v1_router)
 
 
 app = create_app()

@@ -39,6 +39,74 @@ export interface WriterFormState {
   chapterOrder: number;
 }
 
+export type SaasWriterTaskType = "write_scene" | "continue" | "outline";
+
+export interface SaasWriterRunFormState {
+  taskType: SaasWriterTaskType;
+  chapterId: string;
+  selectedSceneId: string;
+  authorInstruction: string;
+  sceneFocus: string;
+  moduleKey: string;
+  selectedAssetIds: string[];
+  worldlinePathIds: string[];
+  characterNames: string[];
+  graphNodeNames: string[];
+  assetQuery: string;
+  worldRuleQuery: string;
+}
+
+export function parseWriterReferenceInput(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[\n,，]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function assignNonEmptyArray(
+  target: Record<string, unknown>,
+  key: string,
+  items: string[] = [],
+) {
+  const cleaned = [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+  if (cleaned.length) {
+    target[key] = cleaned;
+  }
+}
+
+export function buildSaasWriterRunPayload(
+  form: SaasWriterRunFormState,
+): Record<string, unknown> {
+  const options: Record<string, unknown> = {
+    module_key: form.moduleKey,
+  };
+  assignNonEmptyArray(options, "selected_asset_ids", form.selectedAssetIds);
+  assignNonEmptyArray(options, "worldline_path_ids", form.worldlinePathIds);
+  assignNonEmptyArray(options, "character_names", form.characterNames);
+  assignNonEmptyArray(options, "graph_node_names", form.graphNodeNames);
+  const assetQuery = form.assetQuery.trim();
+  const worldRuleQuery = form.worldRuleQuery.trim();
+  if (assetQuery) options.asset_query = assetQuery;
+  if (worldRuleQuery) options.world_rule_query = worldRuleQuery;
+
+  const payload: Record<string, unknown> = {
+    mode: form.taskType === "continue" ? "continue" : "draft",
+    instruction: form.authorInstruction.trim() || form.sceneFocus.trim(),
+    options,
+  };
+  if (form.chapterId) {
+    payload.chapter_id = form.chapterId;
+  }
+  if (form.selectedSceneId) {
+    payload.scene_id = form.selectedSceneId;
+  }
+  return payload;
+}
+
 export function buildWriterRequestPayload(form: Partial<WriterFormState> = {}): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     scope_type: form.scopeType,

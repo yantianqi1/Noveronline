@@ -1,0 +1,177 @@
+name: ${COMPOSE_PROJECT_NAME:-mirofish-saas}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mirofish}
+      POSTGRES_USER: ${POSTGRES_USER:-mirofish}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mirofish_dev_password}
+    ports:
+      - "${POSTGRES_PORT:-54329}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-mirofish} -d ${POSTGRES_DB:-mirofish}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-63799}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-mirofish}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-mirofish_dev_password}
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "temporal operator cluster health --address \"$$(hostname -i):7233\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:2.32.0
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3999
+    ports:
+      - "${TEMPORAL_UI_PORT:-8233}:8080"
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mirofish}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/minio/health/ready",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mirofish}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}
+    entrypoint:
+      [
+        "sh",
+        "-c",
+        "mc alias set mirofish-minio http://minio:9000 \"$${MINIO_ROOT_USER}\" \"$${MINIO_ROOT_PASSWORD}\" && mc mb --ignore-existing \"mirofish-minio/$${MIROFISH_OBJECT_STORAGE_BUCKET}\"",
+      ]
+    restart: "no"
+
+  agent-runtime:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    restart: unless-stopped
+
+  agent-runtime-seed:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_RUNTIME_TASK_QUEUE: seed-heavy
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}
+      MIROFISH_OBJECT_STORAGE_ENDPOINT: minio:9000
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}
+      MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-mirofish}
+      MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}
+      MIROFISH_OBJECT_STORAGE_USE_SSL: "false"
+    restart: unless-stopped
+
+  agent-runtime-graph:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_RUNTIME_TASK_QUEUE: graph-heavy
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}
+    restart: unless-stopped
+
+  pi-agent-runtime:
+    build:
+      context: ../apps/pi-agent-runtime
+      args:
+        NODE_VERSION: ${PI_AGENT_RUNTIME_NODE_VERSION:-22.19.0}
+    command: npm run worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      WRITER_TASK_QUEUE: writer-streaming
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

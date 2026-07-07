@@ -480,6 +480,96 @@ function WriterPageBody() {
                   </div>
                 </div>
 
+                {/* Explicit SaaS writer references */}
+                <div className="space-y-2 rounded-md border border-border/40 bg-muted/20 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold">上下文引用</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      Writer Tools
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        资产 ID
+                      </label>
+                      <Textarea
+                        className="min-h-[52px] resize-y text-xs"
+                        value={state.selectedAssetIdsInput}
+                        onChange={(e) =>
+                          state.setSelectedAssetIdsInput(e.target.value)
+                        }
+                        placeholder="asset_1, asset_2"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        世界线 Path ID
+                      </label>
+                      <Textarea
+                        className="min-h-[52px] resize-y text-xs"
+                        value={state.worldlinePathIdsInput}
+                        onChange={(e) =>
+                          state.setWorldlinePathIdsInput(e.target.value)
+                        }
+                        placeholder="path_main"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        角色名
+                      </label>
+                      <Input
+                        className="h-8 text-xs"
+                        value={state.characterNamesInput}
+                        onChange={(e) =>
+                          state.setCharacterNamesInput(e.target.value)
+                        }
+                        placeholder="顾行舟, 沈照"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        图谱节点
+                      </label>
+                      <Input
+                        className="h-8 text-xs"
+                        value={state.graphNodeNamesInput}
+                        onChange={(e) =>
+                          state.setGraphNodeNamesInput(e.target.value)
+                        }
+                        placeholder="废塔, 机关"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        资产检索
+                      </label>
+                      <Input
+                        className="h-8 text-xs"
+                        value={state.assetQuery}
+                        onChange={(e) => state.setAssetQuery(e.target.value)}
+                        placeholder="线索、素材关键词"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        世界规则检索
+                      </label>
+                      <Input
+                        className="h-8 text-xs"
+                        value={state.worldRuleQuery}
+                        onChange={(e) =>
+                          state.setWorldRuleQuery(e.target.value)
+                        }
+                        placeholder="规则、限制关键词"
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 {/* Action buttons */}
                 <div className="flex flex-wrap gap-2">
                   <Button

@@ -10,6 +10,116 @@ import type { SSEHandlers } from "@/api/sse";
 
 /* ---------- Core writing (SSE) ---------- */
 
+export interface WriterRunV1 {
+  run_id: string;
+  tenant_id: string;
+  project_id: string;
+  status: string;
+  mode: string;
+  chapter_id?: string | null;
+  scene_id?: string | null;
+  instruction: string;
+  module_key: string;
+}
+
+interface WriterRunV1Response {
+  success?: boolean;
+  data?: WriterRunV1;
+  error?: {
+    code?: string;
+    message?: string;
+    details?: Record<string, unknown>;
+  };
+}
+
+export async function createWriterRunV1(
+  projectId: string,
+  payload: unknown,
+): Promise<ApiResponse<WriterRunV1>> {
+  const response = await fetch(`/api/v1/projects/${projectId}/writer-runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+  });
+  const data = (await response.json().catch(() => ({}))) as WriterRunV1Response;
+  if (!response.ok || data.success === false) {
+    const message = data.error?.message || `writer run failed: ${response.status}`;
+    const error = new Error(message) as Error & { code?: string; details?: Record<string, unknown> };
+    error.code = data.error?.code;
+    error.details = data.error?.details;
+    throw error;
+  }
+  return data as ApiResponse<WriterRunV1>;
+}
+
+export async function streamWriterRunEventsV1(
+  runId: string,
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`/api/v1/writer-runs/${runId}/events`, {
+    method: "GET",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`writer run stream failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+    for (const part of parts) {
+      const line = part.split("\n").find((item) => item.startsWith("data: "));
+      if (!line) continue;
+      const event = normalizeWriterRunEvent(JSON.parse(line.slice(6)));
+      if (event.type === "done") {
+        handlers.onDone?.(event);
+      } else if (event.type === "error") {
+        handlers.onError?.(event);
+      } else {
+        handlers.onEvent?.(event);
+      }
+    }
+  }
+}
+
+export function adoptWriterDraftV1(draftId: string): Promise<ApiResponse<{ block_id: string }>> {
+  return post(`/api/v1/drafts/${draftId}/adoptions`, {});
+}
+
+export function normalizeWriterRunEvent(event: Record<string, unknown>): { type: string; [key: string]: unknown } {
+  const payload = (event.payload || {}) as Record<string, unknown>;
+  switch (event.type) {
+    case "writer.run.started":
+      return { type: "orchestrator_status", phase: "writing", message: "写作运行已启动" };
+    case "writer.token":
+      return { type: "writer_token", token: payload.token || "" };
+    case "writer.tool.started":
+      return { type: "tool_call", name: payload.tool_name, display: payload.tool_name };
+    case "writer.tool.completed":
+      return {
+        type: "tool_result",
+        name: payload.tool_name,
+        status: payload.is_error ? "error" : "done",
+        full_result: JSON.stringify(payload.result ?? {}, null, 2),
+      };
+    case "writer.draft.saved":
+      return { type: "draft_saved", draft_id: payload.draft_id };
+    case "writer.run.failed":
+      return { type: "error", message: payload.message || "生成失败", code: payload.code };
+    case "writer.run.completed":
+      return { type: "done", draft_id: payload.draft_id };
+    default:
+      return { type: String(event.type || "unknown"), ...payload };
+  }
+}
+
 export function runWriterAgent(
   payload: unknown,
   handlers: SSEHandlers,
