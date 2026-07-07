@@ -3,6 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +27,16 @@ import (
 	"mirofish-novel/apps/api/internal/workflows"
 	"mirofish-novel/apps/api/internal/worldline"
 )
+
+func signedSessionTokenForTest(t *testing.T, secret string, userID string) string {
+	t.Helper()
+	message := "v1:" + strings.TrimSpace(userID)
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write([]byte(message)); err != nil {
+		t.Fatalf("sign test session token: %v", err)
+	}
+	return message + ":" + hex.EncodeToString(mac.Sum(nil))
+}
 
 type recordingStarter struct {
 	input workflows.StartWriterRunInput
@@ -1155,6 +1168,46 @@ func TestHealthzReturnsServiceStatus(t *testing.T) {
 	}
 }
 
+func TestHealthzIgnoresMalformedPresentedAuthCredentials(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(*http.Request)
+	}{
+		{
+			name: "malformed authorization",
+			setup: func(request *http.Request) {
+				request.Header.Set("Authorization", "Basic not-a-session")
+			},
+		},
+		{
+			name: "stale cookie",
+			setup: func(request *http.Request) {
+				request.AddCookie(&http.Cookie{Name: "mirofish_session", Value: "v1:stale-user:deadbeef"})
+			},
+		},
+		{
+			name: "malformed authorization and stale cookie",
+			setup: func(request *http.Request) {
+				request.Header.Set("Authorization", "Token broken")
+				request.AddCookie(&http.Cookie{Name: "mirofish_session", Value: "v1:stale-user:deadbeef"})
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(Config{SessionAuthSecret: "test-secret"})
+			request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			tt.setup(request)
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func (s *recordingSourceFileStore) GetUploadObject(ctx context.Context, input sourcefiles.GetUploadObjectInput) (sourcefiles.ObjectWriteInput, error) {
 	s.objectInput = input
 	if s.err != nil {
@@ -1212,6 +1265,54 @@ func TestUnknownRouteReturnsStableErrorEnvelope(t *testing.T) {
 	}
 	if body.Error.RequestID != "req_test" {
 		t.Fatalf("expected request id to round-trip, got %#v", body.Error.RequestID)
+	}
+}
+
+func TestUnknownRoutePreservesNotFoundWithMalformedPresentedAuthCredentials(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(*http.Request)
+	}{
+		{
+			name: "malformed authorization",
+			setup: func(request *http.Request) {
+				request.Header.Set("Authorization", "Basic not-a-session")
+			},
+		},
+		{
+			name: "stale cookie",
+			setup: func(request *http.Request) {
+				request.AddCookie(&http.Cookie{Name: "mirofish_session", Value: "v1:stale-user:deadbeef"})
+			},
+		},
+		{
+			name: "malformed authorization and stale cookie",
+			setup: func(request *http.Request) {
+				request.Header.Set("Authorization", "Token broken")
+				request.AddCookie(&http.Cookie{Name: "mirofish_session", Value: "v1:stale-user:deadbeef"})
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(Config{SessionAuthSecret: "test-secret"})
+			request := httptest.NewRequest(http.MethodGet, "/missing", nil)
+			request.Header.Set("X-Request-Id", "req_missing")
+			tt.setup(request)
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.Error.Code != "NOT_FOUND" || body.Error.RequestID != "req_missing" {
+				t.Fatalf("unexpected not found body: %#v", body)
+			}
+		})
 	}
 }
 
@@ -1344,6 +1445,197 @@ func TestGetCurrentUserUsesInjectedReaderAndReturnsOnlyPublicSummary(t *testing.
 	project := projects[0].(map[string]any)
 	if project["project_id"] != "project-123" || project["tenant_id"] != "tenant-123" || project["role"] != "editor" {
 		t.Fatalf("unexpected project summary: %#v", project)
+	}
+}
+
+func TestAuthSubjectCurrentUserUsesSignedSessionCookieWithoutHeader(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "user-cookie"},
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.AddCookie(&http.Cookie{
+		Name:  "mirofish_session",
+		Value: signedSessionTokenForTest(t, "test-secret", " user-cookie "),
+	})
+	request.Header.Set("X-Request-Id", "req_cookie_subject")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.input.UserID != "user-cookie" || reader.input.RequestID != "req_cookie_subject" {
+		t.Fatalf("reader did not receive signed cookie subject: %#v", reader.input)
+	}
+}
+
+func TestAuthSubjectCurrentUserBearerOverridesHeaderAndCookie(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "user-bearer"},
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "user-bearer"))
+	request.Header.Set("X-User-Id", "header-user")
+	request.AddCookie(&http.Cookie{
+		Name:  "mirofish_session",
+		Value: signedSessionTokenForTest(t, "test-secret", "cookie-user"),
+	})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.input.UserID != "user-bearer" {
+		t.Fatalf("bearer subject was not authoritative: %#v", reader.input)
+	}
+}
+
+func TestAuthSubjectRejectsDuplicateAuthorizationHeadersBeforeReader(t *testing.T) {
+	reader := &recordingAuthReader{}
+	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header["Authorization"] = []string{
+		"Bearer " + signedSessionTokenForTest(t, "test-secret", "user-valid"),
+		"Basic not-a-session",
+	}
+	request.Header.Set("X-User-Id", "fallback-user")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called {
+		t.Fatalf("auth reader was called after duplicate Authorization headers: %#v", reader.input)
+	}
+}
+
+func TestAuthSubjectRejectsOddAuthorizationHeadersInsteadOfFallback(t *testing.T) {
+	reader := &recordingAuthReader{}
+	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header["Authorization"] = []string{
+		"  ",
+		"Basic not-a-session",
+	}
+	request.Header.Set("X-User-Id", "fallback-user")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called {
+		t.Fatalf("auth reader was called after malformed Authorization headers: %#v", reader.input)
+	}
+}
+
+func TestAuthSubjectRejectsMalformedCredentialsBeforeReaderWithoutLeakingPayload(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		secret    string
+		token     string
+		setHeader bool
+	}{
+		{
+			name:      "invalid bearer signature",
+			secret:    "test-secret",
+			token:     "v1:user-secret:deadbeef",
+			setHeader: true,
+		},
+		{
+			name:   "malformed cookie",
+			secret: "test-secret",
+			token:  "v1:user-cookie",
+		},
+		{
+			name:      "bearer with missing secret",
+			token:     signedSessionTokenForTest(t, "test-secret", "user-missing-secret"),
+			setHeader: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingAuthReader{}
+			server := NewServer(Config{AuthReader: reader, SessionAuthSecret: tt.secret})
+			request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+			request.Header.Set("X-User-Id", "fallback-user")
+			if tt.setHeader {
+				request.Header.Set("Authorization", "Bearer "+tt.token)
+			} else {
+				request.AddCookie(&http.Cookie{Name: "mirofish_session", Value: tt.token})
+			}
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.called {
+				t.Fatalf("auth reader was called after invalid credential: %#v", reader.input)
+			}
+			rawBody := response.Body.String()
+			for _, forbidden := range []string{tt.token, "user-secret", "user-cookie", "user-missing-secret", "fallback-user"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("auth error leaked forbidden credential payload %q: %s", forbidden, rawBody)
+				}
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+				t.Fatalf("unexpected auth error body: %#v", body)
+			}
+		})
+	}
+}
+
+func TestAuthSubjectStartSeedRunRejectsInvalidBearerBeforeFallbackAndSideEffects(t *testing.T) {
+	starter := &recordingSeedStarter{}
+	sourceStore := &recordingSourceFileStore{}
+	server := NewServer(Config{
+		SeedStarter:       starter,
+		SourceFileStore:   sourceStore,
+		SessionAuthSecret: "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{"upload_id":"upload-123"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer v1:bearer-user:deadbeef")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if sourceStore.validateInput.TenantID != "" || starter.input.ProjectID != "" {
+		t.Fatalf("seed side effects ran after invalid bearer: source=%#v starter=%#v", sourceStore.validateInput, starter.input)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"bearer-user", "fallback-user", "deadbeef"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("auth error leaked forbidden credential payload %q: %s", forbidden, response.Body.String())
+		}
 	}
 }
 
@@ -1603,6 +1895,37 @@ func TestStartWriterRunCarriesTenantProjectAndRunContext(t *testing.T) {
 	}
 	if body["run_id"] != "run_123" || body["trace_id"] != "trace_123" || body["status"] != "queued" || body["project_id"] != "project-123" {
 		t.Fatalf("unexpected response body: %#v", body)
+	}
+}
+
+func TestAuthSubjectWriterRunUsesSignedCookieForRBACAndStarter(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	starter := &recordingStarter{}
+	server := NewServer(Config{
+		Authorizer:        authorizer,
+		WriterStarter:     starter,
+		LLMResolver:       boundWriterComposerResolver(),
+		SessionAuthSecret: "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.AddCookie(&http.Cookie{
+		Name:  "mirofish_session",
+		Value: signedSessionTokenForTest(t, "test-secret", "user-cookie"),
+	})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", response.Code, response.Body.String())
+	}
+	if authorizer.input.UserID != "user-cookie" || authorizer.input.Permission != auth.PermissionWriterRun {
+		t.Fatalf("authorizer did not receive signed cookie subject: %#v", authorizer.input)
+	}
+	if starter.input.ActorUserID != "user-cookie" {
+		t.Fatalf("starter did not receive signed cookie subject: %#v", starter.input)
 	}
 }
 
@@ -2741,6 +3064,41 @@ func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 	for _, forbidden := range []string{"prompt", "response", "api_key", "encrypted_api_key", "credential_ref"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("worldline session response leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAuthSubjectStartWorldlineSessionRejectsInvalidCookieBeforeFallbackAndStarter(t *testing.T) {
+	starter := &recordingWorldlineSessionStarter{}
+	server := NewServer(Config{
+		WorldlineSessionStarter: starter,
+		SessionAuthSecret:       "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldline-sessions", strings.NewReader(`{"goal":"test a path"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.AddCookie(&http.Cookie{Name: "mirofish_session", Value: "v1:cookie-user:deadbeef"})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if starter.input.ProjectID != "" {
+		t.Fatalf("worldline starter ran after invalid cookie: %#v", starter.input)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"cookie-user", "fallback-user", "deadbeef"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("auth error leaked forbidden credential payload %q: %s", forbidden, response.Body.String())
 		}
 	}
 }
@@ -5091,6 +5449,45 @@ func TestBulkAssetActionUsesTenantProjectActorRequestAndReturnsSanitizedResult(t
 	for _, forbidden := range []string{"asset-1", "asset-2", "secret-category", "target_lifecycle", "prompt", "api_key", "encrypted_api_key", "credential_ref", "content_text", "material_text"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("bulk action response leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAuthSubjectBulkAssetActionRejectsInvalidBearerBeforeFallbackAndStore(t *testing.T) {
+	store := &recordingAssetBulkActionStore{}
+	server := NewServer(Config{
+		AssetBulkActionStore: store,
+		SessionAuthSecret:    "test-secret",
+	})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/assets/bulk-actions",
+		strings.NewReader(`{"project_id":"project-123","action":"disable","asset_ids":["asset-1"]}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer v1:bulk-user:deadbeef")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if store.input.ProjectID != "" || store.input.ActorID != "" {
+		t.Fatalf("bulk action store ran after invalid bearer: %#v", store.input)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"bulk-user", "fallback-user", "deadbeef"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("auth error leaked forbidden credential payload %q: %s", forbidden, response.Body.String())
 		}
 	}
 }
@@ -8952,6 +9349,96 @@ func TestExportAgentTraceAuditsAndReturnsEvents(t *testing.T) {
 	rawBody := response.Body.String()
 	if !strings.Contains(rawBody, "写下一场雨夜谈判") || !strings.Contains(rawBody, `"trace_id":"trace-1"`) {
 		t.Fatalf("unexpected export body: %s", rawBody)
+	}
+}
+
+func TestAuthSubjectTraceExportUsesSignedCookieForFullAccessAndAudit(t *testing.T) {
+	reader := &recordingTraceReader{
+		events: []traces.EventRecord{{
+			EventID:        "event-1",
+			TraceID:        "trace-1",
+			EventOrder:     1,
+			EventType:      "prompt_snapshot",
+			Payload:        map[string]any{"summary": "safe"},
+			RedactionLevel: "full",
+			CreatedAt:      "2026-07-04T00:00:00Z",
+		}},
+	}
+	access := &allowTraceAccessChecker{}
+	auditor := &recordingTraceExportAuditor{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{
+		Authorizer:         authorizer,
+		TraceReader:        reader,
+		TraceAccessChecker: access,
+		TraceExportAuditor: auditor,
+		SessionAuthSecret:  "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.AddCookie(&http.Cookie{
+		Name:  "mirofish_session",
+		Value: signedSessionTokenForTest(t, "test-secret", "trace-user"),
+	})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 2 ||
+		authorizer.inputs[0].UserID != "trace-user" ||
+		authorizer.inputs[1].UserID != "trace-user" {
+		t.Fatalf("authorizer did not receive signed cookie subject for export permissions: %#v", authorizer.inputs)
+	}
+	if access.input.ActorID != "trace-user" {
+		t.Fatalf("trace access checker did not receive signed cookie subject: %#v", access.input)
+	}
+	if auditor.input.ActorID != "trace-user" || auditor.input.EventCount != 1 {
+		t.Fatalf("trace audit did not receive signed cookie subject: %#v", auditor.input)
+	}
+}
+
+func TestAuthSubjectTraceExportRejectsInvalidBearerBeforeFallbackAndSideEffects(t *testing.T) {
+	reader := &recordingTraceReader{}
+	access := &allowTraceAccessChecker{}
+	auditor := &recordingTraceExportAuditor{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{
+		Authorizer:         authorizer,
+		TraceReader:        reader,
+		TraceAccessChecker: access,
+		TraceExportAuditor: auditor,
+		SessionAuthSecret:  "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer v1:trace-user:deadbeef")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if authorizer.called || access.called || reader.called || auditor.called {
+		t.Fatalf("trace export side effects ran after invalid bearer: authorizer=%#v access=%#v reader=%#v auditor=%#v", authorizer.inputs, access.input, reader.input, auditor.input)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"trace-user", "fallback-user", "deadbeef"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("auth error leaked forbidden credential payload %q: %s", forbidden, response.Body.String())
+		}
 	}
 }
 

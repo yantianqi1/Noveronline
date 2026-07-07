@@ -628,7 +628,7 @@ func main() {
 		}()
 	}
 
-	server := httpapi.NewServer(httpapi.Config{
+	serverConfig := withSessionAuthSecret(httpapi.Config{
 		AuthReader:                      authReader,
 		Authorizer:                      auth.NewReaderBackedAuthorizer(authReader),
 		WriterStarter:                   writerStarter,
@@ -685,10 +685,16 @@ func main() {
 		WorldlinePreparationStore:       worldlinePreparationStore,
 		CharacterConsoleStore:           characterConsoleStore,
 	})
+	server := httpapi.NewServer(serverConfig)
 	log.Printf("mirofish api listening on %s", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func withSessionAuthSecret(config httpapi.Config) httpapi.Config {
+	config.SessionAuthSecret = strings.TrimSpace(os.Getenv("MIROFISH_AUTH_SESSION_SECRET"))
+	return config
 }
 
 func temporalNamespace() string {

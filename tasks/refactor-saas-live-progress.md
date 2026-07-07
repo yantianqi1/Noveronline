@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam 和 W2-S4b trace RBAC seam 已接入；完整 compose health、真实 Temporal handoff、session/cookie/JWT 与 route-wide RBAC 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam 和 W2-S4c signed HTTP auth subject resolver seam 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle 与 route-wide RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,49 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 session/cookie/JWT transport、route-wide RBAC enforcement |
-| 本轮开发 slice | W2-S4b trace RBAC seam：把 reader-backed `auth.Authorizer` 接入 trace list/export read side，并收紧 full trace export auth-before-validation 顺序 |
-| 推荐下一步 | W2-S4c 继续扩展 RBAC enforcement 到更多 route/mutation，并开始 session/cookie/JWT transport。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4b 不声明完整 Auth/RBAC、route-wide RBAC 或 session transport 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、route-wide RBAC enforcement |
+| 本轮开发 slice | W2-S4c signed HTTP auth subject resolver seam：Go HTTP 现在可从 signed Bearer / `mirofish_session` cookie 解析 actor subject，并保留开发期 `X-User-Id` fallback 作为无 credential 时的开发 transport |
+| 推荐下一步 | W2-S4d 继续扩展 route-wide RBAC/permission matrix，或进入完整 login/JWT/session lifecycle。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4c 不声明完整 Auth/RBAC、注册登录或 JWT/session 生命周期完成 |
+
+## Wave 2 W2-S4c Signed HTTP Auth Subject Resolver seam
+
+Context:
+
+- W2-S1/W2-S2 提供 current-user membership truth source，W2-S4a/W2-S4b 已把 reader-backed `auth.Authorizer` 用于首批 project / LLM / trace gates。
+- 本 slice 只实现 Go HTTP actor subject resolver seam，不实现注册、登录、refresh、logout、JWT claims、cookie issuance 或 CSRF/session lifecycle。
+- Tenant source 仍为 development `X-Tenant-Id`；无 Bearer/cookie credential 时仍允许 development `X-User-Id` fallback。
+
+TDD / Review:
+
+- Implementer subagent Epicurus 先补 RED：`go test ./internal/httpapi -run 'AuthSubject|CurrentUser|RBAC|WriterRun|TraceExport' -count=1` 失败于缺 `Config.SessionAuthSecret`；`go test ./cmd/api -run 'AuthSubject|Session|Auth' -count=1` 失败于缺 `withSessionAuthSecret`。
+- 实现 signed token 格式 `v1:<user_id>:<hex_hmac_sha256>`，使用 `Config.SessionAuthSecret` / `MIROFISH_AUTH_SESSION_SECRET` 校验 `Authorization: Bearer ...` 和 `mirofish_session` cookie。优先级为 Bearer > cookie > dev `X-User-Id` fallback。
+- 任何已呈现 credential 的无效签名、格式错误、缺 secret 或 duplicate/odd `Authorization` header 都在 actor-sensitive known route 上以稳定 `UNAUTHENTICATED` / `user context is required` 失败，不 fallback 到 header、不调用 reader/starter/store/auditor，也不把 token/user payload 暴露到响应。
+- `/healthz` 与 default unknown-route 404 保持 public；malformed/stale credential 不改变这两个公开路由的 200/404 行为。
+- Quality reviewer Feynman 发现 duplicate `Authorization` 与 global preflight 影响 `/healthz`/404，Nash 补 RED/GREEN 修正；quality re-review McClintock 发现去掉 global preflight 后无效 credential 可在 actor-sensitive route 变成空 actor，Hilbert 补 route-scoped actor guard 和 request-context subject cache；coordinator 追加 `/v1/assets/bulk-actions` 漏项 RED 并修正 classifier；final reviewer Hume PASS。
+
+Verification:
+
+- `cd apps/api && go test ./internal/httpapi -run 'AuthSubject|CurrentUser|RBAC|WriterRun|TraceExport|Health|NotFound|Seed|Worldline|BulkAssetAction' -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'AuthSubject|Session|Auth' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Auth|Session|RBAC|Trace' -count=1` 通过。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `gofmt -l` 无输出；`git diff --check` 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+
+Next:
+
+- W2-S4d：继续把 remaining sensitive reads/mutations 纳入 permission matrix，避免 route-scoped actor predicate 与新增 handler drift。
+- 完整注册登录、JWT claim parsing、session cookie issuance/rotation/revocation、CSRF 和 browser cookie transport 仍 pending。
 
 ## Wave 2 W2-S4b Trace RBAC seam
 
@@ -109,8 +148,8 @@ Docs synced:
 
 Next:
 
-- W2-S4c：继续 route-wide RBAC enforcement，把 remaining sensitive reads/mutations 纳入 permission matrix。
-- 后续 session/cookie/JWT transport 仍 pending；当前 W2-S4b 仍使用 development actor headers。
+- W2-S4d：继续 route-wide RBAC enforcement，把 remaining sensitive reads/mutations 纳入 permission matrix。
+- 完整 login/JWT/session lifecycle 仍 pending；W2-S4c 已补 Go HTTP signed subject resolver seam，但当前 Web shell 仍使用 development actor header。
 
 ## Wave 2 W2-S4a Go HTTP RBAC seam
 
@@ -149,8 +188,8 @@ Docs synced:
 
 Next:
 
-- W2-S4c：继续 route-wide RBAC enforcement，把剩余 sensitive reads/mutations 纳入 permission matrix。
-- 后续 session/cookie/JWT transport 仍 pending；当前 W2-S4a 仍使用 development actor headers。
+- W2-S4d：继续 route-wide RBAC enforcement，把剩余 sensitive reads/mutations 纳入 permission matrix。
+- 完整 login/JWT/session lifecycle 仍 pending；W2-S4c 已补 Go HTTP signed subject resolver seam，但当前 Web shell 仍使用 development actor header。
 
 ## Wave 2 W2-S3 Next tenant/project picker
 

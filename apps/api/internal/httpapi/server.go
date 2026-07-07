@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +28,7 @@ import (
 )
 
 type Config struct {
+	SessionAuthSecret               string
 	AuthReader                      auth.Reader
 	Authorizer                      auth.Authorizer
 	WriterStarter                   workflows.WriterStarter
@@ -86,6 +90,7 @@ type Config struct {
 }
 
 type Server struct {
+	sessionAuthSecret               string
 	authReader                      auth.Reader
 	authorizer                      auth.Authorizer
 	writerStarter                   workflows.WriterStarter
@@ -152,6 +157,10 @@ type apiError struct {
 	Details   map[string]any `json:"details"`
 	RequestID string         `json:"request_id"`
 }
+
+const sessionCookieName = "mirofish_session"
+
+type actorUserIDContextKey struct{}
 
 type errorEnvelope struct {
 	Error apiError `json:"error"`
@@ -793,6 +802,7 @@ func NewServer(config Config) *Server {
 		characterConsoleStore = characterconsole.NewDisabledStore()
 	}
 	return &Server{
+		sessionAuthSecret:               strings.TrimSpace(config.SessionAuthSecret),
 		authReader:                      authReader,
 		authorizer:                      authorizer,
 		writerStarter:                   starter,
@@ -854,7 +864,205 @@ func NewServer(config Config) *Server {
 	}
 }
 
+func (s *Server) actorUserID(request *http.Request) string {
+	if userID, ok := request.Context().Value(actorUserIDContextKey{}).(string); ok {
+		return userID
+	}
+	userID, _ := s.resolveActorUserID(request)
+	return userID
+}
+
+func (s *Server) withResolvedActorUserID(response http.ResponseWriter, request *http.Request) (*http.Request, bool) {
+	userID, ok := s.resolveActorUserID(request)
+	if !ok {
+		if hasPresentedActorCredential(request) {
+			writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, "user context is required", nil)
+			return request, false
+		}
+		return request, true
+	}
+	return request.WithContext(context.WithValue(request.Context(), actorUserIDContextKey{}, userID)), true
+}
+
+func hasPresentedActorCredential(request *http.Request) bool {
+	if len(request.Header.Values("Authorization")) > 0 {
+		return true
+	}
+	if _, err := request.Cookie(sessionCookieName); err == nil {
+		return true
+	}
+	return false
+}
+
+func (s *Server) resolveActorUserID(request *http.Request) (string, bool) {
+	authorizationValues := request.Header.Values("Authorization")
+	if len(authorizationValues) > 0 {
+		if len(authorizationValues) != 1 {
+			return "", false
+		}
+		token, ok := bearerToken(authorizationValues[0])
+		if !ok {
+			return "", false
+		}
+		return s.verifySessionToken(token)
+	}
+	if cookie, err := request.Cookie(sessionCookieName); err == nil {
+		return s.verifySessionToken(cookie.Value)
+	}
+	userID := strings.TrimSpace(request.Header.Get("X-User-Id"))
+	return userID, userID != ""
+}
+
+func bearerToken(authorization string) (string, bool) {
+	parts := strings.Fields(authorization)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return "", false
+	}
+	token := strings.TrimSpace(parts[1])
+	return token, token != ""
+}
+
+func (s *Server) verifySessionToken(token string) (string, bool) {
+	secret := strings.TrimSpace(s.sessionAuthSecret)
+	if secret == "" {
+		return "", false
+	}
+	parts := strings.Split(strings.TrimSpace(token), ":")
+	if len(parts) != 3 || parts[0] != "v1" {
+		return "", false
+	}
+	userID := strings.TrimSpace(parts[1])
+	if userID == "" {
+		return "", false
+	}
+	signature, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return "", false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write([]byte("v1:" + userID)); err != nil {
+		return "", false
+	}
+	if !hmac.Equal(signature, mac.Sum(nil)) {
+		return "", false
+	}
+	return userID, true
+}
+
+func isActorSensitiveRoute(request *http.Request) bool {
+	path := request.URL.Path
+	switch {
+	case request.Method == http.MethodGet && path == "/v1/me":
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/workflow-runs/") && strings.HasSuffix(path, "/cancel"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/workflow-runs/") && strings.HasSuffix(path, "/retry"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/seed-runs/") && strings.HasSuffix(path, "/cancel"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/seed-runs/") && strings.HasSuffix(path, "/retry"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/steps"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/variables"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/saved-paths"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-events/") && strings.HasSuffix(path, "/adoptions"):
+		return true
+	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/worldline-events/"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/character-interactions/") && strings.HasSuffix(path, "/turns"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/character-interactions/") && strings.HasSuffix(path, "/chapter-drafts"):
+		return true
+	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/character-interactions/"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/writer-runs/") && strings.HasSuffix(path, "/cancel"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/adoptions"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/reviews"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/assets/") && strings.HasSuffix(path, "/adoptions"):
+		return true
+	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/assets/"):
+		return true
+	case request.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/assets/"):
+		return true
+	case request.Method == http.MethodPost && path == "/v1/assets/bulk-actions":
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/archive-memories/") && strings.HasSuffix(path, "/adoptions"):
+		return true
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/archive-memories/") && strings.HasSuffix(path, "/rejections"):
+		return true
+	case projectActorSensitiveRoute(request):
+		return true
+	default:
+		return false
+	}
+}
+
+func projectActorSensitiveRoute(request *http.Request) bool {
+	path := request.URL.Path
+	if !strings.HasPrefix(path, "/v1/projects/") {
+		return false
+	}
+	switch {
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/overview"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/seed-runs"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/uploads"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/worldline-sessions"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/worldlines/preparations"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/character-interactions"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/writer-runs"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/agent-runtime/hello-runs"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/assets"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/asset-ingestions"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/style-extractions"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/assets/reindex"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/story-graph/builds"):
+		return true
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/story-graph/bond-generations"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/nodes/") && strings.HasSuffix(path, "/evidence"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/edges/") && strings.HasSuffix(path, "/evidence"):
+		return true
+	case request.Method == http.MethodPut && strings.Contains(path, "/llm/module-bindings/"):
+		return true
+	case request.Method == http.MethodDelete && strings.Contains(path, "/llm/module-bindings/"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/agent-traces/") && strings.HasSuffix(path, "/events"):
+		return true
+	case request.Method == http.MethodPost && strings.Contains(path, "/agent-traces/") && strings.HasSuffix(path, "/export"):
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if isActorSensitiveRoute(request) {
+		var ok bool
+		request, ok = s.withResolvedActorUserID(response, request)
+		if !ok {
+			return
+		}
+	}
+
 	switch {
 	case request.Method == http.MethodGet && request.URL.Path == "/healthz":
 		writeJSON(response, http.StatusOK, map[string]string{
@@ -1053,7 +1261,7 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) handleGetCurrentUser(response http.ResponseWriter, request *http.Request) {
-	userID := strings.TrimSpace(request.Header.Get("X-User-Id"))
+	userID := s.actorUserID(request)
 	if userID == "" {
 		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, "user context is required", nil)
 		return
@@ -1076,7 +1284,7 @@ func (s *Server) authorizeProject(response http.ResponseWriter, request *http.Re
 		authorizer = auth.NewReaderBackedAuthorizer(s.authReader)
 	}
 	err := authorizer.Authorize(request.Context(), auth.AuthorizeInput{
-		UserID:     strings.TrimSpace(request.Header.Get("X-User-Id")),
+		UserID:     s.actorUserID(request),
 		TenantID:   tenantID,
 		ProjectID:  projectID,
 		Permission: permission,
@@ -1128,7 +1336,7 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 	run, err := s.writerStarter.StartWriterRun(request.Context(), workflows.StartWriterRunInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
-		ActorUserID:  strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:  s.actorUserID(request),
 		RequestID:    requestID(request),
 		Mode:         strings.TrimSpace(payload.Mode),
 		Instruction:  strings.TrimSpace(payload.Instruction),
@@ -1184,7 +1392,7 @@ func (s *Server) handleStartSeedRun(response http.ResponseWriter, request *http.
 		TenantID:        tenantID,
 		ProjectID:       projectID,
 		UploadID:        strings.TrimSpace(payload.UploadID),
-		ActorUserID:     strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:     s.actorUserID(request),
 		RequestID:       requestID(request),
 		SourceFileID:    sourceFile.FileID,
 		SourceObjectKey: sourceFile.ObjectKey,
@@ -1357,7 +1565,7 @@ func (s *Server) handleCancelSeedRun(response http.ResponseWriter, request *http
 	cancelled, err := s.workflowCanceller.CancelWorkflowRun(request.Context(), workflows.CancelWorkflowRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 	})
 	if err != nil {
@@ -1391,7 +1599,7 @@ func (s *Server) handleRetrySeedRun(response http.ResponseWriter, request *http.
 	retried, err := s.workflowRetrier.RetryWorkflowRun(request.Context(), workflows.RetryWorkflowRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 	})
 	if err != nil {
@@ -1429,7 +1637,7 @@ func (s *Server) handleCreateUpload(response http.ResponseWriter, request *http.
 	record, err := s.sourceFileStore.CreateSourceFile(request.Context(), sourcefiles.CreateInput{
 		TenantID:    tenantID,
 		ProjectID:   projectID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		Filename:    strings.TrimSpace(payload.Filename),
 		MimeType:    strings.TrimSpace(payload.MimeType),
 		SizeBytes:   payload.SizeBytes,
@@ -1607,7 +1815,7 @@ func (s *Server) handleStartWorldlineSession(response http.ResponseWriter, reque
 	run, err := s.worldlineSessionStarter.StartSession(request.Context(), worldline.StartSessionInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
-		ActorUserID:  strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:  s.actorUserID(request),
 		RequestID:    requestID(request),
 		Goal:         strings.TrimSpace(payload.Goal),
 		AnchorPathID: strings.TrimSpace(payload.AnchorPathID),
@@ -1646,7 +1854,7 @@ func (s *Server) handleCreateCharacterInteraction(response http.ResponseWriter, 
 	record, err := s.characterConsoleStore.CreateInteraction(request.Context(), characterconsole.CreateInteractionInput{
 		TenantID:           tenantID,
 		ProjectID:          projectID,
-		ActorUserID:        strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:        s.actorUserID(request),
 		RequestID:          requestID(request),
 		WorldlineSessionID: strings.TrimSpace(payload.WorldlineSessionID),
 		AnchorType:         strings.TrimSpace(payload.AnchorType),
@@ -1743,7 +1951,7 @@ func (s *Server) handleUpdateCharacterInteractionStatus(response http.ResponseWr
 	record, err := s.characterConsoleStore.UpdateInteractionStatus(request.Context(), characterconsole.UpdateInteractionStatusInput{
 		TenantID:      tenantID,
 		InteractionID: interactionID,
-		ActorUserID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:   s.actorUserID(request),
 		RequestID:     requestID(request),
 		Status:        strings.TrimSpace(payload.Status),
 	})
@@ -1782,7 +1990,7 @@ func (s *Server) handleAppendCharacterInteractionTurn(response http.ResponseWrit
 	record, err := s.characterConsoleStore.AppendTurn(request.Context(), characterconsole.AppendTurnInput{
 		TenantID:        tenantID,
 		InteractionID:   interactionID,
-		ActorUserID:     strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:     s.actorUserID(request),
 		RequestID:       requestID(request),
 		ActorType:       strings.TrimSpace(payload.ActorType),
 		ActorID:         strings.TrimSpace(payload.ActorID),
@@ -1907,7 +2115,7 @@ func (s *Server) handleConvertCharacterInteractionToChapterDraft(response http.R
 	run, err := s.writerStarter.StartWriterRun(request.Context(), workflows.StartWriterRunInput{
 		TenantID:     tenantID,
 		ProjectID:    interaction.ProjectID,
-		ActorUserID:  strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:  s.actorUserID(request),
 		RequestID:    requestID(request),
 		Mode:         "draft",
 		Instruction:  characterInteractionChapterDraftInstruction(interaction, turns, payload),
@@ -1952,7 +2160,7 @@ func (s *Server) handleStartWorldlineStep(response http.ResponseWriter, request 
 	run, err := s.worldlineStepStarter.StartStep(request.Context(), worldline.StartStepInput{
 		TenantID:    tenantID,
 		SessionID:   sessionID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		Mode:        strings.TrimSpace(payload.Mode),
 		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
@@ -1985,7 +2193,7 @@ func (s *Server) handleCreateWorldlinePreparation(response http.ResponseWriter, 
 	record, err := s.worldlinePreparationStore.CreatePreparation(request.Context(), worldline.CreatePreparationInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
-		ActorUserID:  strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:  s.actorUserID(request),
 		RequestID:    requestID(request),
 		Goal:         strings.TrimSpace(payload.Goal),
 		AnchorPathID: strings.TrimSpace(payload.AnchorPathID),
@@ -2114,7 +2322,7 @@ func (s *Server) handleAdoptWorldlineEvent(response http.ResponseWriter, request
 	record, err := s.worldlineEventAdoptionStore.AdoptEvent(request.Context(), worldline.AdoptEventInput{
 		TenantID:    tenantID,
 		EventID:     eventID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		Note:        strings.TrimSpace(payload.Note),
 	})
@@ -2146,7 +2354,7 @@ func (s *Server) handleUpdateWorldlineEvent(response http.ResponseWriter, reques
 	record, err := s.worldlineEventMutationStore.UpdateEvent(request.Context(), worldline.UpdateEventInput{
 		TenantID:    tenantID,
 		EventID:     eventID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		Title:       strings.TrimSpace(payload.Title),
 		Summary:     strings.TrimSpace(payload.Summary),
@@ -2181,7 +2389,7 @@ func (s *Server) handleInjectWorldlineVariable(response http.ResponseWriter, req
 	record, err := s.worldlineVariableStore.InjectVariable(request.Context(), worldline.InjectVariableInput{
 		TenantID:    tenantID,
 		SessionID:   sessionID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		Name:        strings.TrimSpace(payload.Name),
 		Description: strings.TrimSpace(payload.Description),
@@ -2218,7 +2426,7 @@ func (s *Server) handleCreateWorldlineSavedPath(response http.ResponseWriter, re
 	record, err := s.worldlineSavedPathStore.CreateSavedPath(request.Context(), worldline.CreateSavedPathInput{
 		TenantID:          tenantID,
 		SessionID:         sessionID,
-		ActorUserID:       strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:       s.actorUserID(request),
 		RequestID:         requestID(request),
 		Title:             strings.TrimSpace(payload.Title),
 		Summary:           strings.TrimSpace(payload.Summary),
@@ -2301,7 +2509,7 @@ func (s *Server) handleCreateAsset(response http.ResponseWriter, request *http.R
 		TenantID:     tenantID,
 		ProjectID:    projectID,
 		BodyTenantID: strings.TrimSpace(payload.BodyTenantID),
-		ActorID:      strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:      s.actorUserID(request),
 		RequestID:    requestID(request),
 		Scope:        strings.TrimSpace(payload.Scope),
 		AssetType:    strings.TrimSpace(payload.AssetType),
@@ -2425,7 +2633,7 @@ func (s *Server) handleReviewArchiveMemory(response http.ResponseWriter, request
 		TenantID:  tenantID,
 		ProjectID: strings.TrimSpace(payload.ProjectID),
 		MemoryID:  memoryID,
-		ActorID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:   s.actorUserID(request),
 		RequestID: requestID(request),
 	}
 	var (
@@ -2468,7 +2676,7 @@ func (s *Server) handleBulkAssetAction(response http.ResponseWriter, request *ht
 		TenantID:        tenantID,
 		ProjectID:       projectID,
 		BodyTenantID:    strings.TrimSpace(payload.BodyTenantID),
-		ActorID:         strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:         s.actorUserID(request),
 		RequestID:       requestID(request),
 		Action:          action,
 		AssetIDs:        assetIDs,
@@ -2506,7 +2714,7 @@ func (s *Server) handleStartAssetIngestion(response http.ResponseWriter, request
 	run, err := s.assetIngestionStarter.StartAssetIngestion(request.Context(), workflows.StartAssetIngestionInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
-		ActorUserID:  strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:  s.actorUserID(request),
 		RequestID:    requestID(request),
 		MaterialText: strings.TrimSpace(payload.MaterialText),
 		HintType:     strings.TrimSpace(payload.HintType),
@@ -2568,7 +2776,7 @@ func (s *Server) handleStartStyleExtraction(response http.ResponseWriter, reques
 	run, err := s.styleExtractionStarter.StartStyleExtraction(request.Context(), workflows.StartStyleExtractionInput{
 		TenantID:      tenantID,
 		ProjectID:     projectID,
-		ActorUserID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID:   s.actorUserID(request),
 		RequestID:     requestID(request),
 		MaterialText:  strings.TrimSpace(payload.MaterialText),
 		SourceAssetID: strings.TrimSpace(payload.SourceAssetID),
@@ -2630,7 +2838,7 @@ func (s *Server) handleStartAssetReindex(response http.ResponseWriter, request *
 	run, err := s.assetReindexStarter.StartAssetReindex(request.Context(), workflows.StartAssetReindexInput{
 		TenantID:    tenantID,
 		ProjectID:   projectID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		Scope:       workflows.NormalizeAssetReindexScope(payload.Scope),
 		Mode:        workflows.NormalizeAssetReindexMode(payload.Mode),
@@ -2669,7 +2877,7 @@ func (s *Server) handleStartStoryGraphBuild(response http.ResponseWriter, reques
 	run, err := s.storyGraphBuildStarter.StartStoryGraphBuild(request.Context(), workflows.StartStoryGraphBuildInput{
 		TenantID:    tenantID,
 		ProjectID:   projectID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		Mode:        workflows.NormalizeStoryGraphBuildMode(payload.Mode),
 		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
@@ -2707,7 +2915,7 @@ func (s *Server) handleStartStoryGraphBondGeneration(response http.ResponseWrite
 	run, err := s.storyGraphBondGenerationStarter.StartStoryGraphBondGeneration(request.Context(), workflows.StartStoryGraphBondGenerationInput{
 		TenantID:    tenantID,
 		ProjectID:   projectID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		GraphID:     strings.TrimSpace(payload.GraphID),
 		NodeIDs:     workflows.NormalizeStoryGraphBondNodeIDs(payload.NodeIDs),
@@ -2805,7 +3013,7 @@ func (s *Server) handleGetStoryGraphEvidence(response http.ResponseWriter, reque
 			ProjectID: projectID,
 			OwnerType: ownerType,
 			OwnerID:   ownerID,
-			ActorID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+			ActorID:   s.actorUserID(request),
 		})
 		if err != nil {
 			writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
@@ -2966,7 +3174,7 @@ func (s *Server) handleAdoptAsset(response http.ResponseWriter, request *http.Re
 	record, err := s.assetAdoptionStore.AdoptAsset(request.Context(), assets.AdoptAssetInput{
 		TenantID:        tenantID,
 		AssetID:         assetID,
-		ActorID:         strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:         s.actorUserID(request),
 		RequestID:       requestID(request),
 		TargetLifecycle: strings.TrimSpace(payload.TargetLifecycle),
 	})
@@ -3009,7 +3217,7 @@ func (s *Server) handlePatchAsset(response http.ResponseWriter, request *http.Re
 		TenantID:     tenantID,
 		AssetID:      assetID,
 		BodyTenantID: strings.TrimSpace(payload.BodyTenantID),
-		ActorID:      strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:      s.actorUserID(request),
 		RequestID:    requestID(request),
 		Scope:        trimOptionalString(payload.Scope),
 		AssetType:    trimOptionalString(payload.AssetType),
@@ -3046,7 +3254,7 @@ func (s *Server) handleDeleteAsset(response http.ResponseWriter, request *http.R
 	result, err := s.assetMutationStore.DeleteAsset(request.Context(), assets.DeleteAssetInput{
 		TenantID:  tenantID,
 		AssetID:   assetID,
-		ActorID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:   s.actorUserID(request),
 		RequestID: requestID(request),
 	})
 	if err != nil {
@@ -3150,7 +3358,7 @@ func (s *Server) handleUpsertLLMModuleBinding(response http.ResponseWriter, requ
 	binding, err := s.llmBindingStore.UpsertProjectModuleBinding(request.Context(), llm.UpsertProjectModuleBindingInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
-		ActorID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:   s.actorUserID(request),
 		ModuleKey: moduleKey,
 		ChannelID: strings.TrimSpace(payload.ChannelID),
 		ModelID:   strings.TrimSpace(payload.ModelID),
@@ -3634,7 +3842,7 @@ func (s *Server) handleListAgentTraceEvents(response http.ResponseWriter, reques
 			TenantID:  tenantID,
 			ProjectID: projectID,
 			TraceID:   traceID,
-			ActorID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+			ActorID:   s.actorUserID(request),
 		})
 		if err != nil {
 			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
@@ -3681,7 +3889,7 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 			TenantID:  tenantID,
 			ProjectID: projectID,
 			TraceID:   traceID,
-			ActorID:   strings.TrimSpace(request.Header.Get("X-User-Id")),
+			ActorID:   s.actorUserID(request),
 		})
 		if err != nil {
 			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
@@ -3709,7 +3917,7 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 		TenantID:    tenantID,
 		ProjectID:   projectID,
 		TraceID:     traceID,
-		ActorID:     strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorID:     s.actorUserID(request),
 		RequestID:   requestID(request),
 		IncludeFull: payload.IncludeFull,
 		EventCount:  len(items),
@@ -3739,7 +3947,7 @@ func (s *Server) handleStartHelloAgent(response http.ResponseWriter, request *ht
 	run, err := s.agentHelloStarter.StartHelloAgent(request.Context(), workflows.StartHelloAgentInput{
 		TenantID:    tenantID,
 		ProjectID:   projectID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 	})
 	if err != nil {
@@ -3872,7 +4080,7 @@ func (s *Server) handleCancelWriterRun(response http.ResponseWriter, request *ht
 	cancelled, err := s.writerCanceller.CancelWriterRun(request.Context(), workflows.CancelWriterRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 	})
 	if err != nil {
@@ -3909,7 +4117,7 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 	adoption, err := s.draftAdoptionStore.AdoptDraft(request.Context(), workflows.DraftAdoptionInput{
 		TenantID:    tenantID,
 		DraftID:     draftID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		ChapterID:   strings.TrimSpace(payload.ChapterID),
 		BlockOrder:  payload.BlockOrder,
@@ -3961,7 +4169,7 @@ func (s *Server) handleStartDraftReview(response http.ResponseWriter, request *h
 		TenantID:    tenantID,
 		ProjectID:   projectID,
 		DraftID:     draftID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 		RunID:       strings.TrimSpace(payload.RunID),
 		Note:        strings.TrimSpace(payload.Note),
@@ -4060,7 +4268,7 @@ func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *
 	cancelled, err := s.workflowCanceller.CancelWorkflowRun(request.Context(), workflows.CancelWorkflowRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 	})
 	if err != nil {
@@ -4087,7 +4295,7 @@ func (s *Server) handleRetryWorkflowRun(response http.ResponseWriter, request *h
 	retried, err := s.workflowRetrier.RetryWorkflowRun(request.Context(), workflows.RetryWorkflowRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
-		ActorUserID: strings.TrimSpace(request.Header.Get("X-User-Id")),
+		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
 	})
 	if err != nil {

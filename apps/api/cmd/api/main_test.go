@@ -9,6 +9,7 @@ import (
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
 	"mirofish-novel/apps/api/internal/characterconsole"
+	"mirofish-novel/apps/api/internal/httpapi"
 	"mirofish-novel/apps/api/internal/llm"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
@@ -50,6 +51,16 @@ func TestNewAuthReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
 	}
 	if closeReader == nil {
 		t.Fatal("expected close function with database URL")
+	}
+}
+
+func TestAuthSessionSecretEnvIsCarriedIntoHTTPConfig(t *testing.T) {
+	t.Setenv("MIROFISH_AUTH_SESSION_SECRET", "session-secret")
+
+	config := withSessionAuthSecret(httpapi.Config{})
+
+	if config.SessionAuthSecret != "session-secret" {
+		t.Fatalf("expected session secret in HTTP config, got %q", config.SessionAuthSecret)
 	}
 }
 
