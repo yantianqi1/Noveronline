@@ -7,6 +7,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"mirofish-novel/apps/api/internal/assets"
+	"mirofish-novel/apps/api/internal/auth"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/llm"
 	"mirofish-novel/apps/api/internal/projectoverview"
@@ -16,6 +17,41 @@ import (
 	"mirofish-novel/apps/api/internal/workflows"
 	"mirofish-novel/apps/api/internal/worldline"
 )
+
+func TestNewAuthReaderUsesDisabledReaderWithoutDatabaseURL(t *testing.T) {
+	reader, closeReader, err := newAuthReader("")
+
+	if err != nil {
+		t.Fatalf("new auth reader: %v", err)
+	}
+	if closeReader != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if _, ok := reader.(auth.DisabledReader); !ok {
+		t.Fatalf("expected disabled auth reader, got %T", reader)
+	}
+}
+
+func TestNewAuthReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
+	reader, closeReader, err := newAuthReader("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeReader != nil {
+		defer func() {
+			if err := closeReader(); err != nil {
+				t.Fatalf("close auth reader: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new auth reader: %v", err)
+	}
+	if _, ok := reader.(*auth.SQLReader); !ok {
+		t.Fatalf("expected SQL auth reader, got %T", reader)
+	}
+	if closeReader == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
 
 func TestNewTemporalStartersWiresWriterAndHelloToSharedTemporalClient(t *testing.T) {
 	writerStarter, helloStarter, seedStarter, assetStarter, styleStarter, assetReindexStarter, storyGraphStarter, storyGraphBondStarter := newTemporalStarters(

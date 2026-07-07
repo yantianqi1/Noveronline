@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mirofish-novel/apps/api/internal/assets"
+	"mirofish-novel/apps/api/internal/auth"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/httpapi"
 	"mirofish-novel/apps/api/internal/llm"
@@ -31,6 +32,18 @@ func main() {
 		addr = ":8080"
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
+
+	authReader, closeAuthReader, err := newAuthReader(databaseURL)
+	if err != nil {
+		log.Fatalf("configure auth reader: %v", err)
+	}
+	if closeAuthReader != nil {
+		defer func() {
+			if err := closeAuthReader(); err != nil {
+				log.Printf("close auth reader: %v", err)
+			}
+		}()
+	}
 
 	writerStarter := workflows.WriterStarter(workflows.NewLocalWriterStarter())
 	writerCanceller := workflows.WriterCanceller(workflows.NewDisabledWriterCanceller())
@@ -616,6 +629,7 @@ func main() {
 	}
 
 	server := httpapi.NewServer(httpapi.Config{
+		AuthReader:                      authReader,
 		WriterStarter:                   writerStarter,
 		WriterReader:                    writerReader,
 		WriterEventReader:               writerEventReader,
@@ -682,6 +696,19 @@ func temporalNamespace() string {
 		return "default"
 	}
 	return namespace
+}
+
+func newAuthReader(databaseURL string) (auth.Reader, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return auth.NewDisabledReader(), nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return auth.NewSQLReader(auth.SQLReaderConfig{
+		Queryer: auth.NewSQLDBQueryer(db),
+	}), db.Close, nil
 }
 
 func newTemporalStarters(

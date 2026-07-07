@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam 已 fail-closed 接入；完整 compose health、真实 Temporal handoff、DB-backed auth/project picker 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam 和 W2-S2 DB-backed auth membership read side 已接入；完整 compose health、真实 Temporal handoff、project picker/RBAC enforcement 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,52 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 DB-backed auth reader、tenant/project picker、RBAC enforcement |
-| 本轮开发 slice | W2-S1 `/v1/me` auth reader seam：新增 fail-closed current-user API 契约，默认不伪造 header-derived tenant/project memberships |
-| 推荐下一步 | W2-S2 实现 DB-backed auth reader / tenant/project membership read side，或提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S1 不声明完整 Auth/RBAC 或 project picker 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 tenant/project picker、RBAC enforcement、session/cookie/JWT transport |
+| 本轮开发 slice | W2-S2 DB-backed auth membership read side：`/v1/me` 在 `DATABASE_URL` 配置时读取真实 active user/tenant/project membership summaries |
+| 推荐下一步 | W2-S3 实现 Next tenant/project picker 消费 `/v1/me`，或 W2-S4 接入 RBAC enforcement；也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S2 不声明完整 Auth/RBAC 或 project picker 完成 |
+
+## Wave 2 W2-S2 DB-backed auth membership read side
+
+Context:
+
+- W2-S1 已新增 `/v1/me` fail-closed auth reader seam。
+- 本 slice 将 cmd/api `DATABASE_URL` path 接到真实 SQL reader，让 current-user API 可读取既有 SaaS core tables 的 public membership summary。
+- Scope 限定在 `apps/api/internal/auth/**` 与 `apps/api/cmd/api/**`；不改前端、不改 schema、不替换现有业务路由的 `X-Tenant-Id` 兼容路径、不实现完整 RBAC enforcement。
+
+TDD / Review:
+
+- Implementer subagent Turing 先跑 RED：`cd apps/api && go test ./internal/auth -count=1`，失败为 `undefined: SQLRows`、`undefined: NewSQLReader`、`undefined: SQLReaderConfig`。
+- `auth.SQLReader` 新增 `SQLQueryer` / `SQLRows` / `SQLDBQueryer`，并实现 `Reader.GetCurrentUser`。
+- SQL reader 读取 active `users` public columns、active `tenant_memberships` joined active `tenants`，以及 active tenant membership 可访问的 active `projects`；项目角色优先使用 `project_members.role`，否则继承 tenant membership role。
+- Auth lookup 不使用 `X-Tenant-Id`，这是 current-user membership discovery 的受控跨租户查询，不是普通 tenant-scoped business read bypass。
+- Missing/inactive user 返回 `AUTH_USER_NOT_FOUND`；普通 query/scan/rows/close failure 统一为 `AUTH_LOOKUP_FAILED` / `auth lookup failed`，不透传 driver 文本。
+- 测试检查 SQL 不选择高风险字段名：`api_key`、`encrypted`、`credential_ref`、`object_key`、`content_text`、`body`、`draft`、`manuscript`、`prompt`、`response`。
+- `cmd/api` 新增 `newAuthReader(databaseURL)`：无 DB 时 disabled fail-closed，有 DB 时 `auth.SQLReader`，并传入 `httpapi.Config.AuthReader`。
+- Spec reviewer Zeno APPROVED：确认 `DATABASE_URL` wiring、`/v1/me` 不用 `X-Tenant-Id`、public active summaries、role fallback 和 sanitized auth errors。
+- Quality reviewer Ohm APPROVED：确认 scope 窄、disabled reader 仍 fail closed、跨 tenant lookup 仅用于 current-user membership discovery、无生产 fake success。
+
+Verification:
+
+- `cd apps/api && go test ./internal/auth -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'Auth|CurrentUser|Me' -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -count=1` 通过。
+- Coordinator broader：`cd apps/api && go test ./internal/httpapi -run 'Auth|CurrentUser|Me|Writer|Draft|Trace|LLM|Workflow' -count=1` 通过。
+- Coordinator broader：`cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `gofmt -l`、`git diff --check` 和触达 Go 文件尾随空白扫描通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+
+Next:
+
+- W2-S3：Next tenant/project picker 消费 `/v1/me` active membership summary，并逐步减少开发期硬编码 tenant/project route assumptions。
+- W2-S4：RBAC enforcement，把 viewer/editor/admin/writer/analyst 权限接入关键 mutation/read gates；当前 W2-S2 只提供 membership read side。
 
 ## Wave 2 W2-S1 `/v1/me` auth reader seam
 

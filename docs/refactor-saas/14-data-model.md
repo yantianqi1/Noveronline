@@ -30,7 +30,7 @@ usage_events
 resource_locks
 ```
 
-Wave 2 W2-S1 已新增 `/v1/me` 的 Go auth reader seam，但尚未新增 schema。该 endpoint 的目标数据源仍是既有 `users`、`tenants`、`tenant_memberships`、`projects` 和 `project_members`：返回 current user public metadata、active tenant membership summaries，以及 active project membership summaries。当前实现只通过注入 `auth.Reader` 暴露 fail-closed API contract；未配置 reader 时返回 `AUTH_BACKEND_UNCONFIGURED`，不会从 `X-Tenant-Id`、body 或 route params 伪造 tenant/project membership。后续 DB-backed auth reader 必须读取 active user/membership/project public columns，设置明确 tenant/auth context 或使用受控 service-role lookup，并把 query/scan/rows failure 稳定为 `AUTH_LOOKUP_FAILED`，不得公开 prompt/body/content、API key、encrypted credential、`credential_ref`、object key、draft、manuscript 或底层 driver 文本。
+Wave 2 已新增 `/v1/me` 的 Go auth reader seam 和 DB-backed membership read side，未新增 schema。该 endpoint 的数据源是既有 `users`、`tenants`、`tenant_memberships`、`projects` 和 `project_members`：返回 current user public metadata、active tenant membership summaries，以及 active project membership summaries。未配置 reader 时返回 `AUTH_BACKEND_UNCONFIGURED`，不会从 `X-Tenant-Id`、body 或 route params 伪造 tenant/project membership。配置 `DATABASE_URL` 时，`auth.SQLReader` 按 current `user_id` 读取 active user public columns、active tenant memberships joined active tenants，以及该用户 active tenant memberships 可访问的 active projects；若存在 `project_members` row 则返回 project role，否则继承 tenant role。这个跨 tenant 查询只用于 current-user membership discovery，不能扩展成普通业务表 read bypass。query/scan/rows/close failure 稳定为 `AUTH_LOOKUP_FAILED`，不得公开 prompt/body/content、API key、encrypted credential、`credential_ref`、object key、draft、manuscript 或底层 driver 文本。
 
 ## Project / File Tables
 

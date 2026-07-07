@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 )
@@ -52,6 +53,41 @@ type Reader interface {
 	GetCurrentUser(context.Context, GetCurrentUserInput) (CurrentUser, error)
 }
 
+type SQLQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
+}
+
+type SQLRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+	Close() error
+}
+
+type SQLDBQueryer struct {
+	db *sql.DB
+}
+
+func NewSQLDBQueryer(db *sql.DB) *SQLDBQueryer {
+	return &SQLDBQueryer{db: db}
+}
+
+func (q *SQLDBQueryer) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
+	return q.db.QueryContext(ctx, query, args...)
+}
+
+type SQLReaderConfig struct {
+	Queryer SQLQueryer
+}
+
+type SQLReader struct {
+	queryer SQLQueryer
+}
+
+func NewSQLReader(config SQLReaderConfig) *SQLReader {
+	return &SQLReader{queryer: config.Queryer}
+}
+
 type AppError struct {
 	Code    string
 	Message string
@@ -87,4 +123,142 @@ func ValidateGetCurrentUserInput(input GetCurrentUserInput) error {
 		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
 	}
 	return nil
+}
+
+func (r *SQLReader) GetCurrentUser(ctx context.Context, input GetCurrentUserInput) (CurrentUser, error) {
+	if err := ValidateGetCurrentUserInput(input); err != nil {
+		return CurrentUser{}, err
+	}
+	if r.queryer == nil {
+		return CurrentUser{}, authLookupFailed()
+	}
+	userID := strings.TrimSpace(input.UserID)
+
+	user, err := r.readActiveUser(ctx, userID)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	tenants, err := r.readActiveTenants(ctx, userID)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	projects, err := r.readActiveProjects(ctx, userID)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	return CurrentUser{
+		User:           user,
+		ActiveTenants:  tenants,
+		ActiveProjects: projects,
+	}, nil
+}
+
+func (r *SQLReader) readActiveUser(ctx context.Context, userID string) (UserSummary, error) {
+	rows, err := r.queryer.QueryContext(ctx, `
+SELECT user_id::text, email, display_name, COALESCE(avatar_url, '')
+FROM users
+WHERE user_id = $1 AND status = 'active'
+LIMIT 1
+`, userID)
+	if err != nil {
+		return UserSummary{}, authLookupFailed()
+	}
+
+	var user UserSummary
+	found := false
+	if rows.Next() {
+		if err := rows.Scan(&user.UserID, &user.Email, &user.DisplayName, &user.AvatarURL); err != nil {
+			_ = rows.Close()
+			return UserSummary{}, authLookupFailed()
+		}
+		found = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return UserSummary{}, authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return UserSummary{}, authLookupFailed()
+	}
+	if !found {
+		return UserSummary{}, &AppError{Code: CodeUserNotFound, Message: "current user was not found"}
+	}
+	return user, nil
+}
+
+func (r *SQLReader) readActiveTenants(ctx context.Context, userID string) ([]TenantMembershipSummary, error) {
+	rows, err := r.queryer.QueryContext(ctx, `
+SELECT t.tenant_id::text, t.name, tm.role, tm.status
+FROM tenant_memberships tm
+JOIN tenants t ON t.tenant_id = tm.tenant_id AND t.status = 'active'
+WHERE tm.user_id = $1 AND tm.status = 'active'
+ORDER BY t.name, t.tenant_id
+`, userID)
+	if err != nil {
+		return nil, authLookupFailed()
+	}
+
+	tenants := make([]TenantMembershipSummary, 0)
+	for rows.Next() {
+		var tenant TenantMembershipSummary
+		if err := rows.Scan(&tenant.TenantID, &tenant.Name, &tenant.Role, &tenant.Status); err != nil {
+			_ = rows.Close()
+			return nil, authLookupFailed()
+		}
+		tenants = append(tenants, tenant)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return nil, authLookupFailed()
+	}
+	return tenants, nil
+}
+
+func (r *SQLReader) readActiveProjects(ctx context.Context, userID string) ([]ProjectMembershipSummary, error) {
+	rows, err := r.queryer.QueryContext(ctx, `
+SELECT p.tenant_id::text, p.project_id::text, p.title, pm.role, tm.role, p.status
+FROM tenant_memberships tm
+JOIN tenants t ON t.tenant_id = tm.tenant_id AND t.status = 'active'
+JOIN projects p ON p.tenant_id = tm.tenant_id AND p.status = 'active'
+LEFT JOIN project_members pm
+  ON pm.tenant_id = p.tenant_id
+ AND pm.project_id = p.project_id
+ AND pm.user_id = tm.user_id
+WHERE tm.user_id = $1 AND tm.status = 'active'
+ORDER BY p.title, p.project_id
+`, userID)
+	if err != nil {
+		return nil, authLookupFailed()
+	}
+
+	projects := make([]ProjectMembershipSummary, 0)
+	for rows.Next() {
+		var project ProjectMembershipSummary
+		var projectRole sql.NullString
+		var tenantRole string
+		if err := rows.Scan(&project.TenantID, &project.ProjectID, &project.Name, &projectRole, &tenantRole, &project.Status); err != nil {
+			_ = rows.Close()
+			return nil, authLookupFailed()
+		}
+		project.Role = tenantRole
+		if projectRole.Valid && strings.TrimSpace(projectRole.String) != "" {
+			project.Role = projectRole.String
+		}
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return nil, authLookupFailed()
+	}
+	return projects, nil
+}
+
+func authLookupFailed() *AppError {
+	return &AppError{Code: CodeLookupFailed, Message: "auth lookup failed"}
 }
