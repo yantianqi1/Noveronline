@@ -2845,6 +2845,9 @@ func (s *Server) handleBulkAssetAction(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "project_id, action, and asset_ids are required", nil)
 		return
 	}
+	if !s.authorizeAssetManage(response, request, tenantID, projectID) {
+		return
+	}
 	result, err := s.assetBulkActionStore.ApplyBulkAction(request.Context(), assets.BulkActionInput{
 		TenantID:        tenantID,
 		ProjectID:       projectID,
@@ -2860,10 +2863,18 @@ func (s *Server) handleBulkAssetAction(response http.ResponseWriter, request *ht
 		Payload:         sanitizeAssetPayload(payload.Payload),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetBulkActionPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, result)
+}
+
+func assetBulkActionPublicErrorMessage(code string) string {
+	if code == "ASSET_BULK_ACTION_BACKEND_UNCONFIGURED" {
+		return "asset bulk action backend is not configured"
+	}
+	return "asset bulk action failed"
 }
 
 func (s *Server) handleStartAssetIngestion(response http.ResponseWriter, request *http.Request) {

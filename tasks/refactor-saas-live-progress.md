@@ -1,6 +1,6 @@
 # MiroFish-Novel SaaS Refactor Live Progress
 
-更新时间：`2026-07-07`
+更新时间：`2026-07-08`
 
 ## 用途
 
@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC 和 W2-S4h-a single-asset mutation owner-aware RBAC 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle、browser cookie transport、bulk/archive owner-aware mutation RBAC 和 remaining non-asset mutation RBAC 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC 和 W2-S4h-b bulk asset action RBAC 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle、browser cookie transport、archive owner-aware mutation RBAC 和 remaining non-asset mutation RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,47 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g `GET /v1/assets/{assetId}` owner-aware detail read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、browser cookie transport、bulk action / archive memory review owner-aware RBAC、剩余 non-asset mutation RBAC |
-| 本轮开发 slice | W2-S4h-a single-asset mutation owner-aware RBAC：`PATCH/DELETE /v1/assets/{assetId}` 与 `POST /v1/assets/{assetId}/adoptions` 在 JSON decode 和 mutation/adoption store 前先用 tenant-scoped asset reader 反查 project，再执行 `asset_manage`；reader backend errors 使用稳定 public message |
-| 推荐下一步 | W2-S4h-b 继续 owner-aware/global mutation RBAC：优先处理 `POST /v1/assets/bulk-actions` 和 archive memory review adoptions/rejections；或进入完整 login/JWT/session lifecycle。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4h-a 不声明完整 Auth/RBAC、注册登录、JWT/session 生命周期、bulk/archive RBAC 或所有 mutation RBAC 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g `GET /v1/assets/{assetId}` owner-aware detail read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、browser cookie transport、archive memory review owner-aware RBAC、剩余 non-asset mutation RBAC |
+| 本轮开发 slice | W2-S4h-b bulk asset action RBAC：`POST /v1/assets/bulk-actions` 在 strict JSON decode 和 required field validation 后、bulk store 前对 body `project_id` 执行 `asset_manage`；body project 只作为请求授权 scope，DB store 继续按 header tenant + project + asset ids 过滤；bulk store errors 使用稳定 public message |
+| 推荐下一步 | W2-S4h-c 继续 owner-aware/global mutation RBAC：archive memory review adoptions/rejections 需要 memory -> project preflight lookup seam，不能继续只信任 body `project_id`；或进入完整 login/JWT/session lifecycle。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4h-b 不声明完整 Auth/RBAC、注册登录、JWT/session 生命周期、archive RBAC 或所有 mutation RBAC 完成 |
+
+## Wave 2 W2-S4h-b Bulk asset action RBAC
+
+Context:
+
+- W2-S4h-a 已覆盖 single-asset patch/delete/adoption owner-aware RBAC，但 `POST /v1/assets/bulk-actions` 是 body-project route，之前在 valid body 后会直接进入 bulk store。
+- 本 slice 只覆盖 bulk action RBAC 与该 route 的 public store-error boundary；不实现 archive memory review、完整 session/login 或 browser cookie transport。
+
+TDD / Review:
+
+- Implementer subagent Pascal 先补 RED：`cd apps/api && go test ./internal/httpapi -run 'BulkAsset|AssetBulk|AssetManage|AuthSubject|RBAC' -count=1` 失败，success/no-store path 没有 `asset_manage` authorizer input，denied bulk action 返回 202 而不是 403。
+- `handleBulkAssetAction` 现在在 strict JSON decode 和 `project_id` / `action` / `asset_ids` validation 后、`AssetBulkActionStore.ApplyBulkAction` 前调用 `authorizeAssetManage(response, request, tenantID, projectID)`。Header `X-Tenant-Id` 仍是 tenant source；body `project_id` 只是请求授权 scope，不作为资产归属证明，DB-backed store 继续按 tenant/project/submitted asset ids 过滤。
+- Denied auth 在 bulk store side effect 前返回稳定 `AUTH_ACCESS_DENIED`，测试覆盖不泄露 submitted asset ids、body tenant、actor id、authorizer message、prompt/provider response/raw body/content、API key、encrypted credential、`credential_ref`、object key、draft 或 manuscript。
+- Quality reviewer Wegener 初审发现 bulk store error branch 仍可能回显 raw `err.Error()`；Pascal 补 RED/GREEN 后，bulk action store errors 现在保留 app code/status，但 HTTP message 收敛为 stable `asset bulk action failed`，`ASSET_BULK_ACTION_BACKEND_UNCONFIGURED` 保持 stable disabled-store message。Quality re-review PASS。残余风险：store-side validation failure 对客户端更不具体，但隐私边界更安全。
+
+Verification:
+
+- `cd apps/api && go test ./internal/httpapi -run 'BulkAsset|AssetBulk|AssetManage|AuthSubject|RBAC' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Auth|Session|RBAC' -count=1` 通过。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `cd apps/api && gofmt -l internal/httpapi/server.go internal/httpapi/server_test.go` 无输出。
+- `git diff --check` 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+
+Next:
+
+- W2-S4h-c：archive memory review adoptions/rejections 需要 memory -> project preflight lookup seam，不能继续只信任 body `project_id`。
+- 完整注册登录、JWT claim parsing、session cookie issuance/rotation/revocation、CSRF、browser cookie transport 仍 pending。
 
 ## Wave 2 W2-S4h-a Single-asset mutation owner-aware RBAC
 
@@ -101,7 +138,7 @@ Docs synced:
 
 Next:
 
-- W2-S4h-b：`POST /v1/assets/bulk-actions` body-project route 需要 decode 后、store 前执行 `asset_manage`，仍不得把 body tenant/project 当作资产归属证明；DB store 继续 tenant/project/asset ids 过滤。
+- W2-S4h-b 已完成：`POST /v1/assets/bulk-actions` body-project route 在 decode/validation 后、store 前执行 `asset_manage`，且不把 body tenant/project 当作资产归属证明；DB store 继续 tenant/project/asset ids 过滤。
 - W2-S4h-c：archive memory review adoptions/rejections 需要 memory -> project preflight lookup seam，不能继续只信任 body `project_id`。
 
 ## Wave 2 W2-S4g Asset detail owner-aware read RBAC

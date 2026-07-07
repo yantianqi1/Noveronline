@@ -867,6 +867,7 @@ type recordingAssetBulkActionStore struct {
 	input  assets.BulkActionInput
 	result assets.BulkActionResult
 	err    error
+	called bool
 }
 
 func (r *recordingAssetReader) ListAssets(ctx context.Context, input assets.ListAssetsInput) ([]assets.Record, error) {
@@ -1065,6 +1066,7 @@ func (s *recordingAssetMutationStore) DeleteAsset(ctx context.Context, input ass
 
 func (s *recordingAssetBulkActionStore) ApplyBulkAction(ctx context.Context, input assets.BulkActionInput) (assets.BulkActionResult, error) {
 	s.input = input
+	s.called = true
 	if s.err != nil {
 		return assets.BulkActionResult{}, s.err
 	}
@@ -6599,7 +6601,8 @@ func TestAssetMutationsFailClosedWithoutConfiguredStore(t *testing.T) {
 
 func TestBulkAssetActionUsesTenantProjectActorRequestAndReturnsSanitizedResult(t *testing.T) {
 	store := &recordingAssetBulkActionStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetBulkActionStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/assets/bulk-actions",
@@ -6615,6 +6618,10 @@ func TestBulkAssetActionUsesTenantProjectActorRequestAndReturnsSanitizedResult(t
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-bulk")
+	if !store.called {
+		t.Fatal("expected bulk action store to run after asset_manage authorization")
 	}
 	if store.input.TenantID != "tenant-123" || store.input.ProjectID != "project-123" {
 		t.Fatalf("store lost tenant/project context: %#v", store.input)
@@ -6639,11 +6646,101 @@ func TestBulkAssetActionUsesTenantProjectActorRequestAndReturnsSanitizedResult(t
 	}
 }
 
+func TestAssetManageRBACBulkAssetActionDenyAfterValidationBeforeStore(t *testing.T) {
+	store := &recordingAssetBulkActionStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied for user-123 asset-1 prompt provider_response raw_body api-key encrypted credential_ref object-key draft manuscript"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/assets/bulk-actions",
+		strings.NewReader(`{"tenant_id":"body-tenant","project_id":"project-123","action":"disable","asset_ids":["asset-1","asset-2"],"payload":{"prompt":"private prompt","provider_response":"raw provider","raw_body":"raw body","content":"secret content","api_key":"secret-key","encrypted_credential":"ciphertext","credential_ref":"cred-1","object_key":"obj-1","draft":"draft text","manuscript":"manuscript text"}}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-denied")
+	if store.called {
+		t.Fatalf("bulk action store ran after denied asset_manage authorization: %#v", store.input)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{
+		"asset-1", "asset-2", "body-tenant", "user-123", "denied for user-123",
+		"private prompt", "raw provider", "raw body", "secret content", "secret-key",
+		"ciphertext", "credential_ref", "cred-1", "object-key", "object_key", "obj-1",
+		"draft text", "manuscript text",
+	} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("denied bulk action response leaked forbidden value %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestBulkAssetActionStoreFailureReturnsPublicMessage(t *testing.T) {
+	store := &recordingAssetBulkActionStore{
+		err: &assets.AppError{Code: "ASSET_BULK_ACTION_FAILED", Message: "failed asset-1 asset-2 body-tenant user-123 prompt provider_response raw_body content api_key encrypted_credential credential_ref object_key draft manuscript private prompt raw provider secret-key cred-1 obj-1 draft text manuscript text"},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/assets/bulk-actions",
+		strings.NewReader(`{"tenant_id":"body-tenant","project_id":"project-123","action":"disable","asset_ids":["asset-1","asset-2"],"payload":{"prompt":"private prompt","provider_response":"raw provider","raw_body":"raw body","content":"secret content","api_key":"secret-key","encrypted_credential":"ciphertext","credential_ref":"cred-1","object_key":"obj-1","draft":"draft text","manuscript":"manuscript text"}}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-store-failure")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-store-failure")
+	if !store.called {
+		t.Fatal("expected bulk action store to run after asset_manage authorization")
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "ASSET_BULK_ACTION_FAILED" || body.Error.Message != "asset bulk action failed" {
+		t.Fatalf("unexpected bulk action error body: %#v", body)
+	}
+	for _, forbidden := range []string{
+		"asset-1", "asset-2", "body-tenant", "user-123",
+		"private prompt", "raw provider", "raw body", "secret content", "secret-key",
+		"ciphertext", "encrypted_credential", "credential_ref", "cred-1", "object_key", "obj-1",
+		"draft text", "manuscript text",
+	} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("bulk action store failure leaked forbidden value %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
 func TestAuthSubjectBulkAssetActionRejectsInvalidBearerBeforeFallbackAndStore(t *testing.T) {
 	store := &recordingAssetBulkActionStore{}
+	authorizer := &recordingAuthorizer{}
 	server := NewServer(Config{
 		AssetBulkActionStore: store,
 		SessionAuthSecret:    "test-secret",
+		Authorizer:           authorizer,
 	})
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -6661,8 +6758,11 @@ func TestAuthSubjectBulkAssetActionRejectsInvalidBearerBeforeFallbackAndStore(t 
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
 	}
-	if store.input.ProjectID != "" || store.input.ActorID != "" {
+	if store.called || store.input.ProjectID != "" || store.input.ActorID != "" {
 		t.Fatalf("bulk action store ran after invalid bearer: %#v", store.input)
+	}
+	if authorizer.called {
+		t.Fatalf("authorizer ran after invalid bearer: %#v", authorizer.input)
 	}
 	var body errorEnvelope
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
@@ -6679,7 +6779,8 @@ func TestAuthSubjectBulkAssetActionRejectsInvalidBearerBeforeFallbackAndStore(t 
 }
 
 func TestBulkAssetActionFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/assets/bulk-actions",
@@ -6687,6 +6788,8 @@ func TestBulkAssetActionFailsClosedWithoutConfiguredStore(t *testing.T) {
 	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-no-store")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -6701,6 +6804,7 @@ func TestBulkAssetActionFailsClosedWithoutConfiguredStore(t *testing.T) {
 	if body.Error.Code != "ASSET_BULK_ACTION_BACKEND_UNCONFIGURED" {
 		t.Fatalf("unexpected error body: %#v", body)
 	}
+	assertSingleAssetManageAuthorization(t, authorizer, "req-no-store")
 	for _, forbidden := range []string{"asset-1", "private", "credential_ref", "cred-1", "content_text"} {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("bulk action failure leaked forbidden value %q: %s", forbidden, response.Body.String())
