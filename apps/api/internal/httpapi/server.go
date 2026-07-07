@@ -974,9 +974,9 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodGet && isWorldlineSessionEventsPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-events/") && strings.HasSuffix(path, "/adoptions"):
+	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(path):
 		return true
-	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/worldline-events/"):
+	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(path):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/character-interactions/") && strings.HasSuffix(path, "/turns"):
 		return true
@@ -1052,6 +1052,14 @@ func isWorldlineSessionEventsPath(path string) bool {
 	return worldlineSessionPathPart(path, "events") != ""
 }
 
+func isWorldlineEventAdoptionPath(path string) bool {
+	return worldlineEventAdoptionPathPart(path) != ""
+}
+
+func isWorldlineEventMutationPath(path string) bool {
+	return worldlineEventPathPart(path) != ""
+}
+
 func worldlineSessionPathPart(path string, suffix string) string {
 	const prefix = "/v1/worldline-sessions/"
 	if !strings.HasPrefix(path, prefix) {
@@ -1073,6 +1081,32 @@ func worldlineSessionPathPart(path string, suffix string) string {
 		return ""
 	}
 	return sessionID
+}
+
+func worldlineEventAdoptionPathPart(path string) string {
+	const prefix = "/v1/worldline-events/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	remainder := strings.TrimPrefix(path, prefix)
+	eventID, suffix, ok := strings.Cut(remainder, "/")
+	eventID = strings.TrimSpace(eventID)
+	if !ok || suffix != "adoptions" || eventID == "" || strings.Contains(eventID, "/") {
+		return ""
+	}
+	return eventID
+}
+
+func worldlineEventPathPart(path string) string {
+	const prefix = "/v1/worldline-events/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	eventID := strings.TrimSpace(strings.TrimPrefix(path, prefix))
+	if eventID == "" || strings.Contains(eventID, "/") {
+		return ""
+	}
+	return eventID
 }
 
 func projectActorSensitiveRoute(request *http.Request) bool {
@@ -1342,9 +1376,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListWorldlineEvents(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/steps"):
 		s.handleStartWorldlineStep(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-events/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
+	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(request.URL.Path):
 		s.handleAdoptWorldlineEvent(response, request)
-	case request.Method == http.MethodPatch && strings.HasPrefix(request.URL.Path, "/v1/worldline-events/"):
+	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(request.URL.Path):
 		s.handleUpdateWorldlineEvent(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/variables"):
 		s.handleInjectWorldlineVariable(response, request)
@@ -1523,6 +1557,24 @@ func (s *Server) authorizeWorldlineSessionProjectRead(response http.ResponseWrit
 		return worldline.SessionRecord{}, false
 	}
 	return record, true
+}
+
+func (s *Server) authorizeWorldlineEventCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, eventID string) bool {
+	record, err := s.worldlineEventReader.GetEvent(request.Context(), worldline.GetEventInput{
+		TenantID: tenantID,
+		EventID:  eventID,
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineEventOwnerPreflightPublicErrorMessage(code), nil)
+		return false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite)
 }
 
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
@@ -2567,11 +2619,12 @@ func (s *Server) handleAdoptWorldlineEvent(response http.ResponseWriter, request
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	eventID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-events/")
-	eventID = strings.TrimSuffix(eventID, "/adoptions")
-	eventID = strings.TrimSpace(strings.Trim(eventID, "/"))
-	if eventID == "" || strings.Contains(eventID, "/") {
+	eventID := worldlineEventAdoptionPathPart(request.URL.Path)
+	if eventID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline event adoption route not found", nil)
+		return
+	}
+	if !s.authorizeWorldlineEventCreativeWrite(response, request, tenantID, eventID) {
 		return
 	}
 	var payload adoptWorldlineEventRequest
@@ -2588,7 +2641,8 @@ func (s *Server) handleAdoptWorldlineEvent(response http.ResponseWriter, request
 		Note:        strings.TrimSpace(payload.Note),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineEventAdoptionPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, record)
@@ -2600,10 +2654,12 @@ func (s *Server) handleUpdateWorldlineEvent(response http.ResponseWriter, reques
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	eventID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-events/")
-	eventID = strings.TrimSpace(strings.Trim(eventID, "/"))
-	if eventID == "" || strings.Contains(eventID, "/") {
+	eventID := worldlineEventPathPart(request.URL.Path)
+	if eventID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline event mutation route not found", nil)
+		return
+	}
+	if !s.authorizeWorldlineEventCreativeWrite(response, request, tenantID, eventID) {
 		return
 	}
 	var payload updateWorldlineEventRequest
@@ -2622,7 +2678,8 @@ func (s *Server) handleUpdateWorldlineEvent(response http.ResponseWriter, reques
 		Kind:        strings.TrimSpace(payload.Kind),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineEventMutationPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, record)
@@ -5752,6 +5809,47 @@ func worldlineSessionOwnerPreflightPublicErrorMessage(code string) string {
 		return "worldline session lookup failed"
 	default:
 		return "worldline session lookup failed"
+	}
+}
+
+func worldlineEventOwnerPreflightPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "worldline event was not found"
+	case "VALIDATION_FAILED":
+		return "invalid worldline event lookup"
+	case "WORLDLINE_EVENT_BACKEND_UNCONFIGURED":
+		return "worldline event backend is not configured"
+	case "WORLDLINE_QUERY_FAILED":
+		return "worldline event lookup failed"
+	default:
+		return "worldline event lookup failed"
+	}
+}
+
+func worldlineEventAdoptionPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "worldline event was not found"
+	case "VALIDATION_FAILED":
+		return "invalid worldline event adoption request"
+	case "WORLDLINE_EVENT_ADOPTION_BACKEND_UNCONFIGURED":
+		return "worldline event adoption backend is not configured"
+	default:
+		return "worldline event adoption failed"
+	}
+}
+
+func worldlineEventMutationPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "worldline event was not found"
+	case "VALIDATION_FAILED":
+		return "invalid worldline event mutation request"
+	case "WORLDLINE_EVENT_MUTATION_BACKEND_UNCONFIGURED":
+		return "worldline event mutation backend is not configured"
+	default:
+		return "worldline event mutation failed"
 	}
 }
 

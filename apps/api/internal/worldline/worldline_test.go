@@ -420,6 +420,19 @@ func TestDisabledEventReaderFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDisabledEventReaderGetEventFailsClosed(t *testing.T) {
+	reader := NewDisabledEventReader()
+
+	_, err := reader.GetEvent(context.Background(), GetEventInput{
+		TenantID: "tenant-123",
+		EventID:  "event-1",
+	})
+
+	if code := ErrorCode(err); code != "WORLDLINE_EVENT_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected fail-closed event backend error, got %s (%v)", code, err)
+	}
+}
+
 func TestSQLEventReaderListsTenantSessionScopedPublicCandidateMetadata(t *testing.T) {
 	queryer := &recordingWorldlineQueryer{
 		rows: &fakeWorldlineRows{values: [][]any{{
@@ -480,6 +493,59 @@ func TestSQLEventReaderListsTenantSessionScopedPublicCandidateMetadata(t *testin
 		}
 	}
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "session-1", "candidate", 25}) {
+		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+}
+
+func TestSQLEventReaderGetsTenantScopedPublicEventMetadata(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"event-1",
+			"session-1",
+			"project-123",
+			3,
+			"密谈破裂",
+			"公开候选事件摘要",
+			"director",
+			"candidate",
+			"simulation",
+			"0.86",
+			`["agent-1","agent-2"]`,
+			`{"tension":"raised"}`,
+			"run-1",
+			"user-1",
+			"2026-07-05T00:00:00Z",
+			"2026-07-05T00:01:00Z",
+		}}},
+	}
+	reader := NewSQLEventReader(SQLEventReaderConfig{Queryer: queryer, Limit: 25})
+
+	event, err := reader.GetEvent(context.Background(), GetEventInput{
+		TenantID: "tenant-123",
+		EventID:  "event-1",
+	})
+
+	if err != nil {
+		t.Fatalf("get event: %v", err)
+	}
+	if event.EventID != "event-1" || event.SessionID != "session-1" || event.ProjectID != "project-123" || event.Step != 3 {
+		t.Fatalf("unexpected event identity: %#v", event)
+	}
+	if event.Status != "candidate" || event.Lifecycle != "simulation" || event.Kind != "director" {
+		t.Fatalf("unexpected event metadata: %#v", event)
+	}
+	if !strings.Contains(queryer.query, "FROM worldline_events") || !strings.Contains(queryer.query, "JOIN worldline_sessions") {
+		t.Fatalf("expected worldline_events joined to worldline_sessions, got %s", queryer.query)
+	}
+	if !strings.Contains(queryer.query, "s.tenant_id::text = $1") || !strings.Contains(queryer.query, "e.event_id::text = $2") {
+		t.Fatalf("expected tenant/event scoped event query, got %s", queryer.query)
+	}
+	for _, forbidden := range []string{"body_text", "content_text", "prompt", "response", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
+		if strings.Contains(strings.ToLower(queryer.query), forbidden) {
+			t.Fatalf("event owner query selected forbidden field %q: %s", forbidden, queryer.query)
+		}
+	}
+	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "event-1"}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
 	}
 }

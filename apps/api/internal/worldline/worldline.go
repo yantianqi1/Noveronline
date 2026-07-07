@@ -147,6 +147,11 @@ type ListEventsInput struct {
 	Status    string
 }
 
+type GetEventInput struct {
+	TenantID string
+	EventID  string
+}
+
 type EventRecord struct {
 	EventID          string         `json:"event_id"`
 	SessionID        string         `json:"session_id"`
@@ -168,6 +173,7 @@ type EventRecord struct {
 
 type EventReader interface {
 	ListEvents(context.Context, ListEventsInput) ([]EventRecord, error)
+	GetEvent(context.Context, GetEventInput) (EventRecord, error)
 }
 
 type AdoptEventInput struct {
@@ -416,6 +422,13 @@ func NewDisabledEventReader() *DisabledEventReader {
 
 func (r *DisabledEventReader) ListEvents(context.Context, ListEventsInput) ([]EventRecord, error) {
 	return nil, &AppError{
+		Code:    "WORLDLINE_EVENT_BACKEND_UNCONFIGURED",
+		Message: "worldline event backend is not configured",
+	}
+}
+
+func (r *DisabledEventReader) GetEvent(context.Context, GetEventInput) (EventRecord, error) {
+	return EventRecord{}, &AppError{
 		Code:    "WORLDLINE_EVENT_BACKEND_UNCONFIGURED",
 		Message: "worldline event backend is not configured",
 	}
@@ -1477,6 +1490,62 @@ LIMIT $%d`, len(args)+1)
 		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
 	return records, nil
+}
+
+func (r *SQLEventReader) GetEvent(ctx context.Context, input GetEventInput) (EventRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	eventID := strings.TrimSpace(input.EventID)
+	if tenantID == "" || eventID == "" {
+		return EventRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and event_id are required"}
+	}
+	if r.queryer == nil {
+		return EventRecord{}, &AppError{Code: "WORLDLINE_EVENT_BACKEND_UNCONFIGURED", Message: "worldline event backend is not configured"}
+	}
+
+	rows, err := r.queryer.QueryContext(ctx, `
+SELECT
+  e.event_id::text,
+  e.session_id::text,
+  e.project_id::text,
+  e.step,
+  e.title,
+  e.summary,
+  e.kind,
+  e.status,
+  e.lifecycle,
+  COALESCE(e.confidence::text, ''),
+  COALESCE(e.involved_agent_ids_jsonb, '[]'::jsonb)::text,
+  COALESCE(e.state_changes_jsonb, '{}'::jsonb)::text,
+  COALESCE(e.source_run_id::text, ''),
+  COALESCE(e.created_by::text, ''),
+  e.created_at::text,
+  e.updated_at::text
+FROM worldline_events e
+JOIN worldline_sessions s
+  ON s.tenant_id = e.tenant_id
+ AND s.project_id = e.project_id
+ AND s.session_id = e.session_id
+WHERE s.tenant_id::text = $1
+  AND e.event_id::text = $2
+LIMIT 1`, tenantID, eventID)
+	if err != nil {
+		return EventRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return EventRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		}
+		return EventRecord{}, &AppError{Code: "NOT_FOUND", Message: "worldline event not found"}
+	}
+	record, err := scanEventRecord(rows)
+	if err != nil {
+		return EventRecord{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return EventRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+	}
+	return record, nil
 }
 
 func scanEventRecord(rows SQLRows) (EventRecord, error) {

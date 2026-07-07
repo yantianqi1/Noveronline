@@ -603,9 +603,13 @@ func (r *recordingWorldlineTimelineReader) ListTimeline(ctx context.Context, inp
 }
 
 type recordingWorldlineEventReader struct {
-	input  worldline.ListEventsInput
-	events []worldline.EventRecord
-	err    error
+	input     worldline.ListEventsInput
+	getInput  worldline.GetEventInput
+	events    []worldline.EventRecord
+	event     worldline.EventRecord
+	err       error
+	getErr    error
+	getCalled bool
 }
 
 func (r *recordingWorldlineEventReader) ListEvents(ctx context.Context, input worldline.ListEventsInput) ([]worldline.EventRecord, error) {
@@ -616,14 +620,25 @@ func (r *recordingWorldlineEventReader) ListEvents(ctx context.Context, input wo
 	return r.events, nil
 }
 
+func (r *recordingWorldlineEventReader) GetEvent(ctx context.Context, input worldline.GetEventInput) (worldline.EventRecord, error) {
+	r.getInput = input
+	r.getCalled = true
+	if r.getErr != nil {
+		return worldline.EventRecord{}, r.getErr
+	}
+	return r.event, nil
+}
+
 type recordingWorldlineEventAdoptionStore struct {
-	input worldline.AdoptEventInput
-	event worldline.EventRecord
-	err   error
+	input  worldline.AdoptEventInput
+	event  worldline.EventRecord
+	err    error
+	called bool
 }
 
 func (s *recordingWorldlineEventAdoptionStore) AdoptEvent(ctx context.Context, input worldline.AdoptEventInput) (worldline.EventRecord, error) {
 	s.input = input
+	s.called = true
 	if s.err != nil {
 		return worldline.EventRecord{}, s.err
 	}
@@ -631,13 +646,15 @@ func (s *recordingWorldlineEventAdoptionStore) AdoptEvent(ctx context.Context, i
 }
 
 type recordingWorldlineEventMutationStore struct {
-	input worldline.UpdateEventInput
-	event worldline.EventRecord
-	err   error
+	input  worldline.UpdateEventInput
+	event  worldline.EventRecord
+	err    error
+	called bool
 }
 
 func (s *recordingWorldlineEventMutationStore) UpdateEvent(ctx context.Context, input worldline.UpdateEventInput) (worldline.EventRecord, error) {
 	s.input = input
+	s.called = true
 	if s.err != nil {
 		return worldline.EventRecord{}, s.err
 	}
@@ -3370,11 +3387,12 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 		method    string
 		path      string
 		body      string
-		message   string
-		requestID string
-		allowAuth bool
-		ownerAuth bool
-	}{
+			message   string
+			requestID string
+			allowAuth bool
+			ownerAuth bool
+			eventAuth bool
+		}{
 		{
 			name:      "session unknown field",
 			method:    http.MethodPost,
@@ -3406,18 +3424,20 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			name:      "event adoption type error",
 			method:    http.MethodPost,
 			path:      "/v1/worldline-events/event-1/adoptions",
-			body:      `{"note":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
-			message:   "invalid worldline event adoption payload",
-			requestID: "req-worldline-adoption-validation",
-		},
-		{
-			name:      "event mutation type error",
-			method:    http.MethodPatch,
-			path:      "/v1/worldline-events/event-1",
-			body:      `{"title":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
-			message:   "invalid worldline event mutation payload",
-			requestID: "req-worldline-mutation-validation",
-		},
+				body:      `{"note":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
+				message:   "invalid worldline event adoption payload",
+				requestID: "req-worldline-adoption-validation",
+				eventAuth: true,
+			},
+			{
+				name:      "event mutation type error",
+				method:    http.MethodPatch,
+				path:      "/v1/worldline-events/event-1",
+				body:      `{"title":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
+				message:   "invalid worldline event mutation payload",
+				requestID: "req-worldline-mutation-validation",
+				eventAuth: true,
+			},
 		{
 			name:      "variable type error",
 			method:    http.MethodPost,
@@ -3446,11 +3466,17 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			}
 			if tt.ownerAuth {
 				config.Authorizer = &recordingAuthorizer{}
-				config.WorldlineSessionReader = &recordingWorldlineSessionReader{
-					session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+					config.WorldlineSessionReader = &recordingWorldlineSessionReader{
+						session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+					}
 				}
-			}
-			server := NewServer(config)
+				if tt.eventAuth {
+					config.Authorizer = &recordingAuthorizer{}
+					config.WorldlineEventReader = &recordingWorldlineEventReader{
+						event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-123"},
+					}
+				}
+				server := NewServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -4911,6 +4937,13 @@ func TestListWorldlineEventsFailsClosedWithoutConfiguredReader(t *testing.T) {
 }
 
 func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t *testing.T) {
+	reader := &recordingWorldlineEventReader{
+		event: worldline.EventRecord{
+			EventID:   "event-1",
+			SessionID: "session-1",
+			ProjectID: "project-owner",
+		},
+	}
 	store := &recordingWorldlineEventAdoptionStore{
 		event: worldline.EventRecord{
 			EventID:          "event-1",
@@ -4931,9 +4964,11 @@ func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t
 			UpdatedAt:        "2026-07-05T00:01:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlineEventAdoptionStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
+		"project_id":"malicious-project",
 		"note":"Adopt as current-world canon",
 		"prompt":"must be stripped",
 		"api_key":"must be stripped"
@@ -4948,6 +4983,10 @@ func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.EventID != "event-1" {
+		t.Fatalf("event reader lost owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
 	if store.input.TenantID != "tenant-123" ||
 		store.input.EventID != "event-1" ||
 		store.input.ActorUserID != "user-456" ||
@@ -4964,7 +5003,7 @@ func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t
 		!strings.Contains(body, `"lifecycle":"canon_reference"`) {
 		t.Fatalf("unexpected event adoption response: %s", body)
 	}
-	for _, forbidden := range []string{"tenant-from-body", "prompt", "response", "body_text", "content_text", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
+	for _, forbidden := range []string{"tenant-from-body", "malicious-project", "prompt", "response", "body_text", "content_text", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("event adoption response leaked forbidden field %q: %s", forbidden, body)
 		}
@@ -4972,9 +5011,11 @@ func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t
 }
 
 func TestAdoptWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"canon"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -4987,7 +5028,127 @@ func TestAdoptWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
 	}
 }
 
+func TestAdoptWorldlineEventDeniedBeforeDecodeAndStore(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventAdoptionStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "actor user-456 denied for hidden-title prompt=secret api_key=sk-hidden"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"private-note","prompt":"secret","api_key":"sk-hidden"`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-deny-adopt")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-deny-adopt")
+	if store.called {
+		t.Fatalf("adoption store ran after RBAC denial: %#v", store.input)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, auth.CodeAccessDenied) || !strings.Contains(body, "current user access is denied") {
+		t.Fatalf("expected public access denied response, got %s", body)
+	}
+	for _, forbidden := range []string{"private-note", "prompt", "secret", "api_key", "sk-hidden", "hidden-title", "user-456"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("event adoption denial leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdoptWorldlineEventOwnerLookupFailuresDoNotAuthorizeOrStore(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      worldline.EventRecord
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "lookup error",
+			err:        &worldline.AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "WORLDLINE_QUERY_FAILED",
+		},
+		{
+			name:       "blank project",
+			event:      worldline.EventRecord{EventID: "event-1"},
+			wantStatus: http.StatusForbidden,
+			wantCode:   auth.CodeAccessDenied,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorldlineEventReader{event: tt.event, getErr: tt.err}
+			store := &recordingWorldlineEventAdoptionStore{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+			request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"private-note","prompt":"secret"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-456")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), tt.wantCode) {
+				t.Fatalf("expected code %s, got %s", tt.wantCode, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("authorizer ran after owner lookup failure: %#v", authorizer.inputs)
+			}
+			if store.called {
+				t.Fatalf("adoption store ran after owner lookup failure: %#v", store.input)
+			}
+			for _, forbidden := range []string{"private-note", "prompt", "secret", "api_key", "sk-hidden", "driver leaked"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("event adoption lookup failure leaked forbidden field %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestAdoptWorldlineEventStoreErrorIsSanitizedAfterAuthorization(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventAdoptionStore{err: &worldline.AppError{Code: "WORLDLINE_EVENT_ADOPTION_WRITE_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden draft=private"}}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"public note"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-store-adopt")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-store-adopt")
+	if !store.called {
+		t.Fatal("expected adoption store after successful auth")
+	}
+	for _, forbidden := range []string{"driver leaked", "prompt", "secret", "api_key", "sk-hidden", "draft=private"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("event adoption store error leaked forbidden field %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
 func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t *testing.T) {
+	reader := &recordingWorldlineEventReader{
+		event: worldline.EventRecord{
+			EventID:   "event-1",
+			SessionID: "session-1",
+			ProjectID: "project-owner",
+		},
+	}
 	store := &recordingWorldlineEventMutationStore{
 		event: worldline.EventRecord{
 			EventID:          "event-1",
@@ -5008,9 +5169,11 @@ func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(
 			UpdatedAt:        "2026-07-05T00:02:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlineEventMutationStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
 	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
+		"project_id":"malicious-project",
 		"title":"密谈缓和",
 		"summary":"公开编辑后的候选事件摘要",
 		"kind":"director_revision",
@@ -5027,6 +5190,10 @@ func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.EventID != "event-1" {
+		t.Fatalf("event reader lost owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
 	if store.input.TenantID != "tenant-123" ||
 		store.input.EventID != "event-1" ||
 		store.input.ActorUserID != "user-456" ||
@@ -5045,7 +5212,7 @@ func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(
 		!strings.Contains(body, `"status":"candidate"`) {
 		t.Fatalf("unexpected event mutation response: %s", body)
 	}
-	for _, forbidden := range []string{"tenant-from-body", "prompt", "response", "body_text", "content_text", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
+	for _, forbidden := range []string{"tenant-from-body", "malicious-project", "prompt", "response", "body_text", "content_text", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("event mutation response leaked forbidden field %q: %s", forbidden, body)
 		}
@@ -5053,9 +5220,11 @@ func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(
 }
 
 func TestUpdateWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
 	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"edit"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5065,6 +5234,164 @@ func TestUpdateWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "WORLDLINE_EVENT_MUTATION_BACKEND_UNCONFIGURED") {
 		t.Fatalf("expected fail-closed worldline event mutation error, got %s", response.Body.String())
+	}
+}
+
+func TestUpdateWorldlineEventDeniedBeforeDecodeAndStore(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventMutationStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "actor user-456 denied for hidden-title prompt=secret api_key=sk-hidden"}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"hidden-title","prompt":"secret","api_key":"sk-hidden"`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-deny-update")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-deny-update")
+	if store.called {
+		t.Fatalf("mutation store ran after RBAC denial: %#v", store.input)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, auth.CodeAccessDenied) || !strings.Contains(body, "current user access is denied") {
+		t.Fatalf("expected public access denied response, got %s", body)
+	}
+	for _, forbidden := range []string{"hidden-title", "prompt", "secret", "api_key", "sk-hidden", "user-456"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("event mutation denial leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestUpdateWorldlineEventOwnerLookupFailuresDoNotAuthorizeOrStore(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      worldline.EventRecord
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "lookup error",
+			err:        &worldline.AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "WORLDLINE_QUERY_FAILED",
+		},
+		{
+			name:       "blank project",
+			event:      worldline.EventRecord{EventID: "event-1"},
+			wantStatus: http.StatusForbidden,
+			wantCode:   auth.CodeAccessDenied,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorldlineEventReader{event: tt.event, getErr: tt.err}
+			store := &recordingWorldlineEventMutationStore{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+			request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"hidden-title","prompt":"secret"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-456")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), tt.wantCode) {
+				t.Fatalf("expected code %s, got %s", tt.wantCode, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("authorizer ran after owner lookup failure: %#v", authorizer.inputs)
+			}
+			if store.called {
+				t.Fatalf("mutation store ran after owner lookup failure: %#v", store.input)
+			}
+			for _, forbidden := range []string{"hidden-title", "prompt", "secret", "api_key", "sk-hidden", "driver leaked"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("event mutation lookup failure leaked forbidden field %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateWorldlineEventStoreErrorIsSanitizedAfterAuthorization(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventMutationStore{err: &worldline.AppError{Code: "WORLDLINE_EVENT_MUTATION_WRITE_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden manuscript=private"}}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"public title"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-store-update")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-store-update")
+	if !store.called {
+		t.Fatal("expected mutation store after successful auth")
+	}
+	for _, forbidden := range []string{"driver leaked", "prompt", "secret", "api_key", "sk-hidden", "manuscript=private"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("event mutation store error leaked forbidden field %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestMalformedWorldlineEventMutationPathsRemainNotFoundWithInvalidBearer(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "adoption extra segment", method: http.MethodPost, path: "/v1/worldline-events/event-1/adoptions/extra"},
+		{name: "adoption double slash", method: http.MethodPost, path: "/v1/worldline-events//adoptions"},
+		{name: "update extra segment", method: http.MethodPatch, path: "/v1/worldline-events/event-1/extra"},
+		{name: "update double slash", method: http.MethodPatch, path: "/v1/worldline-events//event-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorldlineEventReader{}
+			adoptions := &recordingWorldlineEventAdoptionStore{}
+			mutations := &recordingWorldlineEventMutationStore{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{
+				SessionAuthSecret:           "secret",
+				WriterStarter:               &recordingStarter{},
+				Authorizer:                  authorizer,
+				WorldlineEventReader:        reader,
+				WorldlineEventAdoptionStore: adoptions,
+				WorldlineEventMutationStore: mutations,
+			})
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{"title":"hidden","prompt":"secret"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("Authorization", "Bearer invalid-token")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, response.Code, response.Body.String())
+			}
+			if reader.getCalled || authorizer.called || adoptions.called || mutations.called {
+				t.Fatalf("malformed route should not call collaborators: reader=%v auth=%v adoption=%v mutation=%v", reader.getCalled, authorizer.called, adoptions.called, mutations.called)
+			}
+			if strings.Contains(response.Body.String(), "UNAUTHENTICATED") || strings.Contains(response.Body.String(), "hidden") || strings.Contains(response.Body.String(), "prompt") {
+				t.Fatalf("malformed route leaked actor-sensitive or body data: %s", response.Body.String())
+			}
+		})
 	}
 }
 
