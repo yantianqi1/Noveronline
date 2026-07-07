@@ -78,6 +78,38 @@ func TestSQLReaderReturnsPublicCurrentUserWithActiveTenantsAndProjects(t *testin
 	}
 }
 
+func TestSQLReaderActiveProjectsQueryFiltersInactiveProjectMemberOverrides(t *testing.T) {
+	queryer := &fakeAuthQueryer{
+		rows: []SQLRows{
+			&fakeAuthRows{rows: [][]any{{
+				"user-123",
+				"author@example.test",
+				"Author",
+				"",
+			}}},
+			&fakeAuthRows{rows: [][]any{{"tenant-123", "Studio", "writer", "active"}}},
+			&fakeAuthRows{rows: [][]any{{"tenant-123", "project-123", "Long Novel", nil, "writer", "active"}}},
+		},
+	}
+	reader := NewSQLReader(SQLReaderConfig{Queryer: queryer})
+
+	_, err := reader.GetCurrentUser(context.Background(), GetCurrentUserInput{UserID: "user-123"})
+
+	if err != nil {
+		t.Fatalf("GetCurrentUser returned error: %v", err)
+	}
+	if len(queryer.queries) != 3 {
+		t.Fatalf("expected user, tenant, and project queries, got %d", len(queryer.queries))
+	}
+	projectQuery := strings.ToLower(queryer.queries[2])
+	if !strings.Contains(projectQuery, "left join project_members pm") {
+		t.Fatalf("expected project query to left join project_members: %s", queryer.queries[2])
+	}
+	if !strings.Contains(projectQuery, "pm.status = 'active'") {
+		t.Fatalf("project member override join must filter active rows: %s", queryer.queries[2])
+	}
+}
+
 func TestSQLReaderMapsInactiveOrMissingUserToUserNotFound(t *testing.T) {
 	queryer := &fakeAuthQueryer{
 		rows: []SQLRows{&fakeAuthRows{}},
@@ -146,6 +178,273 @@ func TestSQLReaderSanitizesQueryScanRowsAndCloseFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReaderBackedAuthorizerProjectReadRoleMatrix(t *testing.T) {
+	allowedProjectRoles := []string{"project_owner", "editor", "writer", "analyst", "viewer"}
+	for _, role := range allowedProjectRoles {
+		t.Run("project_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionProjectRead,
+			})
+
+			if err != nil {
+				t.Fatalf("expected role %q to read project: %v", role, err)
+			}
+		})
+	}
+
+	resolvedTenantRoles := []string{"owner", "admin", "editor", "writer", "viewer"}
+	for _, role := range resolvedTenantRoles {
+		t.Run("resolved_tenant_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionProjectRead,
+			})
+
+			if err != nil {
+				t.Fatalf("expected resolved role %q to read project: %v", role, err)
+			}
+		})
+	}
+
+	authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole("billing")))
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     "user-123",
+		TenantID:   "tenant-123",
+		ProjectID:  "project-123",
+		Permission: PermissionProjectRead,
+	})
+
+	assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+}
+
+func TestReaderBackedAuthorizerWriterRunRoleMatrix(t *testing.T) {
+	allowedProjectRoles := []string{"project_owner", "editor", "writer"}
+	for _, role := range allowedProjectRoles {
+		t.Run("project_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionWriterRun,
+			})
+
+			if err != nil {
+				t.Fatalf("expected role %q to run writer: %v", role, err)
+			}
+		})
+	}
+
+	deniedProjectRoles := []string{"analyst", "viewer", "billing"}
+	for _, role := range deniedProjectRoles {
+		t.Run("project_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionWriterRun,
+			})
+
+			assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+		})
+	}
+}
+
+func TestReaderBackedAuthorizerProjectScopedPermissionsUseResolvedProjectRole(t *testing.T) {
+	tests := []struct {
+		name       string
+		user       CurrentUser
+		permission Permission
+	}{
+		{
+			name: "tenant_editor_project_override_viewer_denied_writer_run",
+			user: CurrentUser{
+				User:          UserSummary{UserID: "user-123"},
+				ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "editor", Status: "active"}},
+				ActiveProjects: []ProjectMembershipSummary{{
+					TenantID:  "tenant-123",
+					ProjectID: "project-123",
+					Role:      "viewer",
+					Status:    "active",
+				}},
+			},
+			permission: PermissionWriterRun,
+		},
+		{
+			name: "tenant_writer_project_override_viewer_denied_writer_run",
+			user: CurrentUser{
+				User:          UserSummary{UserID: "user-123"},
+				ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "writer", Status: "active"}},
+				ActiveProjects: []ProjectMembershipSummary{{
+					TenantID:  "tenant-123",
+					ProjectID: "project-123",
+					Role:      "viewer",
+					Status:    "active",
+				}},
+			},
+			permission: PermissionWriterRun,
+		},
+		{
+			name: "tenant_writer_without_matching_project_denied_writer_run",
+			user: CurrentUser{
+				User:          UserSummary{UserID: "user-123"},
+				ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "writer", Status: "active"}},
+				ActiveProjects: []ProjectMembershipSummary{{
+					TenantID:  "tenant-123",
+					ProjectID: "other-project",
+					Role:      "writer",
+					Status:    "active",
+				}},
+			},
+			permission: PermissionWriterRun,
+		},
+		{
+			name:       "resolved_billing_denied_project_read",
+			user:       authCurrentUserWithProjectRole("billing"),
+			permission: PermissionProjectRead,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(tt.user))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: tt.permission,
+			})
+
+			assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+		})
+	}
+}
+
+func TestReaderBackedAuthorizerLLMModuleBindingManageRequiresTenantAdmin(t *testing.T) {
+	for _, role := range []string{"owner", "admin"} {
+		t.Run("tenant_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithTenantRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionLLMModuleBindingManage,
+			})
+
+			if err != nil {
+				t.Fatalf("expected tenant role %q to manage LLM module binding: %v", role, err)
+			}
+		})
+	}
+
+	authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(CurrentUser{
+		User:          UserSummary{UserID: "user-123"},
+		ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "editor", Status: "active"}},
+		ActiveProjects: []ProjectMembershipSummary{{
+			TenantID:  "tenant-123",
+			ProjectID: "project-123",
+			Role:      "project_owner",
+			Status:    "active",
+		}},
+	}))
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     "user-123",
+		TenantID:   "tenant-123",
+		ProjectID:  "project-123",
+		Permission: PermissionLLMModuleBindingManage,
+	})
+
+	assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+}
+
+func TestReaderBackedAuthorizerInactiveOrMalformedMembershipStatusesDenyAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		user       CurrentUser
+		permission Permission
+	}{
+		{
+			name:       "blank_project_status_denies_writer_run",
+			user:       authCurrentUserWithProjectRoleAndStatus("writer", ""),
+			permission: PermissionWriterRun,
+		},
+		{
+			name:       "inactive_project_status_denies_writer_run",
+			user:       authCurrentUserWithProjectRoleAndStatus("writer", "inactive"),
+			permission: PermissionWriterRun,
+		},
+		{
+			name: "blank_tenant_status_denies_llm_manage",
+			user: CurrentUser{
+				User:          UserSummary{UserID: "user-123"},
+				ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "owner", Status: ""}},
+			},
+			permission: PermissionLLMModuleBindingManage,
+		},
+		{
+			name: "inactive_tenant_status_denies_llm_manage",
+			user: CurrentUser{
+				User:          UserSummary{UserID: "user-123"},
+				ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "admin", Status: "inactive"}},
+			},
+			permission: PermissionLLMModuleBindingManage,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(tt.user))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: tt.permission,
+			})
+
+			assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+		})
+	}
+}
+
+func TestReaderBackedAuthorizerMapsAuthFailuresToStablePublicErrors(t *testing.T) {
+	authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(CurrentUser{}))
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		TenantID:   "tenant-123",
+		ProjectID:  "project-123",
+		Permission: PermissionProjectRead,
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
+
+	authorizer = NewReaderBackedAuthorizer(NewDisabledReader())
+	err = authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     "user-123",
+		TenantID:   "tenant-123",
+		ProjectID:  "project-123",
+		Permission: PermissionProjectRead,
+	})
+
+	assertAuthError(t, err, CodeBackendUnconfigured, "auth reader is not configured")
 }
 
 type fakeAuthQueryer struct {
@@ -243,5 +542,34 @@ func assertAuthError(t *testing.T, err error, code string, message string) {
 	}
 	if appErr.Code != code || appErr.Message != message || appErr.Error() != message {
 		t.Fatalf("unexpected auth error: %#v", appErr)
+	}
+}
+
+type staticCurrentUserReader CurrentUser
+
+func (r staticCurrentUserReader) GetCurrentUser(context.Context, GetCurrentUserInput) (CurrentUser, error) {
+	return CurrentUser(r), nil
+}
+
+func authCurrentUserWithProjectRole(role string) CurrentUser {
+	return authCurrentUserWithProjectRoleAndStatus(role, "active")
+}
+
+func authCurrentUserWithProjectRoleAndStatus(role string, status string) CurrentUser {
+	return CurrentUser{
+		User: UserSummary{UserID: "user-123"},
+		ActiveProjects: []ProjectMembershipSummary{{
+			TenantID:  "tenant-123",
+			ProjectID: "project-123",
+			Role:      role,
+			Status:    status,
+		}},
+	}
+}
+
+func authCurrentUserWithTenantRole(role string) CurrentUser {
+	return CurrentUser{
+		User:          UserSummary{UserID: "user-123"},
+		ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: role, Status: "active"}},
 	}
 }

@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side 和 W2-S3 Next tenant/project picker 已接入；完整 compose health、真实 Temporal handoff、RBAC enforcement 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker 和 W2-S4a Go HTTP RBAC seam 已接入；完整 compose health、真实 Temporal handoff、session/cookie/JWT 与 route-wide RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,50 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 RBAC enforcement、session/cookie/JWT transport |
-| 本轮开发 slice | W2-S3 Next tenant/project picker：Next project layout 读取 `/v1/me` public membership summary，并在 sidebar 暴露 fail-closed user/tenant/project picker |
-| 推荐下一步 | W2-S4 接入 RBAC enforcement；之后推进 session/cookie/JWT transport。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S3 不声明完整 Auth/RBAC 或 session transport 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 session/cookie/JWT transport、route-wide RBAC enforcement |
+| 本轮开发 slice | W2-S4a Go HTTP RBAC seam：把 reader-backed `auth.Authorizer` 接入 project overview、writer run start、project LLM module binding mutation 四个关键入口 |
+| 推荐下一步 | W2-S4b 继续扩展 RBAC enforcement 到更多 route/mutation，并开始 session/cookie/JWT transport。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4a 不声明完整 Auth/RBAC 或 session transport 完成 |
+
+## Wave 2 W2-S4a Go HTTP RBAC seam
+
+Context:
+
+- W2-S1/W2-S2 已提供 trusted `X-User-Id` current-user reader 与 DB-backed active membership summary；W2-S3 已让 Next shell 消费该 summary。
+- 本 slice 限定在 Go API RBAC authorizer seam，不实现 session cookie/JWT，不替换开发期 `X-Tenant-Id` / `X-User-Id` transport，不声明 route-wide RBAC 完成。
+- `auth.SQLReader` 已把项目权限解析到 `ActiveProjects`：存在 active `project_members.role` 时使用项目 override，否则继承 tenant role。
+
+TDD / Review:
+
+- Implementer subagent Boyle 先补 RED：`go test ./internal/auth -run 'Authorize|RBAC|Permission' -count=1` 和 `go test ./internal/httpapi -run 'RBAC|ProjectOverview|StartWriterRun|LLMModuleBinding' -count=1`，失败于缺少 `Authorizer`、permission 常量和 route gate。
+- 新增 `auth.Authorizer` / `ReaderBackedAuthorizer`，默认通过 current-user reader fail closed；缺 user context 返回 `UNAUTHENTICATED`，无 auth backend 返回 `AUTH_BACKEND_UNCONFIGURED`，lookup failure 返回 `AUTH_LOOKUP_FAILED`，权限拒绝返回 `AUTH_ACCESS_DENIED`。
+- Project read / writer run permission 只使用 `ActiveProjects` 中的 resolved active project role；不会再把 `ActiveTenants` 直接 OR 进 project-scoped 判断，避免 tenant writer/editor 绕过 project override viewer/analyst。blank/inactive membership status 也不授予权限，SQL reader 的 project member override join 也只接受 `pm.status = 'active'`。
+- LLM module binding mutation 仍要求 tenant role `owner` / `admin`；project role alone（即使是 `project_owner`）不能管理绑定。
+- HTTP gate 已接入 `GET /v1/projects/{projectId}/overview`、`POST /v1/projects/{projectId}/writer-runs`、`PUT /v1/projects/{projectId}/llm/module-bindings/{moduleKey}` 和 `DELETE /v1/projects/{projectId}/llm/module-bindings/{moduleKey}`，并在 payload decode、LLM resolver、writer starter、overview reader 或 binding store 之前拒绝。
+- 初版 spec reviewer Sagan 发现 project-scoped permission 用 `ActiveProjects || ActiveTenants` 造成 override bypass；quality reviewer Beauvoir 发现 full `internal/httpapi` 中旧 writer-run fixture 未显式 allow auth，以及 blank status 被当作 active。Correction RED 复现这些失败后已修正。
+- Post-fix spec/quality recheck 确认 previous bypass、blank/inactive status、no-matching-project writer-run side effect 和 full httpapi regression 已关闭。
+
+Verification:
+
+- `cd apps/api && go test ./internal/auth -run 'Authorize|RBAC|Permission|Override|Project' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'RBAC|StartWriterRun|ProjectOverview|LLMModuleBinding' -count=1` 通过。
+- `cd apps/api && go test ./internal/auth -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Auth|RBAC' -count=1` 通过。
+- `gofmt -l`、`git diff --check` 和 reviewer read-only checks 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+
+Next:
+
+- W2-S4b：继续 route-wide RBAC enforcement，把剩余 sensitive reads/mutations 纳入 permission matrix。
+- 后续 session/cookie/JWT transport 仍 pending；当前 W2-S4a 仍使用 development actor headers。
 
 ## Wave 2 W2-S3 Next tenant/project picker
 

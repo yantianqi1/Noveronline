@@ -46,6 +46,18 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 	return r.result, nil
 }
 
+type recordingAuthorizer struct {
+	input  auth.AuthorizeInput
+	err    error
+	called bool
+}
+
+func (a *recordingAuthorizer) Authorize(ctx context.Context, input auth.AuthorizeInput) error {
+	a.input = input
+	a.called = true
+	return a.err
+}
+
 func (s *recordingStarter) StartWriterRun(ctx context.Context, input workflows.StartWriterRunInput) (workflows.WriterRun, error) {
 	s.input = input
 	if s.err != nil {
@@ -130,10 +142,12 @@ type recordingProjectOverviewReader struct {
 	input    projectoverview.GetProjectOverviewInput
 	overview projectoverview.Overview
 	err      error
+	called   bool
 }
 
 func (r *recordingProjectOverviewReader) GetProjectOverview(ctx context.Context, input projectoverview.GetProjectOverviewInput) (projectoverview.Overview, error) {
 	r.input = input
+	r.called = true
 	if r.err != nil {
 		return projectoverview.Overview{}, r.err
 	}
@@ -1367,9 +1381,173 @@ func TestGetCurrentUserSanitizesReaderErrorsAtHTTPBoundary(t *testing.T) {
 	}
 }
 
+func TestRBACDefaultAuthorizerDeniesProjectOverviewBeforeReader(t *testing.T) {
+	authReader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User:          auth.UserSummary{UserID: "user-123"},
+			ActiveTenants: []auth.TenantMembershipSummary{{TenantID: "tenant-123", Role: "billing", Status: "active"}},
+		},
+	}
+	overviewReader := &recordingProjectOverviewReader{
+		overview: projectoverview.Overview{ProjectID: "project-123", Status: "active"},
+	}
+	server := NewServer(Config{AuthReader: authReader, ProjectOverviewReader: overviewReader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/overview", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_overview_denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authReader.called {
+		t.Fatal("expected default authorizer to use auth reader")
+	}
+	if overviewReader.called {
+		t.Fatalf("overview reader was called after RBAC denial: %#v", overviewReader.input)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied ||
+		body.Error.Message != "current user access is denied" ||
+		body.Error.RequestID != "req_overview_denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestRBACAuthorizerDeniesWriterRunBeforeLLMResolverAndStarter(t *testing.T) {
+	authorizer := &recordingAuthorizer{
+		err: &auth.AppError{
+			Code:    auth.CodeAccessDenied,
+			Message: "prompt body api_key credential_ref manuscript must not leak",
+		},
+	}
+	resolver := &recordingLLMResolver{result: writerComposerResolution()}
+	starter := &recordingStarter{}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: starter, LLMResolver: resolver})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_writer_denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authorizer.called {
+		t.Fatal("expected authorizer to be called")
+	}
+	if authorizer.input.Permission != auth.PermissionWriterRun ||
+		authorizer.input.TenantID != "tenant-123" ||
+		authorizer.input.ProjectID != "project-123" ||
+		authorizer.input.UserID != "user-123" ||
+		authorizer.input.RequestID != "req_writer_denied" {
+		t.Fatalf("authorizer lost writer context: %#v", authorizer.input)
+	}
+	if resolver.called {
+		t.Fatalf("LLM resolver was called after RBAC denial: %#v", resolver.input)
+	}
+	if starter.input.ProjectID != "" {
+		t.Fatalf("writer starter was called after RBAC denial: %#v", starter.input)
+	}
+	rawBody := response.Body.String()
+	if strings.Contains(rawBody, "prompt") || strings.Contains(rawBody, "api_key") || strings.Contains(rawBody, "credential_ref") || strings.Contains(rawBody, "manuscript") {
+		t.Fatalf("RBAC error leaked sensitive authorizer message: %s", rawBody)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestRBACRequiresUserContextBeforeWriterRunSideEffects(t *testing.T) {
+	resolver := &recordingLLMResolver{result: writerComposerResolution()}
+	starter := &recordingStarter{}
+	server := NewServer(Config{WriterStarter: starter, LLMResolver: resolver})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if resolver.called {
+		t.Fatalf("LLM resolver was called without user context: %#v", resolver.input)
+	}
+	if starter.input.ProjectID != "" {
+		t.Fatalf("writer starter was called without user context: %#v", starter.input)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestRBACDefaultAuthorizerDeniesWriterRunWithoutMatchingProjectBeforeSideEffects(t *testing.T) {
+	authReader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User:          auth.UserSummary{UserID: "user-123"},
+			ActiveTenants: []auth.TenantMembershipSummary{{TenantID: "tenant-123", Role: "writer", Status: "active"}},
+			ActiveProjects: []auth.ProjectMembershipSummary{{
+				TenantID:  "tenant-123",
+				ProjectID: "other-project",
+				Role:      "writer",
+				Status:    "active",
+			}},
+		},
+	}
+	resolver := &recordingLLMResolver{result: writerComposerResolution()}
+	starter := &recordingStarter{}
+	server := NewServer(Config{AuthReader: authReader, WriterStarter: starter, LLMResolver: resolver})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authReader.called {
+		t.Fatal("expected default authorizer to use auth reader")
+	}
+	if resolver.called {
+		t.Fatalf("LLM resolver was called after RBAC denial: %#v", resolver.input)
+	}
+	if starter.input.ProjectID != "" {
+		t.Fatalf("writer starter was called after RBAC denial: %#v", starter.input)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
 func TestStartWriterRunCarriesTenantProjectAndRunContext(t *testing.T) {
 	starter := &recordingStarter{}
-	server := NewServer(Config{WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	requestBody := bytes.NewBufferString(`{"mode":"draft","instruction":"写下一场谈判","options":{"asset_ids":["asset-1"]}}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", requestBody)
 	request.Header.Set("Content-Type", "application/json")
@@ -1420,7 +1598,7 @@ func TestStartWriterRunCarriesTenantProjectAndRunContext(t *testing.T) {
 
 func TestStartWriterRunSanitizesUntrustedOptionsBeforeStarter(t *testing.T) {
 	starter := &recordingStarter{}
-	server := NewServer(Config{WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	requestBody := bytes.NewBufferString(`{
 		"mode":"draft",
 		"instruction":"写下一场谈判",
@@ -1487,7 +1665,7 @@ func TestStartWriterRunSanitizesUntrustedOptionsBeforeStarter(t *testing.T) {
 
 func TestStartWriterRunValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.T) {
 	starter := &recordingStarter{}
-	server := NewServer(Config{WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", strings.NewReader(`{
 		"mode":"draft",
 		"instruction":"写下一场谈判",
@@ -6057,7 +6235,7 @@ func TestStartSeedRunFailsClosedWithoutConfiguredStarter(t *testing.T) {
 
 func TestGetWriterRunReturnsQueuedRunStatusFromAPI(t *testing.T) {
 	starter := workflows.NewLocalWriterStarter()
-	server := NewServer(Config{WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	startRequest := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/writer-runs",
@@ -6332,7 +6510,7 @@ func TestGetProjectOverviewUsesTenantProjectScopeAndReturnsPublicRollup(t *testi
 			UpdatedAt:                     "2026-07-07T01:05:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/overview", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6392,7 +6570,7 @@ func TestGetProjectOverviewSanitizesReaderErrorsAtHTTPBoundary(t *testing.T) {
 			Message: "driver exploded prompt=hidden api_key=sk-hidden credential_ref=cred-hidden readiness report body draft manuscript",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/overview", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -7426,7 +7604,7 @@ func TestStartWriterRunRejectsMissingTenantContext(t *testing.T) {
 }
 
 func TestStartWriterRunRejectsMissingLLMModuleBinding(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMResolver: llm.NewStaticResolver(nil)})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMResolver: llm.NewStaticResolver(nil)})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -7611,7 +7789,7 @@ func TestListLLMModuleBindingsReturnsSanitizedProjectScopedRows(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMBindingStore: store})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/module-bindings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -7635,6 +7813,71 @@ func TestListLLMModuleBindingsReturnsSanitizedProjectScopedRows(t *testing.T) {
 	}
 }
 
+func TestRBACDefaultAuthorizerRequiresTenantAdminBeforeLLMModuleBindingMutationStore(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		body   io.Reader
+	}{
+		{
+			name:   "upsert",
+			method: http.MethodPut,
+			body:   bytes.NewBufferString(`{"channel_id":"channel-1","model_id":"model-1"}`),
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authReader := &recordingAuthReader{
+				result: auth.CurrentUser{
+					User: auth.UserSummary{UserID: "user-123"},
+					ActiveTenants: []auth.TenantMembershipSummary{{
+						TenantID: "tenant-123",
+						Role:     "editor",
+						Status:   "active",
+					}},
+					ActiveProjects: []auth.ProjectMembershipSummary{{
+						TenantID:  "tenant-123",
+						ProjectID: "project-123",
+						Role:      "project_owner",
+						Status:    "active",
+					}},
+				},
+			}
+			store := &recordingLLMBindingStore{}
+			server := NewServer(Config{AuthReader: authReader, LLMBindingStore: store})
+			request := httptest.NewRequest(tt.method, "/v1/projects/project-123/llm/module-bindings/writer_composer", tt.body)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if !authReader.called {
+				t.Fatal("expected default authorizer to use auth reader")
+			}
+			if store.upsertInput.ProjectID != "" || store.deleteInput.ProjectID != "" {
+				t.Fatalf("binding store was called after RBAC denial: upsert=%#v delete=%#v", store.upsertInput, store.deleteInput)
+			}
+			var body errorEnvelope
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+		})
+	}
+}
+
 func TestUpsertLLMModuleBindingCarriesActorAndReturnsSanitizedBinding(t *testing.T) {
 	store := &recordingLLMBindingStore{
 		upserted: llm.ModuleBindingRecord{
@@ -7651,7 +7894,7 @@ func TestUpsertLLMModuleBindingCarriesActorAndReturnsSanitizedBinding(t *testing
 			UpdatedAt:     "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMBindingStore: store})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
 	request := httptest.NewRequest(
 		http.MethodPut,
 		"/v1/projects/project-123/llm/module-bindings/writer_composer",
@@ -7701,7 +7944,7 @@ func TestDeleteLLMModuleBindingCarriesTenantProjectContext(t *testing.T) {
 			UpdatedAt:     "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMBindingStore: store})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/projects/project-123/llm/module-bindings/writer_composer", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -8474,6 +8717,7 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 		body      string
 		message   string
 		requestID string
+		allowAuth bool
 	}{
 		{
 			name:      "module binding",
@@ -8482,6 +8726,7 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 			body:      `{"channel_id":"channel-1","model_id":"model-1","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid llm module binding payload",
 			requestID: "req-llm-binding-validation",
+			allowAuth: true,
 		},
 		{
 			name:      "channel create",
@@ -8511,7 +8756,11 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{WriterStarter: &recordingStarter{}})
+			config := Config{WriterStarter: &recordingStarter{}}
+			if tt.allowAuth {
+				config.Authorizer = &recordingAuthorizer{}
+			}
+			server := NewServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -8587,6 +8836,7 @@ func TestLLMFacilityRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T)
 			path:   "/v1/projects/project-123/llm/module-bindings/writer_composer",
 			body:   `{"channel_id":"channel-1","model_id":"model-1","settings":{}}`,
 			config: Config{
+				Authorizer:      &recordingAuthorizer{},
 				WriterStarter:   &recordingStarter{},
 				LLMBindingStore: &recordingLLMBindingStore{err: &llm.AppError{Code: "LLM_BINDING_UPDATE_FAILED", Message: sensitiveMessage}},
 			},
@@ -8598,6 +8848,7 @@ func TestLLMFacilityRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T)
 			method: http.MethodDelete,
 			path:   "/v1/projects/project-123/llm/module-bindings/writer_composer",
 			config: Config{
+				Authorizer:      &recordingAuthorizer{},
 				WriterStarter:   &recordingStarter{},
 				LLMBindingStore: &recordingLLMBindingStore{err: &llm.AppError{Code: "LLM_BINDING_DELETE_FAILED", Message: sensitiveMessage}},
 			},
@@ -8951,21 +9202,23 @@ func (a *recordingTraceExportAuditor) RecordExport(ctx context.Context, input tr
 }
 
 func boundWriterComposerResolver() *llm.StaticResolver {
-	return llm.NewStaticResolver([]llm.ModuleResolution{
-		{
-			TenantID:      "tenant-123",
-			ProjectID:     "project-123",
-			ModuleKey:     "writer_composer",
-			ChannelID:     "channel-1",
-			ModelID:       "model-1",
-			Provider:      "openai-compatible",
-			BaseURL:       "https://llm.example.test/v1",
-			CredentialRef: "credref-1",
-			SupportsTools: true,
-			SupportsJSON:  true,
-			Settings:      map[string]any{"temperature": 0.7},
-		},
-	})
+	return llm.NewStaticResolver([]llm.ModuleResolution{writerComposerResolution()})
+}
+
+func writerComposerResolution() llm.ModuleResolution {
+	return llm.ModuleResolution{
+		TenantID:      "tenant-123",
+		ProjectID:     "project-123",
+		ModuleKey:     "writer_composer",
+		ChannelID:     "channel-1",
+		ModelID:       "model-1",
+		Provider:      "openai-compatible",
+		BaseURL:       "https://llm.example.test/v1",
+		CredentialRef: "credref-1",
+		SupportsTools: true,
+		SupportsJSON:  true,
+		Settings:      map[string]any{"temperature": 0.7},
+	}
 }
 
 func boundWriterReviewerResolver() *llm.StaticResolver {

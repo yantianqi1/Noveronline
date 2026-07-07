@@ -25,6 +25,7 @@ import (
 
 type Config struct {
 	AuthReader                      auth.Reader
+	Authorizer                      auth.Authorizer
 	WriterStarter                   workflows.WriterStarter
 	WriterReader                    workflows.WriterReader
 	WriterEventReader               workflows.WriterEventReader
@@ -85,6 +86,7 @@ type Config struct {
 
 type Server struct {
 	authReader                      auth.Reader
+	authorizer                      auth.Authorizer
 	writerStarter                   workflows.WriterStarter
 	writerReader                    workflows.WriterReader
 	writerEventReader               workflows.WriterEventReader
@@ -516,6 +518,10 @@ func NewServer(config Config) *Server {
 	if authReader == nil {
 		authReader = auth.NewDisabledReader()
 	}
+	authorizer := config.Authorizer
+	if authorizer == nil {
+		authorizer = auth.NewReaderBackedAuthorizer(authReader)
+	}
 	starter := config.WriterStarter
 	if starter == nil {
 		starter = workflows.NewLocalWriterStarter()
@@ -750,6 +756,7 @@ func NewServer(config Config) *Server {
 	}
 	return &Server{
 		authReader:                      authReader,
+		authorizer:                      authorizer,
 		writerStarter:                   starter,
 		writerReader:                    reader,
 		writerEventReader:               writerEventReader,
@@ -1025,6 +1032,26 @@ func (s *Server) handleGetCurrentUser(response http.ResponseWriter, request *htt
 	writeJSON(response, http.StatusOK, currentUser)
 }
 
+func (s *Server) authorizeProject(response http.ResponseWriter, request *http.Request, tenantID string, projectID string, permission auth.Permission) bool {
+	authorizer := s.authorizer
+	if authorizer == nil {
+		authorizer = auth.NewReaderBackedAuthorizer(s.authReader)
+	}
+	err := authorizer.Authorize(request.Context(), auth.AuthorizeInput{
+		UserID:     strings.TrimSpace(request.Header.Get("X-User-Id")),
+		TenantID:   tenantID,
+		ProjectID:  projectID,
+		Permission: permission,
+		RequestID:  requestID(request),
+	})
+	if err == nil {
+		return true
+	}
+	code := publicAuthCode(auth.ErrorCode(err))
+	writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+	return false
+}
+
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -1034,6 +1061,9 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 	projectID := projectIDFromPath(request.URL.Path)
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
 		return
 	}
 
@@ -1195,6 +1225,9 @@ func (s *Server) handleGetProjectOverview(response http.ResponseWriter, request 
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "overview")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project overview route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionProjectRead) {
 		return
 	}
 	overview, err := s.projectOverviewReader.GetProjectOverview(request.Context(), projectoverview.GetProjectOverviewInput{
@@ -3063,6 +3096,9 @@ func (s *Server) handleUpsertLLMModuleBinding(response http.ResponseWriter, requ
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm module binding route not found", nil)
 		return
 	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionLLMModuleBindingManage) {
+		return
+	}
 	var payload upsertLLMModuleBindingRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -3098,6 +3134,9 @@ func (s *Server) handleDeleteLLMModuleBinding(response http.ResponseWriter, requ
 	projectID, moduleKey := llmModuleBindingPathParts(request.URL.Path)
 	if projectID == "" || moduleKey == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm module binding route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionLLMModuleBindingManage) {
 		return
 	}
 	binding, err := s.llmBindingStore.DeleteProjectModuleBinding(request.Context(), llm.DeleteProjectModuleBindingInput{

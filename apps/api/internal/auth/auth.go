@@ -53,6 +53,26 @@ type Reader interface {
 	GetCurrentUser(context.Context, GetCurrentUserInput) (CurrentUser, error)
 }
 
+type Permission string
+
+const (
+	PermissionProjectRead            Permission = "project_read"
+	PermissionWriterRun              Permission = "writer_run"
+	PermissionLLMModuleBindingManage Permission = "llm_module_binding_manage"
+)
+
+type AuthorizeInput struct {
+	UserID     string
+	TenantID   string
+	ProjectID  string
+	Permission Permission
+	RequestID  string
+}
+
+type Authorizer interface {
+	Authorize(context.Context, AuthorizeInput) error
+}
+
 type SQLQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
 }
@@ -123,6 +143,55 @@ func ValidateGetCurrentUserInput(input GetCurrentUserInput) error {
 		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
 	}
 	return nil
+}
+
+type ReaderBackedAuthorizer struct {
+	reader Reader
+}
+
+func NewReaderBackedAuthorizer(reader Reader) *ReaderBackedAuthorizer {
+	if reader == nil {
+		reader = NewDisabledReader()
+	}
+	return &ReaderBackedAuthorizer{reader: reader}
+}
+
+func (a *ReaderBackedAuthorizer) Authorize(ctx context.Context, input AuthorizeInput) error {
+	if err := ValidateGetCurrentUserInput(GetCurrentUserInput{UserID: input.UserID, RequestID: input.RequestID}); err != nil {
+		return err
+	}
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	if tenantID == "" || projectID == "" || input.Permission == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "tenant_id, project_id, and permission are required"}
+	}
+	if a.reader == nil {
+		return &AppError{Code: CodeBackendUnconfigured, Message: "auth reader is not configured"}
+	}
+	currentUser, err := a.reader.GetCurrentUser(ctx, GetCurrentUserInput{
+		UserID:    strings.TrimSpace(input.UserID),
+		RequestID: input.RequestID,
+	})
+	if err != nil {
+		return publicAuthErrorFromCode(ErrorCode(err))
+	}
+	if a.allowed(currentUser, tenantID, projectID, input.Permission) {
+		return nil
+	}
+	return accessDenied()
+}
+
+func (a *ReaderBackedAuthorizer) allowed(currentUser CurrentUser, tenantID string, projectID string, permission Permission) bool {
+	switch permission {
+	case PermissionProjectRead:
+		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, projectReadProjectRoles())
+	case PermissionWriterRun:
+		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, writerRunProjectRoles())
+	case PermissionLLMModuleBindingManage:
+		return hasTenantRole(currentUser.ActiveTenants, tenantID, llmModuleBindingManageTenantRoles())
+	default:
+		return false
+	}
 }
 
 func (r *SQLReader) GetCurrentUser(ctx context.Context, input GetCurrentUserInput) (CurrentUser, error) {
@@ -227,6 +296,7 @@ LEFT JOIN project_members pm
   ON pm.tenant_id = p.tenant_id
  AND pm.project_id = p.project_id
  AND pm.user_id = tm.user_id
+ AND pm.status = 'active'
 WHERE tm.user_id = $1 AND tm.status = 'active'
 ORDER BY p.title, p.project_id
 `, userID)
@@ -261,4 +331,85 @@ ORDER BY p.title, p.project_id
 
 func authLookupFailed() *AppError {
 	return &AppError{Code: CodeLookupFailed, Message: "auth lookup failed"}
+}
+
+func accessDenied() *AppError {
+	return &AppError{Code: CodeAccessDenied, Message: "current user access is denied"}
+}
+
+func publicAuthErrorFromCode(code string) *AppError {
+	switch code {
+	case CodeUnauthenticated:
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	case CodeBackendUnconfigured:
+		return &AppError{Code: CodeBackendUnconfigured, Message: "auth reader is not configured"}
+	case CodeUserNotFound:
+		return &AppError{Code: CodeUserNotFound, Message: "current user was not found"}
+	case CodeAccessDenied:
+		return accessDenied()
+	case CodeValidationFailed:
+		return &AppError{Code: CodeValidationFailed, Message: "invalid auth request"}
+	case CodeLookupFailed:
+		return authLookupFailed()
+	default:
+		return authLookupFailed()
+	}
+}
+
+func hasProjectRole(projects []ProjectMembershipSummary, tenantID string, projectID string, allowed map[string]struct{}) bool {
+	for _, project := range projects {
+		if !activeStatus(project.Status) {
+			continue
+		}
+		if strings.TrimSpace(project.TenantID) != tenantID || strings.TrimSpace(project.ProjectID) != projectID {
+			continue
+		}
+		if _, ok := allowed[normalizedRole(project.Role)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTenantRole(tenants []TenantMembershipSummary, tenantID string, allowed map[string]struct{}) bool {
+	for _, tenant := range tenants {
+		if !activeStatus(tenant.Status) {
+			continue
+		}
+		if strings.TrimSpace(tenant.TenantID) != tenantID {
+			continue
+		}
+		if _, ok := allowed[normalizedRole(tenant.Role)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func activeStatus(status string) bool {
+	return normalizedRole(status) == "active"
+}
+
+func normalizedRole(role string) string {
+	return strings.ToLower(strings.TrimSpace(role))
+}
+
+func projectReadProjectRoles() map[string]struct{} {
+	return roleSet("project_owner", "owner", "admin", "editor", "writer", "analyst", "viewer")
+}
+
+func writerRunProjectRoles() map[string]struct{} {
+	return roleSet("project_owner", "owner", "admin", "editor", "writer")
+}
+
+func llmModuleBindingManageTenantRoles() map[string]struct{} {
+	return roleSet("owner", "admin")
+}
+
+func roleSet(roles ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		set[role] = struct{}{}
+	}
+	return set
 }

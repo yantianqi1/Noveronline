@@ -630,6 +630,7 @@ func main() {
 
 	server := httpapi.NewServer(httpapi.Config{
 		AuthReader:                      authReader,
+		Authorizer:                      auth.NewReaderBackedAuthorizer(authReader),
 		WriterStarter:                   writerStarter,
 		WriterReader:                    writerReader,
 		WriterEventReader:               writerEventReader,
