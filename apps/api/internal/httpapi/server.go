@@ -968,6 +968,12 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/saved-paths"):
 		return true
+	case request.Method == http.MethodGet && isWorldlineSessionDetailPath(path):
+		return true
+	case request.Method == http.MethodGet && isWorldlineSessionTimelinePath(path):
+		return true
+	case request.Method == http.MethodGet && isWorldlineSessionEventsPath(path):
+		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-events/") && strings.HasSuffix(path, "/adoptions"):
 		return true
 	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/worldline-events/"):
@@ -1032,6 +1038,41 @@ func isReservedAssetPathPart(assetID string) bool {
 	default:
 		return false
 	}
+}
+
+func isWorldlineSessionDetailPath(path string) bool {
+	return worldlineSessionPathPart(path, "") != ""
+}
+
+func isWorldlineSessionTimelinePath(path string) bool {
+	return worldlineSessionPathPart(path, "timeline") != ""
+}
+
+func isWorldlineSessionEventsPath(path string) bool {
+	return worldlineSessionPathPart(path, "events") != ""
+}
+
+func worldlineSessionPathPart(path string, suffix string) string {
+	const prefix = "/v1/worldline-sessions/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	sessionID := strings.TrimPrefix(path, prefix)
+	if sessionID == "" {
+		return ""
+	}
+	if suffix != "" {
+		expectedSuffix := "/" + suffix
+		if !strings.HasSuffix(sessionID, expectedSuffix) {
+			return ""
+		}
+		sessionID = strings.TrimSuffix(sessionID, expectedSuffix)
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || strings.Contains(sessionID, "/") {
+		return ""
+	}
+	return sessionID
 }
 
 func projectActorSensitiveRoute(request *http.Request) bool {
@@ -1295,9 +1336,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListWorldlinePreparedAgents(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-preparations/"):
 		s.handleGetWorldlinePreparation(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/timeline"):
+	case request.Method == http.MethodGet && isWorldlineSessionTimelinePath(request.URL.Path):
 		s.handleListWorldlineTimeline(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/events"):
+	case request.Method == http.MethodGet && isWorldlineSessionEventsPath(request.URL.Path):
 		s.handleListWorldlineEvents(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/steps"):
 		s.handleStartWorldlineStep(response, request)
@@ -1309,7 +1350,7 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleInjectWorldlineVariable(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/saved-paths"):
 		s.handleCreateWorldlineSavedPath(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/"):
+	case request.Method == http.MethodGet && isWorldlineSessionDetailPath(request.URL.Path):
 		s.handleGetWorldlineSession(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldline/saved-paths"):
 		s.handleListWorldlineSavedPaths(response, request)
@@ -1461,6 +1502,27 @@ func (s *Server) authorizeWorldlineSessionCreativeWrite(response http.ResponseWr
 		return false
 	}
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite)
+}
+
+func (s *Server) authorizeWorldlineSessionProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, sessionID string) (worldline.SessionRecord, bool) {
+	record, err := s.worldlineSessionReader.GetSession(request.Context(), worldline.GetSessionInput{
+		TenantID:  tenantID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
+		return worldline.SessionRecord{}, false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return worldline.SessionRecord{}, false
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return worldline.SessionRecord{}, false
+	}
+	return record, true
 }
 
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
@@ -2434,18 +2496,13 @@ func (s *Server) handleGetWorldlineSession(response http.ResponseWriter, request
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	sessionID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-sessions/")
-	sessionID = strings.TrimSpace(strings.Trim(sessionID, "/"))
+	sessionID := worldlineSessionPathPart(request.URL.Path, "")
 	if sessionID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline session route not found", nil)
 		return
 	}
-	record, err := s.worldlineSessionReader.GetSession(request.Context(), worldline.GetSessionInput{
-		TenantID:  tenantID,
-		SessionID: sessionID,
-	})
-	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+	record, ok := s.authorizeWorldlineSessionProjectRead(response, request, tenantID, sessionID)
+	if !ok {
 		return
 	}
 	writeJSON(response, http.StatusOK, record)
@@ -2457,11 +2514,12 @@ func (s *Server) handleListWorldlineTimeline(response http.ResponseWriter, reque
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	sessionID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-sessions/")
-	sessionID = strings.TrimSuffix(sessionID, "/timeline")
-	sessionID = strings.TrimSpace(strings.Trim(sessionID, "/"))
-	if sessionID == "" || strings.Contains(sessionID, "/") {
+	sessionID := worldlineSessionPathPart(request.URL.Path, "timeline")
+	if sessionID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline timeline route not found", nil)
+		return
+	}
+	if _, ok := s.authorizeWorldlineSessionProjectRead(response, request, tenantID, sessionID); !ok {
 		return
 	}
 	items, err := s.worldlineTimelineReader.ListTimeline(request.Context(), worldline.ListTimelineInput{
@@ -2469,7 +2527,8 @@ func (s *Server) handleListWorldlineTimeline(response http.ResponseWriter, reque
 		SessionID: sessionID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.TimelineEventRecord]{Items: items})
@@ -2481,11 +2540,12 @@ func (s *Server) handleListWorldlineEvents(response http.ResponseWriter, request
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	sessionID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-sessions/")
-	sessionID = strings.TrimSuffix(sessionID, "/events")
-	sessionID = strings.TrimSpace(strings.Trim(sessionID, "/"))
-	if sessionID == "" || strings.Contains(sessionID, "/") {
+	sessionID := worldlineSessionPathPart(request.URL.Path, "events")
+	if sessionID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline event route not found", nil)
+		return
+	}
+	if _, ok := s.authorizeWorldlineSessionProjectRead(response, request, tenantID, sessionID); !ok {
 		return
 	}
 	items, err := s.worldlineEventReader.ListEvents(request.Context(), worldline.ListEventsInput{
@@ -2494,7 +2554,8 @@ func (s *Server) handleListWorldlineEvents(response http.ResponseWriter, request
 		Status:    strings.TrimSpace(request.URL.Query().Get("status")),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.EventRecord]{Items: items})
