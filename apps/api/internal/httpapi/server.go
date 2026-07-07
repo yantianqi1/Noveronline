@@ -990,6 +990,8 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/assets/"):
 		return true
+	case request.Method == http.MethodGet && isAssetDetailPath(path):
+		return true
 	case request.Method == http.MethodPost && path == "/v1/assets/bulk-actions":
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/archive-memories/") && strings.HasSuffix(path, "/adoptions"):
@@ -1000,6 +1002,19 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isAssetDetailPath(path string) bool {
+	assetID := strings.TrimSpace(strings.TrimPrefix(path, "/v1/assets/"))
+	if assetID == "" || assetID == path || strings.Contains(assetID, "/") {
+		return false
+	}
+	switch assetID {
+	case "search", "bulk-actions":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -1252,7 +1267,7 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handlePatchAsset(response, request)
 	case request.Method == http.MethodDelete && strings.HasPrefix(request.URL.Path, "/v1/assets/"):
 		s.handleDeleteAsset(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/assets/"):
+	case request.Method == http.MethodGet && isAssetDetailPath(request.URL.Path):
 		s.handleGetAsset(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldline-sessions"):
 		s.handleStartWorldlineSession(response, request)
@@ -3298,6 +3313,13 @@ func (s *Server) handleGetAsset(response http.ResponseWriter, request *http.Requ
 	})
 	if err != nil {
 		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		return
+	}
+	if strings.TrimSpace(record.ProjectID) == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, record.ProjectID) {
 		return
 	}
 	writeJSON(response, http.StatusOK, record)

@@ -1416,6 +1416,11 @@ func TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBe
 			path:   "/v1/projects/project-123/extra/agent-traces/trace-1/export",
 			body:   `{"include_full":true}`,
 		},
+		{
+			name:   "asset detail extra segment",
+			method: http.MethodGet,
+			path:   "/v1/assets/asset-1/extra",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1428,6 +1433,7 @@ func TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBe
 			traceReader := &recordingTraceReader{}
 			traceAccess := &allowTraceAccessChecker{}
 			traceAuditor := &recordingTraceExportAuditor{}
+			assetReader := &recordingAssetReader{}
 			server := NewServer(Config{
 				Authorizer:         authorizer,
 				StoryGraphReader:   storyReader,
@@ -1437,6 +1443,7 @@ func TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBe
 				TraceReader:        traceReader,
 				TraceAccessChecker: traceAccess,
 				TraceExportAuditor: traceAuditor,
+				AssetReader:        assetReader,
 				SessionAuthSecret:  "test-secret",
 			})
 			body := strings.NewReader(tt.body)
@@ -1471,6 +1478,9 @@ func TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBe
 			}
 			if traceAccess.called || traceReader.called || traceAuditor.called {
 				t.Fatalf("malformed route should not call trace backends: access=%#v reader=%#v auditor=%#v", traceAccess.input, traceReader.input, traceAuditor.input)
+			}
+			if readerWasCalled := assetReader.getInput.TenantID != "" || assetReader.getInput.AssetID != ""; readerWasCalled {
+				t.Fatalf("malformed route should not call asset reader: %#v", assetReader.getInput)
 			}
 			rawBody := response.Body.String()
 			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef"} {
@@ -1718,6 +1728,88 @@ func TestGetCurrentUserUsesInjectedReaderAndReturnsOnlyPublicSummary(t *testing.
 	project := projects[0].(map[string]any)
 	if project["project_id"] != "project-123" || project["tenant_id"] != "tenant-123" || project["role"] != "editor" {
 		t.Fatalf("unexpected project summary: %#v", project)
+	}
+}
+
+func TestAuthSubjectGetAssetRejectsInvalidBearerBeforeFallbackAuthorizerAndReader(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	reader := &recordingAssetReader{
+		asset: assets.Record{
+			AssetID:   "asset-1",
+			ProjectID: "project-123",
+			Title:     "灵气规则",
+			Summary:   "公开摘要",
+			Payload:   map[string]any{"secret": "asset payload"},
+		},
+	}
+	server := NewServer(Config{
+		Authorizer:        authorizer,
+		AssetReader:       reader,
+		SessionAuthSecret: "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer v1:asset-user:deadbeef")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if authorizer.called || reader.getInput.TenantID != "" || reader.getInput.AssetID != "" {
+		t.Fatalf("invalid bearer should stop before authorizer and reader: authorizer=%#v reader=%#v", authorizer.inputs, reader.getInput)
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"asset-user", "fallback-user", "deadbeef", "灵气规则", "公开摘要", "asset payload"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("auth error leaked forbidden payload %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestAuthSubjectReservedAssetGetPathsPreserveNotFoundWithInvalidBearer(t *testing.T) {
+	for _, path := range []string{"/v1/assets/search", "/v1/assets/bulk-actions"} {
+		t.Run(path, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			reader := &recordingAssetReader{}
+			server := NewServer(Config{
+				Authorizer:        authorizer,
+				AssetReader:       reader,
+				SessionAuthSecret: "test-secret",
+			})
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Authorization", "Bearer v1:asset-user:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if authorizer.called || reader.getInput.TenantID != "" || reader.getInput.AssetID != "" {
+				t.Fatalf("reserved GET asset path should not call authorizer or reader: authorizer=%#v reader=%#v", authorizer.inputs, reader.getInput)
+			}
+			rawBody := response.Body.String()
+			if !strings.Contains(rawBody, `"code":"NOT_FOUND"`) {
+				t.Fatalf("expected not found body, got %s", rawBody)
+			}
+			for _, forbidden := range []string{"asset-user", "fallback-user", "deadbeef"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("reserved path response leaked forbidden credential payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
 	}
 }
 
@@ -5050,6 +5142,7 @@ func assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t *testing.T, body strin
 }
 
 func TestGetAssetUsesTenantAssetScopeAndSanitizedRow(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
 	reader := &recordingAssetReader{
 		asset: assets.Record{
 			AssetID:    "asset-1",
@@ -5070,9 +5163,11 @@ func TestGetAssetUsesTenantAssetScopeAndSanitizedRow(t *testing.T) {
 			UpdatedAt:  "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-get-asset")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5083,6 +5178,14 @@ func TestGetAssetUsesTenantAssetScopeAndSanitizedRow(t *testing.T) {
 	if reader.getInput.TenantID != "tenant-123" || reader.getInput.AssetID != "asset-1" {
 		t.Fatalf("reader lost get scope: %#v", reader.getInput)
 	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[0].RequestID != "req-get-asset" {
+		t.Fatalf("unexpected project_read authorizer inputs: %#v", authorizer.inputs)
+	}
 	body := response.Body.String()
 	if !strings.Contains(body, `"asset_id":"asset-1"`) || !strings.Contains(body, `"title":"灵气规则"`) {
 		t.Fatalf("unexpected asset detail: %s", body)
@@ -5090,6 +5193,158 @@ func TestGetAssetUsesTenantAssetScopeAndSanitizedRow(t *testing.T) {
 	for _, forbidden := range []string{"content_text", "raw_payload_jsonb", "api_key", "encrypted_api_key", "credential_ref"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("asset detail leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestGetAssetDeniesProjectReadWithoutLeakingAssetMetadata(t *testing.T) {
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied for user-123 and 灵气规则"}}
+	reader := &recordingAssetReader{
+		asset: assets.Record{
+			AssetID:   "asset-1",
+			ProjectID: "project-123",
+			Title:     "灵气规则",
+			Summary:   "公开摘要",
+			Payload: map[string]any{
+				"body":           "must not leak body",
+				"prompt":         "must not leak prompt",
+				"api_key":        "must not leak key",
+				"credential_ref": "must not leak credential",
+				"object_key":     "must not leak object",
+				"draft":          "must not leak draft",
+				"manuscript":     "must not leak manuscript",
+			},
+		},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-123" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+		t.Fatalf("unexpected authorizer inputs: %#v", authorizer.inputs)
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{
+		"asset-1",
+		"灵气规则",
+		"公开摘要",
+		"payload",
+		"body",
+		"prompt",
+		"api_key",
+		"credential_ref",
+		"object_key",
+		"draft",
+		"manuscript",
+		"user-123",
+		"denied for",
+		"must not leak",
+	} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("denied response leaked forbidden payload %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestGetAssetReaderErrorsDoNotCallAuthorizer(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "not found",
+			err:        &assets.AppError{Code: "NOT_FOUND", Message: "asset was not found"},
+			wantStatus: http.StatusNotFound,
+			wantCode:   "NOT_FOUND",
+		},
+		{
+			name:       "backend error",
+			err:        &assets.AppError{Code: "ASSET_QUERY_FAILED", Message: "database prompt api_key failure"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "ASSET_QUERY_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			reader := &recordingAssetReader{err: tt.err}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+			request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("reader error should not call authorizer: %#v", authorizer.inputs)
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+		})
+	}
+}
+
+func TestGetAssetBlankProjectIDFailsClosedWithoutAssetMetadata(t *testing.T) {
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "blank project denied for user-123"}}
+	reader := &recordingAssetReader{
+		asset: assets.Record{
+			AssetID: "asset-1",
+			Title:   "灵气规则",
+			Summary: "公开摘要",
+			Payload: map[string]any{"body": "must not leak body", "prompt": "must not leak prompt"},
+		},
+	}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if authorizer.called {
+		t.Fatalf("blank project should fail before authorizer: %#v", authorizer.inputs)
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected auth error body: %#v", body)
+	}
+	for _, forbidden := range []string{"asset-1", "灵气规则", "公开摘要", "payload", "body", "prompt", "must not leak", "user-123", "blank project denied"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("blank project response leaked forbidden payload %q: %s", forbidden, rawBody)
 		}
 	}
 }
