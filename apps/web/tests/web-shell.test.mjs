@@ -115,6 +115,95 @@ test("project navigation includes writer and LLM Facility routes with active pat
   assert.match(nav, /aria-current/);
 });
 
+test("Current user API client fetches public membership summary with actor header only", async () => {
+  const client = await fileText("lib/api.ts");
+  const currentUserTypes = sourceSlice(client, "export type TenantMembershipSummary", "export type WriterRunSummary");
+  const currentUserClient = sourceSlice(client, "export async function getCurrentUser", "export async function startWriterRun");
+  const currentUserDecoder = sourceSlice(client, "async function decodeCurrentUserResponse", "async function decodeWriterRunResponse");
+
+  assert.match(currentUserTypes, /CurrentUserRecord/);
+  assert.match(currentUserTypes, /TenantMembershipSummary/);
+  assert.match(currentUserTypes, /ProjectMembershipSummary/);
+  assert.match(currentUserTypes, /CurrentUserSummary/);
+  assert.match(currentUserTypes, /user_id:\s*string/);
+  assert.match(currentUserTypes, /email:\s*string/);
+  assert.match(currentUserTypes, /display_name:\s*string/);
+  assert.match(currentUserTypes, /avatar_url:\s*string/);
+  assert.match(currentUserTypes, /active_tenants:\s*TenantMembershipSummary\[\]/);
+  assert.match(currentUserTypes, /active_projects:\s*ProjectMembershipSummary\[\]/);
+  assert.match(currentUserTypes, /tenant_id:\s*string/);
+  assert.match(currentUserTypes, /project_id:\s*string/);
+  assert.match(currentUserTypes, /role:\s*string/);
+  assert.match(currentUserTypes, /status:\s*string/);
+  assert.match(currentUserTypes, /\|\s*ApiFailure/);
+
+  assert.match(currentUserClient, /\/v1\/me/);
+  assert.match(currentUserClient, /actorUserId:\s*string/);
+  assert.match(currentUserClient, /"X-User-Id":\s*input\.actorUserId/);
+  assert.match(currentUserClient, /decodeCurrentUserResponse/);
+  assert.match(currentUserClient, /networkFailure\(error,\s*"CURRENT_USER_QUERY_FAILED"\)/);
+  assert.doesNotMatch(currentUserClient, /X-Tenant-Id/);
+  assert.doesNotMatch(currentUserClient, /contextHeaders/);
+
+  assert.match(currentUserDecoder, /decodeError\(payload,\s*response\.status,\s*"CURRENT_USER_QUERY_FAILED"\)/);
+  assert.match(currentUserDecoder, /recordFromUnknown\(payload\.user\)/);
+  assert.match(currentUserDecoder, /requiredArray\(payload,\s*"active_tenants"\)/);
+  assert.match(currentUserDecoder, /requiredArray\(payload,\s*"active_projects"\)/);
+  assert.match(currentUserDecoder, /activeTenants\s*===\s*null/);
+  assert.match(currentUserDecoder, /tenantSummaries\s*===\s*null/);
+  assert.match(currentUserDecoder, /projectSummaries\s*===\s*null/);
+  assert.match(currentUserDecoder, /decodeTenantMembershipSummaries/);
+  assert.match(currentUserDecoder, /decodeProjectMembershipSummaries/);
+  assert.match(client, /const tenantName = requiredString\(value,\s*"name"\)/);
+  assert.match(client, /const projectName = requiredString\(value,\s*"name"\)/);
+  assert.match(client, /!tenantName/);
+  assert.match(client, /!projectName/);
+  assert.doesNotMatch(currentUserDecoder, /credential_ref|encrypted_api_key|api_key|prompt|provider|raw_body|body|content|draft|manuscript|object_key/i);
+});
+
+test("tenant picker project layout loads current user and passes memberships into ProjectNav", async () => {
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+
+  assert.match(layout, /getCurrentUser/);
+  assert.match(layout, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
+  assert.match(layout, /actorUserId\s*\?\s*await getCurrentUser\(\{\s*actorUserId\s*\}\)/s);
+  assert.match(layout, /CURRENT_USER_CONTEXT_UNCONFIGURED/);
+  assert.doesNotMatch(layout, /\?\?\s*"web-shell"/);
+  assert.match(layout, /currentUser=\{currentUser\}/);
+  assert.match(layout, /tenantSlug=\{tenantSlug\}/);
+  assert.match(layout, /projectId=\{projectId\}/);
+});
+
+test("ProjectNav renders tenant picker and project picker links from public memberships", async () => {
+  const nav = await fileText("components/project-nav.tsx");
+
+  assert.match(nav, /CurrentUserSummary/);
+  assert.match(nav, /currentUser\.ok/);
+  assert.match(nav, /active_tenants/);
+  assert.match(nav, /active_projects/);
+  assert.match(nav, /currentProject/);
+  assert.match(nav, /Project access unavailable/);
+  assert.match(nav, /ACTIVE_PROJECT_MEMBERSHIP_MISSING/);
+  assert.match(nav, /currentSectionPath/);
+  assert.match(nav, /hrefForProject\(project\.tenant_id,\s*project\.project_id,\s*currentSectionPath\)/);
+  assert.match(nav, /hrefForProject\(tenant\.tenant_id,\s*project\.project_id,\s*currentSectionPath\)/);
+  assert.match(nav, /tenant\.tenant_id/);
+  assert.match(nav, /tenant\.name/);
+  assert.match(nav, /project\.project_id/);
+  assert.match(nav, /project\.name/);
+  assert.match(nav, /\/projects\/\$\{projectId\}\$\{sectionPath\}/);
+  assert.match(nav, /currentProject\s*\?\s*\(/s);
+  assert.match(nav, /currentUser\.code/);
+  assert.match(nav, /currentUser\.message/);
+  assert.match(nav, /Membership unavailable/);
+  assert.match(nav, /User/);
+  assert.match(nav, /Tenants/);
+  assert.match(nav, /Projects/);
+  assert.doesNotMatch(nav, /tenant\.name\s*\|\|\s*tenant\.tenant_id/);
+  assert.doesNotMatch(nav, /project\.name\s*\|\|\s*project\.project_id/);
+  assert.doesNotMatch(nav, /credential_ref|encrypted_api_key|api_key|prompt|provider|raw_body|body|content|draft|manuscript|object_key/i);
+});
+
 test("Next app shell declares tenant/project Overview route for source files and Seed runs", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
 
@@ -831,13 +920,14 @@ test("Next app shell declares tenant/project Story Graph route", async () => {
 
 test("writer API client uses Go API base URL and tenant context headers", async () => {
   const client = await fileText("lib/api.ts");
+  const writerClient = sourceSlice(client, "export async function startWriterRun", "export async function getProjectManuscript");
 
   assert.match(client, /MIROFISH_API_BASE_URL/);
-  assert.match(client, /X-Tenant-Id/);
-  assert.match(client, /X-User-Id/);
-  assert.match(client, /\/v1\/projects\/\$\{(?:input\.)?projectId\}\/writer-runs/);
+  assert.match(writerClient, /X-Tenant-Id/);
+  assert.match(writerClient, /X-User-Id/);
+  assert.match(writerClient, /\/v1\/projects\/\$\{(?:input\.)?projectId\}\/writer-runs/);
   assert.match(client, /trace_id/);
-  assert.doesNotMatch(client, /tenant_id\s*:/);
+  assert.doesNotMatch(writerClient, /tenant_id\s*:/);
 });
 
 test("asset API client uses sanitized Go asset endpoints and tenant context headers", async () => {

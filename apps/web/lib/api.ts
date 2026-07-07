@@ -5,12 +5,42 @@ type ApiContext = {
   actorUserId: string;
 };
 
-type ApiFailure = {
+export type ApiFailure = {
   ok: false;
   code: string;
   message: string;
   request_id: string;
 };
+
+export type TenantMembershipSummary = {
+  tenant_id: string;
+  name: string;
+  role: string;
+  status: string;
+};
+
+export type ProjectMembershipSummary = {
+  tenant_id: string;
+  project_id: string;
+  name: string;
+  role: string;
+  status: string;
+};
+
+export type CurrentUserRecord = {
+  user_id: string;
+  email: string;
+  display_name: string;
+  avatar_url: string;
+  active_tenants: TenantMembershipSummary[];
+  active_projects: ProjectMembershipSummary[];
+};
+
+export type CurrentUserSummary =
+  | ({
+      ok: true;
+    } & CurrentUserRecord)
+  | ApiFailure;
 
 export type WriterRunSummary =
   | {
@@ -1231,6 +1261,21 @@ export type UpdateWorldlineEventInput = ApiContext & {
 
 export function apiBaseUrl() {
   return process.env.MIROFISH_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+}
+
+export async function getCurrentUser(input: { actorUserId: string }): Promise<CurrentUserSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/me`, {
+      headers: {
+        "X-User-Id": input.actorUserId,
+      },
+      cache: "no-store",
+    });
+
+    return await decodeCurrentUserResponse(response);
+  } catch (error) {
+    return networkFailure(error, "CURRENT_USER_QUERY_FAILED");
+  }
 }
 
 export async function startWriterRun(input: StartWriterRunInput): Promise<WriterRunSummary> {
@@ -2777,6 +2822,40 @@ export async function startStoryGraphBondGeneration(
   } catch (error) {
     return networkFailure(error, "STORY_GRAPH_BOND_START_FAILED");
   }
+}
+
+async function decodeCurrentUserResponse(response: Response): Promise<CurrentUserSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "CURRENT_USER_QUERY_FAILED");
+  }
+
+  const user = recordFromUnknown(payload.user);
+  const activeTenants = requiredArray(payload, "active_tenants");
+  const activeProjects = requiredArray(payload, "active_projects");
+  if (activeTenants === null || activeProjects === null) {
+    return invalidApiResponse("current user response missing required fields");
+  }
+
+  const userId = requiredString(user, "user_id");
+  const tenantSummaries = decodeTenantMembershipSummaries(activeTenants);
+  const projectSummaries = decodeProjectMembershipSummaries(activeProjects);
+  if (!userId || tenantSummaries === null || projectSummaries === null) {
+    return invalidApiResponse("current user response missing required fields");
+  }
+
+  return {
+    ok: true,
+    user_id: userId,
+    email: requiredString(user, "email"),
+    display_name: requiredString(user, "display_name"),
+    avatar_url: requiredString(user, "avatar_url"),
+    active_tenants: tenantSummaries,
+    active_projects: projectSummaries,
+  };
 }
 
 async function decodeWriterRunResponse(response: Response): Promise<WriterRunSummary> {
@@ -4651,6 +4730,52 @@ function decodeStoryGraphNodeRecord(item: unknown): StoryGraphNodeRecord {
   };
 }
 
+function decodeTenantMembershipSummaries(items: unknown[]): TenantMembershipSummary[] | null {
+  const summaries = items.map((item) => decodeTenantMembershipSummary(item));
+  return summaries.every((item): item is TenantMembershipSummary => item !== null) ? summaries : null;
+}
+
+function decodeProjectMembershipSummaries(items: unknown[]): ProjectMembershipSummary[] | null {
+  const summaries = items.map((item) => decodeProjectMembershipSummary(item));
+  return summaries.every((item): item is ProjectMembershipSummary => item !== null) ? summaries : null;
+}
+
+function decodeTenantMembershipSummary(item: unknown): TenantMembershipSummary | null {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  const tenantId = requiredString(value, "tenant_id");
+  const tenantName = requiredString(value, "name");
+  const role = requiredString(value, "role");
+  const status = requiredString(value, "status");
+  if (!tenantId || !tenantName || !role || !status) {
+    return null;
+  }
+  return {
+    tenant_id: tenantId,
+    name: tenantName,
+    role,
+    status,
+  };
+}
+
+function decodeProjectMembershipSummary(item: unknown): ProjectMembershipSummary | null {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  const tenantId = requiredString(value, "tenant_id");
+  const projectId = requiredString(value, "project_id");
+  const projectName = requiredString(value, "name");
+  const role = requiredString(value, "role");
+  const status = requiredString(value, "status");
+  if (!tenantId || !projectId || !projectName || !role || !status) {
+    return null;
+  }
+  return {
+    tenant_id: tenantId,
+    project_id: projectId,
+    name: projectName,
+    role,
+    status,
+  };
+}
+
 function decodeStoryGraphEdgeRecord(item: unknown): StoryGraphEdgeRecord {
   const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
   return {
@@ -4776,6 +4901,11 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
 
 function arrayFromUnknown(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function requiredArray(payload: Record<string, unknown>, key: string): unknown[] | null {
+  const value = payload[key];
+  return Array.isArray(value) ? value : null;
 }
 
 function stringArrayFromUnknown(value: unknown): string[] {

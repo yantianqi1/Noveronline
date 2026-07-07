@@ -85,6 +85,25 @@ textarea {
   color: var(--primary-strong);
 }
 
+.sidebar-stack {
+  display: grid;
+  gap: 20px;
+}
+
+.sidebar-section {
+  min-width: 0;
+}
+
+.sidebar-section h2,
+.sidebar-section p {
+  overflow-wrap: anywhere;
+}
+
+.sidebar-section h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
 .workbench-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);

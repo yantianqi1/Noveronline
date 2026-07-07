@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam 和 W2-S2 DB-backed auth membership read side 已接入；完整 compose health、真实 Temporal handoff、project picker/RBAC enforcement 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side 和 W2-S3 Next tenant/project picker 已接入；完整 compose health、真实 Temporal handoff、RBAC enforcement 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,48 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 tenant/project picker、RBAC enforcement、session/cookie/JWT transport |
-| 本轮开发 slice | W2-S2 DB-backed auth membership read side：`/v1/me` 在 `DATABASE_URL` 配置时读取真实 active user/tenant/project membership summaries |
-| 推荐下一步 | W2-S3 实现 Next tenant/project picker 消费 `/v1/me`，或 W2-S4 接入 RBAC enforcement；也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S2 不声明完整 Auth/RBAC 或 project picker 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 RBAC enforcement、session/cookie/JWT transport |
+| 本轮开发 slice | W2-S3 Next tenant/project picker：Next project layout 读取 `/v1/me` public membership summary，并在 sidebar 暴露 fail-closed user/tenant/project picker |
+| 推荐下一步 | W2-S4 接入 RBAC enforcement；之后推进 session/cookie/JWT transport。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S3 不声明完整 Auth/RBAC 或 session transport 完成 |
+
+## Wave 2 W2-S3 Next tenant/project picker
+
+Context:
+
+- W2-S1/W2-S2 已让 Go `/v1/me` 可通过 trusted `X-User-Id` 返回 DB-backed active user/tenant/project public membership summaries。
+- 本 slice 将 Next project shell 接到该 current-user summary；范围限定在 `apps/web/lib/api.ts`、project layout、`ProjectNav`、web shell tests 和 sidebar CSS。
+- 当前仍是开发期 actor transport，不实现 session cookie/JWT，不替换各业务 API 的 `X-Tenant-Id` route context，不声明 route-wide RBAC enforcement 完成。
+
+TDD / Review:
+
+- Implementer subagent Ptolemy 先补 `apps/web/tests/web-shell.test.mjs` RED，要求 `getCurrentUser` 调 `/v1/me` 且只发送 `X-User-Id`、layout 读取 current user、ProjectNav 从 public memberships 渲染 user/tenant/project picker。
+- 初版 reviewer 发现 Go `/v1/me` success payload 是 `user` + top-level `active_tenants` / `active_projects`，不是顶层 `user_id/email`；Coordinator 补 RED 后改为按 Go contract 解码。
+- 去除 layout 对 `web-shell` 的 current-user silent fallback；缺 `MIROFISH_WEB_DEV_ACTOR_USER_ID` 时返回显式 `CURRENT_USER_CONTEXT_UNCONFIGURED` error summary，不请求 `/v1/me`，不伪造 memberships。
+- Current-user decoder 要求 `active_tenants` / `active_projects` 数组存在；tenant/project membership item 必须包含 `tenant_id`、`project_id`（project only）、`name`、`role` 和 `status`，缺失或 malformed 时 fail closed 为 `INVALID_API_RESPONSE`，不把坏 payload 渲染为空列表或空 id/name。
+- ProjectNav 现在只有在当前 route project 存在于 active project memberships 时才渲染项目 section links；缺 current project membership 时显示 `ACTIVE_PROJECT_MEMBERSHIP_MISSING`，不提供可用项目工作台链接。
+- Tenant/project switch links 保留当前 section path，避免从 Writer/Assets/Worldline 等页面切换后被硬重定向回 overview。
+- Spec reviewer Euler APPROVED：确认与 Go `/v1/me` response contract 一致、`getCurrentUser` 只发送 `X-User-Id`、缺 actor 与缺 current project membership 均 fail closed、无敏感字段暴露。
+- Quality reviewer Mill APPROVED：确认 prior blockers closed；残余风险是本 slice 仍以 source-regex contract tests 为主，后续可补更直接的 decoder/render behavior tests。
+
+Verification:
+
+- `cd apps/web && npm run test -- --test-name-pattern='Current user|tenant picker|project picker|ProjectNav'` 通过。
+- `cd apps/web && npm run test` 通过。
+- `cd apps/web && npm run typecheck` 通过。
+- Final reviewer read-only `node --test tests/web-shell.test.mjs` 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+
+Next:
+
+- W2-S4：RBAC enforcement，把 viewer/editor/admin/writer/analyst 权限接入关键 mutation/read gates。
+- 后续 session/cookie/JWT transport 仍 pending；当前 Web shell 只消费 development actor context。
 
 ## Wave 2 W2-S2 DB-backed auth membership read side
 
