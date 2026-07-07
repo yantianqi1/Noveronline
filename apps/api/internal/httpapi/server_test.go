@@ -100,6 +100,18 @@ func assertSingleAssetManageAuthorization(t *testing.T, authorizer *recordingAut
 	}
 }
 
+func assertSingleCreativeWriteAuthorization(t *testing.T, authorizer *recordingAuthorizer, userID string, requestID string) {
+	t.Helper()
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != userID ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+		authorizer.inputs[0].RequestID != requestID {
+		t.Fatalf("unexpected creative_write authorizer inputs: %#v", authorizer.inputs)
+	}
+}
+
 func (s *recordingStarter) StartWriterRun(ctx context.Context, input workflows.StartWriterRunInput) (workflows.WriterRun, error) {
 	s.input = input
 	if s.err != nil {
@@ -3325,6 +3337,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 		body      string
 		message   string
 		requestID string
+		allowAuth bool
 	}{
 		{
 			name:      "session unknown field",
@@ -3333,6 +3346,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			body:      `{"goal":"test a path","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid worldline session payload",
 			requestID: "req-worldline-session-validation",
+			allowAuth: true,
 		},
 		{
 			name:      "step unknown field",
@@ -3349,6 +3363,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			body:      `{"goal":"prepare agents","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid worldline preparation payload",
 			requestID: "req-worldline-preparation-validation",
+			allowAuth: true,
 		},
 		{
 			name:      "event adoption type error",
@@ -3386,7 +3401,11 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{WriterStarter: &recordingStarter{}})
+			config := Config{WriterStarter: &recordingStarter{}}
+			if tt.allowAuth {
+				config.Authorizer = &recordingAuthorizer{}
+			}
+			server := NewServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -3429,6 +3448,116 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 	}
 }
 
+func TestCreativeWriteRBACDeniesProjectMutationsBeforeDecodeAndSideEffects(t *testing.T) {
+	deniedErr := &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "denied user-123 prompt provider_response api_key encrypted_api_key credential_ref object_key draft manuscript",
+	}
+	for _, tt := range []struct {
+		name        string
+		path        string
+		buildConfig func(*recordingAuthorizer) (Config, func(*testing.T))
+	}{
+		{
+			name: "worldline session",
+			path: "/v1/projects/project-123/worldline-sessions",
+			buildConfig: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				starter := &recordingWorldlineSessionStarter{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if starter.input.ProjectID != "" {
+						t.Fatalf("worldline session starter ran after RBAC denial: %#v", starter.input)
+					}
+				}
+			},
+		},
+		{
+			name: "worldline preparation",
+			path: "/v1/projects/project-123/worldlines/preparations",
+			buildConfig: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingWorldlinePreparationStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.createInput.ProjectID != "" {
+						t.Fatalf("worldline preparation store ran after RBAC denial: %#v", store.createInput)
+					}
+				}
+			},
+		},
+		{
+			name: "character interaction",
+			path: "/v1/projects/project-123/character-interactions",
+			buildConfig: func(authorizer *recordingAuthorizer) (Config, func(*testing.T)) {
+				store := &recordingCharacterConsoleStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, CharacterConsoleStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.createInput.ProjectID != "" {
+						t.Fatalf("character interaction store ran after RBAC denial: %#v", store.createInput)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{err: deniedErr}
+			config, assertNoSideEffect := tt.buildConfig(authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{
+				"goal":"private draft",
+				"api_key":"sk-hidden",
+				"prompt":"private prompt",
+				"provider_response":"raw provider",
+				"credential_ref":"cred-hidden",
+				"object_key":"private/object",
+				"draft":"private draft",
+				"manuscript":"private manuscript",
+			}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-creative-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+			}
+			assertSingleCreativeWriteAuthorization(t, authorizer, "user-123", "req-creative-denied")
+			assertNoSideEffect(t)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied ||
+				body.Error.Message != "current user access is denied" ||
+				body.Error.RequestID != "req-creative-denied" {
+				t.Fatalf("unexpected creative write denial body: %#v", body)
+			}
+			rawBody := response.Body.String()
+			for _, forbidden := range []string{
+				"user-123",
+				"private draft",
+				"api_key",
+				"sk-hidden",
+				"prompt",
+				"provider_response",
+				"raw provider",
+				"encrypted_api_key",
+				"credential_ref",
+				"cred-hidden",
+				"object_key",
+				"private/object",
+				"manuscript",
+			} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("creative write denial leaked forbidden detail %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
 func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 	starter := &recordingWorldlineSessionStarter{
 		run: worldline.SessionRun{
@@ -3438,7 +3567,8 @@ func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 			Status:       "queued",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlineSessionStarter: starter})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionStarter: starter})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldline-sessions", strings.NewReader(`{
 		"goal":"test a council betrayal",
 		"anchor_path_id":"path-1",
@@ -3454,6 +3584,7 @@ func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-456", "req-789")
 	if starter.input.TenantID != "tenant-123" ||
 		starter.input.ProjectID != "project-123" ||
 		starter.input.ActorUserID != "user-456" ||
@@ -3512,7 +3643,7 @@ func TestAuthSubjectStartWorldlineSessionRejectsInvalidCookieBeforeFallbackAndSt
 }
 
 func TestStartWorldlineSessionFailsClosedWithoutStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldline-sessions", strings.NewReader(`{"goal":"test a path"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -3617,7 +3748,8 @@ func TestCreateWorldlinePreparationCarriesContextAndSanitizesOptions(t *testing.
 			UpdatedAt:    "2026-07-05T00:01:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlinePreparationStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldlines/preparations", strings.NewReader(`{
 		"goal":"Prepare council agents",
 		"anchor_path_id":"path-1",
@@ -3633,6 +3765,7 @@ func TestCreateWorldlinePreparationCarriesContextAndSanitizesOptions(t *testing.
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
 	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-456", "req-789")
 	if store.createInput.TenantID != "tenant-123" ||
 		store.createInput.ProjectID != "project-123" ||
 		store.createInput.ActorUserID != "user-456" ||
@@ -3658,7 +3791,7 @@ func TestCreateWorldlinePreparationCarriesContextAndSanitizesOptions(t *testing.
 }
 
 func TestCreateWorldlinePreparationFailsClosedWithoutStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldlines/preparations", strings.NewReader(`{"goal":"prepare agents"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -4236,7 +4369,8 @@ func TestCreateCharacterInteractionCarriesTenantProjectActorContextAndSanitizesP
 			UpdatedAt:          "2026-07-06T00:00:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, CharacterConsoleStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/character-interactions", strings.NewReader(`{
 		"tenant_id":"body-tenant",
 		"project_id":"body-project",
@@ -4259,6 +4393,7 @@ func TestCreateCharacterInteractionCarriesTenantProjectActorContextAndSanitizesP
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", response.Code, response.Body.String())
 	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-123", "req-123")
 	if store.createInput.TenantID != "tenant-123" ||
 		store.createInput.ProjectID != "project-123" ||
 		store.createInput.ActorUserID != "user-123" ||

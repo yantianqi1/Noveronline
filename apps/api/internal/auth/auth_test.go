@@ -436,6 +436,85 @@ func TestReaderBackedAuthorizerWriterRunRoleMatrix(t *testing.T) {
 	}
 }
 
+func TestReaderBackedAuthorizerCreativeWriteRoleMatrix(t *testing.T) {
+	for _, role := range []string{"project_owner", "owner", "admin", "editor", "writer"} {
+		t.Run("project_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionCreativeWrite,
+			})
+
+			if err != nil {
+				t.Fatalf("expected resolved project role %q to write creative state: %v", role, err)
+			}
+		})
+	}
+
+	for _, role := range []string{"analyst", "viewer", "billing", ""} {
+		t.Run("project_"+role+"_denied", func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithProjectRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionCreativeWrite,
+			})
+
+			assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+		})
+	}
+
+	tests := []struct {
+		name string
+		user CurrentUser
+	}{
+		{
+			name: "inactive_project_status_denies",
+			user: authCurrentUserWithProjectRoleAndStatus("writer", "inactive"),
+		},
+		{
+			name: "blank_project_status_denies",
+			user: authCurrentUserWithProjectRoleAndStatus("editor", ""),
+		},
+		{
+			name: "raw_tenant_role_without_matching_project_denies",
+			user: authCurrentUserWithTenantRole("owner"),
+		},
+		{
+			name: "different_project_denies",
+			user: CurrentUser{
+				User: UserSummary{UserID: "user-123"},
+				ActiveProjects: []ProjectMembershipSummary{{
+					TenantID:  "tenant-123",
+					ProjectID: "other-project",
+					Role:      "project_owner",
+					Status:    "active",
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(tt.user))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				ProjectID:  "project-123",
+				Permission: PermissionCreativeWrite,
+			})
+
+			assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+		})
+	}
+}
+
 func TestReaderBackedAuthorizerAssetManageRoleMatrix(t *testing.T) {
 	for _, role := range []string{"project_owner", "owner", "admin", "editor"} {
 		t.Run("project_"+role, func(t *testing.T) {

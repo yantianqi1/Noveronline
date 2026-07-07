@@ -1969,6 +1969,9 @@ func (s *Server) handleStartWorldlineSession(response http.ResponseWriter, reque
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project worldline sessions route not found", nil)
 		return
 	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
 	var payload startWorldlineSessionRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2006,6 +2009,9 @@ func (s *Server) handleCreateCharacterInteraction(response http.ResponseWriter, 
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "character-interactions")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project character interactions route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
 		return
 	}
 	var payload createCharacterInteractionRequest
@@ -2348,6 +2354,9 @@ func (s *Server) handleCreateWorldlinePreparation(response http.ResponseWriter, 
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "worldlines/preparations")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project worldline preparations route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
 		return
 	}
 	var payload createWorldlinePreparationRequest
