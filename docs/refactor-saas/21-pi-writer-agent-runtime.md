@@ -421,6 +421,7 @@ UI 细节遵循：
 
 - 创建 writer run。
 - 使用 faux/test provider 产生确定 token stream。
+- `apps/pi-agent-runtime/src/llm/pi-ai-compose.live.test.ts` 提供 opt-in live/local provider smoke：只接受 resolved LLM Facility handoff env（`MIROFISH_PI_WRITER_LIVE_RESOLVED_*`），无 env 时 skip，partial env 时 fail fast，完整 env 时通过 Pi AI explicit-key adapter 调 OpenAI-compatible provider；该 harness 不新增 production fallback，也不在测试输出中打印 API key、prompt、raw provider response 或生成正文。
 - 调用 read tools。
 - 保存 draft。
 - 前端读取 SSE events。

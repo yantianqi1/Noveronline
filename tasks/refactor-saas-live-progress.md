@@ -65,10 +65,45 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 1：Writer live closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening 均已通过 spec / quality reviewer |
-| 当前未完成重点 | 真实 LLM-bound E2E、browser verification、真正内容导出 artifact service |
-| 本轮开发 slice | W1-S5 Writer replay cursor / raw payload UI hardening：Next writer page/shell 显式保留 `after_event_id` replay cursor 与 query run/trace metadata，并停止公开渲染 writer/trace event raw payload JSON |
-| 推荐下一步 | W1-S5 提交后进入 live/local LLM-bound E2E 或浏览器验收 slice；当前切片不声明真实 provider E2E 或内容 export artifact 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness 均已通过 spec / quality reviewer |
+| 当前未完成重点 | 真实 LLM-bound E2E 执行、browser verification、真正内容导出 artifact service |
+| 本轮开发 slice | W1-S6 Pi compose live/local provider opt-in smoke harness：新增 `createPiAIComposeDraft` resolved LLM Facility handoff live smoke，默认无 env 显式 skip，partial env 显式失败，不新增生产 fallback |
+| 推荐下一步 | 提供 resolved live/local provider handoff env 后执行 W1-S6 live smoke，或进入 Writer browser verification slice；当前切片只新增验收入口，不声明真实 provider E2E 已执行完成 |
+
+## Wave 1 W1-S6 Pi compose live/local provider opt-in smoke harness
+
+Context:
+
+- W1-S5 已提交 Writer replay UI / raw payload hardening。
+- Wave 1 仍缺 live/local LLM-bound E2E 执行；本 slice 先补 tests-only opt-in smoke harness，让后续可用 resolved LLM Facility handoff env 真实调用 OpenAI-compatible provider。
+- Scope 限定在 `apps/pi-agent-runtime/src/llm/**`；不改 production worker/env fallback、Go API、DB schema、Web UI 或 docs 之外的 runtime 行为。
+
+TDD / Review:
+
+- Implementer subagent Aristotle 新增 `apps/pi-agent-runtime/src/llm/pi-ai-compose.live.test.ts`，默认无 live env 时 skip，partial env 时 fail fast，完整 env 时调用 `createPiAIComposeDraft`。
+- Coordinator 复跑 partial env RED：只设置 `MIROFISH_PI_WRITER_LIVE_RESOLVED_BASE_URL` 时测试失败并只列缺失 resolved handoff env names，不构造 provider request。
+- Spec reviewer Ampere APPROVED：确认显式 resolved handoff env、无旧式 fallback、无 fake success、无 API key/prompt/raw response/generated content logging。
+- Quality reviewer Dalton 初审要求不要信任 provider-controlled `error.name`；Coordinator 加入 malicious error-name regression，并将 provider failure type 限制为短 allowlisted identifier，否则回落 `Error`。Dalton re-review APPROVED。
+
+Implementation:
+
+- Required envs：`MIROFISH_PI_WRITER_LIVE_RESOLVED_BASE_URL`、`MIROFISH_PI_WRITER_LIVE_RESOLVED_API_KEY`、`MIROFISH_PI_WRITER_LIVE_RESOLVED_MODEL_ID`、`MIROFISH_PI_WRITER_LIVE_RESOLVED_CHANNEL_ID`。
+- Optional envs：`MIROFISH_PI_WRITER_LIVE_MAX_TOKENS`、`MIROFISH_PI_WRITER_LIVE_TEMPERATURE`。
+- Full live path builds a `ComposeDraftRequest` with `module_key = writer_composer`、`provider = openai-compatible`、explicit `apiKey` from the resolved handoff, and a short instruction; assertion only checks non-empty content and does not print the generated text.
+- Provider failures are rethrown as stable redacted messages; API keys, prompt fragments, raw provider body, generated content, and provider-controlled error names are not echoed.
+
+Verification so far:
+
+- Default/no env: `cd apps/pi-agent-runtime && npm run test -- src/llm/pi-ai-compose.live.test.ts` 通过，live smoke skipped，39 passed / 1 skipped。
+- Partial env RED: `cd apps/pi-agent-runtime && MIROFISH_PI_WRITER_LIVE_RESOLVED_BASE_URL=http://127.0.0.1:1 npm run test -- src/llm/pi-ai-compose.live.test.ts` 按预期失败于 missing resolved handoff env names。
+- Combined Pi LLM tests: `cd apps/pi-agent-runtime && npm run test -- src/llm/pi-ai-compose.test.ts src/llm/pi-ai-compose.live.test.ts` 通过，38 passed / 1 skipped before sanitizer regression；后续 full acceptance 待跑。
+- `cd apps/pi-agent-runtime && npm run typecheck` 通过。
+- Wave 1 acceptance：`cd apps/api && go test ./internal/workflows ./internal/httpapi -run 'Writer|Draft|Trace|LLM|Workflow|Manuscript' -count=1` 通过。
+- Wave 1 acceptance：`cd apps/pi-agent-runtime && npm run test && npm run typecheck` 通过，39 passed / 1 skipped。
+- Focused live harness acceptance：`cd apps/pi-agent-runtime && npm run test -- src/llm/pi-ai-compose.test.ts src/llm/pi-ai-compose.live.test.ts` 通过，39 passed / 1 skipped。
+- Wave 1 acceptance：`cd apps/web && npm run test -- --test-name-pattern='Writer|writer|replay|Recovered stream' && npm run typecheck` 通过，39 tests。
+- `git diff --check` 通过。
+- 当前未配置完整 live/local provider env，因此尚未执行真实 provider call；不能声明 live provider E2E completed。
 
 ## Wave 1 W1-S5 Writer replay cursor / raw payload UI hardening
 

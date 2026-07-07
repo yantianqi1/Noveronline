@@ -397,7 +397,7 @@ Character Console validation error detail hardening update: create/append JSON d
 |---|---|---|
 | `writer_agent/orchestrator.py` | WriterRunWorkflow orchestrator | implemented: compatibility Pi Writer Runtime for Writer-first vertical slice；Go API can enqueue Temporal `PiWriterRunWorkflow` when configured；full LLM-bound Temporal workflow pending |
 | `agent_loop.py` | tool loop | implemented: Writer Runtime handles selected read tools before composer；full generic loop pending |
-| `writer.py` | composer | implemented: LLM Facility `writer_composer` adapter contract plus Pi AI explicit-key compose adapter and DB-backed provider/candidate draft/activity/usage path；live provider E2E pending |
+| `writer.py` | composer | implemented: LLM Facility `writer_composer` adapter contract plus Pi AI explicit-key compose adapter, DB-backed provider/candidate draft/activity/usage path, and opt-in resolved LLM Facility handoff live/local provider smoke harness for `createPiAIComposeDraft`; default test env skips explicitly, partial env fails before provider invocation, and no production fallback is introduced；actual live provider E2E execution pending |
 | `reviewer.py` | reviewer workflow | planned (owner: Wave 6 - P6-003 reviewer/dedup closure) |
 | `dedup_extractor.py` | dedup workflow | planned (owner: Wave 6 - P6-003 reviewer/dedup closure) |
 | `tool_executors.py` | typed tools with permissions | implemented: Phase 2 read tools carry tenant/project/run context and emit trace events；broader tool set pending |
