@@ -1011,6 +1011,50 @@ func projectActorSensitiveRoute(request *http.Request) bool {
 	switch {
 	case request.Method == http.MethodGet && strings.HasSuffix(path, "/overview"):
 		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/readiness"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/source-files"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/assets"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/assets/facets"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/worldline/saved-paths"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/worldline-sessions"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/character-interactions"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/story-graph/current"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/views/"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/nodes/") && !strings.HasSuffix(path, "/evidence"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/edges/") && !strings.HasSuffix(path, "/evidence"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/story-graph/layouts/"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/story-graph/clusters"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/modules"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/module-bindings"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/llm/module-bindings/") && strings.HasSuffix(path, "/resolution"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/channels"):
+		return true
+	case request.Method == http.MethodGet && strings.Contains(path, "/llm/channels/") && strings.HasSuffix(path, "/models"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/activity"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/llm/usage"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/manuscript"):
+		return true
+	case request.Method == http.MethodGet && strings.HasSuffix(path, "/manuscript/export"):
+		return true
 	case request.Method == http.MethodPost && strings.HasSuffix(path, "/seed-runs"):
 		return true
 	case request.Method == http.MethodPost && strings.HasSuffix(path, "/uploads"):
@@ -1298,6 +1342,10 @@ func (s *Server) authorizeProject(response http.ResponseWriter, request *http.Re
 	return false
 }
 
+func (s *Server) authorizeProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
+	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionProjectRead)
+}
+
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -1449,6 +1497,9 @@ func (s *Server) handleGetProjectReadiness(response http.ResponseWriter, request
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "readiness")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project readiness route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	snapshot, err := s.projectReadinessReader.GetLatestSnapshot(request.Context(), projectreadiness.GetLatestSnapshotInput{
@@ -1717,6 +1768,9 @@ func (s *Server) handleListSourceFiles(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project source files route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	items, err := s.sourceFileStore.ListSourceFiles(request.Context(), sourcefiles.ListInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -1737,6 +1791,9 @@ func (s *Server) handleListAssets(response http.ResponseWriter, request *http.Re
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "assets")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project assets route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.assetReader.ListAssets(request.Context(), assets.ListAssetsInput{
@@ -1761,6 +1818,9 @@ func (s *Server) handleListAssetFacets(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project asset facets route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	facets, err := s.assetReader.ListFacets(request.Context(), assets.ListFacetsInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -1781,6 +1841,9 @@ func (s *Server) handleListWorldlineSavedPaths(response http.ResponseWriter, req
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "worldline/saved-paths")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project worldline saved paths route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.worldlineSavedPathReader.ListSavedPaths(request.Context(), worldline.ListSavedPathsInput{
@@ -1881,6 +1944,9 @@ func (s *Server) handleListCharacterInteractions(response http.ResponseWriter, r
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "character-interactions")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project character interactions route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.characterConsoleStore.ListInteractions(request.Context(), characterconsole.ListInteractionsInput{
@@ -2215,6 +2281,9 @@ func (s *Server) handleListWorldlineSessions(response http.ResponseWriter, reque
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "worldline-sessions")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project worldline sessions route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.worldlineSessionReader.ListSessions(request.Context(), worldline.ListSessionsInput{
@@ -2945,6 +3014,9 @@ func (s *Server) handleGetStoryGraphCurrent(response http.ResponseWriter, reques
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	current, err := s.storyGraphReader.GetCurrentSnapshot(request.Context(), storygraph.GetCurrentInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -2965,6 +3037,9 @@ func (s *Server) handleGetStoryGraphView(response http.ResponseWriter, request *
 	projectID, viewID := storyGraphPathParts(request.URL.Path, "views")
 	if projectID == "" || viewID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph view route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	limit := 0
@@ -3046,6 +3121,9 @@ func (s *Server) handleGetStoryGraphLayout(response http.ResponseWriter, request
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph layout route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	layout, err := s.storyGraphReader.GetLayout(request.Context(), storygraph.GetLayoutInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -3067,6 +3145,9 @@ func (s *Server) handleListStoryGraphClusters(response http.ResponseWriter, requ
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "story-graph/clusters")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph clusters route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	limit, ok := queryLimit(response, request, "story graph cluster limit must be an integer")
@@ -3096,6 +3177,9 @@ func (s *Server) handleGetStoryGraphNode(response http.ResponseWriter, request *
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph node route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	node, err := s.storyGraphReader.GetNode(request.Context(), storygraph.GetNodeInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -3117,6 +3201,9 @@ func (s *Server) handleGetStoryGraphEdge(response http.ResponseWriter, request *
 	projectID, edgeID := storyGraphPathParts(request.URL.Path, "edges")
 	if projectID == "" || edgeID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph edge route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	edge, err := s.storyGraphReader.GetEdge(request.Context(), storygraph.GetEdgeInput{
@@ -3275,6 +3362,9 @@ func (s *Server) handleResolveLLMModuleBinding(response http.ResponseWriter, req
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm module binding route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	resolution, err := s.llmResolver.ResolveModuleBinding(request.Context(), llm.ResolveModuleInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -3298,6 +3388,9 @@ func (s *Server) handleListLLMModules(response http.ResponseWriter, request *htt
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm modules route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	items, err := s.llmModuleRegistry.ListModules(request.Context(), llm.ModuleRegistryInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -3318,6 +3411,9 @@ func (s *Server) handleListLLMModuleBindings(response http.ResponseWriter, reque
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "llm/module-bindings")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm module bindings route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.llmBindingStore.ListModuleBindings(request.Context(), llm.ListModuleBindingsInput{
@@ -3408,6 +3504,9 @@ func (s *Server) handleListLLMChannels(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm channels route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	items, err := s.llmCatalogReader.ListChannels(request.Context(), llm.CatalogQueryInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -3428,6 +3527,9 @@ func (s *Server) handleListLLMModels(response http.ResponseWriter, request *http
 	projectID, channelID := llmChannelModelsPathParts(request.URL.Path)
 	if projectID == "" || channelID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm channel models route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.llmCatalogReader.ListModels(request.Context(), llm.ModelQueryInput{
@@ -3584,6 +3686,9 @@ func (s *Server) handleListLLMActivity(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm activity route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	items, err := s.llmTelemetryReader.ListActivity(request.Context(), llm.ActivityQueryInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -3606,6 +3711,9 @@ func (s *Server) handleListLLMUsage(response http.ResponseWriter, request *http.
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "llm/usage")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm usage route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	items, err := s.llmTelemetryReader.ListUsage(request.Context(), llm.UsageQueryInput{
@@ -4218,6 +4326,9 @@ func (s *Server) handleGetManuscript(response http.ResponseWriter, request *http
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project manuscript route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	manuscript, err := s.manuscriptReader.GetManuscript(request.Context(), workflows.GetManuscriptInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -4239,6 +4350,9 @@ func (s *Server) handleGetManuscriptExport(response http.ResponseWriter, request
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "manuscript/export")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project manuscript export route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	manifest, err := s.manuscriptReader.GetManuscriptExport(request.Context(), workflows.GetManuscriptExportInput{
