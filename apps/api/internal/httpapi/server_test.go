@@ -48,13 +48,23 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 
 type recordingAuthorizer struct {
 	input  auth.AuthorizeInput
+	inputs []auth.AuthorizeInput
 	err    error
+	errs   []error
 	called bool
 }
 
 func (a *recordingAuthorizer) Authorize(ctx context.Context, input auth.AuthorizeInput) error {
 	a.input = input
+	a.inputs = append(a.inputs, input)
 	a.called = true
+	if len(a.errs) > 0 {
+		err := a.errs[0]
+		a.errs = a.errs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	return a.err
 }
 
@@ -8524,7 +8534,7 @@ func TestListAgentTraceEventsReturnsRedactedTenantProjectScopedRows(t *testing.T
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, TraceReader: reader})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -8543,9 +8553,46 @@ func TestListAgentTraceEventsReturnsRedactedTenantProjectScopedRows(t *testing.T
 	}
 }
 
+func TestRBACDefaultAuthorizerDeniesRedactedTraceListBeforeReader(t *testing.T) {
+	authReader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User:          auth.UserSummary{UserID: "user-123"},
+			ActiveTenants: []auth.TenantMembershipSummary{{TenantID: "tenant-123", Role: "billing", Status: "active"}},
+		},
+	}
+	reader := &recordingTraceReader{}
+	server := NewServer(Config{AuthReader: authReader, TraceReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_trace_redacted_denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authReader.called {
+		t.Fatal("expected default authorizer to use auth reader")
+	}
+	if reader.called {
+		t.Fatalf("trace reader was called after RBAC denial: %#v", reader.input)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied ||
+		body.Error.Message != "current user access is denied" ||
+		body.Error.RequestID != "req_trace_redacted_denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
 func TestListAgentTraceEventsFullPayloadRequiresPermission(t *testing.T) {
 	reader := &recordingTraceReader{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, TraceReader: reader})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -8567,8 +8614,54 @@ func TestListAgentTraceEventsFullPayloadRequiresPermission(t *testing.T) {
 	}
 }
 
+func TestRBACFullTraceListDeniesWriterBeforeTraceAccessCheckerAndReader(t *testing.T) {
+	authReader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "user-123"},
+			ActiveProjects: []auth.ProjectMembershipSummary{{
+				TenantID:  "tenant-123",
+				ProjectID: "project-123",
+				Role:      "writer",
+				Status:    "active",
+			}},
+		},
+	}
+	reader := &recordingTraceReader{}
+	access := &allowTraceAccessChecker{}
+	server := NewServer(Config{AuthReader: authReader, TraceReader: reader, TraceAccessChecker: access})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events?include_full=true", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_trace_full_writer_denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authReader.called {
+		t.Fatal("expected default authorizer to use auth reader")
+	}
+	if access.called {
+		t.Fatalf("trace access checker was called after RBAC denial: %#v", access.input)
+	}
+	if reader.called {
+		t.Fatalf("trace reader was called after RBAC denial: %#v", reader.input)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
 func TestListAgentTraceEventsFullPayloadWhenAuthorized(t *testing.T) {
+	var order []string
 	reader := &recordingTraceReader{
+		order: &order,
 		events: []traces.EventRecord{
 			{
 				EventID:        "event-1",
@@ -8581,8 +8674,9 @@ func TestListAgentTraceEventsFullPayloadWhenAuthorized(t *testing.T) {
 			},
 		},
 	}
-	access := &allowTraceAccessChecker{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, TraceReader: reader, TraceAccessChecker: access})
+	access := &allowTraceAccessChecker{order: &order}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, TraceReader: reader, TraceAccessChecker: access})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -8593,6 +8687,14 @@ func TestListAgentTraceEventsFullPayloadWhenAuthorized(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
+	if len(authorizer.inputs) != 2 ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[1].Permission != auth.PermissionTraceFullAccess {
+		t.Fatalf("expected project read then full trace RBAC, got %#v", authorizer.inputs)
+	}
+	if !reflect.DeepEqual(order, []string{"trace_access", "trace_reader"}) {
+		t.Fatalf("expected trace checker before reader, got %#v", order)
+	}
 	if !reader.input.IncludeFull || access.input.ActorID != "user-123" {
 		t.Fatalf("full trace access context was not preserved: reader=%#v access=%#v", reader.input, access.input)
 	}
@@ -8602,7 +8704,7 @@ func TestListAgentTraceEventsFullPayloadWhenAuthorized(t *testing.T) {
 }
 
 func TestListAgentTraceEventsWithoutReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -8624,7 +8726,7 @@ func TestListAgentTraceEventsWithoutReaderFailsExplicitly(t *testing.T) {
 func TestExportAgentTraceRequiresFullTracePermission(t *testing.T) {
 	reader := &recordingTraceReader{}
 	auditor := &recordingTraceExportAuditor{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, TraceReader: reader, TraceExportAuditor: auditor})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader, TraceExportAuditor: auditor})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -8637,6 +8739,166 @@ func TestExportAgentTraceRequiresFullTracePermission(t *testing.T) {
 	}
 	if reader.input.TraceID != "" || auditor.input.TraceID != "" {
 		t.Fatalf("export should not read or audit before full trace permission: reader=%#v auditor=%#v", reader.input, auditor.input)
+	}
+}
+
+func TestRBACTraceExportProjectReadDenialHappensBeforeDecodeAuditAndReader(t *testing.T) {
+	authReader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User:          auth.UserSummary{UserID: "user-123"},
+			ActiveTenants: []auth.TenantMembershipSummary{{TenantID: "tenant-123", Role: "billing", Status: "active"}},
+		},
+	}
+	reader := &recordingTraceReader{}
+	auditor := &recordingTraceExportAuditor{}
+	server := NewServer(Config{AuthReader: authReader, TraceReader: reader, TraceExportAuditor: auditor})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/projects/project-123/agent-traces/trace-1/export",
+		bytes.NewBufferString(`{"include_full":false,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authReader.called {
+		t.Fatal("expected default authorizer to use auth reader")
+	}
+	if reader.called || auditor.called {
+		t.Fatalf("export should not read or audit after RBAC denial: reader=%#v auditor=%#v", reader.input, auditor.input)
+	}
+	rawBody := response.Body.String()
+	if strings.Contains(rawBody, "VALIDATION_FAILED") ||
+		strings.Contains(rawBody, "api_key") ||
+		strings.Contains(rawBody, "sk-hidden") ||
+		strings.Contains(rawBody, "prompt") ||
+		strings.Contains(rawBody, "credential_ref") ||
+		strings.Contains(rawBody, "draft") ||
+		strings.Contains(rawBody, "manuscript") {
+		t.Fatalf("auth denial leaked validation or sensitive body detail: %s", rawBody)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestRBACTraceExportFullTraceDenialHappensBeforeValidationCheckerAuditAndReader(t *testing.T) {
+	reader := &recordingTraceReader{}
+	access := &allowTraceAccessChecker{}
+	auditor := &recordingTraceExportAuditor{}
+	authorizer := &recordingAuthorizer{
+		errs: []error{
+			nil,
+			&auth.AppError{Code: auth.CodeAccessDenied, Message: "current user access is denied"},
+		},
+	}
+	server := NewServer(Config{
+		WriterStarter:      &recordingStarter{},
+		Authorizer:         authorizer,
+		TraceReader:        reader,
+		TraceAccessChecker: access,
+		TraceExportAuditor: auditor,
+	})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/projects/project-123/agent-traces/trace-1/export",
+		bytes.NewBufferString(`{"include_full":true,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req_export_full_denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 2 ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[1].Permission != auth.PermissionTraceFullAccess {
+		t.Fatalf("expected project read then full trace RBAC, got %#v", authorizer.inputs)
+	}
+	if reader.called || auditor.called || access.called {
+		t.Fatalf("export should stop before checker, reader, and audit after full trace RBAC denial: access=%#v reader=%#v auditor=%#v", access.input, reader.input, auditor.input)
+	}
+	rawBody := response.Body.String()
+	if strings.Contains(rawBody, "VALIDATION_FAILED") ||
+		strings.Contains(rawBody, "api_key") ||
+		strings.Contains(rawBody, "sk-hidden") ||
+		strings.Contains(rawBody, "prompt") ||
+		strings.Contains(rawBody, "credential_ref") ||
+		strings.Contains(rawBody, "draft") ||
+		strings.Contains(rawBody, "manuscript") {
+		t.Fatalf("auth denial leaked validation or sensitive body detail: %s", rawBody)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(strings.NewReader(rawBody)).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied ||
+		body.Error.Message != "current user access is denied" ||
+		body.Error.RequestID != "req_export_full_denied" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestRBACTraceExportDuplicateIncludeFullTrueRequiresFullTracePermissionBeforeCheckerAuditAndReader(t *testing.T) {
+	reader := &recordingTraceReader{}
+	access := &allowTraceAccessChecker{}
+	auditor := &recordingTraceExportAuditor{}
+	authorizer := &recordingAuthorizer{
+		errs: []error{
+			nil,
+			&auth.AppError{Code: auth.CodeAccessDenied, Message: "current user access is denied"},
+		},
+	}
+	server := NewServer(Config{
+		WriterStarter:      &recordingStarter{},
+		Authorizer:         authorizer,
+		TraceReader:        reader,
+		TraceAccessChecker: access,
+		TraceExportAuditor: auditor,
+	})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/projects/project-123/agent-traces/trace-1/export",
+		bytes.NewBufferString(`{"include_full":false,"include_full":true}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 2 ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[1].Permission != auth.PermissionTraceFullAccess {
+		t.Fatalf("expected project read then full trace RBAC, got %#v", authorizer.inputs)
+	}
+	if access.called || reader.called || auditor.called {
+		t.Fatalf("export should stop before checker, reader, and audit after full trace RBAC denial: access=%#v reader=%#v auditor=%#v", access.input, reader.input, auditor.input)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied {
+		t.Fatalf("unexpected error body: %#v", body)
 	}
 }
 
@@ -8656,8 +8918,10 @@ func TestExportAgentTraceAuditsAndReturnsEvents(t *testing.T) {
 	}
 	access := &allowTraceAccessChecker{}
 	auditor := &recordingTraceExportAuditor{}
+	authorizer := &recordingAuthorizer{}
 	server := NewServer(Config{
 		WriterStarter:      &recordingStarter{},
+		Authorizer:         authorizer,
 		TraceReader:        reader,
 		TraceAccessChecker: access,
 		TraceExportAuditor: auditor,
@@ -8674,6 +8938,11 @@ func TestExportAgentTraceAuditsAndReturnsEvents(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
+	if len(authorizer.inputs) != 2 ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[1].Permission != auth.PermissionTraceFullAccess {
+		t.Fatalf("expected project read then full trace RBAC, got %#v", authorizer.inputs)
+	}
 	if !reader.input.IncludeFull || !auditor.input.IncludeFull || auditor.input.EventCount != 1 {
 		t.Fatalf("export lost full trace or audit context: reader=%#v auditor=%#v", reader.input, auditor.input)
 	}
@@ -8689,7 +8958,7 @@ func TestExportAgentTraceAuditsAndReturnsEvents(t *testing.T) {
 func TestExportAgentTraceWithoutAuditorFailsExplicitly(t *testing.T) {
 	reader := &recordingTraceReader{}
 	access := &allowTraceAccessChecker{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, TraceReader: reader, TraceAccessChecker: access})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader, TraceAccessChecker: access})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":false}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -8751,6 +9020,7 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 			body:      `{"include_full":false,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid trace export payload",
 			requestID: "req-trace-export-validation",
+			allowAuth: true,
 		},
 	}
 
@@ -9167,19 +9437,31 @@ func (r *recordingLLMTelemetryReader) ListUsage(ctx context.Context, input llm.U
 type recordingTraceReader struct {
 	input  traces.EventQueryInput
 	events []traces.EventRecord
+	called bool
+	order  *[]string
 }
 
 func (r *recordingTraceReader) ListEvents(ctx context.Context, input traces.EventQueryInput) ([]traces.EventRecord, error) {
 	r.input = input
+	r.called = true
+	if r.order != nil {
+		*r.order = append(*r.order, "trace_reader")
+	}
 	return r.events, nil
 }
 
 type allowTraceAccessChecker struct {
-	input traces.AccessInput
+	input  traces.AccessInput
+	called bool
+	order  *[]string
 }
 
 func (c *allowTraceAccessChecker) CanViewFullTrace(ctx context.Context, input traces.AccessInput) error {
 	c.input = input
+	c.called = true
+	if c.order != nil {
+		*c.order = append(*c.order, "trace_access")
+	}
 	return nil
 }
 
@@ -9193,11 +9475,13 @@ func (c *allowStoryGraphEvidenceAccessChecker) CanViewEvidenceSnippets(ctx conte
 }
 
 type recordingTraceExportAuditor struct {
-	input traces.ExportAuditInput
+	input  traces.ExportAuditInput
+	called bool
 }
 
 func (a *recordingTraceExportAuditor) RecordExport(ctx context.Context, input traces.ExportAuditInput) error {
 	a.input = input
+	a.called = true
 	return nil
 }
 

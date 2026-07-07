@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker 和 W2-S4a Go HTTP RBAC seam 已接入；完整 compose health、真实 Temporal handoff、session/cookie/JWT 与 route-wide RBAC 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam 和 W2-S4b trace RBAC seam 已接入；完整 compose health、真实 Temporal handoff、session/cookie/JWT 与 route-wide RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,52 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam 均已通过对应验收记录 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam 均已通过对应验收记录 |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 session/cookie/JWT transport、route-wide RBAC enforcement |
-| 本轮开发 slice | W2-S4a Go HTTP RBAC seam：把 reader-backed `auth.Authorizer` 接入 project overview、writer run start、project LLM module binding mutation 四个关键入口 |
-| 推荐下一步 | W2-S4b 继续扩展 RBAC enforcement 到更多 route/mutation，并开始 session/cookie/JWT transport。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4a 不声明完整 Auth/RBAC 或 session transport 完成 |
+| 本轮开发 slice | W2-S4b trace RBAC seam：把 reader-backed `auth.Authorizer` 接入 trace list/export read side，并收紧 full trace export auth-before-validation 顺序 |
+| 推荐下一步 | W2-S4c 继续扩展 RBAC enforcement 到更多 route/mutation，并开始 session/cookie/JWT transport。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke；当前 W2-S4b 不声明完整 Auth/RBAC、route-wide RBAC 或 session transport 完成 |
+
+## Wave 2 W2-S4b Trace RBAC seam
+
+Context:
+
+- W2-S4a 已提供 reader-backed `auth.Authorizer`、resolved active project role summary 和首批 project/LLM/writer route gates。
+- 本 slice 限定在 Go trace read/export RBAC seam，不实现 session cookie/JWT，不替换开发期 `X-Tenant-Id` / `X-User-Id` transport，不声明 route-wide RBAC 完成。
+- `auth.SQLReader` 仍是 current-user membership discovery 的真相源；trace full access 必须消费 resolved `ActiveProjects` role，不直接 OR 原始 `ActiveTenants`。
+
+TDD / Review:
+
+- Implementer subagent Mendel 先补 RED：`go test ./internal/auth -run 'Trace|Authorize|RBAC|Permission' -count=1` 和 `go test ./internal/httpapi -run 'Trace|RBAC|AgentTrace' -count=1`，失败于缺 `trace_full_access` permission 和 trace route RBAC gate。
+- 新增 `PermissionTraceFullAccess`：只允许 matching active resolved project role `project_owner`、`owner`、`admin`、`editor`。raw tenant owner/admin/editor 没有 matching project summary 时拒绝；tenant owner/admin/editor 遇到 project override `writer` / `analyst` / `viewer` 时也拒绝。
+- `GET /v1/projects/{projectId}/agent-traces/{traceId}/events` 现在先要求 project read；`include_full=true` 再要求 full trace RBAC，然后才调用既有 `TraceAccessChecker` 和 trace reader。
+- `POST /v1/projects/{projectId}/agent-traces/{traceId}/export` 现在先要求 project read，再读取 body；full export 在任何 strict validation、`TraceAccessChecker`、reader 或 auditor 之前执行 full trace RBAC。body probe 采用保守语义：任意 top-level `include_full: true`，包括 duplicate key `{"include_full":false,"include_full":true}`，都会先触发 full trace RBAC。
+- Project-read deny 和 full-trace deny 均不会把 `VALIDATION_FAILED`、`api_key`、prompt、`credential_ref`、draft、manuscript 或 raw body 字段暴露给无权用户。已授权用户的非法 trace export payload 仍返回稳定 `VALIDATION_FAILED` 和空 details。
+- Spec reviewer Confucius 初审通过；quality reviewer Bacon 发现 full trace export strict decode 早于 full-trace RBAC，Curie 补 RED 后修正；quality re-review Aquinas 发现 duplicate `include_full` key 可绕过 full-trace RBAC，Pasteur 补 RED 后修正；final reviewer Socrates 确认 trace list/export ordering、duplicate key path 和 auth permission matrix 均符合 spec。
+
+Verification:
+
+- `cd apps/api && go test ./internal/auth -run 'Trace|Authorize|RBAC|Permission|Override|Project' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'TraceExport|RBAC|AgentTrace|LLMFacility' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'Trace|RBAC|AgentTrace|LLMFacility' -count=1` 通过。
+- `cd apps/api && go test ./internal/auth -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Auth|RBAC|Trace' -count=1` 通过。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `gofmt -l`、`git diff --check` 和 reviewer read-only checks 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+
+Next:
+
+- W2-S4c：继续 route-wide RBAC enforcement，把 remaining sensitive reads/mutations 纳入 permission matrix。
+- 后续 session/cookie/JWT transport 仍 pending；当前 W2-S4b 仍使用 development actor headers。
 
 ## Wave 2 W2-S4a Go HTTP RBAC seam
 
@@ -107,7 +149,7 @@ Docs synced:
 
 Next:
 
-- W2-S4b：继续 route-wide RBAC enforcement，把剩余 sensitive reads/mutations 纳入 permission matrix。
+- W2-S4c：继续 route-wide RBAC enforcement，把剩余 sensitive reads/mutations 纳入 permission matrix。
 - 后续 session/cookie/JWT transport 仍 pending；当前 W2-S4a 仍使用 development actor headers。
 
 ## Wave 2 W2-S3 Next tenant/project picker

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -373,6 +374,43 @@ type listResponse[T any] struct {
 
 type traceExportRequest struct {
 	IncludeFull bool `json:"include_full"`
+}
+
+func traceExportIncludeFullRequested(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return false
+	}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return false
+		}
+		if key == "include_full" {
+			var includeFull bool
+			if err := decoder.Decode(&includeFull); err != nil {
+				return false
+			}
+			if includeFull {
+				return true
+			}
+			continue
+		}
+		var ignored any
+		if err := decoder.Decode(&ignored); err != nil {
+			return false
+		}
+	}
+	return false
 }
 
 type traceExportResponse struct {
@@ -3584,8 +3622,14 @@ func (s *Server) handleListAgentTraceEvents(response http.ResponseWriter, reques
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "agent trace route not found", nil)
 		return
 	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionProjectRead) {
+		return
+	}
 	includeFull := strings.EqualFold(strings.TrimSpace(request.URL.Query().Get("include_full")), "true")
 	if includeFull {
+		if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionTraceFullAccess) {
+			return
+		}
 		err := s.traceAccessChecker.CanViewFullTrace(request.Context(), traces.AccessInput{
 			TenantID:  tenantID,
 			ProjectID: projectID,
@@ -3621,14 +3665,18 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "agent trace export route not found", nil)
 		return
 	}
-	var payload traceExportRequest
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionProjectRead) {
+		return
+	}
+	bodyBytes, err := io.ReadAll(request.Body)
+	if err != nil {
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid trace export payload", nil)
 		return
 	}
-	if payload.IncludeFull {
+	if traceExportIncludeFullRequested(bodyBytes) {
+		if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionTraceFullAccess) {
+			return
+		}
 		err := s.traceAccessChecker.CanViewFullTrace(request.Context(), traces.AccessInput{
 			TenantID:  tenantID,
 			ProjectID: projectID,
@@ -3639,6 +3687,13 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
 			return
 		}
+	}
+	var payload traceExportRequest
+	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid trace export payload", nil)
+		return
 	}
 	items, err := s.traceReader.ListEvents(request.Context(), traces.EventQueryInput{
 		TenantID:    tenantID,

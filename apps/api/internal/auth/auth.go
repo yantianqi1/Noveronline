@@ -57,6 +57,7 @@ type Permission string
 
 const (
 	PermissionProjectRead            Permission = "project_read"
+	PermissionTraceFullAccess        Permission = "trace_full_access"
 	PermissionWriterRun              Permission = "writer_run"
 	PermissionLLMModuleBindingManage Permission = "llm_module_binding_manage"
 )
@@ -185,6 +186,8 @@ func (a *ReaderBackedAuthorizer) allowed(currentUser CurrentUser, tenantID strin
 	switch permission {
 	case PermissionProjectRead:
 		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, projectReadProjectRoles())
+	case PermissionTraceFullAccess:
+		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, traceFullAccessProjectRoles())
 	case PermissionWriterRun:
 		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, writerRunProjectRoles())
 	case PermissionLLMModuleBindingManage:
@@ -400,6 +403,10 @@ func projectReadProjectRoles() map[string]struct{} {
 
 func writerRunProjectRoles() map[string]struct{} {
 	return roleSet("project_owner", "owner", "admin", "editor", "writer")
+}
+
+func traceFullAccessProjectRoles() map[string]struct{} {
+	return roleSet("project_owner", "owner", "admin", "editor")
 }
 
 func llmModuleBindingManageTenantRoles() map[string]struct{} {

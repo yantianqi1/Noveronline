@@ -220,9 +220,9 @@ event_type：
 
 读取规则：
 
-- 默认 `GET /v1/projects/{projectId}/agent-traces/{traceId}/events` 只返回 `public` / `summary` payload；`full` payload 在 SQL reader 层替换为空对象。
-- `include_full=true` 必须先通过 full trace 权限检查，否则返回 `TRACE_ACCESS_DENIED`。
-- `POST /v1/projects/{projectId}/agent-traces/{traceId}/export` 会写 `audit_logs`，审计失败时不得返回导出内容；`include_full=true` 同样必须先通过 full trace 权限检查。
+- 默认 `GET /v1/projects/{projectId}/agent-traces/{traceId}/events` 必须先通过 membership-backed project read RBAC，只返回 `public` / `summary` payload；`full` payload 在 SQL reader 层替换为空对象。
+- `include_full=true` 必须先通过 project read、resolved-project `trace_full_access` RBAC 和既有 full trace checker，否则返回稳定 auth/full-trace error，不调用 trace reader。`trace_full_access` 只看 matching active project role `project_owner`、`owner`、`admin` 或 `editor`，raw tenant role alone 不授权。
+- `POST /v1/projects/{projectId}/agent-traces/{traceId}/export` 必须先通过 project read RBAC，再检查是否请求 full export；`include_full=true` 同样必须先通过 resolved-project full trace RBAC 和既有 full trace checker，之后才做 strict payload validation、trace reader 和 `audit_logs` 写入。审计失败时不得返回导出内容；duplicate `include_full` key 中只要任一 top-level `include_full: true`，都按 full export 授权。
 - `POST /v1/projects/{projectId}/agent-traces/{traceId}/export` 的 JSON decode validation failure 只返回稳定 `VALIDATION_FAILED` message 和空 details；decoder 原始错误、unknown field 名称、Go struct 字段名、`api_key`、prompt、`credential_ref`、draft 或 manuscript 不得进入公开错误响应。LLM Facility module binding/channel mutation 的 validation failure 也遵守同一边界。
 - Pi Writer Runtime 写入 `prompt_snapshot`、`llm_call_started`、`llm_call_completed`、`artifact_written` 和 `error`；其中 prompt snapshot 标记为 `full`，默认读侧不得泄露用户小说原文或 prompt。
 - LLM Activity 读侧必须把 `llm_activity.error_jsonb` 和 reader 返回的 `error` map 都当作不可信 payload 递归清洗，移除 `api_key`、`encrypted_api_key`、`credential_ref`、`prompt`、`response`、`body`、`content`、`candidate_body`、`event_body`、`source_material`、`source_text`、`draft`、`manuscript` 等高风险字段；解析失败时返回稳定摘要，不把原始错误字符串透传给前端。清洗同时发生在 SQL reader 和 HTTP response 边界，避免替换 reader 实现后绕过隐私防线。Activity / Usage SQL query、scan 或 rows error 也必须收敛为稳定 `LLM_ACTIVITY_QUERY_FAILED` / `LLM activity query failed`，HTTP 边界不得把 driver/SQL 异常文本透出到公开响应。LLM Usage 读侧只聚合 `usage_events.usage_type = llm_tokens`，并继续按 tenant/project/run/module 过滤；不得把 storage、workflow、import 或其他非 LLM billing events 暴露为 LLM Facility usage。Runtime 写入侧也要在入库前清洗错误 payload；Worldline `PostgresLLMTelemetryWriter` 已对 `llm_activity.error_jsonb` 执行同一类递归 key 清洗，避免未来调用方把 credential/prompt/source 字段写进 telemetry 表。
