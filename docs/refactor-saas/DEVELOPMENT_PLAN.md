@@ -321,7 +321,7 @@ assets / graph -> worldline -> character console -> writer -> manuscript
 
 验收：
 
-- 每个旧页面状态从 `planned` 推进到 `implemented` 或 `verified`。
+- 每个旧页面状态从带 owner/wave 的 `planned` 推进到 `implemented` 或 `verified`。
 - 每个旧 endpoint group 有新 API 或明确替代。
 - 旧 SQLite/project artifacts 可生成 import report。
 - 未完成导入不会被标记为成功。

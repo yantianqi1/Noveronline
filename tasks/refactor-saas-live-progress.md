@@ -42,7 +42,7 @@
 | implemented | 已实现主要代码路径，但仍缺 live/E2E 或更广验收 |
 | in_progress | 正在推进，存在明确 pending 子项 |
 | blocked | 依赖缺失或必须等另一 slice |
-| planned | 还未实质开工 |
+| planned | 还未实质开工；必须在对应任务或矩阵行标注 owner/wave |
 
 ## 当前总览
 
@@ -1257,6 +1257,34 @@ Next:
 
 - 继续推进 Go API upload/complete -> Temporal cluster -> Python worker parse/segment 的真实 live E2E。
 - Browser upload/complete、sequential-reading provider/live LLM、扫描/OCR PDF、更完整语义分段、retry failed segments 和真实 ontology/entity resolution/profile/finalize runners 仍 pending。
+
+### 2026-07-07 当前会话：Wave 0 governance and acceptance matrix calibration
+
+Scope:
+
+- 文档/治理-only：不修改产品代码，不声明任何新增 runtime 能力完成。
+- 对齐 `17-migration-roadmap.md` 到 `DEVELOPMENT_PLAN.md` 的 Phase 0..8。
+- 给 coverage matrix 剩余 `planned` 状态补 owner/wave，校准 P6-003 reviewer/dedup 与覆盖矩阵关系。
+
+RED:
+
+- `rg -n "planned|Phase 11|Phase 12|blocked \\|.*verified" docs/refactor-saas tasks` 发现 `17-migration-roadmap.md` 仍有超出 Phase 0..8 的旧后续阶段标题，coverage matrix 多个裸 `planned`，以及 P6-003 `blocked` 行的 verification 文案声称 reviewer/dedup workflows verified。
+- `git diff --check` 基线通过。
+
+GREEN:
+
+- 重新运行同一 acceptance search 后，不再出现超出 Phase 0..8 的实际 roadmap 标题，也不再出现 `blocked | ... verified`；coverage matrix 剩余 `planned` 均带 owner/wave，命令文本和状态规则行仅作为治理说明保留。
+- `git diff --check` 通过。
+
+Review:
+
+- Spec Reviewer approved Wave 0：Phase 0..8 编号一致，P6-003 不再把 blocked 状态写成 reviewer/dedup verified，hard constraints 未被弱化。
+- Quality Reviewer 先要求补 provenance 和 owner：`23-a4-story-graph-runner-fix-handoff.md` 现在明确是历史/外部 handoff note，不是 Wave 0 product-complete 证据，且未记录精确 commit SHA；coverage matrix 的 `project` 行已增加 Wave 2 auth/dev session 与 tenant/project list/create owner。
+- Quality Reviewer 复审通过；Wave 0 仍只声明治理校准完成，不声明任何 Story Graph runner 或产品 runtime 新能力完成。
+
+Next:
+
+- Wave 1 继续 Writer live closure；后续实现 wave 不得把 skeleton、fail-closed shell 或 metadata-only path 当作产品闭环。
 
 ### 2026-07-07 当前会话：P5 Seed entity_resolution LLM Facility runner skeleton + DB-backed snapshot writer/env wiring
 
@@ -3993,14 +4021,14 @@ Progress:
 
 - 保留顶部总览估算：产品真实闭环约 `55%-60%`。
 - 将顶部 `当前焦点` 校准到下一条待开工切片：`P5 Seed public workflow event object-key redaction`。
-- 明确本切片还是 `planned，RED pending`，尚未声明实现或验证完成。
+- 明确本切片还是 `planned，RED pending`（owner/wave: P5 Seed），尚未声明实现或验证完成。
 - 进度记录规则保持不变：每个开发切片开始、RED、GREEN、广泛验证、文档同步和交接前都必须更新本文。
 
 Verification:
 
 - 本轮为文档维护，无代码测试。
 - `test -s tasks/refactor-saas-live-progress.md` 通过，确认实时进度文档存在且非空。
-- `rg -n "当前焦点|实时进度记录校准|Seed public workflow event object-key redaction|planned，RED pending|Follow-up active slice" tasks/refactor-saas-live-progress.md` 通过，核心章节、本轮记录和下一切片可检索。
+- `rg -n "当前焦点|实时进度记录校准|Seed public workflow event object-key redaction|planned，RED pending|Follow-up active slice" tasks/refactor-saas-live-progress.md` 通过，核心章节、本轮记录和下一切片可检索；这里的 planned 文本属于 P5 Seed owner/wave 日志检索词。
 - `rg -n "refactor-saas-live-progress|实时进度流水" tasks/refactor-saas-parallel-board.md` 通过，看板入口仍在。
 - `rg -n '[[:blank:]]$' tasks/refactor-saas-live-progress.md tasks/refactor-saas-parallel-board.md` 未发现尾随空白。
 - `git diff --check` 通过。

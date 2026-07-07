@@ -36,6 +36,7 @@
 - `20-agent-window-identities-and-prompts.md`：每个开发窗口的身份卡和可复制启动提示词清单。
 - `21-pi-writer-agent-runtime.md`：Writer-first Pi Agent Runtime、写作台最小闭环和分批接入方案。
 - `22-midstream-handoff-summary.md`：当前重构中途总结、完成度估算、风险、下一步建议和新对话启动提示词。
+- `23-a4-story-graph-runner-fix-handoff.md`：A4 Story Graph Runner blocking fixes 历史/外部 handoff note；不是 Wave 0 产出的完成证据，后续 agent 必须先核对实际 git diff/commit 和测试输出再视为 product-complete。
 - `prompts/`：各窗口可直接复制到新 Codex 终端的启动提示词。
 
 ## 总体决策

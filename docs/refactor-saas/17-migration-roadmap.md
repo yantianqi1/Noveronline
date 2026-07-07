@@ -12,8 +12,8 @@
 2. 先打通用户写作台和后端 Pi Writer Agent。
 3. 把资产库、故事图谱、worldline、角色控制分批接入 writer tools。
 4. 再用 SaaS 基座承接已经跑通的 Writer vertical slice。
-5. 迁移 seed/assets/graph/worldline 等领域能力。
-6. 最后清理旧 FastAPI 公网面和 legacy artifacts。
+5. 迁移 seed/assets/graph/worldline/character 等领域能力。
+6. 最后完成 legacy import、旧架构清理和生产硬化。
 
 开发总纲以 `DEVELOPMENT_PLAN.md` 为准。本文件是路线摘要。
 
@@ -159,7 +159,7 @@ infra/docker-compose
 - activity/usage 可按 tenant/project/run/module 查询。
 - API Key 和完整小说原文不出现在日志。
 
-## Phase 5：Seed Pipeline
+## Phase 5：Seed / Assets / Graph 结构化迁移
 
 实现：
 
@@ -169,44 +169,9 @@ infra/docker-compose
 - Python seed activities。
 - seed progress UI。
 - structured canon writes。
-
-迁移：
-
-- 复用旧 seed services。
-- `project_artifacts` 导入新表或 object artifacts。
-
-验收：
-
-- 上传 TXT/MD/PDF 分析成功。
-- old seed 功能全部覆盖。
-- seed 结果可被 Writer tools 检索。
-
-## Phase 6：Asset Library
-
-实现：
-
-- assets。
-- archive entities。
-- asset ingestion workflow。
-- search / vector index。
-- facets。
-- asset UI。
-
-迁移：
-
-- 旧 assets 和 archive rows 导入。
-- classification map 导入。
-
-验收：
-
-- 旧 unified-assets 能力覆盖。
-- 入库 Agent 可用。
-- Writer `query_assets` 读取新资产库。
-
-## Phase 7：Story Graph
-
-实现：
-
+- assets CRUD/search/facets。
+- archive entity/memory candidate review。
+- asset ingestion / style extraction workflow。
 - graph build workflow。
 - story_graph tables。
 - React Flow UI。
@@ -215,16 +180,26 @@ infra/docker-compose
 
 迁移：
 
+- 复用旧 seed services。
+- `project_artifacts` 导入新表或 object artifacts。
+- 旧 assets 和 archive rows 导入。
+- classification map 导入。
 - 旧 `graph_*` 导入 snapshot。
 
 验收：
 
+- 上传 TXT/MD/PDF 分析成功。
+- old seed 功能全部覆盖。
+- seed 结果可被 Writer tools 检索。
+- 旧 unified-assets 能力覆盖。
+- 入库 Agent 可用。
+- Writer `query_assets` 读取新资产库。
 - 构建图谱。
 - 大图可读。
 - 羁绊/支线生成。
 - Writer `query_graph_neighbors` 读取图谱。
 
-## Phase 8：Worldline
+## Phase 6：Worldline / Character Console 创作链闭环
 
 实现：
 
@@ -234,37 +209,11 @@ infra/docker-compose
 - saved paths。
 - worldline UI。
 - Writer saved path reference。
-
-迁移：
-
-- 旧 `worldline_sessions` / agent logs 导入。
-
-验收：
-
-- 单世界推演完整。
-- 保存路径给 Writer 引用。
-- 不恢复旧多分支主模型。
-
-## Phase 9：Character Console
-
-实现：
-
-- interaction sessions。
+- Character Console interaction sessions。
 - first-person mode。
 - turn stream。
 - convert to chapter workflow。
 - interaction draft 接入 Writer。
-
-验收：
-
-- 角色互动记录可保存。
-- 可转为章节草稿。
-- 转写草稿能进入写作台。
-
-## Phase 10：Writer Workbench 完整化
-
-在 Phase 1 的 Pi 最小闭环基础上补齐：
-
 - reviewer。
 - dedup。
 - book plans。
@@ -275,14 +224,44 @@ infra/docker-compose
 
 迁移：
 
+- 旧 `worldline_sessions` / agent logs 导入。
 - 旧 `chapter_content` / `scenes` / `assets manuscript_block` 导入。
 
 验收：
 
+- 单世界推演完整。
+- 保存路径给 Writer 引用。
+- 不恢复旧多分支主模型。
+- 角色互动记录可保存。
+- 可转为章节草稿。
+- 转写草稿能进入写作台。
 - 旧 writer-agent API 语义覆盖。
 - 写作台可实际生成、审校、采用和导出正文。
 
-## Phase 11：Ops / Billing / Hardening
+## Phase 7：Legacy import、覆盖矩阵验证和旧架构清理
+
+清理：
+
+- 旧 FastAPI public routes。
+- 旧 `project_artifacts` runtime fallback。
+- 旧多分支接口。
+- 旧本地文件真相源。
+
+保留：
+
+- legacy importer。
+- migration reports。
+- export tools。
+
+验收：
+
+- 旧 SQLite/project artifacts 可生成 import report。
+- selected import 有成功、失败和 rollback report。
+- 未完成导入不会被标记为成功。
+- 覆盖矩阵剩余项都有 owner/wave 或明确 deprecated-with-reason。
+- 不恢复旧 FastAPI public routes 或旧本地文件真相源。
+
+## Phase 8：Ops / Billing / Security / Production hardening
 
 实现：
 
@@ -301,21 +280,6 @@ infra/docker-compose
 - 可限制成本。
 - 可定位故障。
 - logs 不含敏感原文/API Key。
-
-## Phase 12：Legacy Cleanup
-
-清理：
-
-- 旧 FastAPI public routes。
-- 旧 `project_artifacts` runtime fallback。
-- 旧多分支接口。
-- 旧本地文件真相源。
-
-保留：
-
-- legacy importer。
-- migration reports。
-- export tools。
 
 ## 迁移原则
 
