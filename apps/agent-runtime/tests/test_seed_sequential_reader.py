@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -87,9 +88,10 @@ def test_llm_facility_sequential_reader_calls_provider_with_explicit_key_and_seg
         ],
     )
 
+    pass_id = result.pop("pass_id")
+    UUID(pass_id)
     assert result == {
         "status": "completed",
-        "pass_id": "run-1:sequential_reading",
         "module_key": "sequential_reading",
         "model_id": "model-a",
         "notes": [

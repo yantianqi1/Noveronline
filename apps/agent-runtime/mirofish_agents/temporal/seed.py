@@ -4251,7 +4251,6 @@ def _record_completed_parse_event(
             "artifact_type": "extracted_text",
             "char_count": char_count,
             "line_count": line_count,
-            "sha256": sha256,
         },
     )
     return True

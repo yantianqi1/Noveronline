@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 from urllib.request import Request, urlopen
@@ -301,7 +302,7 @@ class LLMFacilitySequentialReader:
 
         return {
             "status": "completed",
-            "pass_id": f"{context.run_id}:sequential_reading",
+            "pass_id": _reading_pass_id(context),
             "module_key": module_key,
             "model_id": resolution.model_id,
             "notes": response_json.get("notes", []),
@@ -510,6 +511,19 @@ def _failed(code: str, message: str) -> dict[str, Any]:
         },
         "module_key": "sequential_reading",
     }
+
+
+def _reading_pass_id(context: AgentContext) -> str:
+    stable_key = ":".join(
+        [
+            "mirofish",
+            "seed-sequential-reading-pass",
+            context.tenant_id,
+            context.project_id or "",
+            context.run_id,
+        ]
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
 
 def _row_value(row: Any, index: int, key: str) -> str:

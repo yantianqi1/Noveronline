@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -49,6 +50,7 @@ UPLOAD_ID = "76666666-6666-6666-6666-666666666666"
 SOURCE_OBJECT_KEY = "projects/live-seed/source-files/upload-1/book.txt"
 CHANNEL_ID = "77777777-7777-7777-7777-777777777777"
 SEGMENT_ID = "78888888-8888-8888-8888-888888888888"
+SEGMENT_ID_2 = "79999999-9999-9999-9999-999999999999"
 KEY_MATERIAL = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 
 
@@ -470,6 +472,167 @@ def test_seed_agent_profile_live_postgres_provider_chain_persists_snapshot_and_p
         assert forbidden not in encoded
 
 
+def test_seed_sequential_reading_live_postgres_provider_object_store_persists_notes_and_public_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    storage_env = _live_object_storage_env()
+    object_store = _object_store_from_env(storage_env)
+    segment_object_key_1 = f"projects/{PROJECT_ID}/seed-runs/{RUN_ID}/segments/0000.txt"
+    segment_object_key_2 = f"projects/{PROJECT_ID}/seed-runs/{RUN_ID}/segments/0001.txt"
+    segment_text_1 = "第一章 雨夜\n雨声压住脚步。"
+    segment_text_2 = "第二章 破晓\n光落在窗沿。"
+
+    with _LiveSequentialReadingProvider() as provider:
+        _prepare_live_sequential_reading_database(
+            admin_url,
+            provider.base_url,
+            segment_object_key_1=segment_object_key_1,
+            segment_object_key_2=segment_object_key_2,
+        )
+        object_store.write_bytes(segment_object_key_1, segment_text_1.encode("utf-8"), "text/plain; charset=utf-8")
+        object_store.write_bytes(segment_object_key_2, segment_text_2.encode("utf-8"), "text/plain; charset=utf-8")
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+        for key, value in storage_env.items():
+            monkeypatch.setenv(key, value)
+
+        result = sequential_reading_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-sequential-reading",
+                    "permissions": {"seed_pipeline": ["run"]},
+                },
+                "segments": [
+                    {
+                        "segment_id": SEGMENT_ID,
+                        "segment_order": 0,
+                        "chapter_guess": "第一章",
+                        "title_guess": "雨夜",
+                        "object_key": segment_object_key_1,
+                    },
+                    {
+                        "segment_id": SEGMENT_ID_2,
+                        "segment_order": 1,
+                        "chapter_guess": "第二章",
+                        "title_guess": "破晓",
+                        "object_key": segment_object_key_2,
+                    },
+                ],
+            }
+        )
+
+    assert result == {
+        "tenant_id": TENANT_ID,
+        "project_id": PROJECT_ID,
+        "run_id": RUN_ID,
+        "workflow_type": "seed_pipeline",
+        "upload_id": None,
+        "status": "completed",
+        "stage": "sequential_reading",
+        "next_stage": "persist_runtime_facts",
+        "module_key": "sequential_reading",
+        "segment_count": 2,
+        "note_count": 2,
+        "stage_event_persisted": True,
+    }
+    assert len(provider.requests) == 1
+    assert _header(provider.requests[0]["headers"], "Authorization") == "Bearer sk-live-seed-sequential"
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Run-Id") == RUN_ID
+    provider_body = json.dumps(provider.requests[0]["body"], ensure_ascii=False, sort_keys=True)
+    assert "model-seed-sequential-live" in provider_body
+    assert "雨声压住脚步" in provider_body
+    assert "光落在窗沿" in provider_body
+    for forbidden in ("credential_ref", "sk-live-seed-sequential", "api_key"):
+        assert forbidden not in provider_body
+
+    persisted = _read_seed_sequential_reading_live_rows(admin_url)
+    assert persisted["text_segments"] == [
+        {"segment_id": SEGMENT_ID, "segment_order": 0, "chapter_guess": "第一章", "title_guess": "雨夜"},
+        {"segment_id": SEGMENT_ID_2, "segment_order": 1, "chapter_guess": "第二章", "title_guess": "破晓"},
+    ]
+    assert persisted["reading_passes"] == [
+        {
+            "pass_id": persisted["reading_passes"][0]["pass_id"],
+            "pass_type": "sequential_reading",
+            "status": "completed",
+            "module_key": "sequential_reading",
+            "model_id": "model-seed-sequential-live",
+            "metadata_jsonb": {"segment_count": 2},
+        }
+    ]
+    UUID(persisted["reading_passes"][0]["pass_id"])
+    assert persisted["reading_segment_notes"] == [
+        {
+            "segment_id": SEGMENT_ID,
+            "pass_id": persisted["reading_passes"][0]["pass_id"],
+            "summary": "林舟在雨夜听见脚步。",
+            "payload_jsonb": {
+                "characters": [{"name": "林舟", "role": "protagonist"}],
+                "organizations": [],
+                "relationships": [],
+                "plot_threads": [{"title": "雨港秘密", "status": "opened"}],
+                "world_rules": [],
+                "events": [{"summary": "雨声压住脚步"}],
+                "consistency_notes": [],
+            },
+        },
+        {
+            "segment_id": SEGMENT_ID_2,
+            "pass_id": persisted["reading_passes"][0]["pass_id"],
+            "summary": "陆晚在破晓抵达窗前。",
+            "payload_jsonb": {
+                "characters": [{"name": "陆晚", "role": "witness"}],
+                "organizations": [],
+                "relationships": [],
+                "plot_threads": [],
+                "world_rules": [{"rule": "破晓会显露昨夜痕迹"}],
+                "events": [{"summary": "光落在窗沿"}],
+                "consistency_notes": [],
+            },
+        },
+    ]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "sequential_reading",
+                "status": "completed",
+                "activity": "sequential_reading_activity",
+                "module_key": "sequential_reading",
+                "segment_count": 2,
+                "note_count": 2,
+                "model_id": "model-seed-sequential-live",
+            },
+        }
+    ]
+    public_event_body = json.dumps(persisted["workflow_events"], ensure_ascii=False, sort_keys=True)
+    for forbidden in (
+        segment_object_key_1,
+        segment_object_key_2,
+        "object_key",
+        "segment_object_key",
+        "source_object_key",
+        "artifact_object_key",
+        "provider_response",
+        "prompt",
+        "credential_ref",
+        "sk-live-seed-sequential",
+        "api_key",
+        segment_text_1,
+        segment_text_2,
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in public_event_body
+
+
 class _InMemoryObjectStore:
     def __init__(self, objects: dict[str, bytes]) -> None:
         self.objects = dict(objects)
@@ -531,6 +694,93 @@ class _LiveAgentProfileProvider:
                         "prompt_tokens": 11,
                         "completion_tokens": 17,
                         "total_tokens": 28,
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        return Handler
+
+
+class _LiveSequentialReadingProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_LiveSequentialReadingProvider":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(body),
+                    }
+                )
+                content = {
+                    "notes": [
+                        {
+                            "segment_id": SEGMENT_ID,
+                            "summary": "林舟在雨夜听见脚步。",
+                            "payload_jsonb": {
+                                "characters": [{"name": "林舟", "role": "protagonist"}],
+                                "organizations": [],
+                                "relationships": [],
+                                "plot_threads": [{"title": "雨港秘密", "status": "opened"}],
+                                "world_rules": [],
+                                "events": [{"summary": "雨声压住脚步"}],
+                                "consistency_notes": [],
+                                "prompt": "must be sanitized",
+                                "provider_response": "must be sanitized",
+                                "credential_ref": "secret-ref",
+                                "api_key": "sk-provider-leak",
+                                "draft": "private draft",
+                                "manuscript": "private manuscript",
+                            },
+                        },
+                        {
+                            "segment_id": SEGMENT_ID_2,
+                            "summary": "陆晚在破晓抵达窗前。",
+                            "payload_jsonb": {
+                                "characters": [{"name": "陆晚", "role": "witness"}],
+                                "organizations": [],
+                                "relationships": [],
+                                "plot_threads": [],
+                                "world_rules": [{"rule": "破晓会显露昨夜痕迹"}],
+                                "events": [{"summary": "光落在窗沿"}],
+                                "consistency_notes": [],
+                            },
+                        },
+                    ]
+                }
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {
+                        "prompt_tokens": 23,
+                        "completion_tokens": 31,
+                        "total_tokens": 54,
                     },
                 }
                 encoded = json.dumps(response).encode("utf-8")
@@ -723,6 +973,80 @@ def _prepare_live_agent_profile_database(admin_url: str, provider_base_url: str)
             )
 
 
+def _prepare_live_sequential_reading_database(
+    admin_url: str,
+    provider_base_url: str,
+    *,
+    segment_object_key_1: str,
+    segment_object_key_2: str,
+) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 40, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO source_files (
+                     tenant_id, file_id, project_id, upload_id, object_key, filename,
+                     mime_type, size_bytes, sha256, purpose, parse_status, created_by
+                   )
+                   VALUES (
+                     %s, %s, %s, %s, %s, 'book.txt', 'text/plain', 1,
+                     repeat('0', 64), 'seed', 'parsed', %s
+                   )""",
+                (TENANT_ID, SOURCE_FILE_ID, PROJECT_ID, UPLOAD_ID, SOURCE_OBJECT_KEY, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO text_segments (
+                     tenant_id, segment_id, project_id, run_id, source_file_id,
+                     segment_order, chapter_guess, title_guess, object_key
+                   )
+                   VALUES
+                     (%s, %s, %s, %s, %s, 0, '第一章', '雨夜', %s),
+                     (%s, %s, %s, %s, %s, 1, '第二章', '破晓', %s)""",
+                (
+                    TENANT_ID,
+                    SEGMENT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SOURCE_FILE_ID,
+                    segment_object_key_1,
+                    TENANT_ID,
+                    SEGMENT_ID_2,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SOURCE_FILE_ID,
+                    segment_object_key_2,
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO llm_channels (
+                     tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+                   )
+                   VALUES (%s, %s, 'Seed Sequential Live Provider', 'openai-compatible', %s, %s, 1, true)""",
+                (TENANT_ID, CHANNEL_ID, provider_base_url, _encrypt_api_key("sk-live-seed-sequential")),
+            )
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES (%s, %s, 'model-seed-sequential-live', 'live-provider', true, false)""",
+                (TENANT_ID, CHANNEL_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES (%s, %s, 'sequential_reading', %s, 'model-seed-sequential-live', '{"temperature":0}'::jsonb, %s)""",
+                (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+
+
 def _prepare_live_database_foundation(admin_url: str) -> None:
     with psycopg.connect(admin_url, autocommit=True) as connection:
         with connection.cursor() as cursor:
@@ -863,6 +1187,49 @@ def _read_seed_live_rows_for(admin_url: str, run_id: str, source_file_id: str) -
         "text_segment_object_refs": text_segment_object_refs,
         "workflow_events": workflow_events,
         "workflow_runs": workflow_runs,
+    }
+
+
+def _read_seed_sequential_reading_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT segment_id::text, segment_order, chapter_guess, title_guess
+                   FROM text_segments
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY segment_order""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            text_segments = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT pass_id::text, pass_type, status, module_key, model_id, metadata_jsonb
+                   FROM reading_passes
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY created_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            reading_passes = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT segment_id::text, pass_id::text, summary, payload_jsonb
+                   FROM reading_segment_notes
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY segment_id""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            reading_segment_notes = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "text_segments": text_segments,
+        "reading_passes": reading_passes,
+        "reading_segment_notes": reading_segment_notes,
+        "workflow_events": workflow_events,
     }
 
 

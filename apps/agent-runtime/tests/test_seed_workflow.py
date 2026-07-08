@@ -219,7 +219,6 @@ def test_seed_workflow_locally_chains_uploaded_text_source_into_parse_and_segmen
                 "artifact_type": "extracted_text",
                 "char_count": 30,
                 "line_count": 5,
-                "sha256": result["sha256"],
             },
         },
         {
@@ -4174,7 +4173,6 @@ def test_parse_file_activity_writes_extracted_text_artifact_without_returning_ra
                 "artifact_type": "extracted_text",
                 "char_count": 8,
                 "line_count": 2,
-                "sha256": result["sha256"],
             },
         }
     ]
