@@ -48,6 +48,7 @@ SOURCE_FILE_ID = "75555555-5555-5555-5555-555555555555"
 UPLOAD_ID = "76666666-6666-6666-6666-666666666666"
 SOURCE_OBJECT_KEY = "projects/live-seed/source-files/upload-1/book.txt"
 CHANNEL_ID = "77777777-7777-7777-7777-777777777777"
+SEGMENT_ID = "78888888-8888-8888-8888-888888888888"
 KEY_MATERIAL = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 
 
@@ -685,11 +686,19 @@ def _prepare_live_agent_profile_database(admin_url: str, provider_base_url: str)
                 (TENANT_ID, PROJECT_ID, RUN_ID),
             )
             cursor.execute(
+                """INSERT INTO text_segments (
+                     tenant_id, segment_id, project_id, run_id, segment_order,
+                     chapter_guess, title_guess, summary
+                   )
+                   VALUES (%s, %s, %s, %s, 0, '第一章', '雨港', '雨夜相遇。')""",
+                (TENANT_ID, SEGMENT_ID, PROJECT_ID, RUN_ID),
+            )
+            cursor.execute(
                 """INSERT INTO segment_summaries (
                      tenant_id, segment_id, project_id, run_id, summary
                    )
-                   VALUES (%s, gen_random_uuid(), %s, %s, '雨夜相遇。')""",
-                (TENANT_ID, PROJECT_ID, RUN_ID),
+                   VALUES (%s, %s, %s, %s, '雨夜相遇。')""",
+                (TENANT_ID, SEGMENT_ID, PROJECT_ID, RUN_ID),
             )
             cursor.execute(
                 """INSERT INTO llm_channels (
