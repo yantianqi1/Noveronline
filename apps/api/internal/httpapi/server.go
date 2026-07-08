@@ -1098,6 +1098,8 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodPost && isLLMChannelSyncPath(path):
 		return true
+	case request.Method == http.MethodDelete && isTenantSessionsPath(path):
+		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/writer-runs/") && strings.HasSuffix(path, "/cancel"):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/adoptions"):
@@ -1152,6 +1154,24 @@ func isReservedAssetPathPart(assetID string) bool {
 	default:
 		return false
 	}
+}
+
+func isTenantSessionsPath(path string) bool {
+	return tenantSessionsPathPart(path) != ""
+}
+
+func tenantSessionsPathPart(path string) string {
+	const prefix = "/v1/tenants/"
+	const suffix = "/sessions"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	tenantID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" || strings.Contains(tenantID, "/") {
+		return ""
+	}
+	return tenantID
 }
 
 func isWorldlineSessionDetailPath(path string) bool {
@@ -1398,6 +1418,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleRevokeAllCurrentUserSessions(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/rotation":
 		s.handleRotateCurrentSession(response, request)
+	case request.Method == http.MethodDelete && isTenantSessionsPath(request.URL.Path):
+		s.handleRevokeTenantSessions(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		s.handleGetCurrentUser(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
@@ -1767,6 +1789,33 @@ func (s *Server) handleRevokeAllCurrentUserSessions(response http.ResponseWriter
 	response.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleRevokeTenantSessions(response http.ResponseWriter, request *http.Request) {
+	tenantID := tenantSessionsPathPart(request.URL.Path)
+	if tenantID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "tenant sessions route not found", nil)
+		return
+	}
+	if !s.authorizeTenantSessionManage(response, request, tenantID) {
+		return
+	}
+	if s.authSessionStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	err := s.authSessionStore.RevokeTenantSessions(request.Context(), auth.RevokeTenantSessionsInput{
+		TenantID:  tenantID,
+		ActorID:   s.actorUserID(request),
+		Now:       time.Now().UTC(),
+		RequestID: requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleRotateCurrentSession(response http.ResponseWriter, request *http.Request) {
 	cookie, err := request.Cookie(sessionCookieName)
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
@@ -1867,6 +1916,10 @@ func (s *Server) authorizeAssetManage(response http.ResponseWriter, request *htt
 
 func (s *Server) authorizeLLMTenantManage(response http.ResponseWriter, request *http.Request, tenantID string) bool {
 	return s.authorizeProject(response, request, tenantID, "", auth.PermissionLLMModuleBindingManage)
+}
+
+func (s *Server) authorizeTenantSessionManage(response http.ResponseWriter, request *http.Request, tenantID string) bool {
+	return s.authorizeProject(response, request, tenantID, "", auth.PermissionTenantSessionManage)
 }
 
 func (s *Server) authorizeSingleAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, assetID string) bool {

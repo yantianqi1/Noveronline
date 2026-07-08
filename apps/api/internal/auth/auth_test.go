@@ -734,6 +734,58 @@ func TestReaderBackedAuthorizerLLMModuleBindingManageAllowsTenantScopeWithoutPro
 	}
 }
 
+func TestReaderBackedAuthorizerTenantSessionManageRequiresTenantAdmin(t *testing.T) {
+	for _, role := range []string{"owner", "admin"} {
+		t.Run("tenant_"+role, func(t *testing.T) {
+			authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithTenantRole(role)))
+
+			err := authorizer.Authorize(context.Background(), AuthorizeInput{
+				UserID:     "user-123",
+				TenantID:   "tenant-123",
+				Permission: PermissionTenantSessionManage,
+			})
+
+			if err != nil {
+				t.Fatalf("expected tenant role %q to manage tenant sessions: %v", role, err)
+			}
+		})
+	}
+
+	authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(CurrentUser{
+		User:          UserSummary{UserID: "user-123"},
+		ActiveTenants: []TenantMembershipSummary{{TenantID: "tenant-123", Role: "editor", Status: "active"}},
+		ActiveProjects: []ProjectMembershipSummary{{
+			TenantID:  "tenant-123",
+			ProjectID: "project-123",
+			Role:      "project_owner",
+			Status:    "active",
+		}},
+	}))
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     "user-123",
+		TenantID:   "tenant-123",
+		ProjectID:  "project-123",
+		Permission: PermissionTenantSessionManage,
+	})
+
+	assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+}
+
+func TestReaderBackedAuthorizerTenantSessionManageAllowsTenantScopeWithoutProject(t *testing.T) {
+	authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithTenantRole("admin")))
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     "user-123",
+		TenantID:   "tenant-123",
+		Permission: PermissionTenantSessionManage,
+	})
+
+	if err != nil {
+		t.Fatalf("expected tenant-scoped session management without project id: %v", err)
+	}
+}
+
 func TestReaderBackedAuthorizerInactiveOrMalformedMembershipStatusesDenyAccess(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -982,6 +1034,53 @@ func TestSQLSessionStoreRevokesAllActiveUserSessionsWithoutTokenMaterial(t *test
 	for _, forbidden := range []string{"session_token", "api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response"} {
 		if strings.Contains(query, forbidden) {
 			t.Fatalf("all-session revocation query selected forbidden field %q: %s", forbidden, execer.queries[0])
+		}
+	}
+}
+
+func TestSQLSessionStoreRevokesTenantSessionsWithoutTokenMaterial(t *testing.T) {
+	now := time.Now().UTC()
+	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 4}}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: execer})
+
+	err := store.RevokeTenantSessions(context.Background(), RevokeTenantSessionsInput{
+		TenantID:  " tenant-123 ",
+		ActorID:   " admin-user ",
+		Now:       now,
+		RequestID: "req-tenant-session-revoke",
+	})
+
+	if err != nil {
+		t.Fatalf("RevokeTenantSessions returned error: %v", err)
+	}
+	if len(execer.queries) != 1 {
+		t.Fatalf("expected one tenant-session revocation update, got %d", len(execer.queries))
+	}
+	query := strings.ToLower(execer.queries[0])
+	for required := range map[string]struct{}{
+		"update user_sessions":     {},
+		"status = 'revoked'":       {},
+		"revoked_at":               {},
+		"tenant_memberships":       {},
+		"tm.tenant_id = $1":        {},
+		"tm.status = 'active'":     {},
+		"user_sessions.user_id":    {},
+		"user_sessions.status":     {},
+		"user_sessions.revoked_at": {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("tenant-session revocation query missing %q: %s", required, execer.queries[0])
+		}
+	}
+	if len(execer.args) != 1 || len(execer.args[0]) != 2 {
+		t.Fatalf("unexpected tenant-session revocation args: %#v", execer.args)
+	}
+	if execer.args[0][0] != "tenant-123" || execer.args[0][1] != now {
+		t.Fatalf("tenant-session revocation args lost public fields: %#v", execer.args[0])
+	}
+	for _, forbidden := range []string{"session_token", "token_hash", "api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response", "admin-user"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("tenant-session revocation query selected forbidden field %q: %s", forbidden, execer.queries[0])
 		}
 	}
 }

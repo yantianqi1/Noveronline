@@ -82,6 +82,13 @@ type RevokeUserSessionsInput struct {
 	RequestID string
 }
 
+type RevokeTenantSessionsInput struct {
+	TenantID  string
+	ActorID   string
+	Now       time.Time
+	RequestID string
+}
+
 type RotateSessionInput struct {
 	UserID       string
 	OldTokenHash string
@@ -96,6 +103,7 @@ type SessionStore interface {
 	ValidateSession(context.Context, ValidateSessionInput) error
 	RevokeSession(context.Context, RevokeSessionInput) error
 	RevokeUserSessions(context.Context, RevokeUserSessionsInput) error
+	RevokeTenantSessions(context.Context, RevokeTenantSessionsInput) error
 	RotateSession(context.Context, RotateSessionInput) error
 }
 
@@ -108,6 +116,7 @@ const (
 	PermissionCreativeWrite          Permission = "creative_write"
 	PermissionAssetManage            Permission = "asset_manage"
 	PermissionLLMModuleBindingManage Permission = "llm_module_binding_manage"
+	PermissionTenantSessionManage    Permission = "tenant_session_manage"
 )
 
 type AuthorizeInput struct {
@@ -256,7 +265,7 @@ func (a *ReaderBackedAuthorizer) Authorize(ctx context.Context, input AuthorizeI
 }
 
 func tenantScopedPermission(permission Permission) bool {
-	return permission == PermissionLLMModuleBindingManage
+	return permission == PermissionLLMModuleBindingManage || permission == PermissionTenantSessionManage
 }
 
 func (a *ReaderBackedAuthorizer) allowed(currentUser CurrentUser, tenantID string, projectID string, permission Permission) bool {
@@ -272,6 +281,8 @@ func (a *ReaderBackedAuthorizer) allowed(currentUser CurrentUser, tenantID strin
 	case PermissionAssetManage:
 		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, assetManageProjectRoles())
 	case PermissionLLMModuleBindingManage:
+		return hasTenantRole(currentUser.ActiveTenants, tenantID, llmModuleBindingManageTenantRoles())
+	case PermissionTenantSessionManage:
 		return hasTenantRole(currentUser.ActiveTenants, tenantID, llmModuleBindingManageTenantRoles())
 	default:
 		return false
@@ -473,6 +484,46 @@ WHERE user_id = $1
 	}
 	if affected == 0 {
 		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	return nil
+}
+
+func (s *SQLSessionStore) RevokeTenantSessions(ctx context.Context, input RevokeTenantSessionsInput) error {
+	tenantID := strings.TrimSpace(input.TenantID)
+	if tenantID == "" || strings.TrimSpace(input.ActorID) == "" {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	if s.execer == nil {
+		return authLookupFailed()
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.execer.ExecContext(ctx, `
+UPDATE user_sessions
+SET status = 'revoked',
+    revoked_at = $2,
+    updated_at = now()
+WHERE user_sessions.expires_at > $2
+  AND user_sessions.revoked_at IS NULL
+  AND user_sessions.status = 'active'
+  AND EXISTS (
+    SELECT 1
+    FROM tenant_memberships tm
+    WHERE tm.tenant_id = $1
+      AND tm.user_id = user_sessions.user_id
+      AND tm.status = 'active'
+  )
+`, tenantID, now)
+	if err != nil {
+		return authLookupFailed()
+	}
+	if result == nil {
+		return authLookupFailed()
+	}
+	if _, err := result.RowsAffected(); err != nil {
+		return authLookupFailed()
 	}
 	return nil
 }

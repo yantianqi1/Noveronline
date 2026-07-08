@@ -117,21 +117,24 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 }
 
 type recordingAuthSessionStore struct {
-	createInput     auth.CreateSessionInput
-	validateInput   auth.ValidateSessionInput
-	revokeInput     auth.RevokeSessionInput
-	revokeAllInput  auth.RevokeUserSessionsInput
-	rotateInput     auth.RotateSessionInput
-	createErr       error
-	validateErr     error
-	revokeErr       error
-	revokeAllErr    error
-	rotateErr       error
-	createCalled    bool
-	validateCalled  bool
-	revokeCalled    bool
-	revokeAllCalled bool
-	rotateCalled    bool
+	createInput        auth.CreateSessionInput
+	validateInput      auth.ValidateSessionInput
+	revokeInput        auth.RevokeSessionInput
+	revokeAllInput     auth.RevokeUserSessionsInput
+	revokeTenantInput  auth.RevokeTenantSessionsInput
+	rotateInput        auth.RotateSessionInput
+	createErr          error
+	validateErr        error
+	revokeErr          error
+	revokeAllErr       error
+	revokeTenantErr    error
+	rotateErr          error
+	createCalled       bool
+	validateCalled     bool
+	revokeCalled       bool
+	revokeAllCalled    bool
+	revokeTenantCalled bool
+	rotateCalled       bool
 }
 
 func (s *recordingAuthSessionStore) CreateSession(ctx context.Context, input auth.CreateSessionInput) error {
@@ -156,6 +159,12 @@ func (s *recordingAuthSessionStore) RevokeUserSessions(ctx context.Context, inpu
 	s.revokeAllInput = input
 	s.revokeAllCalled = true
 	return s.revokeAllErr
+}
+
+func (s *recordingAuthSessionStore) RevokeTenantSessions(ctx context.Context, input auth.RevokeTenantSessionsInput) error {
+	s.revokeTenantInput = input
+	s.revokeTenantCalled = true
+	return s.revokeTenantErr
 }
 
 func (s *recordingAuthSessionStore) RotateSession(ctx context.Context, input auth.RotateSessionInput) error {
@@ -250,6 +259,18 @@ func assertSingleLLMTenantManageAuthorization(t *testing.T, authorizer *recordin
 		authorizer.inputs[0].Permission != auth.PermissionLLMModuleBindingManage ||
 		authorizer.inputs[0].RequestID != requestID {
 		t.Fatalf("unexpected llm tenant manage authorizer inputs: %#v", authorizer.inputs)
+	}
+}
+
+func assertSingleTenantSessionManageAuthorization(t *testing.T, authorizer *recordingAuthorizer, userID string, requestID string) {
+	t.Helper()
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != userID ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "" ||
+		authorizer.inputs[0].Permission != auth.PermissionTenantSessionManage ||
+		authorizer.inputs[0].RequestID != requestID {
+		t.Fatalf("unexpected tenant session manage authorizer inputs: %#v", authorizer.inputs)
 	}
 }
 
@@ -2680,6 +2701,152 @@ func TestMalformedRevokeCurrentSessionPathsStay404WithoutSideEffects(t *testing.
 			}
 			if len(response.Result().Cookies()) != 0 {
 				t.Fatalf("malformed path cleared cookie: %#v", response.Result().Cookies())
+			}
+		})
+	}
+}
+
+func TestAdminTenantSessionRevocationRequiresTenantAdminBeforeStore(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		Authorizer:        authorizer,
+		AuthSessionStore:  sessionStore,
+		SessionAuthSecret: "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodDelete, "/v1/tenants/tenant-123/sessions", nil)
+	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "tenant-admin"))
+	request.Header.Set("X-Request-Id", "req_tenant_sessions")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	assertSingleTenantSessionManageAuthorization(t, authorizer, "tenant-admin", "req_tenant_sessions")
+	if !sessionStore.revokeTenantCalled ||
+		sessionStore.revokeTenantInput.TenantID != "tenant-123" ||
+		sessionStore.revokeTenantInput.ActorID != "tenant-admin" ||
+		sessionStore.revokeTenantInput.RequestID != "req_tenant_sessions" {
+		t.Fatalf("session store did not receive tenant revocation scope: %#v", sessionStore.revokeTenantInput)
+	}
+	if sessionStore.revokeAllCalled || sessionStore.revokeCalled || sessionStore.rotateCalled {
+		t.Fatalf("tenant revocation used current-user/current-session paths: %#v", sessionStore)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("tenant admin revocation must not mutate presented browser cookie: %#v", response.Result().Cookies())
+	}
+}
+
+func TestAdminTenantSessionRevocationFailsClosedBeforeStoreAndSanitizesErrors(t *testing.T) {
+	t.Run("denied", func(t *testing.T) {
+		authorizer := &recordingAuthorizer{err: &auth.AppError{
+			Code:    auth.CodeAccessDenied,
+			Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		}}
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{
+			Authorizer:        authorizer,
+			AuthSessionStore:  sessionStore,
+			SessionAuthSecret: "test-secret",
+		})
+		request := httptest.NewRequest(http.MethodDelete, "/v1/tenants/tenant-123/sessions", nil)
+		request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "tenant-editor"))
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.revokeTenantCalled {
+			t.Fatalf("denied tenant session revocation reached store: %#v", sessionStore.revokeTenantInput)
+		}
+		for _, forbidden := range []string{"tenant-editor", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("tenant revocation denied response leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("missing_store_after_authorization", func(t *testing.T) {
+		authorizer := &recordingAuthorizer{}
+		server := NewServer(Config{
+			Authorizer:        authorizer,
+			SessionAuthSecret: "test-secret",
+		})
+		request := httptest.NewRequest(http.MethodDelete, "/v1/tenants/tenant-123/sessions", nil)
+		request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "tenant-admin"))
+		request.Header.Set("X-Request-Id", "req_tenant_sessions_no_store")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+		}
+		assertSingleTenantSessionManageAuthorization(t, authorizer, "tenant-admin", "req_tenant_sessions_no_store")
+	})
+
+	t.Run("store_failure", func(t *testing.T) {
+		authorizer := &recordingAuthorizer{}
+		sessionStore := &recordingAuthSessionStore{
+			revokeTenantErr: &auth.AppError{
+				Code:    auth.CodeLookupFailed,
+				Message: "tenant sessions leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+			},
+		}
+		server := NewServer(Config{
+			Authorizer:        authorizer,
+			AuthSessionStore:  sessionStore,
+			SessionAuthSecret: "test-secret",
+		})
+		request := httptest.NewRequest(http.MethodDelete, "/v1/tenants/tenant-123/sessions", nil)
+		request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "tenant-admin"))
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected store failure 503, got %d: %s", response.Code, response.Body.String())
+		}
+		if !sessionStore.revokeTenantCalled {
+			t.Fatalf("expected store failure path to call tenant session store")
+		}
+		for _, forbidden := range []string{"tenant-admin", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("tenant revocation error leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+}
+
+func TestMalformedTenantSessionRevocationPathsStay404WithoutActorOrStoreSideEffects(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		Authorizer:        authorizer,
+		AuthSessionStore:  sessionStore,
+		SessionAuthSecret: "test-secret",
+	})
+	for _, path := range []string{
+		"/v1/tenants//tenant-123/sessions",
+		"/v1/tenants/tenant-123//sessions",
+		"/v1/tenants/tenant-123/sessions/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodDelete, path, nil)
+			request.Header.Set("Authorization", "Bearer v1:bad-user:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if authorizer.called || sessionStore.revokeTenantCalled || sessionStore.validateCalled {
+				t.Fatalf("malformed tenant sessions path had side effects: authorizer=%#v store=%#v", authorizer, sessionStore)
 			}
 		})
 	}
