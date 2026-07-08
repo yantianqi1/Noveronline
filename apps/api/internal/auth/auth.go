@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 )
 
 const (
@@ -53,6 +54,25 @@ type Reader interface {
 	GetCurrentUser(context.Context, GetCurrentUserInput) (CurrentUser, error)
 }
 
+type CreateSessionInput struct {
+	UserID    string
+	TokenHash string
+	ExpiresAt time.Time
+	RequestID string
+}
+
+type ValidateSessionInput struct {
+	UserID    string
+	TokenHash string
+	Now       time.Time
+	RequestID string
+}
+
+type SessionStore interface {
+	CreateSession(context.Context, CreateSessionInput) error
+	ValidateSession(context.Context, ValidateSessionInput) error
+}
+
 type Permission string
 
 const (
@@ -80,6 +100,10 @@ type SQLQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
 }
 
+type SQLExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 type SQLRows interface {
 	Next() bool
 	Scan(dest ...any) error
@@ -99,6 +123,10 @@ func (q *SQLDBQueryer) QueryContext(ctx context.Context, query string, args ...a
 	return q.db.QueryContext(ctx, query, args...)
 }
 
+func (q *SQLDBQueryer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return q.db.ExecContext(ctx, query, args...)
+}
+
 type SQLReaderConfig struct {
 	Queryer SQLQueryer
 }
@@ -107,8 +135,22 @@ type SQLReader struct {
 	queryer SQLQueryer
 }
 
+type SQLSessionStoreConfig struct {
+	Queryer SQLQueryer
+	Execer  SQLExecer
+}
+
+type SQLSessionStore struct {
+	queryer SQLQueryer
+	execer  SQLExecer
+}
+
 func NewSQLReader(config SQLReaderConfig) *SQLReader {
 	return &SQLReader{queryer: config.Queryer}
+}
+
+func NewSQLSessionStore(config SQLSessionStoreConfig) *SQLSessionStore {
+	return &SQLSessionStore{queryer: config.Queryer, execer: config.Execer}
 }
 
 type AppError struct {
@@ -236,6 +278,89 @@ func (r *SQLReader) GetCurrentUser(ctx context.Context, input GetCurrentUserInpu
 		ActiveTenants:  tenants,
 		ActiveProjects: projects,
 	}, nil
+}
+
+func (s *SQLSessionStore) CreateSession(ctx context.Context, input CreateSessionInput) error {
+	userID := strings.TrimSpace(input.UserID)
+	tokenHash := strings.TrimSpace(input.TokenHash)
+	if userID == "" || tokenHash == "" || input.ExpiresAt.IsZero() {
+		return &AppError{Code: CodeValidationFailed, Message: "invalid auth request"}
+	}
+	if s.execer == nil {
+		return authLookupFailed()
+	}
+	_, err := s.execer.ExecContext(ctx, `
+INSERT INTO user_sessions (user_id, token_hash, status, expires_at, revoked_at, last_seen_at)
+VALUES ($1, $2, 'active', $3, NULL, now())
+ON CONFLICT (token_hash) DO UPDATE
+SET user_id = EXCLUDED.user_id,
+    status = 'active',
+    expires_at = EXCLUDED.expires_at,
+    revoked_at = NULL,
+    last_seen_at = now(),
+    updated_at = now()
+`, userID, tokenHash, input.ExpiresAt)
+	if err != nil {
+		return authLookupFailed()
+	}
+	return nil
+}
+
+func (s *SQLSessionStore) ValidateSession(ctx context.Context, input ValidateSessionInput) error {
+	userID := strings.TrimSpace(input.UserID)
+	tokenHash := strings.TrimSpace(input.TokenHash)
+	if userID == "" || tokenHash == "" {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	if s.queryer == nil || s.execer == nil {
+		return authLookupFailed()
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	rows, err := s.queryer.QueryContext(ctx, `
+SELECT user_session_id::text
+FROM user_sessions
+WHERE user_id = $1
+  AND token_hash = $2
+  AND expires_at > $3
+  AND revoked_at IS NULL
+  AND status = 'active'
+LIMIT 1
+`, userID, tokenHash, now)
+	if err != nil {
+		return authLookupFailed()
+	}
+
+	sessionID := ""
+	if rows.Next() {
+		if err := rows.Scan(&sessionID); err != nil {
+			_ = rows.Close()
+			return authLookupFailed()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return authLookupFailed()
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	_, err = s.execer.ExecContext(ctx, `
+UPDATE user_sessions
+SET last_seen_at = $3,
+    updated_at = now()
+WHERE user_id = $1
+  AND token_hash = $2
+`, userID, tokenHash, now)
+	if err != nil {
+		return authLookupFailed()
+	}
+	return nil
 }
 
 func (r *SQLReader) readActiveUser(ctx context.Context, userID string) (UserSummary, error) {

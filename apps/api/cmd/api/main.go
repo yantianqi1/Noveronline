@@ -44,6 +44,17 @@ func main() {
 			}
 		}()
 	}
+	authSessionStore, closeAuthSessionStore, err := newAuthSessionStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure auth session store: %v", err)
+	}
+	if closeAuthSessionStore != nil {
+		defer func() {
+			if err := closeAuthSessionStore(); err != nil {
+				log.Printf("close auth session store: %v", err)
+			}
+		}()
+	}
 
 	writerStarter := workflows.WriterStarter(workflows.NewLocalWriterStarter())
 	writerCanceller := workflows.WriterCanceller(workflows.NewDisabledWriterCanceller())
@@ -630,6 +641,7 @@ func main() {
 
 	serverConfig := withSessionAuthSecret(httpapi.Config{
 		AuthReader:                      authReader,
+		AuthSessionStore:                authSessionStore,
 		Authorizer:                      auth.NewReaderBackedAuthorizer(authReader),
 		WriterStarter:                   writerStarter,
 		WriterReader:                    writerReader,
@@ -715,6 +727,21 @@ func newAuthReader(databaseURL string) (auth.Reader, func() error, error) {
 	}
 	return auth.NewSQLReader(auth.SQLReaderConfig{
 		Queryer: auth.NewSQLDBQueryer(db),
+	}), db.Close, nil
+}
+
+func newAuthSessionStore(databaseURL string) (auth.SessionStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	queryer := auth.NewSQLDBQueryer(db)
+	return auth.NewSQLSessionStore(auth.SQLSessionStoreConfig{
+		Queryer: queryer,
+		Execer:  queryer,
 	}), db.Close, nil
 }
 

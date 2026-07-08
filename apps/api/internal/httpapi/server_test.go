@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
@@ -57,6 +58,27 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 		return auth.CurrentUser{}, r.err
 	}
 	return r.result, nil
+}
+
+type recordingAuthSessionStore struct {
+	createInput    auth.CreateSessionInput
+	validateInput  auth.ValidateSessionInput
+	createErr      error
+	validateErr    error
+	createCalled   bool
+	validateCalled bool
+}
+
+func (s *recordingAuthSessionStore) CreateSession(ctx context.Context, input auth.CreateSessionInput) error {
+	s.createInput = input
+	s.createCalled = true
+	return s.createErr
+}
+
+func (s *recordingAuthSessionStore) ValidateSession(ctx context.Context, input auth.ValidateSessionInput) error {
+	s.validateInput = input
+	s.validateCalled = true
+	return s.validateErr
 }
 
 type recordingAuthorizer struct {
@@ -1933,6 +1955,85 @@ func TestCreateDevSessionIssuesSignedHttpOnlyCookieWithoutTokenLeak(t *testing.T
 	}
 }
 
+func TestCreateDevSessionPersistsSessionBeforeIssuingCookie(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "user-session"},
+		},
+	}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-Id", "req_session_persist")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if !sessionStore.createCalled {
+		t.Fatal("session store was not called before issuing cookie")
+	}
+	if sessionStore.createInput.UserID != "user-session" ||
+		sessionStore.createInput.RequestID != "req_session_persist" ||
+		strings.TrimSpace(sessionStore.createInput.TokenHash) == "" ||
+		!sessionStore.createInput.ExpiresAt.After(time.Now()) {
+		t.Fatalf("session create input lost public scope: %#v", sessionStore.createInput)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != sessionCookieName || cookies[0].Value == "" {
+		t.Fatalf("expected issued session cookie after persistence: %#v", cookies)
+	}
+	if strings.Contains(sessionStore.createInput.TokenHash, cookies[0].Value) || strings.Contains(sessionStore.createInput.TokenHash, "test-secret") {
+		t.Fatalf("session store must receive token hash only, got %#v", sessionStore.createInput)
+	}
+}
+
+func TestCreateDevSessionFailsClosedWhenSessionPersistenceFailsBeforeCookie(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "user-session"},
+		},
+	}
+	sessionStore := &recordingAuthSessionStore{
+		createErr: &auth.AppError{
+			Code:    auth.CodeLookupFailed,
+			Message: "session insert leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if !sessionStore.createCalled {
+		t.Fatal("session store was not called on dev session issuance")
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("cookie was issued even though persistence failed: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeLookupFailed || body.Error.Message != "auth lookup failed" {
+		t.Fatalf("unexpected persistence error body: %#v", body)
+	}
+	for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript", "user-session"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("session persistence error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
 func TestCreateDevSessionFailsClosedWithoutSessionSecretBeforeReader(t *testing.T) {
 	reader := &recordingAuthReader{}
 	server := NewServer(Config{AuthReader: reader})
@@ -2140,6 +2241,44 @@ func TestAuthSubjectCurrentUserUsesSignedSessionCookieWithoutHeader(t *testing.T
 	}
 	if reader.input.UserID != "user-cookie" || reader.input.RequestID != "req_cookie_subject" {
 		t.Fatalf("reader did not receive signed cookie subject: %#v", reader.input)
+	}
+}
+
+func TestAuthSubjectRejectsRevokedPersistedSessionBeforeReaderAndFallback(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{
+		validateErr: &auth.AppError{
+			Code:    auth.CodeUnauthenticated,
+			Message: "revoked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.AddCookie(&http.Cookie{
+		Name:  sessionCookieName,
+		Value: signedSessionTokenForTest(t, "test-secret", "user-cookie"),
+	})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called {
+		t.Fatalf("auth reader was called after revoked persisted session: %#v", reader.input)
+	}
+	if !sessionStore.validateCalled ||
+		sessionStore.validateInput.UserID != "user-cookie" ||
+		strings.TrimSpace(sessionStore.validateInput.TokenHash) == "" {
+		t.Fatalf("session store did not validate signed cookie before rejecting: %#v", sessionStore.validateInput)
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{"user-cookie", "fallback-user", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("revoked session error leaked forbidden payload %q: %s", forbidden, rawBody)
+		}
 	}
 }
 

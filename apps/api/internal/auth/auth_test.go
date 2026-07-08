@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSQLReaderReturnsPublicCurrentUserWithActiveTenantsAndProjects(t *testing.T) {
@@ -805,10 +806,161 @@ func TestReaderBackedAuthorizerMapsAuthFailuresToStablePublicErrors(t *testing.T
 	assertAuthError(t, err, CodeBackendUnconfigured, "auth reader is not configured")
 }
 
+func TestSQLSessionStoreCreatesSessionWithTokenHashOnly(t *testing.T) {
+	execer := &fakeAuthExecer{}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: execer})
+	expiresAt := time.Now().UTC().Add(time.Hour)
+
+	err := store.CreateSession(context.Background(), CreateSessionInput{
+		UserID:    " user-session ",
+		TokenHash: "token-hash-value",
+		ExpiresAt: expiresAt,
+		RequestID: "req-session-create",
+	})
+
+	if err != nil {
+		t.Fatalf("CreateSession returned error: %v", err)
+	}
+	if len(execer.queries) != 1 {
+		t.Fatalf("expected one insert, got %d", len(execer.queries))
+	}
+	query := strings.ToLower(execer.queries[0])
+	if !strings.Contains(query, "insert into user_sessions") ||
+		!strings.Contains(query, "token_hash") ||
+		strings.Contains(query, "session_token") {
+		t.Fatalf("unexpected session insert query: %s", execer.queries[0])
+	}
+	if len(execer.args) != 1 || len(execer.args[0]) != 3 {
+		t.Fatalf("unexpected session insert args: %#v", execer.args)
+	}
+	if execer.args[0][0] != "user-session" || execer.args[0][1] != "token-hash-value" || execer.args[0][2] != expiresAt {
+		t.Fatalf("session insert args lost public fields: %#v", execer.args[0])
+	}
+	for _, forbidden := range []string{"api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("session insert query selected forbidden field %q: %s", forbidden, execer.queries[0])
+		}
+	}
+}
+
+func TestSQLSessionStoreValidatesActiveUnexpiredSession(t *testing.T) {
+	now := time.Now().UTC()
+	queryer := &fakeAuthQueryer{
+		rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"session-id"}}}},
+	}
+	execer := &fakeAuthExecer{}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Queryer: queryer, Execer: execer})
+
+	err := store.ValidateSession(context.Background(), ValidateSessionInput{
+		UserID:    " user-session ",
+		TokenHash: " token-hash-value ",
+		Now:       now,
+		RequestID: "req-session-validate",
+	})
+
+	if err != nil {
+		t.Fatalf("ValidateSession returned error: %v", err)
+	}
+	if len(queryer.queries) != 1 {
+		t.Fatalf("expected one validation query, got %d", len(queryer.queries))
+	}
+	query := strings.ToLower(queryer.queries[0])
+	for required := range map[string]struct{}{
+		"from user_sessions": {},
+		"token_hash = $2":    {},
+		"status = 'active'":  {},
+		"revoked_at is null": {},
+		"expires_at > $3":    {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("session validation query missing %q: %s", required, queryer.queries[0])
+		}
+	}
+	if len(execer.queries) != 1 || !strings.Contains(strings.ToLower(execer.queries[0]), "last_seen_at") {
+		t.Fatalf("expected last_seen_at update after validation, got %#v", execer.queries)
+	}
+}
+
+func TestSQLSessionStoreRejectsMissingRevokedOrExpiredSessions(t *testing.T) {
+	store := NewSQLSessionStore(SQLSessionStoreConfig{
+		Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{}}},
+		Execer:  &fakeAuthExecer{},
+	})
+
+	err := store.ValidateSession(context.Background(), ValidateSessionInput{
+		UserID:    "user-session",
+		TokenHash: "token-hash-value",
+		Now:       time.Now().UTC(),
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
+}
+
+func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
+	maliciousErr := errors.New("driver leaked prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/private content_text=secret body=secret draft=private manuscript=private response=raw")
+
+	t.Run("create", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: &fakeAuthExecer{err: maliciousErr}})
+
+		err := store.CreateSession(context.Background(), CreateSessionInput{
+			UserID:    "user-session",
+			TokenHash: "token-hash-value",
+			ExpiresAt: time.Now().UTC().Add(time.Hour),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
+
+	t.Run("validate_query", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{
+			Queryer: &fakeAuthQueryer{errs: []error{maliciousErr}},
+			Execer:  &fakeAuthExecer{},
+		})
+
+		err := store.ValidateSession(context.Background(), ValidateSessionInput{
+			UserID:    "user-session",
+			TokenHash: "token-hash-value",
+			Now:       time.Now().UTC(),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
+
+	t.Run("last_seen_update", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{
+			Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"session-id"}}}}},
+			Execer:  &fakeAuthExecer{err: maliciousErr},
+		})
+
+		err := store.ValidateSession(context.Background(), ValidateSessionInput{
+			UserID:    "user-session",
+			TokenHash: "token-hash-value",
+			Now:       time.Now().UTC(),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
+}
+
 type fakeAuthQueryer struct {
 	queries []string
 	rows    []SQLRows
 	errs    []error
+}
+
+type fakeAuthExecer struct {
+	queries []string
+	args    [][]any
+	err     error
+}
+
+func (e *fakeAuthExecer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	e.queries = append(e.queries, query)
+	e.args = append(e.args, args)
+	return nil, e.err
 }
 
 func (q *fakeAuthQueryer) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
@@ -900,6 +1052,26 @@ func assertAuthError(t *testing.T, err error, code string, message string) {
 	}
 	if appErr.Code != code || appErr.Message != message || appErr.Error() != message {
 		t.Fatalf("unexpected auth error: %#v", appErr)
+	}
+}
+
+func assertNoSensitiveAuthError(t *testing.T, err error) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"prompt",
+		"api_key",
+		"sk-hidden",
+		"credential_ref",
+		"object_key",
+		"content_text",
+		"body",
+		"draft",
+		"manuscript",
+		"response",
+	} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("auth error leaked %q: %v", forbidden, err)
+		}
 	}
 }
 

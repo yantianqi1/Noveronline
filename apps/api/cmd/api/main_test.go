@@ -54,6 +54,41 @@ func TestNewAuthReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestNewAuthSessionStoreUsesNilWithoutDatabaseURL(t *testing.T) {
+	store, closeStore, err := newAuthSessionStore("")
+
+	if err != nil {
+		t.Fatalf("new auth session store: %v", err)
+	}
+	if closeStore != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if store != nil {
+		t.Fatalf("expected nil auth session store without database URL, got %T", store)
+	}
+}
+
+func TestNewAuthSessionStoreUsesSQLSessionStoreWithDatabaseURL(t *testing.T) {
+	store, closeStore, err := newAuthSessionStore("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeStore != nil {
+		defer func() {
+			if err := closeStore(); err != nil {
+				t.Fatalf("close auth session store: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new auth session store: %v", err)
+	}
+	if _, ok := store.(*auth.SQLSessionStore); !ok {
+		t.Fatalf("expected SQL auth session store, got %T", store)
+	}
+	if closeStore == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestAuthSessionSecretEnvIsCarriedIntoHTTPConfig(t *testing.T) {
 	t.Setenv("MIROFISH_AUTH_SESSION_SECRET", "session-secret")
 

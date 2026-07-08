@@ -26,6 +26,7 @@ def test_core_saas_schema_declares_minimum_phase3_tables() -> None:
     sql = _schema_sql()
     for table_name in (
         "users",
+        "user_sessions",
         "tenants",
         "tenant_memberships",
         "project_members",
@@ -1133,6 +1134,46 @@ def test_agent_trace_schema_supports_redaction_and_run_queries() -> None:
 
     assert "idx_agent_traces_tenant_project_run" in sql
     assert "idx_agent_trace_events_trace_order" in sql
+
+
+def test_user_sessions_schema_supports_server_side_session_revocation() -> None:
+    sql = _schema_sql()
+
+    sessions_sql = _table_block(sql, "user_sessions")
+    for column in (
+        "user_session_id",
+        "user_id",
+        "token_hash",
+        "status",
+        "expires_at",
+        "revoked_at",
+        "last_seen_at",
+        "created_at",
+        "updated_at",
+    ):
+        assert column in sessions_sql
+
+    assert "token_hash TEXT NOT NULL UNIQUE" in sessions_sql
+    assert "CHECK (status IN ('active', 'revoked', 'expired'))" in sessions_sql
+    assert "REFERENCES users(user_id) ON DELETE CASCADE" in sessions_sql
+    assert "idx_user_sessions_user_status" in sql
+    assert "idx_user_sessions_token_hash" in sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON user_sessions TO mirofish_app" in sql
+
+    forbidden = sessions_sql.lower()
+    for field in (
+        "api_key",
+        "encrypted",
+        "credential_ref",
+        "object_key",
+        "content_text",
+        "draft",
+        "manuscript",
+        "prompt",
+        "response",
+        "session_token",
+    ):
+        assert field not in forbidden
 
 
 def test_rls_is_enabled_for_tenant_scoped_tables() -> None:

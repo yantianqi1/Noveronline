@@ -31,6 +31,7 @@ import (
 type Config struct {
 	SessionAuthSecret               string
 	AuthReader                      auth.Reader
+	AuthSessionStore                auth.SessionStore
 	Authorizer                      auth.Authorizer
 	WriterStarter                   workflows.WriterStarter
 	WriterReader                    workflows.WriterReader
@@ -93,6 +94,7 @@ type Config struct {
 type Server struct {
 	sessionAuthSecret               string
 	authReader                      auth.Reader
+	authSessionStore                auth.SessionStore
 	authorizer                      auth.Authorizer
 	writerStarter                   workflows.WriterStarter
 	writerReader                    workflows.WriterReader
@@ -809,6 +811,7 @@ func NewServer(config Config) *Server {
 	return &Server{
 		sessionAuthSecret:               strings.TrimSpace(config.SessionAuthSecret),
 		authReader:                      authReader,
+		authSessionStore:                config.AuthSessionStore,
 		authorizer:                      authorizer,
 		writerStarter:                   starter,
 		writerReader:                    reader,
@@ -909,10 +912,10 @@ func (s *Server) resolveActorUserID(request *http.Request) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		return s.verifySessionToken(token)
+		return s.resolveSessionToken(request, token)
 	}
 	if cookie, err := request.Cookie(sessionCookieName); err == nil {
-		return s.verifySessionToken(cookie.Value)
+		return s.resolveSessionToken(request, cookie.Value)
 	}
 	userID := strings.TrimSpace(request.Header.Get("X-User-Id"))
 	return userID, userID != ""
@@ -928,30 +931,56 @@ func bearerToken(authorization string) (string, bool) {
 }
 
 func (s *Server) verifySessionToken(token string) (string, bool) {
-	secret := strings.TrimSpace(s.sessionAuthSecret)
-	if secret == "" {
+	userID, _, ok := s.verifySignedSessionToken(token)
+	return userID, ok
+}
+
+func (s *Server) resolveSessionToken(request *http.Request, token string) (string, bool) {
+	userID, tokenHash, ok := s.verifySignedSessionToken(token)
+	if !ok {
 		return "", false
 	}
-	parts := strings.Split(strings.TrimSpace(token), ":")
-	if len(parts) != 3 || parts[0] != "v1" {
-		return "", false
+	if s.authSessionStore == nil {
+		return userID, true
 	}
-	userID := strings.TrimSpace(parts[1])
-	if userID == "" {
-		return "", false
-	}
-	signature, err := hex.DecodeString(parts[2])
+	err := s.authSessionStore.ValidateSession(request.Context(), auth.ValidateSessionInput{
+		UserID:    userID,
+		TokenHash: tokenHash,
+		Now:       time.Now().UTC(),
+		RequestID: requestID(request),
+	})
 	if err != nil {
 		return "", false
 	}
+	return userID, true
+}
+
+func (s *Server) verifySignedSessionToken(token string) (string, string, bool) {
+	secret := strings.TrimSpace(s.sessionAuthSecret)
+	if secret == "" {
+		return "", "", false
+	}
+	token = strings.TrimSpace(token)
+	parts := strings.Split(token, ":")
+	if len(parts) != 3 || parts[0] != "v1" {
+		return "", "", false
+	}
+	userID := strings.TrimSpace(parts[1])
+	if userID == "" {
+		return "", "", false
+	}
+	signature, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return "", "", false
+	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	if _, err := mac.Write([]byte("v1:" + userID)); err != nil {
-		return "", false
+		return "", "", false
 	}
 	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return "", false
+		return "", "", false
 	}
-	return userID, true
+	return userID, hashSessionToken(token), true
 }
 
 func (s *Server) signSessionToken(userID string) (string, bool) {
@@ -965,6 +994,11 @@ func (s *Server) signSessionToken(userID string) (string, bool) {
 		return "", false
 	}
 	return "v1:" + userID + ":" + hex.EncodeToString(mac.Sum(nil)), true
+}
+
+func hashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
 }
 
 func isActorSensitiveRoute(request *http.Request) bool {
@@ -1526,11 +1560,25 @@ func (s *Server) handleCreateDevSession(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "session auth secret is not configured", nil)
 		return
 	}
+	sessionTTL := 7 * 24 * time.Hour
+	if s.authSessionStore != nil {
+		err := s.authSessionStore.CreateSession(request.Context(), auth.CreateSessionInput{
+			UserID:    currentUser.User.UserID,
+			TokenHash: hashSessionToken(token),
+			ExpiresAt: time.Now().UTC().Add(sessionTTL),
+			RequestID: requestID(request),
+		})
+		if err != nil {
+			code := publicAuthCode(auth.ErrorCode(err))
+			writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+			return
+		}
+	}
 	http.SetCookie(response, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
-		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   request.TLS != nil,
