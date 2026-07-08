@@ -191,6 +191,12 @@ type passwordLoginRequest struct {
 	Password string `json:"password"`
 }
 
+type sessionAccessTokenResponse struct {
+	AccessToken string    `json:"access_token"`
+	TokenType   string    `json:"token_type"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
 type startWriterRunResponse struct {
 	RunID     string `json:"run_id"`
 	TraceID   string `json:"trace_id"`
@@ -1586,6 +1592,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleRevokeCurrentSession(response, request)
 	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/sessions":
 		s.handleRevokeAllCurrentUserSessions(response, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/access-token":
+		s.handleCreateCurrentSessionAccessToken(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/jwt-rotation":
 		s.handleRotateCurrentSessionToJWT(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/rotation":
@@ -2168,6 +2176,64 @@ func (s *Server) handleRotateCurrentSessionToJWT(response http.ResponseWriter, r
 		Secure:   request.TLS != nil,
 	})
 	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCreateCurrentSessionAccessToken(response http.ResponseWriter, request *http.Request) {
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if strings.TrimSpace(s.sessionAuthSecret) == "" || s.authSessionStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	userID, oldTokenHash, ok := s.verifySignedSessionToken(cookie.Value)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if !s.verifySessionCSRFToken(oldTokenHash, request.Header.Get(csrfHeaderName)) {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	now := time.Now().UTC()
+	if err := s.authSessionStore.ValidateSession(request.Context(), auth.ValidateSessionInput{
+		UserID:    userID,
+		TokenHash: oldTokenHash,
+		Now:       now,
+		RequestID: requestID(request),
+	}); err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	sessionID, ok := randomSessionID()
+	if !ok {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	accessToken, ok := s.signJWTSessionToken(userID, sessionID, now)
+	if !ok {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	expiresAt := now.Add(sessionTTL)
+	if err := s.authSessionStore.CreateSession(request.Context(), auth.CreateSessionInput{
+		UserID:    userID,
+		TokenHash: hashSessionToken(accessToken),
+		ExpiresAt: expiresAt,
+		RequestID: requestID(request),
+	}); err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, sessionAccessTokenResponse{
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresAt:   expiresAt,
+	})
 }
 
 func (s *Server) handleGetCurrentUser(response http.ResponseWriter, request *http.Request) {
