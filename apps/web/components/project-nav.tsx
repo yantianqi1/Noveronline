@@ -19,11 +19,19 @@ type ProjectNavProps = {
   basePath: string;
   currentUser: CurrentUserSummary;
   logoutAction: () => Promise<void>;
+  rotateSessionAction: () => Promise<void>;
   tenantSlug: string;
   projectId: string;
 };
 
-export function ProjectNav({ basePath, currentUser, logoutAction, tenantSlug, projectId }: ProjectNavProps) {
+export function ProjectNav({
+  basePath,
+  currentUser,
+  logoutAction,
+  rotateSessionAction,
+  tenantSlug,
+  projectId,
+}: ProjectNavProps) {
   const pathname = usePathname();
   const activeProjects = currentUser.ok ? currentUser.active_projects : [];
   const routeTenantProjects = activeProjects.filter((project) => project.tenant_id === tenantSlug);
@@ -49,6 +57,11 @@ export function ProjectNav({ basePath, currentUser, logoutAction, tenantSlug, pr
         <form action={logoutAction}>
           <button className="nav-link nav-button" type="submit">
             Sign out
+          </button>
+        </form>
+        <form action={rotateSessionAction}>
+          <button className="nav-link nav-button" type="submit">
+            Refresh session
           </button>
         </form>
       </section>

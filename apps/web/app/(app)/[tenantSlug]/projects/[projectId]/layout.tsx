@@ -1,7 +1,13 @@
 import { cookies } from "next/headers";
 
 import { ProjectNav } from "../../../../../components/project-nav";
-import { getCurrentUser, getSessionCSRFToken, revokeCurrentSession, type CurrentUserSummary } from "../../../../../lib/api";
+import {
+  getCurrentUser,
+  getSessionCSRFToken,
+  revokeCurrentSession,
+  rotateCurrentSession,
+  type CurrentUserSummary,
+} from "../../../../../lib/api";
 
 export default async function ProjectLayout({
   children,
@@ -15,6 +21,34 @@ export default async function ProjectLayout({
   const cookieStore = await cookies();
   const sessionCookie = cookieStore.get("mirofish_session")?.value?.trim();
   const actorUserId = process.env.MIROFISH_WEB_DEV_ACTOR_USER_ID?.trim();
+  async function rotateSessionAction() {
+    "use server";
+
+    const actionCookieStore = await cookies();
+    const actionSessionCookie = actionCookieStore.get("mirofish_session")?.value?.trim();
+    if (!actionSessionCookie) {
+      return;
+    }
+    const csrfResult = await getSessionCSRFToken({ sessionCookie: actionSessionCookie });
+    if (!csrfResult.ok) {
+      return;
+    }
+    const rotationResult = await rotateCurrentSession({
+      sessionCookie: actionSessionCookie,
+      csrfToken: csrfResult.csrf_token,
+    });
+    if (!rotationResult.ok) {
+      return;
+    }
+    actionCookieStore.set("mirofish_session", rotationResult.session_cookie.value, {
+      httpOnly: rotationResult.session_cookie.http_only,
+      maxAge: rotationResult.session_cookie.max_age,
+      path: rotationResult.session_cookie.path,
+      sameSite: rotationResult.session_cookie.same_site,
+      secure: rotationResult.session_cookie.secure,
+    });
+  }
+
   async function logoutAction() {
     "use server";
 
@@ -53,6 +87,7 @@ export default async function ProjectLayout({
           currentUser={currentUser}
           logoutAction={logoutAction}
           projectId={projectId}
+          rotateSessionAction={rotateSessionAction}
           tenantSlug={tenantSlug}
         />
       </aside>

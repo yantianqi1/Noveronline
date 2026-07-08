@@ -56,6 +56,22 @@ export type SessionCSRFTokenSummary =
     }
   | ApiFailure;
 
+export type RotatedSessionCookie = {
+  value: string;
+  path: string;
+  max_age: number;
+  http_only: boolean;
+  same_site: "lax" | "strict" | "none";
+  secure: boolean;
+};
+
+export type SessionRotationSummary =
+  | {
+      ok: true;
+      session_cookie: RotatedSessionCookie;
+    }
+  | ApiFailure;
+
 export type WriterRunSummary =
   | {
       ok: true;
@@ -1325,6 +1341,34 @@ export async function revokeCurrentSession(input: { sessionCookie?: string; csrf
   }
 }
 
+export async function rotateCurrentSession(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRotationSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/auth/session/rotation`, {
+      method: "POST",
+      headers: sessionCookieHeaders(input),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const payload = await readLLMPayload(response);
+      if (isApiFailure(payload)) {
+        return payload;
+      }
+      return decodeError(payload, response.status, "SESSION_ROTATION_FAILED");
+    }
+
+    const sessionCookie = parseSessionCookieSetCookie(response.headers.get("set-cookie"));
+    if (sessionCookie === null) {
+      return invalidApiResponse("session rotation response missing replacement cookie");
+    }
+    return {
+      ok: true,
+      session_cookie: sessionCookie,
+    };
+  } catch (error) {
+    return networkFailure(error, "SESSION_ROTATION_FAILED");
+  }
+}
+
 export async function getSessionCSRFToken(input: { sessionCookie?: string }): Promise<SessionCSRFTokenSummary> {
   try {
     const response = await fetch(`${apiBaseUrl()}/v1/auth/csrf-token`, {
@@ -1365,6 +1409,58 @@ function sessionCookieHeaders(input: { sessionCookie?: string; csrfToken?: strin
   }
 
   return headers;
+}
+
+function parseSessionCookieSetCookie(setCookieHeader: string | null): RotatedSessionCookie | null {
+  if (!setCookieHeader) {
+    return null;
+  }
+  const parts = setCookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const [nameValue, ...attributes] = parts;
+  const prefix = "mirofish_session=";
+  if (!nameValue?.startsWith(prefix)) {
+    return null;
+  }
+  const value = nameValue.slice(prefix.length).trim();
+  if (!value) {
+    return null;
+  }
+
+  const cookie: RotatedSessionCookie = {
+    value,
+    path: "/",
+    max_age: 0,
+    http_only: false,
+    same_site: "lax",
+    secure: false,
+  };
+  for (const attribute of attributes) {
+    const [rawName, ...rawValueParts] = attribute.split("=");
+    const name = rawName.trim().toLowerCase();
+    const rawValue = rawValueParts.join("=").trim();
+    if (name === "path" && rawValue) {
+      cookie.path = rawValue;
+    } else if (name === "max-age") {
+      const maxAge = Number.parseInt(rawValue, 10);
+      cookie.max_age = Number.isFinite(maxAge) && maxAge > 0 ? maxAge : 0;
+    } else if (name === "httponly") {
+      cookie.http_only = true;
+    } else if (name === "samesite") {
+      const sameSite = rawValue.toLowerCase();
+      if (sameSite === "strict" || sameSite === "none" || sameSite === "lax") {
+        cookie.same_site = sameSite;
+      }
+    } else if (name === "secure") {
+      cookie.secure = true;
+    }
+  }
+  if (cookie.max_age <= 0 || !cookie.http_only) {
+    return null;
+  }
+  return cookie;
 }
 
 export async function startWriterRun(input: StartWriterRunInput): Promise<WriterRunSummary> {

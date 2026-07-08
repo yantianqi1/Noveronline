@@ -223,6 +223,39 @@ test("project shell exposes current-session logout without leaking the session t
   assert.doesNotMatch(nav, /mirofish_session|sessionCookie|api_key|credential_ref|draft|manuscript|prompt|provider/i);
 });
 
+test("project shell exposes current-session rotation without leaking the session token", async () => {
+  const client = await fileText("lib/api.ts");
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+  const rotationClient = sourceSlice(client, "export async function rotateCurrentSession", "export async function getSessionCSRFToken");
+  const rotateAction = sourceSlice(layout, "async function rotateSessionAction", "async function logoutAction");
+
+  assert.match(client, /export type RotatedSessionCookie/);
+  assert.match(client, /export async function rotateCurrentSession\(input:\s*\{\s*sessionCookie\?:\s*string;\s*csrfToken\?:\s*string;?\s*\}\)/);
+  assert.match(rotationClient, /\/v1\/auth\/session\/rotation/);
+  assert.match(rotationClient, /method:\s*"POST"/);
+  assert.match(rotationClient, /headers:\s*sessionCookieHeaders\(input\)/);
+  assert.match(rotationClient, /response\.headers\.get\("set-cookie"\)/);
+  assert.match(rotationClient, /parseSessionCookieSetCookie/);
+  assert.match(rotationClient, /networkFailure\(error,\s*"SESSION_ROTATION_FAILED"\)/);
+  assert.doesNotMatch(rotationClient, /X-User-Id|contextHeaders|actorUserId|body|JSON\.stringify/);
+
+  assert.match(layout, /rotateCurrentSession/);
+  assert.match(rotateAction, /"use server"/);
+  assert.match(rotateAction, /const\s+actionCookieStore\s*=\s*await\s+cookies\(\)/);
+  assert.match(rotateAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(rotateAction, /const\s+csrfResult\s*=\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(rotateAction, /const\s+rotationResult\s*=\s*await\s+rotateCurrentSession\(\{[\s\S]*sessionCookie:\s*actionSessionCookie,[\s\S]*csrfToken:\s*csrfResult\.csrf_token,[\s\S]*\}\)/);
+  assert.match(rotateAction, /actionCookieStore\.set\("mirofish_session",\s*rotationResult\.session_cookie\.value,/);
+  assert.doesNotMatch(rotateAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify/);
+  assert.match(layout, /rotateSessionAction=\{rotateSessionAction\}/);
+
+  assert.match(nav, /rotateSessionAction:\s*\(\)\s*=>\s*Promise<void>/);
+  assert.match(nav, /<form\s+action=\{rotateSessionAction\}/);
+  assert.match(nav, /Refresh session/);
+  assert.doesNotMatch(nav, /mirofish_session|sessionCookie|api_key|credential_ref|draft|manuscript|prompt|provider/i);
+});
+
 test("project pages resolve API context from browser session cookie instead of hardcoded actor", async () => {
   const helper = await fileText("lib/server-auth.ts");
   const projectPages = [
