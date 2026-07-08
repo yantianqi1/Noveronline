@@ -75,6 +75,13 @@ type RevokeSessionInput struct {
 	RequestID string
 }
 
+type RevokeUserSessionsInput struct {
+	UserID    string
+	TokenHash string
+	Now       time.Time
+	RequestID string
+}
+
 type RotateSessionInput struct {
 	UserID       string
 	OldTokenHash string
@@ -88,6 +95,7 @@ type SessionStore interface {
 	CreateSession(context.Context, CreateSessionInput) error
 	ValidateSession(context.Context, ValidateSessionInput) error
 	RevokeSession(context.Context, RevokeSessionInput) error
+	RevokeUserSessions(context.Context, RevokeUserSessionsInput) error
 	RotateSession(context.Context, RotateSessionInput) error
 }
 
@@ -404,6 +412,54 @@ WHERE user_id = $1
   AND expires_at > $3
   AND revoked_at IS NULL
   AND status = 'active'
+`, userID, tokenHash, now)
+	if err != nil {
+		return authLookupFailed()
+	}
+	if result == nil {
+		return authLookupFailed()
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return authLookupFailed()
+	}
+	if affected == 0 {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	return nil
+}
+
+func (s *SQLSessionStore) RevokeUserSessions(ctx context.Context, input RevokeUserSessionsInput) error {
+	userID := strings.TrimSpace(input.UserID)
+	tokenHash := strings.TrimSpace(input.TokenHash)
+	if userID == "" || tokenHash == "" {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	if s.execer == nil {
+		return authLookupFailed()
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.execer.ExecContext(ctx, `
+UPDATE user_sessions
+SET status = 'revoked',
+    revoked_at = $3,
+    updated_at = now()
+WHERE user_id = $1
+  AND expires_at > $3
+  AND revoked_at IS NULL
+  AND status = 'active'
+  AND EXISTS (
+    SELECT 1
+    FROM user_sessions presented
+    WHERE presented.user_id = $1
+      AND presented.token_hash = $2
+      AND presented.expires_at > $3
+      AND presented.revoked_at IS NULL
+      AND presented.status = 'active'
+  )
 `, userID, tokenHash, now)
 	if err != nil {
 		return authLookupFailed()

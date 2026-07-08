@@ -940,6 +940,52 @@ func TestSQLSessionStoreRevokesActiveSessionByTokenHashOnly(t *testing.T) {
 	}
 }
 
+func TestSQLSessionStoreRevokesAllActiveUserSessionsWithoutTokenMaterial(t *testing.T) {
+	now := time.Now().UTC()
+	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 3}}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: execer})
+
+	err := store.RevokeUserSessions(context.Background(), RevokeUserSessionsInput{
+		UserID:    " user-session ",
+		TokenHash: " presented-token-hash ",
+		Now:       now,
+		RequestID: "req-session-revoke-all",
+	})
+
+	if err != nil {
+		t.Fatalf("RevokeUserSessions returned error: %v", err)
+	}
+	if len(execer.queries) != 1 {
+		t.Fatalf("expected one all-session revocation update, got %d", len(execer.queries))
+	}
+	query := strings.ToLower(execer.queries[0])
+	for required := range map[string]struct{}{
+		"update user_sessions": {},
+		"status = 'revoked'":   {},
+		"revoked_at":           {},
+		"user_id = $1":         {},
+		"token_hash = $2":      {},
+		"status = 'active'":    {},
+		"expires_at > $3":      {},
+		"exists":               {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("all-session revocation query missing %q: %s", required, execer.queries[0])
+		}
+	}
+	if len(execer.args) != 1 || len(execer.args[0]) != 3 {
+		t.Fatalf("unexpected all-session revocation args: %#v", execer.args)
+	}
+	if execer.args[0][0] != "user-session" || execer.args[0][1] != "presented-token-hash" || execer.args[0][2] != now {
+		t.Fatalf("all-session revocation args lost public fields: %#v", execer.args[0])
+	}
+	for _, forbidden := range []string{"session_token", "api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("all-session revocation query selected forbidden field %q: %s", forbidden, execer.queries[0])
+		}
+	}
+}
+
 func TestSQLSessionStoreRotatesActiveSessionTokenHashOnly(t *testing.T) {
 	now := time.Now().UTC()
 	expiresAt := now.Add(7 * 24 * time.Hour)
@@ -1075,6 +1121,19 @@ func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 		store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: &fakeAuthExecer{err: maliciousErr}})
 
 		err := store.RevokeSession(context.Background(), RevokeSessionInput{
+			UserID:    "user-session",
+			TokenHash: "token-hash-value",
+			Now:       time.Now().UTC(),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
+
+	t.Run("revoke_all", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: &fakeAuthExecer{err: maliciousErr}})
+
+		err := store.RevokeUserSessions(context.Background(), RevokeUserSessionsInput{
 			UserID:    "user-session",
 			TokenHash: "token-hash-value",
 			Now:       time.Now().UTC(),

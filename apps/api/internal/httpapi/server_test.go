@@ -117,18 +117,21 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 }
 
 type recordingAuthSessionStore struct {
-	createInput    auth.CreateSessionInput
-	validateInput  auth.ValidateSessionInput
-	revokeInput    auth.RevokeSessionInput
-	rotateInput    auth.RotateSessionInput
-	createErr      error
-	validateErr    error
-	revokeErr      error
-	rotateErr      error
-	createCalled   bool
-	validateCalled bool
-	revokeCalled   bool
-	rotateCalled   bool
+	createInput     auth.CreateSessionInput
+	validateInput   auth.ValidateSessionInput
+	revokeInput     auth.RevokeSessionInput
+	revokeAllInput  auth.RevokeUserSessionsInput
+	rotateInput     auth.RotateSessionInput
+	createErr       error
+	validateErr     error
+	revokeErr       error
+	revokeAllErr    error
+	rotateErr       error
+	createCalled    bool
+	validateCalled  bool
+	revokeCalled    bool
+	revokeAllCalled bool
+	rotateCalled    bool
 }
 
 func (s *recordingAuthSessionStore) CreateSession(ctx context.Context, input auth.CreateSessionInput) error {
@@ -147,6 +150,12 @@ func (s *recordingAuthSessionStore) RevokeSession(ctx context.Context, input aut
 	s.revokeInput = input
 	s.revokeCalled = true
 	return s.revokeErr
+}
+
+func (s *recordingAuthSessionStore) RevokeUserSessions(ctx context.Context, input auth.RevokeUserSessionsInput) error {
+	s.revokeAllInput = input
+	s.revokeAllCalled = true
+	return s.revokeAllErr
 }
 
 func (s *recordingAuthSessionStore) RotateSession(ctx context.Context, input auth.RotateSessionInput) error {
@@ -2318,6 +2327,149 @@ func TestRevokeCurrentSessionFailsClosedWhenStoreFailsBeforeClearingCookie(t *te
 		if strings.Contains(rawBody, forbidden) {
 			t.Fatalf("session revocation error leaked forbidden text %q: %s", forbidden, rawBody)
 		}
+	}
+}
+
+func TestRevokeAllCurrentUserSessionsRequiresCSRFAndStoreBeforeClearingCookie(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	token := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
+	request.Header.Set("X-Request-Id", "req_session_revoke_all")
+	request.Header.Set("X-CSRF-Token", server.sessionCSRFToken(hashSessionToken(token)))
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.revokeCalled || sessionStore.rotateCalled || sessionStore.validateCalled {
+		t.Fatalf("all-session revocation should not call reader/single-session paths: reader=%v store=%#v", reader.called, sessionStore)
+	}
+	if !sessionStore.revokeAllCalled ||
+		sessionStore.revokeAllInput.UserID != "user-session" ||
+		strings.TrimSpace(sessionStore.revokeAllInput.TokenHash) == "" ||
+		sessionStore.revokeAllInput.RequestID != "req_session_revoke_all" {
+		t.Fatalf("session store did not receive all-session revocation scope: %#v", sessionStore.revokeAllInput)
+	}
+	if strings.Contains(sessionStore.revokeAllInput.TokenHash, token) || strings.Contains(sessionStore.revokeAllInput.TokenHash, "test-secret") {
+		t.Fatalf("session store must receive presented token hash only, got %#v", sessionStore.revokeAllInput)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 ||
+		cookies[0].Name != sessionCookieName ||
+		cookies[0].Value != "" ||
+		cookies[0].MaxAge >= 0 ||
+		!cookies[0].HttpOnly ||
+		cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("expected cleared session cookie after all-session revocation: %#v", cookies)
+	}
+	if strings.Contains(response.Body.String(), token) || strings.Contains(response.Body.String(), hashSessionToken(token)) {
+		t.Fatalf("all-session revocation response leaked token material: %s", response.Body.String())
+	}
+}
+
+func TestRevokeAllCurrentUserSessionsFailsClosedBeforeStoreOrCookieSideEffects(t *testing.T) {
+	t.Run("missing_csrf", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.revokeAllCalled {
+			t.Fatalf("missing csrf called all-session store: %#v", sessionStore.revokeAllInput)
+		}
+		if len(response.Result().Cookies()) != 0 {
+			t.Fatalf("missing csrf cleared cookie: %#v", response.Result().Cookies())
+		}
+	})
+
+	t.Run("missing_store", func(t *testing.T) {
+		server := NewServer(Config{SessionAuthSecret: "test-secret"})
+		token := signedSessionTokenForTest(t, "test-secret", "user-session")
+		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
+		request.Header.Set("X-CSRF-Token", server.sessionCSRFToken(hashSessionToken(token)))
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected missing store 503, got %d: %s", response.Code, response.Body.String())
+		}
+		if len(response.Result().Cookies()) != 0 {
+			t.Fatalf("missing store cleared cookie: %#v", response.Result().Cookies())
+		}
+	})
+
+	t.Run("store_failure", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{
+			revokeAllErr: &auth.AppError{
+				Code:    auth.CodeLookupFailed,
+				Message: "all revoke leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+			},
+		}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		token := signedSessionTokenForTest(t, "test-secret", "user-session")
+		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
+		request.Header.Set("X-CSRF-Token", server.sessionCSRFToken(hashSessionToken(token)))
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected store failure 503, got %d: %s", response.Code, response.Body.String())
+		}
+		if !sessionStore.revokeAllCalled {
+			t.Fatalf("expected store failure path to call all-session store")
+		}
+		if len(response.Result().Cookies()) != 0 {
+			t.Fatalf("store failure cleared cookie: %#v", response.Result().Cookies())
+		}
+		rawBody := response.Body.String()
+		for _, forbidden := range []string{"user-session", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+			if strings.Contains(rawBody, forbidden) {
+				t.Fatalf("all-session revocation error leaked forbidden text %q: %s", forbidden, rawBody)
+			}
+		}
+	})
+}
+
+func TestMalformedRevokeAllSessionsPathsStay404WithoutSideEffects(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	for _, path := range []string{
+		"/v1/auth//sessions",
+		"/v1/auth/sessions/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodDelete, path, nil)
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.revokeAllCalled {
+				t.Fatalf("malformed path called all-session store: %#v", sessionStore.revokeAllInput)
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatalf("malformed path cleared cookie: %#v", response.Result().Cookies())
+			}
+		})
 	}
 }
 
