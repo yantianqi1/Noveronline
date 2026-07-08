@@ -3782,6 +3782,9 @@ func (s *Server) handleGetStoryGraphEvidence(response http.ResponseWriter, reque
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph evidence route not found", nil)
 		return
 	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	limit, ok := queryLimit(response, request, "story graph evidence limit must be an integer")
 	if !ok {
 		return

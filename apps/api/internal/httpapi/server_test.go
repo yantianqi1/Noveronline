@@ -10694,7 +10694,8 @@ func TestGetStoryGraphEvidenceMetadataRemainsPublicReadSide(t *testing.T) {
 			}},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
 
 	requests := []struct {
 		path     string
@@ -10706,6 +10707,7 @@ func TestGetStoryGraphEvidenceMetadataRemainsPublicReadSide(t *testing.T) {
 	for _, item := range requests {
 		request := httptest.NewRequest(http.MethodGet, item.path, nil)
 		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
 		response := httptest.NewRecorder()
 
 		server.ServeHTTP(response, request)
@@ -10724,6 +10726,87 @@ func TestGetStoryGraphEvidenceMetadataRemainsPublicReadSide(t *testing.T) {
 	}
 	if reader.evidenceInput.TenantID != "tenant-123" || reader.evidenceInput.ProjectID != "project-123" || reader.evidenceInput.OwnerType != "edge" || reader.evidenceInput.OwnerID != "edge-1" {
 		t.Fatalf("reader lost evidence context: %#v", reader.evidenceInput)
+	}
+	if len(authorizer.inputs) != 2 ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[1].UserID != "user-123" ||
+		authorizer.inputs[1].TenantID != "tenant-123" ||
+		authorizer.inputs[1].ProjectID != "project-123" ||
+		authorizer.inputs[1].Permission != auth.PermissionProjectRead {
+		t.Fatalf("evidence metadata did not require project_read: %#v", authorizer.inputs)
+	}
+}
+
+func TestGetStoryGraphEvidenceProjectReadDenialStopsBeforeAccessCheckerAndReader(t *testing.T) {
+	reader := &recordingStoryGraphReader{}
+	access := &allowStoryGraphEvidenceAccessChecker{}
+	authorizer := &recordingAuthorizer{
+		err: &auth.AppError{
+			Code:    auth.CodeAccessDenied,
+			Message: "denied leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1/evidence?include_full=true", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-story-evidence-denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	assertSingleProjectReadAuthorizationForProject(t, authorizer, "user-123", "project-123", "req-story-evidence-denied")
+	if access.called {
+		t.Fatalf("snippet access checker ran after project_read denial: %#v", access.input)
+	}
+	if reader.evidenceInput.OwnerID != "" {
+		t.Fatalf("reader ran after project_read denial: %#v", reader.evidenceInput)
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript", "user-123"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("project_read denial leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestGetStoryGraphEvidenceMalformedPathsStay404WithoutAuthOrReader(t *testing.T) {
+	reader := &recordingStoryGraphReader{}
+	access := &allowStoryGraphEvidenceAccessChecker{}
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access, SessionAuthSecret: "test-secret"})
+	for _, path := range []string{
+		"/v1/projects/project-123/story-graph/nodes//evidence",
+		"/v1/projects/project-123/story-graph/nodes/node-1/evidence/extra",
+		"/v1/projects/project-123/story-graph//nodes/node-1/evidence",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("Authorization", "Bearer not-a-valid-session")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if authorizer.called {
+				t.Fatalf("malformed path called authorizer: %#v", authorizer.inputs)
+			}
+			if access.called {
+				t.Fatalf("malformed path called snippet access checker: %#v", access.input)
+			}
+			if reader.evidenceInput.OwnerID != "" {
+				t.Fatalf("malformed path called reader: %#v", reader.evidenceInput)
+			}
+		})
 	}
 }
 
@@ -10806,9 +10889,10 @@ func TestGetStoryGraphLayoutAndClustersRequireProjectRead(t *testing.T) {
 
 func TestGetStoryGraphEvidenceFullSnippetRequiresPermission(t *testing.T) {
 	reader := &recordingStoryGraphReader{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
+	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1/evidence?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -10852,7 +10936,7 @@ func TestGetStoryGraphEvidenceFullSnippetWhenAuthorized(t *testing.T) {
 		},
 	}
 	access := &allowStoryGraphEvidenceAccessChecker{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access})
+	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1/evidence?include_full=true&limit=25", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -14932,11 +15016,13 @@ func (c *allowTraceAccessChecker) CanViewFullTrace(ctx context.Context, input tr
 }
 
 type allowStoryGraphEvidenceAccessChecker struct {
-	input storygraph.EvidenceAccessInput
+	input  storygraph.EvidenceAccessInput
+	called bool
 }
 
 func (c *allowStoryGraphEvidenceAccessChecker) CanViewEvidenceSnippets(ctx context.Context, input storygraph.EvidenceAccessInput) error {
 	c.input = input
+	c.called = true
 	return nil
 }
 
