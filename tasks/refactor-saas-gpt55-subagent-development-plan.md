@@ -25,7 +25,7 @@
 | Phase 2 | 70%-80% | Writer tools 已接入 assets/graph/worldline paths；live LLM reference E2E、proposal tools 和更完整上下文引用仍 pending。 |
 | Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；完整 compose health、真实 Temporal handoff、Auth/tenant/project picker 仍 pending。 |
 | Phase 4 | 75%-85% | LLM Facility 已有 binding/channel/model/trace/usage/secure key/concurrency；live provider/cluster E2E、retry backend、quota/billing aggregation 仍 pending。 |
-| Phase 5 | 45%-60% | Seed/Assets/Graph skeleton 和部分真实持久化已落地；`story_ontology` 与 `entity_resolution` 已有 LLM Facility runner skeleton、DB-backed snapshot writer 和 env wiring；Go upload/complete -> Temporal cluster -> Python parse/segment E2E、OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Story Graph candidate adoption/live E2E 仍 pending。 |
+| Phase 5 | 50%-65% | Seed/Assets/Graph skeleton 和部分真实持久化已落地；`story_ontology` 与 `entity_resolution` 已有 LLM Facility runner skeleton、DB-backed snapshot writer 和 env wiring；Story Graph candidate adoption backend API/store 已推进；Go upload/complete -> Temporal cluster -> Python parse/segment E2E、OCR PDF、完整智能分段、vector/hybrid search、Story Graph candidate adoption UI/live E2E 仍 pending。 |
 | Phase 6 | 35%-45% | Worldline step 和最小 LLM candidate producer 已推进，Character Console metadata skeleton 已硬化；runtime-generated saved paths、prepare runtime、richer director tools、Character Console runtime 仍 pending。 |
 | Phase 7 | 0%-10% | Legacy import report skeleton blocked，旧架构清理未开始。 |
 | Phase 8 | 0%-10% | Auth/Ops/Billing/Security/production hardening 仍主要停留在设计和少量底座。 |
@@ -103,7 +103,7 @@ startingState.branchName = codex/saas-mainline
 | A1 Seed Live E2E | P0 | 打通 Go upload/complete -> Temporal cluster -> Python parse/segment live E2E | 当前主线，直接提升 Phase 5 闭环度。 |
 | A2 Writer Live LLM E2E | P0 | 验证 Writer/Pi Runtime/LLM Facility 真实 provider draft path | Phase 1/4 关键真实链路，不与 Seed 主文件冲突。 |
 | A3 Asset Search/Vector | P1 | 补 asset versions/collections/embeddings/hybrid search 或明确第一批 DB-backed search | 与 Seed/Writer 解耦，可并行推进 Writer 上下文质量。 |
-| A4 Story Graph Runner | P1 | 补 real `graph_bond_generator` runner 或 graph candidate adoption flow | 与 Asset 可共享 canon 契约但写域独立，提升图谱闭环。 |
+| A4 Story Graph Runner | P1 | 补 Story Graph candidate viewer/adoption UI 或 graph live E2E | 与 Asset 可共享 canon 契约但写域独立，提升图谱闭环。 |
 
 ### Wave 2：Runtime 深水区
 
@@ -255,7 +255,7 @@ git diff --check
 
 目标：
 
-- 补 real `graph_bond_generator` runner、semantic merge/layout hardening 或 candidate adoption flow 中的一个完整 verified slice。
+- 补 Story Graph candidate viewer/adoption UI、semantic merge/layout hardening 或 graph live E2E 中的一个完整 verified slice。
 - 不能写假 bond/thread/canon。
 
 建议可写范围：

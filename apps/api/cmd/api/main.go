@@ -528,6 +528,17 @@ func main() {
 			}
 		}()
 	}
+	storyGraphCandidateAdoptionStore, closeStoryGraphCandidateAdoptions, err := newStoryGraphCandidateAdoptionStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure story graph candidate adoption store: %v", err)
+	}
+	if closeStoryGraphCandidateAdoptions != nil {
+		defer func() {
+			if err := closeStoryGraphCandidateAdoptions(); err != nil {
+				log.Printf("close story graph candidate adoption store: %v", err)
+			}
+		}()
+	}
 	worldlineSavedPathReader, closeWorldlineSavedPathReader, err := newWorldlineSavedPathReader(databaseURL)
 	if err != nil {
 		log.Fatalf("configure worldline saved path reader: %v", err)
@@ -651,63 +662,64 @@ func main() {
 	}
 
 	serverConfig := withSessionAuthSecret(httpapi.Config{
-		AuthReader:                      authReader,
-		PasswordAuthenticator:           passwordAuthenticator,
-		AuthSessionStore:                authSessionStore,
-		Authorizer:                      auth.NewReaderBackedAuthorizer(authReader),
-		WriterStarter:                   writerStarter,
-		WriterReader:                    writerReader,
-		WriterEventReader:               writerEventReader,
-		WriterCanceller:                 writerCanceller,
-		DraftAdoptionStore:              draftAdoptionStore,
-		DraftReviewStore:                draftReviewStore,
-		ManuscriptReader:                manuscriptReader,
-		WorkflowReader:                  workflowReader,
-		WorkflowEventReader:             workflowEventReader,
-		WorkflowCanceller:               workflowCanceller,
-		WorkflowRetrier:                 workflowRetrier,
-		SeedStarter:                     seedStarter,
-		SeedRunReader:                   seedRunReader,
-		ProjectOverviewReader:           projectOverviewReader,
-		ProjectReadinessReader:          projectReadinessReader,
-		AgentHelloStarter:               helloStarter,
-		LLMResolver:                     llmResolver,
-		LLMBindingStore:                 llmBindingStore,
-		LLMCatalogReader:                llmCatalogReader,
-		LLMChannelStore:                 llmChannelStore,
-		LLMModelSyncer:                  llmModelSyncer,
-		LLMSettingsReader:               llmSettingsReader,
-		LLMTelemetryReader:              llmTelemetryReader,
-		TraceReader:                     traceReader,
-		TraceExportAuditor:              traceExportAuditor,
-		SourceFileStore:                 sourceFileStore,
-		SourceFileObjectWriter:          sourceFileObjectWriter,
-		AssetReader:                     assetReader,
-		ArchiveMemoryReader:             archiveMemoryReader,
-		ArchiveMemoryReviewStore:        archiveMemoryReviewStore,
-		AssetAdoptionStore:              assetAdoptionStore,
-		AssetMutationStore:              assetMutationStore,
-		AssetBulkActionStore:            assetBulkActionStore,
-		AssetReindexStarter:             assetReindexStarter,
-		AssetIngestionStarter:           assetIngestionStarter,
-		AssetIngestionReader:            assetIngestionReader,
-		StyleExtractionStarter:          styleExtractionStarter,
-		StyleExtractionReader:           styleExtractionReader,
-		StoryGraphBuildStarter:          storyGraphBuildStarter,
-		StoryGraphBondGenerationStarter: storyGraphBondGenerationStarter,
-		StoryGraphReader:                storyGraphReader,
-		WorldlineSavedPathReader:        worldlineSavedPathReader,
-		WorldlineSavedPathStore:         worldlineSavedPathStore,
-		WorldlineSessionStarter:         worldlineSessionStarter,
-		WorldlineStepStarter:            worldlineStepStarter,
-		WorldlineSessionReader:          worldlineSessionReader,
-		WorldlineTimelineReader:         worldlineTimelineReader,
-		WorldlineEventReader:            worldlineEventReader,
-		WorldlineEventAdoptionStore:     worldlineEventAdoptionStore,
-		WorldlineEventMutationStore:     worldlineEventMutationStore,
-		WorldlineVariableStore:          worldlineVariableStore,
-		WorldlinePreparationStore:       worldlinePreparationStore,
-		CharacterConsoleStore:           characterConsoleStore,
+		AuthReader:                       authReader,
+		PasswordAuthenticator:            passwordAuthenticator,
+		AuthSessionStore:                 authSessionStore,
+		Authorizer:                       auth.NewReaderBackedAuthorizer(authReader),
+		WriterStarter:                    writerStarter,
+		WriterReader:                     writerReader,
+		WriterEventReader:                writerEventReader,
+		WriterCanceller:                  writerCanceller,
+		DraftAdoptionStore:               draftAdoptionStore,
+		DraftReviewStore:                 draftReviewStore,
+		ManuscriptReader:                 manuscriptReader,
+		WorkflowReader:                   workflowReader,
+		WorkflowEventReader:              workflowEventReader,
+		WorkflowCanceller:                workflowCanceller,
+		WorkflowRetrier:                  workflowRetrier,
+		SeedStarter:                      seedStarter,
+		SeedRunReader:                    seedRunReader,
+		ProjectOverviewReader:            projectOverviewReader,
+		ProjectReadinessReader:           projectReadinessReader,
+		AgentHelloStarter:                helloStarter,
+		LLMResolver:                      llmResolver,
+		LLMBindingStore:                  llmBindingStore,
+		LLMCatalogReader:                 llmCatalogReader,
+		LLMChannelStore:                  llmChannelStore,
+		LLMModelSyncer:                   llmModelSyncer,
+		LLMSettingsReader:                llmSettingsReader,
+		LLMTelemetryReader:               llmTelemetryReader,
+		TraceReader:                      traceReader,
+		TraceExportAuditor:               traceExportAuditor,
+		SourceFileStore:                  sourceFileStore,
+		SourceFileObjectWriter:           sourceFileObjectWriter,
+		AssetReader:                      assetReader,
+		ArchiveMemoryReader:              archiveMemoryReader,
+		ArchiveMemoryReviewStore:         archiveMemoryReviewStore,
+		AssetAdoptionStore:               assetAdoptionStore,
+		AssetMutationStore:               assetMutationStore,
+		AssetBulkActionStore:             assetBulkActionStore,
+		AssetReindexStarter:              assetReindexStarter,
+		AssetIngestionStarter:            assetIngestionStarter,
+		AssetIngestionReader:             assetIngestionReader,
+		StyleExtractionStarter:           styleExtractionStarter,
+		StyleExtractionReader:            styleExtractionReader,
+		StoryGraphBuildStarter:           storyGraphBuildStarter,
+		StoryGraphBondGenerationStarter:  storyGraphBondGenerationStarter,
+		StoryGraphReader:                 storyGraphReader,
+		StoryGraphCandidateAdoptionStore: storyGraphCandidateAdoptionStore,
+		WorldlineSavedPathReader:         worldlineSavedPathReader,
+		WorldlineSavedPathStore:          worldlineSavedPathStore,
+		WorldlineSessionStarter:          worldlineSessionStarter,
+		WorldlineStepStarter:             worldlineStepStarter,
+		WorldlineSessionReader:           worldlineSessionReader,
+		WorldlineTimelineReader:          worldlineTimelineReader,
+		WorldlineEventReader:             worldlineEventReader,
+		WorldlineEventAdoptionStore:      worldlineEventAdoptionStore,
+		WorldlineEventMutationStore:      worldlineEventMutationStore,
+		WorldlineVariableStore:           worldlineVariableStore,
+		WorldlinePreparationStore:        worldlinePreparationStore,
+		CharacterConsoleStore:            characterConsoleStore,
 	})
 	server := httpapi.NewServer(serverConfig)
 	log.Printf("mirofish api listening on %s", addr)
@@ -1071,6 +1083,19 @@ func newStoryGraphReader(databaseURL string) (storygraph.Reader, func() error, e
 		return nil, nil, err
 	}
 	return storygraph.NewSQLReader(storygraph.SQLReaderConfig{
+		Queryer: storygraph.NewSQLDBQueryer(db),
+	}), db.Close, nil
+}
+
+func newStoryGraphCandidateAdoptionStore(databaseURL string) (storygraph.CandidateAdoptionStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return storygraph.NewDisabledCandidateAdoptionStore(), nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return storygraph.NewSQLCandidateAdoptionStore(storygraph.SQLCandidateAdoptionStoreConfig{
 		Queryer: storygraph.NewSQLDBQueryer(db),
 	}), db.Close, nil
 }

@@ -391,6 +391,9 @@ def test_llm_facility_graph_bond_runner_persists_schema_valid_candidate_metadata
                 {
                     "title": "雨约同盟",
                     "summary": "两名角色在雨夜密约中形成互相制衡的短期同盟。",
+                    "source_entity_name": "Ari",
+                    "target_entity_name": "Bryn",
+                    "relationship_type": "alliance",
                     "kind": "alliance",
                     "confidence": 0.82,
                     "node_ids": ["node-1", "node-2"],
@@ -464,6 +467,9 @@ def test_llm_facility_graph_bond_runner_persists_schema_valid_candidate_metadata
         "plot_thread",
         "conflict_trigger",
     ]
+    assert persisted_candidates[0]["payload"]["source_entity_name"] == "Ari"
+    assert persisted_candidates[0]["payload"]["target_entity_name"] == "Bryn"
+    assert persisted_candidates[0]["payload"]["relationship_type"] == "alliance"
     joined_public = json.dumps([result, candidate_writer.calls], ensure_ascii=False, default=str)
     for forbidden in [
         "sk-graph-secret",
@@ -532,6 +538,57 @@ def test_llm_facility_graph_bond_runner_rejects_sensitive_candidate_values_befor
         assert forbidden not in joined
 
 
+def test_llm_facility_graph_bond_runner_requires_relationship_fields_before_persistence() -> None:
+    from mirofish_agents.temporal import graph as graph_module
+    from mirofish_agents.seed.sequential_reader import ModuleBindingResolution
+
+    LLMFacilityGraphBondGenerationRunner = getattr(graph_module, "LLMFacilityGraphBondGenerationRunner")
+    resolution = ModuleBindingResolution(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        module_key=GRAPH_BOND_GENERATION_MODULE_KEY,
+        channel_id="channel-1",
+        model_id="model-graph",
+        provider="openai-compatible",
+        base_url="https://llm.example/v1",
+        credential_ref="channel-1",
+        supports_json=True,
+        settings={"temperature": 0.3},
+    )
+    candidate_writer = RecordingGraphBondCandidateWriter()
+    runner = LLMFacilityGraphBondGenerationRunner(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-graph-secret"),
+        chat_client=RecordingJSONChatClient(
+            {
+                "bonds": [
+                    {
+                        "title": "雨约同盟",
+                        "summary": "两名角色形成短期同盟。",
+                        "kind": "alliance",
+                    }
+                ]
+            }
+        ),
+        candidate_writer=candidate_writer,
+    )
+
+    result = runner.generate(
+        context=_bond_context(),
+        graph_id="graph-1",
+        node_ids=["node-1", "node-2"],
+        focus=None,
+        options={},
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "SCHEMA_VALIDATION_FAILED"
+    assert candidate_writer.calls == []
+    joined = json.dumps(result, ensure_ascii=False)
+    for forbidden in ["sk-graph-secret", "node-1", "node-2", "prompt"]:
+        assert forbidden not in joined
+
+
 def test_postgres_graph_bond_candidate_writer_persists_candidate_assets_without_public_node_ids_or_credentials() -> None:
     connection = FakeStoryGraphConnection({})
     writer = PostgresGraphBondCandidateWriter(connect=lambda: connection)
@@ -555,6 +612,9 @@ def test_postgres_graph_bond_candidate_writer_persists_candidate_assets_without_
                 "tags": ["story_graph", "graph_bond"],
                 "payload": {
                     "proposal_type": "graph_bond",
+                    "source_entity_name": "Ari",
+                    "target_entity_name": "Bryn",
+                    "relationship_type": "alliance",
                     "kind": "alliance",
                     "node_ids": ["node-1", "node-2"],
                     "prompt": "hidden prompt",
@@ -588,6 +648,9 @@ def test_postgres_graph_bond_candidate_writer_persists_candidate_assets_without_
     joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
     assert "graph_bond_generation" in joined_params
     assert "graph-bond:run-story-graph-bond-1" in joined_params
+    assert "Ari" in joined_params
+    assert "Bryn" in joined_params
+    assert "alliance" in joined_params
     for forbidden in [
         "node-1",
         "node-2",

@@ -1266,6 +1266,41 @@ func TestNewStoryGraphReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestNewStoryGraphCandidateAdoptionStoreUsesDisabledStoreWithoutDatabaseURL(t *testing.T) {
+	store, closeStore, err := newStoryGraphCandidateAdoptionStore("")
+
+	if err != nil {
+		t.Fatalf("new story graph candidate adoption store: %v", err)
+	}
+	if closeStore != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if _, ok := store.(storygraph.DisabledCandidateAdoptionStore); !ok {
+		t.Fatalf("expected disabled story graph candidate adoption store, got %T", store)
+	}
+}
+
+func TestNewStoryGraphCandidateAdoptionStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
+	store, closeStore, err := newStoryGraphCandidateAdoptionStore("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeStore != nil {
+		defer func() {
+			if err := closeStore(); err != nil {
+				t.Fatalf("close story graph candidate adoption store: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new story graph candidate adoption store: %v", err)
+	}
+	if _, ok := store.(*storygraph.SQLCandidateAdoptionStore); !ok {
+		t.Fatalf("expected SQL story graph candidate adoption store, got %T", store)
+	}
+	if closeStore == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestNewWorldlineSavedPathReaderUsesDisabledReaderWithoutDatabaseURL(t *testing.T) {
 	reader, closeReader, err := newWorldlineSavedPathReader("")
 

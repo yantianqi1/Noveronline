@@ -654,6 +654,15 @@ type recordingStoryGraphReader struct {
 	err           error
 }
 
+type recordingStoryGraphCandidateAdoptionStore struct {
+	input                     storygraph.AdoptCandidateInput
+	result                    storygraph.AdoptionResult
+	err                       error
+	called                    bool
+	authorizer                *recordingAuthorizer
+	authorizedBeforeStoreCall bool
+}
+
 func (r *recordingStoryGraphReader) GetCurrentSnapshot(ctx context.Context, input storygraph.GetCurrentInput) (storygraph.CurrentSnapshot, error) {
 	r.input = input
 	if r.err != nil {
@@ -708,6 +717,27 @@ func (r *recordingStoryGraphReader) ListClusters(ctx context.Context, input stor
 		return storygraph.GraphClusters{}, r.err
 	}
 	return r.clusters, nil
+}
+
+func (s *recordingStoryGraphCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input storygraph.AdoptCandidateInput) (storygraph.AdoptionResult, error) {
+	s.input = input
+	s.called = true
+	if s.authorizer != nil && len(s.authorizer.inputs) > 0 {
+		s.authorizedBeforeStoreCall = true
+	}
+	if s.err != nil {
+		return storygraph.AdoptionResult{}, s.err
+	}
+	if s.result.AssetID != "" {
+		return s.result, nil
+	}
+	return storygraph.AdoptionResult{
+		AssetID:    input.AssetID,
+		ProjectID:  input.ProjectID,
+		TargetKind: input.TargetKind,
+		TargetID:   "target-123",
+		Status:     "adopted",
+	}, nil
 }
 
 type recordingWorldlineSavedPathReader struct {
@@ -1948,6 +1978,7 @@ func TestActorSensitiveRouteInventoryUsesStrictCanonicalShapes(t *testing.T) {
 		{name: "draft review", method: http.MethodPost, path: "/v1/drafts/draft-1/reviews"},
 		{name: "archive memory adoption", method: http.MethodPost, path: "/v1/archive-memories/memory-1/adoptions"},
 		{name: "archive memory rejection", method: http.MethodPost, path: "/v1/archive-memories/memory-1/rejections"},
+		{name: "story graph candidate adoption", method: http.MethodPost, path: "/v1/projects/project-123/story-graph/candidates/asset-1/adoptions"},
 	}
 	for _, tt := range canonical {
 		t.Run("canonical "+tt.name, func(t *testing.T) {
@@ -1973,6 +2004,8 @@ func TestActorSensitiveRouteInventoryUsesStrictCanonicalShapes(t *testing.T) {
 		{name: "archive memory adoption extra segment", method: http.MethodPost, path: "/v1/archive-memories/memory-1/extra/adoptions"},
 		{name: "archive memory adoption double slash", method: http.MethodPost, path: "/v1/archive-memories//adoptions"},
 		{name: "archive memory rejection extra segment", method: http.MethodPost, path: "/v1/archive-memories/memory-1/extra/rejections"},
+		{name: "story graph candidate adoption extra segment", method: http.MethodPost, path: "/v1/projects/project-123/story-graph/candidates/asset-1/extra/adoptions"},
+		{name: "story graph candidate adoption double slash", method: http.MethodPost, path: "/v1/projects/project-123/story-graph/candidates//adoptions"},
 	}
 	for _, tt := range malformed {
 		t.Run("malformed "+tt.name, func(t *testing.T) {
@@ -2103,6 +2136,21 @@ func TestMalformedProtectedInventoryRoutesStay404WithoutActorOrSideEffects(t *te
 				}
 			},
 		},
+		{
+			name:   "story graph candidate adoption extra segment",
+			method: http.MethodPost,
+			path:   "/v1/projects/project-123/story-graph/candidates/asset-1/extra/adoptions",
+			body:   `{"target_kind":"relationship","prompt":"private"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				store := &recordingStoryGraphCandidateAdoptionStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, StoryGraphCandidateAdoptionStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.called || authorizer.called {
+						t.Fatalf("malformed story graph candidate adoption reached side effects: store=%#v authorizer=%#v", store.input, authorizer.inputs)
+					}
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2175,6 +2223,15 @@ func TestActorSensitiveRouteInventoryMatchesCanonicalRoutesAndRejectsMalformedSh
 				"/v1/archive-memories/memory-123/adoptions/extra",
 			},
 		},
+		{
+			name:      "story graph candidate adoption",
+			method:    http.MethodPost,
+			canonical: "/v1/projects/project-123/story-graph/candidates/asset-123/adoptions",
+			malformed: []string{
+				"/v1/projects/project-123/story-graph/candidates//adoptions",
+				"/v1/projects/project-123/story-graph/candidates/asset-123/adoptions/extra",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2241,6 +2298,16 @@ func TestProtectedRouteAllowlistGuardRejectsInvalidCanonicalCredentialsButKeepsM
 			},
 			body: `{"tenant_id":"tenant-123","project_id":"project-123","note":"private"}`,
 		},
+		{
+			name:      "story graph candidate adoption",
+			method:    http.MethodPost,
+			canonical: "/v1/projects/project-123/story-graph/candidates/asset-123/adoptions",
+			malformed: []string{
+				"/v1/projects/project-123/story-graph/candidates//adoptions",
+				"/v1/projects/project-123/story-graph/candidates/asset-123/adoptions/extra",
+			},
+			body: `{"target_kind":"relationship","prompt":"private prompt"}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2296,6 +2363,7 @@ type protectedRouteAllowlistGuardSideEffects struct {
 	draftAdoptionStore   *recordingDraftAdoptionStore
 	archiveMemoryReader  *recordingArchiveMemoryReader
 	archiveReviewStore   *recordingArchiveMemoryReviewStore
+	storyGraphAdoptions  *recordingStoryGraphCandidateAdoptionStore
 }
 
 func newProtectedRouteAllowlistGuardServer() (*Server, protectedRouteAllowlistGuardSideEffects) {
@@ -2308,17 +2376,19 @@ func newProtectedRouteAllowlistGuardServer() (*Server, protectedRouteAllowlistGu
 		draftAdoptionStore:   &recordingDraftAdoptionStore{},
 		archiveMemoryReader:  &recordingArchiveMemoryReader{},
 		archiveReviewStore:   &recordingArchiveMemoryReviewStore{},
+		storyGraphAdoptions:  &recordingStoryGraphCandidateAdoptionStore{},
 	}
 	server := NewServer(Config{
-		SessionAuthSecret:        "test-secret",
-		AuthSessionStore:         sideEffects.sessionStore,
-		Authorizer:               sideEffects.authorizer,
-		WriterStarter:            sideEffects.writerStarter,
-		WorldlineSessionReader:   sideEffects.worldlineReader,
-		WorldlineStepStarter:     sideEffects.worldlineStepStarter,
-		DraftAdoptionStore:       sideEffects.draftAdoptionStore,
-		ArchiveMemoryReader:      sideEffects.archiveMemoryReader,
-		ArchiveMemoryReviewStore: sideEffects.archiveReviewStore,
+		SessionAuthSecret:                "test-secret",
+		AuthSessionStore:                 sideEffects.sessionStore,
+		Authorizer:                       sideEffects.authorizer,
+		WriterStarter:                    sideEffects.writerStarter,
+		WorldlineSessionReader:           sideEffects.worldlineReader,
+		WorldlineStepStarter:             sideEffects.worldlineStepStarter,
+		DraftAdoptionStore:               sideEffects.draftAdoptionStore,
+		ArchiveMemoryReader:              sideEffects.archiveMemoryReader,
+		ArchiveMemoryReviewStore:         sideEffects.archiveReviewStore,
+		StoryGraphCandidateAdoptionStore: sideEffects.storyGraphAdoptions,
 	})
 	return server, sideEffects
 }
@@ -2348,6 +2418,9 @@ func assertNoProtectedRouteAllowlistGuardSideEffects(t *testing.T, sideEffects p
 	}
 	if sideEffects.archiveReviewStore.called {
 		t.Fatalf("malformed or invalid route reached archive memory review store: %#v", sideEffects.archiveReviewStore)
+	}
+	if sideEffects.storyGraphAdoptions.called {
+		t.Fatalf("malformed or invalid route reached story graph candidate adoption store: %#v", sideEffects.storyGraphAdoptions.input)
 	}
 }
 
@@ -10563,7 +10636,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 			},
 		},
 		turns: []characterconsole.TurnRecord{
-			{
+			characterconsole.TurnRecord{
 				TurnID:        "turn-1",
 				InteractionID: "interaction-1",
 				ProjectID:     "project-123",
@@ -10577,7 +10650,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 					"prompt": "hidden turn prompt",
 				},
 			},
-			{
+			characterconsole.TurnRecord{
 				TurnID:        "turn-2",
 				InteractionID: "interaction-1",
 				ProjectID:     "project-123",
@@ -13321,6 +13394,146 @@ func TestGetStoryGraphCurrentFailsClosedWithoutConfiguredReader(t *testing.T) {
 	}
 	if body.Error.Code != "STORY_GRAPH_BACKEND_UNCONFIGURED" {
 		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestAdoptStoryGraphCandidateUsesPathScopeCreativeWriteAndPublicResponse(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	store := &recordingStoryGraphCandidateAdoptionStore{
+		authorizer: authorizer,
+		result: storygraph.AdoptionResult{
+			AssetID:    "asset-candidate-1",
+			ProjectID:  "project-123",
+			TargetKind: "relationship",
+			TargetID:   "relationship-123",
+			Status:     "adopted",
+		},
+	}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{
+		"tenant_id":"evil-tenant",
+		"project_id":"evil-project",
+		"target_kind":"relationship"
+	}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-story-graph-adopt")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-123", "req-story-graph-adopt")
+	if !store.called || !store.authorizedBeforeStoreCall {
+		t.Fatalf("adoption store was not called after authorization: called=%v authorized_before=%v input=%#v", store.called, store.authorizedBeforeStoreCall, store.input)
+	}
+	if store.input.TenantID != "tenant-123" || store.input.ProjectID != "project-123" || store.input.AssetID != "asset-candidate-1" {
+		t.Fatalf("store trusted body scope or lost path scope: %#v", store.input)
+	}
+	if store.input.ActorID != "user-123" || store.input.RequestID != "req-story-graph-adopt" || store.input.TargetKind != "relationship" {
+		t.Fatalf("store lost adoption context: %#v", store.input)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"asset_id":"asset-candidate-1"`, `"project_id":"project-123"`, `"target_kind":"relationship"`, `"target_id":"relationship-123"`, `"status":"adopted"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("adoption response missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"tenant_id", "prompt", "provider", "raw", "content", "api_key", "credential", "object_key", "draft", "manuscript", "evil-tenant", "evil-project", "user-123"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("adoption response leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdoptStoryGraphCandidateDenialStopsBeforeDecodeAndStore(t *testing.T) {
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied leaked prompt=secret api_key=sk-hidden draft=private"}}
+	store := &recordingStoryGraphCandidateAdoptionStore{}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{this is not json and should not be decoded before auth}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-story-graph-adopt-denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-123", "req-story-graph-adopt-denied")
+	if store.called {
+		t.Fatalf("adoption store should not be called after authorization denial: %#v", store.input)
+	}
+	body := response.Body.String()
+	for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "draft", "private", "user-123"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("authorization denial leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdoptStoryGraphCandidateStoreErrorUsesStablePublicMessage(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	store := &recordingStoryGraphCandidateAdoptionStore{
+		err: &storygraph.AppError{
+			Code:    "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED",
+			Message: "driver leaked prompt=hidden api_key=sk-hidden credential_ref=secret object_key=private draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{"target_kind":"plot_thread"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-story-graph-adopt-error")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-123", "req-story-graph-adopt-error")
+	if !store.called || store.input.TargetKind != "plot_thread" {
+		t.Fatalf("expected store call with plot_thread target: %#v", store.input)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"message":"story graph candidate adoption failed"`) {
+		t.Fatalf("expected stable public error message, got %s", body)
+	}
+	for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "credential_ref", "object_key", "draft", "manuscript", "private", "user-123"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("store error leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdoptStoryGraphCandidateRejectsInvalidBodyBeforeStoreSideEffects(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	store := &recordingStoryGraphCandidateAdoptionStore{}
+	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{"target_kind":"relationship","api_key": "sk-hidden"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-story-graph-adopt-invalid")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorization(t, authorizer, "user-123", "req-story-graph-adopt-invalid")
+	if store.called {
+		t.Fatalf("adoption store should not be called after invalid body: %#v", store.input)
+	}
+	body := response.Body.String()
+	for _, forbidden := range []string{"api_key", "sk-hidden", "prompt", "credential_ref", "draft", "manuscript", "user-123"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("invalid body response leaked forbidden field %q: %s", forbidden, body)
+		}
 	}
 }
 

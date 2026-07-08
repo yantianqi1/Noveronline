@@ -1248,9 +1248,11 @@ def _graph_bond_messages(
             "content": (
                 "You are the MiroFish graph_bond_generator module. Return one JSON object with arrays named "
                 "bonds, plot_threads, and conflict_triggers. Each item must include title and summary. "
+                "Each bonds item must also include source_entity_name, target_entity_name, and "
+                "relationship_type so it can be explicitly adopted into canon later. "
                 "Optional fields may include kind, thread_type, trigger_type, confidence, tags, and "
                 "evidence_assumptions as public summaries only. Do not include prompt, raw story text, "
-                "evidence snippets, credentials, provider metadata, drafts, manuscripts, or API keys."
+                "evidence snippets, node ids, credentials, provider metadata, drafts, manuscripts, or API keys."
             ),
         },
         {
@@ -1335,6 +1337,22 @@ def _proposal_candidates(
             payload_kind_key=payload_kind_key,
             forbidden_values=forbidden_values,
         )
+        if asset_type == "graph_bond":
+            payload["source_entity_name"] = _required_graph_bond_text(
+                item.get("source_entity_name"),
+                "source_entity_name",
+                forbidden_values=forbidden_values,
+            )
+            payload["target_entity_name"] = _required_graph_bond_text(
+                item.get("target_entity_name"),
+                "target_entity_name",
+                forbidden_values=forbidden_values,
+            )
+            payload["relationship_type"] = _required_graph_bond_text(
+                item.get("relationship_type"),
+                "relationship_type",
+                forbidden_values=forbidden_values,
+            )
         candidates.append(
             {
                 "asset_type": asset_type,

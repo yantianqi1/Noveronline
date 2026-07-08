@@ -63,7 +63,7 @@ git -C /Users/yantianqi/Documents/Noveronline-saas-mainline status -sb
 - LLM Facility：live provider model sync/E2E、realtime activity、billing aggregation、quota enforcement 仍 pending。
 - Seed：browser/direct upload handoff、PDF parsing、完整智能分段、真实 ontology/entity resolution/agent profile/finalize runner、retry failed segments、vector embeddings 仍 pending。
 - Assets/Search：asset versions/collections/embeddings、hybrid/vector search、live DB-backed bulk/reindex/browser memory-review check 仍 pending。
-- Story Graph：React Flow canvas、semantic merge/layout hardening、real `graph_bond_generator` runner、candidate adoption flow、legacy graph import 仍 pending。
+- Story Graph：real `graph_bond_generator` runner 和 backend candidate adoption API/store 已推进；React Flow canvas、candidate viewer/adoption UI、semantic merge/layout hardening、live DB/browser E2E、legacy graph import 仍 pending。
 - Worldline：runtime-generated saved paths、prepare runtime、richer director tools、auto-evolution 和 live provider E2E 仍 pending；source loader 已有 DB-backed public metadata skeleton，但尚未做完整 live E2E。
 - Character Console：除 route shell 外基本仍 planned (owner: Wave 6 - Character Console runtime closure)，依赖 Worldline runtime。
 - SaaS/Auth/Ops：注册登录、成员协作、tenant/user preferences、billing、backup/restore、incident playbook、production hardening 仍 pending。

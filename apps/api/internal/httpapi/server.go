@@ -30,131 +30,133 @@ import (
 )
 
 type Config struct {
-	SessionAuthSecret               string
-	AuthReader                      auth.Reader
-	PasswordAuthenticator           auth.PasswordAuthenticator
-	AuthSessionStore                auth.SessionStore
-	Authorizer                      auth.Authorizer
-	WriterStarter                   workflows.WriterStarter
-	WriterReader                    workflows.WriterReader
-	WriterEventReader               workflows.WriterEventReader
-	WriterCanceller                 workflows.WriterCanceller
-	DraftAdoptionStore              workflows.DraftAdoptionStore
-	DraftReviewStore                workflows.DraftReviewStore
-	ManuscriptReader                workflows.ManuscriptReader
-	WorkflowReader                  workflows.WorkflowReader
-	WorkflowEventReader             workflows.WorkflowEventReader
-	WorkflowCanceller               workflows.WorkflowCanceller
-	WorkflowRetrier                 workflows.WorkflowRetrier
-	SeedStarter                     workflows.SeedRunStarter
-	SeedRunReader                   workflows.SeedRunReader
-	ProjectOverviewReader           projectoverview.Reader
-	ProjectReadinessReader          projectreadiness.Reader
-	AgentHelloStarter               workflows.AgentHelloStarter
-	LLMResolver                     llm.Resolver
-	LLMModuleRegistry               llm.ModuleRegistry
-	LLMBindingStore                 llm.BindingStore
-	LLMCatalogReader                llm.CatalogReader
-	LLMChannelStore                 llm.ChannelStore
-	LLMModelSyncer                  llm.ModelSyncer
-	LLMSettingsReader               llm.SettingsReader
-	LLMTelemetryReader              llm.TelemetryReader
-	TraceReader                     traces.Reader
-	TraceAccessChecker              traces.AccessChecker
-	TraceExportAuditor              traces.ExportAuditor
-	SourceFileStore                 sourcefiles.Store
-	SourceFileObjectWriter          sourcefiles.ObjectWriter
-	AssetReader                     assets.Reader
-	ArchiveMemoryReader             assets.ArchiveMemoryReader
-	ArchiveMemoryReviewStore        assets.ArchiveMemoryReviewStore
-	AssetAdoptionStore              assets.AdoptionStore
-	AssetMutationStore              assets.MutationStore
-	AssetBulkActionStore            assets.BulkActionStore
-	AssetIngestionStarter           workflows.AssetIngestionStarter
-	AssetIngestionReader            workflows.AssetIngestionReader
-	AssetReindexStarter             workflows.AssetReindexStarter
-	StyleExtractionStarter          workflows.StyleExtractionStarter
-	StyleExtractionReader           workflows.StyleExtractionReader
-	StoryGraphBuildStarter          workflows.StoryGraphBuildStarter
-	StoryGraphBondGenerationStarter workflows.StoryGraphBondGenerationStarter
-	StoryGraphReader                storygraph.Reader
-	StoryGraphEvidenceAccess        storygraph.EvidenceAccessChecker
-	WorldlineSavedPathReader        worldline.SavedPathReader
-	WorldlineSavedPathStore         worldline.SavedPathStore
-	WorldlineSessionStarter         worldline.SessionStarter
-	WorldlineStepStarter            worldline.StepStarter
-	WorldlineSessionReader          worldline.SessionReader
-	WorldlineTimelineReader         worldline.TimelineReader
-	WorldlineEventReader            worldline.EventReader
-	WorldlineEventAdoptionStore     worldline.EventAdoptionStore
-	WorldlineEventMutationStore     worldline.EventMutationStore
-	WorldlineVariableStore          worldline.VariableStore
-	WorldlinePreparationStore       worldline.PreparationStore
-	CharacterConsoleStore           characterconsole.Store
+	SessionAuthSecret                string
+	AuthReader                       auth.Reader
+	PasswordAuthenticator            auth.PasswordAuthenticator
+	AuthSessionStore                 auth.SessionStore
+	Authorizer                       auth.Authorizer
+	WriterStarter                    workflows.WriterStarter
+	WriterReader                     workflows.WriterReader
+	WriterEventReader                workflows.WriterEventReader
+	WriterCanceller                  workflows.WriterCanceller
+	DraftAdoptionStore               workflows.DraftAdoptionStore
+	DraftReviewStore                 workflows.DraftReviewStore
+	ManuscriptReader                 workflows.ManuscriptReader
+	WorkflowReader                   workflows.WorkflowReader
+	WorkflowEventReader              workflows.WorkflowEventReader
+	WorkflowCanceller                workflows.WorkflowCanceller
+	WorkflowRetrier                  workflows.WorkflowRetrier
+	SeedStarter                      workflows.SeedRunStarter
+	SeedRunReader                    workflows.SeedRunReader
+	ProjectOverviewReader            projectoverview.Reader
+	ProjectReadinessReader           projectreadiness.Reader
+	AgentHelloStarter                workflows.AgentHelloStarter
+	LLMResolver                      llm.Resolver
+	LLMModuleRegistry                llm.ModuleRegistry
+	LLMBindingStore                  llm.BindingStore
+	LLMCatalogReader                 llm.CatalogReader
+	LLMChannelStore                  llm.ChannelStore
+	LLMModelSyncer                   llm.ModelSyncer
+	LLMSettingsReader                llm.SettingsReader
+	LLMTelemetryReader               llm.TelemetryReader
+	TraceReader                      traces.Reader
+	TraceAccessChecker               traces.AccessChecker
+	TraceExportAuditor               traces.ExportAuditor
+	SourceFileStore                  sourcefiles.Store
+	SourceFileObjectWriter           sourcefiles.ObjectWriter
+	AssetReader                      assets.Reader
+	ArchiveMemoryReader              assets.ArchiveMemoryReader
+	ArchiveMemoryReviewStore         assets.ArchiveMemoryReviewStore
+	AssetAdoptionStore               assets.AdoptionStore
+	AssetMutationStore               assets.MutationStore
+	AssetBulkActionStore             assets.BulkActionStore
+	AssetIngestionStarter            workflows.AssetIngestionStarter
+	AssetIngestionReader             workflows.AssetIngestionReader
+	AssetReindexStarter              workflows.AssetReindexStarter
+	StyleExtractionStarter           workflows.StyleExtractionStarter
+	StyleExtractionReader            workflows.StyleExtractionReader
+	StoryGraphBuildStarter           workflows.StoryGraphBuildStarter
+	StoryGraphBondGenerationStarter  workflows.StoryGraphBondGenerationStarter
+	StoryGraphReader                 storygraph.Reader
+	StoryGraphCandidateAdoptionStore storygraph.CandidateAdoptionStore
+	StoryGraphEvidenceAccess         storygraph.EvidenceAccessChecker
+	WorldlineSavedPathReader         worldline.SavedPathReader
+	WorldlineSavedPathStore          worldline.SavedPathStore
+	WorldlineSessionStarter          worldline.SessionStarter
+	WorldlineStepStarter             worldline.StepStarter
+	WorldlineSessionReader           worldline.SessionReader
+	WorldlineTimelineReader          worldline.TimelineReader
+	WorldlineEventReader             worldline.EventReader
+	WorldlineEventAdoptionStore      worldline.EventAdoptionStore
+	WorldlineEventMutationStore      worldline.EventMutationStore
+	WorldlineVariableStore           worldline.VariableStore
+	WorldlinePreparationStore        worldline.PreparationStore
+	CharacterConsoleStore            characterconsole.Store
 }
 
 type Server struct {
-	sessionAuthSecret               string
-	authReader                      auth.Reader
-	passwordAuthenticator           auth.PasswordAuthenticator
-	authSessionStore                auth.SessionStore
-	authorizer                      auth.Authorizer
-	writerStarter                   workflows.WriterStarter
-	writerReader                    workflows.WriterReader
-	writerEventReader               workflows.WriterEventReader
-	writerCanceller                 workflows.WriterCanceller
-	draftAdoptionStore              workflows.DraftAdoptionStore
-	draftReviewStore                workflows.DraftReviewStore
-	manuscriptReader                workflows.ManuscriptReader
-	workflowReader                  workflows.WorkflowReader
-	workflowEventReader             workflows.WorkflowEventReader
-	workflowCanceller               workflows.WorkflowCanceller
-	workflowRetrier                 workflows.WorkflowRetrier
-	seedStarter                     workflows.SeedRunStarter
-	seedRunReader                   workflows.SeedRunReader
-	projectOverviewReader           projectoverview.Reader
-	projectReadinessReader          projectreadiness.Reader
-	agentHelloStarter               workflows.AgentHelloStarter
-	llmResolver                     llm.Resolver
-	llmModuleRegistry               llm.ModuleRegistry
-	llmBindingStore                 llm.BindingStore
-	llmCatalogReader                llm.CatalogReader
-	llmChannelStore                 llm.ChannelStore
-	llmModelSyncer                  llm.ModelSyncer
-	llmSettingsReader               llm.SettingsReader
-	llmTelemetryReader              llm.TelemetryReader
-	traceReader                     traces.Reader
-	traceAccessChecker              traces.AccessChecker
-	traceExportAuditor              traces.ExportAuditor
-	sourceFileStore                 sourcefiles.Store
-	sourceFileObjectWriter          sourcefiles.ObjectWriter
-	assetReader                     assets.Reader
-	archiveMemoryReader             assets.ArchiveMemoryReader
-	archiveMemoryReviewStore        assets.ArchiveMemoryReviewStore
-	assetAdoptionStore              assets.AdoptionStore
-	assetMutationStore              assets.MutationStore
-	assetBulkActionStore            assets.BulkActionStore
-	assetIngestionStarter           workflows.AssetIngestionStarter
-	assetIngestionReader            workflows.AssetIngestionReader
-	assetReindexStarter             workflows.AssetReindexStarter
-	styleExtractionStarter          workflows.StyleExtractionStarter
-	styleExtractionReader           workflows.StyleExtractionReader
-	storyGraphBuildStarter          workflows.StoryGraphBuildStarter
-	storyGraphBondGenerationStarter workflows.StoryGraphBondGenerationStarter
-	storyGraphReader                storygraph.Reader
-	storyGraphEvidenceAccess        storygraph.EvidenceAccessChecker
-	worldlineSavedPathReader        worldline.SavedPathReader
-	worldlineSavedPathStore         worldline.SavedPathStore
-	worldlineSessionStarter         worldline.SessionStarter
-	worldlineStepStarter            worldline.StepStarter
-	worldlineSessionReader          worldline.SessionReader
-	worldlineTimelineReader         worldline.TimelineReader
-	worldlineEventReader            worldline.EventReader
-	worldlineEventAdoptionStore     worldline.EventAdoptionStore
-	worldlineEventMutationStore     worldline.EventMutationStore
-	worldlineVariableStore          worldline.VariableStore
-	worldlinePreparationStore       worldline.PreparationStore
-	characterConsoleStore           characterconsole.Store
+	sessionAuthSecret                string
+	authReader                       auth.Reader
+	passwordAuthenticator            auth.PasswordAuthenticator
+	authSessionStore                 auth.SessionStore
+	authorizer                       auth.Authorizer
+	writerStarter                    workflows.WriterStarter
+	writerReader                     workflows.WriterReader
+	writerEventReader                workflows.WriterEventReader
+	writerCanceller                  workflows.WriterCanceller
+	draftAdoptionStore               workflows.DraftAdoptionStore
+	draftReviewStore                 workflows.DraftReviewStore
+	manuscriptReader                 workflows.ManuscriptReader
+	workflowReader                   workflows.WorkflowReader
+	workflowEventReader              workflows.WorkflowEventReader
+	workflowCanceller                workflows.WorkflowCanceller
+	workflowRetrier                  workflows.WorkflowRetrier
+	seedStarter                      workflows.SeedRunStarter
+	seedRunReader                    workflows.SeedRunReader
+	projectOverviewReader            projectoverview.Reader
+	projectReadinessReader           projectreadiness.Reader
+	agentHelloStarter                workflows.AgentHelloStarter
+	llmResolver                      llm.Resolver
+	llmModuleRegistry                llm.ModuleRegistry
+	llmBindingStore                  llm.BindingStore
+	llmCatalogReader                 llm.CatalogReader
+	llmChannelStore                  llm.ChannelStore
+	llmModelSyncer                   llm.ModelSyncer
+	llmSettingsReader                llm.SettingsReader
+	llmTelemetryReader               llm.TelemetryReader
+	traceReader                      traces.Reader
+	traceAccessChecker               traces.AccessChecker
+	traceExportAuditor               traces.ExportAuditor
+	sourceFileStore                  sourcefiles.Store
+	sourceFileObjectWriter           sourcefiles.ObjectWriter
+	assetReader                      assets.Reader
+	archiveMemoryReader              assets.ArchiveMemoryReader
+	archiveMemoryReviewStore         assets.ArchiveMemoryReviewStore
+	assetAdoptionStore               assets.AdoptionStore
+	assetMutationStore               assets.MutationStore
+	assetBulkActionStore             assets.BulkActionStore
+	assetIngestionStarter            workflows.AssetIngestionStarter
+	assetIngestionReader             workflows.AssetIngestionReader
+	assetReindexStarter              workflows.AssetReindexStarter
+	styleExtractionStarter           workflows.StyleExtractionStarter
+	styleExtractionReader            workflows.StyleExtractionReader
+	storyGraphBuildStarter           workflows.StoryGraphBuildStarter
+	storyGraphBondGenerationStarter  workflows.StoryGraphBondGenerationStarter
+	storyGraphReader                 storygraph.Reader
+	storyGraphCandidateAdoptionStore storygraph.CandidateAdoptionStore
+	storyGraphEvidenceAccess         storygraph.EvidenceAccessChecker
+	worldlineSavedPathReader         worldline.SavedPathReader
+	worldlineSavedPathStore          worldline.SavedPathStore
+	worldlineSessionStarter          worldline.SessionStarter
+	worldlineStepStarter             worldline.StepStarter
+	worldlineSessionReader           worldline.SessionReader
+	worldlineTimelineReader          worldline.TimelineReader
+	worldlineEventReader             worldline.EventReader
+	worldlineEventAdoptionStore      worldline.EventAdoptionStore
+	worldlineEventMutationStore      worldline.EventMutationStore
+	worldlineVariableStore           worldline.VariableStore
+	worldlinePreparationStore        worldline.PreparationStore
+	characterConsoleStore            characterconsole.Store
 }
 
 type apiError struct {
@@ -585,6 +587,12 @@ type startStoryGraphBondGenerationResponse struct {
 	Status       string `json:"status"`
 }
 
+type adoptStoryGraphCandidateRequest struct {
+	BodyTenantID  string `json:"tenant_id"`
+	BodyProjectID string `json:"project_id"`
+	TargetKind    string `json:"target_kind"`
+}
+
 func NewServer(config Config) *Server {
 	authReader := config.AuthReader
 	if authReader == nil {
@@ -774,6 +782,10 @@ func NewServer(config Config) *Server {
 	if storyGraphReader == nil {
 		storyGraphReader = storygraph.NewDisabledReader()
 	}
+	storyGraphCandidateAdoptionStore := config.StoryGraphCandidateAdoptionStore
+	if storyGraphCandidateAdoptionStore == nil {
+		storyGraphCandidateAdoptionStore = storygraph.NewDisabledCandidateAdoptionStore()
+	}
 	storyGraphEvidenceAccess := config.StoryGraphEvidenceAccess
 	if storyGraphEvidenceAccess == nil {
 		storyGraphEvidenceAccess = storygraph.NewDenyEvidenceSnippetAccessChecker()
@@ -827,67 +839,68 @@ func NewServer(config Config) *Server {
 		characterConsoleStore = characterconsole.NewDisabledStore()
 	}
 	return &Server{
-		sessionAuthSecret:               strings.TrimSpace(config.SessionAuthSecret),
-		authReader:                      authReader,
-		passwordAuthenticator:           config.PasswordAuthenticator,
-		authSessionStore:                config.AuthSessionStore,
-		authorizer:                      authorizer,
-		writerStarter:                   starter,
-		writerReader:                    reader,
-		writerEventReader:               writerEventReader,
-		writerCanceller:                 writerCanceller,
-		draftAdoptionStore:              draftAdoptionStore,
-		draftReviewStore:                draftReviewStore,
-		manuscriptReader:                manuscriptReader,
-		workflowReader:                  workflowReader,
-		workflowEventReader:             workflowEventReader,
-		workflowCanceller:               workflowCanceller,
-		workflowRetrier:                 workflowRetrier,
-		seedStarter:                     seedStarter,
-		seedRunReader:                   seedRunReader,
-		projectOverviewReader:           projectOverviewReader,
-		projectReadinessReader:          projectReadinessReader,
-		agentHelloStarter:               helloStarter,
-		llmResolver:                     llmResolver,
-		llmModuleRegistry:               llmModuleRegistry,
-		llmBindingStore:                 llmBindingStore,
-		llmCatalogReader:                llmCatalogReader,
-		llmChannelStore:                 llmChannelStore,
-		llmModelSyncer:                  llmModelSyncer,
-		llmSettingsReader:               llmSettingsReader,
-		llmTelemetryReader:              llmTelemetryReader,
-		traceReader:                     traceReader,
-		traceAccessChecker:              traceAccessChecker,
-		traceExportAuditor:              traceExportAuditor,
-		sourceFileStore:                 sourceFileStore,
-		sourceFileObjectWriter:          sourceFileObjectWriter,
-		assetReader:                     assetReader,
-		archiveMemoryReader:             archiveMemoryReader,
-		archiveMemoryReviewStore:        archiveMemoryReviewStore,
-		assetAdoptionStore:              assetAdoptionStore,
-		assetMutationStore:              assetMutationStore,
-		assetBulkActionStore:            assetBulkActionStore,
-		assetIngestionStarter:           assetIngestionStarter,
-		assetIngestionReader:            assetIngestionReader,
-		assetReindexStarter:             assetReindexStarter,
-		styleExtractionStarter:          styleExtractionStarter,
-		styleExtractionReader:           styleExtractionReader,
-		storyGraphBuildStarter:          storyGraphBuildStarter,
-		storyGraphBondGenerationStarter: storyGraphBondGenerationStarter,
-		storyGraphReader:                storyGraphReader,
-		storyGraphEvidenceAccess:        storyGraphEvidenceAccess,
-		worldlineSavedPathReader:        worldlineSavedPathReader,
-		worldlineSavedPathStore:         worldlineSavedPathStore,
-		worldlineSessionStarter:         worldlineSessionStarter,
-		worldlineStepStarter:            worldlineStepStarter,
-		worldlineSessionReader:          worldlineSessionReader,
-		worldlineTimelineReader:         worldlineTimelineReader,
-		worldlineEventReader:            worldlineEventReader,
-		worldlineEventAdoptionStore:     worldlineEventAdoptionStore,
-		worldlineEventMutationStore:     worldlineEventMutationStore,
-		worldlineVariableStore:          worldlineVariableStore,
-		worldlinePreparationStore:       worldlinePreparationStore,
-		characterConsoleStore:           characterConsoleStore,
+		sessionAuthSecret:                strings.TrimSpace(config.SessionAuthSecret),
+		authReader:                       authReader,
+		passwordAuthenticator:            config.PasswordAuthenticator,
+		authSessionStore:                 config.AuthSessionStore,
+		authorizer:                       authorizer,
+		writerStarter:                    starter,
+		writerReader:                     reader,
+		writerEventReader:                writerEventReader,
+		writerCanceller:                  writerCanceller,
+		draftAdoptionStore:               draftAdoptionStore,
+		draftReviewStore:                 draftReviewStore,
+		manuscriptReader:                 manuscriptReader,
+		workflowReader:                   workflowReader,
+		workflowEventReader:              workflowEventReader,
+		workflowCanceller:                workflowCanceller,
+		workflowRetrier:                  workflowRetrier,
+		seedStarter:                      seedStarter,
+		seedRunReader:                    seedRunReader,
+		projectOverviewReader:            projectOverviewReader,
+		projectReadinessReader:           projectReadinessReader,
+		agentHelloStarter:                helloStarter,
+		llmResolver:                      llmResolver,
+		llmModuleRegistry:                llmModuleRegistry,
+		llmBindingStore:                  llmBindingStore,
+		llmCatalogReader:                 llmCatalogReader,
+		llmChannelStore:                  llmChannelStore,
+		llmModelSyncer:                   llmModelSyncer,
+		llmSettingsReader:                llmSettingsReader,
+		llmTelemetryReader:               llmTelemetryReader,
+		traceReader:                      traceReader,
+		traceAccessChecker:               traceAccessChecker,
+		traceExportAuditor:               traceExportAuditor,
+		sourceFileStore:                  sourceFileStore,
+		sourceFileObjectWriter:           sourceFileObjectWriter,
+		assetReader:                      assetReader,
+		archiveMemoryReader:              archiveMemoryReader,
+		archiveMemoryReviewStore:         archiveMemoryReviewStore,
+		assetAdoptionStore:               assetAdoptionStore,
+		assetMutationStore:               assetMutationStore,
+		assetBulkActionStore:             assetBulkActionStore,
+		assetIngestionStarter:            assetIngestionStarter,
+		assetIngestionReader:             assetIngestionReader,
+		assetReindexStarter:              assetReindexStarter,
+		styleExtractionStarter:           styleExtractionStarter,
+		styleExtractionReader:            styleExtractionReader,
+		storyGraphBuildStarter:           storyGraphBuildStarter,
+		storyGraphBondGenerationStarter:  storyGraphBondGenerationStarter,
+		storyGraphReader:                 storyGraphReader,
+		storyGraphCandidateAdoptionStore: storyGraphCandidateAdoptionStore,
+		storyGraphEvidenceAccess:         storyGraphEvidenceAccess,
+		worldlineSavedPathReader:         worldlineSavedPathReader,
+		worldlineSavedPathStore:          worldlineSavedPathStore,
+		worldlineSessionStarter:          worldlineSessionStarter,
+		worldlineStepStarter:             worldlineStepStarter,
+		worldlineSessionReader:           worldlineSessionReader,
+		worldlineTimelineReader:          worldlineTimelineReader,
+		worldlineEventReader:             worldlineEventReader,
+		worldlineEventAdoptionStore:      worldlineEventAdoptionStore,
+		worldlineEventMutationStore:      worldlineEventMutationStore,
+		worldlineVariableStore:           worldlineVariableStore,
+		worldlinePreparationStore:        worldlinePreparationStore,
+		characterConsoleStore:            characterConsoleStore,
 	}
 }
 
@@ -1273,6 +1286,7 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "asset reindex start", method: http.MethodPost, match: matchProjectSuffixPath("assets/reindex")},
 	{name: "story graph build start", method: http.MethodPost, match: matchProjectSuffixPath("story-graph/builds")},
 	{name: "story graph bond generation start", method: http.MethodPost, match: matchProjectSuffixPath("story-graph/bond-generations")},
+	{name: "story graph candidate adoption", method: http.MethodPost, match: hasStoryGraphCandidateAdoptionPathShape},
 	{name: "story graph evidence", method: http.MethodGet, match: hasStoryGraphEvidencePathShape},
 	{name: "llm module binding put", method: http.MethodPut, match: hasLLMModuleBindingPathShape},
 	{name: "llm module binding delete", method: http.MethodDelete, match: hasLLMModuleBindingPathShape},
@@ -1544,6 +1558,11 @@ func hasStoryGraphEvidencePathShapeFor(path string, expectedOwnerType string) bo
 	return isSinglePathSegment(projectID) && ownerType == expectedOwnerType && isSinglePathSegment(ownerID)
 }
 
+func hasStoryGraphCandidateAdoptionPathShape(path string) bool {
+	projectID, assetID := storyGraphCandidateAdoptionPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(assetID)
+}
+
 func hasLLMResolutionPathShape(path string) bool {
 	projectID, moduleKey := llmResolutionPathParts(path)
 	return isSinglePathSegment(projectID) && isSinglePathSegment(moduleKey)
@@ -1712,6 +1731,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartStoryGraphBuild(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/story-graph/bond-generations"):
 		s.handleStartStoryGraphBondGeneration(response, request)
+	case request.Method == http.MethodPost && hasStoryGraphCandidateAdoptionPathShape(request.URL.Path):
+		s.handleAdoptStoryGraphCandidate(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/story-graph/current"):
 		s.handleGetStoryGraphCurrent(response, request)
 	case request.Method == http.MethodGet && hasStoryGraphPathShape(request.URL.Path, "views"):
@@ -4365,6 +4386,43 @@ func (s *Server) handleStartStoryGraphBondGeneration(response http.ResponseWrite
 	})
 }
 
+func (s *Server) handleAdoptStoryGraphCandidate(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID, assetID := storyGraphCandidateAdoptionPathParts(request.URL.Path)
+	if projectID == "" || assetID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph candidate adoption route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
+	var payload adoptStoryGraphCandidateRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid story graph candidate adoption payload", nil)
+		return
+	}
+	result, err := s.storyGraphCandidateAdoptionStore.AdoptCandidate(request.Context(), storygraph.AdoptCandidateInput{
+		TenantID:   tenantID,
+		ProjectID:  projectID,
+		AssetID:    assetID,
+		ActorID:    s.actorUserID(request),
+		RequestID:  requestID(request),
+		TargetKind: strings.TrimSpace(payload.TargetKind),
+	})
+	if err != nil {
+		code := storygraph.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, storyGraphCandidateAdoptionPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
 func (s *Server) handleGetStoryGraphCurrent(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -5916,6 +5974,19 @@ func storyGraphPathParts(path string, kind string) (string, string) {
 	return strings.TrimSpace(projectID), strings.TrimSpace(suffix)
 }
 
+func storyGraphCandidateAdoptionPathParts(path string) (string, string) {
+	remainder := strings.TrimPrefix(path, "/v1/projects/")
+	projectID, suffix, ok := strings.Cut(remainder, "/story-graph/candidates/")
+	if !ok {
+		return "", ""
+	}
+	assetID, tail, ok := strings.Cut(suffix, "/")
+	if !ok || tail != "adoptions" {
+		return "", ""
+	}
+	return strings.TrimSpace(projectID), strings.TrimSpace(assetID)
+}
+
 func storyGraphEvidencePathParts(path string) (string, string, string) {
 	remainder := strings.TrimPrefix(path, "/v1/projects/")
 	projectID, suffix, ok := strings.Cut(remainder, "/story-graph/")
@@ -7146,6 +7217,19 @@ func worldlineEventMutationPublicErrorMessage(code string) string {
 		return "worldline event mutation backend is not configured"
 	default:
 		return "worldline event mutation failed"
+	}
+}
+
+func storyGraphCandidateAdoptionPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "story graph candidate was not found"
+	case "VALIDATION_FAILED":
+		return "invalid story graph candidate adoption request"
+	case "STORY_GRAPH_CANDIDATE_ADOPTION_BACKEND_UNCONFIGURED":
+		return "story graph candidate adoption backend is not configured"
+	default:
+		return "story graph candidate adoption failed"
 	}
 }
 

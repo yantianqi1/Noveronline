@@ -55,6 +55,23 @@ type ListClustersInput struct {
 	Limit     int
 }
 
+type AdoptCandidateInput struct {
+	TenantID   string
+	ProjectID  string
+	AssetID    string
+	ActorID    string
+	RequestID  string
+	TargetKind string
+}
+
+type AdoptionResult struct {
+	AssetID    string `json:"asset_id"`
+	ProjectID  string `json:"project_id"`
+	TargetKind string `json:"target_kind"`
+	TargetID   string `json:"target_id"`
+	Status     string `json:"status"`
+}
+
 type CurrentSnapshot struct {
 	GraphID           string `json:"graph_id"`
 	ProjectID         string `json:"project_id"`
@@ -185,6 +202,10 @@ type Reader interface {
 	ListClusters(context.Context, ListClustersInput) (GraphClusters, error)
 }
 
+type CandidateAdoptionStore interface {
+	AdoptCandidate(context.Context, AdoptCandidateInput) (AdoptionResult, error)
+}
+
 type EvidenceAccessInput struct {
 	TenantID  string
 	ProjectID string
@@ -282,6 +303,19 @@ func (DisabledReader) ListClusters(context.Context, ListClustersInput) (GraphClu
 	}
 }
 
+type DisabledCandidateAdoptionStore struct{}
+
+func NewDisabledCandidateAdoptionStore() DisabledCandidateAdoptionStore {
+	return DisabledCandidateAdoptionStore{}
+}
+
+func (DisabledCandidateAdoptionStore) AdoptCandidate(context.Context, AdoptCandidateInput) (AdoptionResult, error) {
+	return AdoptionResult{}, &AppError{
+		Code:    "STORY_GRAPH_CANDIDATE_ADOPTION_BACKEND_UNCONFIGURED",
+		Message: "story graph candidate adoption backend is not configured",
+	}
+}
+
 type SQLRows interface {
 	Next() bool
 	Scan(...any) error
@@ -291,6 +325,10 @@ type SQLRows interface {
 
 type SQLQueryer interface {
 	QueryContext(context.Context, string, ...any) (SQLRows, error)
+}
+
+type SQLTenantQueryer interface {
+	QueryTenantContext(context.Context, string, string, ...any) (SQLRows, error)
 }
 
 type SQLDBQueryer struct {
@@ -305,6 +343,62 @@ func (q *SQLDBQueryer) QueryContext(ctx context.Context, query string, args ...a
 	return q.db.QueryContext(ctx, query, args...)
 }
 
+func (q *SQLDBQueryer) QueryTenantContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, NULL::uuid, false)", strings.TrimSpace(tenantID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &tenantScopedRows{rows: rows, tx: tx}, nil
+}
+
+type tenantScopedRows struct {
+	rows SQLRows
+	tx   *sql.Tx
+}
+
+func (r *tenantScopedRows) Next() bool {
+	return r.rows.Next()
+}
+
+func (r *tenantScopedRows) Scan(dest ...any) error {
+	return r.rows.Scan(dest...)
+}
+
+func (r *tenantScopedRows) Close() error {
+	closeErr := r.rows.Close()
+	rowsErr := r.rows.Err()
+	if closeErr != nil || rowsErr != nil {
+		_ = r.tx.Rollback()
+		if closeErr != nil {
+			return closeErr
+		}
+		return rowsErr
+	}
+	return r.tx.Commit()
+}
+
+func (r *tenantScopedRows) Abort() error {
+	closeErr := r.rows.Close()
+	rollbackErr := r.tx.Rollback()
+	if closeErr != nil {
+		return closeErr
+	}
+	return rollbackErr
+}
+
+func (r *tenantScopedRows) Err() error {
+	return r.rows.Err()
+}
+
 type SQLReaderConfig struct {
 	Queryer SQLQueryer
 }
@@ -313,9 +407,296 @@ type SQLReader struct {
 	queryer SQLQueryer
 }
 
+type SQLCandidateAdoptionStoreConfig struct {
+	Queryer SQLTenantQueryer
+}
+
+type SQLCandidateAdoptionStore struct {
+	queryer SQLTenantQueryer
+}
+
 func NewSQLReader(config SQLReaderConfig) *SQLReader {
 	return &SQLReader{queryer: config.Queryer}
 }
+
+func NewSQLCandidateAdoptionStore(config SQLCandidateAdoptionStoreConfig) *SQLCandidateAdoptionStore {
+	return &SQLCandidateAdoptionStore{queryer: config.Queryer}
+}
+
+func (s *SQLCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input AdoptCandidateInput) (AdoptionResult, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	assetID := strings.TrimSpace(input.AssetID)
+	targetKind := strings.TrimSpace(input.TargetKind)
+	if tenantID == "" || projectID == "" || assetID == "" {
+		return AdoptionResult{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, project_id, and asset_id are required"}
+	}
+	if targetKind != "relationship" && targetKind != "plot_thread" {
+		return AdoptionResult{}, &AppError{Code: "VALIDATION_FAILED", Message: "target_kind must be relationship or plot_thread"}
+	}
+	if s.queryer == nil {
+		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_BACKEND_UNCONFIGURED", Message: "story graph candidate adoption backend is not configured"}
+	}
+	query := relationshipCandidateAdoptionSQL
+	if targetKind == "plot_thread" {
+		query = plotThreadCandidateAdoptionSQL
+	}
+	rows, err := s.queryer.QueryTenantContext(
+		ctx,
+		tenantID,
+		query,
+		tenantID,
+		projectID,
+		assetID,
+		strings.TrimSpace(input.ActorID),
+		strings.TrimSpace(input.RequestID),
+		targetKind,
+	)
+	if err != nil {
+		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+	}
+	closeRows := true
+	defer func() {
+		if closeRows {
+			_ = rows.Close()
+		}
+	}()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+		}
+		closeRows = false
+		if err := rows.Close(); err != nil {
+			return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+		}
+		return AdoptionResult{}, &AppError{Code: "NOT_FOUND", Message: "story graph candidate was not found or cannot be adopted"}
+	}
+	var result AdoptionResult
+	if err := rows.Scan(&result.AssetID, &result.ProjectID, &result.TargetKind, &result.TargetID, &result.Status); err != nil {
+		closeRows = false
+		if aborter, ok := rows.(interface{ Abort() error }); ok {
+			_ = aborter.Abort()
+		} else {
+			_ = rows.Close()
+		}
+		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+	}
+	if err := rows.Err(); err != nil {
+		closeRows = false
+		if aborter, ok := rows.(interface{ Abort() error }); ok {
+			_ = aborter.Abort()
+		} else {
+			_ = rows.Close()
+		}
+		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+	}
+	closeRows = false
+	if err := rows.Close(); err != nil {
+		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+	}
+	return result, nil
+}
+
+const relationshipCandidateAdoptionSQL = `WITH candidate AS (
+  SELECT
+    asset_id,
+    project_id,
+    asset_type,
+    title,
+    COALESCE(summary, '') AS summary,
+    source_kind,
+    source_ref,
+    payload_jsonb,
+    NULLIF(payload_jsonb->>'source_run_id', '') AS source_run_id,
+    NULLIF(payload_jsonb->>'first_seen_segment_id', '') AS first_seen_segment_id,
+    NULLIF(COALESCE(payload_jsonb->>'source_entity_name', payload_jsonb->>'source_entity', payload_jsonb->>'source'), '') AS source_entity_name,
+    NULLIF(COALESCE(payload_jsonb->>'target_entity_name', payload_jsonb->>'target_entity', payload_jsonb->>'target'), '') AS target_entity_name,
+    NULLIF(COALESCE(payload_jsonb->>'relationship_type', payload_jsonb->>'kind'), '') AS relationship_type,
+    NULLIF(COALESCE(payload_jsonb->>'status', payload_jsonb->>'thread_status'), '') AS thread_status,
+    NULLIF(COALESCE(payload_jsonb->>'thread_type', payload_jsonb->>'proposal_type'), '') AS thread_type,
+    NULLIF(payload_jsonb->>'confidence', '') AS confidence
+  FROM assets
+  WHERE tenant_id::text = $1
+    AND project_id::text = $2
+    AND asset_id::text = $3
+    AND lifecycle = 'candidate'
+    AND source_kind = 'graph_bond_generation'
+    AND asset_type = 'graph_bond'
+),
+relationship_target AS (
+  INSERT INTO relationships (
+    tenant_id, project_id, source_entity_name, target_entity_name,
+    relationship_type, summary, source_run_id, first_seen_segment_id,
+    evidence_text, metadata_jsonb
+  )
+  SELECT
+    $1::uuid,
+    project_id,
+    source_entity_name,
+    target_entity_name,
+    relationship_type,
+    NULLIF(summary, ''),
+    source_run_id::uuid,
+    CASE WHEN first_seen_segment_id IS NULL THEN NULL ELSE first_seen_segment_id::uuid END,
+    NULL,
+    jsonb_strip_nulls(jsonb_build_object(
+      'source_asset_id', asset_id::text,
+      'source_kind', source_kind,
+      'source_ref', source_ref,
+      'proposal_type', 'graph_bond',
+      'confidence', confidence
+    ))
+  FROM candidate
+  WHERE $6 = 'relationship'
+    AND source_entity_name IS NOT NULL
+    AND target_entity_name IS NOT NULL
+    AND relationship_type IS NOT NULL
+    AND source_run_id IS NOT NULL
+  ON CONFLICT (tenant_id, project_id, source_entity_name, target_entity_name, relationship_type)
+  DO UPDATE SET
+    summary = COALESCE(EXCLUDED.summary, relationships.summary),
+    metadata_jsonb = relationships.metadata_jsonb || EXCLUDED.metadata_jsonb,
+    updated_at = now()
+  RETURNING relationship_id::text AS target_id
+),
+target AS (
+  SELECT target_id FROM relationship_target
+),
+adopted AS (
+  UPDATE assets
+  SET lifecycle = 'canon',
+      updated_at = now()
+  FROM candidate, target
+  WHERE assets.tenant_id::text = $1
+    AND assets.project_id::text = $2
+    AND assets.asset_id = candidate.asset_id
+  RETURNING assets.asset_id::text AS asset_id, assets.project_id::text AS project_id, target.target_id
+),
+audit AS (
+  INSERT INTO audit_logs (
+    tenant_id, actor_user_id, action, resource_type, resource_id,
+    project_id, run_id, request_id, metadata_jsonb
+  )
+  SELECT
+    $1::uuid,
+    CASE
+      WHEN $4 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' THEN $4::uuid
+      ELSE NULL
+    END,
+    'story_graph.candidate_adopt',
+    $6,
+    target_id::uuid,
+    project_id::uuid,
+    NULL,
+    $5,
+    jsonb_build_object(
+      'asset_id', asset_id,
+      'target_kind', $6,
+      'target_id', target_id,
+      'actor_id', $4
+    )
+  FROM adopted
+  RETURNING audit_id
+)
+SELECT asset_id, project_id, $6, target_id, 'adopted'
+FROM adopted`
+
+const plotThreadCandidateAdoptionSQL = `WITH candidate AS (
+  SELECT
+    asset_id,
+    project_id,
+    asset_type,
+    title,
+    COALESCE(summary, '') AS summary,
+    source_kind,
+    source_ref,
+    payload_jsonb,
+    NULLIF(payload_jsonb->>'source_run_id', '') AS source_run_id,
+    NULLIF(payload_jsonb->>'first_seen_segment_id', '') AS first_seen_segment_id,
+    NULLIF(COALESCE(payload_jsonb->>'status', payload_jsonb->>'thread_status'), '') AS thread_status,
+    NULLIF(COALESCE(payload_jsonb->>'thread_type', payload_jsonb->>'proposal_type'), '') AS thread_type,
+    NULLIF(payload_jsonb->>'confidence', '') AS confidence
+  FROM assets
+  WHERE tenant_id::text = $1
+    AND project_id::text = $2
+    AND asset_id::text = $3
+    AND lifecycle = 'candidate'
+    AND source_kind = 'graph_bond_generation'
+    AND asset_type = 'plot_thread'
+),
+plot_thread_target AS (
+  INSERT INTO plot_threads (
+    tenant_id, project_id, source_run_id, title, status,
+    summary, first_seen_segment_id, evidence_text, metadata_jsonb
+  )
+  SELECT
+    $1::uuid,
+    project_id,
+    source_run_id::uuid,
+    title,
+    COALESCE(thread_status, 'open'),
+    NULLIF(summary, ''),
+    CASE WHEN first_seen_segment_id IS NULL THEN NULL ELSE first_seen_segment_id::uuid END,
+    NULL,
+    jsonb_strip_nulls(jsonb_build_object(
+      'source_asset_id', asset_id::text,
+      'source_kind', source_kind,
+      'source_ref', source_ref,
+      'proposal_type', 'plot_thread',
+      'thread_type', thread_type,
+      'confidence', confidence
+    ))
+  FROM candidate
+  WHERE source_run_id IS NOT NULL
+  ON CONFLICT (tenant_id, project_id, title)
+  DO UPDATE SET
+    status = COALESCE(EXCLUDED.status, plot_threads.status),
+    summary = COALESCE(EXCLUDED.summary, plot_threads.summary),
+    metadata_jsonb = plot_threads.metadata_jsonb || EXCLUDED.metadata_jsonb,
+    updated_at = now()
+  RETURNING thread_id::text AS target_id
+),
+target AS (
+  SELECT target_id FROM plot_thread_target
+),
+adopted AS (
+  UPDATE assets
+  SET lifecycle = 'canon',
+      updated_at = now()
+  FROM candidate, target
+  WHERE assets.tenant_id::text = $1
+    AND assets.project_id::text = $2
+    AND assets.asset_id = candidate.asset_id
+  RETURNING assets.asset_id::text AS asset_id, assets.project_id::text AS project_id, target.target_id
+),
+audit AS (
+  INSERT INTO audit_logs (
+    tenant_id, actor_user_id, action, resource_type, resource_id,
+    project_id, run_id, request_id, metadata_jsonb
+  )
+  SELECT
+    $1::uuid,
+    CASE
+      WHEN $4 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' THEN $4::uuid
+      ELSE NULL
+    END,
+    'story_graph.candidate_adopt',
+    $6,
+    target_id::uuid,
+    project_id::uuid,
+    NULL,
+    $5,
+    jsonb_build_object(
+      'asset_id', asset_id,
+      'target_kind', $6,
+      'target_id', target_id,
+      'actor_id', $4
+    )
+  FROM adopted
+  RETURNING audit_id
+)
+SELECT asset_id, project_id, $6, target_id, 'adopted'
+FROM adopted`
 
 func (r *SQLReader) GetCurrentSnapshot(ctx context.Context, input GetCurrentInput) (CurrentSnapshot, error) {
 	tenantID := strings.TrimSpace(input.TenantID)

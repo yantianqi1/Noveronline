@@ -48,7 +48,7 @@ codex/saas-mainline
 | Phase 2 | 70%-80% | Writer 已能读 assets/graph/worldline paths，但 proposal tools 和 live reference E2E 未闭环。 |
 | Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、workers skeleton 已有；Auth/project picker/full compose health 未闭环。 |
 | Phase 4 | 75%-85% | LLM Facility 主体已有；quota/billing/retry/live provider/cluster E2E 未闭环。 |
-| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed path；browser E2E、provider success chain、vector/hybrid、Graph adoption/UI 未闭环。 |
+| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed path；Story Graph adoption backend API/store 已推进；browser E2E、provider success chain、vector/hybrid、Graph adoption UI/live E2E 未闭环。 |
 | Phase 6 | 35%-45% | Worldline/Character 仍偏 metadata/admission；runtime、dialogue、interaction -> draft 闭环未完成。 |
 | Phase 7 | 0%-10% | Legacy import 和旧架构清理基本未开始。 |
 | Phase 8 | 0%-10% | Auth/Ops/Billing/Security/production hardening 大多仍是设计。 |
