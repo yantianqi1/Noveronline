@@ -992,6 +992,17 @@ export type StoryGraphBondGenerationSummary =
     }
   | ApiFailure;
 
+export type StoryGraphCandidateAdoptionSummary =
+  | {
+      ok: true;
+      asset_id: string;
+      project_id: string;
+      target_kind: string;
+      target_id: string;
+      status: string;
+    }
+  | ApiFailure;
+
 export type StoryGraphCurrentSummary =
   | {
       ok: true;
@@ -1212,6 +1223,12 @@ export type StartStoryGraphBondGenerationInput = ApiContext & {
   nodeIds: string[];
   focus: string;
   options?: Record<string, unknown>;
+};
+
+export type AdoptStoryGraphCandidateInput = ApiContext & {
+  projectId: string;
+  assetId: string;
+  targetKind: "relationship" | "plot_thread";
 };
 
 export type GetStoryGraphViewInput = ApiContext & {
@@ -3146,6 +3163,28 @@ export async function startStoryGraphBondGeneration(
   }
 }
 
+export async function adoptStoryGraphCandidate(
+  input: AdoptStoryGraphCandidateInput,
+): Promise<StoryGraphCandidateAdoptionSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/candidates/${input.assetId}/adoptions`, {
+      method: "POST",
+      headers: {
+        ...contextHeaders(input),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        target_kind: input.targetKind,
+      }),
+      cache: "no-store",
+    });
+
+    return await decodeStoryGraphCandidateAdoptionResponse(response);
+  } catch (error) {
+    return networkFailure(error, "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED");
+  }
+}
+
 async function decodeCurrentUserResponse(response: Response): Promise<CurrentUserSummary> {
   const payload = await readLLMPayload(response);
   if (isApiFailure(payload)) {
@@ -4347,6 +4386,35 @@ async function decodeStoryGraphBondGenerationResponse(
     run_id: runId,
     project_id: projectId,
     workflow_type: workflowType,
+    status,
+  };
+}
+
+async function decodeStoryGraphCandidateAdoptionResponse(
+  response: Response,
+): Promise<StoryGraphCandidateAdoptionSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED");
+  }
+
+  const assetId = requiredString(payload, "asset_id");
+  const projectId = requiredString(payload, "project_id");
+  const targetKind = requiredString(payload, "target_kind");
+  const targetId = requiredString(payload, "target_id");
+  const status = requiredString(payload, "status");
+  if (!assetId || !projectId || !targetKind || !targetId || !status) {
+    return invalidApiResponse("story graph candidate adoption response missing required fields");
+  }
+  return {
+    ok: true,
+    asset_id: assetId,
+    project_id: projectId,
+    target_kind: targetKind,
+    target_id: targetId,
     status,
   };
 }

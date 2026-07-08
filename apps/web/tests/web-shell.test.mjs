@@ -1314,6 +1314,9 @@ test("Story Graph API client uses sanitized Go story graph endpoints and tenant 
   assert.match(client, /StoryGraphClustersSummary/);
   assert.match(client, /StoryGraphBuildSummary/);
   assert.match(client, /StoryGraphBondGenerationSummary/);
+  assert.match(client, /StoryGraphCandidateAdoptionSummary/);
+  assert.match(client, /AdoptStoryGraphCandidateInput/);
+  assert.match(client, /adoptStoryGraphCandidate/);
   assert.match(client, /\/v1\/workflow-runs\/\$\{input\.runId\}`/);
   assert.match(client, /\/v1\/workflow-runs\/\$\{input\.runId\}\/events/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/story-graph\/current`/);
@@ -1323,11 +1326,14 @@ test("Story Graph API client uses sanitized Go story graph endpoints and tenant 
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/story-graph\/clusters`/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/story-graph\/builds`/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/story-graph\/bond-generations`/);
+  assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/story-graph\/candidates\/\$\{input\.assetId\}\/adoptions`/);
+  assert.match(client, /target_kind:\s*input\.targetKind/);
   assert.match(client, /workflow_type/);
   assert.match(client, /graph_id/);
   assert.match(client, /node_ids/);
   assert.match(client, /node_count/);
   assert.match(client, /edge_count/);
+  assert.match(client, /target_id/);
   assert.match(client, /X-Tenant-Id/);
   assert.match(client, /X-User-Id/);
   assert.doesNotMatch(client, /snippet:\s*string/);
@@ -1349,6 +1355,12 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.match(shell, /Workflow events/);
   assert.match(shell, /Compose Mode/);
   assert.match(shell, /Generate bonds/);
+  assert.match(shell, /Candidate adoption/);
+  assert.match(shell, /Graph candidates/);
+  assert.match(shell, /Adopt relationship/);
+  assert.match(shell, /Adopt plot thread/);
+  assert.match(shell, /graphCandidates/);
+  assert.match(shell, /adoptStoryGraphCandidateAction/);
   assert.match(shell, /bondAction/);
   assert.match(shell, /bondStatus/);
   assert.match(shell, /storyGraphBondStatus/);
@@ -1367,7 +1379,29 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.match(shell, /node_count/);
   assert.match(shell, /edge_count/);
   assert.match(shell, /storyGraphBuildStatus/);
+  assert.doesNotMatch(shell, /content_text/);
+  assert.doesNotMatch(shell, /credential_ref/);
+  assert.doesNotMatch(shell, /api_key/);
   assert.doesNotMatch(shell, /mock/i);
+});
+
+test("Story Graph page loads graph candidates and wires explicit adoption action", async () => {
+  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/graph/page.tsx");
+
+  assert.match(page, /getProjectAssets/);
+  assert.match(page, /graphCandidatesFromAssets/);
+  assert.match(page, /source_kind\s*===\s*"graph_bond_generation"/);
+  assert.match(page, /lifecycle\s*===\s*"candidate"/);
+  assert.match(page, /adoptStoryGraphCandidate/);
+  assert.match(page, /adoptStoryGraphCandidateAction/);
+  assert.match(page, /targetKind/);
+  assert.match(page, /targetKindFromFormData\(formData\)/);
+  assert.match(page, /STORY_GRAPH_CANDIDATE_ADOPTION_VALIDATION_FAILED/);
+  assert.match(page, /invalid story graph candidate adoption target/);
+  assert.match(page, /storyGraphAdoptionStatus/);
+  assert.doesNotMatch(page, /content_text/);
+  assert.doesNotMatch(page, /credential_ref/);
+  assert.doesNotMatch(page, /api_key/);
 });
 
 test("Story Graph page loads workflow progress when a build run id is present", async () => {

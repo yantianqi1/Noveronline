@@ -1,4 +1,5 @@
 import type {
+  AssetListSummary,
   StoryGraphBondGenerationSummary,
   StoryGraphBuildSummary,
   StoryGraphClustersSummary,
@@ -19,6 +20,10 @@ type StoryGraphShellProps = {
   bondStatus: string;
   bondCode: string;
   bondMessage: string;
+  adoptionStatus: string;
+  adoptionCode: string;
+  adoptionMessage: string;
+  adoptionTargetId: string;
   selectedRunId: string;
   selectedBuildRunId: string;
   selectedBondRunId: string;
@@ -27,10 +32,12 @@ type StoryGraphShellProps = {
   evidence: StoryGraphEvidenceSummary;
   layout: StoryGraphLayoutSummary;
   clusters: StoryGraphClustersSummary;
+  graphCandidates: AssetListSummary;
   workflowRun: WorkflowRunSummary | null;
   workflowEvents: WorkflowRunEventsSummary | null;
   buildAction: (formData: FormData) => Promise<void>;
   bondAction: (formData: FormData) => Promise<void>;
+  adoptStoryGraphCandidateAction: (formData: FormData) => Promise<void>;
 };
 
 export function StoryGraphShell({
@@ -42,6 +49,10 @@ export function StoryGraphShell({
   bondStatus,
   bondCode,
   bondMessage,
+  adoptionStatus,
+  adoptionCode,
+  adoptionMessage,
+  adoptionTargetId,
   selectedRunId,
   selectedBuildRunId,
   selectedBondRunId,
@@ -50,10 +61,12 @@ export function StoryGraphShell({
   evidence,
   layout,
   clusters,
+  graphCandidates,
   workflowRun,
   workflowEvents,
   buildAction,
   bondAction,
+  adoptStoryGraphCandidateAction,
 }: StoryGraphShellProps) {
   return (
     <div>
@@ -167,6 +180,20 @@ export function StoryGraphShell({
           </section>
 
           <section
+            className={`panel ${graphCandidates.ok ? "" : "error-box"}`}
+            aria-labelledby="graph-candidate-adoption-heading"
+          >
+            <p className="eyebrow">Candidate adoption</p>
+            <h2 id="graph-candidate-adoption-heading">Graph candidates</h2>
+            <StatusLine status={adoptionStatus} code={adoptionCode} message={adoptionMessage} />
+            {adoptionTargetId ? <p className="form-hint">Adopted target: {adoptionTargetId}</p> : null}
+            <GraphCandidates
+              graphCandidates={graphCandidates}
+              adoptStoryGraphCandidateAction={adoptStoryGraphCandidateAction}
+            />
+          </section>
+
+          <section
             className={`panel ${workflowRun && !workflowRun.ok ? "error-box" : ""}`}
             aria-labelledby="graph-build-progress-heading"
           >
@@ -185,6 +212,55 @@ export function StoryGraphShell({
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function GraphCandidates({
+  graphCandidates,
+  adoptStoryGraphCandidateAction,
+}: {
+  graphCandidates: AssetListSummary;
+  adoptStoryGraphCandidateAction: (formData: FormData) => Promise<void>;
+}) {
+  if (!graphCandidates.ok) {
+    return <p className="form-hint">{graphCandidates.code}: {graphCandidates.message}</p>;
+  }
+  if (graphCandidates.items.length === 0) {
+    return <p className="form-hint">No graph candidates awaiting adoption</p>;
+  }
+  return (
+    <div className="data-table-wrap">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Candidate</th>
+            <th>Type</th>
+            <th>Source</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {graphCandidates.items.map((candidate) => (
+            <tr key={candidate.asset_id}>
+              <td>
+                <strong>{candidate.title || candidate.asset_id}</strong>
+                <br />
+                <span className="form-hint">{candidate.summary || candidate.asset_id}</span>
+              </td>
+              <td>{candidate.asset_type}</td>
+              <td>{candidate.source_ref || "graph bond generation"}</td>
+              <td>
+                <form action={adoptStoryGraphCandidateAction} className="inline-action-form">
+                  <input type="hidden" name="assetId" value={candidate.asset_id} />
+                  <button type="submit" name="targetKind" value="relationship">Adopt relationship</button>
+                  <button type="submit" name="targetKind" value="plot_thread">Adopt plot thread</button>
+                </form>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { StoryGraphShell, storyGraphBondStatus, storyGraphBuildStatus } from "../../../../../../components/story-graph-shell";
 import {
+  adoptStoryGraphCandidate,
+  getProjectAssets,
   getWorkflowRunEvents,
   getWorkflowRunSummary,
   getStoryGraphClusters,
@@ -10,6 +12,8 @@ import {
   getStoryGraphView,
   startStoryGraphBondGeneration,
   startStoryGraphBuild,
+  type AssetListSummary,
+  type StoryGraphCandidateAdoptionSummary,
   type StoryGraphEvidenceSummary,
 } from "../../../../../../lib/api";
 import { webApiContext } from "../../../../../../lib/server-auth";
@@ -30,6 +34,10 @@ export default async function StoryGraphPage({
     bondStatus?: string;
     bondRunId?: string;
     runId?: string;
+    storyGraphAdoptionCode?: string;
+    storyGraphAdoptionMessage?: string;
+    storyGraphAdoptionStatus?: string;
+    storyGraphAdoptionTargetId?: string;
   }>;
 }) {
   const { tenantSlug, projectId } = await params;
@@ -51,6 +59,7 @@ export default async function StoryGraphPage({
     ...apiContext,
     limit: 50,
   });
+  const graphCandidates = graphCandidatesFromAssets(await getProjectAssets(apiContext));
   const selectedRunId = query.bondRunId || query.runId || "";
   const workflowRun = selectedRunId ? await getWorkflowRunSummary({
     ...(await webApiContext({ tenantId: tenantSlug })),
@@ -115,6 +124,53 @@ export default async function StoryGraphPage({
     }));
   }
 
+  async function adoptStoryGraphCandidateAction(formData: FormData) {
+    "use server";
+
+    const targetKind = targetKindFromFormData(formData);
+    if (!targetKind) {
+      redirect(storyGraphRoute({
+        tenantSlug,
+        projectId,
+        buildStatus: query.buildStatus ?? "",
+        buildCode: query.buildCode ?? "",
+        buildMessage: query.buildMessage ?? "",
+        runId: query.runId ?? "",
+        bondStatus: query.bondStatus ?? "",
+        bondCode: query.bondCode ?? "",
+        bondMessage: query.bondMessage ?? "",
+        bondRunId: query.bondRunId ?? "",
+        storyGraphAdoptionStatus: "error",
+        storyGraphAdoptionCode: "STORY_GRAPH_CANDIDATE_ADOPTION_VALIDATION_FAILED",
+        storyGraphAdoptionMessage: "invalid story graph candidate adoption target",
+        storyGraphAdoptionTargetId: "",
+      }));
+    }
+    const result = await adoptStoryGraphCandidate({
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
+      projectId,
+      assetId: stringFromFormData(formData, "assetId"),
+      targetKind,
+    });
+    const status = storyGraphAdoptionStatus(result);
+    redirect(storyGraphRoute({
+      tenantSlug,
+      projectId,
+      buildStatus: query.buildStatus ?? "",
+      buildCode: query.buildCode ?? "",
+      buildMessage: query.buildMessage ?? "",
+      runId: query.runId ?? "",
+      bondStatus: query.bondStatus ?? "",
+      bondCode: query.bondCode ?? "",
+      bondMessage: query.bondMessage ?? "",
+      bondRunId: query.bondRunId ?? "",
+      storyGraphAdoptionStatus: status.status,
+      storyGraphAdoptionCode: status.code,
+      storyGraphAdoptionMessage: status.message,
+      storyGraphAdoptionTargetId: status.targetId,
+    }));
+  }
+
   return (
     <StoryGraphShell
       tenantSlug={tenantSlug}
@@ -124,12 +180,17 @@ export default async function StoryGraphPage({
       evidence={evidence}
       layout={layout}
       clusters={clusters}
+      graphCandidates={graphCandidates}
       buildStatus={query.buildStatus ?? ""}
       buildCode={query.buildCode ?? ""}
       buildMessage={query.buildMessage ?? ""}
       bondStatus={query.bondStatus ?? ""}
       bondCode={query.bondCode ?? ""}
       bondMessage={query.bondMessage ?? ""}
+      adoptionStatus={query.storyGraphAdoptionStatus ?? ""}
+      adoptionCode={query.storyGraphAdoptionCode ?? ""}
+      adoptionMessage={query.storyGraphAdoptionMessage ?? ""}
+      adoptionTargetId={query.storyGraphAdoptionTargetId ?? ""}
       selectedRunId={selectedRunId}
       selectedBuildRunId={query.runId ?? ""}
       selectedBondRunId={query.bondRunId ?? ""}
@@ -137,6 +198,7 @@ export default async function StoryGraphPage({
       workflowEvents={workflowEvents}
       buildAction={buildAction}
       bondAction={bondAction}
+      adoptStoryGraphCandidateAction={adoptStoryGraphCandidateAction}
     />
   );
 }
@@ -152,6 +214,10 @@ function storyGraphRoute(input: {
   bondCode: string;
   bondMessage: string;
   bondRunId: string;
+  storyGraphAdoptionStatus?: string;
+  storyGraphAdoptionCode?: string;
+  storyGraphAdoptionMessage?: string;
+  storyGraphAdoptionTargetId?: string;
 }) {
   const query = new URLSearchParams();
   setQueryIfPresent(query, "buildStatus", input.buildStatus);
@@ -166,6 +232,10 @@ function storyGraphRoute(input: {
   if (input.bondRunId) {
     query.set("bondRunId", input.bondRunId);
   }
+  setQueryIfPresent(query, "storyGraphAdoptionStatus", input.storyGraphAdoptionStatus ?? "");
+  setQueryIfPresent(query, "storyGraphAdoptionCode", input.storyGraphAdoptionCode ?? "");
+  setQueryIfPresent(query, "storyGraphAdoptionMessage", input.storyGraphAdoptionMessage ?? "");
+  setQueryIfPresent(query, "storyGraphAdoptionTargetId", input.storyGraphAdoptionTargetId ?? "");
   return `/${input.tenantSlug}/projects/${input.projectId}/graph?${query.toString()}`;
 }
 
@@ -179,6 +249,47 @@ function stringListFromFormData(formData: FormData, key: string) {
     .split(/[\n,]/)
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function targetKindFromFormData(formData: FormData): "relationship" | "plot_thread" | null {
+  const targetKind = stringFromFormData(formData, "targetKind");
+  if (targetKind === "relationship" || targetKind === "plot_thread") {
+    return targetKind;
+  }
+  return null;
+}
+
+function storyGraphAdoptionStatus(result: StoryGraphCandidateAdoptionSummary) {
+  if (!result.ok) {
+    return {
+      status: "error",
+      code: result.code,
+      message: result.message,
+      targetId: "",
+    };
+  }
+  return {
+    status: "success",
+    code: "STORY_GRAPH_CANDIDATE_ADOPTED",
+    message: `${result.asset_id} adopted as ${result.target_kind}`,
+    targetId: result.target_id,
+  };
+}
+
+function graphCandidatesFromAssets(assets: AssetListSummary): AssetListSummary {
+  if (!assets.ok) {
+    return assets;
+  }
+  return {
+    ok: true,
+    items: assets.items
+      .filter((asset) => asset.source_kind === "graph_bond_generation" && asset.lifecycle === "candidate")
+      .map((asset) => ({
+        ...asset,
+        tags: [],
+        payload: {},
+      })),
+  };
 }
 
 function setQueryIfPresent(query: URLSearchParams, key: string, value: string) {
