@@ -182,6 +182,50 @@ test("tenant picker project layout loads current user and passes memberships int
   assert.match(layout, /projectId=\{projectId\}/);
 });
 
+test("password login page issues browser session server-side without exposing token material", async () => {
+  const client = await fileText("lib/api.ts");
+  const page = await fileText("app/login/page.tsx");
+  const loginClient = sourceSlice(client, "export async function loginWithPassword", "export async function revokeCurrentSession");
+  const loginAction = sourceSlice(page, "async function loginAction", "return (");
+
+  assert.match(client, /export type PasswordLoginSummary/);
+  assert.match(client, /export async function loginWithPassword\(input:\s*\{\s*email:\s*string;\s*password:\s*string;?\s*\}\)/);
+  assert.match(loginClient, /\/v1\/auth\/login/);
+  assert.match(loginClient, /method:\s*"POST"/);
+  assert.match(loginClient, /"Content-Type":\s*"application\/json"/);
+  assert.match(loginClient, /body:\s*JSON\.stringify\(\{\s*email:\s*input\.email,\s*password:\s*input\.password,\s*\}\)/s);
+  assert.match(loginClient, /parseSessionCookieSetCookie\(response\.headers\.get\("set-cookie"\)\)/);
+  assert.match(loginClient, /decodeCurrentUserResponse\(response\)/);
+  assert.match(loginClient, /session_cookie:\s*sessionCookie/);
+  assert.match(loginClient, /networkFailure\(error,\s*"PASSWORD_LOGIN_FAILED"\)/);
+  assert.doesNotMatch(loginClient, /X-User-Id|X-Tenant-Id|headers\.Cookie|Cookie:\s*|contextHeaders|actorUserId|csrfToken/);
+
+  assert.match(page, /import\s*\{\s*cookies\s*\}\s*from\s*"next\/headers"/);
+  assert.match(page, /import\s*\{\s*redirect\s*\}\s*from\s*"next\/navigation"/);
+  assert.match(page, /loginWithPassword/);
+  assert.match(loginAction, /"use server"/);
+  assert.match(loginAction, /const\s+email\s*=\s*stringFromFormData\(formData,\s*"email"\)/);
+  assert.match(loginAction, /const\s+password\s*=\s*rawStringFromFormData\(formData,\s*"password"\)/);
+  assert.match(loginAction, /await\s+loginWithPassword\(\{\s*email,\s*password\s*\}\)/s);
+  assert.match(loginAction, /const\s+cookieStore\s*=\s*await\s+cookies\(\)/);
+  assert.match(loginAction, /cookieStore\.set\("mirofish_session",\s*result\.session_cookie\.value,/);
+  assert.match(loginAction, /httpOnly:\s*result\.session_cookie\.http_only/);
+  assert.match(loginAction, /sameSite:\s*result\.session_cookie\.same_site/);
+  assert.match(loginAction, /const\s+project\s*=\s*result\.active_projects\[0\]/);
+  assert.match(loginAction, /redirect\(`\/\$\{project\.tenant_id\}\/projects\/\$\{project\.project_id\}\/overview`\)/);
+  assert.doesNotMatch(loginAction, /console\.|MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|X-Tenant-Id|getCurrentUser|session_cookie\.value\}/);
+
+  assert.match(page, /<form\s+action=\{loginAction\}/);
+  assert.match(page, /htmlFor="login-email"/);
+  assert.match(page, /type="email"/);
+  assert.match(page, /htmlFor="login-password"/);
+  assert.match(page, /type="password"/);
+  assert.match(page, /autoComplete="email"/);
+  assert.match(page, /autoComplete="current-password"/);
+  assert.match(page, /Sign in/);
+  assert.doesNotMatch(page, /token_hash|credential_ref|encrypted_api_key|api_key|object_key|draft|manuscript|prompt|provider|raw_body|content_text/i);
+});
+
 test("project shell exposes current-session logout without leaking the session token", async () => {
   const client = await fileText("lib/api.ts");
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");

@@ -88,6 +88,13 @@ export type CurrentUserSessionsSummary =
     }
   | ApiFailure;
 
+export type PasswordLoginSummary =
+  | ({
+      ok: true;
+      session_cookie: RotatedSessionCookie;
+    } & CurrentUserRecord)
+  | ApiFailure;
+
 export type WriterRunSummary =
   | {
       ok: true;
@@ -1334,6 +1341,45 @@ function currentUserHeaders(input: { actorUserId?: string; sessionCookie?: strin
   }
 
   return headers;
+}
+
+export async function loginWithPassword(input: { email: string; password: string }): Promise<PasswordLoginSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: input.email,
+        password: input.password,
+      }),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const payload = await readLLMPayload(response);
+      if (isApiFailure(payload)) {
+        return payload;
+      }
+      return decodeError(payload, response.status, "PASSWORD_LOGIN_FAILED");
+    }
+
+    const currentUser = await decodeCurrentUserResponse(response);
+    if (!currentUser.ok) {
+      return currentUser;
+    }
+    const sessionCookie = parseSessionCookieSetCookie(response.headers.get("set-cookie"));
+    if (sessionCookie === null) {
+      return invalidApiResponse("password login response missing session cookie");
+    }
+    return {
+      ...currentUser,
+      ok: true,
+      session_cookie: sessionCookie,
+    };
+  } catch (error) {
+    return networkFailure(error, "PASSWORD_LOGIN_FAILED");
+  }
 }
 
 export async function revokeCurrentSession(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
