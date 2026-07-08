@@ -134,6 +134,7 @@ export default async function OverviewPage({
       ...(await webApiContext({ tenantId: tenantSlug })),
       uploadId: admitted.upload_id,
       file,
+      mimeType,
     });
     if (!uploaded.ok) {
       const status = sourceFileObjectActionStatus(uploaded);

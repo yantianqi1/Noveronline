@@ -1272,6 +1272,7 @@ export type CompleteSourceFileUploadInput = ApiContext & {
 export type UploadSourceFileObjectInput = ApiContext & {
   uploadId: string;
   file: Blob;
+  mimeType?: string;
 };
 
 export type StartSeedRunInput = ApiContext & {
@@ -1822,11 +1823,12 @@ export async function uploadSourceFileObject(
   input: UploadSourceFileObjectInput,
 ): Promise<SourceFileObjectUploadSummary> {
   try {
+    const contentType = input.mimeType?.trim() || input.file.type || "application/octet-stream";
     const response = await fetch(`${apiBaseUrl()}/v1/uploads/${input.uploadId}/object`, {
       method: "PUT",
       headers: {
         ...contextHeaders(input),
-        "Content-Type": input.file.type || "application/octet-stream",
+        "Content-Type": contentType,
       },
       body: input.file,
       cache: "no-store",

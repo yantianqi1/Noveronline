@@ -65,10 +65,45 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Phase 5：Seed live chain / product closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化 |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed full semantic success-chain live E2E：Go API upload/complete -> Temporal cluster -> Python worker 顺序执行 parse/segment/sequential/runtime-facts/global-aggregation/ontology/entity-resolution/agent-profile/archive/index/finalize 并 completed |
+| 本轮开发 slice | P5 Seed Overview upload MIME contract hardening：Web one-step upload/start action 将校验/推断后的 source MIME 贯穿 create upload 与 object PUT，并用 mock-fetch contract 覆盖 create upload -> PUT object -> complete -> start 顺序 |
 | 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 browser upload/complete live check、外部 provider/cluster Seed success-chain E2E、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+
+## Phase 5 P5 Seed Overview upload MIME contract hardening
+
+Context:
+
+- Previous Overview one-step upload/start action already derived a supported source MIME for admission, but `uploadSourceFileObject` used the browser `Blob.type` for object PUT. Browser uploads can report empty or generic `application/octet-stream`, which could diverge from the admitted MIME inferred from `.txt` / `.md` / `.markdown` / `.pdf`.
+- This slice is a Web contract hardening only. It does not claim browser live E2E, external provider/cluster Seed E2E, OCR/scanned PDF, retry, vector/hybrid search, or complete Seed product closure.
+
+TDD / Review:
+
+- RED：新增 `apps/web/tests/seed-upload-api.test.mjs`，mock-fetch 执行 `createSourceFileUpload` -> `uploadSourceFileObject` -> `completeSourceFileUpload` -> `startSeedRun`。测试先失败，因为 `uploadSourceFileObject` 对 raw `Blob.type = ""` 使用 `application/octet-stream`，且 Overview action 未把 sanitized `mimeType` 传给 object upload。
+- Implementation：`UploadSourceFileObjectInput` 新增可选 `mimeType`；`uploadSourceFileObject` 优先使用该值作为 object PUT `Content-Type`，再回退到 `file.type` / `application/octet-stream`。Overview `uploadAndStartSeedAction` 现在把前面 `supportedSourceMimeType(file)` 得到的 `mimeType` 传入 object upload。
+- Reviewer follow-up：采纳 spec reviewer 建议，mock-fetch test 改用 raw `Blob.type = "application/octet-stream"` 但传入 admitted `text/plain`，显式证明 admitted/sanitized MIME 优先，并断言 admission / seed start JSON body 不携带 `tenant_id` / `project_id` authority。
+- Spec reviewer PASS，无阻塞问题。Quality/privacy reviewer PASS，无 fake success、silent fallback 或 prompt/provider/raw body/content/API key/encrypted credential/`credential_ref`/object key/draft/manuscript 泄露路径。
+
+Verification:
+
+- RED evidence：`cd apps/web && npm run test -- --test-name-pattern='Seed upload API client|Overview upload action passes'` initially failed with object PUT `Content-Type = application/octet-stream` and missing `mimeType` in the Overview object upload call.
+- GREEN focused：`cd apps/web && npm run test -- --test-name-pattern='Seed upload API client|Overview upload action passes'` passed, 54 passed.
+- Focused regression：`cd apps/web && npm run test -- --test-name-pattern='Overview|Seed|source file|Seed upload API client'` passed, 54 passed.
+- Broader Web：`cd apps/web && npm run test` passed, 54 passed.
+- Typecheck：`cd apps/web && npm run typecheck` passed.
+- Build：`cd apps/web && npm run build` passed; local Next SWC platform package warning remained non-fatal.
+- `git diff --check` passed.
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+
+Next:
+
+- Continue with actual browser upload/complete live check against a running Next shell + Go API + object storage, then external provider/cluster Seed success-chain E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph live DB/browser E2E, and Writer live reference E2E.
 
 ## Phase 5 P5 Story Graph metadata canvas
 
