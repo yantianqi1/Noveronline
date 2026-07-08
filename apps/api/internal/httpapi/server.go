@@ -1227,6 +1227,18 @@ func isActorSensitiveRoute(request *http.Request) bool {
 	switch {
 	case request.Method == http.MethodGet && path == "/v1/me":
 		return true
+	case request.Method == http.MethodGet && isWorkflowRunDetailPath(path):
+		return true
+	case request.Method == http.MethodGet && isWorkflowRunEventsPath(path):
+		return true
+	case request.Method == http.MethodGet && isSeedRunDetailPath(path):
+		return true
+	case request.Method == http.MethodGet && isSeedRunEventsPath(path):
+		return true
+	case request.Method == http.MethodGet && isWriterRunDetailPath(path):
+		return true
+	case request.Method == http.MethodGet && isWriterRunEventsPath(path):
+		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/workflow-runs/") && strings.HasSuffix(path, "/cancel"):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/workflow-runs/") && strings.HasSuffix(path, "/retry"):
@@ -1557,6 +1569,30 @@ func hasProjectSuffixPathShape(path string, suffix string) bool {
 	return isSinglePathSegment(projectIDFromPathWithSuffix(path, suffix))
 }
 
+func isWorkflowRunDetailPath(path string) bool {
+	return workflowRunPathPart(path) != ""
+}
+
+func isWorkflowRunEventsPath(path string) bool {
+	return workflowRunEventsPathPart(path) != ""
+}
+
+func isSeedRunDetailPath(path string) bool {
+	return seedRunPathPart(path) != ""
+}
+
+func isSeedRunEventsPath(path string) bool {
+	return seedRunEventsPathPart(path) != ""
+}
+
+func isWriterRunDetailPath(path string) bool {
+	return writerRunPathPart(path) != ""
+}
+
+func isWriterRunEventsPath(path string) bool {
+	return writerRunEventsPathPart(path) != ""
+}
+
 func isSinglePathSegment(value string) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && !strings.Contains(value, "/")
@@ -1604,13 +1640,13 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleRevokeTenantSessions(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		s.handleGetCurrentUser(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
+	case request.Method == http.MethodGet && isWorkflowRunEventsPath(request.URL.Path):
 		s.handleListWorkflowRunEvents(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
 		s.handleCancelWorkflowRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/retry"):
 		s.handleRetryWorkflowRun(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/"):
+	case request.Method == http.MethodGet && isWorkflowRunDetailPath(request.URL.Path):
 		s.handleGetWorkflowRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/seed-runs"):
 		s.handleStartSeedRun(response, request)
@@ -1624,13 +1660,13 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetManuscriptExport(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/manuscript"):
 		s.handleGetManuscript(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
+	case request.Method == http.MethodGet && isSeedRunEventsPath(request.URL.Path):
 		s.handleListSeedRunEvents(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
 		s.handleCancelSeedRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/retry"):
 		s.handleRetrySeedRun(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/"):
+	case request.Method == http.MethodGet && isSeedRunDetailPath(request.URL.Path):
 		s.handleGetSeedRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/uploads"):
 		s.handleCreateUpload(response, request)
@@ -1750,9 +1786,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartDraftReview(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
 		s.handleListDraftReviews(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
+	case request.Method == http.MethodGet && isWriterRunEventsPath(request.URL.Path):
 		s.handleListWriterRunEvents(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/"):
+	case request.Method == http.MethodGet && isWriterRunDetailPath(request.URL.Path):
 		s.handleGetWriterRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/agent-runtime/hello-runs"):
 		s.handleStartHelloAgent(response, request)
@@ -6318,27 +6354,60 @@ func traceExportPathParts(path string) (string, string) {
 }
 
 func writerRunEventsPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/writer-runs/")
+	remainder, ok := strings.CutPrefix(path, "/v1/writer-runs/")
+	if !ok {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "events" {
+	if !ok || suffix != "events" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
 }
 
 func workflowRunEventsPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/workflow-runs/")
+	remainder, ok := strings.CutPrefix(path, "/v1/workflow-runs/")
+	if !ok {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "events" {
+	if !ok || suffix != "events" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
 }
 
 func seedRunEventsPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/seed-runs/")
+	remainder, ok := strings.CutPrefix(path, "/v1/seed-runs/")
+	if !ok {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "events" {
+	if !ok || suffix != "events" || !isSinglePathSegment(runID) {
+		return ""
+	}
+	return strings.TrimSpace(runID)
+}
+
+func writerRunPathPart(path string) string {
+	runID, ok := strings.CutPrefix(path, "/v1/writer-runs/")
+	if !ok || !isSinglePathSegment(runID) {
+		return ""
+	}
+	return strings.TrimSpace(runID)
+}
+
+func workflowRunPathPart(path string) string {
+	runID, ok := strings.CutPrefix(path, "/v1/workflow-runs/")
+	if !ok || !isSinglePathSegment(runID) {
+		return ""
+	}
+	return strings.TrimSpace(runID)
+}
+
+func seedRunPathPart(path string) string {
+	runID, ok := strings.CutPrefix(path, "/v1/seed-runs/")
+	if !ok || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)

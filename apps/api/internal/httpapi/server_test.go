@@ -12743,6 +12743,393 @@ func TestGetWriterRunReturnsQueuedRunStatusFromAPI(t *testing.T) {
 	}
 }
 
+func TestAuthSubjectGlobalRunReadsRejectInvalidBearerBeforeFallbackAndReaders(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		path          string
+		config        func() (Config, func(t *testing.T))
+		setCredential func(t *testing.T, request *http.Request)
+	}{
+		{
+			name: "workflow detail invalid bearer",
+			path: "/v1/workflow-runs/run-123",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{
+					run: workflows.WorkflowRun{
+						RunID:     "run-123",
+						ProjectID: "project-123",
+						Status:    "completed",
+						Message:   "prompt body content api_key sk-hidden credential_ref draft manuscript",
+					},
+				}
+				return Config{WorkflowReader: reader, SessionAuthSecret: "test-secret"}, func(t *testing.T) {
+					if reader.input.TenantID != "" || reader.input.RunID != "" {
+						t.Fatalf("workflow reader was called before rejecting invalid actor credential: %#v", reader.input)
+					}
+				}
+			},
+			setCredential: func(t *testing.T, request *http.Request) {
+				request.Header.Set("Authorization", "Bearer v1:run-reader:deadbeef")
+			},
+		},
+		{
+			name: "workflow events duplicate authorization",
+			path: "/v1/workflow-runs/run-123/events",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowEventReader{
+					events: []workflows.WorkflowEvent{{
+						EventID: "evt-1",
+						RunID:   "run-123",
+						Payload: map[string]any{"prompt": "body content api_key credential_ref draft manuscript"},
+					}},
+				}
+				return Config{WorkflowEventReader: reader, SessionAuthSecret: "test-secret"}, func(t *testing.T) {
+					if reader.input.TenantID != "" || reader.input.RunID != "" {
+						t.Fatalf("workflow event reader was called before rejecting invalid actor credential: %#v", reader.input)
+					}
+				}
+			},
+			setCredential: func(t *testing.T, request *http.Request) {
+				request.Header["Authorization"] = []string{
+					"Bearer " + signedSessionTokenForTest(t, "test-secret", "run-reader"),
+					"Bearer v1:duplicate:deadbeef",
+				}
+			},
+		},
+		{
+			name: "seed detail invalid cookie",
+			path: "/v1/seed-runs/run-123",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{
+					run: workflows.WorkflowRun{
+						RunID:     "run-123",
+						ProjectID: "project-123",
+						Status:    "completed",
+						Message:   "prompt body content api_key sk-hidden credential_ref draft manuscript",
+					},
+				}
+				return Config{SeedRunReader: reader, SessionAuthSecret: "test-secret"}, func(t *testing.T) {
+					if reader.getInput.TenantID != "" || reader.getInput.RunID != "" {
+						t.Fatalf("seed reader was called before rejecting invalid actor credential: %#v", reader.getInput)
+					}
+				}
+			},
+			setCredential: func(t *testing.T, request *http.Request) {
+				request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "v1:seed-reader:deadbeef"})
+			},
+		},
+		{
+			name: "seed events malformed bearer",
+			path: "/v1/seed-runs/run-123/events",
+			config: func() (Config, func(t *testing.T)) {
+				seedReader := &recordingSeedRunReader{
+					run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-123", Status: "running"},
+				}
+				eventReader := &recordingWorkflowEventReader{
+					events: []workflows.WorkflowEvent{{
+						EventID: "evt-1",
+						RunID:   "run-123",
+						Payload: map[string]any{"prompt": "body content api_key credential_ref draft manuscript"},
+					}},
+				}
+				return Config{SeedRunReader: seedReader, WorkflowEventReader: eventReader, SessionAuthSecret: "test-secret"}, func(t *testing.T) {
+					if seedReader.getInput.TenantID != "" || seedReader.getInput.RunID != "" {
+						t.Fatalf("seed reader was called before rejecting invalid actor credential: %#v", seedReader.getInput)
+					}
+					if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+						t.Fatalf("seed event reader was called before rejecting invalid actor credential: %#v", eventReader.input)
+					}
+				}
+			},
+			setCredential: func(t *testing.T, request *http.Request) {
+				request.Header.Set("Authorization", "Basic v1:seed-reader:deadbeef")
+			},
+		},
+		{
+			name: "writer detail invalid bearer",
+			path: "/v1/writer-runs/run-123",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{
+					run: workflows.WriterRun{
+						RunID:     "run-123",
+						TraceID:   "trace-123",
+						ProjectID: "project-123",
+						Status:    "draft manuscript",
+					},
+				}
+				return Config{WriterReader: reader, SessionAuthSecret: "test-secret"}, func(t *testing.T) {
+					if reader.input.TenantID != "" || reader.input.RunID != "" {
+						t.Fatalf("writer reader was called before rejecting invalid actor credential: %#v", reader.input)
+					}
+				}
+			},
+			setCredential: func(t *testing.T, request *http.Request) {
+				request.Header.Set("Authorization", "Bearer v1:writer-reader:deadbeef")
+			},
+		},
+		{
+			name: "writer events invalid cookie",
+			path: "/v1/writer-runs/run-123/events",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingWriterEventReader{
+					events: []workflows.WriterEvent{{
+						EventID: "evt-1",
+						RunID:   "run-123",
+						Payload: map[string]any{"prompt": "body content api_key credential_ref draft manuscript"},
+					}},
+				}
+				return Config{WriterEventReader: reader, SessionAuthSecret: "test-secret"}, func(t *testing.T) {
+					if reader.input.TenantID != "" || reader.input.RunID != "" {
+						t.Fatalf("writer event reader was called before rejecting invalid actor credential: %#v", reader.input)
+					}
+				}
+			},
+			setCredential: func(t *testing.T, request *http.Request) {
+				request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "v1:writer-reader:deadbeef"})
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config, assertReadersUnused := tt.config()
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			tt.setCredential(t, request)
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+			}
+			assertReadersUnused(t)
+			rawBody := response.Body.String()
+			var body errorEnvelope
+			if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeUnauthenticated || body.Error.Message != "user context is required" {
+				t.Fatalf("unexpected auth error body: %#v", body)
+			}
+			for _, forbidden := range []string{
+				"run-reader", "seed-reader", "writer-reader", "duplicate", "fallback-user", "deadbeef",
+				"prompt", "body", "content", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript",
+			} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("auth error leaked forbidden payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedGlobalRunReadPathsStay404WithoutAuthOrReaders(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		path   string
+		config func() (Config, func(t *testing.T))
+	}{
+		{
+			name: "workflow events extra segment",
+			path: "/v1/workflow-runs/run-1/events/extra",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{}
+				eventReader := &recordingWorkflowEventReader{}
+				sessionStore := &recordingAuthSessionStore{}
+				return Config{
+						WorkflowReader:      reader,
+						WorkflowEventReader: eventReader,
+						AuthSessionStore:    sessionStore,
+						SessionAuthSecret:   "test-secret",
+					}, func(t *testing.T) {
+						if sessionStore.validateCalled {
+							t.Fatalf("malformed workflow path should not validate actor session: %#v", sessionStore.validateInput)
+						}
+						if reader.input.TenantID != "" || reader.input.RunID != "" {
+							t.Fatalf("malformed workflow path should not call reader: %#v", reader.input)
+						}
+						if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+							t.Fatalf("malformed workflow path should not call event reader: %#v", eventReader.input)
+						}
+					}
+			},
+		},
+		{
+			name: "seed events missing run id",
+			path: "/v1/seed-runs//events",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{}
+				eventReader := &recordingWorkflowEventReader{}
+				sessionStore := &recordingAuthSessionStore{}
+				return Config{
+						SeedRunReader:       reader,
+						WorkflowEventReader: eventReader,
+						AuthSessionStore:    sessionStore,
+						SessionAuthSecret:   "test-secret",
+					}, func(t *testing.T) {
+						if sessionStore.validateCalled {
+							t.Fatalf("malformed seed path should not validate actor session: %#v", sessionStore.validateInput)
+						}
+						if reader.getInput.TenantID != "" || reader.getInput.RunID != "" {
+							t.Fatalf("malformed seed path should not call reader: %#v", reader.getInput)
+						}
+						if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+							t.Fatalf("malformed seed path should not call event reader: %#v", eventReader.input)
+						}
+					}
+			},
+		},
+		{
+			name: "writer detail extra segment",
+			path: "/v1/writer-runs/run-1/extra",
+			config: func() (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{}
+				eventReader := &recordingWriterEventReader{}
+				sessionStore := &recordingAuthSessionStore{}
+				return Config{
+						WriterReader:      reader,
+						WriterEventReader: eventReader,
+						AuthSessionStore:  sessionStore,
+						SessionAuthSecret: "test-secret",
+					}, func(t *testing.T) {
+						if sessionStore.validateCalled {
+							t.Fatalf("malformed writer path should not validate actor session: %#v", sessionStore.validateInput)
+						}
+						if reader.input.TenantID != "" || reader.input.RunID != "" {
+							t.Fatalf("malformed writer path should not call reader: %#v", reader.input)
+						}
+						if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+							t.Fatalf("malformed writer path should not call event reader: %#v", eventReader.input)
+						}
+					}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config, assertNoSideEffects := tt.config()
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.AddCookie(&http.Cookie{
+				Name:  sessionCookieName,
+				Value: signedSessionTokenForTest(t, "test-secret", "cookie-user"),
+			})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			assertNoSideEffects(t)
+			rawBody := response.Body.String()
+			if !strings.Contains(rawBody, `"code":"NOT_FOUND"`) {
+				t.Fatalf("expected not found body, got %s", rawBody)
+			}
+			for _, forbidden := range []string{"cookie-user", "fallback-user", "test-secret"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("malformed path response leaked forbidden actor payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalRunReadPathHelpersRequireStrictSingleSegmentRunIDs(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		match   func(string) bool
+		valid   string
+		invalid []string
+	}{
+		{
+			name:  "workflow detail",
+			match: isWorkflowRunDetailPath,
+			valid: "/v1/workflow-runs/run-1",
+			invalid: []string{
+				"/v1/workflow-runs/",
+				"/v1/workflow-runs//events",
+				"/v1/workflow-runs/run-1/events",
+				"/v1/workflow-runs/run-1/extra",
+				"/api/v1/workflow-runs/run-1",
+			},
+		},
+		{
+			name:  "workflow events",
+			match: isWorkflowRunEventsPath,
+			valid: "/v1/workflow-runs/run-1/events",
+			invalid: []string{
+				"/v1/workflow-runs/",
+				"/v1/workflow-runs//events",
+				"/v1/workflow-runs/run-1",
+				"/v1/workflow-runs/run-1/events/extra",
+				"/api/v1/workflow-runs/run-1/events",
+			},
+		},
+		{
+			name:  "seed detail",
+			match: isSeedRunDetailPath,
+			valid: "/v1/seed-runs/run-1",
+			invalid: []string{
+				"/v1/seed-runs/",
+				"/v1/seed-runs//events",
+				"/v1/seed-runs/run-1/events",
+				"/v1/seed-runs/run-1/extra",
+				"/api/v1/seed-runs/run-1",
+			},
+		},
+		{
+			name:  "seed events",
+			match: isSeedRunEventsPath,
+			valid: "/v1/seed-runs/run-1/events",
+			invalid: []string{
+				"/v1/seed-runs/",
+				"/v1/seed-runs//events",
+				"/v1/seed-runs/run-1",
+				"/v1/seed-runs/run-1/events/extra",
+				"/api/v1/seed-runs/run-1/events",
+			},
+		},
+		{
+			name:  "writer detail",
+			match: isWriterRunDetailPath,
+			valid: "/v1/writer-runs/run-1",
+			invalid: []string{
+				"/v1/writer-runs/",
+				"/v1/writer-runs//events",
+				"/v1/writer-runs/run-1/events",
+				"/v1/writer-runs/run-1/extra",
+				"/api/v1/writer-runs/run-1",
+			},
+		},
+		{
+			name:  "writer events",
+			match: isWriterRunEventsPath,
+			valid: "/v1/writer-runs/run-1/events",
+			invalid: []string{
+				"/v1/writer-runs/",
+				"/v1/writer-runs//events",
+				"/v1/writer-runs/run-1",
+				"/v1/writer-runs/run-1/events/extra",
+				"/api/v1/writer-runs/run-1/events",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !tt.match(tt.valid) {
+				t.Fatalf("expected canonical path to match: %s", tt.valid)
+			}
+			for _, path := range tt.invalid {
+				if tt.match(path) {
+					t.Fatalf("expected malformed or non-canonical path not to match: %s", path)
+				}
+			}
+		})
+	}
+}
+
 func TestGetWriterRunUsesConfiguredReader(t *testing.T) {
 	reader := &recordingWriterReader{
 		run: workflows.WriterRun{
