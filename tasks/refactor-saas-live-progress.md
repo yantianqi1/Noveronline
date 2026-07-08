@@ -65,9 +65,9 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Phase 5：Seed live chain / product closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；P5 Seed Web API upload/start live harness 已新增为严格 opt-in，默认 skip，要求 session cookie、local API base URL、mutation 确认、throwaway project 确认，以及 `/v1/me` 返回的 active project id/name 包含 disposable marker；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；P5 Seed Web API upload/start live harness 已新增为严格 opt-in，默认 skip，要求 session cookie、local API base URL、mutation 确认、throwaway project 确认，以及 `/v1/me` 返回的 active project id/name 包含 disposable marker；P5 Seed browser Overview upload/start live harness 已新增为严格 opt-in，默认 skip，要求 local Next app + local Go API + session cookie + disposable project preflight，并通过 Playwright 驱动真实 Overview form；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化 |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed Web upload/start live harness hardening：新增严格 opt-in Web API client harness 覆盖 create upload -> PUT object -> complete -> start 顺序；默认 skip，真实 mutation 需要 session cookie、local API base URL、mutation/throwaway env 双确认和 server-returned disposable project marker preflight |
+| 本轮开发 slice | P5 Seed browser Overview upload/start live harness hardening：新增严格 opt-in browser harness 覆盖 Overview form file upload -> object PUT -> complete -> Seed start -> run summary readback；默认 skip，真实 mutation 需要 local Next app、local Go API、session cookie、mutation/throwaway env 双确认和 server-returned disposable project marker preflight |
 | 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 browser upload/complete live check、外部 provider/cluster Seed success-chain E2E、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
 
 ## Phase 5 P5 Seed Overview upload MIME contract hardening
@@ -141,6 +141,30 @@ Docs synced:
 Next:
 
 - Execute a true browser upload/complete live check against running Next + Go API + object storage, then continue external provider/cluster Seed success-chain E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph live DB/browser E2E, and Writer live reference E2E.
+
+## Phase 5 P5 Seed browser Overview upload/start live harness
+
+Context:
+
+- Previous Web API live harness exercised the typed client directly, but did not drive the actual Overview form in a browser.
+- This slice adds only a repository-native, opt-in browser automation harness for the existing Overview upload/start flow. It is not an executed live browser certification unless the live env is provided, and it does not claim external provider/cluster Seed E2E, OCR/scanned PDF, retry, vector/hybrid search, or complete Seed product closure.
+
+TDD / Review:
+
+- RED：`apps/web/tests/web-shell.test.mjs` first required a `tests/seed-upload-browser-live.test.mjs` harness with browser-live env markers, default skip, dynamic Playwright import, session-cookie setup, disposable project preflight, real `setInputFiles` form interaction, Seed run summary readback, and public marker checks; the contract failed while the file was absent.
+- Implementation：`apps/web/tests/seed-upload-browser-live.test.mjs` now requires local `MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL` and local `MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL`, tenant/project ids, `MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE`, mutation and throwaway confirmations, and a disposable project marker. Before browser mutation, it calls `/v1/me` through `getCurrentUser` and requires the target active project id/name to contain the marker. It launches Chromium only after that preflight, sets the `mirofish_session` cookie, drives the Overview form with a TXT upload and `Upload and start Seed`, waits for success query state and `runId`, then reads the public Seed run summary.
+- Safety/privacy hardening：the harness does not accept development actor fallback or `X-User-Id`, skips only when no browser-live env is set, fails loud when any partial browser-live env is present, restores `MIROFISH_API_BASE_URL` after each test, and recursively scans page body, URL, `/v1/me`, and Seed run summary output for prompt/provider/raw/body/content/source text/session token/private content/API key/encrypted credential/`credential_ref`/object key/draft/manuscript markers and high-risk public key names. Runtime-sensitive values such as the session cookie and uploaded source text are passed as forbidden markers without echoing those values in assertion labels.
+
+Verification:
+
+- RED evidence：`cd apps/web && npm run test -- --test-name-pattern='Overview Seed browser live harness is opt-in'` failed while `tests/seed-upload-browser-live.test.mjs` was missing.
+- Default opt-in skip：`cd apps/web && node --test tests/seed-upload-browser-live.test.mjs` passed as 1 skipped.
+- Partial-env fail-loud check：`cd apps/web && MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL=http://127.0.0.1:3999 node --test tests/seed-upload-browser-live.test.mjs` failed as expected with an incomplete-config message instead of skipping.
+- GREEN focused：`cd apps/web && npm run test -- --test-name-pattern='Overview Seed browser live harness is opt-in|Browser Overview upload form can upload'` passed, 56 passed / 2 skipped.
+
+Next:
+
+- Execute the browser harness against running local Next + Go API + object storage with a disposable project/session cookie, then continue external provider/cluster Seed success-chain E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph live DB/browser E2E, and Writer live reference E2E.
 
 ## Phase 5 P5 Story Graph metadata canvas
 

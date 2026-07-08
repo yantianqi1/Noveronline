@@ -665,6 +665,48 @@ test("Overview Seed upload live harness is opt-in and privacy bounded", async ()
   assert.doesNotMatch(liveTest, /OPENAI_API_KEY|api_key|encrypted_api_key|credential_ref|object_key|draft|manuscript|prompt|provider_response|raw_body|content_text/i);
 });
 
+test("Overview Seed browser live harness is opt-in and privacy bounded", async () => {
+  const browserLiveTest = await fileText("tests/seed-upload-browser-live.test.mjs");
+
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_TENANT_ID/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_PROJECT_ID/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER/);
+  assert.match(browserLiveTest, /test\.skip/);
+  assert.match(browserLiveTest, /hasAnyBrowserLiveConfig/);
+  assert.match(browserLiveTest, /assertBrowserLiveConfigComplete/);
+  assert.match(browserLiveTest, /browser Seed upload live config is incomplete/);
+  assert.match(browserLiveTest, /import\("@playwright\/test"\)/);
+  assert.match(browserLiveTest, /chromium\.launch/);
+  assert.match(browserLiveTest, /addCookies/);
+  assert.match(browserLiveTest, /mirofish_session/);
+  assert.match(browserLiveTest, /getCurrentUser/);
+  assert.match(browserLiveTest, /assertDisposableProject/);
+  assert.match(browserLiveTest, /assertSafeLocalUrl/);
+  assert.match(browserLiveTest, /setInputFiles/);
+  assert.match(browserLiveTest, /getByRole\("button",\s*\{\s*name:\s*\/Upload and start Seed\/i\s*\}\)/);
+  assert.match(browserLiveTest, /getSeedRunSummary/);
+  assert.match(browserLiveTest, /assertNoForbiddenPublicMarkers/);
+  assert.match(browserLiveTest, /"bo"\s*\+\s*"dy"/);
+  assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"body"/);
+  assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"source"/);
+  assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"token"/);
+  assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"sessioncookie"/);
+  assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"privatecontent"/);
+  assert.match(browserLiveTest, /sessionCookie:\s*config\.sessionCookie/);
+  assert.match(browserLiveTest, /"session"\s*\+\s*"Cookie"/);
+  assert.match(browserLiveTest, /"private"\s*\+\s*"Content"/);
+  assert.match(browserLiveTest, /redactAssertionMessage/);
+  assert.match(browserLiveTest, /"api"\s*\+\s*"\s+"\s*\+\s*"key"/);
+  assert.match(browserLiveTest, /"encrypted"\s*\+\s*"\s+"\s*\+\s*"credential"/);
+  assert.match(browserLiveTest, /"object"\s*\+\s*"\s+"\s*\+\s*"key"/);
+  assert.doesNotMatch(browserLiveTest, /actorUserId|MIROFISH_WEB_BROWSER_LIVE_SEED_ACTOR|X-User-Id|OPENAI_API_KEY|api_key|encrypted_api_key|credential_ref|object_key|draft|manuscript|prompt|provider_response|raw_body|content_text/i);
+});
+
 test("Overview Seed shell renders explicit source file and Seed run states", async () => {
   const shell = await fileText("components/overview-seed-shell.tsx");
 
