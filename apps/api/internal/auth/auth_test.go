@@ -940,6 +940,59 @@ func TestSQLSessionStoreRevokesActiveSessionByTokenHashOnly(t *testing.T) {
 	}
 }
 
+func TestSQLSessionStoreRotatesActiveSessionTokenHashOnly(t *testing.T) {
+	now := time.Now().UTC()
+	expiresAt := now.Add(7 * 24 * time.Hour)
+	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 1}}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: execer})
+
+	err := store.RotateSession(context.Background(), RotateSessionInput{
+		UserID:       " user-session ",
+		OldTokenHash: " old-token-hash ",
+		NewTokenHash: " new-token-hash ",
+		ExpiresAt:    expiresAt,
+		Now:          now,
+		RequestID:    "req-session-rotate",
+	})
+
+	if err != nil {
+		t.Fatalf("RotateSession returned error: %v", err)
+	}
+	if len(execer.queries) != 1 {
+		t.Fatalf("expected one rotation update, got %d", len(execer.queries))
+	}
+	query := strings.ToLower(execer.queries[0])
+	for required := range map[string]struct{}{
+		"update user_sessions": {},
+		"token_hash = $3":      {},
+		"expires_at = $4":      {},
+		"last_seen_at = $5":    {},
+		"revoked_at = null":    {},
+		"token_hash = $2":      {},
+		"status = 'active'":    {},
+		"expires_at > $5":      {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("session rotation query missing %q: %s", required, execer.queries[0])
+		}
+	}
+	if len(execer.args) != 1 || len(execer.args[0]) != 5 {
+		t.Fatalf("unexpected session rotation args: %#v", execer.args)
+	}
+	if execer.args[0][0] != "user-session" ||
+		execer.args[0][1] != "old-token-hash" ||
+		execer.args[0][2] != "new-token-hash" ||
+		execer.args[0][3] != expiresAt ||
+		execer.args[0][4] != now {
+		t.Fatalf("session rotation args lost public fields: %#v", execer.args[0])
+	}
+	for _, forbidden := range []string{"session_token", "api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("session rotation query selected forbidden field %q: %s", forbidden, execer.queries[0])
+		}
+	}
+}
+
 func TestSQLSessionStoreRejectsMissingRevocationTarget(t *testing.T) {
 	store := NewSQLSessionStore(SQLSessionStoreConfig{
 		Execer: &fakeAuthExecer{result: fakeSQLResult{affected: 0}},
@@ -949,6 +1002,22 @@ func TestSQLSessionStoreRejectsMissingRevocationTarget(t *testing.T) {
 		UserID:    "user-session",
 		TokenHash: "token-hash-value",
 		Now:       time.Now().UTC(),
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
+}
+
+func TestSQLSessionStoreRejectsMissingRotationTarget(t *testing.T) {
+	store := NewSQLSessionStore(SQLSessionStoreConfig{
+		Execer: &fakeAuthExecer{result: fakeSQLResult{affected: 0}},
+	})
+
+	err := store.RotateSession(context.Background(), RotateSessionInput{
+		UserID:       "user-session",
+		OldTokenHash: "old-token-hash",
+		NewTokenHash: "new-token-hash",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		Now:          time.Now().UTC(),
 	})
 
 	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
@@ -1009,6 +1078,21 @@ func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 			UserID:    "user-session",
 			TokenHash: "token-hash-value",
 			Now:       time.Now().UTC(),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
+
+	t.Run("rotate", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: &fakeAuthExecer{err: maliciousErr}})
+
+		err := store.RotateSession(context.Background(), RotateSessionInput{
+			UserID:       "user-session",
+			OldTokenHash: "old-token-hash",
+			NewTokenHash: "new-token-hash",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+			Now:          time.Now().UTC(),
 		})
 
 		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")

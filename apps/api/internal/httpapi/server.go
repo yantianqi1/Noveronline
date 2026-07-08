@@ -1365,6 +1365,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCreateDevSession(response, request)
 	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/session":
 		s.handleRevokeCurrentSession(response, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/rotation":
+		s.handleRotateCurrentSession(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		s.handleGetCurrentUser(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
@@ -1644,6 +1646,54 @@ func (s *Server) handleRevokeCurrentSession(response http.ResponseWriter, reques
 		Path:     "/",
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0).UTC(),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   request.TLS != nil,
+	})
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRotateCurrentSession(response http.ResponseWriter, request *http.Request) {
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if s.authSessionStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	userID, oldTokenHash, ok := s.verifySignedSessionToken(cookie.Value)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	newToken, ok := s.signSessionToken(userID)
+	if !ok {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	sessionTTL := 7 * 24 * time.Hour
+	now := time.Now().UTC()
+	newTokenHash := hashSessionToken(newToken)
+	err = s.authSessionStore.RotateSession(request.Context(), auth.RotateSessionInput{
+		UserID:       userID,
+		OldTokenHash: oldTokenHash,
+		NewTokenHash: newTokenHash,
+		ExpiresAt:    now.Add(sessionTTL),
+		Now:          now,
+		RequestID:    requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	http.SetCookie(response, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    newToken,
+		Path:     "/",
+		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   request.TLS != nil,

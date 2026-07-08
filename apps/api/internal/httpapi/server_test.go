@@ -98,12 +98,15 @@ type recordingAuthSessionStore struct {
 	createInput    auth.CreateSessionInput
 	validateInput  auth.ValidateSessionInput
 	revokeInput    auth.RevokeSessionInput
+	rotateInput    auth.RotateSessionInput
 	createErr      error
 	validateErr    error
 	revokeErr      error
+	rotateErr      error
 	createCalled   bool
 	validateCalled bool
 	revokeCalled   bool
+	rotateCalled   bool
 }
 
 func (s *recordingAuthSessionStore) CreateSession(ctx context.Context, input auth.CreateSessionInput) error {
@@ -122,6 +125,12 @@ func (s *recordingAuthSessionStore) RevokeSession(ctx context.Context, input aut
 	s.revokeInput = input
 	s.revokeCalled = true
 	return s.revokeErr
+}
+
+func (s *recordingAuthSessionStore) RotateSession(ctx context.Context, input auth.RotateSessionInput) error {
+	s.rotateInput = input
+	s.rotateCalled = true
+	return s.rotateErr
 }
 
 type recordingAuthorizer struct {
@@ -2221,6 +2230,163 @@ func TestRevokeCurrentSessionFailsClosedWhenStoreFailsBeforeClearingCookie(t *te
 		if strings.Contains(rawBody, forbidden) {
 			t.Fatalf("session revocation error leaked forbidden text %q: %s", forbidden, rawBody)
 		}
+	}
+}
+
+func TestRotateCurrentSessionReplacesPersistedCookieBeforeIssuingNewCookie(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	oldToken := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
+	request.Header.Set("X-Request-Id", "req_session_rotate")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: oldToken})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.createCalled || sessionStore.revokeCalled || sessionStore.validateCalled {
+		t.Fatalf("rotation should not call reader/create/revoke/validate: reader=%v store=%#v", reader.called, sessionStore)
+	}
+	if !sessionStore.rotateCalled ||
+		sessionStore.rotateInput.UserID != "user-session" ||
+		sessionStore.rotateInput.RequestID != "req_session_rotate" ||
+		strings.TrimSpace(sessionStore.rotateInput.OldTokenHash) == "" ||
+		strings.TrimSpace(sessionStore.rotateInput.NewTokenHash) == "" ||
+		!sessionStore.rotateInput.ExpiresAt.After(time.Now()) {
+		t.Fatalf("session store did not receive rotation scope: %#v", sessionStore.rotateInput)
+	}
+	if sessionStore.rotateInput.OldTokenHash == sessionStore.rotateInput.NewTokenHash {
+		t.Fatalf("rotation reused token hash: %#v", sessionStore.rotateInput)
+	}
+	for _, forbidden := range []string{oldToken, "test-secret", "fallback-user"} {
+		if strings.Contains(sessionStore.rotateInput.OldTokenHash, forbidden) || strings.Contains(sessionStore.rotateInput.NewTokenHash, forbidden) {
+			t.Fatalf("session store hash leaked forbidden token material %q: %#v", forbidden, sessionStore.rotateInput)
+		}
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 ||
+		cookies[0].Name != sessionCookieName ||
+		cookies[0].Value == "" ||
+		cookies[0].Value == oldToken ||
+		cookies[0].MaxAge <= 0 ||
+		!cookies[0].HttpOnly ||
+		cookies[0].Path != "/" ||
+		cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("expected rotated session cookie after persistence: %#v", cookies)
+	}
+	userID, newTokenHash, ok := server.verifySignedSessionToken(cookies[0].Value)
+	if !ok || userID != "user-session" || newTokenHash != sessionStore.rotateInput.NewTokenHash {
+		t.Fatalf("rotated cookie was not persisted as the new token hash: user=%q hash=%q input=%#v ok=%v", userID, newTokenHash, sessionStore.rotateInput, ok)
+	}
+	if strings.Contains(response.Body.String(), cookies[0].Value) || strings.Contains(response.Body.String(), sessionStore.rotateInput.NewTokenHash) {
+		t.Fatalf("rotation response leaked token material: %s", response.Body.String())
+	}
+}
+
+func TestRotateCurrentSessionRequiresCookieAndSessionStoreWithoutFallback(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "bearer-user"))
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.rotateCalled {
+		t.Fatalf("rotation used non-cookie credential or fallback: reader=%v store=%v", reader.called, sessionStore.rotateCalled)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("rotation issued cookie without a browser session cookie: %#v", response.Result().Cookies())
+	}
+
+	noStoreServer := NewServer(Config{SessionAuthSecret: "test-secret"})
+	noStoreRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
+	noStoreRequest.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	noStoreResponse := httptest.NewRecorder()
+
+	noStoreServer.ServeHTTP(noStoreResponse, noStoreRequest)
+
+	if noStoreResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected no-store rotation to fail closed, got %d: %s", noStoreResponse.Code, noStoreResponse.Body.String())
+	}
+	if len(noStoreResponse.Result().Cookies()) != 0 {
+		t.Fatalf("rotation issued stateless cookie without session store: %#v", noStoreResponse.Result().Cookies())
+	}
+}
+
+func TestRotateCurrentSessionFailsClosedWhenStoreFailsBeforeReplacingCookie(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{
+		rotateErr: &auth.AppError{
+			Code:    auth.CodeLookupFailed,
+			Message: "rotate leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || !sessionStore.rotateCalled {
+		t.Fatalf("unexpected rotation ordering: reader=%v store=%v", reader.called, sessionStore.rotateCalled)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("cookie was replaced even though rotation failed: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeLookupFailed || body.Error.Message != "auth lookup failed" {
+		t.Fatalf("unexpected rotation error body: %#v", body)
+	}
+	for _, forbidden := range []string{"user-session", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("session rotation error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestMalformedRotateCurrentSessionPathsStay404WithoutSideEffects(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	for _, path := range []string{
+		"/v1/auth//session/rotation",
+		"/v1/auth/session/rotation/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.rotateCalled {
+				t.Fatalf("malformed path called session store: %#v", sessionStore.rotateInput)
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatalf("malformed path replaced cookie: %#v", response.Result().Cookies())
+			}
+		})
 	}
 }
 
