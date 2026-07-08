@@ -3210,6 +3210,192 @@ func TestMalformedRotateCurrentSessionPathsStay404WithoutSideEffects(t *testing.
 	}
 }
 
+func TestRotateCurrentSessionToJWTReplacesPersistedCookieBeforeIssuingJWTCookie(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	oldToken := signedSessionTokenForTest(t, "test-secret", "user-session")
+	csrfToken := sessionCSRFTokenForTest(t, server, oldToken)
+	sessionStore.validateCalled = false
+	sessionStore.validateInput = auth.ValidateSessionInput{}
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
+	request.Header.Set("X-Request-Id", "req_session_jwt_rotate")
+	request.Header.Set("X-CSRF-Token", csrfToken)
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "bearer-user"))
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: oldToken})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.createCalled || sessionStore.revokeCalled || sessionStore.validateCalled {
+		t.Fatalf("jwt rotation should not call reader/create/revoke/validate: reader=%v store=%#v", reader.called, sessionStore)
+	}
+	if !sessionStore.rotateCalled ||
+		sessionStore.rotateInput.UserID != "user-session" ||
+		sessionStore.rotateInput.RequestID != "req_session_jwt_rotate" ||
+		strings.TrimSpace(sessionStore.rotateInput.OldTokenHash) == "" ||
+		strings.TrimSpace(sessionStore.rotateInput.NewTokenHash) == "" ||
+		!sessionStore.rotateInput.ExpiresAt.After(time.Now()) {
+		t.Fatalf("session store did not receive jwt rotation scope: %#v", sessionStore.rotateInput)
+	}
+	if sessionStore.rotateInput.OldTokenHash == sessionStore.rotateInput.NewTokenHash {
+		t.Fatalf("jwt rotation reused token hash: %#v", sessionStore.rotateInput)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 ||
+		cookies[0].Name != sessionCookieName ||
+		cookies[0].Value == "" ||
+		cookies[0].Value == oldToken ||
+		strings.Count(cookies[0].Value, ".") != 2 ||
+		cookies[0].MaxAge <= 0 ||
+		!cookies[0].HttpOnly ||
+		cookies[0].Path != "/" ||
+		cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("expected compact jwt session cookie after persistence: %#v", cookies)
+	}
+	userID, newTokenHash, ok := server.verifySignedSessionToken(cookies[0].Value)
+	if !ok || userID != "user-session" || newTokenHash != sessionStore.rotateInput.NewTokenHash {
+		t.Fatalf("jwt cookie was not persisted as the new token hash: user=%q hash=%q input=%#v ok=%v", userID, newTokenHash, sessionStore.rotateInput, ok)
+	}
+	for _, forbidden := range []string{oldToken, "test-secret", "fallback-user", "bearer-user"} {
+		if strings.Contains(sessionStore.rotateInput.OldTokenHash, forbidden) || strings.Contains(sessionStore.rotateInput.NewTokenHash, forbidden) || strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("jwt rotation leaked forbidden token material %q: hashes=%#v body=%s", forbidden, sessionStore.rotateInput, response.Body.String())
+		}
+	}
+	if strings.Contains(response.Body.String(), cookies[0].Value) || strings.Contains(response.Body.String(), sessionStore.rotateInput.NewTokenHash) {
+		t.Fatalf("jwt rotation response leaked token material: %s", response.Body.String())
+	}
+}
+
+func TestRotateCurrentSessionToJWTRequiresCSRFBeforeStore(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if sessionStore.rotateCalled {
+		t.Fatalf("missing csrf called session store: %#v", sessionStore.rotateInput)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("missing csrf issued jwt cookie: %#v", response.Result().Cookies())
+	}
+}
+
+func TestRotateCurrentSessionToJWTRequiresCookieAndSessionStoreWithoutFallback(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "bearer-user"))
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.rotateCalled {
+		t.Fatalf("jwt rotation used non-cookie credential or fallback: reader=%v store=%v", reader.called, sessionStore.rotateCalled)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("jwt rotation issued cookie without a browser session cookie: %#v", response.Result().Cookies())
+	}
+
+	noStoreServer := NewServer(Config{SessionAuthSecret: "test-secret"})
+	noStoreToken := signedSessionTokenForTest(t, "test-secret", "user-session")
+	noStoreRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
+	noStoreRequest.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, noStoreServer, noStoreToken))
+	noStoreRequest.AddCookie(&http.Cookie{Name: sessionCookieName, Value: noStoreToken})
+	noStoreResponse := httptest.NewRecorder()
+
+	noStoreServer.ServeHTTP(noStoreResponse, noStoreRequest)
+
+	if noStoreResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected no-store jwt rotation to fail closed, got %d: %s", noStoreResponse.Code, noStoreResponse.Body.String())
+	}
+	if len(noStoreResponse.Result().Cookies()) != 0 {
+		t.Fatalf("jwt rotation issued stateless cookie without session store: %#v", noStoreResponse.Result().Cookies())
+	}
+}
+
+func TestRotateCurrentSessionToJWTFailsClosedWhenStoreFailsBeforeReplacingCookie(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{
+		rotateErr: &auth.AppError{
+			Code:    auth.CodeLookupFailed,
+			Message: "jwt rotate leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
+	token := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if !sessionStore.rotateCalled {
+		t.Fatalf("jwt rotation did not reach session store failure path: %#v", sessionStore)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("cookie was replaced even though jwt rotation failed: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeLookupFailed || body.Error.Message != "auth lookup failed" {
+		t.Fatalf("unexpected jwt rotation error body: %#v", body)
+	}
+	for _, forbidden := range []string{"user-session", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("jwt session rotation error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestMalformedRotateCurrentSessionToJWTPathsStay404WithoutSideEffects(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	for _, path := range []string{
+		"/v1/auth//session/jwt-rotation",
+		"/v1/auth/session/jwt-rotation/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.rotateCalled {
+				t.Fatalf("malformed path called session store: %#v", sessionStore.rotateInput)
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatalf("malformed path replaced cookie: %#v", response.Result().Cookies())
+			}
+		})
+	}
+}
+
 func TestMalformedRevokeCurrentSessionPathsStay404WithoutSideEffects(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
 	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
