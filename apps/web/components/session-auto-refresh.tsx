@@ -5,14 +5,19 @@ import { useEffect } from "react";
 const SESSION_REFRESH_STORAGE_KEY = "mf_auto_refresh_at";
 const SESSION_REFRESH_STATUS_KEY = "mf_auto_refresh_status";
 const SESSION_REFRESH_COOLDOWN_MS = 25 * 60 * 1000;
+const SESSION_REFRESH_THRESHOLD_MS = 15 * 60 * 1000;
 
-export function SessionAutoRefresh(input: { enabled: boolean }) {
+export function SessionAutoRefresh(input: { currentSessionExpiresAt?: string; enabled: boolean }) {
   useEffect(() => {
     if (!input.enabled) {
       return;
     }
 
     const now = Date.now();
+    const expiresAt = Date.parse(input.currentSessionExpiresAt ?? "");
+    if (!Number.isFinite(expiresAt) || expiresAt - now > SESSION_REFRESH_THRESHOLD_MS) {
+      return;
+    }
     if (!claimRefreshWindow(now)) {
       return;
     }
@@ -22,7 +27,7 @@ export function SessionAutoRefresh(input: { enabled: boolean }) {
     return () => {
       controller.abort();
     };
-  }, [input.enabled]);
+  }, [input.currentSessionExpiresAt, input.enabled]);
 
   return null;
 }

@@ -357,14 +357,19 @@ test("project shell triggers automatic session refresh without exposing the sess
   const route = await fileText("app/api/auth/session/refresh/route.ts");
 
   assert.match(layout, /SessionAutoRefresh/);
-  assert.match(layout, /<SessionAutoRefresh\s+enabled=\{Boolean\(sessionCookie\)\}\s*\/>/);
+  assert.match(layout, /const\s+currentSessionExpiresAt\s*=\s*currentUserSessions\?\.ok\s*\?\s*currentUserSessions\.sessions\.find\(\(session\)\s*=>\s*session\.current\)\?\.expires_at\s*:\s*undefined/s);
+  assert.match(layout, /<SessionAutoRefresh\s+currentSessionExpiresAt=\{currentSessionExpiresAt\}\s+enabled=\{Boolean\(sessionCookie\)\}\s*\/>/);
   assert.doesNotMatch(layout, /<SessionAutoRefresh[^>]*sessionCookie=\{/i);
 
   assert.match(trigger, /"use client"/);
-  assert.match(trigger, /export function SessionAutoRefresh\(input:\s*\{\s*enabled:\s*boolean;?\s*\}\)/);
+  assert.match(trigger, /export function SessionAutoRefresh\(input:\s*\{\s*currentSessionExpiresAt\?:\s*string;\s*enabled:\s*boolean;?\s*\}\)/);
   assert.match(trigger, /useEffect/);
   assert.match(trigger, /sessionStorage/);
   assert.match(trigger, /SESSION_REFRESH_COOLDOWN_MS/);
+  assert.match(trigger, /SESSION_REFRESH_THRESHOLD_MS/);
+  assert.match(trigger, /Date\.parse\(input\.currentSessionExpiresAt\s*\?\?\s*""\)/);
+  assert.match(trigger, /expiresAt\s*-\s*now\s*>\s*SESSION_REFRESH_THRESHOLD_MS/);
+  assert.match(trigger, /\[input\.currentSessionExpiresAt,\s*input\.enabled\]/);
   assert.match(trigger, /fetch\("\/api\/auth\/session\/refresh"/);
   assert.match(trigger, /method:\s*"POST"/);
   assert.match(trigger, /credentials:\s*"same-origin"/);

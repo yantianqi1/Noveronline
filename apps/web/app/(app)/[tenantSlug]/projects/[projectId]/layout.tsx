@@ -89,6 +89,7 @@ export default async function ProjectLayout({
   }
 
   const currentUserSessions = sessionCookie ? await getCurrentUserSessions({ sessionCookie }) : undefined;
+  const currentSessionExpiresAt = currentUserSessions?.ok ? currentUserSessions.sessions.find((session) => session.current)?.expires_at : undefined;
   const currentUser: CurrentUserSummary = sessionCookie || actorUserId
     ? await getCurrentUser({
         actorUserId: sessionCookie ? undefined : actorUserId,
@@ -103,7 +104,7 @@ export default async function ProjectLayout({
 
   return (
     <div className="app-frame">
-      <SessionAutoRefresh enabled={Boolean(sessionCookie)} />
+      <SessionAutoRefresh currentSessionExpiresAt={currentSessionExpiresAt} enabled={Boolean(sessionCookie)} />
       <aside className="app-sidebar" aria-label="Project navigation">
         <ProjectNav
           basePath={basePath}
