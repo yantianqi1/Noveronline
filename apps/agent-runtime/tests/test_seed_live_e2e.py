@@ -31,6 +31,7 @@ from mirofish_agents.temporal.seed import (
     agent_profile_activity,
     archive_candidate_activity,
     entity_resolution_activity,
+    finalize_seed_activity,
     ontology_activity,
     parse_file_activity,
     seed_pipeline_activity,
@@ -1073,6 +1074,102 @@ def test_seed_archive_candidate_live_postgres_provider_persists_candidate_assets
         assert forbidden not in public_body
 
 
+def test_seed_finalize_live_postgres_readiness_updates_snapshot_and_workflow_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    _prepare_live_finalize_database(admin_url)
+    app_url = _app_database_url(admin_url)
+    monkeypatch.setenv("DATABASE_URL", app_url)
+
+    result = finalize_seed_activity(
+        {
+            "context": {
+                "tenant_id": TENANT_ID,
+                "project_id": PROJECT_ID,
+                "run_id": RUN_ID,
+                "workflow_type": "seed_pipeline",
+                "actor_user_id": USER_ID,
+                "trace_id": "trace-live-seed-finalize",
+                "permissions": {"seed_pipeline": ["run"]},
+            }
+        }
+    )
+
+    assert result == {
+        "tenant_id": TENANT_ID,
+        "project_id": PROJECT_ID,
+        "run_id": RUN_ID,
+        "workflow_type": "seed_pipeline",
+        "upload_id": None,
+        "status": "completed",
+        "stage": "finalize",
+        "project_readiness_snapshot_id": result["project_readiness_snapshot_id"],
+        "ready_asset_count": 2,
+        "ready_entity_count": 2,
+        "ready_relationship_count": 1,
+        "ready_world_rule_count": 1,
+        "stage_event_persisted": True,
+        "workflow_status_persisted": True,
+    }
+
+    persisted = _read_seed_finalize_live_rows(admin_url)
+    assert persisted["project_readiness_snapshots"] == [
+        {
+            "project_readiness_snapshot_id": result["project_readiness_snapshot_id"],
+            "run_id": RUN_ID,
+            "ready_asset_count": 2,
+            "ready_entity_count": 2,
+            "ready_relationship_count": 1,
+            "ready_world_rule_count": 1,
+            "metadata_jsonb": {},
+        }
+    ]
+    assert persisted["workflow_runs"] == [
+        {
+            "status": "completed",
+            "progress": 100,
+            "message": "seed pipeline completed",
+            "error_code": None,
+            "error_message": None,
+            "result_jsonb": {
+                "stage": "finalize",
+                "project_readiness_snapshot_id": result["project_readiness_snapshot_id"],
+                "ready_asset_count": 2,
+                "ready_entity_count": 2,
+                "ready_relationship_count": 1,
+                "ready_world_rule_count": 1,
+            },
+        }
+    ]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "finalize",
+                "status": "completed",
+                "activity": "finalize_seed_activity",
+                "project_readiness_snapshot_id": result["project_readiness_snapshot_id"],
+                "ready_asset_count": 2,
+                "ready_entity_count": 2,
+                "ready_relationship_count": 1,
+                "ready_world_rule_count": 1,
+            },
+        }
+    ]
+    public_body = json.dumps(
+        {
+            "result": result,
+            "workflow_runs": persisted["workflow_runs"],
+            "workflow_events": persisted["workflow_events"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    for forbidden in _finalize_live_forbidden_public_markers():
+        assert forbidden not in public_body
+
+
 class _InMemoryObjectStore:
     def __init__(self, objects: dict[str, bytes]) -> None:
         self.objects = dict(objects)
@@ -1849,6 +1946,164 @@ def _prepare_live_archive_candidate_database(admin_url: str, provider_base_url: 
             )
 
 
+def _prepare_live_finalize_database(admin_url: str) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 95, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO source_files (
+                     tenant_id, file_id, project_id, upload_id, object_key, filename,
+                     mime_type, size_bytes, sha256, purpose, parse_status, created_by
+                   )
+                   VALUES (
+                     %s, %s, %s, %s, 'projects/live-seed/private-source-must-not-leak.txt',
+                     'book.txt', 'text/plain', 1, repeat('0', 64), 'seed', 'parsed', %s
+                   )""",
+                (TENANT_ID, SOURCE_FILE_ID, PROJECT_ID, UPLOAD_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO text_segments (
+                     tenant_id, segment_id, project_id, run_id, source_file_id,
+                     segment_order, chapter_guess, title_guess, object_key, summary
+                   )
+                   VALUES (
+                     %s, %s, %s, %s, %s, 0, '第一章', '雨港',
+                     'projects/live-seed/private-segment-must-not-leak.txt',
+                     'PRIVATE_FINALIZE_RAW_TEXT must stay private'
+                   )""",
+                (TENANT_ID, SEGMENT_ID, PROJECT_ID, RUN_ID, SOURCE_FILE_ID),
+            )
+            cursor.execute(
+                """INSERT INTO assets (
+                     tenant_id, asset_id, project_id, scope, asset_type, category, lifecycle,
+                     title, summary, content_text, payload_jsonb, tags_jsonb,
+                     source_kind, source_ref, enabled, created_by
+                   )
+                   VALUES
+                     (
+                       %s, gen_random_uuid(), %s, 'project', 'character', 'cast', 'seed',
+                       '林舟', '雨港守夜人', 'PRIVATE_FINALIZE_ASSET_BODY must stay private',
+                       %s::jsonb, '["seed"]'::jsonb,
+                       'seed_pipeline', 'seed-finalize:asset:1', true, %s
+                     ),
+                     (
+                       %s, gen_random_uuid(), %s, 'project', 'world_rule', 'rule', 'candidate',
+                       '破晓规则', '破晓会显露昨夜痕迹', 'PRIVATE_FINALIZE_RULE_BODY must stay private',
+                       %s::jsonb, '["candidate", "world"]'::jsonb,
+                       'seed_pipeline', 'seed-finalize:asset:2', true, %s
+                     ),
+                     (
+                       %s, gen_random_uuid(), %s, 'project', 'discarded', 'hidden', 'seed',
+                       '禁用资产', '不应计入 ready asset count', 'PRIVATE_FINALIZE_DISABLED_BODY',
+                       %s::jsonb, '["seed"]'::jsonb,
+                       'seed_pipeline', 'seed-finalize:asset:disabled', false, %s
+                     )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    json.dumps(
+                        {
+                            "source_run_id": RUN_ID,
+                            "prompt": "PRIVATE_FINALIZE_PROMPT must not leak",
+                            "api_key": "sk-finalize-live-leak",
+                            "credential_ref": "finalize-secret-ref",
+                            "object_key": "projects/live-seed/private-asset.txt",
+                            "draft": "PRIVATE_FINALIZE_DRAFT",
+                            "manuscript": "PRIVATE_FINALIZE_MANUSCRIPT",
+                        }
+                    ),
+                    USER_ID,
+                    TENANT_ID,
+                    PROJECT_ID,
+                    json.dumps({"source_run_id": RUN_ID}),
+                    USER_ID,
+                    TENANT_ID,
+                    PROJECT_ID,
+                    json.dumps({"source_run_id": RUN_ID}),
+                    USER_ID,
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO entities (
+                     tenant_id, entity_id, project_id, source_run_id, canonical_name,
+                     entity_type, importance, state_summary, first_seen_segment_id, metadata_jsonb
+                   )
+                   VALUES
+                     (
+                       %s, gen_random_uuid(), %s, %s, '林舟', 'character',
+                       'major', 'PRIVATE_FINALIZE_ENTITY_BODY must stay private', %s,
+                       %s::jsonb
+                     ),
+                     (
+                       %s, gen_random_uuid(), %s, %s, '陆晚', 'character',
+                       'supporting', 'PRIVATE_FINALIZE_ENTITY_BODY_TWO must stay private', %s,
+                       '{}'::jsonb
+                     )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                    json.dumps(
+                        {
+                            "provider_response": "PRIVATE_FINALIZE_PROVIDER_RESPONSE",
+                            "raw_body": "PRIVATE_FINALIZE_RAW_BODY",
+                        }
+                    ),
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO relationships (
+                     tenant_id, relationship_id, project_id, source_entity_name,
+                     target_entity_name, relationship_type, summary, source_run_id,
+                     first_seen_segment_id, evidence_text, metadata_jsonb
+                   )
+                   VALUES (
+                     %s, gen_random_uuid(), %s, '林舟', '陆晚', 'ally',
+                     'PRIVATE_FINALIZE_RELATIONSHIP_BODY must stay private',
+                     %s, %s, 'PRIVATE_FINALIZE_EVIDENCE must stay private',
+                     %s::jsonb
+                   )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                    json.dumps({"source_text": "PRIVATE_FINALIZE_SOURCE_TEXT"}),
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO world_rule_evidence (
+                     tenant_id, rule_evidence_id, project_id, run_id, segment_id,
+                     rule_text, evidence_text, category, confidence, metadata_jsonb
+                   )
+                   VALUES (
+                     %s, gen_random_uuid(), %s, %s, %s,
+                     '破晓会显露昨夜痕迹',
+                     'PRIVATE_FINALIZE_WORLD_RULE_EVIDENCE must stay private',
+                     'magic', 0.8, %s::jsonb
+                   )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                    json.dumps({"content": "PRIVATE_FINALIZE_WORLD_RULE_CONTENT"}),
+                ),
+            )
+
+
 def _prepare_live_database_foundation(admin_url: str) -> None:
     with psycopg.connect(admin_url, autocommit=True) as connection:
         with connection.cursor() as cursor:
@@ -2176,6 +2431,45 @@ def _read_seed_archive_candidate_live_rows(admin_url: str) -> dict[str, list[dic
     }
 
 
+def _read_seed_finalize_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT
+                     project_readiness_snapshot_id::text,
+                     run_id::text,
+                     ready_asset_count,
+                     ready_entity_count,
+                     ready_relationship_count,
+                     ready_world_rule_count,
+                     metadata_jsonb
+                   FROM project_readiness_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            project_readiness_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT status, progress, message, error_code, error_message, result_jsonb
+                   FROM workflow_runs
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_runs = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "project_readiness_snapshots": project_readiness_snapshots,
+        "workflow_runs": workflow_runs,
+        "workflow_events": workflow_events,
+    }
+
+
 def _archive_candidate_live_forbidden_public_markers() -> tuple[str, ...]:
     return (
         "prompt",
@@ -2216,6 +2510,31 @@ def _archive_candidate_live_forbidden_public_markers() -> tuple[str, ...]:
         "PRIVATE_ARCHIVE_MEMORY_MANUSCRIPT",
         "PRIVATE_ARCHIVE_TOP_LEVEL_DRAFT",
         "PRIVATE_ARCHIVE_TOP_LEVEL_MANUSCRIPT",
+    )
+
+
+def _finalize_live_forbidden_public_markers() -> tuple[str, ...]:
+    return (
+        "prompt",
+        "provider_response",
+        "provider_raw_body",
+        "raw_body",
+        "raw_content",
+        "content",
+        "api_key",
+        "encrypted_api_key",
+        "credential_ref",
+        "object_key",
+        "source_object_key",
+        "artifact_object_key",
+        "segment_object_key",
+        "projects/live-seed/private",
+        "sk-finalize-live-leak",
+        "finalize-secret-ref",
+        "readiness_report",
+        "PRIVATE_FINALIZE",
+        "draft",
+        "manuscript",
     )
 
 
