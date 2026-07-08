@@ -29,6 +29,7 @@ from mirofish_agents.temporal.seed import (
     SeedPipelineWorkflow,
     S3CompatibleObjectStore,
     agent_profile_activity,
+    ontology_activity,
     parse_file_activity,
     seed_pipeline_activity,
     segment_text_activity,
@@ -472,6 +473,145 @@ def test_seed_agent_profile_live_postgres_provider_chain_persists_snapshot_and_p
         assert forbidden not in encoded
 
 
+def test_seed_story_ontology_live_postgres_provider_persists_snapshot_and_public_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    with _LiveOntologyProvider() as provider:
+        _prepare_live_ontology_database(admin_url, provider.base_url)
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+
+        result = ontology_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-story-ontology",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+        repeat_result = ontology_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-story-ontology-repeat",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+
+    assert result == {
+        "tenant_id": TENANT_ID,
+        "project_id": PROJECT_ID,
+        "run_id": RUN_ID,
+        "workflow_type": "seed_pipeline",
+        "upload_id": None,
+        "status": "completed",
+        "stage": "story_ontology",
+        "next_stage": "entity_resolution",
+        "module_key": "story_ontology",
+        "ontology_snapshot_id": result["ontology_snapshot_id"],
+        "entity_type_count": 2,
+        "relationship_type_count": 1,
+        "world_rule_type_count": 1,
+        "stage_event_persisted": True,
+        "model_id": "model-seed-ontology-live",
+    }
+    assert repeat_result["status"] == "completed"
+    assert repeat_result["ontology_snapshot_id"] == result["ontology_snapshot_id"]
+    assert len(provider.requests) == 2
+    assert _header(provider.requests[0]["headers"], "Authorization") == "Bearer sk-live-seed-ontology"
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Run-Id") == RUN_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Module-Key") == "story_ontology"
+    provider_body = json.dumps(provider.requests[0]["body"], ensure_ascii=False, sort_keys=True)
+    assert "model-seed-ontology-live" in provider_body
+    assert "story_ontology" in provider_body
+    for forbidden in (
+        "credential_ref",
+        "sk-live-seed-ontology",
+        "api_key",
+        "provider_response",
+        "raw manuscript sentence",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in provider_body
+
+    persisted = _read_seed_ontology_live_rows(admin_url)
+    assert persisted["seed_ontology_snapshots"] == [
+        {
+            "module_key": "story_ontology",
+            "model_id": "model-seed-ontology-live",
+            "entity_type_count": 2,
+            "relationship_type_count": 1,
+            "world_rule_type_count": 1,
+            "ontology_jsonb": {
+                "entity_types": [{"name": "character"}, {"name": "organization"}],
+                "relationship_types": [{"name": "ally"}],
+                "world_rule_types": [{"name": "ritual_law"}],
+                "private_notes": "allowed only in private ontology snapshot",
+            },
+        }
+    ]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "story_ontology",
+                "status": "completed",
+                "activity": "ontology_activity",
+                "module_key": "story_ontology",
+                "ontology_snapshot_id": result["ontology_snapshot_id"],
+                "entity_type_count": 2,
+                "relationship_type_count": 1,
+                "world_rule_type_count": 1,
+                "model_id": "model-seed-ontology-live",
+            },
+        },
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "story_ontology",
+                "status": "completed",
+                "activity": "ontology_activity",
+                "module_key": "story_ontology",
+                "ontology_snapshot_id": result["ontology_snapshot_id"],
+                "entity_type_count": 2,
+                "relationship_type_count": 1,
+                "world_rule_type_count": 1,
+                "model_id": "model-seed-ontology-live",
+            },
+        },
+    ]
+    public_event_body = json.dumps(persisted["workflow_events"], ensure_ascii=False, sort_keys=True)
+    encoded = json.dumps({"result": result, "events": persisted["workflow_events"]}, ensure_ascii=False, sort_keys=True)
+    for forbidden in (
+        "sk-live-seed-ontology",
+        "sk-provider-leak",
+        "secret-ref",
+        "credential_ref",
+        "provider_response",
+        "raw_body",
+        "raw manuscript sentence",
+        "private prompt",
+        "draft",
+        "manuscript",
+        "allowed only in private ontology snapshot",
+    ):
+        assert forbidden not in public_event_body
+        assert forbidden not in encoded
+
+
 def test_seed_sequential_reading_live_postgres_provider_object_store_persists_notes_and_public_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -796,6 +936,73 @@ class _LiveSequentialReadingProvider:
         return Handler
 
 
+class _LiveOntologyProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_LiveOntologyProvider":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(body),
+                    }
+                )
+                content = {
+                    "seed_ontology": {
+                        "entity_types": [
+                            {"name": "character", "text": "must be sanitized"},
+                            {"name": "organization", "source_text": "must be sanitized"},
+                        ],
+                        "relationship_types": [{"name": "ally", "provider_response": "must be sanitized"}],
+                        "world_rule_types": [{"name": "ritual_law", "api_key": "sk-provider-leak"}],
+                        "private_notes": "allowed only in private ontology snapshot",
+                        "prompt": "private prompt",
+                        "raw_body": "raw manuscript sentence",
+                        "credential_ref": "secret-ref",
+                        "draft": "private draft",
+                        "manuscript": "private manuscript",
+                    }
+                }
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {
+                        "prompt_tokens": 13,
+                        "completion_tokens": 19,
+                        "total_tokens": 32,
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        return Handler
+
+
 def _live_database_url() -> str:
     database_url = os.environ.get("MIROFISH_SEED_LIVE_DATABASE_URL", "").strip()
     if not database_url:
@@ -969,6 +1176,40 @@ def _prepare_live_agent_profile_database(admin_url: str, provider_base_url: str)
                      tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
                    )
                    VALUES (%s, %s, 'character_agent_profile', %s, 'model-seed-profile-live', '{"temperature":0.1}'::jsonb, %s)""",
+                (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+
+
+def _prepare_live_ontology_database(admin_url: str, provider_base_url: str) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 65, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_channels (
+                     tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+                   )
+                   VALUES (%s, %s, 'Seed Ontology Live Provider', 'openai-compatible', %s, %s, 1, true)""",
+                (TENANT_ID, CHANNEL_ID, provider_base_url, _encrypt_api_key("sk-live-seed-ontology")),
+            )
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES (%s, %s, 'model-seed-ontology-live', 'live-provider', true, false)""",
+                (TENANT_ID, CHANNEL_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES (%s, %s, 'story_ontology', %s, 'model-seed-ontology-live', '{"temperature":0}'::jsonb, %s)""",
                 (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
             )
 
@@ -1229,6 +1470,33 @@ def _read_seed_sequential_reading_live_rows(admin_url: str) -> dict[str, list[di
         "text_segments": text_segments,
         "reading_passes": reading_passes,
         "reading_segment_notes": reading_segment_notes,
+        "workflow_events": workflow_events,
+    }
+
+
+def _read_seed_ontology_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT
+                     module_key, model_id, entity_type_count,
+                     relationship_type_count, world_rule_type_count, ontology_jsonb
+                   FROM seed_ontology_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            seed_ontology_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "seed_ontology_snapshots": seed_ontology_snapshots,
         "workflow_events": workflow_events,
     }
 
