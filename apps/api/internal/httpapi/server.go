@@ -1185,6 +1185,134 @@ func (s *Server) verifySessionCSRFToken(tokenHash string, presented string) bool
 	return hmac.Equal(presentedBytes, expectedBytes)
 }
 
+type protectedRoute struct {
+	name   string
+	method string
+	match  func(string) bool
+}
+
+var actorSensitiveRoutes = []protectedRoute{
+	{name: "current user", method: http.MethodGet, match: pathEquals("/v1/me")},
+	{name: "workflow run detail", method: http.MethodGet, match: isWorkflowRunDetailPath},
+	{name: "workflow run events", method: http.MethodGet, match: isWorkflowRunEventsPath},
+	{name: "seed run detail", method: http.MethodGet, match: isSeedRunDetailPath},
+	{name: "seed run events", method: http.MethodGet, match: isSeedRunEventsPath},
+	{name: "writer run detail", method: http.MethodGet, match: isWriterRunDetailPath},
+	{name: "writer run events", method: http.MethodGet, match: isWriterRunEventsPath},
+	{name: "workflow run cancel", method: http.MethodPost, match: isWorkflowRunCancelPath},
+	{name: "workflow run retry", method: http.MethodPost, match: isWorkflowRunRetryPath},
+	{name: "seed run cancel", method: http.MethodPost, match: isSeedRunCancelPath},
+	{name: "seed run retry", method: http.MethodPost, match: isSeedRunRetryPath},
+	{name: "worldline session step", method: http.MethodPost, match: isWorldlineSessionStepPath},
+	{name: "worldline session variables", method: http.MethodPost, match: isWorldlineSessionVariablesPath},
+	{name: "worldline session saved paths", method: http.MethodPost, match: isWorldlineSessionSavedPathsPath},
+	{name: "worldline session detail", method: http.MethodGet, match: isWorldlineSessionDetailPath},
+	{name: "worldline session timeline", method: http.MethodGet, match: isWorldlineSessionTimelinePath},
+	{name: "worldline session events", method: http.MethodGet, match: isWorldlineSessionEventsPath},
+	{name: "worldline preparation detail", method: http.MethodGet, match: isWorldlinePreparationDetailPath},
+	{name: "worldline preparation agents", method: http.MethodGet, match: isWorldlinePreparationAgentsPath},
+	{name: "worldline event adoption", method: http.MethodPost, match: isWorldlineEventAdoptionPath},
+	{name: "worldline event mutation", method: http.MethodPatch, match: isWorldlineEventMutationPath},
+	{name: "character interaction turn", method: http.MethodPost, match: matchCharacterInteractionNestedPath("turns")},
+	{name: "character interaction chapter draft", method: http.MethodPost, match: matchCharacterInteractionNestedPath("chapter-drafts")},
+	{name: "source upload object", method: http.MethodPut, match: isUploadSourceObjectPath},
+	{name: "source upload complete", method: http.MethodPost, match: isCompleteUploadPath},
+	{name: "character interaction mutation", method: http.MethodPatch, match: isCharacterInteractionMutationPath},
+	{name: "llm settings", method: http.MethodGet, match: pathEquals("/v1/llm/settings")},
+	{name: "llm channel create", method: http.MethodPost, match: pathEquals("/v1/llm/channels")},
+	{name: "llm channel patch", method: http.MethodPatch, match: isLLMChannelMutationPath},
+	{name: "llm channel delete", method: http.MethodDelete, match: isLLMChannelMutationPath},
+	{name: "llm channel sync", method: http.MethodPost, match: isLLMChannelSyncPath},
+	{name: "tenant sessions revoke", method: http.MethodDelete, match: isTenantSessionsPath},
+	{name: "writer run cancel", method: http.MethodPost, match: isWriterRunCancelPath},
+	{name: "draft adoption", method: http.MethodPost, match: isDraftAdoptionPath},
+	{name: "draft review", method: http.MethodPost, match: isDraftReviewPath},
+	{name: "asset adoption", method: http.MethodPost, match: isAssetAdoptionPath},
+	{name: "asset patch", method: http.MethodPatch, match: isAssetMutationPath},
+	{name: "asset delete", method: http.MethodDelete, match: isAssetMutationPath},
+	{name: "asset detail", method: http.MethodGet, match: isAssetDetailPath},
+	{name: "asset bulk action", method: http.MethodPost, match: pathEquals("/v1/assets/bulk-actions")},
+	{name: "archive memory adoption", method: http.MethodPost, match: isArchiveMemoryAdoptionPath},
+	{name: "archive memory rejection", method: http.MethodPost, match: isArchiveMemoryRejectionPath},
+}
+
+var projectActorSensitiveRoutes = []protectedRoute{
+	{name: "project overview", method: http.MethodGet, match: matchProjectSuffixPath("overview")},
+	{name: "project readiness", method: http.MethodGet, match: matchProjectSuffixPath("readiness")},
+	{name: "source file list", method: http.MethodGet, match: matchProjectSuffixPath("source-files")},
+	{name: "asset list", method: http.MethodGet, match: matchProjectSuffixPath("assets")},
+	{name: "asset facets", method: http.MethodGet, match: matchProjectSuffixPath("assets/facets")},
+	{name: "worldline saved paths list", method: http.MethodGet, match: matchProjectSuffixPath("worldline/saved-paths")},
+	{name: "worldline sessions list", method: http.MethodGet, match: matchProjectSuffixPath("worldline-sessions")},
+	{name: "character interactions list", method: http.MethodGet, match: matchProjectSuffixPath("character-interactions")},
+	{name: "story graph current", method: http.MethodGet, match: matchProjectSuffixPath("story-graph/current")},
+	{name: "story graph view", method: http.MethodGet, match: matchStoryGraphPath("views")},
+	{name: "story graph node", method: http.MethodGet, match: matchStoryGraphPath("nodes")},
+	{name: "story graph edge", method: http.MethodGet, match: matchStoryGraphPath("edges")},
+	{name: "story graph layout", method: http.MethodGet, match: matchStoryGraphPath("layouts")},
+	{name: "story graph clusters", method: http.MethodGet, match: matchProjectSuffixPath("story-graph/clusters")},
+	{name: "llm modules", method: http.MethodGet, match: matchProjectSuffixPath("llm/modules")},
+	{name: "llm module bindings", method: http.MethodGet, match: matchProjectSuffixPath("llm/module-bindings")},
+	{name: "llm resolution", method: http.MethodGet, match: hasLLMResolutionPathShape},
+	{name: "llm channels", method: http.MethodGet, match: matchProjectSuffixPath("llm/channels")},
+	{name: "llm channel models", method: http.MethodGet, match: hasLLMChannelModelsPathShape},
+	{name: "llm activity", method: http.MethodGet, match: matchProjectSuffixPath("llm/activity")},
+	{name: "llm usage", method: http.MethodGet, match: matchProjectSuffixPath("llm/usage")},
+	{name: "manuscript", method: http.MethodGet, match: matchProjectSuffixPath("manuscript")},
+	{name: "manuscript export", method: http.MethodGet, match: matchProjectSuffixPath("manuscript/export")},
+	{name: "seed run start", method: http.MethodPost, match: matchProjectSuffixPath("seed-runs")},
+	{name: "upload create", method: http.MethodPost, match: matchProjectSuffixPath("uploads")},
+	{name: "worldline session start", method: http.MethodPost, match: matchProjectSuffixPath("worldline-sessions")},
+	{name: "worldline preparation create", method: http.MethodPost, match: matchProjectSuffixPath("worldlines/preparations")},
+	{name: "character interaction create", method: http.MethodPost, match: matchProjectSuffixPath("character-interactions")},
+	{name: "writer run start", method: http.MethodPost, match: matchProjectSuffixPath("writer-runs")},
+	{name: "hello agent start", method: http.MethodPost, match: matchProjectSuffixPath("agent-runtime/hello-runs")},
+	{name: "asset create", method: http.MethodPost, match: matchProjectSuffixPath("assets")},
+	{name: "asset ingestion start", method: http.MethodPost, match: matchProjectSuffixPath("asset-ingestions")},
+	{name: "style extraction start", method: http.MethodPost, match: matchProjectSuffixPath("style-extractions")},
+	{name: "asset reindex start", method: http.MethodPost, match: matchProjectSuffixPath("assets/reindex")},
+	{name: "story graph build start", method: http.MethodPost, match: matchProjectSuffixPath("story-graph/builds")},
+	{name: "story graph bond generation start", method: http.MethodPost, match: matchProjectSuffixPath("story-graph/bond-generations")},
+	{name: "story graph evidence", method: http.MethodGet, match: hasStoryGraphEvidencePathShape},
+	{name: "llm module binding put", method: http.MethodPut, match: hasLLMModuleBindingPathShape},
+	{name: "llm module binding delete", method: http.MethodDelete, match: hasLLMModuleBindingPathShape},
+	{name: "trace events", method: http.MethodGet, match: hasTraceEventsPathShape},
+	{name: "trace export", method: http.MethodPost, match: hasTraceExportPathShape},
+}
+
+func pathEquals(expected string) func(string) bool {
+	return func(path string) bool {
+		return path == expected
+	}
+}
+
+func matchProjectSuffixPath(suffix string) func(string) bool {
+	return func(path string) bool {
+		return hasProjectSuffixPathShape(path, suffix)
+	}
+}
+
+func matchStoryGraphPath(kind string) func(string) bool {
+	return func(path string) bool {
+		return hasStoryGraphPathShape(path, kind)
+	}
+}
+
+func matchCharacterInteractionNestedPath(expectedSuffix string) func(string) bool {
+	return func(path string) bool {
+		return isCharacterInteractionNestedPath(path, expectedSuffix)
+	}
+}
+
+func matchesProtectedRoute(routes []protectedRoute, method string, path string) bool {
+	for _, route := range routes {
+		if route.method == method && route.match(path) {
+			return true
+		}
+	}
+	return false
+}
+
 func unsafeActorSensitiveCookieRequest(request *http.Request) bool {
 	if !isActorSensitiveRoute(request) {
 		return false
@@ -1223,97 +1351,7 @@ func (s *Server) verifyUnsafeActorSensitiveCookieCSRF(response http.ResponseWrit
 }
 
 func isActorSensitiveRoute(request *http.Request) bool {
-	path := request.URL.Path
-	switch {
-	case request.Method == http.MethodGet && path == "/v1/me":
-		return true
-	case request.Method == http.MethodGet && isWorkflowRunDetailPath(path):
-		return true
-	case request.Method == http.MethodGet && isWorkflowRunEventsPath(path):
-		return true
-	case request.Method == http.MethodGet && isSeedRunDetailPath(path):
-		return true
-	case request.Method == http.MethodGet && isSeedRunEventsPath(path):
-		return true
-	case request.Method == http.MethodGet && isWriterRunDetailPath(path):
-		return true
-	case request.Method == http.MethodGet && isWriterRunEventsPath(path):
-		return true
-	case request.Method == http.MethodPost && isWorkflowRunCancelPath(path):
-		return true
-	case request.Method == http.MethodPost && isWorkflowRunRetryPath(path):
-		return true
-	case request.Method == http.MethodPost && isSeedRunCancelPath(path):
-		return true
-	case request.Method == http.MethodPost && isSeedRunRetryPath(path):
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/steps"):
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/variables"):
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/saved-paths"):
-		return true
-	case request.Method == http.MethodGet && isWorldlineSessionDetailPath(path):
-		return true
-	case request.Method == http.MethodGet && isWorldlineSessionTimelinePath(path):
-		return true
-	case request.Method == http.MethodGet && isWorldlineSessionEventsPath(path):
-		return true
-	case request.Method == http.MethodGet && isWorldlinePreparationDetailPath(path):
-		return true
-	case request.Method == http.MethodGet && isWorldlinePreparationAgentsPath(path):
-		return true
-	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(path):
-		return true
-	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(path):
-		return true
-	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(path, "turns"):
-		return true
-	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(path, "chapter-drafts"):
-		return true
-	case request.Method == http.MethodPut && isUploadSourceObjectPath(path):
-		return true
-	case request.Method == http.MethodPost && isCompleteUploadPath(path):
-		return true
-	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(path):
-		return true
-	case request.Method == http.MethodGet && path == "/v1/llm/settings":
-		return true
-	case request.Method == http.MethodPost && path == "/v1/llm/channels":
-		return true
-	case request.Method == http.MethodPatch && isLLMChannelMutationPath(path):
-		return true
-	case request.Method == http.MethodDelete && isLLMChannelMutationPath(path):
-		return true
-	case request.Method == http.MethodPost && isLLMChannelSyncPath(path):
-		return true
-	case request.Method == http.MethodDelete && isTenantSessionsPath(path):
-		return true
-	case request.Method == http.MethodPost && isWriterRunCancelPath(path):
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/adoptions"):
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/reviews"):
-		return true
-	case request.Method == http.MethodPost && isAssetAdoptionPath(path):
-		return true
-	case request.Method == http.MethodPatch && isAssetMutationPath(path):
-		return true
-	case request.Method == http.MethodDelete && isAssetMutationPath(path):
-		return true
-	case request.Method == http.MethodGet && isAssetDetailPath(path):
-		return true
-	case request.Method == http.MethodPost && path == "/v1/assets/bulk-actions":
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/archive-memories/") && strings.HasSuffix(path, "/adoptions"):
-		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/archive-memories/") && strings.HasSuffix(path, "/rejections"):
-		return true
-	case projectActorSensitiveRoute(request):
-		return true
-	default:
-		return false
-	}
+	return matchesProtectedRoute(actorSensitiveRoutes, request.Method, request.URL.Path) || projectActorSensitiveRoute(request)
 }
 
 func isAssetDetailPath(path string) bool {
@@ -1373,6 +1411,18 @@ func isWorldlineSessionTimelinePath(path string) bool {
 
 func isWorldlineSessionEventsPath(path string) bool {
 	return worldlineSessionPathPart(path, "events") != ""
+}
+
+func isWorldlineSessionStepPath(path string) bool {
+	return worldlineSessionPathPart(path, "steps") != ""
+}
+
+func isWorldlineSessionVariablesPath(path string) bool {
+	return worldlineSessionPathPart(path, "variables") != ""
+}
+
+func isWorldlineSessionSavedPathsPath(path string) bool {
+	return worldlineSessionPathPart(path, "saved-paths") != ""
 }
 
 func isWorldlineEventAdoptionPath(path string) bool {
@@ -1476,92 +1526,7 @@ func projectActorSensitiveRoute(request *http.Request) bool {
 	if !strings.HasPrefix(path, "/v1/projects/") {
 		return false
 	}
-	switch {
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "overview"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "readiness"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "source-files"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "assets"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "assets/facets"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "worldline/saved-paths"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "worldline-sessions"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "character-interactions"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "story-graph/current"):
-		return true
-	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "views"):
-		return true
-	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "nodes"):
-		return true
-	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "edges"):
-		return true
-	case request.Method == http.MethodGet && hasStoryGraphPathShape(path, "layouts"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "story-graph/clusters"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/modules"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/module-bindings"):
-		return true
-	case request.Method == http.MethodGet && hasLLMResolutionPathShape(path):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/channels"):
-		return true
-	case request.Method == http.MethodGet && hasLLMChannelModelsPathShape(path):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/activity"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "llm/usage"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "manuscript"):
-		return true
-	case request.Method == http.MethodGet && hasProjectSuffixPathShape(path, "manuscript/export"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "seed-runs"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "uploads"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "worldline-sessions"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "worldlines/preparations"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "character-interactions"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "writer-runs"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "agent-runtime/hello-runs"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "assets"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "asset-ingestions"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "style-extractions"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "assets/reindex"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "story-graph/builds"):
-		return true
-	case request.Method == http.MethodPost && hasProjectSuffixPathShape(path, "story-graph/bond-generations"):
-		return true
-	case request.Method == http.MethodGet && hasStoryGraphEvidencePathShape(path):
-		return true
-	case request.Method == http.MethodPut && hasLLMModuleBindingPathShape(path):
-		return true
-	case request.Method == http.MethodDelete && hasLLMModuleBindingPathShape(path):
-		return true
-	case request.Method == http.MethodGet && hasTraceEventsPathShape(path):
-		return true
-	case request.Method == http.MethodPost && hasTraceExportPathShape(path):
-		return true
-	default:
-		return false
-	}
+	return matchesProtectedRoute(projectActorSensitiveRoutes, request.Method, path)
 }
 
 func hasStoryGraphPathShape(path string, kind string) bool {
@@ -1779,9 +1744,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListArchiveMemories(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/archive-assets/") && strings.HasSuffix(request.URL.Path, "/memory-events"):
 		s.handleListArchiveMemoryEvents(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/archive-memories/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
+	case request.Method == http.MethodPost && isArchiveMemoryAdoptionPath(request.URL.Path):
 		s.handleAdoptArchiveMemory(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/archive-memories/") && strings.HasSuffix(request.URL.Path, "/rejections"):
+	case request.Method == http.MethodPost && isArchiveMemoryRejectionPath(request.URL.Path):
 		s.handleRejectArchiveMemory(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/assets/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
 		s.handleAdoptAsset(response, request)
@@ -1805,15 +1770,15 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListWorldlineTimeline(response, request)
 	case request.Method == http.MethodGet && isWorldlineSessionEventsPath(request.URL.Path):
 		s.handleListWorldlineEvents(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/steps"):
+	case request.Method == http.MethodPost && isWorldlineSessionStepPath(request.URL.Path):
 		s.handleStartWorldlineStep(response, request)
 	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(request.URL.Path):
 		s.handleAdoptWorldlineEvent(response, request)
 	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(request.URL.Path):
 		s.handleUpdateWorldlineEvent(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/variables"):
+	case request.Method == http.MethodPost && isWorldlineSessionVariablesPath(request.URL.Path):
 		s.handleInjectWorldlineVariable(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/worldline-sessions/") && strings.HasSuffix(request.URL.Path, "/saved-paths"):
+	case request.Method == http.MethodPost && isWorldlineSessionSavedPathsPath(request.URL.Path):
 		s.handleCreateWorldlineSavedPath(response, request)
 	case request.Method == http.MethodGet && isWorldlineSessionDetailPath(request.URL.Path):
 		s.handleGetWorldlineSession(response, request)
@@ -1839,9 +1804,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartWriterRun(response, request)
 	case request.Method == http.MethodPost && isWriterRunCancelPath(request.URL.Path):
 		s.handleCancelWriterRun(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
+	case request.Method == http.MethodPost && isDraftAdoptionPath(request.URL.Path):
 		s.handleAdoptDraft(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
+	case request.Method == http.MethodPost && isDraftReviewPath(request.URL.Path):
 		s.handleStartDraftReview(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
 		s.handleListDraftReviews(response, request)
@@ -6148,12 +6113,23 @@ func archiveAssetPathPart(path string, suffix string) string {
 }
 
 func archiveMemoryReviewPathPart(path string, suffix string) string {
-	remainder := strings.TrimPrefix(path, "/v1/archive-memories/")
+	remainder, prefixOK := strings.CutPrefix(path, "/v1/archive-memories/")
+	if !prefixOK {
+		return ""
+	}
 	memoryID, rest, ok := strings.Cut(remainder, "/")
-	if !ok || rest != suffix {
+	if !ok || rest != suffix || !isSinglePathSegment(memoryID) {
 		return ""
 	}
 	return strings.TrimSpace(memoryID)
+}
+
+func isArchiveMemoryAdoptionPath(path string) bool {
+	return archiveMemoryReviewPathPart(path, "adoptions") != ""
+}
+
+func isArchiveMemoryRejectionPath(path string) bool {
+	return archiveMemoryReviewPathPart(path, "rejections") != ""
 }
 
 func trimOptionalString(value *string) *string {
@@ -6723,21 +6699,35 @@ func writerRunCancelPathPart(path string) string {
 }
 
 func draftAdoptionPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/drafts/")
+	remainder, prefixOK := strings.CutPrefix(path, "/v1/drafts/")
+	if !prefixOK {
+		return ""
+	}
 	draftID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "adoptions" {
+	if !ok || suffix != "adoptions" || !isSinglePathSegment(draftID) {
 		return ""
 	}
 	return strings.TrimSpace(draftID)
 }
 
 func draftReviewPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/drafts/")
+	remainder, prefixOK := strings.CutPrefix(path, "/v1/drafts/")
+	if !prefixOK {
+		return ""
+	}
 	draftID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "reviews" {
+	if !ok || suffix != "reviews" || !isSinglePathSegment(draftID) {
 		return ""
 	}
 	return strings.TrimSpace(draftID)
+}
+
+func isDraftAdoptionPath(path string) bool {
+	return draftAdoptionPathPart(path) != ""
+}
+
+func isDraftReviewPath(path string) bool {
+	return draftReviewPathPart(path) != ""
 }
 
 func characterInteractionNestedPathPart(path string, expectedSuffix string) string {

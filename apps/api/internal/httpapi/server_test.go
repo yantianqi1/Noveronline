@@ -1935,6 +1935,422 @@ func TestActorSensitiveCanonicalNestedProjectRoutesRejectInvalidBearerBeforeFall
 	}
 }
 
+func TestActorSensitiveRouteInventoryUsesStrictCanonicalShapes(t *testing.T) {
+	canonical := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "worldline step", method: http.MethodPost, path: "/v1/worldline-sessions/session-1/steps"},
+		{name: "worldline variables", method: http.MethodPost, path: "/v1/worldline-sessions/session-1/variables"},
+		{name: "worldline saved paths", method: http.MethodPost, path: "/v1/worldline-sessions/session-1/saved-paths"},
+		{name: "draft adoption", method: http.MethodPost, path: "/v1/drafts/draft-1/adoptions"},
+		{name: "draft review", method: http.MethodPost, path: "/v1/drafts/draft-1/reviews"},
+		{name: "archive memory adoption", method: http.MethodPost, path: "/v1/archive-memories/memory-1/adoptions"},
+		{name: "archive memory rejection", method: http.MethodPost, path: "/v1/archive-memories/memory-1/rejections"},
+	}
+	for _, tt := range canonical {
+		t.Run("canonical "+tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(tt.method, tt.path, nil)
+			if !isActorSensitiveRoute(request) {
+				t.Fatalf("expected canonical protected route %s %s to be actor-sensitive", tt.method, tt.path)
+			}
+		})
+	}
+
+	malformed := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "worldline step extra segment", method: http.MethodPost, path: "/v1/worldline-sessions/session-1/extra/steps"},
+		{name: "worldline step double slash", method: http.MethodPost, path: "/v1/worldline-sessions//steps"},
+		{name: "worldline variable extra segment", method: http.MethodPost, path: "/v1/worldline-sessions/session-1/extra/variables"},
+		{name: "worldline saved path extra segment", method: http.MethodPost, path: "/v1/worldline-sessions/session-1/extra/saved-paths"},
+		{name: "draft adoption extra segment", method: http.MethodPost, path: "/v1/drafts/draft-1/extra/adoptions"},
+		{name: "draft adoption double slash", method: http.MethodPost, path: "/v1/drafts//adoptions"},
+		{name: "draft review extra segment", method: http.MethodPost, path: "/v1/drafts/draft-1/extra/reviews"},
+		{name: "archive memory adoption extra segment", method: http.MethodPost, path: "/v1/archive-memories/memory-1/extra/adoptions"},
+		{name: "archive memory adoption double slash", method: http.MethodPost, path: "/v1/archive-memories//adoptions"},
+		{name: "archive memory rejection extra segment", method: http.MethodPost, path: "/v1/archive-memories/memory-1/extra/rejections"},
+	}
+	for _, tt := range malformed {
+		t.Run("malformed "+tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(tt.method, tt.path, nil)
+			if isActorSensitiveRoute(request) {
+				t.Fatalf("expected malformed protected-like route %s %s to remain outside actor-sensitive inventory", tt.method, tt.path)
+			}
+		})
+	}
+}
+
+func TestMalformedProtectedInventoryRoutesStay404WithoutActorOrSideEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		config func(authorizer *recordingAuthorizer) (Config, func(t *testing.T))
+	}{
+		{
+			name:   "worldline step extra segment",
+			method: http.MethodPost,
+			path:   "/v1/worldline-sessions/session-1/extra/steps",
+			body:   `{"step_mode":"advance"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorldlineSessionReader{session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"}}
+				starter := &recordingWorldlineStepStarter{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineStepStarter: starter}, func(t *testing.T) {
+					t.Helper()
+					if reader.getInput.SessionID != "" || starter.input.SessionID != "" || authorizer.called {
+						t.Fatalf("malformed worldline step reached side effects: reader=%#v starter=%#v authorizer=%#v", reader.getInput, starter.input, authorizer.inputs)
+					}
+				}
+			},
+		},
+		{
+			name:   "worldline variable extra segment",
+			method: http.MethodPost,
+			path:   "/v1/worldline-sessions/session-1/extra/variables",
+			body:   `{"name":"mood","value":"tense"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorldlineSessionReader{session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"}}
+				store := &recordingWorldlineVariableStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineVariableStore: store}, func(t *testing.T) {
+					t.Helper()
+					if reader.getInput.SessionID != "" || store.input.SessionID != "" || authorizer.called {
+						t.Fatalf("malformed worldline variable reached side effects: reader=%#v store=%#v authorizer=%#v", reader.getInput, store.input, authorizer.inputs)
+					}
+				}
+			},
+		},
+		{
+			name:   "worldline saved path extra segment",
+			method: http.MethodPost,
+			path:   "/v1/worldline-sessions/session-1/extra/saved-paths",
+			body:   `{"title":"path"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorldlineSessionReader{session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"}}
+				store := &recordingWorldlineSavedPathStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineSavedPathStore: store}, func(t *testing.T) {
+					t.Helper()
+					if reader.getInput.SessionID != "" || store.input.SessionID != "" || authorizer.called {
+						t.Fatalf("malformed worldline saved path reached side effects: reader=%#v store=%#v authorizer=%#v", reader.getInput, store.input, authorizer.inputs)
+					}
+				}
+			},
+		},
+		{
+			name:   "draft adoption extra segment",
+			method: http.MethodPost,
+			path:   "/v1/drafts/draft-1/extra/adoptions",
+			body:   `{"chapter_id":"chapter-1"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				store := &recordingDraftAdoptionStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, DraftAdoptionStore: store}, func(t *testing.T) {
+					t.Helper()
+					if store.called || authorizer.called {
+						t.Fatalf("malformed draft adoption reached side effects: store=%#v authorizer=%#v", store, authorizer.inputs)
+					}
+				}
+			},
+		},
+		{
+			name:   "draft review extra segment",
+			method: http.MethodPost,
+			path:   "/v1/drafts/draft-1/extra/reviews",
+			body:   `{"project_id":"project-1"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				store := &recordingDraftReviewStore{}
+				resolver := &recordingLLMResolver{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, DraftReviewStore: store, LLMResolver: resolver}, func(t *testing.T) {
+					t.Helper()
+					if store.called || resolver.called || authorizer.called {
+						t.Fatalf("malformed draft review reached side effects: store=%#v resolver=%#v authorizer=%#v", store, resolver.input, authorizer.inputs)
+					}
+				}
+			},
+		},
+		{
+			name:   "archive memory adoption extra segment",
+			method: http.MethodPost,
+			path:   "/v1/archive-memories/memory-1/extra/adoptions",
+			body:   `{"project_id":"project-1"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingArchiveMemoryReader{}
+				store := &recordingArchiveMemoryReviewStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store}, func(t *testing.T) {
+					t.Helper()
+					if reader.getCalled || store.called || authorizer.called {
+						t.Fatalf("malformed archive memory adoption reached side effects: reader=%#v store=%#v authorizer=%#v", reader.getInput, store, authorizer.inputs)
+					}
+				}
+			},
+		},
+		{
+			name:   "archive memory rejection extra segment",
+			method: http.MethodPost,
+			path:   "/v1/archive-memories/memory-1/extra/rejections",
+			body:   `{"project_id":"project-1"}`,
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingArchiveMemoryReader{}
+				store := &recordingArchiveMemoryReviewStore{}
+				return Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store}, func(t *testing.T) {
+					t.Helper()
+					if reader.getCalled || store.called || authorizer.called {
+						t.Fatalf("malformed archive memory rejection reached side effects: reader=%#v store=%#v authorizer=%#v", reader.getInput, store, authorizer.inputs)
+					}
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			config, assertNoSideEffects := tt.config(authorizer)
+			config.SessionAuthSecret = "test-secret"
+			server := NewServer(config)
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Authorization", "Bearer v1:route-user:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected malformed route to preserve status %d, got %d: %s", http.StatusNotFound, response.Code, response.Body.String())
+			}
+			assertNoSideEffects(t)
+			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef", "prompt", "api_key", "credential_ref", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("not found response leaked forbidden payload %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestActorSensitiveRouteInventoryMatchesCanonicalRoutesAndRejectsMalformedShapes(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		canonical string
+		malformed []string
+	}{
+		{
+			name:      "project writer run start",
+			method:    http.MethodPost,
+			canonical: "/v1/projects/project-123/writer-runs",
+			malformed: []string{
+				"/v1/projects//writer-runs",
+				"/v1/projects/project-123/writer-runs/extra",
+			},
+		},
+		{
+			name:      "worldline session step",
+			method:    http.MethodPost,
+			canonical: "/v1/worldline-sessions/session-123/steps",
+			malformed: []string{
+				"/v1/worldline-sessions//steps",
+				"/v1/worldline-sessions/session-123/steps/extra",
+			},
+		},
+		{
+			name:      "draft adoption",
+			method:    http.MethodPost,
+			canonical: "/v1/drafts/draft-123/adoptions",
+			malformed: []string{
+				"/v1/drafts//adoptions",
+				"/v1/drafts/draft-123/adoptions/extra",
+			},
+		},
+		{
+			name:      "archive memory adoption",
+			method:    http.MethodPost,
+			canonical: "/v1/archive-memories/memory-123/adoptions",
+			malformed: []string{
+				"/v1/archive-memories//adoptions",
+				"/v1/archive-memories/memory-123/adoptions/extra",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonical := httptest.NewRequest(tt.method, tt.canonical, nil)
+			if !isActorSensitiveRoute(canonical) {
+				t.Fatalf("canonical route %s %s was not protected by actor-sensitive inventory", tt.method, tt.canonical)
+			}
+			for _, path := range tt.malformed {
+				malformed := httptest.NewRequest(tt.method, path, nil)
+				if isActorSensitiveRoute(malformed) {
+					t.Fatalf("malformed route %s %s unexpectedly matched actor-sensitive inventory", tt.method, path)
+				}
+			}
+		})
+	}
+}
+
+func TestProtectedRouteAllowlistGuardRejectsInvalidCanonicalCredentialsButKeepsMalformedRoutes404(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		canonical string
+		malformed []string
+		body      string
+	}{
+		{
+			name:      "project writer run start",
+			method:    http.MethodPost,
+			canonical: "/v1/projects/project-123/writer-runs",
+			malformed: []string{
+				"/v1/projects//writer-runs",
+				"/v1/projects/project-123/writer-runs/extra",
+			},
+			body: `{"mode":"compose","instruction":"private prompt"}`,
+		},
+		{
+			name:      "worldline session step",
+			method:    http.MethodPost,
+			canonical: "/v1/worldline-sessions/session-123/steps",
+			malformed: []string{
+				"/v1/worldline-sessions//steps",
+				"/v1/worldline-sessions/session-123/steps/extra",
+			},
+			body: `{"mode":"advance","options":{"prompt":"private"}}`,
+		},
+		{
+			name:      "draft adoption",
+			method:    http.MethodPost,
+			canonical: "/v1/drafts/draft-123/adoptions",
+			malformed: []string{
+				"/v1/drafts//adoptions",
+				"/v1/drafts/draft-123/adoptions/extra",
+			},
+			body: `{"tenant_id":"tenant-123","chapter_id":"chapter-1","scene_id":"scene-1","block_order":1}`,
+		},
+		{
+			name:      "archive memory adoption",
+			method:    http.MethodPost,
+			canonical: "/v1/archive-memories/memory-123/adoptions",
+			malformed: []string{
+				"/v1/archive-memories//adoptions",
+				"/v1/archive-memories/memory-123/adoptions/extra",
+			},
+			body: `{"tenant_id":"tenant-123","project_id":"project-123","note":"private"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+"/canonical", func(t *testing.T) {
+			server, sideEffects := newProtectedRouteAllowlistGuardServer()
+			request := httptest.NewRequest(tt.method, tt.canonical, strings.NewReader(tt.body))
+			request.Header.Set("Authorization", "Bearer v1:route-user:deadbeef")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("expected canonical protected route to fail before downstream side effects, got %d: %s", response.Code, response.Body.String())
+			}
+			assertNoProtectedRouteAllowlistGuardSideEffects(t, sideEffects)
+		})
+
+		for _, path := range tt.malformed {
+			t.Run(tt.name+"/malformed/"+path, func(t *testing.T) {
+				server, sideEffects := newProtectedRouteAllowlistGuardServer()
+				request := httptest.NewRequest(tt.method, path, strings.NewReader(tt.body))
+				request.Header.Set("Authorization", "Bearer v1:route-user:deadbeef")
+				request.Header.Set("X-Tenant-Id", "tenant-123")
+				request.Header.Set("X-User-Id", "fallback-user")
+				request.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+
+				server.ServeHTTP(response, request)
+
+				if response.Code != http.StatusNotFound {
+					t.Fatalf("expected malformed protected-shaped route to remain 404, got %d: %s", response.Code, response.Body.String())
+				}
+				assertNoProtectedRouteAllowlistGuardSideEffects(t, sideEffects)
+				for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef", "private prompt"} {
+					if strings.Contains(response.Body.String(), forbidden) {
+						t.Fatalf("malformed route response leaked %q: %s", forbidden, response.Body.String())
+					}
+				}
+			})
+		}
+	}
+}
+
+type protectedRouteAllowlistGuardSideEffects struct {
+	sessionStore         *recordingAuthSessionStore
+	authorizer           *recordingAuthorizer
+	writerStarter        *recordingStarter
+	worldlineReader      *recordingWorldlineSessionReader
+	worldlineStepStarter *recordingWorldlineStepStarter
+	draftAdoptionStore   *recordingDraftAdoptionStore
+	archiveMemoryReader  *recordingArchiveMemoryReader
+	archiveReviewStore   *recordingArchiveMemoryReviewStore
+}
+
+func newProtectedRouteAllowlistGuardServer() (*Server, protectedRouteAllowlistGuardSideEffects) {
+	sideEffects := protectedRouteAllowlistGuardSideEffects{
+		sessionStore:         &recordingAuthSessionStore{},
+		authorizer:           &recordingAuthorizer{},
+		writerStarter:        &recordingStarter{},
+		worldlineReader:      &recordingWorldlineSessionReader{},
+		worldlineStepStarter: &recordingWorldlineStepStarter{},
+		draftAdoptionStore:   &recordingDraftAdoptionStore{},
+		archiveMemoryReader:  &recordingArchiveMemoryReader{},
+		archiveReviewStore:   &recordingArchiveMemoryReviewStore{},
+	}
+	server := NewServer(Config{
+		SessionAuthSecret:        "test-secret",
+		AuthSessionStore:         sideEffects.sessionStore,
+		Authorizer:               sideEffects.authorizer,
+		WriterStarter:            sideEffects.writerStarter,
+		WorldlineSessionReader:   sideEffects.worldlineReader,
+		WorldlineStepStarter:     sideEffects.worldlineStepStarter,
+		DraftAdoptionStore:       sideEffects.draftAdoptionStore,
+		ArchiveMemoryReader:      sideEffects.archiveMemoryReader,
+		ArchiveMemoryReviewStore: sideEffects.archiveReviewStore,
+	})
+	return server, sideEffects
+}
+
+func assertNoProtectedRouteAllowlistGuardSideEffects(t *testing.T, sideEffects protectedRouteAllowlistGuardSideEffects) {
+	t.Helper()
+	if sideEffects.sessionStore.validateCalled {
+		t.Fatalf("malformed or invalid route reached session store validation: %#v", sideEffects.sessionStore.validateInput)
+	}
+	if sideEffects.authorizer.called {
+		t.Fatalf("malformed or invalid route reached authorizer: %#v", sideEffects.authorizer.inputs)
+	}
+	if sideEffects.writerStarter.input.ProjectID != "" || sideEffects.writerStarter.input.TenantID != "" {
+		t.Fatalf("malformed or invalid route reached writer starter: %#v", sideEffects.writerStarter.input)
+	}
+	if sideEffects.worldlineReader.getInput.SessionID != "" || sideEffects.worldlineReader.listInput.ProjectID != "" {
+		t.Fatalf("malformed or invalid route reached worldline session reader: %#v", sideEffects.worldlineReader)
+	}
+	if sideEffects.worldlineStepStarter.input.SessionID != "" {
+		t.Fatalf("malformed or invalid route reached worldline step starter: %#v", sideEffects.worldlineStepStarter.input)
+	}
+	if sideEffects.draftAdoptionStore.called {
+		t.Fatalf("malformed or invalid route reached draft adoption store: %#v", sideEffects.draftAdoptionStore.input)
+	}
+	if sideEffects.archiveMemoryReader.getCalled {
+		t.Fatalf("malformed or invalid route reached archive memory reader: %#v", sideEffects.archiveMemoryReader.getInput)
+	}
+	if sideEffects.archiveReviewStore.called {
+		t.Fatalf("malformed or invalid route reached archive memory review store: %#v", sideEffects.archiveReviewStore)
+	}
+}
+
 func TestGetCurrentUserRequiresTrustedUserContextBeforeReader(t *testing.T) {
 	reader := &recordingAuthReader{}
 	server := NewServer(Config{AuthReader: reader})
