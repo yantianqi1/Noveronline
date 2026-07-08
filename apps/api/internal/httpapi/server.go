@@ -1259,6 +1259,10 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodGet && isWorldlineSessionEventsPath(path):
 		return true
+	case request.Method == http.MethodGet && isWorldlinePreparationDetailPath(path):
+		return true
+	case request.Method == http.MethodGet && isWorldlinePreparationAgentsPath(path):
+		return true
 	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(path):
 		return true
 	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(path):
@@ -1375,6 +1379,14 @@ func isWorldlineEventMutationPath(path string) bool {
 	return worldlineEventPathPart(path) != ""
 }
 
+func isWorldlinePreparationDetailPath(path string) bool {
+	return worldlinePreparationPathPart(path, "") != ""
+}
+
+func isWorldlinePreparationAgentsPath(path string) bool {
+	return worldlinePreparationPathPart(path, "agents") != ""
+}
+
 func worldlineSessionPathPart(path string, suffix string) string {
 	const prefix = "/v1/worldline-sessions/"
 	if !strings.HasPrefix(path, prefix) {
@@ -1396,6 +1408,29 @@ func worldlineSessionPathPart(path string, suffix string) string {
 		return ""
 	}
 	return sessionID
+}
+
+func worldlinePreparationPathPart(path string, suffix string) string {
+	const prefix = "/v1/worldline-preparations/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	prepareID := strings.TrimPrefix(path, prefix)
+	if prepareID == "" {
+		return ""
+	}
+	if suffix != "" {
+		expectedSuffix := "/" + suffix
+		if !strings.HasSuffix(prepareID, expectedSuffix) {
+			return ""
+		}
+		prepareID = strings.TrimSuffix(prepareID, expectedSuffix)
+	}
+	prepareID = strings.TrimSpace(prepareID)
+	if prepareID == "" || strings.Contains(prepareID, "/") {
+		return ""
+	}
+	return prepareID
 }
 
 func worldlineEventAdoptionPathPart(path string) string {
@@ -1758,9 +1793,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListWorldlineSessions(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldlines/preparations"):
 		s.handleCreateWorldlinePreparation(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-preparations/") && strings.HasSuffix(request.URL.Path, "/agents"):
+	case request.Method == http.MethodGet && isWorldlinePreparationAgentsPath(request.URL.Path):
 		s.handleListWorldlinePreparedAgents(response, request)
-	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-preparations/"):
+	case request.Method == http.MethodGet && isWorldlinePreparationDetailPath(request.URL.Path):
 		s.handleGetWorldlinePreparation(response, request)
 	case request.Method == http.MethodGet && isWorldlineSessionTimelinePath(request.URL.Path):
 		s.handleListWorldlineTimeline(response, request)
@@ -2503,6 +2538,27 @@ func (s *Server) authorizeWorldlineSessionProjectRead(response http.ResponseWrit
 	}
 	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return worldline.SessionRecord{}, false
+	}
+	return record, true
+}
+
+func (s *Server) authorizeWorldlinePreparationProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, prepareID string) (worldline.PreparationRecord, bool) {
+	record, err := s.worldlinePreparationStore.GetPreparation(request.Context(), worldline.GetPreparationInput{
+		TenantID:  tenantID,
+		PrepareID: prepareID,
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlinePreparationOwnerPreflightPublicErrorMessage(code), nil)
+		return worldline.PreparationRecord{}, false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return worldline.PreparationRecord{}, false
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return worldline.PreparationRecord{}, false
 	}
 	return record, true
 }
@@ -3759,18 +3815,13 @@ func (s *Server) handleGetWorldlinePreparation(response http.ResponseWriter, req
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	prepareID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-preparations/")
-	prepareID = strings.TrimSpace(strings.Trim(prepareID, "/"))
-	if prepareID == "" || strings.Contains(prepareID, "/") {
+	prepareID := worldlinePreparationPathPart(request.URL.Path, "")
+	if prepareID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline preparation route not found", nil)
 		return
 	}
-	record, err := s.worldlinePreparationStore.GetPreparation(request.Context(), worldline.GetPreparationInput{
-		TenantID:  tenantID,
-		PrepareID: prepareID,
-	})
-	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+	record, ok := s.authorizeWorldlinePreparationProjectRead(response, request, tenantID, prepareID)
+	if !ok {
 		return
 	}
 	writeJSON(response, http.StatusOK, record)
@@ -3782,11 +3833,12 @@ func (s *Server) handleListWorldlinePreparedAgents(response http.ResponseWriter,
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	prepareID := strings.TrimPrefix(request.URL.Path, "/v1/worldline-preparations/")
-	prepareID = strings.TrimSuffix(prepareID, "/agents")
-	prepareID = strings.TrimSpace(strings.Trim(prepareID, "/"))
-	if prepareID == "" || strings.Contains(prepareID, "/") {
+	prepareID := worldlinePreparationPathPart(request.URL.Path, "agents")
+	if prepareID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline prepared agents route not found", nil)
+		return
+	}
+	if _, ok := s.authorizeWorldlinePreparationProjectRead(response, request, tenantID, prepareID); !ok {
 		return
 	}
 	items, err := s.worldlinePreparationStore.ListPreparedAgents(request.Context(), worldline.ListPreparedAgentsInput{
@@ -3794,7 +3846,8 @@ func (s *Server) handleListWorldlinePreparedAgents(response http.ResponseWriter,
 		PrepareID: prepareID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlinePreparationOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.PreparedAgentRecord]{Items: items})
@@ -6995,6 +7048,21 @@ func worldlineSessionOwnerPreflightPublicErrorMessage(code string) string {
 		return "worldline session lookup failed"
 	default:
 		return "worldline session lookup failed"
+	}
+}
+
+func worldlinePreparationOwnerPreflightPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "worldline preparation was not found"
+	case "VALIDATION_FAILED":
+		return "invalid worldline preparation lookup"
+	case "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED":
+		return "worldline preparation backend is not configured"
+	case "WORLDLINE_QUERY_FAILED":
+		return "worldline preparation lookup failed"
+	default:
+		return "worldline preparation lookup failed"
 	}
 }
 

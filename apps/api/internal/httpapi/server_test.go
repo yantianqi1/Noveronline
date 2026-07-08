@@ -887,6 +887,8 @@ type recordingWorldlinePreparationStore struct {
 	getErr          error
 	agentsErr       error
 	createWasCalled bool
+	getWasCalled    bool
+	agentsWasCalled bool
 }
 
 func (s *recordingWorldlinePreparationStore) CreatePreparation(ctx context.Context, input worldline.CreatePreparationInput) (worldline.PreparationRecord, error) {
@@ -900,6 +902,7 @@ func (s *recordingWorldlinePreparationStore) CreatePreparation(ctx context.Conte
 
 func (s *recordingWorldlinePreparationStore) GetPreparation(ctx context.Context, input worldline.GetPreparationInput) (worldline.PreparationRecord, error) {
 	s.getInput = input
+	s.getWasCalled = true
 	if s.getErr != nil {
 		return worldline.PreparationRecord{}, s.getErr
 	}
@@ -908,6 +911,7 @@ func (s *recordingWorldlinePreparationStore) GetPreparation(ctx context.Context,
 
 func (s *recordingWorldlinePreparationStore) ListPreparedAgents(ctx context.Context, input worldline.ListPreparedAgentsInput) ([]worldline.PreparedAgentRecord, error) {
 	s.agentsInput = input
+	s.agentsWasCalled = true
 	if s.agentsErr != nil {
 		return nil, s.agentsErr
 	}
@@ -6623,10 +6627,11 @@ func TestGetWorldlinePreparationAndPreparedAgentsUseTenantPrepareScope(t *testin
 			UpdatedAt:     "2026-07-05T00:01:00Z",
 		}},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorldlinePreparationStore: store})
+	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlinePreparationStore: store}))
 
 	detailRequest := httptest.NewRequest(http.MethodGet, "/v1/worldline-preparations/prepare-1", nil)
 	detailRequest.Header.Set("X-Tenant-Id", "tenant-123")
+	detailRequest.Header.Set("X-User-Id", "user-456")
 	detailResponse := httptest.NewRecorder()
 	server.ServeHTTP(detailResponse, detailRequest)
 
@@ -6643,6 +6648,7 @@ func TestGetWorldlinePreparationAndPreparedAgentsUseTenantPrepareScope(t *testin
 
 	agentsRequest := httptest.NewRequest(http.MethodGet, "/v1/worldline-preparations/prepare-1/agents", nil)
 	agentsRequest.Header.Set("X-Tenant-Id", "tenant-123")
+	agentsRequest.Header.Set("X-User-Id", "user-456")
 	agentsResponse := httptest.NewRecorder()
 	server.ServeHTTP(agentsResponse, agentsRequest)
 
@@ -6661,6 +6667,373 @@ func TestGetWorldlinePreparationAndPreparedAgentsUseTenantPrepareScope(t *testin
 			if strings.Contains(body, forbidden) {
 				t.Fatalf("worldline preparation response leaked forbidden field %q: %s", forbidden, body)
 			}
+		}
+	}
+}
+
+func TestWorldlinePreparationReadsAuthorizeOwnerProjectBeforeResponseOrAgents(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		path          string
+		expectAgents  bool
+		assertPayload func(t *testing.T, body string)
+	}{
+		{
+			name: "detail",
+			path: "/v1/worldline-preparations/prepare-1",
+			assertPayload: func(t *testing.T, body string) {
+				t.Helper()
+				if !strings.Contains(body, `"prepare_id":"prepare-1"`) || !strings.Contains(body, `"goal_summary":"Prepare council agents"`) {
+					t.Fatalf("unexpected preparation detail body: %s", body)
+				}
+			},
+		},
+		{
+			name:         "agents",
+			path:         "/v1/worldline-preparations/prepare-1/agents",
+			expectAgents: true,
+			assertPayload: func(t *testing.T, body string) {
+				t.Helper()
+				if !strings.Contains(body, `"agent_id":"agent-1"`) || !strings.Contains(body, `"display_name":"林砚"`) {
+					t.Fatalf("unexpected prepared agents body: %s", body)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := worldlinePreparationReadStoreForTest()
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-456")
+			request.Header.Set("X-Request-Id", "req-preparation-read")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+			}
+			if !store.getWasCalled || store.getInput.TenantID != "tenant-123" || store.getInput.PrepareID != "prepare-1" {
+				t.Fatalf("preparation owner lookup lost tenant/prepare scope: %#v", store.getInput)
+			}
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != "project-owner" ||
+				authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+				authorizer.inputs[0].UserID != "user-456" ||
+				authorizer.inputs[0].RequestID != "req-preparation-read" {
+				t.Fatalf("unexpected preparation read authorization input: %#v", authorizer.inputs)
+			}
+			if tt.expectAgents {
+				if !store.agentsWasCalled || store.agentsInput.TenantID != "tenant-123" || store.agentsInput.PrepareID != "prepare-1" {
+					t.Fatalf("prepared agents reader lost tenant/prepare scope: %#v", store.agentsInput)
+				}
+			} else if store.agentsWasCalled {
+				t.Fatalf("detail route should not list prepared agents: %#v", store.agentsInput)
+			}
+			tt.assertPayload(t, response.Body.String())
+			assertWorldlinePreparationReadBodyHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestWorldlinePreparationReadsRejectInvalidCredentialBeforeStoreOrAuthorizer(t *testing.T) {
+	for _, path := range []string{
+		"/v1/worldline-preparations/prepare-1",
+		"/v1/worldline-preparations/prepare-1/agents",
+	} {
+		t.Run(path, func(t *testing.T) {
+			store := worldlinePreparationReadStoreForTest()
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{
+				WriterStarter:             &recordingStarter{},
+				Authorizer:                authorizer,
+				WorldlinePreparationStore: store,
+				SessionAuthSecret:         "test-secret",
+			})
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("Authorization", "Bearer v1:credential-user:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusUnauthorized, response.Code, response.Body.String())
+			}
+			if store.getWasCalled || store.agentsWasCalled || len(authorizer.inputs) != 0 {
+				t.Fatalf("invalid credential reached preparation side effects: store=%#v authorizer=%#v", store, authorizer.inputs)
+			}
+			for _, forbidden := range []string{"credential-user", "fallback-user", "deadbeef"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("auth error leaked forbidden credential text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestWorldlinePreparationReadsDenyAndBlankOwnerBeforeResponseOrAgents(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		path        string
+		projectID   string
+		authErr     error
+		wantAuth    bool
+		expectAgent bool
+	}{
+		{
+			name:      "detail denied",
+			path:      "/v1/worldline-preparations/prepare-1",
+			projectID: "project-owner",
+			authErr: &auth.AppError{
+				Code:    auth.CodeAccessDenied,
+				Message: "denied private prompt api_key credential_ref draft manuscript",
+			},
+			wantAuth: true,
+		},
+		{
+			name:        "agents denied",
+			path:        "/v1/worldline-preparations/prepare-1/agents",
+			projectID:   "project-owner",
+			authErr:     &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied private prompt api_key credential_ref draft manuscript"},
+			wantAuth:    true,
+			expectAgent: true,
+		},
+		{
+			name:      "detail blank owner",
+			path:      "/v1/worldline-preparations/prepare-1",
+			projectID: "",
+		},
+		{
+			name:        "agents blank owner",
+			path:        "/v1/worldline-preparations/prepare-1/agents",
+			projectID:   "",
+			expectAgent: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := worldlinePreparationReadStoreForTest()
+			store.preparation.ProjectID = tt.projectID
+			authorizer := &recordingAuthorizer{err: tt.authErr}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-456")
+			request.Header.Set("X-Request-Id", "req-preparation-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+			}
+			if !store.getWasCalled || store.getInput.TenantID != "tenant-123" || store.getInput.PrepareID != "prepare-1" {
+				t.Fatalf("preparation owner lookup did not run with tenant/prepare scope: %#v", store.getInput)
+			}
+			if tt.expectAgent && store.agentsWasCalled {
+				t.Fatalf("prepared agents reader ran before authorization: %#v", store.agentsInput)
+			}
+			if tt.wantAuth {
+				if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-owner" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+					t.Fatalf("unexpected denied preparation authorization input: %#v", authorizer.inputs)
+				}
+			} else if len(authorizer.inputs) != 0 {
+				t.Fatalf("blank owner project should not call authorizer: %#v", authorizer.inputs)
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode denied body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+				t.Fatalf("unexpected denied body: %#v", body)
+			}
+			assertWorldlinePreparationReadBodyHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestWorldlinePreparationReadLookupAndAgentErrorsAreSanitized(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		path       string
+		getErr     error
+		agentsErr  error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "detail owner lookup driver error",
+			path:       "/v1/worldline-preparations/prepare-1",
+			getErr:     &worldline.AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "driver leaked prompt api_key credential_ref draft manuscript"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "WORLDLINE_QUERY_FAILED",
+		},
+		{
+			name:       "agents owner lookup not found",
+			path:       "/v1/worldline-preparations/prepare-1/agents",
+			getErr:     &worldline.AppError{Code: "NOT_FOUND", Message: "missing prompt api_key credential_ref draft manuscript"},
+			wantStatus: http.StatusNotFound,
+			wantCode:   "NOT_FOUND",
+		},
+		{
+			name:       "agents reader driver error",
+			path:       "/v1/worldline-preparations/prepare-1/agents",
+			agentsErr:  &worldline.AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "agent driver leaked prompt api_key credential_ref draft manuscript"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "WORLDLINE_QUERY_FAILED",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := worldlinePreparationReadStoreForTest()
+			store.getErr = tt.getErr
+			store.agentsErr = tt.agentsErr
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-456")
+			request.Header.Set("X-Request-Id", "req-preparation-error")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+			if tt.getErr != nil && len(authorizer.inputs) != 0 {
+				t.Fatalf("owner lookup failure should not call authorizer: %#v", authorizer.inputs)
+			}
+			assertWorldlinePreparationReadBodyHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestMalformedWorldlinePreparationReadPathsStay404WithoutActorOrStore(t *testing.T) {
+	store := worldlinePreparationReadStoreForTest()
+	authorizer := &recordingAuthorizer{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		WriterStarter:             &recordingStarter{},
+		Authorizer:                authorizer,
+		WorldlinePreparationStore: store,
+		AuthSessionStore:          sessionStore,
+		SessionAuthSecret:         "test-secret",
+	})
+	for _, path := range []string{
+		"/v1/worldline-preparations//agents",
+		"/v1/worldline-preparations/prepare-1/agents/extra",
+		"/v1/worldline-preparations/prepare-1/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "v1:cookie-user:deadbeef"})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, response.Code, response.Body.String())
+			}
+			if store.getWasCalled || store.agentsWasCalled || len(authorizer.inputs) != 0 || sessionStore.validateCalled {
+				t.Fatalf("malformed preparation path triggered side effects: store=%#v authorizer=%#v session=%#v", store, authorizer.inputs, sessionStore)
+			}
+		})
+	}
+}
+
+func TestWorldlinePreparationReadPathHelpersRejectMalformedShapes(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		path       string
+		wantDetail bool
+		wantAgents bool
+	}{
+		{name: "detail", path: "/v1/worldline-preparations/prepare-1", wantDetail: true},
+		{name: "agents", path: "/v1/worldline-preparations/prepare-1/agents", wantAgents: true},
+		{name: "detail trailing slash", path: "/v1/worldline-preparations/prepare-1/"},
+		{name: "agents trailing slash", path: "/v1/worldline-preparations/prepare-1/agents/"},
+		{name: "double slash", path: "/v1/worldline-preparations//agents"},
+		{name: "extra detail segment", path: "/v1/worldline-preparations/prepare-1/extra"},
+		{name: "extra agents segment", path: "/v1/worldline-preparations/prepare-1/agents/extra"},
+		{name: "missing id", path: "/v1/worldline-preparations/"},
+		{name: "false prefix", path: "/v1/worldline-preparations-extra/prepare-1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWorldlinePreparationDetailPath(tt.path); got != tt.wantDetail {
+				t.Fatalf("detail helper mismatch for %s: got %v want %v", tt.path, got, tt.wantDetail)
+			}
+			if got := isWorldlinePreparationAgentsPath(tt.path); got != tt.wantAgents {
+				t.Fatalf("agents helper mismatch for %s: got %v want %v", tt.path, got, tt.wantAgents)
+			}
+		})
+	}
+}
+
+func worldlinePreparationReadStoreForTest() *recordingWorldlinePreparationStore {
+	return &recordingWorldlinePreparationStore{
+		preparation: worldline.PreparationRecord{
+			PrepareID:    "prepare-1",
+			RunID:        "run-prepare-1",
+			ProjectID:    "project-owner",
+			WorkflowType: "worldline_preparation",
+			Status:       "queued",
+			Lifecycle:    "preparing",
+			GoalSummary:  "Prepare council agents",
+			AnchorPathID: "path-1",
+			CreatedBy:    "user-456",
+			CreatedAt:    "2026-07-05T00:00:00Z",
+			UpdatedAt:    "2026-07-05T00:01:00Z",
+		},
+		agents: []worldline.PreparedAgentRecord{{
+			AgentID:       "agent-1",
+			PrepareID:     "prepare-1",
+			ProjectID:     "project-owner",
+			DisplayName:   "林砚",
+			Role:          "protagonist",
+			Status:        "queued",
+			SourceAssetID: "asset-1",
+			Summary:       "public agent summary",
+			CreatedAt:     "2026-07-05T00:00:00Z",
+			UpdatedAt:     "2026-07-05T00:01:00Z",
+		}},
+	}
+}
+
+func assertWorldlinePreparationReadBodyHasNoPrivateLeaks(t *testing.T, body string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"private prompt",
+		"provider",
+		"raw provider",
+		"raw body",
+		"body_text",
+		"content_text",
+		"prompt",
+		"provider_response",
+		"api_key",
+		"sk-hidden",
+		"encrypted_api_key",
+		"credential_ref",
+		"object_key",
+		"private/object",
+		"draft",
+		"manuscript",
+		"driver leaked",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("worldline preparation read response leaked forbidden detail %q: %s", forbidden, body)
 		}
 	}
 }
