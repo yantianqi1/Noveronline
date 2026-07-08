@@ -63,10 +63,13 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 type recordingAuthSessionStore struct {
 	createInput    auth.CreateSessionInput
 	validateInput  auth.ValidateSessionInput
+	revokeInput    auth.RevokeSessionInput
 	createErr      error
 	validateErr    error
+	revokeErr      error
 	createCalled   bool
 	validateCalled bool
+	revokeCalled   bool
 }
 
 func (s *recordingAuthSessionStore) CreateSession(ctx context.Context, input auth.CreateSessionInput) error {
@@ -79,6 +82,12 @@ func (s *recordingAuthSessionStore) ValidateSession(ctx context.Context, input a
 	s.validateInput = input
 	s.validateCalled = true
 	return s.validateErr
+}
+
+func (s *recordingAuthSessionStore) RevokeSession(ctx context.Context, input auth.RevokeSessionInput) error {
+	s.revokeInput = input
+	s.revokeCalled = true
+	return s.revokeErr
 }
 
 type recordingAuthorizer struct {
@@ -2031,6 +2040,137 @@ func TestCreateDevSessionFailsClosedWhenSessionPersistenceFailsBeforeCookie(t *t
 		if strings.Contains(rawBody, forbidden) {
 			t.Fatalf("session persistence error leaked forbidden text %q: %s", forbidden, rawBody)
 		}
+	}
+}
+
+func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	token := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
+	request.Header.Set("X-Request-Id", "req_session_revoke")
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called {
+		t.Fatalf("auth reader was called during session revocation: %#v", reader.input)
+	}
+	if !sessionStore.revokeCalled ||
+		sessionStore.revokeInput.UserID != "user-session" ||
+		sessionStore.revokeInput.RequestID != "req_session_revoke" ||
+		strings.TrimSpace(sessionStore.revokeInput.TokenHash) == "" {
+		t.Fatalf("session store did not receive revocation scope: %#v", sessionStore.revokeInput)
+	}
+	if strings.Contains(sessionStore.revokeInput.TokenHash, token) || strings.Contains(sessionStore.revokeInput.TokenHash, "test-secret") {
+		t.Fatalf("session store must receive token hash only, got %#v", sessionStore.revokeInput)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 ||
+		cookies[0].Name != sessionCookieName ||
+		cookies[0].Value != "" ||
+		cookies[0].MaxAge >= 0 ||
+		!cookies[0].HttpOnly ||
+		cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("expected cleared session cookie after revocation: %#v", cookies)
+	}
+}
+
+func TestRevokeCurrentSessionRequiresPresentedSignedCredentialWithoutFallback(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
+	request.Header.Set("X-User-Id", "fallback-user")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.revokeCalled {
+		t.Fatalf("missing credential used fallback or store: reader=%v store=%v", reader.called, sessionStore.revokeCalled)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("cookie was cleared without a presented session credential: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{"fallback-user", "prompt", "api_key", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("missing credential response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestRevokeCurrentSessionFailsClosedWhenStoreFailsBeforeClearingCookie(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{
+		revokeErr: &auth.AppError{
+			Code:    auth.CodeLookupFailed,
+			Message: "revoke leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || !sessionStore.revokeCalled {
+		t.Fatalf("unexpected revocation ordering: reader=%v store=%v", reader.called, sessionStore.revokeCalled)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("cookie was cleared even though revocation failed: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeLookupFailed || body.Error.Message != "auth lookup failed" {
+		t.Fatalf("unexpected revocation error body: %#v", body)
+	}
+	for _, forbidden := range []string{"user-session", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("session revocation error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestMalformedRevokeCurrentSessionPathsStay404WithoutSideEffects(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	for _, path := range []string{
+		"/v1/auth//session",
+		"/v1/auth/session/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodDelete, path, nil)
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.revokeCalled {
+				t.Fatalf("malformed path called session store: %#v", sessionStore.revokeInput)
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatalf("malformed path cleared cookie: %#v", response.Result().Cookies())
+			}
+		})
 	}
 }
 

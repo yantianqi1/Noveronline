@@ -68,9 +68,17 @@ type ValidateSessionInput struct {
 	RequestID string
 }
 
+type RevokeSessionInput struct {
+	UserID    string
+	TokenHash string
+	Now       time.Time
+	RequestID string
+}
+
 type SessionStore interface {
 	CreateSession(context.Context, CreateSessionInput) error
 	ValidateSession(context.Context, ValidateSessionInput) error
+	RevokeSession(context.Context, RevokeSessionInput) error
 }
 
 type Permission string
@@ -359,6 +367,46 @@ WHERE user_id = $1
 `, userID, tokenHash, now)
 	if err != nil {
 		return authLookupFailed()
+	}
+	return nil
+}
+
+func (s *SQLSessionStore) RevokeSession(ctx context.Context, input RevokeSessionInput) error {
+	userID := strings.TrimSpace(input.UserID)
+	tokenHash := strings.TrimSpace(input.TokenHash)
+	if userID == "" || tokenHash == "" {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	if s.execer == nil {
+		return authLookupFailed()
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.execer.ExecContext(ctx, `
+UPDATE user_sessions
+SET status = 'revoked',
+    revoked_at = $3,
+    updated_at = now()
+WHERE user_id = $1
+  AND token_hash = $2
+  AND expires_at > $3
+  AND revoked_at IS NULL
+  AND status = 'active'
+`, userID, tokenHash, now)
+	if err != nil {
+		return authLookupFailed()
+	}
+	if result == nil {
+		return authLookupFailed()
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return authLookupFailed()
+	}
+	if affected == 0 {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
 	}
 	return nil
 }

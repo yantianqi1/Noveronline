@@ -1338,6 +1338,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		})
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/dev-sessions":
 		s.handleCreateDevSession(response, request)
+	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/session":
+		s.handleRevokeCurrentSession(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		s.handleGetCurrentUser(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
@@ -1584,6 +1586,44 @@ func (s *Server) handleCreateDevSession(response http.ResponseWriter, request *h
 		Secure:   request.TLS != nil,
 	})
 	writeJSON(response, http.StatusCreated, currentUser)
+}
+
+func (s *Server) handleRevokeCurrentSession(response http.ResponseWriter, request *http.Request) {
+	token := ""
+	if bearer, ok := bearerToken(request.Header.Get("Authorization")); ok {
+		token = bearer
+	} else if cookie, err := request.Cookie(sessionCookieName); err == nil {
+		token = cookie.Value
+	}
+	userID, tokenHash, ok := s.verifySignedSessionToken(token)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if s.authSessionStore != nil {
+		err := s.authSessionStore.RevokeSession(request.Context(), auth.RevokeSessionInput{
+			UserID:    userID,
+			TokenHash: tokenHash,
+			Now:       time.Now().UTC(),
+			RequestID: requestID(request),
+		})
+		if err != nil {
+			code := publicAuthCode(auth.ErrorCode(err))
+			writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+			return
+		}
+	}
+	http.SetCookie(response, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0).UTC(),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   request.TLS != nil,
+	})
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleGetCurrentUser(response http.ResponseWriter, request *http.Request) {

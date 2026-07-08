@@ -896,6 +896,64 @@ func TestSQLSessionStoreRejectsMissingRevokedOrExpiredSessions(t *testing.T) {
 	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
 }
 
+func TestSQLSessionStoreRevokesActiveSessionByTokenHashOnly(t *testing.T) {
+	now := time.Now().UTC()
+	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 1}}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: execer})
+
+	err := store.RevokeSession(context.Background(), RevokeSessionInput{
+		UserID:    " user-session ",
+		TokenHash: " token-hash-value ",
+		Now:       now,
+		RequestID: "req-session-revoke",
+	})
+
+	if err != nil {
+		t.Fatalf("RevokeSession returned error: %v", err)
+	}
+	if len(execer.queries) != 1 {
+		t.Fatalf("expected one revocation update, got %d", len(execer.queries))
+	}
+	query := strings.ToLower(execer.queries[0])
+	for required := range map[string]struct{}{
+		"update user_sessions": {},
+		"status = 'revoked'":   {},
+		"revoked_at":           {},
+		"token_hash = $2":      {},
+		"status = 'active'":    {},
+		"expires_at > $3":      {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("session revocation query missing %q: %s", required, execer.queries[0])
+		}
+	}
+	if len(execer.args) != 1 || len(execer.args[0]) != 3 {
+		t.Fatalf("unexpected session revocation args: %#v", execer.args)
+	}
+	if execer.args[0][0] != "user-session" || execer.args[0][1] != "token-hash-value" || execer.args[0][2] != now {
+		t.Fatalf("session revocation args lost public fields: %#v", execer.args[0])
+	}
+	for _, forbidden := range []string{"session_token", "api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("session revocation query selected forbidden field %q: %s", forbidden, execer.queries[0])
+		}
+	}
+}
+
+func TestSQLSessionStoreRejectsMissingRevocationTarget(t *testing.T) {
+	store := NewSQLSessionStore(SQLSessionStoreConfig{
+		Execer: &fakeAuthExecer{result: fakeSQLResult{affected: 0}},
+	})
+
+	err := store.RevokeSession(context.Background(), RevokeSessionInput{
+		UserID:    "user-session",
+		TokenHash: "token-hash-value",
+		Now:       time.Now().UTC(),
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
+}
+
 func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 	maliciousErr := errors.New("driver leaked prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/private content_text=secret body=secret draft=private manuscript=private response=raw")
 
@@ -943,6 +1001,19 @@ func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
 		assertNoSensitiveAuthError(t, err)
 	})
+
+	t.Run("revoke", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: &fakeAuthExecer{err: maliciousErr}})
+
+		err := store.RevokeSession(context.Background(), RevokeSessionInput{
+			UserID:    "user-session",
+			TokenHash: "token-hash-value",
+			Now:       time.Now().UTC(),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
 }
 
 type fakeAuthQueryer struct {
@@ -954,13 +1025,26 @@ type fakeAuthQueryer struct {
 type fakeAuthExecer struct {
 	queries []string
 	args    [][]any
+	result  sql.Result
 	err     error
 }
 
 func (e *fakeAuthExecer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	e.queries = append(e.queries, query)
 	e.args = append(e.args, args)
-	return nil, e.err
+	return e.result, e.err
+}
+
+type fakeSQLResult struct {
+	affected int64
+}
+
+func (r fakeSQLResult) LastInsertId() (int64, error) {
+	return 0, errors.New("last insert id is unsupported")
+}
+
+func (r fakeSQLResult) RowsAffected() (int64, error) {
+	return r.affected, nil
 }
 
 func (q *fakeAuthQueryer) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
