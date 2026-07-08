@@ -726,6 +726,8 @@ type recordingCharacterConsoleStore struct {
 	turns        []characterconsole.TurnRecord
 	err          error
 	getErr       error
+	updateErr    error
+	appendErr    error
 	turnsErr     error
 }
 
@@ -758,6 +760,9 @@ func (s *recordingCharacterConsoleStore) GetInteraction(ctx context.Context, inp
 
 func (s *recordingCharacterConsoleStore) UpdateInteractionStatus(ctx context.Context, input characterconsole.UpdateInteractionStatusInput) (characterconsole.InteractionRecord, error) {
 	s.updateInput = input
+	if s.updateErr != nil {
+		return characterconsole.InteractionRecord{}, s.updateErr
+	}
 	if s.err != nil {
 		return characterconsole.InteractionRecord{}, s.err
 	}
@@ -766,6 +771,9 @@ func (s *recordingCharacterConsoleStore) UpdateInteractionStatus(ctx context.Con
 
 func (s *recordingCharacterConsoleStore) AppendTurn(ctx context.Context, input characterconsole.AppendTurnInput) (characterconsole.TurnRecord, error) {
 	s.appendInput = input
+	if s.appendErr != nil {
+		return characterconsole.TurnRecord{}, s.appendErr
+	}
 	if s.err != nil {
 		return characterconsole.TurnRecord{}, s.err
 	}
@@ -781,6 +789,19 @@ func (s *recordingCharacterConsoleStore) ListTurns(ctx context.Context, input ch
 		return nil, s.err
 	}
 	return s.turns, nil
+}
+
+func assertNoCharacterInteractionMutationSideEffects(t *testing.T, store *recordingCharacterConsoleStore, resolver *recordingLLMResolver, starter *recordingStarter) {
+	t.Helper()
+	if store.appendInput.TenantID != "" || store.updateInput.TenantID != "" || store.turnsInput.TenantID != "" {
+		t.Fatalf("character interaction mutation side effect ran: append=%#v update=%#v turns=%#v", store.appendInput, store.updateInput, store.turnsInput)
+	}
+	if resolver != nil && resolver.called {
+		t.Fatalf("LLM resolver ran before character interaction mutation authorization: %#v", resolver.input)
+	}
+	if starter != nil && starter.input.TenantID != "" {
+		t.Fatalf("writer starter ran before character interaction mutation authorization: %#v", starter.input)
+	}
 }
 
 type recordingSourceFileStore struct {
@@ -3387,12 +3408,12 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 		method    string
 		path      string
 		body      string
-			message   string
-			requestID string
-			allowAuth bool
-			ownerAuth bool
-			eventAuth bool
-		}{
+		message   string
+		requestID string
+		allowAuth bool
+		ownerAuth bool
+		eventAuth bool
+	}{
 		{
 			name:      "session unknown field",
 			method:    http.MethodPost,
@@ -3424,20 +3445,20 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			name:      "event adoption type error",
 			method:    http.MethodPost,
 			path:      "/v1/worldline-events/event-1/adoptions",
-				body:      `{"note":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
-				message:   "invalid worldline event adoption payload",
-				requestID: "req-worldline-adoption-validation",
-				eventAuth: true,
-			},
-			{
-				name:      "event mutation type error",
-				method:    http.MethodPatch,
-				path:      "/v1/worldline-events/event-1",
-				body:      `{"title":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
-				message:   "invalid worldline event mutation payload",
-				requestID: "req-worldline-mutation-validation",
-				eventAuth: true,
-			},
+			body:      `{"note":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
+			message:   "invalid worldline event adoption payload",
+			requestID: "req-worldline-adoption-validation",
+			eventAuth: true,
+		},
+		{
+			name:      "event mutation type error",
+			method:    http.MethodPatch,
+			path:      "/v1/worldline-events/event-1",
+			body:      `{"title":42,"api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
+			message:   "invalid worldline event mutation payload",
+			requestID: "req-worldline-mutation-validation",
+			eventAuth: true,
+		},
 		{
 			name:      "variable type error",
 			method:    http.MethodPost,
@@ -3466,17 +3487,17 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			}
 			if tt.ownerAuth {
 				config.Authorizer = &recordingAuthorizer{}
-					config.WorldlineSessionReader = &recordingWorldlineSessionReader{
-						session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
-					}
+				config.WorldlineSessionReader = &recordingWorldlineSessionReader{
+					session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
 				}
-				if tt.eventAuth {
-					config.Authorizer = &recordingAuthorizer{}
-					config.WorldlineEventReader = &recordingWorldlineEventReader{
-						event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-123"},
-					}
+			}
+			if tt.eventAuth {
+				config.Authorizer = &recordingAuthorizer{}
+				config.WorldlineEventReader = &recordingWorldlineEventReader{
+					event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-123"},
 				}
-				server := NewServer(config)
+			}
+			server := NewServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5581,6 +5602,402 @@ func TestCreateCharacterInteractionCarriesTenantProjectActorContextAndSanitizesP
 	assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, body)
 }
 
+func TestCharacterInteractionMutationRBACDeniedBeforeDecodeAndSideEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		makeRequest func() *http.Request
+	}{
+		{
+			name: "append turn",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{
+					"tenant_id":"body-tenant",
+					"prompt":"hidden prompt",
+					"api_key":"sk-hidden",
+				`))
+			},
+		},
+		{
+			name: "status update",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{
+					"tenant_id":"body-tenant",
+					"status":"saved",
+					"credential_ref":"secret",
+				`))
+			},
+		},
+		{
+			name: "chapter draft",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{
+					"tenant_id":"body-tenant",
+					"author_instruction":"draft private manuscript",
+					"provider_response":"hidden",
+				`))
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{
+				interaction: characterconsole.InteractionRecord{
+					InteractionID: "interaction-1",
+					ProjectID:     "project-owner",
+				},
+			}
+			authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden actor=user-123"}}
+			resolver := &recordingLLMResolver{}
+			starter := &recordingStarter{}
+			server := NewServer(Config{
+				Authorizer:            authorizer,
+				WriterStarter:         starter,
+				LLMResolver:           resolver,
+				CharacterConsoleStore: store,
+			})
+			request := testCase.makeRequest()
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-character-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected denied mutation to stop before decode with 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+				t.Fatalf("owner lookup did not use header tenant and path interaction id: %#v", store.getInput)
+			}
+			assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-character-denied")
+			assertNoCharacterInteractionMutationSideEffects(t, store, resolver, starter)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+				t.Fatalf("unexpected denied body: %#v", body)
+			}
+			assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, response.Body.String())
+		})
+	}
+}
+
+func TestCharacterInteractionMutationOwnerLookupFailureFailsClosedBeforeAuthorizationAndSideEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		makeRequest func() *http.Request
+	}{
+		{
+			name: "append turn",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{"prompt":"hidden prompt",`))
+			},
+		},
+		{
+			name: "status update",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{"api_key":"sk-hidden",`))
+			},
+		},
+		{
+			name: "chapter draft",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{"draft":"private manuscript",`))
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{
+				getErr: errors.New("driver failed prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private"),
+			}
+			authorizer := &recordingAuthorizer{}
+			resolver := &recordingLLMResolver{}
+			starter := &recordingStarter{}
+			server := NewServer(Config{
+				Authorizer:            authorizer,
+				WriterStarter:         starter,
+				LLMResolver:           resolver,
+				CharacterConsoleStore: store,
+			})
+			request := testCase.makeRequest()
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-character-owner-lookup")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected lookup failure to fail closed before decode with 503, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+				t.Fatalf("owner lookup did not use header tenant and path interaction id: %#v", store.getInput)
+			}
+			if authorizer.called {
+				t.Fatalf("authorizer ran after owner lookup failure: %#v", authorizer.inputs)
+			}
+			assertNoCharacterInteractionMutationSideEffects(t, store, resolver, starter)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != "CHARACTER_INTERACTION_QUERY_FAILED" || body.Error.Message != "character interaction lookup failed" {
+				t.Fatalf("unexpected lookup failure body: %#v", body)
+			}
+			assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, response.Body.String())
+		})
+	}
+}
+
+func TestCharacterInteractionMutationBlankOwnerProjectFailsClosedBeforeAuthorizationAndSideEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		makeRequest func() *http.Request
+	}{
+		{
+			name: "append turn",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{"prompt":"hidden prompt",`))
+			},
+		},
+		{
+			name: "status update",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{"api_key":"sk-hidden",`))
+			},
+		},
+		{
+			name: "chapter draft",
+			makeRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{"draft":"private manuscript",`))
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{
+				interaction: characterconsole.InteractionRecord{
+					InteractionID: "interaction-1",
+					ProjectID:     "   ",
+				},
+			}
+			authorizer := &recordingAuthorizer{}
+			resolver := &recordingLLMResolver{}
+			starter := &recordingStarter{}
+			server := NewServer(Config{
+				Authorizer:            authorizer,
+				WriterStarter:         starter,
+				LLMResolver:           resolver,
+				CharacterConsoleStore: store,
+			})
+			request := testCase.makeRequest()
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-character-blank-owner")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected blank owner project to fail closed before decode with 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+				t.Fatalf("owner lookup did not use header tenant and path interaction id: %#v", store.getInput)
+			}
+			if authorizer.called {
+				t.Fatalf("authorizer ran for blank owner project: %#v", authorizer.inputs)
+			}
+			assertNoCharacterInteractionMutationSideEffects(t, store, resolver, starter)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+				t.Fatalf("unexpected blank owner project body: %#v", body)
+			}
+			assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, response.Body.String())
+		})
+	}
+}
+
+func TestCharacterInteractionMutationSuccessAuthorizesCreativeWriteOnOwnerProject(t *testing.T) {
+	t.Run("append turn", func(t *testing.T) {
+		store := &recordingCharacterConsoleStore{
+			interaction: characterconsole.InteractionRecord{
+				InteractionID: "interaction-1",
+				ProjectID:     "project-owner",
+			},
+			turn: characterconsole.TurnRecord{
+				TurnID:        "turn-1",
+				InteractionID: "interaction-1",
+				ProjectID:     "project-owner",
+				TurnOrder:     1,
+				ActorType:     "user",
+				TurnKind:      "dialogue",
+				Summary:       "公开回合",
+			},
+		}
+		authorizer := &recordingAuthorizer{}
+		server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, CharacterConsoleStore: store})
+		request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{
+			"tenant_id":"body-tenant",
+			"actor_type":"user",
+			"turn_kind":"dialogue",
+			"summary":"公开回合"
+		}`))
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		request.Header.Set("X-Request-Id", "req-character-append-owner")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", response.Code, response.Body.String())
+		}
+		if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+			t.Fatalf("owner lookup lost scope: %#v", store.getInput)
+		}
+		assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-character-append-owner")
+		if store.appendInput.TenantID != "tenant-123" || store.appendInput.InteractionID != "interaction-1" {
+			t.Fatalf("append lost interaction scope: %#v", store.appendInput)
+		}
+	})
+
+	t.Run("status update", func(t *testing.T) {
+		store := &recordingCharacterConsoleStore{
+			interaction: characterconsole.InteractionRecord{
+				InteractionID: "interaction-1",
+				ProjectID:     "project-owner",
+				Status:        "saved",
+			},
+		}
+		authorizer := &recordingAuthorizer{}
+		server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, CharacterConsoleStore: store})
+		request := httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{
+			"tenant_id":"body-tenant",
+			"status":"saved"
+		}`))
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		request.Header.Set("X-Request-Id", "req-character-status-owner")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+		}
+		if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+			t.Fatalf("owner lookup lost scope: %#v", store.getInput)
+		}
+		assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-character-status-owner")
+		if store.updateInput.TenantID != "tenant-123" || store.updateInput.InteractionID != "interaction-1" || store.updateInput.Status != "saved" {
+			t.Fatalf("status update lost interaction scope: %#v", store.updateInput)
+		}
+	})
+
+	t.Run("chapter draft", func(t *testing.T) {
+		starter := &recordingStarter{}
+		resolver := &recordingLLMResolver{result: writerComposerResolution()}
+		resolver.result.ProjectID = "project-owner"
+		store := &recordingCharacterConsoleStore{
+			interaction: characterconsole.InteractionRecord{
+				InteractionID: "interaction-1",
+				ProjectID:     "project-owner",
+				Title:         "公开互动标题",
+				Summary:       "公开互动摘要",
+			},
+			turns: []characterconsole.TurnRecord{{
+				TurnID:        "turn-1",
+				InteractionID: "interaction-1",
+				ProjectID:     "project-owner",
+				TurnOrder:     1,
+				ActorType:     "user",
+				TurnKind:      "dialogue",
+				Summary:       "公开回合",
+			}},
+		}
+		authorizer := &recordingAuthorizer{}
+		server := NewServer(Config{
+			Authorizer:            authorizer,
+			WriterStarter:         starter,
+			LLMResolver:           resolver,
+			CharacterConsoleStore: store,
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{
+			"tenant_id":"body-tenant",
+			"target_chapter_id":"chapter-9",
+			"author_instruction":"保持紧张感"
+		}`))
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		request.Header.Set("X-Request-Id", "req-character-convert-owner")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("expected 202, got %d: %s", response.Code, response.Body.String())
+		}
+		if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+			t.Fatalf("owner lookup lost scope: %#v", store.getInput)
+		}
+		assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-character-convert-owner")
+		if store.turnsInput.TenantID != "tenant-123" || store.turnsInput.InteractionID != "interaction-1" {
+			t.Fatalf("turn listing lost interaction scope: %#v", store.turnsInput)
+		}
+		if !resolver.called || resolver.input.ProjectID != "project-owner" || resolver.input.TenantID != "tenant-123" || resolver.input.ModuleKey != "writer_composer" {
+			t.Fatalf("LLM resolver did not use owner project: %#v", resolver.input)
+		}
+		if starter.input.ProjectID != "project-owner" || starter.input.TenantID != "tenant-123" || starter.input.ActorUserID != "user-123" {
+			t.Fatalf("writer starter did not use owner project: %#v", starter.input)
+		}
+	})
+}
+
+func TestCharacterInteractionMutationMalformedPathsRemain404WithoutActorResolutionOrSideEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "append double slash", method: http.MethodPost, path: "/v1/character-interactions//turns"},
+		{name: "append extra segment", method: http.MethodPost, path: "/v1/character-interactions/interaction-1/turns/extra"},
+		{name: "chapter draft double slash", method: http.MethodPost, path: "/v1/character-interactions//chapter-drafts"},
+		{name: "chapter draft extra segment", method: http.MethodPost, path: "/v1/character-interactions/interaction-1/chapter-drafts/extra"},
+		{name: "status missing id", method: http.MethodPatch, path: "/v1/character-interactions/"},
+		{name: "status extra segment", method: http.MethodPatch, path: "/v1/character-interactions/interaction-1/extra"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{}
+			authorizer := &recordingAuthorizer{}
+			resolver := &recordingLLMResolver{}
+			starter := &recordingStarter{}
+			server := NewServer(Config{
+				SessionAuthSecret:     "test-secret",
+				Authorizer:            authorizer,
+				WriterStarter:         starter,
+				LLMResolver:           resolver,
+				CharacterConsoleStore: store,
+			})
+			request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader(`{"summary":"public"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("Authorization", "Bearer v1:user-123:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected malformed mutation path to remain ordinary 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.getInput.TenantID != "" || authorizer.called {
+				t.Fatalf("malformed path triggered owner lookup or authorizer: get=%#v auth=%#v", store.getInput, authorizer.inputs)
+			}
+			assertNoCharacterInteractionMutationSideEffects(t, store, resolver, starter)
+		})
+	}
+}
+
 func TestUpdateCharacterInteractionStatusUsesTenantScopeAndSanitizesResponse(t *testing.T) {
 	store := &recordingCharacterConsoleStore{
 		interaction: characterconsole.InteractionRecord{
@@ -5850,10 +6267,108 @@ func TestCharacterInteractionRoutesSanitizeUnexpectedStoreErrorsAtHTTPBoundary(t
 			t.Fatalf("expected fail-closed status for %s %s, got %d: %s", request.Method, request.URL.Path, response.Code, response.Body.String())
 		}
 		body := response.Body.String()
-		if !strings.Contains(body, "CHARACTER_INTERACTION_QUERY_FAILED") || !strings.Contains(body, "character interaction query failed") {
+		expectedMessage := "character interaction query failed"
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/turns") {
+			expectedMessage = "character interaction lookup failed"
+		}
+		if !strings.Contains(body, "CHARACTER_INTERACTION_QUERY_FAILED") || !strings.Contains(body, expectedMessage) {
 			t.Fatalf("expected stable character interaction query failure, got %s", body)
 		}
 		assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, body)
+	}
+}
+
+func TestCharacterInteractionMutationStoreErrorsAfterAuthorizationAreSanitized(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		request    *http.Request
+		configure  func(*recordingCharacterConsoleStore)
+		assertStop func(*testing.T, *recordingCharacterConsoleStore, *recordingLLMResolver, *recordingStarter)
+	}{
+		{
+			name:    "append turn",
+			request: httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{"actor_type":"user","turn_kind":"dialogue","summary":"公开回合"}`)),
+			configure: func(store *recordingCharacterConsoleStore) {
+				store.appendErr = &characterconsole.AppError{Code: "CHARACTER_INTERACTION_DRIVER_FAILED", Message: "append failed prompt=hidden api_key=sk-hidden credential_ref=secret actor=user-123 draft=private manuscript=private"}
+			},
+			assertStop: func(t *testing.T, store *recordingCharacterConsoleStore, resolver *recordingLLMResolver, starter *recordingStarter) {
+				t.Helper()
+				if store.appendInput.TenantID != "tenant-123" || store.updateInput.TenantID != "" || store.turnsInput.TenantID != "" {
+					t.Fatalf("unexpected side effects for append store failure: append=%#v update=%#v turns=%#v", store.appendInput, store.updateInput, store.turnsInput)
+				}
+				assertNoCharacterInteractionMutationSideEffects(t, &recordingCharacterConsoleStore{}, resolver, starter)
+			},
+		},
+		{
+			name:    "status update",
+			request: httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{"status":"saved"}`)),
+			configure: func(store *recordingCharacterConsoleStore) {
+				store.updateErr = &characterconsole.AppError{Code: "CHARACTER_INTERACTION_DRIVER_FAILED", Message: "status failed prompt=hidden api_key=sk-hidden credential_ref=secret actor=user-123 draft=private manuscript=private"}
+			},
+			assertStop: func(t *testing.T, store *recordingCharacterConsoleStore, resolver *recordingLLMResolver, starter *recordingStarter) {
+				t.Helper()
+				if store.updateInput.TenantID != "tenant-123" || store.appendInput.TenantID != "" || store.turnsInput.TenantID != "" {
+					t.Fatalf("unexpected side effects for status store failure: append=%#v update=%#v turns=%#v", store.appendInput, store.updateInput, store.turnsInput)
+				}
+				assertNoCharacterInteractionMutationSideEffects(t, &recordingCharacterConsoleStore{}, resolver, starter)
+			},
+		},
+		{
+			name:    "chapter draft turns",
+			request: httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{"author_instruction":"公开指令"}`)),
+			configure: func(store *recordingCharacterConsoleStore) {
+				store.turnsErr = &characterconsole.AppError{Code: "CHARACTER_INTERACTION_DRIVER_FAILED", Message: "turns failed prompt=hidden api_key=sk-hidden credential_ref=secret actor=user-123 draft=private manuscript=private"}
+			},
+			assertStop: func(t *testing.T, store *recordingCharacterConsoleStore, resolver *recordingLLMResolver, starter *recordingStarter) {
+				t.Helper()
+				if store.turnsInput.TenantID != "tenant-123" || store.appendInput.TenantID != "" || store.updateInput.TenantID != "" {
+					t.Fatalf("unexpected side effects for chapter-draft turns failure: append=%#v update=%#v turns=%#v", store.appendInput, store.updateInput, store.turnsInput)
+				}
+				if resolver.called || starter.input.TenantID != "" {
+					t.Fatalf("chapter-draft turns failure reached downstream side effects: resolver=%#v starter=%#v", resolver.input, starter.input)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{
+				interaction: characterconsole.InteractionRecord{
+					InteractionID: "interaction-1",
+					ProjectID:     "project-owner",
+				},
+			}
+			testCase.configure(store)
+			authorizer := &recordingAuthorizer{}
+			resolver := &recordingLLMResolver{}
+			starter := &recordingStarter{}
+			server := NewServer(Config{
+				Authorizer:            authorizer,
+				WriterStarter:         starter,
+				LLMResolver:           resolver,
+				CharacterConsoleStore: store,
+			})
+			request := testCase.request
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Request-Id", "req-character-store-error")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected sanitized store failure status, got %d: %s", response.Code, response.Body.String())
+			}
+			assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-character-store-error")
+			testCase.assertStop(t, store, resolver, starter)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != "CHARACTER_INTERACTION_DRIVER_FAILED" || body.Error.Message != "character interaction request failed" {
+				t.Fatalf("unexpected sanitized store error body: %#v", body)
+			}
+			assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, response.Body.String())
+		})
 	}
 }
 
@@ -5930,9 +6445,15 @@ func TestCharacterInteractionValidationErrorsDoNotEchoSensitiveUnknownFields(t *
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			store := &recordingCharacterConsoleStore{}
+			store := &recordingCharacterConsoleStore{
+				interaction: characterconsole.InteractionRecord{
+					InteractionID: "interaction-1",
+					ProjectID:     "project-123",
+				},
+			}
 			server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 			testCase.request.Header.Set("X-Tenant-Id", "tenant-123")
+			testCase.request.Header.Set("X-User-Id", "user-123")
 			testCase.request.Header.Set("X-Request-Id", "req-character-validation")
 
 			response := httptest.NewRecorder()
@@ -5946,8 +6467,81 @@ func TestCharacterInteractionValidationErrorsDoNotEchoSensitiveUnknownFields(t *
 				t.Fatalf("expected validation failure, got %s", body)
 			}
 			assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, body)
-			if store.createInput.TenantID != "" || store.appendInput.TenantID != "" || store.getInput.TenantID != "" {
-				t.Fatalf("validation failure should stop before store calls: %#v %#v %#v", store.createInput, store.appendInput, store.getInput)
+			if store.createInput.TenantID != "" || store.appendInput.TenantID != "" {
+				t.Fatalf("validation failure should stop before mutation store calls: %#v %#v", store.createInput, store.appendInput)
+			}
+		})
+	}
+}
+
+func TestCharacterInteractionMutationValidationErrorsRunAfterOwnerCreativeWritePreflight(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		request *http.Request
+	}{
+		{
+			name: "append turn",
+			request: httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{
+				"actor_type":"user",
+				"turn_kind":"dialogue",
+				"prompt":"hidden prompt"
+			}`)),
+		},
+		{
+			name: "status update",
+			request: httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{
+				"status":"saved",
+				"api_key":"sk-hidden"
+			}`)),
+		},
+		{
+			name: "chapter draft",
+			request: httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{
+				"author_instruction":"公开交接说明",
+				"credential_ref":"secret"
+			}`)),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{
+				interaction: characterconsole.InteractionRecord{
+					InteractionID: "interaction-1",
+					ProjectID:     "project-owner",
+				},
+			}
+			authorizer := &recordingAuthorizer{}
+			resolver := &recordingLLMResolver{}
+			starter := &recordingStarter{}
+			server := NewServer(Config{
+				Authorizer:            authorizer,
+				WriterStarter:         starter,
+				LLMResolver:           resolver,
+				CharacterConsoleStore: store,
+			})
+			testCase.request.Header.Set("X-Tenant-Id", "tenant-123")
+			testCase.request.Header.Set("X-User-Id", "user-123")
+			testCase.request.Header.Set("X-Request-Id", "req-character-validation-owner")
+
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, testCase.request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
+				t.Fatalf("validation path did not run owner lookup before decode: %#v", store.getInput)
+			}
+			assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-owner", "req-character-validation-owner")
+			assertNoCharacterInteractionMutationSideEffects(t, store, resolver, starter)
+			body := response.Body.String()
+			if !strings.Contains(body, `"code":"VALIDATION_FAILED"`) {
+				t.Fatalf("expected validation failure, got %s", body)
+			}
+			lower := strings.ToLower(body)
+			for _, forbidden := range []string{"prompt", "api_key", "credential_ref", "provider_response", "manuscript", "hidden prompt", "sk-hidden", "secret"} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("validation response leaked forbidden field/value %q: %s", forbidden, body)
+				}
 			}
 		})
 	}
@@ -5955,6 +6549,10 @@ func TestCharacterInteractionValidationErrorsDoNotEchoSensitiveUnknownFields(t *
 
 func TestAppendCharacterInteractionTurnDoesNotGenerateAgentReply(t *testing.T) {
 	store := &recordingCharacterConsoleStore{
+		interaction: characterconsole.InteractionRecord{
+			InteractionID: "interaction-1",
+			ProjectID:     "project-123",
+		},
 		turn: characterconsole.TurnRecord{
 			TurnID:        "turn-1",
 			InteractionID: "interaction-1",
@@ -6236,6 +6834,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 		},
 	}
 	server := NewServer(Config{
+		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           boundWriterComposerResolver(),
 		CharacterConsoleStore: store,
@@ -6323,12 +6922,14 @@ func TestConvertCharacterInteractionToChapterDraftRequiresWriterBindingBeforeAdm
 		}},
 	}
 	server := NewServer(Config{
+		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           llm.NewStaticResolver(nil),
 		CharacterConsoleStore: store,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -6357,6 +6958,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresPublicTurns(t *testing
 		turns: []characterconsole.TurnRecord{},
 	}
 	server := NewServer(Config{
+		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           boundWriterComposerResolver(),
 		CharacterConsoleStore: store,
@@ -6365,6 +6967,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresPublicTurns(t *testing
 		"author_instruction":"不要凭空生成"
 	}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
@@ -6407,6 +7010,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresPublicTurnSummaryMater
 		}},
 	}
 	server := NewServer(Config{
+		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           boundWriterComposerResolver(),
 		CharacterConsoleStore: store,
@@ -6415,6 +7019,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresPublicTurnSummaryMater
 		"author_instruction":"不要用空白回合扩写"
 	}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)

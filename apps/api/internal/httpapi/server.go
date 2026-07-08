@@ -978,11 +978,11 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/character-interactions/") && strings.HasSuffix(path, "/turns"):
+	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(path, "turns"):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/character-interactions/") && strings.HasSuffix(path, "/chapter-drafts"):
+	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(path, "chapter-drafts"):
 		return true
-	case request.Method == http.MethodPatch && strings.HasPrefix(path, "/v1/character-interactions/"):
+	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(path):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/writer-runs/") && strings.HasSuffix(path, "/cancel"):
 		return true
@@ -1107,6 +1107,14 @@ func worldlineEventPathPart(path string) string {
 		return ""
 	}
 	return eventID
+}
+
+func isCharacterInteractionNestedPath(path string, expectedSuffix string) bool {
+	return characterInteractionNestedPathPart(path, expectedSuffix) != ""
+}
+
+func isCharacterInteractionMutationPath(path string) bool {
+	return characterInteractionPathPart(path) != ""
 }
 
 func projectActorSensitiveRoute(request *http.Request) bool {
@@ -1392,15 +1400,15 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCreateCharacterInteraction(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/character-interactions"):
 		s.handleListCharacterInteractions(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") && strings.HasSuffix(request.URL.Path, "/turns"):
+	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(request.URL.Path, "turns"):
 		s.handleAppendCharacterInteractionTurn(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") && strings.HasSuffix(request.URL.Path, "/turns"):
 		s.handleListCharacterInteractionTurns(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") && strings.HasSuffix(request.URL.Path, "/events"):
 		s.handleCharacterConsoleRuntimePending(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") && strings.HasSuffix(request.URL.Path, "/chapter-drafts"):
+	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(request.URL.Path, "chapter-drafts"):
 		s.handleConvertCharacterInteractionToChapterDraft(response, request)
-	case request.Method == http.MethodPatch && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/"):
+	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(request.URL.Path):
 		s.handleUpdateCharacterInteractionStatus(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/"):
 		s.handleGetCharacterInteraction(response, request)
@@ -1575,6 +1583,28 @@ func (s *Server) authorizeWorldlineEventCreativeWrite(response http.ResponseWrit
 		return false
 	}
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite)
+}
+
+func (s *Server) authorizeCharacterInteractionCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, interactionID string) (characterconsole.InteractionRecord, bool) {
+	record, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
+		TenantID:      tenantID,
+		InteractionID: interactionID,
+	})
+	if err != nil {
+		code := characterconsole.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, characterInteractionOwnerPreflightPublicErrorMessage(code), nil)
+		return characterconsole.InteractionRecord{}, false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return characterconsole.InteractionRecord{}, false
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return characterconsole.InteractionRecord{}, false
+	}
+	record.ProjectID = projectID
+	return record, true
 }
 
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
@@ -2240,10 +2270,12 @@ func (s *Server) handleUpdateCharacterInteractionStatus(response http.ResponseWr
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	interactionID := strings.TrimPrefix(request.URL.Path, "/v1/character-interactions/")
-	interactionID = strings.TrimSpace(strings.Trim(interactionID, "/"))
-	if interactionID == "" || strings.Contains(interactionID, "/") {
+	interactionID := characterInteractionPathPart(request.URL.Path)
+	if interactionID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction route not found", nil)
+		return
+	}
+	if _, ok := s.authorizeCharacterInteractionCreativeWrite(response, request, tenantID, interactionID); !ok {
 		return
 	}
 	var payload updateCharacterInteractionStatusRequest
@@ -2278,18 +2310,14 @@ func (s *Server) handleAppendCharacterInteractionTurn(response http.ResponseWrit
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction turn route not found", nil)
 		return
 	}
+	if _, ok := s.authorizeCharacterInteractionCreativeWrite(response, request, tenantID, interactionID); !ok {
+		return
+	}
 	var payload appendCharacterInteractionTurnRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil {
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid character interaction turn payload", nil)
-		return
-	}
-	if _, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
-		TenantID:      tenantID,
-		InteractionID: interactionID,
-	}); err != nil {
-		writeCharacterConsoleError(response, request, err)
 		return
 	}
 	record, err := s.characterConsoleStore.AppendTurn(request.Context(), characterconsole.AppendTurnInput{
@@ -2376,19 +2404,15 @@ func (s *Server) handleConvertCharacterInteractionToChapterDraft(response http.R
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction chapter draft route not found", nil)
 		return
 	}
+	interaction, ok := s.authorizeCharacterInteractionCreativeWrite(response, request, tenantID, interactionID)
+	if !ok {
+		return
+	}
 	var payload convertCharacterInteractionToChapterDraftRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil {
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid character interaction chapter draft payload", nil)
-		return
-	}
-	interaction, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
-		TenantID:      tenantID,
-		InteractionID: interactionID,
-	})
-	if err != nil {
-		writeCharacterConsoleError(response, request, err)
 		return
 	}
 	turns, err := s.characterConsoleStore.ListTurns(request.Context(), characterconsole.ListTurnsInput{
@@ -4217,7 +4241,7 @@ func sourceFilePublicErrorMessage(code string) string {
 
 func writeCharacterConsoleError(response http.ResponseWriter, request *http.Request, err error) {
 	code := characterconsole.ErrorCode(err)
-	message := characterConsolePublicErrorMessage(code, err.Error())
+	message := characterConsolePublicErrorMessage(code)
 	writeError(response, request, statusForAppCode(code), code, message, nil)
 }
 
@@ -4226,7 +4250,7 @@ func writeCharacterConsoleLLMError(response http.ResponseWriter, request *http.R
 	writeError(response, request, statusForAppCode(code), code, characterConsoleLLMPublicErrorMessage(code), nil)
 }
 
-func characterConsolePublicErrorMessage(code string, fallback string) string {
+func characterConsolePublicErrorMessage(code string) string {
 	switch code {
 	case "CHARACTER_INTERACTION_QUERY_FAILED":
 		return "character interaction query failed"
@@ -4235,7 +4259,7 @@ func characterConsolePublicErrorMessage(code string, fallback string) string {
 	case "NOT_FOUND":
 		return "character interaction was not found"
 	default:
-		return fallback
+		return "character interaction request failed"
 	}
 }
 
@@ -5507,12 +5531,29 @@ func draftReviewPathPart(path string) string {
 }
 
 func characterInteractionNestedPathPart(path string, expectedSuffix string) string {
-	remainder := strings.TrimPrefix(path, "/v1/character-interactions/")
-	interactionID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != expectedSuffix {
+	const prefix = "/v1/character-interactions/"
+	if !strings.HasPrefix(path, prefix) {
 		return ""
 	}
-	return strings.TrimSpace(interactionID)
+	remainder := strings.TrimPrefix(path, prefix)
+	interactionID, suffix, ok := strings.Cut(remainder, "/")
+	interactionID = strings.TrimSpace(interactionID)
+	if !ok || suffix != expectedSuffix || interactionID == "" || strings.Contains(interactionID, "/") {
+		return ""
+	}
+	return interactionID
+}
+
+func characterInteractionPathPart(path string) string {
+	const prefix = "/v1/character-interactions/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	interactionID := strings.TrimSpace(strings.TrimPrefix(path, prefix))
+	if interactionID == "" || strings.Contains(interactionID, "/") {
+		return ""
+	}
+	return interactionID
 }
 
 func workflowRunCancelPathPart(path string) string {
@@ -5824,6 +5865,19 @@ func worldlineEventOwnerPreflightPublicErrorMessage(code string) string {
 		return "worldline event lookup failed"
 	default:
 		return "worldline event lookup failed"
+	}
+}
+
+func characterInteractionOwnerPreflightPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "character interaction was not found"
+	case "CHARACTER_INTERACTION_BACKEND_UNCONFIGURED":
+		return "character interaction backend is not configured"
+	case "CHARACTER_INTERACTION_QUERY_FAILED":
+		return "character interaction lookup failed"
+	default:
+		return "character interaction lookup failed"
 	}
 }
 
