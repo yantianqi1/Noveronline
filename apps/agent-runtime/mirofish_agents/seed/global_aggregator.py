@@ -20,6 +20,7 @@ SENSITIVE_AGGREGATE_KEYS = {
     "artifact_object_key",
     "body",
     "content",
+    "credential",
     "credential_ref",
     "draft",
     "encrypted_api_key",
@@ -31,6 +32,7 @@ SENSITIVE_AGGREGATE_KEYS = {
     "prompt",
     "provider_raw_body",
     "provider_response",
+    "raw",
     "raw_body",
     "raw_content",
     "raw_text",
@@ -164,6 +166,9 @@ class LLMFacilityGlobalAggregator:
                 messages=_global_aggregation_messages(context=context, aggregate_input=aggregate_input),
             )
             seed_analysis = response_json.get("seed_analysis")
+            if not isinstance(seed_analysis, dict):
+                raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "seed_analysis must be a JSON object")
+            seed_analysis = _sanitize_aggregate_input(seed_analysis)
             if not isinstance(seed_analysis, dict):
                 raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "seed_analysis must be a JSON object")
         except LLMFacilityError as exc:

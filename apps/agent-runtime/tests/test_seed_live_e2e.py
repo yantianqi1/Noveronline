@@ -991,9 +991,11 @@ def test_seed_global_aggregation_live_postgres_provider_persists_sanitized_snaps
     assert "model-seed-global-aggregation-live" in provider_body
     assert "雨夜公共摘要" in provider_body
     assert "破晓公共摘要" in provider_body
-    assert '"fact_counts"' in provider_body
-    assert '"entities"' in provider_body
-    assert '"relationships"' in provider_body
+    provider_user_payload = json.loads(provider.requests[0]["body"]["messages"][1]["content"])
+    assert provider_user_payload["aggregate_input"]["fact_counts"] == {
+        "entities": 1,
+        "relationships": 1,
+    }
     for forbidden in _global_aggregation_live_forbidden_public_markers():
         assert forbidden not in provider_body
 

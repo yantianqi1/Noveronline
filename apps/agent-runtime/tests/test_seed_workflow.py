@@ -5766,6 +5766,12 @@ def test_global_aggregator_from_env_builds_db_backed_llm_facility_aggregator(
                                     "seed_analysis": {
                                         "overview": "雨城卷建立追踪压力。",
                                         "timeline_summary": "雨夜追踪后进入破晓。",
+                                        "prompt": "private prompt must not affect public counts",
+                                        "api_key": "sk-hidden-aggregate",
+                                        "credential": "private credential marker",
+                                        "draft": "private draft marker",
+                                        "manuscript": "private manuscript marker",
+                                        "raw": "private raw marker",
                                     }
                                 },
                                 ensure_ascii=False,
@@ -5822,6 +5828,10 @@ def test_global_aggregator_from_env_builds_db_backed_llm_facility_aggregator(
     assert result["model_id"] == "model-agg"
     assert result["segment_count"] == 1
     assert result["summary_count"] == 2
+    assert result["seed_analysis"] == {
+        "overview": "雨城卷建立追踪压力。",
+        "timeline_summary": "雨夜追踪后进入破晓。",
+    }
     request = transport.requests[0]
     assert request.headers["Authorization"] == "Bearer sk-seed-live"
     request_body = request.data.decode("utf-8")
