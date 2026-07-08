@@ -719,6 +719,20 @@ func TestReaderBackedAuthorizerLLMModuleBindingManageRequiresTenantAdmin(t *test
 	assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
 }
 
+func TestReaderBackedAuthorizerLLMModuleBindingManageAllowsTenantScopeWithoutProject(t *testing.T) {
+	authorizer := NewReaderBackedAuthorizer(staticCurrentUserReader(authCurrentUserWithTenantRole("admin")))
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     "user-123",
+		TenantID:   "tenant-123",
+		Permission: PermissionLLMModuleBindingManage,
+	})
+
+	if err != nil {
+		t.Fatalf("expected tenant-scoped llm management without project id: %v", err)
+	}
+}
+
 func TestReaderBackedAuthorizerInactiveOrMalformedMembershipStatusesDenyAccess(t *testing.T) {
 	tests := []struct {
 		name       string

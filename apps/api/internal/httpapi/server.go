@@ -984,6 +984,16 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(path):
 		return true
+	case request.Method == http.MethodGet && path == "/v1/llm/settings":
+		return true
+	case request.Method == http.MethodPost && path == "/v1/llm/channels":
+		return true
+	case request.Method == http.MethodPatch && isLLMChannelMutationPath(path):
+		return true
+	case request.Method == http.MethodDelete && isLLMChannelMutationPath(path):
+		return true
+	case request.Method == http.MethodPost && isLLMChannelSyncPath(path):
+		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/writer-runs/") && strings.HasSuffix(path, "/cancel"):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/adoptions"):
@@ -1446,11 +1456,11 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetLLMSettings(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/llm/channels":
 		s.handleCreateLLMChannel(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/llm/channels/") && strings.HasSuffix(request.URL.Path, "/sync-models"):
+	case request.Method == http.MethodPost && isLLMChannelSyncPath(request.URL.Path):
 		s.handleSyncLLMChannelModels(response, request)
-	case request.Method == http.MethodPatch && strings.HasPrefix(request.URL.Path, "/v1/llm/channels/"):
+	case request.Method == http.MethodPatch && isLLMChannelMutationPath(request.URL.Path):
 		s.handlePatchLLMChannel(response, request)
-	case request.Method == http.MethodDelete && strings.HasPrefix(request.URL.Path, "/v1/llm/channels/"):
+	case request.Method == http.MethodDelete && isLLMChannelMutationPath(request.URL.Path):
 		s.handleDeleteLLMChannel(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/activity"):
 		s.handleListLLMActivity(response, request)
@@ -1509,6 +1519,10 @@ func (s *Server) authorizeProjectRead(response http.ResponseWriter, request *htt
 
 func (s *Server) authorizeAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionAssetManage)
+}
+
+func (s *Server) authorizeLLMTenantManage(response http.ResponseWriter, request *http.Request, tenantID string) bool {
+	return s.authorizeProject(response, request, tenantID, "", auth.PermissionLLMModuleBindingManage)
 }
 
 func (s *Server) authorizeSingleAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, assetID string) bool {
@@ -3914,6 +3928,9 @@ func (s *Server) handleGetLLMSettings(response http.ResponseWriter, request *htt
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
+	if !s.authorizeLLMTenantManage(response, request, tenantID) {
+		return
+	}
 	settings, err := s.llmSettingsReader.GetSettings(request.Context(), llm.SettingsInput{
 		TenantID: tenantID,
 	})
@@ -3928,6 +3945,9 @@ func (s *Server) handleCreateLLMChannel(response http.ResponseWriter, request *h
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	if !s.authorizeLLMTenantManage(response, request, tenantID) {
 		return
 	}
 	var payload createLLMChannelRequest
@@ -3968,6 +3988,9 @@ func (s *Server) handlePatchLLMChannel(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm channel route not found", nil)
 		return
 	}
+	if !s.authorizeLLMTenantManage(response, request, tenantID) {
+		return
+	}
 	var payload patchLLMChannelRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -4006,6 +4029,9 @@ func (s *Server) handleDeleteLLMChannel(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm channel route not found", nil)
 		return
 	}
+	if !s.authorizeLLMTenantManage(response, request, tenantID) {
+		return
+	}
 	channel, err := s.llmChannelStore.DeleteChannel(request.Context(), llm.DeleteChannelInput{
 		TenantID:  tenantID,
 		ChannelID: channelID,
@@ -4026,6 +4052,9 @@ func (s *Server) handleSyncLLMChannelModels(response http.ResponseWriter, reques
 	channelID := llmChannelSyncPathPart(request.URL.Path)
 	if channelID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm channel model sync route not found", nil)
+		return
+	}
+	if !s.authorizeLLMTenantManage(response, request, tenantID) {
 		return
 	}
 	result, err := s.llmModelSyncer.SyncModels(request.Context(), llm.ModelSyncInput{
@@ -4913,6 +4942,10 @@ func llmChannelIDFromPath(path string) string {
 	return channelID
 }
 
+func isLLMChannelMutationPath(path string) bool {
+	return llmChannelIDFromPath(path) != ""
+}
+
 func llmChannelSyncPathPart(path string) string {
 	remainder := strings.TrimPrefix(path, "/v1/llm/channels/")
 	channelID, suffix, ok := strings.Cut(remainder, "/")
@@ -4920,6 +4953,10 @@ func llmChannelSyncPathPart(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(channelID)
+}
+
+func isLLMChannelSyncPath(path string) bool {
+	return llmChannelSyncPathPart(path) != ""
 }
 
 func uploadIDFromCompletePath(path string) string {

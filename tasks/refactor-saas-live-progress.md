@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC 和 W2-S4m Character Console interaction owner-aware RBAC 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle、browser cookie transport 和剩余 owner-aware/global non-asset mutation/read RBAC 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC 和 W2-S4n tenant-level LLM management RBAC 已接入；完整 compose health、真实 Temporal handoff、完整 login/JWT/session lifecycle、browser cookie transport 和其他剩余 owner-aware/global non-asset mutation/read RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,51 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g `GET /v1/assets/{assetId}` owner-aware detail read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC 均已通过对应验收记录 |
-| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、browser cookie transport、剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | W2-S4m Character Console interaction owner-aware RBAC：通过 header tenant + path interaction id 读取 interaction owner project，并在 JSON decode、AppendTurn、UpdateInteractionStatus、ListTurns、LLM resolver 或 WriterStarter side effect 前 gate `POST /v1/character-interactions/{interactionId}/turns`、`PATCH /v1/character-interactions/{interactionId}` 和 `POST /v1/character-interactions/{interactionId}/chapter-drafts` 的 `creative_write` |
-| 推荐下一步 | 继续 Wave 2：优先收口 tenant-level LLM settings/channel management RBAC 或其他剩余 owner-aware/global non-asset RBAC；随后推进完整 login/JWT/session lifecycle、browser cookie issuance/rotation/revocation/CSRF/session persistence。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke。当前不声明完整 Auth/RBAC、注册登录、JWT/session 生命周期或所有 mutation RBAC 完成 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g `GET /v1/assets/{assetId}` owner-aware detail read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC 均已通过对应验收记录 |
+| 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 完整 login/JWT/session lifecycle、browser cookie transport、其他剩余 owner-aware/global non-asset mutation/read RBAC |
+| 本轮开发 slice | W2-S4n tenant-level LLM management RBAC：`GET /v1/llm/settings`、`POST/PATCH/DELETE /v1/llm/channels` 和 `POST /v1/llm/channels/{channelId}/sync-models` 现在在 settings reader、JSON decode、channel store 或 model sync side effect 前 gate tenant-scoped `llm_module_binding_manage` |
+| 推荐下一步 | 继续 Wave 2：推进完整 login/JWT/session lifecycle、browser cookie issuance/rotation/revocation/CSRF/session persistence，或继续收口其他 remaining owner-aware/global non-asset RBAC。也可提供 resolved live/local provider handoff env 后回补 W1-S6 live smoke。当前不声明完整 Auth/RBAC、注册登录、JWT/session 生命周期或所有 mutation RBAC 完成 |
+
+## Wave 2 W2-S4n Tenant-level LLM management RBAC
+
+Context:
+
+- W2-S4d 已把 project-scoped LLM reads 纳入 `project_read`；project module binding PUT/DELETE 已在 W2-S4a 通过 tenant owner/admin gate。
+- 本 slice 只覆盖 tenant-level LLM settings/channel management surfaces：`GET /v1/llm/settings`、`POST /v1/llm/channels`、`PATCH /v1/llm/channels/{channelId}`、`DELETE /v1/llm/channels/{channelId}` 和 `POST /v1/llm/channels/{channelId}/sync-models`。不实现完整 login/JWT/session lifecycle、browser cookie transport、quota/billing 或 provider live E2E。
+
+TDD / Review:
+
+- Implementer subagent handoff 已先补 RED：`go test ./internal/auth -run 'LLMModuleBindingManage' -count=1` 失败于 `ReaderBackedAuthorizer` 对 tenant-level permission 强制要求 `project_id`；`go test ./internal/httpapi -run 'TenantLLM|LLMChannel|LLMSettings|AuthSubject' -count=1` 失败于 settings/channel/sync routes 在 auth 前读取、decode、store 或 sync。
+- `auth.ReaderBackedAuthorizer` 现在允许 tenant-scoped `PermissionLLMModuleBindingManage` 不携带 project id；该 permission 仍只允许 active tenant `owner` / `admin`，project role alone 不授权。
+- Go HTTP 新增 `authorizeLLMTenantManage`，在 settings reader、channel create/patch JSON decode、channel delete store 和 model syncer 前统一执行 `llm_module_binding_manage`；授权输入只来自 header tenant、resolved actor 和 tenant-scoped permission，body tenant/project 不可信。
+- Strict LLM channel route helpers 让 malformed double-slash / extra-segment patch/delete/sync paths 保持普通 404，不触发 actor resolver、authorizer、store 或 model syncer。Canonical tenant LLM routes 被加入 actor-sensitive predicate，invalid presented credential 会在 fallback actor 或 backend side effects 前 fail closed。
+- Coordinator GREEN 修补：旧 validation/store-error sanitizer tests 明确配置 allow-all authorizer，继续验证 post-auth decoder/store error redaction，而不绕过新生产 auth gate。
+- Spec reviewer PASS：五条 tenant LLM route 的 auth ordering、tenant-only permission scope、body distrust、malformed path 404 和 redaction contract 满足 W2-S4n 规格。
+- Quality reviewer PASS：生产改动集中于 authorizer validation、route predicate/dispatch helpers 和 handler preflight；测试覆盖 denied-before-decode/no-side-effect、malformed 404、tenant-scoped authorizer input、sanitized validation/store errors。残余风险：tenant-level LLM management 仍复用既有 `PermissionLLMModuleBindingManage` 命名，后续如拆出独立 channel/settings permission 需迁移 matrix。
+
+Verification:
+
+- `cd apps/api && go test ./internal/httpapi -run 'LLM|AuthSubject|RBAC' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -run 'TenantLLM|LLMChannel|LLMSettings|AuthSubject|RBAC|LLMFacility' -count=1` 通过。
+- `cd apps/api && go test ./internal/auth -run 'LLMModuleBindingManage|Authorize|RBAC|Permission' -count=1` 通过。
+- `cd apps/api && go test ./internal/httpapi -count=1` 通过。
+- `cd apps/api && go test ./internal/auth -count=1` 通过。
+- `cd apps/api && go test ./cmd/api -run 'Auth|Session|RBAC|LLM' -count=1` 通过。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `git diff --check` 通过。
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/14-data-model.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+
+Next:
+
+- Complete login/JWT/session lifecycle, browser cookie issuance/rotation/revocation/CSRF/session persistence, and other remaining owner-aware/global non-asset RBAC remain pending.
 
 ## Wave 2 W2-S4m Character Console interaction owner-aware RBAC
 
@@ -145,7 +186,7 @@ Docs synced:
 
 Next:
 
-- Character Console interaction turn/status/chapter-draft owner-aware RBAC, tenant-level LLM settings/channel management RBAC, other remaining owner-aware/global non-asset RBAC, complete login/JWT/session lifecycle, browser cookie transport, and production hardening remain pending.
+- Character Console interaction turn/status/chapter-draft owner-aware RBAC and tenant-level LLM settings/channel management were pending at this handoff and are now covered by W2-S4m/W2-S4n above. Other remaining owner-aware/global non-asset RBAC, complete login/JWT/session lifecycle, browser cookie transport, and production hardening remain pending.
 
 ## Wave 2 W2-S4k Owner-aware worldline session read RBAC
 
@@ -183,7 +224,7 @@ Docs synced:
 Next:
 
 - Worldline event edit/adoption owner-aware RBAC was pending at W2-S4k handoff and is now covered by W2-S4l above.
-- Character Console interaction turn/status/chapter-draft owner-aware RBAC, tenant-level LLM settings/channel management RBAC, and complete login/JWT/session lifecycle remain pending.
+- Character Console interaction turn/status/chapter-draft owner-aware RBAC and tenant-level LLM settings/channel management were pending at W2-S4k handoff and are now covered by W2-S4m/W2-S4n above; complete login/JWT/session lifecycle remains pending.
 
 ## Wave 2 W2-S4j Owner-aware worldline session mutation RBAC
 
@@ -220,7 +261,7 @@ Docs synced:
 Next:
 
 - Worldline event edit/adoption/read owner-aware RBAC and global session detail/timeline read owner-aware RBAC remain pending.
-- Character Console interaction turn/status/chapter-draft owner-aware RBAC, tenant-level LLM settings/channel management RBAC, and complete login/JWT/session lifecycle remain pending.
+- Character Console interaction turn/status/chapter-draft owner-aware RBAC and tenant-level LLM settings/channel management were pending at W2-S4j handoff and are now covered by W2-S4m/W2-S4n above; complete login/JWT/session lifecycle remains pending.
 
 ## Wave 2 W2-S4i Project-scoped creative mutation RBAC
 

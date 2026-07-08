@@ -165,8 +165,11 @@ func (a *ReaderBackedAuthorizer) Authorize(ctx context.Context, input AuthorizeI
 	}
 	tenantID := strings.TrimSpace(input.TenantID)
 	projectID := strings.TrimSpace(input.ProjectID)
-	if tenantID == "" || projectID == "" || input.Permission == "" {
-		return &AppError{Code: CodeValidationFailed, Message: "tenant_id, project_id, and permission are required"}
+	if tenantID == "" || input.Permission == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "tenant_id and permission are required"}
+	}
+	if !tenantScopedPermission(input.Permission) && projectID == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "project_id is required"}
 	}
 	if a.reader == nil {
 		return &AppError{Code: CodeBackendUnconfigured, Message: "auth reader is not configured"}
@@ -182,6 +185,10 @@ func (a *ReaderBackedAuthorizer) Authorize(ctx context.Context, input AuthorizeI
 		return nil
 	}
 	return accessDenied()
+}
+
+func tenantScopedPermission(permission Permission) bool {
+	return permission == PermissionLLMModuleBindingManage
 }
 
 func (a *ReaderBackedAuthorizer) allowed(currentUser CurrentUser, tenantID string, projectID string, permission Permission) bool {

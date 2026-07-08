@@ -136,6 +136,18 @@ func assertSingleProjectReadAuthorizationForProject(t *testing.T, authorizer *re
 	}
 }
 
+func assertSingleLLMTenantManageAuthorization(t *testing.T, authorizer *recordingAuthorizer, userID string, requestID string) {
+	t.Helper()
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != userID ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "" ||
+		authorizer.inputs[0].Permission != auth.PermissionLLMModuleBindingManage ||
+		authorizer.inputs[0].RequestID != requestID {
+		t.Fatalf("unexpected llm tenant manage authorizer inputs: %#v", authorizer.inputs)
+	}
+}
+
 func (s *recordingStarter) StartWriterRun(ctx context.Context, input workflows.StartWriterRunInput) (workflows.WriterRun, error) {
 	s.input = input
 	if s.err != nil {
@@ -11833,7 +11845,7 @@ func TestGetLLMSettingsReturnsSanitizedTenantSnapshot(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMSettingsReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMSettingsReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/llm/settings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -11860,7 +11872,7 @@ func TestGetLLMSettingsReturnsSanitizedTenantSnapshot(t *testing.T) {
 }
 
 func TestGetLLMSettingsWithoutReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/llm/settings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -12186,7 +12198,7 @@ func TestCreateLLMChannelEncryptsCredentialAndReturnsSanitizedChannel(t *testing
 			UpdatedAt:      "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMChannelStore: store})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/llm/channels",
@@ -12229,7 +12241,7 @@ func TestPatchLLMChannelCarriesTenantContextAndReturnsSanitizedChannel(t *testin
 			UpdatedAt:      "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMChannelStore: store})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
 	request := httptest.NewRequest(
 		http.MethodPatch,
 		"/v1/llm/channels/channel-1",
@@ -12270,7 +12282,7 @@ func TestDeleteLLMChannelDisablesTenantChannel(t *testing.T) {
 			UpdatedAt:      "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMChannelStore: store})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/llm/channels/channel-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -12314,7 +12326,7 @@ func TestSyncLLMChannelModelsCarriesTenantContextAndReturnsSanitizedModels(t *te
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMModelSyncer: syncer})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMModelSyncer: syncer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/llm/channels/channel-1/sync-models", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -12338,8 +12350,133 @@ func TestSyncLLMChannelModelsCarriesTenantContextAndReturnsSanitizedModels(t *te
 	}
 }
 
+func TestTenantLLMSettingsAndChannelManagementRBACDeniedBeforeDecodeAndSideEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		request *http.Request
+	}{
+		{
+			name:    "settings snapshot",
+			request: httptest.NewRequest(http.MethodGet, "/v1/llm/settings", nil),
+		},
+		{
+			name: "create channel",
+			request: httptest.NewRequest(http.MethodPost, "/v1/llm/channels", strings.NewReader(`{
+				"name":"private channel",
+				"api_key":"sk-hidden",
+				"prompt":"hidden prompt"
+			}`)),
+		},
+		{
+			name: "patch channel",
+			request: httptest.NewRequest(http.MethodPatch, "/v1/llm/channels/channel-1", strings.NewReader(`{
+				"name":"private channel",
+				"credential_ref":"secret",
+				"draft":"private"
+			}`)),
+		},
+		{
+			name:    "delete channel",
+			request: httptest.NewRequest(http.MethodDelete, "/v1/llm/channels/channel-1", nil),
+		},
+		{
+			name:    "sync channel models",
+			request: httptest.NewRequest(http.MethodPost, "/v1/llm/channels/channel-1/sync-models", nil),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			settingsReader := &recordingLLMSettingsReader{}
+			channelStore := &recordingLLMChannelStore{}
+			modelSyncer := &recordingLLMModelSyncer{}
+			authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied actor=user-123 prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private"}}
+			server := NewServer(Config{
+				Authorizer:        authorizer,
+				LLMSettingsReader: settingsReader,
+				LLMChannelStore:   channelStore,
+				LLMModelSyncer:    modelSyncer,
+			})
+			testCase.request.Header.Set("Content-Type", "application/json")
+			testCase.request.Header.Set("X-Tenant-Id", "tenant-123")
+			testCase.request.Header.Set("X-User-Id", "user-123")
+			testCase.request.Header.Set("X-Request-Id", "req-llm-tenant-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, testCase.request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected tenant llm management denial before side effects, got %d: %s", response.Code, response.Body.String())
+			}
+			assertSingleLLMTenantManageAuthorization(t, authorizer, "user-123", "req-llm-tenant-denied")
+			if settingsReader.input.TenantID != "" ||
+				channelStore.createInput.TenantID != "" ||
+				channelStore.updateInput.TenantID != "" ||
+				channelStore.deleteInput.TenantID != "" ||
+				modelSyncer.input.TenantID != "" {
+				t.Fatalf("tenant llm side effect ran before authorization: settings=%#v create=%#v update=%#v delete=%#v sync=%#v", settingsReader.input, channelStore.createInput, channelStore.updateInput, channelStore.deleteInput, modelSyncer.input)
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode denied body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != "current user access is denied" {
+				t.Fatalf("unexpected denied body: %#v", body)
+			}
+			lower := strings.ToLower(response.Body.String())
+			for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript", "actor=user-123"} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("denied response leaked %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestTenantLLMChannelManagementMalformedPathsRemain404WithoutActorResolutionOrSideEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "patch double slash", method: http.MethodPatch, path: "/v1/llm/channels//"},
+		{name: "patch extra segment", method: http.MethodPatch, path: "/v1/llm/channels/channel-1/extra"},
+		{name: "delete double slash", method: http.MethodDelete, path: "/v1/llm/channels//"},
+		{name: "delete extra segment", method: http.MethodDelete, path: "/v1/llm/channels/channel-1/extra"},
+		{name: "sync double slash", method: http.MethodPost, path: "/v1/llm/channels//sync-models"},
+		{name: "sync extra segment", method: http.MethodPost, path: "/v1/llm/channels/channel-1/sync-models/extra"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			channelStore := &recordingLLMChannelStore{}
+			modelSyncer := &recordingLLMModelSyncer{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{
+				SessionAuthSecret: "test-secret",
+				Authorizer:        authorizer,
+				LLMChannelStore:   channelStore,
+				LLMModelSyncer:    modelSyncer,
+			})
+			request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader(`{"name":"public"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("Authorization", "Bearer v1:user-123:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected malformed tenant llm channel path to remain 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if authorizer.called ||
+				channelStore.createInput.TenantID != "" ||
+				channelStore.updateInput.TenantID != "" ||
+				channelStore.deleteInput.TenantID != "" ||
+				modelSyncer.input.TenantID != "" {
+				t.Fatalf("malformed tenant llm path triggered side effects: auth=%#v create=%#v update=%#v delete=%#v sync=%#v", authorizer.inputs, channelStore.createInput, channelStore.updateInput, channelStore.deleteInput, modelSyncer.input)
+			}
+		})
+	}
+}
+
 func TestCreateLLMChannelWithoutStoreFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/llm/channels",
@@ -13354,6 +13491,7 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 			body:      `{"name":"Draft Channel","provider":"openai-compatible","base_url":"https://llm.example.test/v1","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid llm channel payload",
 			requestID: "req-llm-channel-create-validation",
+			allowAuth: true,
 		},
 		{
 			name:      "channel patch",
@@ -13362,6 +13500,7 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 			body:      `{"name":"Draft Channel","base_url":"https://llm.example.test/v1","api_key":"sk-hidden","prompt":"private","credential_ref":"cred-hidden","draft":"private","manuscript":"private"}`,
 			message:   "invalid llm channel payload",
 			requestID: "req-llm-channel-patch-validation",
+			allowAuth: true,
 		},
 		{
 			name:      "trace export",
@@ -13563,6 +13702,9 @@ func TestLLMFacilityRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T)
 			config := tt.config
 			if tt.method == http.MethodGet && strings.HasPrefix(tt.path, "/v1/projects/") {
 				config = projectReadAllowedConfig(config)
+			}
+			if strings.HasPrefix(tt.path, "/v1/llm/") {
+				config.Authorizer = &recordingAuthorizer{}
 			}
 			server := NewServer(config)
 			body := tt.body
