@@ -948,6 +948,84 @@ func TestSQLSessionStoreRejectsMissingRevokedOrExpiredSessions(t *testing.T) {
 	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
 }
 
+func TestSQLSessionStoreListsActiveUserSessionMetadataWithoutTokenMaterial(t *testing.T) {
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Hour)
+	lastSeenAt := now.Add(-time.Minute)
+	queryer := &fakeAuthQueryer{
+		rows: []SQLRows{&fakeAuthRows{rows: [][]any{{
+			"session-id",
+			"active",
+			expiresAt,
+			lastSeenAt,
+			true,
+		}}}},
+	}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{Queryer: queryer})
+
+	sessions, err := store.ListUserSessions(context.Background(), ListUserSessionsInput{
+		UserID:    " user-session ",
+		TokenHash: " presented-token-hash ",
+		Now:       now,
+		RequestID: "req-session-list",
+	})
+
+	if err != nil {
+		t.Fatalf("ListUserSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 ||
+		sessions[0].SessionID != "session-id" ||
+		sessions[0].Status != "active" ||
+		!sessions[0].ExpiresAt.Equal(expiresAt) ||
+		!sessions[0].LastSeenAt.Equal(lastSeenAt) ||
+		!sessions[0].Current {
+		t.Fatalf("unexpected session summaries: %#v", sessions)
+	}
+	if len(queryer.queries) != 1 {
+		t.Fatalf("expected one session list query, got %d", len(queryer.queries))
+	}
+	query := strings.ToLower(queryer.queries[0])
+	for required := range map[string]struct{}{
+		"from user_sessions":    {},
+		"user_id = $1":          {},
+		"token_hash = $2":       {},
+		"status = 'active'":     {},
+		"revoked_at is null":    {},
+		"expires_at > $3":       {},
+		"exists":                {},
+		"limit 100":             {},
+		"user_session_id::text": {},
+		"current_session":       {},
+		"coalesce(last_seen_at": {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("session list query missing %q: %s", required, queryer.queries[0])
+		}
+	}
+	if len(queryer.rows) != 0 {
+		t.Fatalf("session list left unread rows: %#v", queryer.rows)
+	}
+	for _, forbidden := range []string{"session_token", "api_key", "credential_ref", "object_key", "content_text", "draft", "manuscript", "prompt", "response"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("session list query selected forbidden field %q: %s", forbidden, queryer.queries[0])
+		}
+	}
+}
+
+func TestSQLSessionStoreRejectsListWhenPresentedSessionIsMissingRevokedOrExpired(t *testing.T) {
+	store := NewSQLSessionStore(SQLSessionStoreConfig{
+		Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{}}},
+	})
+
+	_, err := store.ListUserSessions(context.Background(), ListUserSessionsInput{
+		UserID:    "user-session",
+		TokenHash: "presented-token-hash",
+		Now:       time.Now().UTC(),
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "user context is required")
+}
+
 func TestSQLSessionStoreRevokesActiveSessionByTokenHashOnly(t *testing.T) {
 	now := time.Now().UTC()
 	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 1}}
@@ -1256,6 +1334,19 @@ func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
 		assertNoSensitiveAuthError(t, err)
 	})
+
+	t.Run("list", func(t *testing.T) {
+		store := NewSQLSessionStore(SQLSessionStoreConfig{Queryer: &fakeAuthQueryer{errs: []error{maliciousErr}}})
+
+		_, err := store.ListUserSessions(context.Background(), ListUserSessionsInput{
+			UserID:    "user-session",
+			TokenHash: "token-hash",
+			Now:       time.Now().UTC(),
+		})
+
+		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+		assertNoSensitiveAuthError(t, err)
+	})
 }
 
 type fakeAuthQueryer struct {
@@ -1352,6 +1443,18 @@ func (r *fakeAuthRows) Scan(dest ...any) error {
 				return fmt.Errorf("value %d is %T, not string", i, values[i])
 			}
 			*target = sql.NullString{String: value, Valid: true}
+		case *time.Time:
+			value, ok := values[i].(time.Time)
+			if !ok {
+				return fmt.Errorf("value %d is %T, not time.Time", i, values[i])
+			}
+			*target = value
+		case *bool:
+			value, ok := values[i].(bool)
+			if !ok {
+				return fmt.Errorf("value %d is %T, not bool", i, values[i])
+			}
+			*target = value
 		default:
 			return fmt.Errorf("unsupported scan destination %T", dest[i])
 		}

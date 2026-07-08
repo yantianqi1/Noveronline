@@ -1452,6 +1452,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCreateDevSession(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/auth/csrf-token":
 		s.handleGetSessionCSRFToken(response, request)
+	case request.Method == http.MethodGet && request.URL.Path == "/v1/auth/sessions":
+		s.handleListCurrentUserSessions(response, request)
 	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/session":
 		s.handleRevokeCurrentSession(response, request)
 	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/sessions":
@@ -1734,6 +1736,51 @@ func (s *Server) handleGetSessionCSRFToken(response http.ResponseWriter, request
 	}
 	writeJSON(response, http.StatusOK, map[string]string{
 		"csrf_token": s.sessionCSRFToken(tokenHash),
+	})
+}
+
+func (s *Server) handleListCurrentUserSessions(response http.ResponseWriter, request *http.Request) {
+	token := ""
+	authorizationValues := request.Header.Values("Authorization")
+	if len(authorizationValues) > 0 {
+		if len(authorizationValues) != 1 {
+			writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+			return
+		}
+		bearer, ok := bearerToken(authorizationValues[0])
+		if !ok {
+			writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+			return
+		}
+		token = bearer
+	} else if cookie, err := request.Cookie(sessionCookieName); err == nil {
+		token = cookie.Value
+	}
+	if s.authSessionStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	userID, tokenHash, ok := s.verifySignedSessionToken(token)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	sessions, err := s.authSessionStore.ListUserSessions(request.Context(), auth.ListUserSessionsInput{
+		UserID:    userID,
+		TokenHash: tokenHash,
+		Now:       time.Now().UTC(),
+		RequestID: requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	if sessions == nil {
+		sessions = []auth.SessionSummary{}
+	}
+	writeJSON(response, http.StatusOK, map[string][]auth.SessionSummary{
+		"sessions": sessions,
 	})
 }
 

@@ -68,6 +68,21 @@ type ValidateSessionInput struct {
 	RequestID string
 }
 
+type ListUserSessionsInput struct {
+	UserID    string
+	TokenHash string
+	Now       time.Time
+	RequestID string
+}
+
+type SessionSummary struct {
+	SessionID  string    `json:"session_id"`
+	Status     string    `json:"status"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	Current    bool      `json:"current"`
+}
+
 type RevokeSessionInput struct {
 	UserID    string
 	TokenHash string
@@ -101,6 +116,7 @@ type RotateSessionInput struct {
 type SessionStore interface {
 	CreateSession(context.Context, CreateSessionInput) error
 	ValidateSession(context.Context, ValidateSessionInput) error
+	ListUserSessions(context.Context, ListUserSessionsInput) ([]SessionSummary, error)
 	RevokeSession(context.Context, RevokeSessionInput) error
 	RevokeUserSessions(context.Context, RevokeUserSessionsInput) error
 	RevokeTenantSessions(context.Context, RevokeTenantSessionsInput) error
@@ -398,6 +414,67 @@ WHERE user_id = $1
 		return authLookupFailed()
 	}
 	return nil
+}
+
+func (s *SQLSessionStore) ListUserSessions(ctx context.Context, input ListUserSessionsInput) ([]SessionSummary, error) {
+	userID := strings.TrimSpace(input.UserID)
+	tokenHash := strings.TrimSpace(input.TokenHash)
+	if userID == "" || tokenHash == "" {
+		return nil, &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	if s.queryer == nil {
+		return nil, authLookupFailed()
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	rows, err := s.queryer.QueryContext(ctx, `
+SELECT user_session_id::text,
+       status,
+       expires_at,
+       COALESCE(last_seen_at, created_at) AS last_seen_at,
+       token_hash = $2 AS current_session
+FROM user_sessions
+WHERE user_id = $1
+  AND expires_at > $3
+  AND revoked_at IS NULL
+  AND status = 'active'
+  AND EXISTS (
+    SELECT 1
+    FROM user_sessions presented
+    WHERE presented.user_id = $1
+      AND presented.token_hash = $2
+      AND presented.expires_at > $3
+      AND presented.revoked_at IS NULL
+      AND presented.status = 'active'
+  )
+ORDER BY current_session DESC, COALESCE(last_seen_at, created_at) DESC
+LIMIT 100
+`, userID, tokenHash, now)
+	if err != nil {
+		return nil, authLookupFailed()
+	}
+	sessions := make([]SessionSummary, 0)
+	for rows.Next() {
+		var session SessionSummary
+		if err := rows.Scan(&session.SessionID, &session.Status, &session.ExpiresAt, &session.LastSeenAt, &session.Current); err != nil {
+			_ = rows.Close()
+			return nil, authLookupFailed()
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return nil, authLookupFailed()
+	}
+	if len(sessions) == 0 {
+		return nil, &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	return sessions, nil
 }
 
 func (s *SQLSessionStore) RevokeSession(ctx context.Context, input RevokeSessionInput) error {

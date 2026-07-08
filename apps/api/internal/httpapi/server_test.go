@@ -119,18 +119,22 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 type recordingAuthSessionStore struct {
 	createInput        auth.CreateSessionInput
 	validateInput      auth.ValidateSessionInput
+	listInput          auth.ListUserSessionsInput
 	revokeInput        auth.RevokeSessionInput
 	revokeAllInput     auth.RevokeUserSessionsInput
 	revokeTenantInput  auth.RevokeTenantSessionsInput
 	rotateInput        auth.RotateSessionInput
+	listResult         []auth.SessionSummary
 	createErr          error
 	validateErr        error
+	listErr            error
 	revokeErr          error
 	revokeAllErr       error
 	revokeTenantErr    error
 	rotateErr          error
 	createCalled       bool
 	validateCalled     bool
+	listCalled         bool
 	revokeCalled       bool
 	revokeAllCalled    bool
 	revokeTenantCalled bool
@@ -147,6 +151,12 @@ func (s *recordingAuthSessionStore) ValidateSession(ctx context.Context, input a
 	s.validateInput = input
 	s.validateCalled = true
 	return s.validateErr
+}
+
+func (s *recordingAuthSessionStore) ListUserSessions(ctx context.Context, input auth.ListUserSessionsInput) ([]auth.SessionSummary, error) {
+	s.listInput = input
+	s.listCalled = true
+	return s.listResult, s.listErr
 }
 
 func (s *recordingAuthSessionStore) RevokeSession(ctx context.Context, input auth.RevokeSessionInput) error {
@@ -2279,6 +2289,156 @@ func TestUnsafeActorSensitiveCookieRoutesRequireCSRFBeforeAuthorizerAndStores(t 
 			if strings.Contains(response.Body.String(), forbidden) {
 				t.Fatalf("missing CSRF response leaked %q: %s", forbidden, response.Body.String())
 			}
+		}
+	})
+}
+
+func TestListCurrentUserSessionsRequiresPresentedCredentialAndReturnsMetadataOnly(t *testing.T) {
+	reader := &recordingAuthReader{}
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	lastSeenAt := time.Now().UTC().Add(-time.Minute)
+	sessionStore := &recordingAuthSessionStore{
+		listResult: []auth.SessionSummary{{
+			SessionID:  "session-public-id",
+			Status:     "active",
+			ExpiresAt:  expiresAt,
+			LastSeenAt: lastSeenAt,
+			Current:    true,
+		}},
+	}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	token := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
+	request.Header.Set("X-Request-Id", "req_session_list")
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.createCalled || sessionStore.revokeCalled || sessionStore.revokeAllCalled || sessionStore.revokeTenantCalled || sessionStore.rotateCalled {
+		t.Fatalf("session listing used unrelated auth/session paths: reader=%v store=%#v", reader.called, sessionStore)
+	}
+	if !sessionStore.listCalled ||
+		sessionStore.listInput.UserID != "user-session" ||
+		sessionStore.listInput.RequestID != "req_session_list" ||
+		strings.TrimSpace(sessionStore.listInput.TokenHash) == "" {
+		t.Fatalf("session store did not receive list scope: %#v", sessionStore.listInput)
+	}
+	if strings.Contains(sessionStore.listInput.TokenHash, token) || strings.Contains(sessionStore.listInput.TokenHash, "test-secret") {
+		t.Fatalf("session store must receive token hash only, got %#v", sessionStore.listInput)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("session listing mutated cookies: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	var body map[string]any
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode sessions body: %v", err)
+	}
+	if _, ok := body["sessions"].([]any); !ok {
+		t.Fatalf("session listing response missing sessions array: %#v", body)
+	}
+	sessions := body["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("expected one listed session, got %#v", sessions)
+	}
+	session, ok := sessions[0].(map[string]any)
+	if !ok ||
+		session["session_id"] != "session-public-id" ||
+		session["status"] != "active" ||
+		session["current"] != true {
+		t.Fatalf("unexpected listed session metadata: %#v", sessions[0])
+	}
+	for _, forbidden := range []string{token, hashSessionToken(token), "test-secret", "user-session", "fallback-user", "token_hash", "api_key", "credential_ref", "draft", "manuscript", "prompt"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("session listing response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestListCurrentUserSessionsFailsClosedWithoutCredentialStoreOrExactPath(t *testing.T) {
+	t.Run("missing_credential_does_not_use_development_fallback", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
+		request.Header.Set("X-User-Id", "fallback-user")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.validateCalled {
+			t.Fatalf("missing credential reached session store: %#v", sessionStore.validateInput)
+		}
+		if strings.Contains(response.Body.String(), "fallback-user") {
+			t.Fatalf("missing credential response leaked fallback actor: %s", response.Body.String())
+		}
+	})
+
+	t.Run("missing_store_fails_closed_without_cookie_mutation", func(t *testing.T) {
+		server := NewServer(Config{SessionAuthSecret: "test-secret"})
+		token := signedSessionTokenForTest(t, "test-secret", "user-session")
+		request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected missing store 503, got %d: %s", response.Code, response.Body.String())
+		}
+		if len(response.Result().Cookies()) != 0 {
+			t.Fatalf("missing store mutated cookies: %#v", response.Result().Cookies())
+		}
+		for _, forbidden := range []string{token, "user-session", "prompt", "api_key", "credential_ref", "draft", "manuscript"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("missing store response leaked forbidden text %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("malformed_authorization_fails_before_store", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
+		request.Header.Add("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "user-session"))
+		request.Header.Add("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "other-user"))
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected duplicate auth 401, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.listCalled || sessionStore.validateCalled {
+			t.Fatalf("malformed authorization reached session store: %#v", sessionStore)
+		}
+	})
+
+	t.Run("malformed_paths_stay_404_without_store_side_effects", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		for _, path := range []string{"/v1/auth//sessions", "/v1/auth/sessions/extra"} {
+			t.Run(path, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, path, nil)
+				request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+				response := httptest.NewRecorder()
+
+				server.ServeHTTP(response, request)
+
+				if response.Code != http.StatusNotFound {
+					t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+				}
+				if sessionStore.validateCalled {
+					t.Fatalf("malformed path reached session store: %#v", sessionStore.validateInput)
+				}
+			})
 		}
 	})
 }
