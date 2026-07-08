@@ -162,6 +162,7 @@ type apiError struct {
 }
 
 const sessionCookieName = "mirofish_session"
+const csrfHeaderName = "X-CSRF-Token"
 
 type actorUserIDContextKey struct{}
 
@@ -1026,6 +1027,32 @@ func hashSessionToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *Server) sessionCSRFToken(tokenHash string) string {
+	secret := strings.TrimSpace(s.sessionAuthSecret)
+	tokenHash = strings.TrimSpace(tokenHash)
+	if secret == "" || tokenHash == "" {
+		return ""
+	}
+	return hex.EncodeToString(signSessionMessage(secret, "csrf:"+tokenHash))
+}
+
+func (s *Server) verifySessionCSRFToken(tokenHash string, presented string) bool {
+	expected := s.sessionCSRFToken(tokenHash)
+	presented = strings.TrimSpace(presented)
+	if expected == "" || presented == "" {
+		return false
+	}
+	expectedBytes, err := hex.DecodeString(expected)
+	if err != nil {
+		return false
+	}
+	presentedBytes, err := hex.DecodeString(presented)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(presentedBytes, expectedBytes)
+}
+
 func isActorSensitiveRoute(request *http.Request) bool {
 	path := request.URL.Path
 	switch {
@@ -1363,6 +1390,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		})
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/dev-sessions":
 		s.handleCreateDevSession(response, request)
+	case request.Method == http.MethodGet && request.URL.Path == "/v1/auth/csrf-token":
+		s.handleGetSessionCSRFToken(response, request)
 	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/session":
 		s.handleRevokeCurrentSession(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/rotation":
@@ -1615,16 +1644,51 @@ func (s *Server) handleCreateDevSession(response http.ResponseWriter, request *h
 	writeJSON(response, http.StatusCreated, currentUser)
 }
 
+func (s *Server) handleGetSessionCSRFToken(response http.ResponseWriter, request *http.Request) {
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	userID, tokenHash, ok := s.verifySignedSessionToken(cookie.Value)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if s.authSessionStore != nil {
+		err := s.authSessionStore.ValidateSession(request.Context(), auth.ValidateSessionInput{
+			UserID:    userID,
+			TokenHash: tokenHash,
+			Now:       time.Now().UTC(),
+			RequestID: requestID(request),
+		})
+		if err != nil {
+			code := publicAuthCode(auth.ErrorCode(err))
+			writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+			return
+		}
+	}
+	writeJSON(response, http.StatusOK, map[string]string{
+		"csrf_token": s.sessionCSRFToken(tokenHash),
+	})
+}
+
 func (s *Server) handleRevokeCurrentSession(response http.ResponseWriter, request *http.Request) {
 	token := ""
+	fromCookie := false
 	if bearer, ok := bearerToken(request.Header.Get("Authorization")); ok {
 		token = bearer
 	} else if cookie, err := request.Cookie(sessionCookieName); err == nil {
 		token = cookie.Value
+		fromCookie = true
 	}
 	userID, tokenHash, ok := s.verifySignedSessionToken(token)
 	if !ok {
 		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if fromCookie && !s.verifySessionCSRFToken(tokenHash, request.Header.Get(csrfHeaderName)) {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
 		return
 	}
 	if s.authSessionStore != nil {
@@ -1666,6 +1730,10 @@ func (s *Server) handleRotateCurrentSession(response http.ResponseWriter, reques
 	userID, oldTokenHash, ok := s.verifySignedSessionToken(cookie.Value)
 	if !ok {
 		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if !s.verifySessionCSRFToken(oldTokenHash, request.Header.Get(csrfHeaderName)) {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
 		return
 	}
 	newToken, ok := s.signSessionToken(userID)

@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 
 import { ProjectNav } from "../../../../../components/project-nav";
-import { getCurrentUser, revokeCurrentSession, type CurrentUserSummary } from "../../../../../lib/api";
+import { getCurrentUser, getSessionCSRFToken, revokeCurrentSession, type CurrentUserSummary } from "../../../../../lib/api";
 
 export default async function ProjectLayout({
   children,
@@ -23,7 +23,11 @@ export default async function ProjectLayout({
     if (!actionSessionCookie) {
       return;
     }
-    const result = await revokeCurrentSession({ sessionCookie: actionSessionCookie });
+    const csrfResult = await getSessionCSRFToken({ sessionCookie: actionSessionCookie });
+    if (!csrfResult.ok) {
+      return;
+    }
+    const result = await revokeCurrentSession({ sessionCookie: actionSessionCookie, csrfToken: csrfResult.csrf_token });
     if (result.ok) {
       actionCookieStore.delete("mirofish_session");
     }

@@ -189,21 +189,29 @@ test("project shell exposes current-session logout without leaking the session t
   const logoutClient = sourceSlice(client, "export async function revokeCurrentSession", "export async function startWriterRun");
   const logoutAction = sourceSlice(layout, "async function logoutAction", "const currentUser");
 
+  assert.match(client, /export async function getSessionCSRFToken\(input:\s*\{\s*sessionCookie\?:\s*string;?\s*\}\)/);
+  assert.match(client, /\/v1\/auth\/csrf-token/);
+  assert.match(client, /networkFailure\(error,\s*"SESSION_CSRF_TOKEN_FAILED"\)/);
   assert.match(logoutClient, /sessionCookie\?:\s*string/);
+  assert.match(logoutClient, /csrfToken\?:\s*string/);
   assert.match(logoutClient, /\/v1\/auth\/session/);
   assert.match(logoutClient, /method:\s*"DELETE"/);
   assert.match(logoutClient, /headers:\s*sessionCookieHeaders\(input\)/);
   assert.match(logoutClient, /networkFailure\(error,\s*"SESSION_REVOKE_FAILED"\)/);
-  assert.match(client, /function sessionCookieHeaders\(input:\s*\{\s*sessionCookie\?:\s*string;?\s*\}\)/);
+  assert.match(client, /function sessionCookieHeaders\(input:\s*\{\s*sessionCookie\?:\s*string;\s*csrfToken\?:\s*string;?\s*\}\)/);
   assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
+  assert.match(client, /headers\["X-CSRF-Token"\]\s*=\s*csrfToken/);
   assert.doesNotMatch(logoutClient, /X-User-Id|contextHeaders|actorUserId|body|JSON\.stringify/);
 
+  assert.match(layout, /getSessionCSRFToken/);
   assert.match(layout, /revokeCurrentSession/);
   assert.match(logoutAction, /"use server"/);
   assert.match(logoutAction, /const\s+actionCookieStore\s*=\s*await\s+cookies\(\)/);
   assert.match(logoutAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
   assert.match(logoutAction, /if\s*\(!actionSessionCookie\)\s*\{\s*return;\s*\}/s);
-  assert.match(logoutAction, /await\s+revokeCurrentSession\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(logoutAction, /const\s+csrfResult\s*=\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(logoutAction, /if\s*\(!csrfResult\.ok\)\s*\{\s*return;\s*\}/s);
+  assert.match(logoutAction, /await\s+revokeCurrentSession\(\{\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
   assert.doesNotMatch(logoutAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|sessionCookie\s*\}/);
   assert.match(layout, /logoutAction=\{logoutAction\}/);
 

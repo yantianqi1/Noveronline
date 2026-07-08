@@ -49,6 +49,13 @@ export type SessionRevokeSummary =
     }
   | ApiFailure;
 
+export type SessionCSRFTokenSummary =
+  | {
+      ok: true;
+      csrf_token: string;
+    }
+  | ApiFailure;
+
 export type WriterRunSummary =
   | {
       ok: true;
@@ -1297,7 +1304,7 @@ function currentUserHeaders(input: { actorUserId?: string; sessionCookie?: strin
   return headers;
 }
 
-export async function revokeCurrentSession(input: { sessionCookie?: string }): Promise<SessionRevokeSummary> {
+export async function revokeCurrentSession(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
   try {
     const response = await fetch(`${apiBaseUrl()}/v1/auth/session`, {
       method: "DELETE",
@@ -1318,12 +1325,43 @@ export async function revokeCurrentSession(input: { sessionCookie?: string }): P
   }
 }
 
-function sessionCookieHeaders(input: { sessionCookie?: string }) {
+export async function getSessionCSRFToken(input: { sessionCookie?: string }): Promise<SessionCSRFTokenSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/auth/csrf-token`, {
+      headers: sessionCookieHeaders(input),
+      cache: "no-store",
+    });
+    const payload = await readLLMPayload(response);
+    if (isApiFailure(payload)) {
+      return payload;
+    }
+    if (!response.ok) {
+      return decodeError(payload, response.status, "SESSION_CSRF_TOKEN_FAILED");
+    }
+
+    const csrfToken = requiredString(payload, "csrf_token");
+    if (!csrfToken) {
+      return invalidApiResponse("session csrf token response missing required fields");
+    }
+    return {
+      ok: true,
+      csrf_token: csrfToken,
+    };
+  } catch (error) {
+    return networkFailure(error, "SESSION_CSRF_TOKEN_FAILED");
+  }
+}
+
+function sessionCookieHeaders(input: { sessionCookie?: string; csrfToken?: string }) {
   const headers: Record<string, string> = {};
   const sessionCookie = input.sessionCookie?.trim();
 
   if (sessionCookie) {
     headers.Cookie = `mirofish_session=${sessionCookie}`;
+  }
+  const csrfToken = input.csrfToken?.trim();
+  if (csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
   }
 
   return headers;

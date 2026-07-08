@@ -39,6 +39,28 @@ func signedSessionTokenForTest(t *testing.T, secret string, userID string) strin
 	return message + ":" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func sessionCSRFTokenForTest(t *testing.T, server *Server, sessionToken string) string {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/v1/auth/csrf-token", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionToken})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected csrf token response 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode csrf token response: %v", err)
+	}
+	token, _ := body["csrf_token"].(string)
+	if strings.TrimSpace(token) == "" {
+		t.Fatalf("csrf token response missing token: %#v", body)
+	}
+	return token
+}
+
 func TestSignSessionTokenUsesNonceBearingFormatForRotation(t *testing.T) {
 	server := NewServer(Config{SessionAuthSecret: "test-secret"})
 
@@ -2129,6 +2151,42 @@ func TestCreateDevSessionFailsClosedWhenSessionPersistenceFailsBeforeCookie(t *t
 	}
 }
 
+func TestSessionCSRFTokenRequiresSessionCookieAndDoesNotLeakTokenMaterial(t *testing.T) {
+	server := NewServer(Config{SessionAuthSecret: "test-secret"})
+	sessionToken := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request := httptest.NewRequest(http.MethodGet, "/v1/auth/csrf-token", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionToken})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	rawBody := response.Body.String()
+	var body map[string]any
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode csrf body: %v", err)
+	}
+	csrfToken, _ := body["csrf_token"].(string)
+	if strings.TrimSpace(csrfToken) == "" {
+		t.Fatalf("csrf token response did not include token: %#v", body)
+	}
+	for _, forbidden := range []string{sessionToken, hashSessionToken(sessionToken), "test-secret", "user-session", "api_key", "credential_ref", "draft", "manuscript", "prompt"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("csrf response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+
+	missingCookieRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/csrf-token", nil)
+	missingCookieResponse := httptest.NewRecorder()
+	server.ServeHTTP(missingCookieResponse, missingCookieRequest)
+
+	if missingCookieResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing cookie 401, got %d: %s", missingCookieResponse.Code, missingCookieResponse.Body.String())
+	}
+}
+
 func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
@@ -2136,6 +2194,7 @@ func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *test
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
 	request.Header.Set("X-Request-Id", "req_session_revoke")
+	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	response := httptest.NewRecorder()
 
@@ -2167,11 +2226,38 @@ func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *test
 	}
 }
 
+func TestRevokeCurrentSessionRequiresCSRFForCookieCredentialBeforeStore(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if sessionStore.revokeCalled {
+		t.Fatalf("missing csrf called session store: %#v", sessionStore.revokeInput)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("missing csrf cleared cookie: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{"user-session", "prompt", "api_key", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("missing csrf response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
 func TestRevokeCurrentSessionRequiresPresentedSignedCredentialWithoutFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
 	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
+	request.Header.Set("X-CSRF-Token", "csrf-token-for-missing-cookie")
 	request.Header.Set("X-User-Id", "fallback-user")
 	response := httptest.NewRecorder()
 
@@ -2204,7 +2290,9 @@ func TestRevokeCurrentSessionFailsClosedWhenStoreFailsBeforeClearingCookie(t *te
 	}
 	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
-	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	token := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -2238,8 +2326,12 @@ func TestRotateCurrentSessionReplacesPersistedCookieBeforeIssuingNewCookie(t *te
 	sessionStore := &recordingAuthSessionStore{}
 	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	oldToken := signedSessionTokenForTest(t, "test-secret", "user-session")
+	csrfToken := sessionCSRFTokenForTest(t, server, oldToken)
+	sessionStore.validateCalled = false
+	sessionStore.validateInput = auth.ValidateSessionInput{}
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
 	request.Header.Set("X-Request-Id", "req_session_rotate")
+	request.Header.Set("X-CSRF-Token", csrfToken)
 	request.Header.Set("X-User-Id", "fallback-user")
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: oldToken})
 	response := httptest.NewRecorder()
@@ -2288,6 +2380,26 @@ func TestRotateCurrentSessionReplacesPersistedCookieBeforeIssuingNewCookie(t *te
 	}
 }
 
+func TestRotateCurrentSessionRequiresCSRFBeforeStore(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if sessionStore.rotateCalled {
+		t.Fatalf("missing csrf called session store: %#v", sessionStore.rotateInput)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("missing csrf rotated cookie: %#v", response.Result().Cookies())
+	}
+}
+
 func TestRotateCurrentSessionRequiresCookieAndSessionStoreWithoutFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
@@ -2310,8 +2422,10 @@ func TestRotateCurrentSessionRequiresCookieAndSessionStoreWithoutFallback(t *tes
 	}
 
 	noStoreServer := NewServer(Config{SessionAuthSecret: "test-secret"})
+	noStoreToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	noStoreRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
-	noStoreRequest.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	noStoreRequest.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, noStoreServer, noStoreToken))
+	noStoreRequest.AddCookie(&http.Cookie{Name: sessionCookieName, Value: noStoreToken})
 	noStoreResponse := httptest.NewRecorder()
 
 	noStoreServer.ServeHTTP(noStoreResponse, noStoreRequest)
@@ -2334,7 +2448,9 @@ func TestRotateCurrentSessionFailsClosedWhenStoreFailsBeforeReplacingCookie(t *t
 	}
 	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
-	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
+	token := signedSessionTokenForTest(t, "test-secret", "user-session")
+	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
