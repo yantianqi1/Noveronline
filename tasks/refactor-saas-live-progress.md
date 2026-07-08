@@ -1,6 +1,6 @@
 # MiroFish-Novel SaaS Refactor Live Progress
 
-更新时间：`2026-07-08`
+更新时间：`2026-07-09`
 
 ## 用途
 
@@ -55,7 +55,7 @@
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
 | Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S4o Story Graph evidence project-read RBAC、W2-S4p Worldline preparation read RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam、W2-S5f Web logout UI/action、W2-S5g nonce session token groundwork、W2-S5h current-session rotation API seam、W2-S5i cookie current-session CSRF seam、W2-S5j Web session refresh action、W2-S5k automatic project-shell session refresh trigger、W2-S5l current-user all-session revocation seam、W2-S5m admin tenant-wide session revocation seam、W2-S5n route-wide unsafe cookie CSRF guard、W2-S5o current-user session listing metadata API、W2-S5p Web session management panel、W2-S5q production password login session issuance seam、W2-S5r Web password login action/page、W2-S5s JWT bearer subject resolver seam、W2-S5t Web session renewal threshold hardening、W2-S5u Web tenant-wide session revocation action、W2-S5v JWT cookie rotation seam、W2-S5w JWT bearer access-token issuance seam、W2-S5x JWT bearer refresh seam、W2-S5y global run read/replay credential preflight、W2-S5z global run read/replay owner-aware project-read authorization、W2-S5za global run cancel/retry owner-aware authorization、W2-S5zb Source upload route auth/RBAC hardening 和 W2-S5zc actor-sensitive protected route inventory guard 已接入；完整 compose health、真实 Temporal handoff、完整 production login/session lifecycle、refresh token/session renewal、full route-wide auth middleware、production-grade cookie/session management UI 和其他 remaining owner-aware/global non-asset RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
-| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
+| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`story_ontology` / `entity_resolution` / `character_agent_profile` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、agent profile context/live provider E2E、finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
 | Phase 7 | 0%-10% | Legacy import report skeleton blocked，旧架构清理未开始 |
 | Phase 8 | 0%-10% | Ops/Billing/Security/Production hardening 仍主要停留在设计和少量底座 |
@@ -67,8 +67,38 @@
 | 当前主线 | Phase 5：Seed browser upload / product closure |
 | 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed browser one-step upload/start action：Next Overview server action 从真实 selected file 派生 filename/MIME/size/SHA-256，顺序执行 create upload -> object PUT -> complete -> start Seed，并保留 existing upload complete/start recovery actions |
-| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 Seed sequential-reading/provider live E2E、full browser/provider pipeline E2E、LLM live provider/cluster E2E、Graph candidate adoption 或 Writer live reference E2E。当前不声明完整 Seed pipeline、provider E2E、Graph/Writer closure 或 100% |
+| 本轮开发 slice | P5 Seed `character_agent_profile` DB-backed runner persistence：通过 LLM Facility module binding + explicit credential + JSON provider 输出 schema validation，写入私有 `seed_agent_profile_snapshots`，公开 result 只返回 snapshot id、model 和 counts |
+| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 Seed agent profile context loader/live provider E2E、sequential-reading/provider live E2E、full browser/provider pipeline E2E、LLM live provider/cluster E2E、Graph candidate adoption 或 Writer live reference E2E。当前不声明完整 Seed pipeline、provider E2E、Graph/Writer closure 或 100% |
+
+## Phase 5 P5 Seed character agent profile runner persistence
+
+Context:
+
+- Prior `agent_profile_activity` was wired into the Seed workflow chain but still depended on a fail-closed runner shell unless a custom runner was injected.
+- This slice adds the default DB-backed `character_agent_profile` runner/writer path while keeping public workflow/API boundaries metadata-only.
+
+TDD / Review:
+
+- RED：`apps/agent-runtime/tests/test_seed_workflow.py` was expanded to require `PostgresAgentProfileSnapshotWriter` and `_agent_profile_runner_from_env(http_request, connect)` to exist, set app-role tenant context, upsert sanitized private snapshots, resolve `character_agent_profile` through LLM Facility, decrypt the explicit credential, call the JSON provider, and return only public snapshot/count metadata. Before implementation those tests failed because the writer was missing and the env runner had no injectable DB/HTTP seam.
+- Implementation：`apps/agent-runtime/mirofish_agents/temporal/seed.py` now adds `LLMFacilityAgentProfileRunner`, `PostgresAgentProfileSnapshotWriter`, schema validation for `agent_profiles.profiles` / `memory_seeds` / `relationship_views`, and `_agent_profile_runner_from_env()` DB-backed wiring via `DATABASE_URL` plus explicit `LLM_CREDENTIAL_ENCRYPTION_KEY`. `infra/postgres/migrations/0001_core_saas.sql` adds `seed_agent_profile_snapshots` with tenant/project/run/module uniqueness, RLS, app-role grants, and run/project index.
+- Public boundary：activity result / workflow event only expose `profile_snapshot_id`, `model_id`, `profile_count`, `memory_seed_count`, and `relationship_view_count`. Prompt, provider response, API key, encrypted credential, `credential_ref`, raw text/content, object keys, draft, manuscript, and profile body are not public fields.
+- Review：read-only spec/quality review found the slice matches persistence scope and verified GREEN, while noting remaining product gaps: the default prompt/context still needs a real entity/canon/profile source loader, and this fake-provider test is not live provider E2E.
+
+Verification:
+
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'agent_profile_snapshot_writer or agent_profile_runner_from_env'` 通过，2 passed / 119 deselected。
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'agent_profile or AgentProfile or profile_runner or profile_snapshot'` 通过，7 passed / 114 deselected。
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q` 通过，121 passed。
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` 通过，229 passed / 4 skipped。
+- `cd backend && .venv/bin/python -m pytest tests/test_saas_phase3_rls_schema.py -q -k 'core_saas_schema_declares_minimum_phase3_tables or tenant_business_tables_have_tenant_id_and_timestamps or seed_canon_structured_tables or rls_is_enabled_for_tenant_scoped_tables'` 通过，3 passed / 16 deselected。
+- `cd apps/api && go test ./... -count=1` 通过。
+- `git diff --check` 通过。
+
+Next:
+
+- Add a real agent profile context/source loader from entity resolution snapshots, structured canon, and public character/entity metadata before provider invocation.
+- Run Seed live provider/browser/Temporal E2E with `character_agent_profile` configured through LLM Facility.
+- Finalize/full Seed pipeline, retry, vector/hybrid search, OCR/scanned PDF, and Graph candidate adoption remain pending.
 
 ## Phase 5 P5 Seed browser one-step upload/start action
 

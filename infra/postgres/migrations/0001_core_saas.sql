@@ -578,6 +578,24 @@ CREATE TABLE IF NOT EXISTS seed_entity_resolution_snapshots (
   FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS seed_agent_profile_snapshots (
+  tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+  seed_agent_profile_snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL,
+  run_id UUID NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+  module_key TEXT NOT NULL,
+  model_id TEXT,
+  profiles_jsonb JSONB NOT NULL DEFAULT '{}'::JSONB,
+  profile_count INTEGER NOT NULL DEFAULT 0 CHECK (profile_count >= 0),
+  memory_seed_count INTEGER NOT NULL DEFAULT 0 CHECK (memory_seed_count >= 0),
+  relationship_view_count INTEGER NOT NULL DEFAULT 0 CHECK (relationship_view_count >= 0),
+  metadata_jsonb JSONB NOT NULL DEFAULT '{}'::JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, project_id, run_id, module_key),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS project_readiness_snapshots (
   tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
   project_readiness_snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1262,6 +1280,7 @@ CREATE INDEX IF NOT EXISTS idx_segment_summaries_tenant_project_run ON segment_s
 CREATE INDEX IF NOT EXISTS idx_seed_analysis_snapshots_tenant_project_run ON seed_analysis_snapshots (tenant_id, project_id, run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_seed_ontology_snapshots_tenant_project_run ON seed_ontology_snapshots (tenant_id, project_id, run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_seed_entity_resolution_snapshots_tenant_project_run ON seed_entity_resolution_snapshots (tenant_id, project_id, run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_seed_agent_profile_snapshots_tenant_project_run ON seed_agent_profile_snapshots (tenant_id, project_id, run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_readiness_snapshots_tenant_project_run ON project_readiness_snapshots (tenant_id, project_id, run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_tenant_project_type ON assets (tenant_id, project_id, asset_type, lifecycle, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_tenant_project_source ON assets (tenant_id, project_id, source_kind, source_ref);
@@ -1326,6 +1345,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON story_graph_layouts TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON story_graph_clusters TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON seed_ontology_snapshots TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON seed_entity_resolution_snapshots TO mirofish_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON seed_agent_profile_snapshots TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON worldline_sessions TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON worldline_preparations TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON worldline_prepared_agents TO mirofish_app;
@@ -1569,6 +1589,15 @@ ALTER TABLE seed_entity_resolution_snapshots FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_seed_entity_resolution_snapshots ON seed_entity_resolution_snapshots;
 CREATE POLICY tenant_isolation_seed_entity_resolution_snapshots
 ON seed_entity_resolution_snapshots
+FOR ALL
+USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+
+ALTER TABLE seed_agent_profile_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE seed_agent_profile_snapshots FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_seed_agent_profile_snapshots ON seed_agent_profile_snapshots;
+CREATE POLICY tenant_isolation_seed_agent_profile_snapshots
+ON seed_agent_profile_snapshots
 FOR ALL
 USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
 WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);

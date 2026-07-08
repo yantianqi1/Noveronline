@@ -1,6 +1,6 @@
 # 14. Data Model
 
-更新时间：`2026-07-08`
+更新时间：`2026-07-09`
 
 ## 目标
 
@@ -109,6 +109,9 @@ narrative_arcs
 volume_summaries
 segment_summaries
 seed_analysis_snapshots
+seed_ontology_snapshots
+seed_entity_resolution_snapshots
+seed_agent_profile_snapshots
 project_readiness_snapshots
 ```
 
@@ -182,6 +185,29 @@ seed_entity_resolution_snapshots
 ```
 
 表必须启用 tenant RLS，并通过 `(tenant_id, project_id, run_id, module_key)` 保持同一 Seed run / module 的 upsert 幂等性。`PostgresEntityResolutionSnapshotWriter` 写入前设置 `app_set_tenant_context`，并清洗 prompt/API key/`credential_ref`/raw content 等高风险字段；普通 DB/driver failure 稳定为 `ENTITY_RESOLUTION_SNAPSHOT_WRITE_FAILED`。
+
+## Seed Agent Profile Snapshots
+
+`seed_agent_profile_snapshots` 是 `character_agent_profile` stage 的私有 DB snapshot 表，保存 schema-valid character agent profile JSON 和 public counts。公开 workflow event、Seed run event replay 和后续 handoff 只能使用 snapshot id、model id 与 profile/memory seed/relationship view counts，不能返回 `profiles_jsonb` 正文。
+
+```text
+seed_agent_profile_snapshots
+  tenant_id
+  seed_agent_profile_snapshot_id
+  project_id
+  run_id
+  module_key
+  model_id
+  profiles_jsonb
+  profile_count
+  memory_seed_count
+  relationship_view_count
+  metadata_jsonb
+  created_at
+  updated_at
+```
+
+表必须启用 tenant RLS，并通过 `(tenant_id, project_id, run_id, module_key)` 保持同一 Seed run / module 的 upsert 幂等性。`PostgresAgentProfileSnapshotWriter` 写入前设置 `app_set_tenant_context`，并清洗 prompt/API key/`credential_ref`/raw content/object key/draft/manuscript 等高风险字段；普通 DB/driver failure 稳定为 `AGENT_PROFILE_SNAPSHOT_WRITE_FAILED`。
 
 ## Asset Tables
 

@@ -6510,6 +6510,146 @@ def test_entity_resolution_runner_from_env_builds_db_backed_llm_facility_runner(
     assert "api_key" not in request_body
 
 
+def test_postgres_agent_profile_snapshot_writer_upserts_sanitized_private_snapshot() -> None:
+    connection = FakeOntologySnapshotConnection([{"seed_agent_profile_snapshot_id": "profile-snapshot-1"}])
+    writer = seed_module.PostgresAgentProfileSnapshotWriter(connect=lambda: connection)
+
+    snapshot_id = writer.record_agent_profile_snapshot(
+        context=_context(),
+        module_key="character_agent_profile",
+        model_id="model-profile",
+        agent_profiles={
+            "profiles": [{"name": "林舟", "private_profile": {"body": "可私有保存的人设正文"}}],
+            "memory_seeds": [{"name": "林舟", "summary": "雨夜记忆"}],
+            "relationship_views": [{"source": "林舟", "target": "陆晚"}],
+            "private_notes": "private profile body is allowed only in seed_agent_profile_snapshots",
+            "prompt": "must not be stored",
+            "raw_content": "full novel text must not be stored",
+            "credential_ref": "secret-ref",
+            "api_key": "sk-test",
+        },
+        profile_count=1,
+        memory_seed_count=1,
+        relationship_view_count=1,
+    )
+
+    assert snapshot_id == "profile-snapshot-1"
+    assert connection.cursor_instance.executed[0] == (
+        "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
+        ("tenant-1", "project-1"),
+    )
+    assert "INSERT INTO seed_agent_profile_snapshots" in connection.cursor_instance.query
+    assert (
+        "ON CONFLICT (tenant_id, project_id, run_id, module_key)"
+        in connection.cursor_instance.query
+    )
+    assert connection.cursor_instance.params[:5] == (
+        "tenant-1",
+        "project-1",
+        "run-1",
+        "character_agent_profile",
+        "model-profile",
+    )
+    assert json.loads(connection.cursor_instance.params[5]) == {
+        "profiles": [{"name": "林舟", "private_profile": {"body": "可私有保存的人设正文"}}],
+        "memory_seeds": [{"name": "林舟", "summary": "雨夜记忆"}],
+        "relationship_views": [{"source": "林舟", "target": "陆晚"}],
+        "private_notes": "private profile body is allowed only in seed_agent_profile_snapshots",
+    }
+    assert connection.cursor_instance.params[6:] == (1, 1, 1)
+    joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
+    for forbidden in ("must not be stored", "full novel text", "credential_ref", "api_key", "sk-test"):
+        assert forbidden not in joined_params
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://seed-runtime")
+    monkeypatch.setenv(
+        "LLM_CREDENTIAL_ENCRYPTION_KEY",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    transport = RecordingHTTPTransport(
+        response_body=json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "agent_profiles": {
+                                        "profiles": [{"name": "林舟", "voice": "冷静"}],
+                                        "memory_seeds": [{"name": "林舟", "summary": "雨夜"}],
+                                        "relationship_views": [{"source": "林舟", "target": "陆晚"}],
+                                    }
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ]
+            }
+        ).encode("utf-8")
+    )
+    connections = iter(
+        [
+            QueryConnection(
+                rows=[
+                    {
+                        "tenant_id": "tenant-1",
+                        "project_id": "project-1",
+                        "module_key": "character_agent_profile",
+                        "channel_id": "channel-project",
+                        "model_id": "model-profile",
+                        "provider": "openai-compatible",
+                        "base_url": "https://llm.example/v1",
+                        "supports_json": True,
+                        "settings_jsonb": "{}",
+                    }
+                ]
+            ),
+            QueryConnection(
+                rows=[
+                    {
+                        "encrypted_api_key": (
+                            "aes-256-gcm:v1:ABEiM0RVZneImaq7:"
+                            "87utEhTfLrnKAiv0vtWdTg==:qe3dwCoCLzMECbZ5"
+                        )
+                    }
+                ]
+            ),
+            FakeOntologySnapshotConnection([{"seed_agent_profile_snapshot_id": "profile-snapshot-1"}]),
+        ]
+    )
+
+    runner = seed_module._agent_profile_runner_from_env(
+        http_request=transport,
+        connect=lambda: next(connections),
+    )
+    assert runner is not None
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "completed",
+        "module_key": "character_agent_profile",
+        "model_id": "model-profile",
+        "profile_snapshot_id": "profile-snapshot-1",
+        "profile_count": 1,
+        "memory_seed_count": 1,
+        "relationship_view_count": 1,
+    }
+    request = transport.requests[0]
+    assert request.headers["Authorization"] == "Bearer sk-seed-live"
+    request_body = request.data.decode("utf-8")
+    assert "character_agent_profile" in request_body
+    assert "credential_ref" not in request_body
+    assert "api_key" not in request_body
+
+
 def test_postgres_text_segment_writer_requires_project_context() -> None:
     writer = PostgresTextSegmentWriter(connect=FakeConnection)
     context = _context().model_copy(update={"project_id": None})

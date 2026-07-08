@@ -349,6 +349,21 @@ class EntityResolutionSnapshotWriter(Protocol):
         """Persist a private entity resolution snapshot and return its public id."""
 
 
+class AgentProfileSnapshotWriter(Protocol):
+    def record_agent_profile_snapshot(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        model_id: str | None,
+        agent_profiles: dict[str, Any],
+        profile_count: int,
+        memory_seed_count: int,
+        relationship_view_count: int,
+    ) -> str:
+        """Persist a private character-agent profile snapshot and return its public id."""
+
+
 class GlobalAggregationRunner(Protocol):
     def aggregate(
         self,
@@ -1166,6 +1181,87 @@ class PostgresEntityResolutionSnapshotWriter:
             connection.close()
 
 
+class PostgresAgentProfileSnapshotWriter:
+    def __init__(self, *, connect: Callable[[], Any]) -> None:
+        self._connect = connect
+
+    @classmethod
+    def from_database_url(cls, database_url: str) -> "PostgresAgentProfileSnapshotWriter":
+        try:
+            import psycopg
+        except ImportError as exc:  # pragma: no cover - depends on optional runtime packaging
+            raise RuntimeError("psycopg is required for DATABASE_URL agent profile snapshot persistence") from exc
+
+        return cls(connect=lambda: psycopg.connect(database_url))
+
+    def record_agent_profile_snapshot(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        model_id: str | None,
+        agent_profiles: dict[str, Any],
+        profile_count: int,
+        memory_seed_count: int,
+        relationship_view_count: int,
+    ) -> str:
+        if context.project_id is None:
+            raise ValueError("project_id is required to persist agent profile snapshots")
+        normalized_module_key = _required_text_value(module_key, "module_key")
+        if model_id is not None and not isinstance(model_id, str):
+            raise ValueError("model_id must be a string")
+        normalized_profile_count = _non_negative_int(profile_count, "profile_count")
+        normalized_memory_seed_count = _non_negative_int(memory_seed_count, "memory_seed_count")
+        normalized_relationship_view_count = _non_negative_int(
+            relationship_view_count,
+            "relationship_view_count",
+        )
+        profiles_json = _json_agent_profile_object(agent_profiles)
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                cursor.execute(
+                    """INSERT INTO seed_agent_profile_snapshots (
+                         tenant_id, project_id, run_id, module_key, model_id,
+                         profiles_jsonb, profile_count, memory_seed_count,
+                         relationship_view_count, metadata_jsonb
+                       )
+                       VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, '{}'::jsonb)
+                       ON CONFLICT (tenant_id, project_id, run_id, module_key)
+                       DO UPDATE SET
+                         model_id = EXCLUDED.model_id,
+                         profiles_jsonb = EXCLUDED.profiles_jsonb,
+                         profile_count = EXCLUDED.profile_count,
+                         memory_seed_count = EXCLUDED.memory_seed_count,
+                         relationship_view_count = EXCLUDED.relationship_view_count,
+                         updated_at = now()
+                       RETURNING seed_agent_profile_snapshot_id::text AS seed_agent_profile_snapshot_id""",
+                    (
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        normalized_module_key,
+                        model_id.strip() if isinstance(model_id, str) and model_id.strip() else None,
+                        profiles_json,
+                        normalized_profile_count,
+                        normalized_memory_seed_count,
+                        normalized_relationship_view_count,
+                    ),
+                )
+                row = cursor.fetchone()
+            connection.commit()
+            return _row_value(row, "seed_agent_profile_snapshot_id")
+        except Exception as exc:
+            _rollback_postgres_connection(connection)
+            raise LLMFacilityError(
+                "AGENT_PROFILE_SNAPSHOT_WRITE_FAILED",
+                "agent profile snapshot write failed",
+            ) from exc
+        finally:
+            connection.close()
+
+
 class LLMFacilityOntologyRunner:
     def __init__(
         self,
@@ -1307,6 +1403,78 @@ class LLMFacilityEntityResolutionRunner:
             "merged_entity_count": merged_entity_count,
             "alias_count": alias_count,
             "conflict_count": conflict_count,
+        }
+
+
+class LLMFacilityAgentProfileRunner:
+    def __init__(
+        self,
+        *,
+        binding_resolver: Any,
+        credential_provider: Any,
+        chat_client: Any,
+        agent_profile_snapshot_writer: AgentProfileSnapshotWriter,
+    ) -> None:
+        self._binding_resolver = binding_resolver
+        self._credential_provider = credential_provider
+        self._chat_client = chat_client
+        self._agent_profile_snapshot_writer = agent_profile_snapshot_writer
+
+    def generate(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+    ) -> dict[str, Any]:
+        if module_key != CHARACTER_AGENT_PROFILE_MODULE_KEY:
+            return _agent_profile_runner_failed(
+                "VALIDATION_FAILED",
+                f"LLMFacilityAgentProfileRunner only supports {CHARACTER_AGENT_PROFILE_MODULE_KEY}",
+            )
+        try:
+            resolution = self._binding_resolver.resolve_module_binding(
+                context=context,
+                module_key=module_key,
+            )
+            _validate_agent_profile_resolution(resolution)
+            api_key = self._credential_provider.resolve_api_key(
+                context=context,
+                credential_ref=resolution.credential_ref,
+            )
+            if not isinstance(api_key, str) or not api_key.strip():
+                raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
+            response_json = self._chat_client.complete_json(
+                context=context,
+                resolution=resolution,
+                api_key=api_key.strip(),
+                messages=_agent_profile_messages(context=context),
+            )
+            agent_profiles = _agent_profiles_payload(response_json)
+            profile_count = _agent_profile_item_count(agent_profiles, "profiles")
+            memory_seed_count = _agent_profile_item_count(agent_profiles, "memory_seeds")
+            relationship_view_count = _agent_profile_item_count(agent_profiles, "relationship_views")
+            profile_snapshot_id = self._agent_profile_snapshot_writer.record_agent_profile_snapshot(
+                context=context,
+                module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY,
+                model_id=resolution.model_id,
+                agent_profiles=agent_profiles,
+                profile_count=profile_count,
+                memory_seed_count=memory_seed_count,
+                relationship_view_count=relationship_view_count,
+            )
+        except LLMFacilityError as exc:
+            return _agent_profile_runner_failed(exc.code, exc.message)
+        except Exception:
+            return _agent_profile_runner_failed("LLM_PROVIDER_ERROR", "agent profile generation failed")
+
+        return {
+            "status": "completed",
+            "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
+            "model_id": resolution.model_id,
+            "profile_snapshot_id": profile_snapshot_id,
+            "profile_count": profile_count,
+            "memory_seed_count": memory_seed_count,
+            "relationship_view_count": relationship_view_count,
         }
 
 
@@ -2606,6 +2774,39 @@ def _json_object(value: dict[str, Any]) -> str:
     return json.dumps(sanitized_metadata, ensure_ascii=False, separators=(",", ":"))
 
 
+AGENT_PROFILE_PRIVATE_SNAPSHOT_BLOCKED_KEYS = {
+    "api_key",
+    "artifact_object_key",
+    "content",
+    "content_text",
+    "credential_ref",
+    "draft",
+    "encrypted_api_key",
+    "encrypted_credential",
+    "manuscript",
+    "material_text",
+    "object_key",
+    "prompt",
+    "raw_content",
+    "raw_text",
+    "response",
+    "segment_object_key",
+    "source_material",
+    "source_object_key",
+    "source_text",
+    "text",
+}
+
+
+def _json_agent_profile_object(value: dict[str, Any]) -> str:
+    if not isinstance(value, dict):
+        raise ValueError("agent profile snapshot must be an object")
+    sanitized = _sanitize_agent_profile_value(value)
+    if not isinstance(sanitized, dict):
+        raise ValueError("agent profile snapshot must be an object")
+    return json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+
+
 def _ontology_runner_failed(code: str, message: str) -> dict[str, Any]:
     return {
         "status": "failed",
@@ -2618,6 +2819,14 @@ def _entity_resolution_runner_failed(code: str, message: str) -> dict[str, Any]:
     return {
         "status": "failed",
         "module_key": ENTITY_RESOLUTION_MODULE_KEY,
+        "error": {"code": code, "message": message},
+    }
+
+
+def _agent_profile_runner_failed(code: str, message: str) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
         "error": {"code": code, "message": message},
     }
 
@@ -2649,6 +2858,23 @@ def _validate_entity_resolution_resolution(resolution: Any) -> None:
         raise LLMFacilityError(
             "LLM_MODULE_CAPABILITY_MISSING",
             f"{ENTITY_RESOLUTION_MODULE_KEY} requires a JSON-capable model",
+        )
+    for field_name in ("channel_id", "model_id", "base_url", "credential_ref"):
+        value = getattr(resolution, field_name, None)
+        if not isinstance(value, str) or not value.strip():
+            raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
+
+
+def _validate_agent_profile_resolution(resolution: Any) -> None:
+    if getattr(resolution, "module_key", None) != CHARACTER_AGENT_PROFILE_MODULE_KEY:
+        raise LLMFacilityError(
+            "LLM_MODULE_UNBOUND",
+            f"resolved module key does not match {CHARACTER_AGENT_PROFILE_MODULE_KEY}",
+        )
+    if not getattr(resolution, "supports_json", False):
+        raise LLMFacilityError(
+            "LLM_MODULE_CAPABILITY_MISSING",
+            f"{CHARACTER_AGENT_PROFILE_MODULE_KEY} requires a JSON-capable model",
         )
     for field_name in ("channel_id", "model_id", "base_url", "credential_ref"):
         value = getattr(resolution, field_name, None)
@@ -2712,6 +2938,34 @@ def _entity_resolution_messages(*, context: AgentContext) -> list[dict[str, str]
     ]
 
 
+def _agent_profile_messages(*, context: AgentContext) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the MiroFish character_agent_profile module. Return one JSON object with an "
+                "agent_profiles object containing profiles, memory_seeds, and relationship_views arrays. "
+                "Do not include prompt bodies, raw source material copies, API keys, credentials, or "
+                "provider metadata."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "tenant_id": context.tenant_id,
+                    "project_id": context.project_id,
+                    "run_id": context.run_id,
+                    "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
+                    "task": "Generate character agent profiles from resolved Seed canon metadata.",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+
+
 def _seed_ontology_payload(response_json: dict[str, Any]) -> dict[str, Any]:
     seed_ontology = response_json.get("seed_ontology")
     if seed_ontology is None:
@@ -2740,6 +2994,20 @@ def _entity_resolution_payload(response_json: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _agent_profiles_payload(response_json: dict[str, Any]) -> dict[str, Any]:
+    agent_profiles = response_json.get("agent_profiles")
+    if agent_profiles is None:
+        agent_profiles = response_json.get("profiles")
+    if not isinstance(agent_profiles, dict):
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "agent_profiles must be an object")
+    sanitized = _sanitize_agent_profile_value(agent_profiles)
+    if not isinstance(sanitized, dict):
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "agent_profiles must be an object")
+    for field_name in ("profiles", "memory_seeds", "relationship_views"):
+        _agent_profile_item_count(sanitized, field_name)
+    return sanitized
+
+
 def _sanitize_ontology_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -2749,6 +3017,18 @@ def _sanitize_ontology_value(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_sanitize_ontology_value(child) for child in value]
+    return value
+
+
+def _sanitize_agent_profile_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_agent_profile_value(child)
+            for key, child in value.items()
+            if str(key).lower() not in AGENT_PROFILE_PRIVATE_SNAPSHOT_BLOCKED_KEYS
+        }
+    if isinstance(value, list):
+        return [_sanitize_agent_profile_value(child) for child in value]
     return value
 
 
@@ -2764,6 +3044,16 @@ def _ontology_type_count(seed_ontology: dict[str, Any], field_name: str) -> int:
 
 def _resolution_item_count(entity_resolution: dict[str, Any], field_name: str) -> int:
     value = entity_resolution.get(field_name)
+    if not isinstance(value, list):
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", f"{field_name} must be an array")
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", f"{field_name}[{index}] must be an object")
+    return len(value)
+
+
+def _agent_profile_item_count(agent_profiles: dict[str, Any], field_name: str) -> int:
+    value = agent_profiles.get(field_name)
     if not isinstance(value, list):
         raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", f"{field_name} must be an array")
     for index, item in enumerate(value):
@@ -3305,8 +3595,40 @@ def _entity_resolution_runner_from_env(
     )
 
 
-def _agent_profile_runner_from_env() -> AgentProfileRunner | None:
-    return None
+def _agent_profile_runner_from_env(
+    *,
+    http_request: Callable[[Request], bytes] | None = None,
+    connect: Callable[[], Any] | None = None,
+) -> AgentProfileRunner | None:
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url and connect is None:
+        return None
+    from mirofish_agents.seed.sequential_reader import (
+        AesGcmCredentialDecryptor,
+        OpenAICompatibleJSONClient,
+        PostgresCredentialProvider,
+        PostgresModuleBindingResolver,
+    )
+
+    key_material = os.environ.get("LLM_CREDENTIAL_ENCRYPTION_KEY", "").strip()
+    decryptor = AesGcmCredentialDecryptor(key_material=key_material) if key_material else None
+    if connect is not None:
+        binding_resolver = PostgresModuleBindingResolver(connect=connect)
+        credential_provider = PostgresCredentialProvider(connect=connect, decryptor=decryptor)
+        agent_profile_snapshot_writer = PostgresAgentProfileSnapshotWriter(connect=connect)
+    else:
+        binding_resolver = PostgresModuleBindingResolver.from_database_url(database_url)
+        credential_provider = PostgresCredentialProvider.from_database_url(
+            database_url=database_url,
+            key_material=key_material or None,
+        )
+        agent_profile_snapshot_writer = PostgresAgentProfileSnapshotWriter.from_database_url(database_url)
+    return LLMFacilityAgentProfileRunner(
+        binding_resolver=binding_resolver,
+        credential_provider=credential_provider,
+        chat_client=OpenAICompatibleJSONClient(http_request=http_request),
+        agent_profile_snapshot_writer=agent_profile_snapshot_writer,
+    )
 
 
 def _archive_candidate_runner_from_env() -> ArchiveCandidateRunner | None:
