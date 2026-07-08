@@ -73,6 +73,12 @@ def test_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_fails_
     asyncio.run(_run_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_fails_ontology_unbound(monkeypatch))
 
 
+def test_seed_live_go_api_temporal_worker_completes_full_semantic_success_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(_run_seed_live_go_api_temporal_worker_completes_full_semantic_success_chain(monkeypatch))
+
+
 async def _run_seed_live_go_api_upload_complete_temporal_worker_parse_segment_e2e(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,6 +271,195 @@ async def _run_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_
         assert forbidden not in public_body
 
 
+async def _run_seed_live_go_api_temporal_worker_completes_full_semantic_success_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    temporal_address = _live_temporal_address()
+    temporal_namespace = os.environ.get("MIROFISH_SEED_LIVE_TEMPORAL_NAMESPACE", "default").strip() or "default"
+    storage_env = _live_object_storage_env()
+    object_store = _object_store_from_env(storage_env)
+    source_text = "第一章 雨夜\n雨声压住脚步。\n\n第二章 破晓\n光落在窗沿。\n"
+    source_bytes = source_text.encode("utf-8")
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    task_queue = f"seed-live-full-semantic-e2e-{os.getpid()}-{int(time.time() * 1000)}"
+
+    with _LiveSeedSemanticProvider() as provider:
+        _prepare_live_seed_full_semantic_database(admin_url, provider.base_url)
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+        for key, value in storage_env.items():
+            monkeypatch.setenv(key, value)
+        client = await Client.connect(temporal_address, namespace=temporal_namespace)
+        with _start_live_go_api(app_url, temporal_address, temporal_namespace, task_queue, storage_env) as api:
+            async with _seed_worker(client, task_queue):
+                run_id, source_file_id, persisted, public_events = await asyncio.to_thread(
+                    _drive_live_go_api_seed_full_semantic_run,
+                    api,
+                    admin_url,
+                    source_bytes,
+                    source_sha256,
+                )
+
+    assert persisted["source_files"] == [{"file_id": source_file_id, "parse_status": "parsed"}]
+    assert persisted["project_text_artifacts"] == [
+        {
+            "source_file_id": source_file_id,
+            "artifact_type": "extracted_text",
+            "char_count": len(source_text),
+            "line_count": len(source_text.splitlines()),
+            "sha256": source_sha256,
+        }
+    ]
+    assert persisted["text_segments"] == [
+        {"segment_order": 0, "chapter_guess": "第一章", "title_guess": "雨夜"},
+        {"segment_order": 1, "chapter_guess": "第二章", "title_guess": "破晓"},
+    ]
+    assert persisted["runtime_facts"] == [
+        {
+            "entities": 2,
+            "relationships": 1,
+            "segment_summaries": 2,
+            "plot_threads": 1,
+            "world_rules": 1,
+        }
+    ]
+    assert persisted["seed_analysis_snapshots"] == [
+        {
+            "module_key": "anchor_point_summary",
+            "model_id": "model-seed-global-aggregation-live",
+            "summary_count": 2,
+            "segment_count": 2,
+        }
+    ]
+    assert persisted["seed_ontology_snapshots"] == [
+        {
+            "module_key": "story_ontology",
+            "model_id": "model-seed-ontology-live",
+            "entity_type_count": 2,
+            "relationship_type_count": 1,
+            "world_rule_type_count": 1,
+        }
+    ]
+    assert persisted["seed_entity_resolution_snapshots"] == [
+        {
+            "module_key": "entity_resolution",
+            "model_id": "model-seed-entity-resolution-live",
+            "merged_entity_count": 1,
+            "alias_count": 2,
+            "conflict_count": 1,
+        }
+    ]
+    assert persisted["seed_agent_profile_snapshots"] == [
+        {
+            "module_key": "character_agent_profile",
+            "model_id": "model-seed-profile-live",
+            "profile_count": 1,
+            "memory_seed_count": 1,
+            "relationship_view_count": 1,
+        }
+    ]
+    assert persisted["archive_candidate_counts"] == [{"assets": 1, "archive_memories": 1, "archive_memory_events": 1}]
+    assert persisted["seed_asset_counts"] == [{"assets": 5, "search_documents": 5}]
+    assert persisted["project_readiness_snapshots"] == [
+        {
+            "ready_asset_count": 5,
+            "ready_entity_count": 2,
+            "ready_relationship_count": 1,
+            "ready_world_rule_count": 1,
+        }
+    ]
+    assert persisted["workflow_runs"] == [{"status": "completed", "error_code": None}]
+    assert len(persisted["workflow_run_details"]) == 1
+    workflow_run_detail = persisted["workflow_run_details"][0]
+    assert workflow_run_detail["status"] == "completed"
+    assert workflow_run_detail["progress"] == 100
+    assert workflow_run_detail["error_code"] is None
+    assert workflow_run_detail["error_message"] is None
+    assert workflow_run_detail["result_jsonb"]["stage"] == "finalize"
+    assert workflow_run_detail["result_jsonb"]["ready_asset_count"] == 5
+    assert workflow_run_detail["result_jsonb"]["ready_entity_count"] == 2
+    assert workflow_run_detail["result_jsonb"]["ready_relationship_count"] == 1
+    assert workflow_run_detail["result_jsonb"]["ready_world_rule_count"] == 1
+    completed_stages = [
+        event["payload_jsonb"].get("stage")
+        for event in persisted["workflow_events"]
+        if event["event_type"] == "seed.stage.completed"
+    ]
+    assert completed_stages == [
+        "parse_file",
+        "segment_text",
+        "sequential_reading",
+        "persist_runtime_facts",
+        "global_aggregation",
+        "story_ontology",
+        "entity_resolution",
+        "agent_profiles",
+        "archive_candidates",
+        "index_assets",
+        "finalize",
+    ]
+    assert not any(event["event_type"] == "seed.stage.failed" for event in persisted["workflow_events"])
+    assert [request["module_key"] for request in provider.requests] == [
+        "sequential_reading",
+        "anchor_point_summary",
+        "story_ontology",
+        "entity_resolution",
+        "character_agent_profile",
+        "narrative_archives",
+    ]
+    _assert_seed_object_readback(
+        object_store,
+        persisted,
+        expected_artifact_bytes=source_bytes,
+        expected_segment_texts=["第一章 雨夜\n雨声压住脚步。", "第二章 破晓\n光落在窗沿。"],
+    )
+    public_body = json.dumps(
+        {
+            "events": public_events,
+            "persisted_events": persisted["workflow_events"],
+            "workflow_runs": persisted["workflow_runs"],
+            "workflow_run_details": persisted["workflow_run_details"],
+            "readiness": persisted["project_readiness_snapshots"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    for forbidden in (
+        "object_key",
+        "source_object_key",
+        "artifact_object_key",
+        "segment_object_key",
+        "source_sha256",
+        "sha256",
+        "hash",
+        "checksum",
+        source_sha256,
+        "雨声压住脚步",
+        "光落在窗沿",
+        "prompt",
+        "provider_response",
+        "provider_raw_body",
+        "response",
+        "raw_body",
+        "raw_content",
+        "raw_text",
+        "source_text",
+        "body_text",
+        "content",
+        "credential_ref",
+        "encrypted_api_key",
+        "api_key",
+        "sk-live-seed-semantic",
+        "PRIVATE_SEMANTIC",
+        "PRIVATE_ARCHIVE",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in public_body
+
+
 def _drive_live_go_api_seed_run(
     api: str,
     admin_url: str,
@@ -387,6 +582,72 @@ def _drive_live_go_api_seed_semantic_run(
     assert run["status"] == "queued"
     run_id = run["run_id"]
     persisted = _wait_for_seed_live_semantic_rows(admin_url, run_id, source_file_id)
+    public_events = _api_json(
+        "GET",
+        f"{api}/v1/seed-runs/{run_id}/events",
+        {"X-Tenant-Id": TENANT_ID, "X-User-Id": USER_ID},
+        None,
+    )
+    return run_id, source_file_id, persisted, public_events
+
+
+def _drive_live_go_api_seed_full_semantic_run(
+    api: str,
+    admin_url: str,
+    source_bytes: bytes,
+    source_sha256: str,
+) -> tuple[str, str, dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    headers = {
+        "X-Tenant-Id": TENANT_ID,
+        "X-User-Id": USER_ID,
+        "Content-Type": "application/json",
+    }
+    upload = _api_json(
+        "POST",
+        f"{api}/v1/projects/{PROJECT_ID}/uploads",
+        headers,
+        {
+            "filename": "book.txt",
+            "mime_type": "text/plain; charset=utf-8",
+            "size_bytes": len(source_bytes),
+            "sha256": source_sha256,
+            "purpose": "seed",
+            "tenant_id": "00000000-0000-0000-0000-000000000000",
+        },
+    )
+    upload_id = upload["upload_id"]
+    source_file_id = upload["file_id"]
+    _api_bytes(
+        "PUT",
+        f"{api}/v1/uploads/{upload_id}/object",
+        {"X-Tenant-Id": TENANT_ID, "X-User-Id": USER_ID},
+        source_bytes,
+    )
+    completed = _api_json(
+        "POST",
+        f"{api}/v1/uploads/{upload_id}/complete",
+        headers,
+        {},
+    )
+    assert completed["parse_status"] == "uploaded"
+    run = _api_json(
+        "POST",
+        f"{api}/v1/projects/{PROJECT_ID}/seed-runs",
+        headers,
+        {
+            "tenant_id": "00000000-0000-0000-0000-000000000000",
+            "upload_id": upload_id,
+            "options": {
+                "language": "zh-CN",
+                "prompt": "must not enter the Temporal payload",
+                "credential_ref": "hidden",
+                "raw_text": "must not enter public workflow events",
+            },
+        },
+    )
+    assert run["status"] == "queued"
+    run_id = run["run_id"]
+    persisted = _wait_for_seed_live_full_semantic_rows(admin_url, run_id, source_file_id)
     public_events = _api_json(
         "GET",
         f"{api}/v1/seed-runs/{run_id}/events",
@@ -2057,6 +2318,130 @@ class _LiveSeedSemanticProvider:
                             "manuscript": "PRIVATE_SEMANTIC_AGGREGATE_MANUSCRIPT",
                         }
                     }
+                elif module_key == "story_ontology":
+                    content = {
+                        "seed_ontology": {
+                            "entity_types": [
+                                {"name": "character", "text": "PRIVATE_SEMANTIC_ONTOLOGY_TEXT"},
+                                {"name": "organization", "source_text": "PRIVATE_SEMANTIC_ONTOLOGY_SOURCE"},
+                            ],
+                            "relationship_types": [
+                                {"name": "ally", "provider_response": "PRIVATE_SEMANTIC_ONTOLOGY_RESPONSE"}
+                            ],
+                            "world_rule_types": [{"name": "ritual_law", "api_key": "sk-provider-semantic-ontology"}],
+                            "prompt": "PRIVATE_SEMANTIC_ONTOLOGY_PROMPT",
+                            "raw_body": "PRIVATE_SEMANTIC_ONTOLOGY_RAW_BODY",
+                            "credential_ref": "semantic-ontology-secret-ref",
+                            "draft": "PRIVATE_SEMANTIC_ONTOLOGY_DRAFT",
+                            "manuscript": "PRIVATE_SEMANTIC_ONTOLOGY_MANUSCRIPT",
+                        }
+                    }
+                elif module_key == "entity_resolution":
+                    content = {
+                        "entity_resolution": {
+                            "merged_entities": [
+                                {
+                                    "canonical_name": "林舟",
+                                    "entity_type": "character",
+                                    "aliases": ["小舟", "雨港守夜人"],
+                                    "object_key": "projects/leaked/semantic/entity.txt",
+                                    "source_text": "PRIVATE_SEMANTIC_ENTITY_SOURCE",
+                                }
+                            ],
+                            "aliases": [
+                                {
+                                    "alias": "小舟",
+                                    "canonical_name": "林舟",
+                                    "provider_response": "PRIVATE_SEMANTIC_ENTITY_RESPONSE",
+                                },
+                                {
+                                    "alias": "雨港守夜人",
+                                    "canonical_name": "林舟",
+                                    "api_key": "sk-provider-semantic-entity",
+                                },
+                            ],
+                            "conflicts": [
+                                {
+                                    "name": "林舟",
+                                    "reason": "章节称谓不一致",
+                                    "raw_body": "PRIVATE_SEMANTIC_ENTITY_RAW_BODY",
+                                }
+                            ],
+                            "prompt": "PRIVATE_SEMANTIC_ENTITY_PROMPT",
+                            "credential_ref": "semantic-entity-secret-ref",
+                            "draft": "PRIVATE_SEMANTIC_ENTITY_DRAFT",
+                            "manuscript": "PRIVATE_SEMANTIC_ENTITY_MANUSCRIPT",
+                        }
+                    }
+                elif module_key == "character_agent_profile":
+                    content = {
+                        "agent_profiles": {
+                            "profiles": [
+                                {
+                                    "name": "林舟",
+                                    "voice": "quiet resolve",
+                                    "provider_raw_body": "PRIVATE_SEMANTIC_PROFILE_RAW",
+                                    "api_key": "sk-provider-semantic-profile",
+                                }
+                            ],
+                            "memory_seeds": [{"title": "雨港承诺", "summary": "Keeps one promise."}],
+                            "relationship_views": [{"name": "林舟 / 陆晚", "summary": "Careful alliance."}],
+                            "prompt": "PRIVATE_SEMANTIC_PROFILE_PROMPT",
+                            "credential_ref": "semantic-profile-secret-ref",
+                            "draft": "PRIVATE_SEMANTIC_PROFILE_DRAFT",
+                            "manuscript": "PRIVATE_SEMANTIC_PROFILE_MANUSCRIPT",
+                        }
+                    }
+                elif module_key == "narrative_archives":
+                    content = {
+                        "archive_entities": [
+                            {
+                                "title": "阿澜档案",
+                                "summary": "雨夜谈判中的核心人物。",
+                                "category": "character",
+                                "tags": ["character", "rain", "draft"],
+                                "payload": {
+                                    "entity_name": "阿澜",
+                                    "entity_type": "character",
+                                    "core_drive": "守住秘密",
+                                    "stable_detail": "只保留可进入档案候选的结构化摘要。",
+                                    "prompt": "PRIVATE_SEMANTIC_ARCHIVE_PROMPT",
+                                    "provider_response": "PRIVATE_SEMANTIC_ARCHIVE_RESPONSE",
+                                    "raw_body": "PRIVATE_SEMANTIC_ARCHIVE_RAW_BODY",
+                                    "api_key": "sk-provider-semantic-archive",
+                                    "credential_ref": "semantic-archive-secret-ref",
+                                    "object_key": "projects/leaked/semantic/archive.txt",
+                                    "draft": "PRIVATE_SEMANTIC_ARCHIVE_DRAFT",
+                                    "manuscript": "PRIVATE_SEMANTIC_ARCHIVE_MANUSCRIPT",
+                                },
+                                "memories": [
+                                    {
+                                        "memory_type": "motivation",
+                                        "summary": "她用沉默拖住谈判节奏。",
+                                        "body_text": "PRIVATE_SEMANTIC_ARCHIVE_MEMORY_BODY",
+                                        "payload": {
+                                            "body_text": "PRIVATE_SEMANTIC_ARCHIVE_MEMORY_PAYLOAD",
+                                            "raw_body": "PRIVATE_SEMANTIC_ARCHIVE_MEMORY_RAW",
+                                            "provider_response": "PRIVATE_SEMANTIC_ARCHIVE_MEMORY_RESPONSE",
+                                            "api_key": "sk-provider-semantic-memory",
+                                            "credential_ref": "semantic-memory-secret-ref",
+                                            "object_key": "projects/leaked/semantic/memory.txt",
+                                            "draft": "PRIVATE_SEMANTIC_ARCHIVE_MEMORY_DRAFT",
+                                            "manuscript": "PRIVATE_SEMANTIC_ARCHIVE_MEMORY_MANUSCRIPT",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                        "prompt": "PRIVATE_SEMANTIC_ARCHIVE_TOP_PROMPT",
+                        "provider_response": "PRIVATE_SEMANTIC_ARCHIVE_TOP_RESPONSE",
+                        "raw_body": "PRIVATE_SEMANTIC_ARCHIVE_TOP_RAW",
+                        "api_key": "sk-provider-semantic-archive-top",
+                        "credential_ref": "semantic-archive-top-secret-ref",
+                        "object_key": "projects/leaked/semantic/archive-top.txt",
+                        "draft": "PRIVATE_SEMANTIC_ARCHIVE_TOP_DRAFT",
+                        "manuscript": "PRIVATE_SEMANTIC_ARCHIVE_TOP_MANUSCRIPT",
+                    }
                 else:
                     content = {"error": {"code": "UNEXPECTED_MODULE", "message": module_key}}
                 response = {
@@ -2203,6 +2588,60 @@ def _prepare_live_seed_semantic_database(admin_url: str, provider_base_url: str)
                      (%s, %s, 'sequential_reading', %s, 'model-seed-sequential-live', '{"temperature":0}'::jsonb, %s),
                      (%s, %s, 'anchor_point_summary', %s, 'model-seed-global-aggregation-live', '{"temperature":0}'::jsonb, %s)""",
                 (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    CHANNEL_ID,
+                    USER_ID,
+                    TENANT_ID,
+                    PROJECT_ID,
+                    CHANNEL_ID,
+                    USER_ID,
+                ),
+            )
+
+
+def _prepare_live_seed_full_semantic_database(admin_url: str, provider_base_url: str) -> None:
+    _prepare_live_seed_semantic_database(admin_url, provider_base_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES
+                     (%s, %s, 'model-seed-ontology-live', 'live-provider', true, false),
+                     (%s, %s, 'model-seed-entity-resolution-live', 'live-provider', true, false),
+                     (%s, %s, 'model-seed-profile-live', 'live-provider', true, false),
+                     (%s, %s, 'model-seed-archive-live', 'live-provider', true, false)""",
+                (
+                    TENANT_ID,
+                    CHANNEL_ID,
+                    TENANT_ID,
+                    CHANNEL_ID,
+                    TENANT_ID,
+                    CHANNEL_ID,
+                    TENANT_ID,
+                    CHANNEL_ID,
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES
+                     (%s, %s, 'story_ontology', %s, 'model-seed-ontology-live', '{"temperature":0}'::jsonb, %s),
+                     (%s, %s, 'entity_resolution', %s, 'model-seed-entity-resolution-live', '{"temperature":0}'::jsonb, %s),
+                     (%s, %s, 'character_agent_profile', %s, 'model-seed-profile-live', '{"temperature":0}'::jsonb, %s),
+                     (%s, %s, 'narrative_archives', %s, 'model-seed-archive-live', '{"temperature":0}'::jsonb, %s)""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    CHANNEL_ID,
+                    USER_ID,
+                    TENANT_ID,
+                    PROJECT_ID,
+                    CHANNEL_ID,
+                    USER_ID,
                     TENANT_ID,
                     PROJECT_ID,
                     CHANNEL_ID,
@@ -2996,6 +3435,101 @@ def _read_seed_semantic_live_rows_for(admin_url: str, run_id: str, source_file_i
     }
 
 
+def _read_seed_full_semantic_live_rows_for(admin_url: str, run_id: str, source_file_id: str) -> dict[str, list[dict[str, Any]]]:
+    rows = _read_seed_semantic_live_rows_for(admin_url, run_id, source_file_id)
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT
+                     module_key, model_id, entity_type_count,
+                     relationship_type_count, world_rule_type_count
+                   FROM seed_ontology_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            seed_ontology_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     module_key, model_id, merged_entity_count,
+                     alias_count, conflict_count
+                   FROM seed_entity_resolution_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            seed_entity_resolution_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     module_key, model_id, profile_count, memory_seed_count,
+                     relationship_view_count
+                   FROM seed_agent_profile_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            seed_agent_profile_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     (SELECT count(*)::int FROM assets
+                        WHERE tenant_id = %s AND project_id = %s AND source_kind = 'narrative_archives') AS assets,
+                     (SELECT count(*)::int FROM archive_memories
+                        WHERE tenant_id = %s AND project_id = %s AND source_kind = 'narrative_archives') AS archive_memories,
+                     (SELECT count(*)::int FROM archive_memory_events
+                        WHERE tenant_id = %s AND project_id = %s) AS archive_memory_events""",
+                (TENANT_ID, PROJECT_ID, TENANT_ID, PROJECT_ID, TENANT_ID, PROJECT_ID),
+            )
+            archive_candidate_counts = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     (SELECT count(*)::int FROM assets
+                        WHERE tenant_id = %s
+                          AND project_id = %s
+                          AND source_kind = 'seed_pipeline'
+                          AND payload_jsonb->>'source_run_id' = %s) AS assets,
+                     (SELECT count(*)::int FROM global_search_index gsi
+                        JOIN assets a
+                          ON a.tenant_id = gsi.tenant_id
+                         AND a.project_id = gsi.project_id
+                         AND a.asset_id::text = gsi.source_ref
+                       WHERE gsi.tenant_id = %s
+                         AND gsi.project_id = %s
+                         AND gsi.source = 'asset'
+                         AND a.source_kind = 'seed_pipeline'
+                         AND a.payload_jsonb->>'source_run_id' = %s) AS search_documents""",
+                (TENANT_ID, PROJECT_ID, run_id, TENANT_ID, PROJECT_ID, run_id),
+            )
+            seed_asset_counts = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     ready_asset_count,
+                     ready_entity_count,
+                     ready_relationship_count,
+                     ready_world_rule_count
+                   FROM project_readiness_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            project_readiness_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT status, progress, error_code, error_message, result_jsonb
+                   FROM workflow_runs
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            workflow_run_details = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        **rows,
+        "seed_ontology_snapshots": seed_ontology_snapshots,
+        "seed_entity_resolution_snapshots": seed_entity_resolution_snapshots,
+        "seed_agent_profile_snapshots": seed_agent_profile_snapshots,
+        "archive_candidate_counts": archive_candidate_counts,
+        "seed_asset_counts": seed_asset_counts,
+        "project_readiness_snapshots": project_readiness_snapshots,
+        "workflow_run_details": workflow_run_details,
+    }
+
+
 def _read_seed_sequential_reading_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
     with psycopg.connect(admin_url, row_factory=dict_row) as connection:
         with connection.cursor() as cursor:
@@ -3406,6 +3940,33 @@ def _wait_for_seed_live_semantic_rows(admin_url: str, run_id: str, source_file_i
             return last
         time.sleep(0.5)
     raise AssertionError(f"timed out waiting for live seed semantic rows: {last!r}")
+
+
+def _wait_for_seed_live_full_semantic_rows(admin_url: str, run_id: str, source_file_id: str) -> dict[str, list[dict[str, Any]]]:
+    deadline = time.monotonic() + 120
+    last: dict[str, list[dict[str, Any]]] = {}
+    while time.monotonic() < deadline:
+        last = _read_seed_full_semantic_live_rows_for(admin_url, run_id, source_file_id)
+        if (
+            last["source_files"] == [{"file_id": source_file_id, "parse_status": "parsed"}]
+            and len(last["project_text_artifacts"]) == 1
+            and len(last["text_segments"]) == 2
+            and len(last["reading_segment_notes"]) == 2
+            and len(last["seed_analysis_snapshots"]) == 1
+            and len(last["seed_ontology_snapshots"]) == 1
+            and len(last["seed_entity_resolution_snapshots"]) == 1
+            and len(last["seed_agent_profile_snapshots"]) == 1
+            and last["archive_candidate_counts"] == [{"assets": 1, "archive_memories": 1, "archive_memory_events": 1}]
+            and last["seed_asset_counts"] == [{"assets": 5, "search_documents": 5}]
+            and len(last["project_readiness_snapshots"]) == 1
+            and last["workflow_runs"] == [{"status": "completed", "error_code": None}]
+            and len(last["workflow_run_details"]) == 1
+            and last["workflow_run_details"][0]["progress"] == 100
+            and (last["workflow_run_details"][0]["result_jsonb"] or {}).get("stage") == "finalize"
+        ):
+            return last
+        time.sleep(0.5)
+    raise AssertionError(f"timed out waiting for live seed full semantic rows: {last!r}")
 
 
 def _assert_seed_object_readback(
