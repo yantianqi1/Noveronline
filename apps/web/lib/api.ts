@@ -1263,12 +1263,10 @@ export function apiBaseUrl() {
   return process.env.MIROFISH_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 }
 
-export async function getCurrentUser(input: { actorUserId: string }): Promise<CurrentUserSummary> {
+export async function getCurrentUser(input: { actorUserId?: string; sessionCookie?: string }): Promise<CurrentUserSummary> {
   try {
     const response = await fetch(`${apiBaseUrl()}/v1/me`, {
-      headers: {
-        "X-User-Id": input.actorUserId,
-      },
+      headers: currentUserHeaders(input),
       cache: "no-store",
     });
 
@@ -1276,6 +1274,20 @@ export async function getCurrentUser(input: { actorUserId: string }): Promise<Cu
   } catch (error) {
     return networkFailure(error, "CURRENT_USER_QUERY_FAILED");
   }
+}
+
+function currentUserHeaders(input: { actorUserId?: string; sessionCookie?: string }) {
+  const headers: Record<string, string> = {};
+  const sessionCookie = input.sessionCookie?.trim();
+  const actorUserId = input.actorUserId?.trim();
+
+  if (sessionCookie) {
+    headers.Cookie = `mirofish_session=${sessionCookie}`;
+  } else if (actorUserId) {
+    headers["X-User-Id"] = actorUserId;
+  }
+
+  return headers;
 }
 
 export async function startWriterRun(input: StartWriterRunInput): Promise<WriterRunSummary> {

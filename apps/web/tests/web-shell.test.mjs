@@ -115,7 +115,7 @@ test("project navigation includes writer and LLM Facility routes with active pat
   assert.match(nav, /aria-current/);
 });
 
-test("Current user API client fetches public membership summary with actor header only", async () => {
+test("Current user API client can fetch public membership summary with browser session cookie", async () => {
   const client = await fileText("lib/api.ts");
   const currentUserTypes = sourceSlice(client, "export type TenantMembershipSummary", "export type WriterRunSummary");
   const currentUserClient = sourceSlice(client, "export async function getCurrentUser", "export async function startWriterRun");
@@ -138,8 +138,12 @@ test("Current user API client fetches public membership summary with actor heade
   assert.match(currentUserTypes, /\|\s*ApiFailure/);
 
   assert.match(currentUserClient, /\/v1\/me/);
-  assert.match(currentUserClient, /actorUserId:\s*string/);
-  assert.match(currentUserClient, /"X-User-Id":\s*input\.actorUserId/);
+  assert.match(currentUserClient, /actorUserId\?:\s*string/);
+  assert.match(currentUserClient, /sessionCookie\?:\s*string/);
+  assert.match(currentUserClient, /headers:\s*currentUserHeaders\(input\)/);
+  assert.match(client, /function currentUserHeaders\(input:\s*\{\s*actorUserId\?:\s*string;\s*sessionCookie\?:\s*string;?\s*\}\)/);
+  assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
+  assert.match(client, /else if\s*\(actorUserId\)\s*\{\s*headers\["X-User-Id"\]\s*=\s*actorUserId;\s*\}/s);
   assert.match(currentUserClient, /decodeCurrentUserResponse/);
   assert.match(currentUserClient, /networkFailure\(error,\s*"CURRENT_USER_QUERY_FAILED"\)/);
   assert.doesNotMatch(currentUserClient, /X-Tenant-Id/);
@@ -165,8 +169,12 @@ test("tenant picker project layout loads current user and passes memberships int
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
 
   assert.match(layout, /getCurrentUser/);
+  assert.match(layout, /import\s*\{\s*cookies\s*\}\s*from\s*"next\/headers"/);
+  assert.match(layout, /const\s+cookieStore\s*=\s*await\s+cookies\(\)/);
+  assert.match(layout, /cookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
   assert.match(layout, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
-  assert.match(layout, /actorUserId\s*\?\s*await getCurrentUser\(\{\s*actorUserId\s*\}\)/s);
+  assert.match(layout, /sessionCookie\s*\|\|\s*actorUserId/);
+  assert.match(layout, /await\s+getCurrentUser\(\{\s*actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId,\s*sessionCookie,\s*\}\)/s);
   assert.match(layout, /CURRENT_USER_CONTEXT_UNCONFIGURED/);
   assert.doesNotMatch(layout, /\?\?\s*"web-shell"/);
   assert.match(layout, /currentUser=\{currentUser\}/);
