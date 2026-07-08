@@ -17,15 +17,27 @@ from mirofish_agents.seed.sequential_reader import (
 GLOBAL_AGGREGATION_MODULE_KEY = "anchor_point_summary"
 SENSITIVE_AGGREGATE_KEYS = {
     "api_key",
+    "artifact_object_key",
     "body",
     "content",
     "credential_ref",
+    "draft",
     "encrypted_api_key",
+    "encrypted_credential",
     "evidence",
     "evidence_text",
+    "manuscript",
+    "object_key",
     "prompt",
+    "provider_raw_body",
+    "provider_response",
+    "raw_body",
     "raw_content",
+    "raw_text",
     "response",
+    "segment_object_key",
+    "source_object_key",
+    "source_text",
     "text",
 }
 
@@ -73,13 +85,13 @@ class PostgresSeedAggregateSource:
                        FROM entities e, input i
                        WHERE e.tenant_id::text = i.tenant_id
                          AND e.project_id::text = i.project_id
-                         AND e.run_id::text = i.run_id
+                         AND e.source_run_id::text = i.run_id
                        UNION ALL
                        SELECT 'relationships' AS fact_type, COUNT(*)::int AS fact_count
                        FROM relationships r, input i
                        WHERE r.tenant_id::text = i.tenant_id
                          AND r.project_id::text = i.project_id
-                         AND r.run_id::text = i.run_id""",
+                         AND r.source_run_id::text = i.run_id""",
                     (context.tenant_id, context.project_id, context.run_id),
                 )
                 count_rows = cursor.fetchall()
@@ -191,7 +203,7 @@ def _global_aggregation_messages(
             "content": (
                 "You are the MiroFish seed global aggregation module. Return one JSON object with "
                 "seed_analysis as an object. Use only the supplied public summaries and fact counts. "
-                "Do not include raw text, evidence, prompt bodies, API keys, or provider metadata."
+                "Do not include raw text, evidence, private request bodies, API keys, or provider metadata."
             ),
         },
         {

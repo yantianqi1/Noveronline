@@ -54,6 +54,27 @@ SENSITIVE_ARCHIVE_CANDIDATE_KEYS = {
     "source_text",
     "text",
 }
+SENSITIVE_SEED_ANALYSIS_KEYS = {
+    *SENSITIVE_WORKFLOW_EVENT_KEYS,
+    "body_text",
+    "content_text",
+    "encrypted_credential",
+    "evidence",
+    "evidence_quotes",
+    "evidence_text",
+    "excerpt",
+    "material_text",
+    "quote",
+    "quotes",
+    "raw_text",
+    "source_material",
+    "source_text",
+    "text",
+}
+NORMALIZED_SENSITIVE_SEED_ANALYSIS_KEYS = {
+    re.sub(r"[^a-z0-9]", "", key)
+    for key in SENSITIVE_SEED_ANALYSIS_KEYS
+}
 SEQUENTIAL_READING_PAYLOAD_LIST_FIELDS = (
     "characters",
     "organizations",
@@ -65,6 +86,20 @@ SEQUENTIAL_READING_PAYLOAD_LIST_FIELDS = (
 )
 OPTIONAL_SEQUENTIAL_READING_PAYLOAD_LIST_FIELDS = ("narrative_arcs", "volume_summaries")
 GLOBAL_AGGREGATION_MODULE_KEY = "anchor_point_summary"
+PUBLIC_GLOBAL_AGGREGATION_ERROR_CODES = {
+    "GLOBAL_AGGREGATOR_CONFIGURATION_FAILED",
+    "GLOBAL_AGGREGATOR_UNCONFIGURED",
+    "LLM_CONCURRENCY_LIMITED",
+    "LLM_CREDENTIAL_DECRYPT_FAILED",
+    "LLM_CREDENTIAL_KEY_INVALID",
+    "LLM_CREDENTIAL_KEY_UNCONFIGURED",
+    "LLM_CREDENTIAL_UNAVAILABLE",
+    "LLM_MODULE_UNBOUND",
+    "LLM_PROVIDER_ERROR",
+    "SCHEMA_VALIDATION_FAILED",
+    "SEED_AGGREGATE_SOURCE_QUERY_FAILED",
+    "SEED_ANALYSIS_WRITE_FAILED",
+}
 STORY_ONTOLOGY_MODULE_KEY = "story_ontology"
 ENTITY_RESOLUTION_MODULE_KEY = "entity_resolution"
 CHARACTER_AGENT_PROFILE_MODULE_KEY = "character_agent_profile"
@@ -997,7 +1032,7 @@ class PostgresSeedAnalysisWriter:
             raise ValueError("model_id must be a string")
         normalized_segment_count = _non_negative_int(segment_count, "segment_count")
         normalized_summary_count = _non_negative_int(summary_count, "summary_count")
-        analysis_json = _json_object(seed_analysis)
+        analysis_json = _seed_analysis_json(seed_analysis)
         connection = self._connect()
         try:
             with connection.cursor() as cursor:
@@ -2949,6 +2984,32 @@ def _json_object(value: dict[str, Any]) -> str:
         raise ValueError("json value must be an object")
     sanitized_metadata = _sanitize_workflow_event_payload(value)
     return json.dumps(sanitized_metadata, ensure_ascii=False, separators=(",", ":"))
+
+
+def _seed_analysis_json(value: dict[str, Any]) -> str:
+    if not isinstance(value, dict):
+        raise ValueError("seed_analysis must be an object")
+    sanitized_analysis = _sanitize_seed_analysis_value(value)
+    if not isinstance(sanitized_analysis, dict):
+        raise ValueError("seed_analysis must be an object")
+    return json.dumps(sanitized_analysis, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sanitize_seed_analysis_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_seed_analysis_value(child)
+            for key, child in value.items()
+            if not _is_sensitive_seed_analysis_key(str(key))
+        }
+    if isinstance(value, list):
+        return [_sanitize_seed_analysis_value(child) for child in value]
+    return value
+
+
+def _is_sensitive_seed_analysis_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return normalized in NORMALIZED_SENSITIVE_SEED_ANALYSIS_KEYS
 
 
 AGENT_PROFILE_PRIVATE_SNAPSHOT_BLOCKED_KEYS = {
@@ -5117,16 +5178,18 @@ def _global_aggregation_failed_result(
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
 ) -> dict[str, Any]:
+    safe_code = _public_global_aggregation_error_code(code)
+    safe_message = _public_global_aggregation_error_message(safe_code)
     _record_failed_global_aggregation_event(
         context=context,
-        error_code=code,
-        error_message=public_message,
+        error_code=safe_code,
+        error_message=safe_message,
         workflow_event_writer=workflow_event_writer,
     )
     return _error_result(
         base=base,
-        code=code,
-        message=message,
+        code=safe_code,
+        message=safe_message,
         extra={"stage": "global_aggregation", "module_key": GLOBAL_AGGREGATION_MODULE_KEY},
     )
 
@@ -7233,6 +7296,10 @@ def _public_llm_error_message(code: str) -> str:
 
 
 def _public_global_aggregation_error_message(code: str) -> str:
+    if code == "GLOBAL_AGGREGATOR_CONFIGURATION_FAILED":
+        return "global aggregator configuration failed"
+    if code == "GLOBAL_AGGREGATOR_UNCONFIGURED":
+        return "global aggregator is unconfigured"
     if code == "LLM_MODULE_UNBOUND":
         return f"{GLOBAL_AGGREGATION_MODULE_KEY} module is unbound"
     if code == "LLM_CREDENTIAL_KEY_UNCONFIGURED":
@@ -7245,7 +7312,19 @@ def _public_global_aggregation_error_message(code: str) -> str:
         return "LLM credential decrypt failed"
     if code == "LLM_CONCURRENCY_LIMITED":
         return "LLM concurrency limit reached"
+    if code == "SCHEMA_VALIDATION_FAILED":
+        return "global aggregation output schema validation failed"
+    if code == "SEED_AGGREGATE_SOURCE_QUERY_FAILED":
+        return "seed aggregate source query failed"
+    if code == "SEED_ANALYSIS_WRITE_FAILED":
+        return "seed analysis write failed"
     return "global aggregation failed"
+
+
+def _public_global_aggregation_error_code(code: str) -> str:
+    if code in PUBLIC_GLOBAL_AGGREGATION_ERROR_CODES:
+        return code
+    return "LLM_PROVIDER_ERROR"
 
 
 def _public_ontology_error_message(code: str) -> str:

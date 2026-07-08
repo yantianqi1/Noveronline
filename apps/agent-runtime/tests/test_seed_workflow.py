@@ -44,6 +44,7 @@ from mirofish_agents.temporal.seed import (
 )
 from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution
 from mirofish_agents.temporal.worker import worker_components_for_task_queue
+from mirofish_agents.seed.global_aggregator import PostgresSeedAggregateSource
 
 
 def _context() -> AgentContext:
@@ -1310,6 +1311,54 @@ def test_global_aggregation_activity_records_sanitized_counts_from_injected_aggr
     ]
     assert "private aggregate" not in str(result)
     assert "private aggregate" not in str(workflow_writer.events)
+
+
+def test_global_aggregation_activity_sanitizes_failed_aggregator_public_result() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+
+    result = global_aggregation_activity(
+        {"context": _context().model_dump()},
+        global_aggregator=FailingGlobalAggregator(),
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["stage"] == "global_aggregation"
+    assert result["module_key"] == "anchor_point_summary"
+    assert result["error"] == {
+        "code": "LLM_PROVIDER_ERROR",
+        "message": "global aggregation failed",
+    }
+    assert workflow_writer.events == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "workflow_type": "seed_pipeline",
+            "event_type": "seed.stage.failed",
+            "payload": {
+                "stage": "global_aggregation",
+                "status": "failed",
+                "activity": "global_aggregation_activity",
+                "module_key": "anchor_point_summary",
+                "error_code": "LLM_PROVIDER_ERROR",
+                "error_message": "global aggregation failed",
+            },
+        }
+    ]
+    encoded = json.dumps({"result": result, "events": workflow_writer.events}, sort_keys=True)
+    for forbidden in (
+        "prompt",
+        "api_key",
+        "sk-hidden",
+        "credential_ref",
+        "object_key",
+        "private/raw.txt",
+        "raw_text",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in encoded
 
 
 def test_global_aggregation_activity_persists_seed_analysis_snapshot_without_public_body() -> None:
@@ -2886,6 +2935,27 @@ class RecordingGlobalAggregator:
         }
 
 
+class FailingGlobalAggregator:
+    def aggregate(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+    ) -> dict[str, object]:
+        return {
+            "status": "failed",
+            "module_key": module_key,
+            "error": {
+                "code": "PROMPT_API_KEY_EVIDENCE_LEAK",
+                "message": (
+                    "provider failed prompt=hidden api_key=sk-hidden "
+                    "credential_ref=secret object_key=private/raw.txt raw_text=body "
+                    "draft=private manuscript=private"
+                ),
+            },
+        }
+
+
 class RecordingSeedAnalysisWriter:
     def __init__(self) -> None:
         self.snapshots: list[dict[str, object]] = []
@@ -3911,6 +3981,7 @@ class AggregateInputCursor:
         self.segment_rows = segment_rows
         self.count_rows = count_rows
         self.query_count = 0
+        self.executed: list[tuple[str, tuple[object, ...]]] = []
 
     def __enter__(self) -> "AggregateInputCursor":
         return self
@@ -3920,6 +3991,7 @@ class AggregateInputCursor:
 
     def execute(self, query: str, params: tuple[object, ...]) -> None:
         self.query_count += 1
+        self.executed.append((query, params))
 
     def fetchall(self) -> list[dict[str, object]]:
         if self.query_count == 1:
@@ -3937,6 +4009,16 @@ class AggregateInputConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+class RecordingAggregateInputConnection(AggregateInputConnection):
+    @property
+    def cursor_instance(self) -> AggregateInputCursor:
+        return self._cursor_instance
+
+    @cursor_instance.setter
+    def cursor_instance(self, value: AggregateInputCursor) -> None:
+        self._cursor_instance = value
 
 
 def test_seed_pipeline_activity_records_sanitized_pending_stage_event() -> None:
@@ -5746,6 +5828,72 @@ def test_global_aggregator_from_env_builds_db_backed_llm_facility_aggregator(
     assert "雨夜开场" in request_body
     assert "raw_content" not in request_body
     assert "evidence_text" not in request_body
+
+
+def test_postgres_seed_aggregate_source_counts_runtime_facts_by_source_run_id() -> None:
+    connection = RecordingAggregateInputConnection(
+        segment_rows=[{"segment_id": "segment-1", "summary": "雨夜公共摘要。"}],
+        count_rows=[
+            {"fact_type": "entities", "fact_count": 1},
+            {"fact_type": "relationships", "fact_count": 1},
+        ],
+    )
+    source = PostgresSeedAggregateSource(connect=lambda: connection)
+
+    result = source.load_aggregate_input(context=_context())
+
+    assert result == {
+        "segment_summaries": [{"segment_id": "segment-1", "summary": "雨夜公共摘要。"}],
+        "fact_counts": {"entities": 1, "relationships": 1},
+    }
+    count_query = connection.cursor_instance.executed[-1][0]
+    assert "e.source_run_id::text = i.run_id" in count_query
+    assert "r.source_run_id::text = i.run_id" in count_query
+    assert "e.run_id" not in count_query
+    assert "r.run_id" not in count_query
+
+
+def test_postgres_seed_analysis_writer_removes_aggregate_sensitive_keys() -> None:
+    connection = FakeConnection()
+    writer = PostgresSeedAnalysisWriter(connect=lambda: connection)
+
+    writer.record_seed_analysis(
+        context=_context(),
+        module_key="anchor_point_summary",
+        model_id="model-agg",
+        segment_count=2,
+        summary_count=1,
+        seed_analysis={
+            "overview": "雨城卷建立追踪压力。",
+            "nested": {
+                "text": "raw private text must not be stored",
+                "evidence": "private evidence marker",
+                "content_text": "private content text",
+                "body_text": "private body text",
+                "material_text": "private material text",
+                "source_material": "private source material",
+                "sourceMaterial": "private camel source material",
+                "excerpt": "private excerpt",
+                "quote": "private quote",
+                "quotes": ["private quote"],
+                "evidence_quotes": ["private evidence quote"],
+                "evidenceQuotes": ["private camel evidence quote"],
+                "contentText": "private camel content text",
+                "bodyText": "private camel body text",
+                "provider_response": "raw provider response",
+                "credential_ref": "secret-ref",
+                "safe_note": "只保留私有分析摘要。",
+            },
+            "content": "raw body",
+            "raw_body": "raw provider body",
+            "api_key": "sk-test",
+        },
+    )
+
+    assert json.loads(connection.cursor_instance.params[5]) == {
+        "overview": "雨城卷建立追踪压力。",
+        "nested": {"safe_note": "只保留私有分析摘要。"},
+    }
 
 
 def test_global_aggregation_activity_records_factory_configuration_errors(

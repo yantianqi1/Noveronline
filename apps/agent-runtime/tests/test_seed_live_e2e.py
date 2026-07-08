@@ -32,6 +32,7 @@ from mirofish_agents.temporal.seed import (
     archive_candidate_activity,
     entity_resolution_activity,
     finalize_seed_activity,
+    global_aggregation_activity,
     ontology_activity,
     parse_file_activity,
     seed_pipeline_activity,
@@ -939,6 +940,111 @@ def test_seed_sequential_reading_live_postgres_provider_object_store_persists_no
         assert forbidden not in public_event_body
 
 
+def test_seed_global_aggregation_live_postgres_provider_persists_sanitized_snapshot_and_public_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    with _LiveGlobalAggregationProvider() as provider:
+        _prepare_live_global_aggregation_database(admin_url, provider.base_url)
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+
+        result = global_aggregation_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-global-aggregation",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+
+    assert result == {
+        "tenant_id": TENANT_ID,
+        "project_id": PROJECT_ID,
+        "run_id": RUN_ID,
+        "workflow_type": "seed_pipeline",
+        "upload_id": None,
+        "status": "completed",
+        "stage": "global_aggregation",
+        "next_stage": "story_ontology",
+        "module_key": "anchor_point_summary",
+        "segment_count": 2,
+        "summary_count": 2,
+        "stage_event_persisted": True,
+        "model_id": "model-seed-global-aggregation-live",
+        "seed_analysis_snapshot_id": result["seed_analysis_snapshot_id"],
+    }
+    assert len(provider.requests) == 1
+    assert provider.requests[0]["path"] == "/v1/chat/completions"
+    assert _header(provider.requests[0]["headers"], "Authorization") == "Bearer sk-live-seed-global-aggregation"
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Tenant-Id") == TENANT_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Project-Id") == PROJECT_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Run-Id") == RUN_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Module-Key") == "anchor_point_summary"
+    provider_body = json.dumps(provider.requests[0]["body"], ensure_ascii=False, sort_keys=True)
+    assert "model-seed-global-aggregation-live" in provider_body
+    assert "雨夜公共摘要" in provider_body
+    assert "破晓公共摘要" in provider_body
+    assert '"fact_counts"' in provider_body
+    assert '"entities"' in provider_body
+    assert '"relationships"' in provider_body
+    for forbidden in _global_aggregation_live_forbidden_public_markers():
+        assert forbidden not in provider_body
+
+    persisted = _read_seed_global_aggregation_live_rows(admin_url)
+    assert persisted["seed_analysis_snapshots"] == [
+        {
+            "module_key": "anchor_point_summary",
+            "model_id": "model-seed-global-aggregation-live",
+            "summary_count": 2,
+            "segment_count": 2,
+            "analysis_jsonb": {
+                "overview": "雨港卷进入追踪压力。",
+                "timeline_summary": "雨夜发现脚步，破晓确认痕迹。",
+                "anchors": [{"title": "雨夜锚点", "summary": "林舟开始追踪。"}],
+            },
+        }
+    ]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "global_aggregation",
+                "status": "completed",
+                "activity": "global_aggregation_activity",
+                "module_key": "anchor_point_summary",
+                "segment_count": 2,
+                "summary_count": 2,
+                "model_id": "model-seed-global-aggregation-live",
+                "seed_analysis_snapshot_id": result["seed_analysis_snapshot_id"],
+            },
+        }
+    ]
+    public_body = json.dumps({"result": result, "events": persisted["workflow_events"]}, ensure_ascii=False)
+    for forbidden in _global_aggregation_live_forbidden_public_markers():
+        assert forbidden not in public_body
+    snapshot_body = json.dumps(persisted["seed_analysis_snapshots"], ensure_ascii=False)
+    for forbidden in (
+        "prompt",
+        "raw_content",
+        "raw_body",
+        "api_key",
+        "credential_ref",
+        "provider_response",
+        "PRIVATE_AGGREGATE_TEXT",
+        "PRIVATE_AGGREGATE_EVIDENCE",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in snapshot_body
+
+
 def test_seed_archive_candidate_live_postgres_provider_persists_candidate_assets_memories_and_public_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1318,6 +1424,79 @@ class _LiveSequentialReadingProvider:
                         "prompt_tokens": 23,
                         "completion_tokens": 31,
                         "total_tokens": 54,
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        return Handler
+
+
+class _LiveGlobalAggregationProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_LiveGlobalAggregationProvider":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(body),
+                    }
+                )
+                content = {
+                    "seed_analysis": {
+                        "overview": "雨港卷进入追踪压力。",
+                        "timeline_summary": "雨夜发现脚步，破晓确认痕迹。",
+                        "anchors": [
+                            {
+                                "title": "雨夜锚点",
+                                "summary": "林舟开始追踪。",
+                                "text": "PRIVATE_AGGREGATE_TEXT must not persist",
+                                "evidence": "PRIVATE_AGGREGATE_EVIDENCE must not persist",
+                                "provider_response": "PRIVATE_AGGREGATE_PROVIDER_RESPONSE must not persist",
+                            }
+                        ],
+                        "prompt": "PRIVATE_AGGREGATE_PROMPT must not persist",
+                        "raw_content": "PRIVATE_AGGREGATE_RAW_CONTENT must not persist",
+                        "raw_body": "PRIVATE_AGGREGATE_RAW_BODY must not persist",
+                        "api_key": "sk-provider-aggregate-leak",
+                        "credential_ref": "aggregate-secret-ref",
+                        "draft": "PRIVATE_AGGREGATE_DRAFT must not persist",
+                        "manuscript": "PRIVATE_AGGREGATE_MANUSCRIPT must not persist",
+                    }
+                }
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {
+                        "prompt_tokens": 31,
+                        "completion_tokens": 41,
+                        "total_tokens": 72,
                     },
                 }
                 encoded = json.dumps(response).encode("utf-8")
@@ -1912,6 +2091,151 @@ def _prepare_live_sequential_reading_database(
             )
 
 
+def _prepare_live_global_aggregation_database(admin_url: str, provider_base_url: str) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 60, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO text_segments (
+                     tenant_id, segment_id, project_id, run_id, segment_order,
+                     chapter_guess, title_guess, content_excerpt, object_key, summary, metadata_jsonb
+                   )
+                   VALUES
+                     (
+                       %s, %s, %s, %s, 0, '第一章', '雨夜',
+                       'PRIVATE_AGGREGATE_RAW_TEXT must not reach provider',
+                       'projects/live-seed/private-segment-0.txt',
+                       'PRIVATE_AGGREGATE_SEGMENT_SUMMARY must not reach provider',
+                       %s::jsonb
+                     ),
+                     (
+                       %s, %s, %s, %s, 1, '第二章', '破晓',
+                       'PRIVATE_AGGREGATE_RAW_TEXT_TWO must not reach provider',
+                       'projects/live-seed/private-segment-1.txt',
+                       'PRIVATE_AGGREGATE_SEGMENT_SUMMARY_TWO must not reach provider',
+                       %s::jsonb
+                     )""",
+                (
+                    TENANT_ID,
+                    SEGMENT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    json.dumps(
+                        {
+                            "object_key": "projects/live-seed/private-metadata-segment-0.txt",
+                            "prompt": "PRIVATE_AGGREGATE_PROMPT",
+                            "api_key": "sk-private",
+                        }
+                    ),
+                    TENANT_ID,
+                    SEGMENT_ID_2,
+                    PROJECT_ID,
+                    RUN_ID,
+                    json.dumps({"raw_content": "PRIVATE_AGGREGATE_RAW_CONTENT"}),
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO segment_summaries (
+                     tenant_id, project_id, run_id, segment_id, summary, source_kind, metadata_jsonb
+                   )
+                   VALUES
+                     (
+                       %s, %s, %s, %s, '雨夜公共摘要', 'sequential_reading',
+                       %s::jsonb
+                     ),
+                     (
+                       %s, %s, %s, %s, '破晓公共摘要', 'sequential_reading',
+                       %s::jsonb
+                     )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                    json.dumps(
+                        {
+                            "provider_response": "PRIVATE_AGGREGATE_PROVIDER_RESPONSE",
+                            "raw_body": "PRIVATE_AGGREGATE_RAW_BODY",
+                        }
+                    ),
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID_2,
+                    json.dumps({"credential_ref": "aggregate-secret-ref"}),
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO entities (
+                     tenant_id, entity_id, project_id, source_run_id, canonical_name,
+                     entity_type, importance, state_summary, first_seen_segment_id, metadata_jsonb
+                   )
+                   VALUES (
+                     %s, gen_random_uuid(), %s, %s, '林舟', 'character',
+                     'major', 'PRIVATE_AGGREGATE_ENTITY_BODY must not reach provider',
+                     %s, %s::jsonb
+                   )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                    json.dumps({"evidence": "PRIVATE_AGGREGATE_ENTITY_EVIDENCE"}),
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO relationships (
+                     tenant_id, relationship_id, project_id, source_entity_name,
+                     target_entity_name, relationship_type, summary, source_run_id,
+                     first_seen_segment_id, evidence_text, metadata_jsonb
+                   )
+                   VALUES (
+                     %s, gen_random_uuid(), %s, '林舟', '陆晚', 'ally',
+                     'PRIVATE_AGGREGATE_RELATIONSHIP_BODY must not reach provider',
+                     %s, %s, 'PRIVATE_AGGREGATE_EVIDENCE_MARKER must not reach provider',
+                     %s::jsonb
+                   )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    SEGMENT_ID,
+                    json.dumps({"source_text": "PRIVATE_AGGREGATE_SOURCE_TEXT"}),
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO llm_channels (
+                     tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+                   )
+                   VALUES (%s, %s, 'Seed Global Aggregation Live Provider', 'openai-compatible', %s, %s, 1, true)""",
+                (TENANT_ID, CHANNEL_ID, provider_base_url, _encrypt_api_key("sk-live-seed-global-aggregation")),
+            )
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES (%s, %s, 'model-seed-global-aggregation-live', 'live-provider', true, false)""",
+                (TENANT_ID, CHANNEL_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES (
+                     %s, %s, 'anchor_point_summary', %s,
+                     'model-seed-global-aggregation-live', '{"temperature":0}'::jsonb, %s
+                   )""",
+                (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+
+
 def _prepare_live_archive_candidate_database(admin_url: str, provider_base_url: str) -> None:
     _prepare_live_database_foundation(admin_url)
     with psycopg.connect(admin_url, autocommit=True) as connection:
@@ -2290,6 +2614,31 @@ def _read_seed_sequential_reading_live_rows(admin_url: str) -> dict[str, list[di
     }
 
 
+def _read_seed_global_aggregation_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT module_key, model_id, summary_count, segment_count, analysis_jsonb
+                   FROM seed_analysis_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            seed_analysis_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "seed_analysis_snapshots": seed_analysis_snapshots,
+        "workflow_events": workflow_events,
+    }
+
+
 def _read_seed_ontology_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
     with psycopg.connect(admin_url, row_factory=dict_row) as connection:
         with connection.cursor() as cursor:
@@ -2510,6 +2859,42 @@ def _archive_candidate_live_forbidden_public_markers() -> tuple[str, ...]:
         "PRIVATE_ARCHIVE_MEMORY_MANUSCRIPT",
         "PRIVATE_ARCHIVE_TOP_LEVEL_DRAFT",
         "PRIVATE_ARCHIVE_TOP_LEVEL_MANUSCRIPT",
+    )
+
+
+def _global_aggregation_live_forbidden_public_markers() -> tuple[str, ...]:
+    return (
+        "prompt",
+        "provider_response",
+        "raw_body",
+        "raw_content",
+        "content_excerpt",
+        "api_key",
+        "encrypted_api_key",
+        "credential_ref",
+        "object_key",
+        "source_object_key",
+        "artifact_object_key",
+        "segment_object_key",
+        "projects/live-seed/private",
+        "sk-live-seed-global-aggregation",
+        "sk-provider-aggregate-leak",
+        "aggregate-secret-ref",
+        "PRIVATE_AGGREGATE_RAW_TEXT",
+        "PRIVATE_AGGREGATE_RAW_TEXT_TWO",
+        "PRIVATE_AGGREGATE_SEGMENT_SUMMARY",
+        "PRIVATE_AGGREGATE_ENTITY_BODY",
+        "PRIVATE_AGGREGATE_RELATIONSHIP_BODY",
+        "PRIVATE_AGGREGATE_PROVIDER_RESPONSE",
+        "PRIVATE_AGGREGATE_RAW_BODY",
+        "PRIVATE_AGGREGATE_EVIDENCE_MARKER",
+        "PRIVATE_AGGREGATE_SOURCE_TEXT",
+        "PRIVATE_AGGREGATE_PROMPT",
+        "PRIVATE_AGGREGATE_RAW_CONTENT",
+        "draft",
+        "manuscript",
+        "PRIVATE_AGGREGATE_DRAFT",
+        "PRIVATE_AGGREGATE_MANUSCRIPT",
     )
 
 
