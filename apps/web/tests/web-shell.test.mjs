@@ -182,6 +182,36 @@ test("tenant picker project layout loads current user and passes memberships int
   assert.match(layout, /projectId=\{projectId\}/);
 });
 
+test("project pages resolve API context from browser session cookie instead of hardcoded actor", async () => {
+  const helper = await fileText("lib/server-auth.ts");
+  const projectPages = [
+    "app/(app)/[tenantSlug]/projects/[projectId]/assets/page.tsx",
+    "app/(app)/[tenantSlug]/projects/[projectId]/character-console/page.tsx",
+    "app/(app)/[tenantSlug]/projects/[projectId]/graph/page.tsx",
+    "app/(app)/[tenantSlug]/projects/[projectId]/llm-facility/page.tsx",
+    "app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx",
+    "app/(app)/[tenantSlug]/projects/[projectId]/worldline/page.tsx",
+    "app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx",
+  ];
+  const pageSources = (await Promise.all(projectPages.map((page) => fileText(page)))).join("\n");
+  const client = await fileText("lib/api.ts");
+
+  assert.match(helper, /import\s*\{\s*cookies\s*\}\s*from\s*"next\/headers"/);
+  assert.match(helper, /export\s+async\s+function\s+webApiContext/);
+  assert.match(helper, /cookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(helper, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
+  assert.match(helper, /actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId/);
+  assert.match(client, /sessionCookie\?:\s*string/);
+  assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
+  assert.match(client, /else if\s*\(actorUserId\)\s*\{\s*headers\["X-User-Id"\]\s*=\s*actorUserId;\s*\}/s);
+  assert.match(client, /function contextHeaders\(input:\s*ApiContext\)/);
+  assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
+  assert.match(pageSources, /webApiContext/);
+  assert.match(pageSources, /await\s+webApiContext/);
+  assert.doesNotMatch(pageSources, /actorUserId:\s*"web-shell"/);
+  assert.doesNotMatch(pageSources, /actorUserId:\s*'web-shell'/);
+});
+
 test("ProjectNav renders tenant picker and project picker links from public memberships", async () => {
   const nav = await fileText("components/project-nav.tsx");
 
@@ -931,8 +961,10 @@ test("writer API client uses Go API base URL and tenant context headers", async 
   const writerClient = sourceSlice(client, "export async function startWriterRun", "export async function getProjectManuscript");
 
   assert.match(client, /MIROFISH_API_BASE_URL/);
-  assert.match(writerClient, /X-Tenant-Id/);
-  assert.match(writerClient, /X-User-Id/);
+  assert.match(writerClient, /contextHeaders\(input\)/);
+  assert.match(client, /"X-Tenant-Id":\s*input\.tenantId/);
+  assert.match(client, /headers\["X-User-Id"\]\s*=\s*actorUserId/);
+  assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
   assert.match(writerClient, /\/v1\/projects\/\$\{(?:input\.)?projectId\}\/writer-runs/);
   assert.match(client, /trace_id/);
   assert.doesNotMatch(writerClient, /tenant_id\s*:/);

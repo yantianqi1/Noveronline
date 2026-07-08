@@ -15,6 +15,7 @@ import {
   startWorldlineStep,
   updateWorldlineEvent,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -57,21 +58,13 @@ export default async function WorldlinePage({
   const { tenantSlug, projectId } = await params;
   const query = searchParams ? await searchParams : {};
   const selectedPrepareId = query.worldlinePreparationPrepareId ?? "";
+  const apiContext = await webApiContext({ tenantId: tenantSlug, projectId });
   const [savedPaths, sessions, preparation, preparedAgents] = await Promise.all([
-    getWorldlineSavedPaths({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
-      projectId,
-    }),
-    getWorldlineSessions({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
-      projectId,
-    }),
+    getWorldlineSavedPaths(apiContext),
+    getWorldlineSessions(apiContext),
     selectedPrepareId
       ? getWorldlinePreparation({
-          tenantId: tenantSlug,
-          actorUserId: "web-shell",
+          ...(await webApiContext({ tenantId: tenantSlug })),
           prepareId: selectedPrepareId,
         })
       : Promise.resolve({
@@ -82,8 +75,7 @@ export default async function WorldlinePage({
         }),
     selectedPrepareId
       ? getWorldlinePreparedAgents({
-          tenantId: tenantSlug,
-          actorUserId: "web-shell",
+          ...(await webApiContext({ tenantId: tenantSlug })),
           prepareId: selectedPrepareId,
         })
       : Promise.resolve({
@@ -97,13 +89,11 @@ export default async function WorldlinePage({
   const [timeline, events] = selectedSessionId
     ? await Promise.all([
         getWorldlineTimeline({
-          tenantId: tenantSlug,
-          actorUserId: "web-shell",
+          ...(await webApiContext({ tenantId: tenantSlug })),
           sessionId: selectedSessionId,
         }),
         getWorldlineEvents({
-          tenantId: tenantSlug,
-          actorUserId: "web-shell",
+          ...(await webApiContext({ tenantId: tenantSlug })),
           sessionId: selectedSessionId,
           status: "candidate",
         }),
@@ -127,8 +117,7 @@ export default async function WorldlinePage({
     "use server";
 
     const result = await startWorldlineSession({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       goal: stringFromFormData(formData, "goal"),
       anchorPathId: stringFromFormData(formData, "anchorPathId"),
@@ -160,8 +149,7 @@ export default async function WorldlinePage({
     }
 
     const result = await startWorldlineStep({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       sessionId,
       mode: stringFromFormData(formData, "stepMode") || "director",
       options: {
@@ -185,8 +173,7 @@ export default async function WorldlinePage({
     "use server";
 
     const result = await createWorldlinePreparation({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       goal: stringFromFormData(formData, "preparationGoal"),
       anchorPathId: stringFromFormData(formData, "preparationAnchorPathId"),
@@ -221,8 +208,7 @@ export default async function WorldlinePage({
     }
 
     const result = await injectWorldlineVariable({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       sessionId,
       name: stringFromFormData(formData, "variableName"),
       description: stringFromFormData(formData, "variableDescription"),
@@ -266,8 +252,7 @@ export default async function WorldlinePage({
     }
 
     const result = await createWorldlineSavedPath({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       sessionId,
       title: stringFromFormData(formData, "savedPathTitle"),
       summary: stringFromFormData(formData, "savedPathSummary"),
@@ -303,8 +288,7 @@ export default async function WorldlinePage({
     }
 
     const result = await adoptWorldlineEvent({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       eventId,
       note: stringFromFormData(formData, "adoptionNote"),
     });
@@ -337,8 +321,7 @@ export default async function WorldlinePage({
     }
 
     const result = await updateWorldlineEvent({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       eventId,
       title: stringFromFormData(formData, "eventTitle"),
       summary: stringFromFormData(formData, "eventSummary"),

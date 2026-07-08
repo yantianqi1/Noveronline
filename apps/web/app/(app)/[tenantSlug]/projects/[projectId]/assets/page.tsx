@@ -17,6 +17,7 @@ import {
   startStyleExtraction,
   updateAsset,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -52,11 +53,7 @@ export default async function AssetsPage({
   const query = searchParams ? await searchParams : {};
   const searchQuery = query.query?.trim() || "";
   const memoryAssetId = query.memoryAssetId?.trim() || "";
-  const apiContext = {
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
-    projectId,
-  };
+  const apiContext = await webApiContext({ tenantId: tenantSlug, projectId });
 
   const [assets, facets, searchResults, archiveMemories, archiveMemoryEvents] = await Promise.all([
     getProjectAssets(apiContext),
@@ -96,8 +93,7 @@ export default async function AssetsPage({
       redirect(assetStatusRoute(tenantSlug, projectId, searchQuery, "error", payload.code, payload.message));
     }
     const result = await createAsset({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       scope: "project",
       assetType: stringFromFormData(formData, "assetType"),
@@ -134,8 +130,7 @@ export default async function AssetsPage({
       redirect(assetStatusRoute(tenantSlug, projectId, searchQuery, "error", payload.code, payload.message));
     }
     const result = await updateAsset({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       assetId,
       title: optionalStringFromFormData(formData, "title"),
       summary: optionalStringFromFormData(formData, "summary"),
@@ -163,8 +158,7 @@ export default async function AssetsPage({
 
     const assetId = stringFromFormData(formData, "assetId");
     const result = await deleteAsset({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       assetId,
     });
     redirect(
@@ -184,8 +178,7 @@ export default async function AssetsPage({
 
     const targetLifecycle = targetLifecycleFromFormData(formData, "targetLifecycle");
     const result = await adoptAsset({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       assetId: stringFromFormData(formData, "assetId"),
       targetLifecycle,
     });
@@ -206,8 +199,7 @@ export default async function AssetsPage({
 
     const memoryId = stringFromFormData(formData, "memoryId");
     const result = await adoptArchiveMemory({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       memoryId,
     });
@@ -229,8 +221,7 @@ export default async function AssetsPage({
 
     const memoryId = stringFromFormData(formData, "memoryId");
     const result = await rejectArchiveMemory({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       memoryId,
     });
@@ -253,8 +244,7 @@ export default async function AssetsPage({
     const action = stringFromFormData(formData, "bulkAction") || "disable";
     const assetIds = assetIdsFromFormData(formData, "assetIds");
     const result = await bulkActionAssets({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       action,
       assetIds,
@@ -279,8 +269,7 @@ export default async function AssetsPage({
     "use server";
 
     const result = await startAssetIngestion({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       materialText: stringFromFormData(formData, "materialText"),
       hintType: stringFromFormData(formData, "hintType") || "note",
@@ -303,8 +292,7 @@ export default async function AssetsPage({
     "use server";
 
     const result = await startAssetReindex({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       scope: stringFromFormData(formData, "scope") || "project",
       mode: stringFromFormData(formData, "mode") || "keyword",
@@ -326,8 +314,7 @@ export default async function AssetsPage({
     "use server";
 
     const result = await startStyleExtraction({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       materialText: stringFromFormData(formData, "materialText"),
       sourceAssetId: optionalStringFromFormData(formData, "sourceAssetId"),

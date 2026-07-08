@@ -15,6 +15,7 @@ import {
   updateLLMChannel,
   upsertLLMModuleBinding,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -45,13 +46,12 @@ export default async function LLMFacilityPage({
   const query = searchParams ? await searchParams : {};
   const moduleKey = query.moduleKey?.trim() || DEFAULT_MODULE_KEY;
   const runId = query.runId?.trim() || "";
-  const apiContext = {
+  const apiContext = await webApiContext({
     tenantId: tenantSlug,
-    actorUserId: "web-shell",
     projectId,
     moduleKey,
     runId: runId || undefined,
-  };
+  });
 
   const [resolution, modules, bindings, channels, settingsSnapshot, activity, usage] = await Promise.all([
     resolveLLMModuleBinding(apiContext),
@@ -80,8 +80,7 @@ export default async function LLMFacilityPage({
     const nextModelId = stringFromFormData(formData, "modelId");
     const moduleMaxConcurrency = optionalPositiveNumberFromFormData(formData, "moduleMaxConcurrency");
     const result = await upsertLLMModuleBinding({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       moduleKey: nextModuleKey,
       channelId: nextChannelId,
@@ -105,8 +104,7 @@ export default async function LLMFacilityPage({
 
     const nextModuleKey = stringFromFormData(formData, "moduleKey") || DEFAULT_MODULE_KEY;
     const result = await deleteLLMModuleBinding({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       moduleKey: nextModuleKey,
     });
@@ -126,8 +124,7 @@ export default async function LLMFacilityPage({
     "use server";
 
     const result = await createLLMChannel({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       name: stringFromFormData(formData, "name"),
       provider: stringFromFormData(formData, "provider") || "openai-compatible",
       baseUrl: stringFromFormData(formData, "baseUrl"),
@@ -150,8 +147,7 @@ export default async function LLMFacilityPage({
 
     const targetChannelId = stringFromFormData(formData, "channelId");
     const result = await deleteLLMChannel({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       channelId: targetChannelId,
     });
     const nextQuery = new URLSearchParams({
@@ -169,8 +165,7 @@ export default async function LLMFacilityPage({
 
     const targetChannelId = stringFromFormData(formData, "channelId");
     const result = await updateLLMChannel({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       channelId: targetChannelId,
       name: stringFromFormData(formData, "name"),
       baseUrl: stringFromFormData(formData, "baseUrl"),
@@ -193,8 +188,7 @@ export default async function LLMFacilityPage({
 
     const targetChannelId = stringFromFormData(formData, "channelId");
     const result = await syncLLMChannelModels({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       channelId: targetChannelId,
     });
     const nextQuery = new URLSearchParams({

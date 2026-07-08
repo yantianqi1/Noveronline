@@ -12,6 +12,7 @@ import {
   startStoryGraphBuild,
   type StoryGraphEvidenceSummary,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -33,11 +34,7 @@ export default async function StoryGraphPage({
 }) {
   const { tenantSlug, projectId } = await params;
   const query = searchParams ? await searchParams : {};
-  const apiContext = {
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
-    projectId,
-  };
+  const apiContext = await webApiContext({ tenantId: tenantSlug, projectId });
   const current = await getStoryGraphCurrent(apiContext);
   const view = await getStoryGraphView({
     ...apiContext,
@@ -56,13 +53,11 @@ export default async function StoryGraphPage({
   });
   const selectedRunId = query.bondRunId || query.runId || "";
   const workflowRun = selectedRunId ? await getWorkflowRunSummary({
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
+    ...(await webApiContext({ tenantId: tenantSlug })),
     runId: selectedRunId,
   }) : null;
   const workflowEvents = selectedRunId ? await getWorkflowRunEvents({
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
+    ...(await webApiContext({ tenantId: tenantSlug })),
     runId: selectedRunId,
   }) : null;
 
@@ -70,8 +65,7 @@ export default async function StoryGraphPage({
     "use server";
 
     const result = await startStoryGraphBuild({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       mode: stringFromFormData(formData, "mode") || "full",
       options: {
@@ -97,8 +91,7 @@ export default async function StoryGraphPage({
     "use server";
 
     const result = await startStoryGraphBondGeneration({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       graphId: stringFromFormData(formData, "graphId"),
       nodeIds: stringListFromFormData(formData, "nodeIds"),
@@ -195,7 +188,7 @@ function setQueryIfPresent(query: URLSearchParams, key: string, value: string) {
 }
 
 async function firstEvidenceSummary(
-  apiContext: { tenantId: string; actorUserId: string; projectId: string },
+  apiContext: { tenantId: string; actorUserId?: string; sessionCookie?: string; projectId: string },
   view: Awaited<ReturnType<typeof getStoryGraphView>>,
 ): Promise<StoryGraphEvidenceSummary> {
   if (!view.ok) {

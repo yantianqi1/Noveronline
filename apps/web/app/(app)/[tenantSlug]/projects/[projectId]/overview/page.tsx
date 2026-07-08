@@ -20,6 +20,7 @@ import {
   startSeedRun,
   uploadSourceFileObject,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -42,11 +43,7 @@ export default async function OverviewPage({
 }) {
   const { tenantSlug, projectId } = await params;
   const query = searchParams ? await searchParams : {};
-  const apiContext = {
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
-    projectId,
-  };
+  const apiContext = await webApiContext({ tenantId: tenantSlug, projectId });
   const projectOverview = await getProjectOverview(apiContext);
   const sourceFiles = await getProjectSourceFiles(apiContext);
   const projectReadiness = await getProjectReadinessSnapshot(apiContext);
@@ -55,15 +52,13 @@ export default async function OverviewPage({
   const afterEventId = query.after_event_id ?? query.afterEventId ?? "";
   const selectedSeedRun = selectedRunId
     ? await getSeedRunSummary({
-        tenantId: tenantSlug,
-        actorUserId: "web-shell",
+        ...(await webApiContext({ tenantId: tenantSlug })),
         runId: selectedRunId,
       })
     : null;
   const seedEvents = selectedRunId
     ? await getSeedRunEvents({
-        tenantId: tenantSlug,
-        actorUserId: "web-shell",
+        ...(await webApiContext({ tenantId: tenantSlug })),
         runId: selectedRunId,
         afterEventId,
       })
@@ -73,8 +68,7 @@ export default async function OverviewPage({
     "use server";
 
     const result = await createSourceFileUpload({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       filename: stringFromFormData(formData, "filename"),
       mimeType: stringFromFormData(formData, "mimeType"),
@@ -101,8 +95,7 @@ export default async function OverviewPage({
     "use server";
 
     const result = await completeSourceFileUpload({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       uploadId: stringFromFormData(formData, "uploadId"),
     });
     const status = sourceFileActionStatus(result);
@@ -127,8 +120,7 @@ export default async function OverviewPage({
     const file = fileFromFormData(formData, "file");
     const result = file
       ? await uploadSourceFileObject({
-          tenantId: tenantSlug,
-          actorUserId: "web-shell",
+          ...(await webApiContext({ tenantId: tenantSlug })),
           uploadId,
           file,
         })
@@ -152,8 +144,7 @@ export default async function OverviewPage({
     "use server";
 
     const result = await startSeedRun({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       uploadId: stringFromFormData(formData, "uploadId"),
       options: {
@@ -180,8 +171,7 @@ export default async function OverviewPage({
 
     const runId = stringFromFormData(formData, "runId");
     const result = await cancelSeedRun({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       runId,
     });
     const status = seedRunControlStatus(result, "cancel");
@@ -204,8 +194,7 @@ export default async function OverviewPage({
 
     const runId = stringFromFormData(formData, "runId");
     const result = await retrySeedRun({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       runId,
     });
     const status = seedRunControlStatus(result, "retry");

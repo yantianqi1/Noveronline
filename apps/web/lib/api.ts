@@ -1,8 +1,9 @@
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8080";
 
-type ApiContext = {
+export type ApiContext = {
   tenantId: string;
-  actorUserId: string;
+  actorUserId?: string;
+  sessionCookie?: string;
 };
 
 export type ApiFailure = {
@@ -1295,8 +1296,7 @@ export async function startWriterRun(input: StartWriterRunInput): Promise<Writer
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Tenant-Id": input.tenantId,
-      "X-User-Id": input.actorUserId,
+      ...contextHeaders(input),
     },
     body: JSON.stringify({
       mode: input.mode,
@@ -1311,10 +1311,7 @@ export async function startWriterRun(input: StartWriterRunInput): Promise<Writer
 
 export async function getWriterRunSummary(input: ApiContext & { runId: string }) {
   const response = await fetch(`${apiBaseUrl()}/v1/writer-runs/${input.runId}`, {
-    headers: {
-      "X-Tenant-Id": input.tenantId,
-      "X-User-Id": input.actorUserId,
-    },
+    headers: contextHeaders(input),
     cache: "no-store",
   });
 
@@ -4843,10 +4840,19 @@ function decodeStoryGraphClusterRecord(item: unknown): StoryGraphClusterRecord {
 }
 
 function contextHeaders(input: ApiContext) {
-  return {
+  const headers: Record<string, string> = {
     "X-Tenant-Id": input.tenantId,
-    "X-User-Id": input.actorUserId,
   };
+  const sessionCookie = input.sessionCookie?.trim();
+  const actorUserId = input.actorUserId?.trim();
+
+  if (sessionCookie) {
+    headers.Cookie = `mirofish_session=${sessionCookie}`;
+  } else if (actorUserId) {
+    headers["X-User-Id"] = actorUserId;
+  }
+
+  return headers;
 }
 
 function addTelemetryFilters(url: URL, input: { moduleKey?: string; runId?: string }) {

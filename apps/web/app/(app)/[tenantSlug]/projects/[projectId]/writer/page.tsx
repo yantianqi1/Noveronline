@@ -11,6 +11,7 @@ import {
   getWriterRunSummary,
   startWriterRun,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -38,10 +39,7 @@ export default async function WriterPage({
   const afterEventId = query.after_event_id ?? query.afterEventId ?? "";
   const selectedRunId = query.runId ?? "";
   const selectedTraceId = query.traceId ?? "";
-  const apiContext = {
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
-  };
+  const apiContext = await webApiContext({ tenantId: tenantSlug });
   const runSummary = selectedRunId
     ? await getWriterRunSummary({
         ...apiContext,
@@ -98,7 +96,7 @@ export default async function WriterPage({
     const instruction = stringFromFormData(formData, "instruction");
     const mode = writerModeFromFormData(formData);
     const result = await startWriterRun({
-      ...apiContext,
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       mode,
       instruction,
@@ -129,7 +127,7 @@ export default async function WriterPage({
 
     const nextTraceId = stringFromFormData(formData, "traceId");
     const result = await exportAgentTrace({
-      ...apiContext,
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       traceId: nextTraceId,
       includeFull: false,

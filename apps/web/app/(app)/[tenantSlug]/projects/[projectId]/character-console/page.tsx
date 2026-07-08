@@ -15,6 +15,7 @@ import {
   listCharacterInteractionTurns,
   updateCharacterInteractionStatus,
 } from "../../../../../../lib/api";
+import { webApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -43,10 +44,7 @@ export default async function CharacterConsolePage({
 }) {
   const { tenantSlug, projectId } = await params;
   const query = searchParams ? await searchParams : {};
-  const apiContext = {
-    tenantId: tenantSlug,
-    actorUserId: "web-shell",
-  };
+  const apiContext = await webApiContext({ tenantId: tenantSlug });
   const selectedInteractionId = query.selected_interaction_id?.trim() || query.interaction_id?.trim() || "";
   const turnsInteractionId = query.turns_interaction_id?.trim() || "";
   const anchorSessionId = query.anchor_session_id?.trim() || "";
@@ -121,8 +119,7 @@ export default async function CharacterConsolePage({
     "use server";
 
     const result = await createCharacterInteraction({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       worldlineSessionId: stringFromFormData(formData, "worldlineSessionId"),
       anchorType: stringFromFormData(formData, "anchorType"),
@@ -204,8 +201,7 @@ export default async function CharacterConsolePage({
     }
 
     const result = await updateCharacterInteractionStatus({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       interactionId,
       status,
     });
@@ -236,8 +232,7 @@ export default async function CharacterConsolePage({
     }
 
     const result = await getCharacterInteractionEvents({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       interactionId,
     });
     nextQuery.set("runtime_status", result.ok ? "success" : "error");
@@ -263,8 +258,7 @@ export default async function CharacterConsolePage({
     }
 
     const result = await convertCharacterInteractionToChapterDraft({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       interactionId,
       targetChapterId: stringFromFormData(formData, "targetChapterId"),
       povMode: stringFromFormData(formData, "povMode") || "keep_first_person",
@@ -346,8 +340,7 @@ export default async function CharacterConsolePage({
     }
 
     const result = await appendCharacterInteractionTurn({
-      tenantId: tenantSlug,
-      actorUserId: "web-shell",
+      ...(await webApiContext({ tenantId: tenantSlug })),
       interactionId,
       actorType: stringFromFormData(formData, "actorType") || "user",
       actorId: stringFromFormData(formData, "actorId"),
