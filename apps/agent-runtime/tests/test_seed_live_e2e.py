@@ -29,6 +29,7 @@ from mirofish_agents.temporal.seed import (
     SeedPipelineWorkflow,
     S3CompatibleObjectStore,
     agent_profile_activity,
+    archive_candidate_activity,
     entity_resolution_activity,
     ontology_activity,
     parse_file_activity,
@@ -937,6 +938,141 @@ def test_seed_sequential_reading_live_postgres_provider_object_store_persists_no
         assert forbidden not in public_event_body
 
 
+def test_seed_archive_candidate_live_postgres_provider_persists_candidate_assets_memories_and_public_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    with _LiveArchiveCandidateProvider() as provider:
+        _prepare_live_archive_candidate_database(admin_url, provider.base_url)
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+
+        result = archive_candidate_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-archive-candidate",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+
+    assert result == {
+        "tenant_id": TENANT_ID,
+        "project_id": PROJECT_ID,
+        "run_id": RUN_ID,
+        "workflow_type": "seed_pipeline",
+        "upload_id": None,
+        "status": "completed",
+        "stage": "archive_candidates",
+        "next_stage": "index_assets",
+        "module_key": "narrative_archives",
+        "model_id": "model-seed-archive-live",
+        "archive_candidate_batch_id": f"narrative-archives:{RUN_ID}",
+        "candidate_count": 2,
+        "archive_entity_candidate_count": 1,
+        "memory_candidate_count": 1,
+        "stage_event_persisted": True,
+    }
+    assert len(provider.requests) == 1
+    assert provider.requests[0]["path"] == "/v1/chat/completions"
+    assert _header(provider.requests[0]["headers"], "Authorization") == "Bearer sk-live-seed-archive"
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Tenant-Id") == TENANT_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Project-Id") == PROJECT_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Run-Id") == RUN_ID
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Module-Key") == "narrative_archives"
+    provider_body = json.dumps(provider.requests[0]["body"], ensure_ascii=False, sort_keys=True)
+    assert "model-seed-archive-live" in provider_body
+    assert "narrative_archives" in provider_body
+    for forbidden in (
+        "credential_ref",
+        "sk-live-seed-archive",
+        "api_key",
+        "provider_response",
+        "raw_body",
+        "PRIVATE_ARCHIVE_PROMPT",
+        "PRIVATE_ARCHIVE_DRAFT",
+        "PRIVATE_ARCHIVE_MANUSCRIPT",
+    ):
+        assert forbidden not in provider_body
+
+    persisted = _read_seed_archive_candidate_live_rows(admin_url)
+    assert persisted["assets"] == [
+        {
+            "asset_id": persisted["assets"][0]["asset_id"],
+            "asset_type": "archive_entity",
+            "category": "character",
+            "lifecycle": "candidate",
+            "title": "阿澜档案",
+            "summary": "雨夜谈判中的核心人物。",
+            "content_text": "雨夜谈判中的核心人物。",
+            "payload_jsonb": {
+                "entity_name": "阿澜",
+                "entity_type": "character",
+                "core_drive": "守住秘密",
+                "stable_detail": "只保留可进入档案候选的结构化摘要。",
+                "model_id": "model-seed-archive-live",
+            },
+            "tags_jsonb": ["character", "rain"],
+            "source_kind": "narrative_archives",
+            "source_ref": f"narrative-archives:{RUN_ID}:archive:1",
+        }
+    ]
+    assert persisted["archive_memories"] == [
+        {
+            "memory_id": persisted["archive_memories"][0]["memory_id"],
+            "asset_id": persisted["assets"][0]["asset_id"],
+            "memory_type": "motivation",
+            "status": "candidate",
+            "summary": "她用沉默拖住谈判节奏。",
+            "body_text": "PRIVATE_ARCHIVE_MEMORY_BODY is allowed only in archive_memories.body_text.",
+            "payload_jsonb": {"visibility": "writer_context", "confidence": "medium"},
+            "source_kind": "narrative_archives",
+            "source_ref": f"narrative-archives:{RUN_ID}:archive:1:memory:1",
+        }
+    ]
+    assert persisted["archive_memory_events"] == [
+        {
+            "event_type": "memory.candidate.generated",
+            "status": "candidate",
+            "payload_jsonb": {
+                "source_kind": "narrative_archives",
+                "source_ref": f"narrative-archives:{RUN_ID}:archive:1:memory:1",
+                "archive_candidate_batch_id": f"narrative-archives:{RUN_ID}",
+                "memory_type": "motivation",
+            },
+        }
+    ]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "archive_candidates",
+                "status": "completed",
+                "activity": "archive_candidate_activity",
+                "module_key": "narrative_archives",
+                "model_id": "model-seed-archive-live",
+                "archive_candidate_batch_id": f"narrative-archives:{RUN_ID}",
+                "candidate_count": 2,
+                "archive_entity_candidate_count": 1,
+                "memory_candidate_count": 1,
+            },
+        }
+    ]
+    public_body = json.dumps(
+        {"result": result, "workflow_events": persisted["workflow_events"]},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    for forbidden in _archive_candidate_live_forbidden_public_markers():
+        assert forbidden not in public_body
+
+
 class _InMemoryObjectStore:
     def __init__(self, objects: dict[str, bytes]) -> None:
         self.objects = dict(objects)
@@ -1238,6 +1374,113 @@ class _LiveEntityResolutionProvider:
                         "prompt_tokens": 17,
                         "completion_tokens": 21,
                         "total_tokens": 38,
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        return Handler
+
+
+class _LiveArchiveCandidateProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_LiveArchiveCandidateProvider":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(body),
+                    }
+                )
+                content = {
+                    "archive_entities": [
+                        {
+                            "title": "阿澜档案",
+                            "summary": "雨夜谈判中的核心人物。",
+                            "category": "character",
+                            "tags": ["character", "rain", "draft"],
+                            "payload": {
+                                "entity_name": "阿澜",
+                                "entity_type": "character",
+                                "core_drive": "守住秘密",
+                                "stable_detail": "只保留可进入档案候选的结构化摘要。",
+                                "prompt": "PRIVATE_ARCHIVE_PROMPT must not persist",
+                                "provider_response": "PRIVATE_PROVIDER_RESPONSE must not persist",
+                                "raw_body": "PRIVATE_ARCHIVE_RAW_BODY must not persist",
+                                "api_key": "sk-provider-archive-leak",
+                                "credential_ref": "secret-ref",
+                                "object_key": "projects/leaked/archive/private.txt",
+                                "draft": "PRIVATE_ARCHIVE_DRAFT must not persist",
+                                "manuscript": "PRIVATE_ARCHIVE_MANUSCRIPT must not persist",
+                            },
+                            "provider_raw_body": "PRIVATE_PROVIDER_RAW_BODY must not persist",
+                            "source_object_key": "projects/leaked/source.txt",
+                            "memories": [
+                                {
+                                    "memory_type": "motivation",
+                                    "summary": "她用沉默拖住谈判节奏。",
+                                    "body_text": (
+                                        "PRIVATE_ARCHIVE_MEMORY_BODY is allowed only in "
+                                        "archive_memories.body_text."
+                                    ),
+                                    "payload": {
+                                        "visibility": "writer_context",
+                                        "confidence": "medium",
+                                        "body_text": "PRIVATE_ARCHIVE_BODY_TEXT_PAYLOAD must not persist",
+                                        "raw_body": "PRIVATE_ARCHIVE_MEMORY_RAW_BODY must not persist",
+                                        "provider_response": "PRIVATE_MEMORY_PROVIDER_RESPONSE must not persist",
+                                        "api_key": "sk-provider-memory-leak",
+                                        "credential_ref": "memory-secret-ref",
+                                        "object_key": "projects/leaked/archive/memory.txt",
+                                        "draft": "PRIVATE_ARCHIVE_MEMORY_DRAFT must not persist",
+                                        "manuscript": "PRIVATE_ARCHIVE_MEMORY_MANUSCRIPT must not persist",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "prompt": "PRIVATE_ARCHIVE_TOP_LEVEL_PROMPT must not persist",
+                    "provider_response": "PRIVATE_ARCHIVE_TOP_LEVEL_RESPONSE must not persist",
+                    "raw_body": "PRIVATE_ARCHIVE_TOP_LEVEL_RAW_BODY must not persist",
+                    "api_key": "sk-provider-top-level-leak",
+                    "credential_ref": "top-level-secret-ref",
+                    "object_key": "projects/leaked/archive/top-level.txt",
+                    "draft": "PRIVATE_ARCHIVE_TOP_LEVEL_DRAFT must not persist",
+                    "manuscript": "PRIVATE_ARCHIVE_TOP_LEVEL_MANUSCRIPT must not persist",
+                }
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {
+                        "prompt_tokens": 29,
+                        "completion_tokens": 37,
+                        "total_tokens": 66,
                     },
                 }
                 encoded = json.dumps(response).encode("utf-8")
@@ -1572,6 +1815,40 @@ def _prepare_live_sequential_reading_database(
             )
 
 
+def _prepare_live_archive_candidate_database(admin_url: str, provider_base_url: str) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 90, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_channels (
+                     tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+                   )
+                   VALUES (%s, %s, 'Seed Archive Candidate Live Provider', 'openai-compatible', %s, %s, 1, true)""",
+                (TENANT_ID, CHANNEL_ID, provider_base_url, _encrypt_api_key("sk-live-seed-archive")),
+            )
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES (%s, %s, 'model-seed-archive-live', 'live-provider', true, false)""",
+                (TENANT_ID, CHANNEL_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES (%s, %s, 'narrative_archives', %s, 'model-seed-archive-live', '{"temperature":0}'::jsonb, %s)""",
+                (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+
+
 def _prepare_live_database_foundation(admin_url: str) -> None:
     with psycopg.connect(admin_url, autocommit=True) as connection:
         with connection.cursor() as cursor:
@@ -1845,6 +2122,101 @@ def _read_seed_agent_profile_live_rows(admin_url: str) -> dict[str, list[dict[st
         "seed_agent_profile_snapshots": seed_agent_profile_snapshots,
         "workflow_events": workflow_events,
     }
+
+
+def _read_seed_archive_candidate_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT
+                     asset_id::text, asset_type, category, lifecycle, title, summary,
+                     content_text, payload_jsonb, tags_jsonb, source_kind, source_ref
+                   FROM assets
+                   WHERE tenant_id = %s
+                     AND project_id = %s
+                     AND source_kind = 'narrative_archives'
+                   ORDER BY source_ref""",
+                (TENANT_ID, PROJECT_ID),
+            )
+            assets = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     memory_id::text, asset_id::text, memory_type, status, summary,
+                     body_text, payload_jsonb, source_kind, source_ref
+                   FROM archive_memories
+                   WHERE tenant_id = %s
+                     AND project_id = %s
+                     AND source_kind = 'narrative_archives'
+                   ORDER BY source_ref""",
+                (TENANT_ID, PROJECT_ID),
+            )
+            archive_memories = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, status, payload_jsonb
+                   FROM archive_memory_events
+                   WHERE tenant_id = %s
+                     AND project_id = %s
+                   ORDER BY created_at""",
+                (TENANT_ID, PROJECT_ID),
+            )
+            archive_memory_events = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "assets": assets,
+        "archive_memories": archive_memories,
+        "archive_memory_events": archive_memory_events,
+        "workflow_events": workflow_events,
+    }
+
+
+def _archive_candidate_live_forbidden_public_markers() -> tuple[str, ...]:
+    return (
+        "prompt",
+        "provider_response",
+        "provider_raw_body",
+        "raw_body",
+        "api_key",
+        "credential_ref",
+        "object_key",
+        "source_object_key",
+        "artifact_object_key",
+        "segment_object_key",
+        "projects/leaked/archive/private.txt",
+        "projects/leaked/source.txt",
+        "sk-live-seed-archive",
+        "sk-provider-archive-leak",
+        "sk-provider-memory-leak",
+        "sk-provider-top-level-leak",
+        "secret-ref",
+        "memory-secret-ref",
+        "top-level-secret-ref",
+        "PRIVATE_ARCHIVE_PROMPT",
+        "PRIVATE_PROVIDER_RESPONSE",
+        "PRIVATE_PROVIDER_RAW_BODY",
+        "PRIVATE_ARCHIVE_RAW_BODY",
+        "PRIVATE_ARCHIVE_TOP_LEVEL_PROMPT",
+        "PRIVATE_ARCHIVE_TOP_LEVEL_RESPONSE",
+        "PRIVATE_ARCHIVE_TOP_LEVEL_RAW_BODY",
+        "PRIVATE_ARCHIVE_MEMORY_BODY",
+        "PRIVATE_ARCHIVE_BODY_TEXT_PAYLOAD",
+        "PRIVATE_ARCHIVE_MEMORY_RAW_BODY",
+        "PRIVATE_MEMORY_PROVIDER_RESPONSE",
+        "draft",
+        "manuscript",
+        "PRIVATE_ARCHIVE_DRAFT",
+        "PRIVATE_ARCHIVE_MANUSCRIPT",
+        "PRIVATE_ARCHIVE_MEMORY_DRAFT",
+        "PRIVATE_ARCHIVE_MEMORY_MANUSCRIPT",
+        "PRIVATE_ARCHIVE_TOP_LEVEL_DRAFT",
+        "PRIVATE_ARCHIVE_TOP_LEVEL_MANUSCRIPT",
+    )
 
 
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
