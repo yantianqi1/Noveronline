@@ -2301,11 +2301,11 @@ class PostgresProjectReadinessUpdater:
             connection.commit()
             return {
                 "status": "completed",
-                "project_readiness_snapshot_id": _row_value(row, "project_readiness_snapshot_id"),
-                "ready_asset_count": _row_int(row, "ready_asset_count"),
-                "ready_entity_count": _row_int(row, "ready_entity_count"),
-                "ready_relationship_count": _row_int(row, "ready_relationship_count"),
-                "ready_world_rule_count": _row_int(row, "ready_world_rule_count"),
+                "project_readiness_snapshot_id": _row_value_at(row, "project_readiness_snapshot_id", 0),
+                "ready_asset_count": _row_int_at(row, "ready_asset_count", 1),
+                "ready_entity_count": _row_int_at(row, "ready_entity_count", 2),
+                "ready_relationship_count": _row_int_at(row, "ready_relationship_count", 3),
+                "ready_world_rule_count": _row_int_at(row, "ready_world_rule_count", 4),
             }
         except LLMFacilityError:
             _rollback_postgres_connection(connection)
@@ -7811,6 +7811,20 @@ def _row_int(row: Any, key: str) -> int:
     if row is None:
         raise ValueError(f"{key} was not returned")
     value = row.get(key) if isinstance(row, dict) else row[0]
+    return _non_negative_int(value, key)
+
+
+def _row_value_at(row: Any, key: str, index: int) -> str:
+    if row is None:
+        raise ValueError(f"{key} was not returned")
+    value = row.get(key) if isinstance(row, dict) else row[index]
+    return _required_text_value(str(value), key)
+
+
+def _row_int_at(row: Any, key: str, index: int) -> int:
+    if row is None:
+        raise ValueError(f"{key} was not returned")
+    value = row.get(key) if isinstance(row, dict) else row[index]
     return _non_negative_int(value, key)
 
 

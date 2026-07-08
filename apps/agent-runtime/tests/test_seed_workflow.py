@@ -2316,6 +2316,34 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
     assert connection.closed is True
 
 
+def test_postgres_project_readiness_updater_accepts_psycopg_tuple_returning_rows() -> None:
+    connection = FakeProjectReadinessConnection(
+        [
+            (
+                "readiness-snapshot-1",
+                7,
+                3,
+                2,
+                1,
+            )
+        ]
+    )
+    updater = PostgresProjectReadinessUpdater(connect=lambda: connection)
+
+    result = updater.update(context=_context())
+
+    assert result == {
+        "status": "completed",
+        "project_readiness_snapshot_id": "readiness-snapshot-1",
+        "ready_asset_count": 7,
+        "ready_entity_count": 3,
+        "ready_relationship_count": 2,
+        "ready_world_rule_count": 1,
+    }
+    assert connection.committed is True
+    assert connection.closed is True
+
+
 def test_postgres_project_readiness_updater_rolls_back_and_sanitizes_database_failures() -> None:
     execute_failure = FailingProjectReadinessConnection(
         [

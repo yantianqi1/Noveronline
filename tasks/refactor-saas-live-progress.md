@@ -55,7 +55,7 @@
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
 | Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S4o Story Graph evidence project-read RBAC、W2-S4p Worldline preparation read RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam、W2-S5f Web logout UI/action、W2-S5g nonce session token groundwork、W2-S5h current-session rotation API seam、W2-S5i cookie current-session CSRF seam、W2-S5j Web session refresh action、W2-S5k automatic project-shell session refresh trigger、W2-S5l current-user all-session revocation seam、W2-S5m admin tenant-wide session revocation seam、W2-S5n route-wide unsafe cookie CSRF guard、W2-S5o current-user session listing metadata API、W2-S5p Web session management panel、W2-S5q production password login session issuance seam、W2-S5r Web password login action/page、W2-S5s JWT bearer subject resolver seam、W2-S5t Web session renewal threshold hardening、W2-S5u Web tenant-wide session revocation action、W2-S5v JWT cookie rotation seam、W2-S5w JWT bearer access-token issuance seam、W2-S5x JWT bearer refresh seam、W2-S5y global run read/replay credential preflight、W2-S5z global run read/replay owner-aware project-read authorization、W2-S5za global run cancel/retry owner-aware authorization、W2-S5zb Source upload route auth/RBAC hardening 和 W2-S5zc actor-sensitive protected route inventory guard 已接入；完整 compose health、真实 Temporal handoff、完整 production login/session lifecycle、refresh token/session renewal、full route-wide auth middleware、production-grade cookie/session management UI 和其他 remaining owner-aware/global non-asset RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
-| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`sequential_reading` / `story_ontology` / `entity_resolution` / `character_agent_profile` / `narrative_archives` / `graph_bond_generator` LLM Facility runner path、`sequential_reading` Postgres/MinIO/local-provider harness、`story_ontology` Postgres/local-provider harness、`entity_resolution` Postgres/local-provider harness 和 `character_agent_profile` Postgres/local-provider harness 已在本机 live Postgres 执行通过，`narrative_archives` archive candidate Postgres/local-provider harness 与 `finalize_seed_activity` readiness/status Postgres harness 已新增且默认无 live DB 时显式 skip，以及 Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、archive candidate live DB execution、finalize live DB execution/full-chain readiness、vector/hybrid search 和 Graph candidate adoption 待补 |
+| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`sequential_reading` / `story_ontology` / `entity_resolution` / `character_agent_profile` / `narrative_archives` / `graph_bond_generator` LLM Facility runner path、`sequential_reading` Postgres/MinIO/local-provider harness、`story_ontology` Postgres/local-provider harness、`entity_resolution` Postgres/local-provider harness、`character_agent_profile` Postgres/local-provider harness、`narrative_archives` archive candidate Postgres/local-provider harness 和 `finalize_seed_activity` readiness/status Postgres harness 已在本机 live Postgres 执行通过，Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、finalize full-chain readiness beyond harness、vector/hybrid search 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
 | Phase 7 | 0%-10% | Legacy import report skeleton blocked，旧架构清理未开始 |
 | Phase 8 | 0%-10% | Ops/Billing/Security/Production hardening 仍主要停留在设计和少量底座 |
@@ -65,17 +65,17 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Phase 5：Seed browser upload / product closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff；archive candidate 与 finalize readiness/status live Postgres variants 已在本机串行执行通过 |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed `finalize_seed_activity` opt-in live readiness harness：新增真实 app-role Postgres readiness/status 验收入口，验证 `project_readiness_snapshots`、`workflow_runs.status = completed` public result 和 sanitized completed workflow event；当前 shell 无 live DB env，默认 skip 已验证，不声明 live execution |
-| 推荐下一步 | 继续 Phase 5/4 产品闭环：执行 archive candidate / finalize live DB variants、推进 full browser/provider Seed pipeline E2E、LLM live provider/cluster E2E、Graph candidate adoption 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+| 本轮开发 slice | P5 Seed archive/finalize live execution：串行执行 `narrative_archives` archive candidate 与 `finalize_seed_activity` readiness/status live Postgres variants；修复 `PostgresProjectReadinessUpdater` 在 psycopg 默认 tuple `RETURNING` row 下误读 readiness counts 的真实 live failure |
+| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 full browser/provider Seed pipeline E2E、LLM live provider/cluster E2E、Graph candidate adoption 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
 
 ## Phase 5 P5 Seed finalize live readiness harness
 
 Context:
 
 - Previous slices added `PostgresProjectReadinessUpdater`, Go readiness read side, Overview readiness UI handoff, and unit coverage for `finalize_seed_activity`, but opt-in live coverage still lacked a real app-role Postgres harness proving readiness snapshot and terminal workflow status persistence together.
-- This slice adds a harness entry for `finalize_seed_activity`; it does not claim full browser/provider Seed pipeline closure, finalize live DB execution in this shell, or full-chain readiness closure.
+- This slice adds and executes a harness entry for `finalize_seed_activity`; it does not claim full browser/provider Seed pipeline closure or full-chain readiness closure.
 
 TDD / Review:
 
@@ -87,6 +87,10 @@ TDD / Review:
 Verification:
 
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k finalize` passed default opt-in skip, 1 skipped / 8 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k finalize` first failed with missing `project_readiness_snapshot_id`; the public activity result was the stable `PROJECT_READINESS_UPDATE_FAILED` error and workflow failed status persisted.
+- RED / fix：`test_postgres_project_readiness_updater_accepts_psycopg_tuple_returning_rows` now covers psycopg default tuple `RETURNING` rows. `PostgresProjectReadinessUpdater` now reads the five returned columns by explicit index while preserving dict-row behavior.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'accepts_psycopg_tuple_returning_rows or project_readiness or finalize_seed'` passed, 7 passed / 124 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k finalize` passed, 1 passed / 8 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'project_readiness or finalize_seed'` passed, 6 passed / 124 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` passed default opt-in skip, 9 skipped.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` passed, 238 passed / 10 skipped.
@@ -94,8 +98,7 @@ Verification:
 
 Next:
 
-- Execute the finalize live variant in an environment with `MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>'`.
-- Execute the archive candidate live variant, then build a full browser/provider Seed pipeline E2E. Do not mark Phase 5 or Seed complete from this harness alone.
+- Build a full browser/provider Seed pipeline E2E. Do not mark Phase 5 or Seed complete from this harness alone.
 
 ## Phase 5 P5 Seed archive candidate live provider harness
 
@@ -114,6 +117,8 @@ TDD / Review:
 Verification:
 
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k archive_candidate` passed default opt-in skip, 1 skipped / 7 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k archive_candidate` passed, 1 passed / 8 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k 'archive_candidate or finalize'` passed, 2 passed / 7 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'archive_candidate or project_readiness or finalize_seed'` passed, 15 passed / 115 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` passed default opt-in skip, 8 skipped.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` passed, 238 passed / 9 skipped.
@@ -122,8 +127,7 @@ Verification:
 
 Next:
 
-- Execute the archive candidate live variant in an environment with `MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>'`.
-- Add finalize live readiness harness and full browser/provider Seed pipeline E2E. Do not mark Phase 5 or Seed complete from this harness alone.
+- Continue full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 or Seed complete from this harness alone.
 
 ## Phase 5 P5 Seed entity resolution live provider harness
 
@@ -150,7 +154,7 @@ Verification:
 
 Next:
 
-- Continue archive/finalize live provider/readiness closure, full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
+- Continue full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
 
 ## Phase 5 P5 Seed sequential-reading live provider harness
 
@@ -201,7 +205,7 @@ Verification:
 
 Next:
 
-- Continue archive/finalize live provider/readiness closure, full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
+- Continue full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
 
 ## Phase 5 P5 Seed character agent profile live harness execution
 
