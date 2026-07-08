@@ -182,6 +182,39 @@ test("tenant picker project layout loads current user and passes memberships int
   assert.match(layout, /projectId=\{projectId\}/);
 });
 
+test("project shell exposes current-session logout without leaking the session token", async () => {
+  const client = await fileText("lib/api.ts");
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+  const logoutClient = sourceSlice(client, "export async function revokeCurrentSession", "export async function startWriterRun");
+  const logoutAction = sourceSlice(layout, "async function logoutAction", "const currentUser");
+
+  assert.match(logoutClient, /sessionCookie\?:\s*string/);
+  assert.match(logoutClient, /\/v1\/auth\/session/);
+  assert.match(logoutClient, /method:\s*"DELETE"/);
+  assert.match(logoutClient, /headers:\s*sessionCookieHeaders\(input\)/);
+  assert.match(logoutClient, /networkFailure\(error,\s*"SESSION_REVOKE_FAILED"\)/);
+  assert.match(client, /function sessionCookieHeaders\(input:\s*\{\s*sessionCookie\?:\s*string;?\s*\}\)/);
+  assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
+  assert.doesNotMatch(logoutClient, /X-User-Id|contextHeaders|actorUserId|body|JSON\.stringify/);
+
+  assert.match(layout, /revokeCurrentSession/);
+  assert.match(logoutAction, /"use server"/);
+  assert.match(logoutAction, /const\s+actionCookieStore\s*=\s*await\s+cookies\(\)/);
+  assert.match(logoutAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(logoutAction, /if\s*\(!actionSessionCookie\)\s*\{\s*return;\s*\}/s);
+  assert.match(logoutAction, /await\s+revokeCurrentSession\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.doesNotMatch(logoutAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|sessionCookie\s*\}/);
+  assert.match(layout, /logoutAction=\{logoutAction\}/);
+
+  assert.match(nav, /logoutAction:\s*\(\)\s*=>\s*Promise<void>/);
+  assert.match(nav, /logoutAction/);
+  assert.match(nav, /<form\s+action=\{logoutAction\}/);
+  assert.match(nav, /type="submit"/);
+  assert.match(nav, /Sign out/);
+  assert.doesNotMatch(nav, /mirofish_session|sessionCookie|api_key|credential_ref|draft|manuscript|prompt|provider/i);
+});
+
 test("project pages resolve API context from browser session cookie instead of hardcoded actor", async () => {
   const helper = await fileText("lib/server-auth.ts");
   const projectPages = [

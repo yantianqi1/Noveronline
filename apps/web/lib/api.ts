@@ -43,6 +43,12 @@ export type CurrentUserSummary =
     } & CurrentUserRecord)
   | ApiFailure;
 
+export type SessionRevokeSummary =
+  | {
+      ok: true;
+    }
+  | ApiFailure;
+
 export type WriterRunSummary =
   | {
       ok: true;
@@ -1286,6 +1292,38 @@ function currentUserHeaders(input: { actorUserId?: string; sessionCookie?: strin
     headers.Cookie = `mirofish_session=${sessionCookie}`;
   } else if (actorUserId) {
     headers["X-User-Id"] = actorUserId;
+  }
+
+  return headers;
+}
+
+export async function revokeCurrentSession(input: { sessionCookie?: string }): Promise<SessionRevokeSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/auth/session`, {
+      method: "DELETE",
+      headers: sessionCookieHeaders(input),
+      cache: "no-store",
+    });
+    if (response.ok) {
+      return { ok: true };
+    }
+
+    const payload = await readLLMPayload(response);
+    if (isApiFailure(payload)) {
+      return payload;
+    }
+    return decodeError(payload, response.status, "SESSION_REVOKE_FAILED");
+  } catch (error) {
+    return networkFailure(error, "SESSION_REVOKE_FAILED");
+  }
+}
+
+function sessionCookieHeaders(input: { sessionCookie?: string }) {
+  const headers: Record<string, string> = {};
+  const sessionCookie = input.sessionCookie?.trim();
+
+  if (sessionCookie) {
+    headers.Cookie = `mirofish_session=${sessionCookie}`;
   }
 
   return headers;

@@ -53,7 +53,7 @@
 | Phase 0 | 100% | 文档、覆盖矩阵和隔离 worktree 基线已 verified |
 | Phase 1 | 80%-90% | Writer-first contract、Pi Runtime skeleton、缺绑定显式失败、draft 保存和显式 adoption 已落地；真实 LLM-bound E2E 待验收 |
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
-| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork 和 W2-S5e current-session logout/revocation seam 已接入；完整 compose health、真实 Temporal handoff、完整 production login/JWT/session lifecycle、cookie rotation、CSRF、refresh 和其他剩余 owner-aware/global non-asset mutation/read RBAC 待补 |
+| Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam 和 W2-S5f Web logout UI/action 已接入；完整 compose health、真实 Temporal handoff、完整 production login/JWT/session lifecycle、cookie rotation、CSRF、refresh 和其他剩余 owner-aware/global non-asset mutation/read RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
 | Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、`story_ontology` / `entity_resolution` / `graph_bond_generator` LLM Facility runner path，以及 Asset search 版本/collection metadata 已补；browser upload/complete、扫描/OCR PDF、完整智能分段、agent profile/finalize runner、vector/hybrid search、Seed live provider E2E 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
@@ -65,10 +65,38 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Wave 2：SaaS Auth / Tenant / Project / RBAC |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g `GET /v1/assets/{assetId}` owner-aware detail read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam 均已通过对应验收记录 |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g `GET /v1/assets/{assetId}` owner-aware detail read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam、W2-S5f Web logout UI/action 均已通过对应验收记录 |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 production login/JWT/session lifecycle、browser cookie rotation、CSRF、refresh、route-wide auth middleware 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | W2-S5e current-session logout/revocation seam：`DELETE /v1/auth/session` 要求 presented signed Bearer/cookie credential；配置 session store 时按 token hash revoke active session row，成功后清 browser cookie；无 credential 或 revoke failure 不 fallback、不清 cookie、不调用 auth reader |
+| 本轮开发 slice | W2-S5f Web logout UI/action：Next project shell 提供 `Sign out` form，server action 只读取 browser `mirofish_session` cookie 并调用 typed `DELETE /v1/auth/session` client；无 cookie 时 no-op，不使用 development actor fallback，不渲染或记录 session token |
 | 推荐下一步 | 继续 Wave 2：推进 production login/JWT claim lifecycle、cookie rotation、CSRF、refresh token/session renewal 或 route-wide auth middleware。也可继续收口其他 remaining owner-aware/global non-asset RBAC。当前不声明完整 Auth/RBAC、注册登录、JWT/session 生命周期、CSRF 或所有 mutation RBAC 完成 |
+
+## Wave 2 W2-S5f Web logout UI/action
+
+Context:
+
+- W2-S5e 已提供 exact `DELETE /v1/auth/session` current-session revocation seam，但 Next project shell 还没有用户可触发的 logout action。
+- 本 slice 只覆盖 Web shell logout form/server action 和 typed Web API client；不实现 production password/OAuth login、JWT claims、refresh/session renewal、cookie rotation、CSRF token 或 route-wide middleware。
+
+TDD / Review:
+
+- Implementer RED：`node --test apps/web/tests/web-shell.test.mjs --test-name-pattern "project shell exposes current-session logout"` 先失败于缺少 `revokeCurrentSession` typed client / layout server action / ProjectNav form。
+- 新增 `revokeCurrentSession({ sessionCookie })` Web API client：只向 `/v1/auth/session` 发送 `DELETE` 和 `Cookie: mirofish_session=...`，不发送 `X-User-Id`、tenant header、body、JSON payload 或 development actor。
+- Project layout 新增 `logoutAction` server action：在 action execution time 读取 browser cookie；无 cookie 时直接 return；有 cookie 时调用 `revokeCurrentSession`，仅在 Go API 返回 success 后删除 Next-side `mirofish_session` cookie。
+- `ProjectNav` 接收 server action prop 并渲染紧凑 `Sign out` form，不把 session token、credential、prompt、provider response、draft 或 manuscript 放入 UI。
+- Spec reviewer PASS：cookie-only logout, no dev fallback, no token render/logging, no fake success path beyond no-cookie no-op, and production auth hardening remains pending.
+- Quality reviewer PASS：implementation stays in existing web API/layout/nav patterns; `204 No Content` is handled as success without parsing a body; failed revoke does not clear the Next cookie.
+
+Verification:
+
+- `node --test apps/web/tests/web-shell.test.mjs --test-name-pattern "project shell exposes current-session logout"` RED failed as expected before implementation, then passed after GREEN.
+- `node --test apps/web/tests/web-shell.test.mjs` 通过，44 passed。
+- `cd apps/web && npm run test` 通过，44 passed。
+- `cd apps/web && npm run typecheck` 通过。
+- `cd apps/web && npm run build` 通过；Next emitted an SWC native-package load warning, then compiled and generated routes successfully.
+
+Next:
+
+- Production login/JWT claim lifecycle, refresh/session renewal, browser cookie rotation, CSRF, route-wide auth middleware, admin/all-session revocation endpoints, and remaining owner-aware/global non-asset RBAC remain pending.
 
 ## Wave 2 W2-S5e Current-session logout/revocation seam
 
@@ -96,7 +124,7 @@ Verification:
 
 Next:
 
-- Production login/JWT claim lifecycle, refresh/session renewal, browser cookie rotation, CSRF, route-wide auth middleware, Web logout UI/action, and remaining owner-aware/global non-asset RBAC remain pending.
+- Web logout UI/action is now covered by W2-S5f above. Production login/JWT claim lifecycle, refresh/session renewal, browser cookie rotation, CSRF, route-wide auth middleware, and remaining owner-aware/global non-asset RBAC remain pending.
 
 ## Wave 2 W2-S5d Persisted session revocation groundwork
 
@@ -128,7 +156,7 @@ Verification:
 
 Next:
 
-- Production login/JWT claim lifecycle, refresh/session renewal, browser cookie rotation, admin/all-session revocation endpoints, Web logout UI, CSRF, route-wide auth middleware, and remaining owner-aware/global non-asset RBAC remain pending.
+- Web logout UI/action is now covered by W2-S5f above. Production login/JWT claim lifecycle, refresh/session renewal, browser cookie rotation, admin/all-session revocation endpoints, CSRF, route-wide auth middleware, and remaining owner-aware/global non-asset RBAC remain pending.
 
 ## Wave 2 W2-S5c Downstream Web API session propagation
 

@@ -18,11 +18,12 @@ const navItems = [
 type ProjectNavProps = {
   basePath: string;
   currentUser: CurrentUserSummary;
+  logoutAction: () => Promise<void>;
   tenantSlug: string;
   projectId: string;
 };
 
-export function ProjectNav({ basePath, currentUser, tenantSlug, projectId }: ProjectNavProps) {
+export function ProjectNav({ basePath, currentUser, logoutAction, tenantSlug, projectId }: ProjectNavProps) {
   const pathname = usePathname();
   const activeProjects = currentUser.ok ? currentUser.active_projects : [];
   const routeTenantProjects = activeProjects.filter((project) => project.tenant_id === tenantSlug);
@@ -45,6 +46,11 @@ export function ProjectNav({ basePath, currentUser, tenantSlug, projectId }: Pro
             <p>{currentUser.message}</p>
           </div>
         )}
+        <form action={logoutAction}>
+          <button className="nav-link nav-button" type="submit">
+            Sign out
+          </button>
+        </form>
       </section>
 
       <section className="sidebar-section" aria-label="Tenants">
