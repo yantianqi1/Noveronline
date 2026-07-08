@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 
 import { ProjectNav } from "../../../../../components/project-nav";
+import { SessionAutoRefresh } from "../../../../../components/session-auto-refresh";
 import {
   getCurrentUser,
   getSessionCSRFToken,
@@ -81,6 +82,7 @@ export default async function ProjectLayout({
 
   return (
     <div className="app-frame">
+      <SessionAutoRefresh enabled={Boolean(sessionCookie)} />
       <aside className="app-sidebar" aria-label="Project navigation">
         <ProjectNav
           basePath={basePath}
