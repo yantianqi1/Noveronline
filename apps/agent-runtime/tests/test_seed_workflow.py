@@ -3016,6 +3016,40 @@ class RecordingEntityResolutionSnapshotWriter:
         return "resolution-snapshot-1"
 
 
+class RecordingAgentProfileSnapshotWriter:
+    def __init__(self, error: LLMFacilityError | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def record_agent_profile_snapshot(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        model_id: str | None,
+        agent_profiles: dict[str, object],
+        profile_count: int,
+        memory_seed_count: int,
+        relationship_view_count: int,
+    ) -> str:
+        self.calls.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+                "module_key": module_key,
+                "model_id": model_id,
+                "agent_profiles": agent_profiles,
+                "profile_count": profile_count,
+                "memory_seed_count": memory_seed_count,
+                "relationship_view_count": relationship_view_count,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return "profile-snapshot-1"
+
+
 class RecordingAgentProfileRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -3044,6 +3078,29 @@ class RecordingAgentProfileRunner:
             "relationship_view_count": 3,
             "profiles": [{"private_profile": {"body": "private profile body must not be returned or emitted"}}],
         }
+
+
+class RecordingAgentProfileContextLoader:
+    def __init__(self, context_payload: dict[str, object] | None = None, error: Exception | None = None) -> None:
+        self.context_payload = context_payload if context_payload is not None else {
+            "entity_resolution": {
+                "merged_entities": [{"canonical_name": "林舟", "entity_type": "character"}],
+            }
+        }
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def load_context(self, *, context: AgentContext) -> dict[str, object]:
+        self.calls.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.context_payload
 
 
 class RecordingArchiveCandidateRunner:
@@ -3709,6 +3766,85 @@ def _entity_resolution() -> ModuleBindingResolution:
         credential_ref="channel-resolution",
         supports_json=True,
     )
+
+
+def _agent_profile_resolution() -> ModuleBindingResolution:
+    return ModuleBindingResolution(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        module_key="character_agent_profile",
+        channel_id="channel-profile",
+        model_id="model-profile",
+        provider="openai-compatible",
+        base_url="https://llm.example/v1",
+        credential_ref="channel-profile",
+        supports_json=True,
+    )
+
+
+class AgentProfileContextCursor:
+    def __init__(
+        self,
+        *,
+        resolution_rows: list[dict[str, object]],
+        entity_rows: list[dict[str, object]],
+        relationship_rows: list[dict[str, object]],
+        segment_rows: list[dict[str, object]],
+    ) -> None:
+        self._row_sets = [resolution_rows, entity_rows, relationship_rows, segment_rows]
+        self.executed: list[tuple[str, tuple[object, ...]]] = []
+        self.query = ""
+        self.params: tuple[object, ...] = ()
+
+    def __enter__(self) -> "AgentProfileContextCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple[object, ...]) -> None:
+        self.query = query
+        self.params = params
+        self.executed.append((query, params))
+
+    def fetchone(self) -> dict[str, object] | None:
+        if len(self.executed) != 2:
+            raise AssertionError("unexpected fetchone call")
+        rows = self._row_sets[0]
+        return rows[0] if rows else None
+
+    def fetchall(self) -> list[dict[str, object]]:
+        if len(self.executed) == 3:
+            return self._row_sets[1]
+        if len(self.executed) == 4:
+            return self._row_sets[2]
+        if len(self.executed) == 5:
+            return self._row_sets[3]
+        raise AssertionError("unexpected fetchall call")
+
+
+class AgentProfileContextConnection:
+    def __init__(
+        self,
+        *,
+        resolution_rows: list[dict[str, object]],
+        entity_rows: list[dict[str, object]],
+        relationship_rows: list[dict[str, object]],
+        segment_rows: list[dict[str, object]],
+    ) -> None:
+        self.cursor_instance = AgentProfileContextCursor(
+            resolution_rows=resolution_rows,
+            entity_rows=entity_rows,
+            relationship_rows=relationship_rows,
+            segment_rows=segment_rows,
+        )
+        self.closed = False
+
+    def cursor(self) -> AgentProfileContextCursor:
+        return self.cursor_instance
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class QueryCursor:
@@ -6564,6 +6700,459 @@ def test_postgres_agent_profile_snapshot_writer_upserts_sanitized_private_snapsh
     assert connection.closed is True
 
 
+def test_llm_facility_agent_profile_runner_loads_context_before_binding_credentials_and_provider() -> None:
+    call_order: list[str] = []
+
+    class OrderedContextLoader(RecordingAgentProfileContextLoader):
+        def load_context(self, *, context: AgentContext) -> dict[str, object]:
+            call_order.append("context_loader")
+            return super().load_context(context=context)
+
+    class OrderedBindingResolver(RecordingBindingResolver):
+        def resolve_module_binding(self, *, context: AgentContext, module_key: str) -> ModuleBindingResolution:
+            call_order.append("binding")
+            return super().resolve_module_binding(context=context, module_key=module_key)
+
+    class OrderedCredentialProvider(RecordingCredentialProvider):
+        def resolve_api_key(self, *, context: AgentContext, credential_ref: str) -> str:
+            call_order.append("credential")
+            return super().resolve_api_key(context=context, credential_ref=credential_ref)
+
+    class OrderedChatClient(RecordingJSONChatClient):
+        def complete_json(
+            self,
+            *,
+            context: AgentContext,
+            resolution: ModuleBindingResolution,
+            api_key: str,
+            messages: list[dict[str, str]],
+        ) -> dict[str, object]:
+            call_order.append("provider")
+            return super().complete_json(
+                context=context,
+                resolution=resolution,
+                api_key=api_key,
+                messages=messages,
+            )
+
+    loader = OrderedContextLoader()
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=OrderedBindingResolver(_agent_profile_resolution()),
+        credential_provider=OrderedCredentialProvider(api_key="sk-profile"),
+        chat_client=OrderedChatClient(
+            response_json={
+                "agent_profiles": {
+                    "profiles": [],
+                    "memory_seeds": [],
+                    "relationship_views": [],
+                }
+            }
+        ),
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=loader,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    assert loader.calls == [{"tenant_id": "tenant-1", "project_id": "project-1", "run_id": "run-1"}]
+    assert call_order == ["context_loader", "binding", "credential", "provider"]
+
+
+def test_llm_facility_agent_profile_runner_includes_sanitized_context_in_provider_request() -> None:
+    loader = RecordingAgentProfileContextLoader(
+        {
+            "entity_resolution": {
+                "merged_entities": [{"canonical_name": "林舟", "aliases": ["小舟"]}],
+                "prompt": "must not reach provider",
+                "private_notes": "private note must not reach provider",
+                "body": "private body must not reach provider",
+                "provider": "provider-name",
+                "base_url": "https://provider.example",
+                "channel_id": "channel-secret",
+                "rawText": "camel raw text",
+                "credential_ref": "secret-ref",
+            },
+            "canon": {
+                "entities": [
+                    {
+                        "entity_id": "entity-1",
+                        "canonical_name": "林舟",
+                        "state_summary": "守住雨港秘密。",
+                        "source_object_key": "private/source.txt",
+                    }
+                ],
+                "relationships": [
+                    {
+                        "source_entity_name": "林舟",
+                        "target_entity_name": "陆晚",
+                        "summary": "互相试探。",
+                        "evidence_text": "raw manuscript sentence",
+                    }
+                ],
+                "segment_summaries": [
+                    {
+                        "segment_id": "segment-1",
+                        "summary": "雨夜相遇。",
+                        "raw_text": "full chapter",
+                    }
+                ],
+            },
+        }
+    )
+    chat_client = RecordingJSONChatClient(
+        response_json={
+            "agent_profiles": {
+                "profiles": [{"name": "林舟", "voice": "冷静"}],
+                "memory_seeds": [],
+                "relationship_views": [],
+            }
+        }
+    )
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=RecordingBindingResolver(_agent_profile_resolution()),
+        credential_provider=RecordingCredentialProvider(api_key="sk-profile"),
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=loader,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    user_message = json.loads(chat_client.calls[0]["messages"][1]["content"])
+    assert user_message["source_context"]["entity_resolution"]["merged_entities"] == [
+        {"canonical_name": "林舟", "aliases": ["小舟"]}
+    ]
+    assert user_message["source_context"]["canon"]["entities"] == [
+        {
+            "entity_id": "entity-1",
+            "canonical_name": "林舟",
+            "state_summary": "守住雨港秘密。",
+        }
+    ]
+    assert user_message["source_context"]["canon"]["relationships"] == [
+        {
+            "source_entity_name": "林舟",
+            "target_entity_name": "陆晚",
+            "summary": "互相试探。",
+        }
+    ]
+    request_body = json.dumps(chat_client.calls[0]["messages"], ensure_ascii=False)
+    for forbidden in (
+        "must not reach provider",
+        "private note must not reach provider",
+        "private body must not reach provider",
+        "provider-name",
+        "provider.example",
+        "channel-secret",
+        "rawText",
+        "camel raw text",
+        "credential_ref",
+        "secret-ref",
+        "source_object_key",
+        "private/source.txt",
+        "evidence_text",
+        "raw manuscript sentence",
+        "raw_text",
+        "full chapter",
+        "api_key",
+    ):
+        assert forbidden not in request_body
+
+
+def test_llm_facility_agent_profile_runner_fails_closed_when_context_is_empty_before_provider() -> None:
+    loader = RecordingAgentProfileContextLoader({})
+    resolver = RecordingBindingResolver(_agent_profile_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-profile")
+    chat_client = RecordingJSONChatClient(response_json={})
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=loader,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "failed",
+        "module_key": "character_agent_profile",
+        "error": {
+            "code": "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+            "message": "agent profile source context is unavailable",
+        },
+    }
+    assert resolver.calls == []
+    assert credentials.calls == []
+    assert chat_client.calls == []
+
+
+def test_llm_facility_agent_profile_runner_fails_closed_without_context_loader_before_provider() -> None:
+    resolver = RecordingBindingResolver(_agent_profile_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-profile")
+    chat_client = RecordingJSONChatClient(response_json={})
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=None,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "failed",
+        "module_key": "character_agent_profile",
+        "error": {
+            "code": "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+            "message": "agent profile source context is unavailable",
+        },
+    }
+    assert resolver.calls == []
+    assert credentials.calls == []
+    assert chat_client.calls == []
+
+
+def test_llm_facility_agent_profile_runner_fails_closed_on_metadata_only_context_before_provider() -> None:
+    loader = RecordingAgentProfileContextLoader(
+        {
+            "entity_resolution": {
+                "snapshot_id": "resolution-snapshot-1",
+                "model_id": "model-resolution",
+                "merged_entity_count": 1,
+                "alias_count": 0,
+                "conflict_count": 0,
+            }
+        }
+    )
+    resolver = RecordingBindingResolver(_agent_profile_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-profile")
+    chat_client = RecordingJSONChatClient(response_json={})
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=loader,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "failed",
+        "module_key": "character_agent_profile",
+        "error": {
+            "code": "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+            "message": "agent profile source context is unavailable",
+        },
+    }
+    assert resolver.calls == []
+    assert credentials.calls == []
+    assert chat_client.calls == []
+
+
+def test_llm_facility_agent_profile_runner_fails_closed_on_metadata_only_context_lists_before_provider() -> None:
+    loader = RecordingAgentProfileContextLoader(
+        {
+            "entity_resolution": {
+                "merged_entities": [{"entity_id": "entity-1", "entity_type": "character"}],
+                "aliases": [{"entity_id": "entity-1", "alias_count": 1}],
+                "conflicts": [{"conflict_count": 1}],
+            },
+            "canon": {
+                "entities": [{"entity_id": "entity-1", "entity_type": "character", "importance": 8}],
+                "relationships": [{"relationship_id": "rel-1"}],
+                "segment_summaries": [{"segment_id": "segment-1", "segment_order": 0}],
+            },
+        }
+    )
+    resolver = RecordingBindingResolver(_agent_profile_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-profile")
+    chat_client = RecordingJSONChatClient(response_json={})
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=loader,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "failed",
+        "module_key": "character_agent_profile",
+        "error": {
+            "code": "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+            "message": "agent profile source context is unavailable",
+        },
+    }
+    assert resolver.calls == []
+    assert credentials.calls == []
+    assert chat_client.calls == []
+
+
+def test_llm_facility_agent_profile_runner_fails_closed_when_context_loader_errors_before_provider() -> None:
+    loader = RecordingAgentProfileContextLoader(
+        error=RuntimeError(
+            "driver failed prompt=hidden api_key=sk-hidden credential_ref=secret raw manuscript text"
+        )
+    )
+    resolver = RecordingBindingResolver(_agent_profile_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-profile")
+    chat_client = RecordingJSONChatClient(response_json={})
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=loader,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "failed",
+        "module_key": "character_agent_profile",
+        "error": {
+            "code": "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+            "message": "agent profile source context load failed",
+        },
+    }
+    assert resolver.calls == []
+    assert credentials.calls == []
+    assert chat_client.calls == []
+    encoded = json.dumps(result, ensure_ascii=False)
+    for forbidden in ("driver failed", "prompt", "api_key", "sk-hidden", "credential_ref", "raw manuscript text"):
+        assert forbidden not in encoded
+
+
+def test_postgres_agent_profile_context_loader_loads_sanitized_scoped_context_without_raw_fields() -> None:
+    connection = AgentProfileContextConnection(
+        resolution_rows=[
+            {
+                "seed_entity_resolution_snapshot_id": "resolution-snapshot-1",
+                "model_id": "model-resolution",
+                "merged_entity_count": 1,
+                "alias_count": 1,
+                "conflict_count": 0,
+                "resolution_jsonb": {
+                    "merged_entities": [{"canonical_name": "林舟", "aliases": ["小舟"]}],
+                    "prompt": "must not reach provider",
+                    "private_notes": "private note",
+                    "body": "private body",
+                    "provider": "provider-name",
+                    "base_url": "https://provider.example",
+                    "channel_id": "channel-secret",
+                    "credential_ref": "secret-ref",
+                },
+            }
+        ],
+        entity_rows=[
+            {
+                "entity_id": "entity-1",
+                "entity_type": "character",
+                "canonical_name": "林舟",
+                "importance": 8,
+                "state_summary": "守住雨港秘密。",
+                "metadata_jsonb": {"prompt": "hidden"},
+            }
+        ],
+        relationship_rows=[
+            {
+                "relationship_id": "rel-1",
+                "source_entity_name": "林舟",
+                "target_entity_name": "陆晚",
+                "relationship_type": "ally",
+                "summary": "互相试探。",
+                "evidence_text": "raw manuscript sentence",
+            }
+        ],
+        segment_rows=[
+            {
+                "segment_id": "segment-1",
+                "segment_order": 0,
+                "summary": "雨夜相遇。",
+                "source_object_key": "private/source.txt",
+            }
+        ],
+    )
+    loader = seed_module.PostgresAgentProfileContextLoader(connect=lambda: connection)
+
+    context_payload = loader.load_context(context=_context())
+
+    assert context_payload == {
+        "entity_resolution": {
+            "snapshot_id": "resolution-snapshot-1",
+            "model_id": "model-resolution",
+            "merged_entity_count": 1,
+            "alias_count": 1,
+            "conflict_count": 0,
+            "resolution": {
+                "merged_entities": [{"canonical_name": "林舟", "aliases": ["小舟"]}],
+            },
+        },
+        "canon": {
+            "entities": [
+                {
+                    "entity_id": "entity-1",
+                    "entity_type": "character",
+                    "canonical_name": "林舟",
+                    "importance": 8,
+                    "state_summary": "守住雨港秘密。",
+                }
+            ],
+            "relationships": [
+                {
+                    "relationship_id": "rel-1",
+                    "source_entity_name": "林舟",
+                    "target_entity_name": "陆晚",
+                    "relationship_type": "ally",
+                    "summary": "互相试探。",
+                }
+            ],
+            "segment_summaries": [
+                {
+                    "segment_id": "segment-1",
+                    "segment_order": 0,
+                    "summary": "雨夜相遇。",
+                }
+            ],
+        },
+    }
+    queries = "\n".join(query for query, _params in connection.cursor_instance.executed)
+    assert "seed_entity_resolution_snapshots" in queries
+    assert "FROM entities" in queries
+    assert "FROM relationships" in queries
+    assert "FROM segment_summaries" in queries
+    for forbidden in (
+        "object_key",
+        "source_object_key",
+        "prompt",
+        "credential",
+        "private_notes",
+        "body",
+        "provider",
+        "base_url",
+        "channel_id",
+        "api_key",
+        "draft",
+        "manuscript",
+        "raw_text",
+        "content_text",
+        "evidence_text",
+    ):
+        assert forbidden not in queries.lower()
+    assert all(
+        params == ("tenant-1", "project-1", "run-1")
+        for _query, params in connection.cursor_instance.executed[1:]
+    )
+    assert connection.closed is True
+
+
 def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6596,6 +7185,21 @@ def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
     )
     connections = iter(
         [
+            AgentProfileContextConnection(
+                resolution_rows=[
+                    {
+                        "seed_entity_resolution_snapshot_id": "resolution-snapshot-1",
+                        "model_id": "model-resolution",
+                        "merged_entity_count": 1,
+                        "alias_count": 1,
+                        "conflict_count": 0,
+                        "resolution_jsonb": {"merged_entities": [{"canonical_name": "林舟"}]},
+                    }
+                ],
+                entity_rows=[],
+                relationship_rows=[],
+                segment_rows=[],
+            ),
             QueryConnection(
                 rows=[
                     {
@@ -6646,6 +7250,8 @@ def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
     assert request.headers["Authorization"] == "Bearer sk-seed-live"
     request_body = request.data.decode("utf-8")
     assert "character_agent_profile" in request_body
+    assert "source_context" in request_body
+    assert "resolution-snapshot-1" in request_body
     assert "credential_ref" not in request_body
     assert "api_key" not in request_body
 

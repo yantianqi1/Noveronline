@@ -364,6 +364,15 @@ class AgentProfileSnapshotWriter(Protocol):
         """Persist a private character-agent profile snapshot and return its public id."""
 
 
+class AgentProfileContextLoader(Protocol):
+    def load_context(
+        self,
+        *,
+        context: AgentContext,
+    ) -> dict[str, Any]:
+        """Load sanitized Seed canon context for character agent profile generation."""
+
+
 class GlobalAggregationRunner(Protocol):
     def aggregate(
         self,
@@ -1262,6 +1271,149 @@ class PostgresAgentProfileSnapshotWriter:
             connection.close()
 
 
+class PostgresAgentProfileContextLoader:
+    def __init__(self, *, connect: Callable[[], Any]) -> None:
+        self._connect = connect
+
+    @classmethod
+    def from_database_url(cls, database_url: str) -> "PostgresAgentProfileContextLoader":
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover - depends on optional runtime packaging
+            raise RuntimeError("psycopg is required for DATABASE_URL agent profile context loading") from exc
+
+        return cls(connect=lambda: psycopg.connect(database_url, row_factory=dict_row))
+
+    def load_context(self, *, context: AgentContext) -> dict[str, Any]:
+        if context.project_id is None:
+            raise LLMFacilityError(
+                "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+                "agent profile source context load failed",
+            )
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                resolution = self._load_resolution(cursor, context)
+                entities = self._load_entities(cursor, context)
+                relationships = self._load_relationships(cursor, context)
+                segment_summaries = self._load_segment_summaries(cursor, context)
+            context_payload: dict[str, Any] = {}
+            if resolution:
+                context_payload["entity_resolution"] = resolution
+            canon: dict[str, Any] = {}
+            if entities:
+                canon["entities"] = entities
+            if relationships:
+                canon["relationships"] = relationships
+            if segment_summaries:
+                canon["segment_summaries"] = segment_summaries
+            if canon:
+                context_payload["canon"] = canon
+            sanitized = _sanitize_agent_profile_context_value(context_payload)
+            return sanitized if isinstance(sanitized, dict) else {}
+        except LLMFacilityError:
+            raise
+        except Exception as exc:
+            raise LLMFacilityError(
+                "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+                "agent profile source context load failed",
+            ) from exc
+        finally:
+            connection.close()
+
+    def _load_resolution(self, cursor: Any, context: AgentContext) -> dict[str, Any]:
+        cursor.execute(
+            """SELECT
+                   seed_entity_resolution_snapshot_id::text AS seed_entity_resolution_snapshot_id,
+                   model_id,
+                   merged_entity_count,
+                   alias_count,
+                   conflict_count,
+                   resolution_jsonb
+               FROM seed_entity_resolution_snapshots
+               WHERE tenant_id = %s
+                 AND project_id = %s
+                 AND run_id = %s
+                 AND module_key = 'entity_resolution'
+               ORDER BY updated_at DESC
+               LIMIT 1""",
+            (context.tenant_id, context.project_id, context.run_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return {}
+        resolution_json = _jsonb_row_value(row, "resolution_jsonb")
+        resolution_payload = (
+            _project_agent_profile_resolution_context(resolution_json)
+            if isinstance(resolution_json, dict)
+            else {}
+        )
+        result = {
+            "snapshot_id": _optional_row_text(row, "seed_entity_resolution_snapshot_id"),
+            "model_id": _optional_row_text(row, "model_id"),
+            "merged_entity_count": _optional_row_int(row, "merged_entity_count"),
+            "alias_count": _optional_row_int(row, "alias_count"),
+            "conflict_count": _optional_row_int(row, "conflict_count"),
+        }
+        if resolution_payload:
+            result["resolution"] = resolution_payload
+        return {key: value for key, value in result.items() if value is not None}
+
+    def _load_entities(self, cursor: Any, context: AgentContext) -> list[dict[str, Any]]:
+        cursor.execute(
+            """SELECT
+                   entity_id::text AS entity_id,
+                   entity_type,
+                   canonical_name,
+                   importance,
+                   state_summary
+               FROM entities
+               WHERE tenant_id = %s
+                 AND project_id = %s
+                 AND source_run_id::text = %s
+               ORDER BY canonical_name ASC
+               LIMIT 200""",
+            (context.tenant_id, context.project_id, context.run_id),
+        )
+        return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
+
+    def _load_relationships(self, cursor: Any, context: AgentContext) -> list[dict[str, Any]]:
+        cursor.execute(
+            """SELECT
+                   relationship_id::text AS relationship_id,
+                   source_entity_name,
+                   target_entity_name,
+                   relationship_type,
+                   summary
+               FROM relationships
+               WHERE tenant_id = %s
+                 AND project_id = %s
+                 AND source_run_id::text = %s
+               ORDER BY source_entity_name ASC, target_entity_name ASC, relationship_type ASC
+               LIMIT 200""",
+            (context.tenant_id, context.project_id, context.run_id),
+        )
+        return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
+
+    def _load_segment_summaries(self, cursor: Any, context: AgentContext) -> list[dict[str, Any]]:
+        cursor.execute(
+            """SELECT
+                   segment_id::text AS segment_id,
+                   row_number() OVER (ORDER BY created_at ASC, segment_id ASC) - 1 AS segment_order,
+                   summary
+               FROM segment_summaries
+               WHERE tenant_id = %s
+                 AND project_id = %s
+                 AND run_id = %s
+               ORDER BY created_at ASC, segment_id ASC
+               LIMIT 200""",
+            (context.tenant_id, context.project_id, context.run_id),
+        )
+        return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
+
+
 class LLMFacilityOntologyRunner:
     def __init__(
         self,
@@ -1414,11 +1566,13 @@ class LLMFacilityAgentProfileRunner:
         credential_provider: Any,
         chat_client: Any,
         agent_profile_snapshot_writer: AgentProfileSnapshotWriter,
+        agent_profile_context_loader: AgentProfileContextLoader | None,
     ) -> None:
         self._binding_resolver = binding_resolver
         self._credential_provider = credential_provider
         self._chat_client = chat_client
         self._agent_profile_snapshot_writer = agent_profile_snapshot_writer
+        self._agent_profile_context_loader = agent_profile_context_loader
 
     def generate(
         self,
@@ -1432,6 +1586,26 @@ class LLMFacilityAgentProfileRunner:
                 f"LLMFacilityAgentProfileRunner only supports {CHARACTER_AGENT_PROFILE_MODULE_KEY}",
             )
         try:
+            if self._agent_profile_context_loader is None:
+                raise LLMFacilityError(
+                    "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+                    "agent profile source context is unavailable",
+                )
+            try:
+                loaded_context = self._agent_profile_context_loader.load_context(context=context)
+            except LLMFacilityError:
+                raise
+            except Exception as exc:
+                raise LLMFacilityError(
+                    "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+                    "agent profile source context load failed",
+                ) from exc
+            source_context = _sanitize_agent_profile_context_value(loaded_context)
+            if not isinstance(source_context, dict) or not _agent_profile_context_has_content(source_context):
+                raise LLMFacilityError(
+                    "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+                    "agent profile source context is unavailable",
+                )
             resolution = self._binding_resolver.resolve_module_binding(
                 context=context,
                 module_key=module_key,
@@ -1447,7 +1621,7 @@ class LLMFacilityAgentProfileRunner:
                 context=context,
                 resolution=resolution,
                 api_key=api_key.strip(),
-                messages=_agent_profile_messages(context=context),
+                messages=_agent_profile_messages(context=context, source_context=source_context),
             )
             agent_profiles = _agent_profiles_payload(response_json)
             profile_count = _agent_profile_item_count(agent_profiles, "profiles")
@@ -2783,8 +2957,10 @@ AGENT_PROFILE_PRIVATE_SNAPSHOT_BLOCKED_KEYS = {
     "draft",
     "encrypted_api_key",
     "encrypted_credential",
+    "evidence_text",
     "manuscript",
     "material_text",
+    "metadata_jsonb",
     "object_key",
     "prompt",
     "raw_content",
@@ -2938,7 +3114,20 @@ def _entity_resolution_messages(*, context: AgentContext) -> list[dict[str, str]
     ]
 
 
-def _agent_profile_messages(*, context: AgentContext) -> list[dict[str, str]]:
+def _agent_profile_messages(
+    *,
+    context: AgentContext,
+    source_context: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    user_payload: dict[str, Any] = {
+        "tenant_id": context.tenant_id,
+        "project_id": context.project_id,
+        "run_id": context.run_id,
+        "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
+        "task": "Generate character agent profiles from resolved Seed canon metadata.",
+    }
+    if source_context is not None:
+        user_payload["source_context"] = source_context
     return [
         {
             "role": "system",
@@ -2952,13 +3141,7 @@ def _agent_profile_messages(*, context: AgentContext) -> list[dict[str, str]]:
         {
             "role": "user",
             "content": json.dumps(
-                {
-                    "tenant_id": context.tenant_id,
-                    "project_id": context.project_id,
-                    "run_id": context.run_id,
-                    "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
-                    "task": "Generate character agent profiles from resolved Seed canon metadata.",
-                },
+                user_payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -3029,6 +3212,238 @@ def _sanitize_agent_profile_value(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_sanitize_agent_profile_value(child) for child in value]
+    return value
+
+
+AGENT_PROFILE_CONTEXT_ITEM_ALLOWED_KEYS = {
+    "alias",
+    "aliases",
+    "alias_count",
+    "canonical_name",
+    "conflict_count",
+    "conflict_type",
+    "description",
+    "entity_id",
+    "entity_type",
+    "importance",
+    "merged_entity_count",
+    "model_id",
+    "name",
+    "reason",
+    "relationship_id",
+    "relationship_type",
+    "segment_id",
+    "segment_order",
+    "snapshot_id",
+    "source_entity_name",
+    "state_summary",
+    "summary",
+    "target_entity_name",
+    "title",
+}
+
+AGENT_PROFILE_CONTEXT_SEMANTIC_KEYS = {
+    "alias",
+    "aliases",
+    "canonical_name",
+    "conflict_type",
+    "description",
+    "name",
+    "reason",
+    "relationship_type",
+    "source_entity_name",
+    "state_summary",
+    "summary",
+    "target_entity_name",
+    "title",
+}
+
+
+def _sanitize_agent_profile_context_value(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    entity_resolution = value.get("entity_resolution")
+    if isinstance(entity_resolution, dict):
+        projected_resolution = _project_agent_profile_resolution_context(entity_resolution)
+        if projected_resolution:
+            result["entity_resolution"] = projected_resolution
+    canon = value.get("canon")
+    if isinstance(canon, dict):
+        projected_canon = _project_agent_profile_canon_context(canon)
+        if projected_canon:
+            result["canon"] = projected_canon
+    return result
+
+
+def _agent_profile_context_has_content(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    entity_resolution = value.get("entity_resolution")
+    if isinstance(entity_resolution, dict):
+        for field_name in ("merged_entities", "aliases", "conflicts"):
+            if _agent_profile_context_list_has_content(entity_resolution.get(field_name)):
+                return True
+        resolution = entity_resolution.get("resolution")
+        if isinstance(resolution, dict):
+            for field_name in ("merged_entities", "aliases", "conflicts"):
+                if _agent_profile_context_list_has_content(resolution.get(field_name)):
+                    return True
+    canon = value.get("canon")
+    if isinstance(canon, dict):
+        for field_name in ("entities", "relationships", "segment_summaries"):
+            if _agent_profile_context_list_has_content(canon.get(field_name)):
+                return True
+    return False
+
+
+def _agent_profile_context_list_has_content(value: Any) -> bool:
+    return isinstance(value, list) and any(_agent_profile_context_item_has_content(item) for item in value)
+
+
+def _agent_profile_context_item_has_content(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key) in AGENT_PROFILE_CONTEXT_SEMANTIC_KEYS and _agent_profile_context_scalar_has_content(child):
+                return True
+        return False
+    return _agent_profile_context_scalar_has_content(value)
+
+
+def _agent_profile_context_scalar_has_content(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_agent_profile_context_scalar_has_content(item) for item in value)
+    if isinstance(value, dict):
+        return _agent_profile_context_item_has_content(value)
+    return False
+
+
+def _compact_sanitized_context_row(row: Any) -> dict[str, Any]:
+    row_dict = _row_dict(row)
+    sanitized = _project_agent_profile_context_item(row_dict)
+    if not isinstance(sanitized, dict):
+        return {}
+    return {key: value for key, value in sanitized.items() if value is not None}
+
+
+def _project_agent_profile_resolution_context(value: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key in ("snapshot_id", "model_id", "merged_entity_count", "alias_count", "conflict_count"):
+        projected = _project_agent_profile_context_scalar(value.get(key))
+        if projected is not None:
+            result[key] = projected
+    for field_name in ("merged_entities", "aliases", "conflicts"):
+        projected_list = _project_agent_profile_context_list(value.get(field_name))
+        if projected_list:
+            result[field_name] = projected_list
+    nested_resolution = value.get("resolution")
+    if isinstance(nested_resolution, dict):
+        projected_nested: dict[str, Any] = {}
+        for field_name in ("merged_entities", "aliases", "conflicts"):
+            projected_list = _project_agent_profile_context_list(nested_resolution.get(field_name))
+            if projected_list:
+                projected_nested[field_name] = projected_list
+        if projected_nested:
+            result["resolution"] = projected_nested
+    return result
+
+
+def _project_agent_profile_canon_context(value: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for field_name in ("entities", "relationships", "segment_summaries"):
+        projected_list = _project_agent_profile_context_list(value.get(field_name))
+        if projected_list:
+            result[field_name] = projected_list
+    return result
+
+
+def _project_agent_profile_context_list(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    projected_items: list[Any] = []
+    for item in value:
+        if isinstance(item, dict):
+            projected_item = _project_agent_profile_context_item(item)
+            if projected_item:
+                projected_items.append(projected_item)
+        else:
+            projected_scalar = _project_agent_profile_context_scalar(item)
+            if projected_scalar is not None:
+                projected_items.append(projected_scalar)
+    return projected_items
+
+
+def _project_agent_profile_context_item(value: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, child in value.items():
+        normalized_key = str(key)
+        if normalized_key not in AGENT_PROFILE_CONTEXT_ITEM_ALLOWED_KEYS:
+            continue
+        projected_child = _project_agent_profile_context_scalar(child)
+        if projected_child is not None:
+            result[normalized_key] = projected_child
+    return result
+
+
+def _project_agent_profile_context_scalar(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, list):
+        projected = [_project_agent_profile_context_scalar(item) for item in value]
+        return [item for item in projected if item is not None]
+    return None
+
+
+def _row_dict(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return {str(key): value for key, value in row.items()}
+    if hasattr(row, "keys"):
+        return {str(key): row[key] for key in row.keys()}
+    raise ValueError("database row must be mapping-like")
+
+
+def _row_get(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    if hasattr(row, "keys"):
+        return row[key] if key in row.keys() else None
+    raise ValueError("database row must be mapping-like")
+
+
+def _optional_row_text(row: Any, key: str) -> str | None:
+    value = _row_get(row, key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_row_int(row: Any, key: str) -> int | None:
+    value = _row_get(row, key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise ValueError(f"{key} must be an integer")
+
+
+def _jsonb_row_value(row: Any, key: str) -> Any:
+    value = _row_get(row, key)
+    if isinstance(value, str):
+        return json.loads(value)
     return value
 
 
@@ -3616,6 +4031,7 @@ def _agent_profile_runner_from_env(
         binding_resolver = PostgresModuleBindingResolver(connect=connect)
         credential_provider = PostgresCredentialProvider(connect=connect, decryptor=decryptor)
         agent_profile_snapshot_writer = PostgresAgentProfileSnapshotWriter(connect=connect)
+        agent_profile_context_loader = PostgresAgentProfileContextLoader(connect=connect)
     else:
         binding_resolver = PostgresModuleBindingResolver.from_database_url(database_url)
         credential_provider = PostgresCredentialProvider.from_database_url(
@@ -3623,11 +4039,13 @@ def _agent_profile_runner_from_env(
             key_material=key_material or None,
         )
         agent_profile_snapshot_writer = PostgresAgentProfileSnapshotWriter.from_database_url(database_url)
+        agent_profile_context_loader = PostgresAgentProfileContextLoader.from_database_url(database_url)
     return LLMFacilityAgentProfileRunner(
         binding_resolver=binding_resolver,
         credential_provider=credential_provider,
         chat_client=OpenAICompatibleJSONClient(http_request=http_request),
         agent_profile_snapshot_writer=agent_profile_snapshot_writer,
+        agent_profile_context_loader=agent_profile_context_loader,
     )
 
 
