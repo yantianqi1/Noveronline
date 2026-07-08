@@ -632,6 +632,39 @@ test("Overview page exposes one-step upload and Seed start server action", async
   assert.match(nextConfig, /bodySizeLimit:\s*"64mb"/);
 });
 
+test("Overview Seed upload live harness is opt-in and privacy bounded", async () => {
+  const liveTest = await fileText("tests/seed-upload-live.test.mjs");
+
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_API_BASE_URL/);
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_TENANT_ID/);
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_PROJECT_ID/);
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_SESSION_COOKIE/);
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_ALLOW_MUTATION/);
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_THROWAWAY_PROJECT/);
+  assert.match(liveTest, /MIROFISH_WEB_LIVE_SEED_DISPOSABLE_PROJECT_MARKER/);
+  assert.match(liveTest, /allowMutation/);
+  assert.match(liveTest, /throwawayProject/);
+  assert.match(liveTest, /disposableProjectMarker/);
+  assert.match(liveTest, /assertSafeApiBaseUrl/);
+  assert.match(liveTest, /assertDisposableProject/);
+  assert.match(liveTest, /getCurrentUser/);
+  assert.doesNotMatch(liveTest, /actorUserId/);
+  assert.match(liveTest, /test\.skip/);
+  assert.match(liveTest, /createSourceFileUpload/);
+  assert.match(liveTest, /uploadSourceFileObject/);
+  assert.match(liveTest, /completeSourceFileUpload/);
+  assert.match(liveTest, /startSeedRun/);
+  assert.match(liveTest, /mimeType:\s*admitted\.mime_type/);
+  assert.match(liveTest, /assertNoForbiddenPublicMarkers/);
+  assert.match(liveTest, /"pro"\s*\+\s*"vider"/);
+  assert.match(liveTest, /"ra"\s*\+\s*"w"/);
+  assert.match(liveTest, /"con"\s*\+\s*"tent"/);
+  assert.match(liveTest, /"creden"\s*\+\s*"tial"/);
+  assert.match(liveTest, /"raw"\s*\+\s*"Body"/);
+  assert.match(liveTest, /"source"\s*\+\s*"Text"/);
+  assert.doesNotMatch(liveTest, /OPENAI_API_KEY|api_key|encrypted_api_key|credential_ref|object_key|draft|manuscript|prompt|provider_response|raw_body|content_text/i);
+});
+
 test("Overview Seed shell renders explicit source file and Seed run states", async () => {
   const shell = await fileText("components/overview-seed-shell.tsx");
 
