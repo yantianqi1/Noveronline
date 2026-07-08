@@ -12924,6 +12924,96 @@ func TestAuthSubjectGlobalRunReadsRejectInvalidBearerBeforeFallbackAndReaders(t 
 	}
 }
 
+func TestGlobalRunReadErrorsUseStablePublicMessages(t *testing.T) {
+	sensitiveErr := &workflows.AppError{
+		Code:    "WORKFLOW_QUERY_FAILED",
+		Message: "driver exploded prompt=hidden provider=raw api_key=sk-hidden credential_ref=cred-hidden object_key=private draft=secret manuscript=secret",
+	}
+	for _, tt := range []struct {
+		name   string
+		path   string
+		config func() Config
+	}{
+		{
+			name: "workflow detail owner lookup error",
+			path: "/v1/workflow-runs/run-123",
+			config: func() Config {
+				return Config{Authorizer: &recordingAuthorizer{}, WorkflowReader: &recordingWorkflowReader{err: sensitiveErr}}
+			},
+		},
+		{
+			name: "workflow events owner lookup error",
+			path: "/v1/workflow-runs/run-123/events",
+			config: func() Config {
+				return Config{Authorizer: &recordingAuthorizer{}, WorkflowReader: &recordingWorkflowReader{err: sensitiveErr}, WorkflowEventReader: &recordingWorkflowEventReader{}}
+			},
+		},
+		{
+			name: "writer detail owner lookup error",
+			path: "/v1/writer-runs/run-123",
+			config: func() Config {
+				return Config{Authorizer: &recordingAuthorizer{}, WriterReader: &recordingWriterReader{err: sensitiveErr}}
+			},
+		},
+		{
+			name: "writer events owner lookup error",
+			path: "/v1/writer-runs/run-123/events",
+			config: func() Config {
+				return Config{Authorizer: &recordingAuthorizer{}, WriterReader: &recordingWriterReader{err: sensitiveErr}, WriterEventReader: &recordingWriterEventReader{}}
+			},
+		},
+		{
+			name: "workflow events reader error after authorization",
+			path: "/v1/workflow-runs/run-123/events",
+			config: func() Config {
+				return Config{
+					Authorizer:          &recordingAuthorizer{},
+					WorkflowReader:      &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-123", Status: "running"}},
+					WorkflowEventReader: &recordingWorkflowEventReader{err: sensitiveErr},
+				}
+			},
+		},
+		{
+			name: "writer events reader error after authorization",
+			path: "/v1/writer-runs/run-123/events",
+			config: func() Config {
+				return Config{
+					Authorizer:        &recordingAuthorizer{},
+					WriterReader:      &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-123", Status: "running"}},
+					WriterEventReader: &recordingWriterEventReader{err: sensitiveErr},
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(tt.config())
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected workflow query failure status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+			}
+			rawBody := response.Body.String()
+			var body errorEnvelope
+			if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != "WORKFLOW_QUERY_FAILED" || body.Error.Message != "workflow query failed" {
+				t.Fatalf("unexpected stable workflow error body: %#v", body)
+			}
+			for _, forbidden := range []string{"prompt", "provider", "api_key", "sk-hidden", "credential_ref", "object_key", "draft", "manuscript", "driver exploded"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("workflow error response leaked forbidden payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
 func TestMalformedGlobalRunReadPathsStay404WithoutAuthOrReaders(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -13037,6 +13127,283 @@ func TestMalformedGlobalRunReadPathsStay404WithoutAuthOrReaders(t *testing.T) {
 	}
 }
 
+func TestGlobalRunReadsAuthorizeReturnedProjectBeforeResponseOrEvents(t *testing.T) {
+	deniedErr := &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret object-key draft manuscript",
+	}
+	for _, tt := range []struct {
+		name              string
+		path              string
+		config            func(*recordingAuthorizer) (Config, func(t *testing.T))
+		assertPreflight   func(t *testing.T)
+		expectedProjectID string
+	}{
+		{
+			name: "workflow detail uses returned project id",
+			path: "/v1/workflow-runs/run-123",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{
+					run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "owner-project", Status: "completed"},
+				}
+				return Config{WorkflowReader: reader, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+						t.Fatalf("workflow detail did not read owner run before auth: %#v", reader.input)
+					}
+				}
+			},
+			expectedProjectID: "owner-project",
+		},
+		{
+			name: "workflow events authorizes before event reader",
+			path: "/v1/workflow-runs/run-123/events",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				runReader := &recordingWorkflowReader{
+					run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "owner-project", Status: "running"},
+				}
+				eventReader := &recordingWorkflowEventReader{
+					events: []workflows.WorkflowEvent{{EventID: "evt-1", RunID: "run-123"}},
+				}
+				return Config{WorkflowReader: runReader, WorkflowEventReader: eventReader, Authorizer: authorizer}, func(t *testing.T) {
+					if runReader.input.TenantID != "tenant-123" || runReader.input.RunID != "run-123" {
+						t.Fatalf("workflow events did not read owner run before auth: %#v", runReader.input)
+					}
+					if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+						t.Fatalf("workflow events listed events before authorization: %#v", eventReader.input)
+					}
+				}
+			},
+			expectedProjectID: "owner-project",
+		},
+		{
+			name: "seed detail uses returned project id",
+			path: "/v1/seed-runs/run-123",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{
+					run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "seed-owner-project", Status: "completed"},
+				}
+				return Config{SeedRunReader: reader, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.TenantID != "tenant-123" || reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed detail did not read owner run before auth: %#v", reader.getInput)
+					}
+				}
+			},
+			expectedProjectID: "seed-owner-project",
+		},
+		{
+			name: "seed events authorizes before workflow event reader",
+			path: "/v1/seed-runs/run-123/events",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				runReader := &recordingSeedRunReader{
+					run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "seed-owner-project", Status: "running"},
+				}
+				eventReader := &recordingWorkflowEventReader{
+					events: []workflows.WorkflowEvent{{EventID: "evt-1", RunID: "run-123"}},
+				}
+				return Config{SeedRunReader: runReader, WorkflowEventReader: eventReader, Authorizer: authorizer}, func(t *testing.T) {
+					if runReader.getInput.TenantID != "tenant-123" || runReader.getInput.RunID != "run-123" {
+						t.Fatalf("seed events did not read owner run before auth: %#v", runReader.getInput)
+					}
+					if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+						t.Fatalf("seed events listed events before authorization: %#v", eventReader.input)
+					}
+				}
+			},
+			expectedProjectID: "seed-owner-project",
+		},
+		{
+			name: "writer detail uses returned project id",
+			path: "/v1/writer-runs/run-123",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{
+					run: workflows.WriterRun{RunID: "run-123", ProjectID: "writer-owner-project", Status: "completed"},
+				}
+				return Config{WriterReader: reader, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+						t.Fatalf("writer detail did not read owner run before auth: %#v", reader.input)
+					}
+				}
+			},
+			expectedProjectID: "writer-owner-project",
+		},
+		{
+			name: "writer events authorizes before writer event reader",
+			path: "/v1/writer-runs/run-123/events",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				runReader := &recordingWriterReader{
+					run: workflows.WriterRun{RunID: "run-123", ProjectID: "writer-owner-project", Status: "running"},
+				}
+				eventReader := &recordingWriterEventReader{
+					events: []workflows.WriterEvent{{EventID: "evt-1", RunID: "run-123"}},
+				}
+				return Config{WriterReader: runReader, WriterEventReader: eventReader, Authorizer: authorizer}, func(t *testing.T) {
+					if runReader.input.TenantID != "tenant-123" || runReader.input.RunID != "run-123" {
+						t.Fatalf("writer events did not read owner run before auth: %#v", runReader.input)
+					}
+					if eventReader.input.TenantID != "" || eventReader.input.RunID != "" {
+						t.Fatalf("writer events listed events before authorization: %#v", eventReader.input)
+					}
+				}
+			},
+			expectedProjectID: "writer-owner-project",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{err: deniedErr}
+			config, assertPreflight := tt.config(authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected denied status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+			}
+			assertPreflight(t)
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != tt.expectedProjectID ||
+				authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+				authorizer.inputs[0].UserID != "actor-123" {
+				t.Fatalf("unexpected run read authorization inputs: %#v", authorizer.inputs)
+			}
+			rawBody := response.Body.String()
+			var body errorEnvelope
+			if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != authPublicErrorMessage(auth.CodeAccessDenied) {
+				t.Fatalf("unexpected denied body: %#v", body)
+			}
+			for _, forbidden := range []string{"prompt", "api_key", "credential_ref", "object-key", "draft", "manuscript", "actor-123", "hidden"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("denied global run read leaked forbidden payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalRunReadsRejectBlankOwnerProjectBeforeResponseOrEvents(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		path   string
+		config func(*recordingAuthorizer) (Config, func(t *testing.T))
+	}{
+		{
+			name: "workflow detail blank owner",
+			path: "/v1/workflow-runs/run-123",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", Status: "completed"}}
+				return Config{WorkflowReader: reader, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("expected workflow owner lookup before blank-owner denial: %#v", reader.input)
+					}
+				}
+			},
+		},
+		{
+			name: "seed detail blank owner",
+			path: "/v1/seed-runs/run-123",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", Status: "completed"}}
+				return Config{SeedRunReader: reader, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.RunID != "run-123" {
+						t.Fatalf("expected seed owner lookup before blank-owner denial: %#v", reader.getInput)
+					}
+				}
+			},
+		},
+		{
+			name: "writer detail blank owner",
+			path: "/v1/writer-runs/run-123",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", Status: "completed"}}
+				return Config{WriterReader: reader, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("expected writer owner lookup before blank-owner denial: %#v", reader.input)
+					}
+				}
+			},
+		},
+		{
+			name: "workflow events blank owner",
+			path: "/v1/workflow-runs/run-123/events",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				runReader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", Status: "running"}}
+				eventReader := &recordingWorkflowEventReader{events: []workflows.WorkflowEvent{{EventID: "evt-1"}}}
+				return Config{WorkflowReader: runReader, WorkflowEventReader: eventReader, Authorizer: authorizer}, func(t *testing.T) {
+					if runReader.input.RunID != "run-123" {
+						t.Fatalf("expected workflow event owner lookup before blank-owner denial: %#v", runReader.input)
+					}
+					if eventReader.input.RunID != "" {
+						t.Fatalf("blank-owner workflow events should not list events: %#v", eventReader.input)
+					}
+				}
+			},
+		},
+		{
+			name: "seed events blank owner",
+			path: "/v1/seed-runs/run-123/events",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				runReader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", Status: "running"}}
+				eventReader := &recordingWorkflowEventReader{events: []workflows.WorkflowEvent{{EventID: "evt-1"}}}
+				return Config{SeedRunReader: runReader, WorkflowEventReader: eventReader, Authorizer: authorizer}, func(t *testing.T) {
+					if runReader.getInput.RunID != "run-123" {
+						t.Fatalf("expected seed event owner lookup before blank-owner denial: %#v", runReader.getInput)
+					}
+					if eventReader.input.RunID != "" {
+						t.Fatalf("blank-owner seed events should not list events: %#v", eventReader.input)
+					}
+				}
+			},
+		},
+		{
+			name: "writer events blank owner",
+			path: "/v1/writer-runs/run-123/events",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				runReader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", Status: "running"}}
+				eventReader := &recordingWriterEventReader{events: []workflows.WriterEvent{{EventID: "evt-1"}}}
+				return Config{WriterReader: runReader, WriterEventReader: eventReader, Authorizer: authorizer}, func(t *testing.T) {
+					if runReader.input.RunID != "run-123" {
+						t.Fatalf("expected writer event owner lookup before blank-owner denial: %#v", runReader.input)
+					}
+					if eventReader.input.RunID != "" {
+						t.Fatalf("blank-owner writer events should not list events: %#v", eventReader.input)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			config, assertPreflight := tt.config(authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected blank owner status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+			}
+			assertPreflight(t)
+			if len(authorizer.inputs) != 0 {
+				t.Fatalf("blank owner project should fail before authorizer: %#v", authorizer.inputs)
+			}
+			rawBody := response.Body.String()
+			if strings.Contains(rawBody, "run-123") || strings.Contains(rawBody, "evt-1") || strings.Contains(rawBody, "actor-123") {
+				t.Fatalf("blank owner response leaked run/event/actor metadata: %s", rawBody)
+			}
+		})
+	}
+}
+
 func TestGlobalRunReadPathHelpersRequireStrictSingleSegmentRunIDs(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -13140,12 +13507,14 @@ func TestGetWriterRunUsesConfiguredReader(t *testing.T) {
 		},
 	}
 	server := NewServer(Config{
+		Authorizer:    &recordingAuthorizer{},
 		WriterStarter: &recordingStarter{},
 		WriterReader:  reader,
 	})
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/writer-runs/run-db", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-db")
+	request.Header.Set("X-User-Id", "user-db")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 
@@ -13180,12 +13549,14 @@ func TestGetWorkflowRunUsesConfiguredReaderAndReturnsPublicMetadata(t *testing.T
 		},
 	}
 	server := NewServer(Config{
+		Authorizer:     &recordingAuthorizer{},
 		WriterStarter:  &recordingStarter{},
 		WorkflowReader: reader,
 	})
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/workflow-runs/run-db", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-db")
+	request.Header.Set("X-User-Id", "user-db")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 
@@ -13506,9 +13877,10 @@ func TestGetSeedRunEventsUsesWorkflowEventReaderAndRedactsSensitivePayload(t *te
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: seedReader, WorkflowEventReader: eventReader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedRunReader: seedReader, WorkflowEventReader: eventReader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/seed-runs/seed-run-1/events?after_event_id=evt-seed-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -13535,6 +13907,13 @@ func TestGetSeedRunEventsUsesWorkflowEventReaderAndRedactsSensitivePayload(t *te
 }
 
 func TestGetWriterRunEventsReturnsEventsAfterQueryCursor(t *testing.T) {
+	runReader := &recordingWriterReader{
+		run: workflows.WriterRun{
+			RunID:     "run-123",
+			ProjectID: "project-123",
+			Status:    "completed",
+		},
+	}
 	reader := &recordingWriterEventReader{
 		events: []workflows.WriterEvent{
 			{
@@ -13543,20 +13922,30 @@ func TestGetWriterRunEventsReturnsEventsAfterQueryCursor(t *testing.T) {
 				ProjectID: "project-123",
 				Sequence:  2,
 				EventType: "writer.token",
-				Payload:   map[string]any{"delta": "雨"},
+				Payload: map[string]any{
+					"delta":          "雨",
+					"provider":       "raw provider response",
+					"prompt":         "private prompt",
+					"credential_ref": "cred-1",
+					"draft":          "private draft",
+				},
 				CreatedAt: "2026-07-04T01:02:03Z",
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WriterEventReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: runReader, WriterEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/writer-runs/run-123/events?after_event_id=evt-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if runReader.input.TenantID != "tenant-123" || runReader.input.RunID != "run-123" {
+		t.Fatalf("run reader lost owner lookup context: %#v", runReader.input)
 	}
 	if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" || reader.input.AfterEventID != "evt-1" {
 		t.Fatalf("reader lost resume context: %#v", reader.input)
@@ -13568,9 +13957,21 @@ func TestGetWriterRunEventsReturnsEventsAfterQueryCursor(t *testing.T) {
 	if len(body.Items) != 1 || body.Items[0].EventID != "evt-2" || body.Items[0].Payload["delta"] != "雨" {
 		t.Fatalf("unexpected events body: %#v", body)
 	}
+	for _, forbidden := range []string{"provider", "prompt", "credential_ref", "draft"} {
+		if _, ok := body.Items[0].Payload[forbidden]; ok {
+			t.Fatalf("writer event leaked forbidden field %q: %#v", forbidden, body.Items[0].Payload)
+		}
+	}
 }
 
 func TestGetWorkflowRunEventsReturnsEventsAfterQueryCursorAndSanitizesPayload(t *testing.T) {
+	runReader := &recordingWorkflowReader{
+		run: workflows.WorkflowRun{
+			RunID:     "run-123",
+			ProjectID: "project-123",
+			Status:    "running",
+		},
+	}
 	reader := &recordingWorkflowEventReader{
 		events: []workflows.WorkflowEvent{
 			{
@@ -13587,6 +13988,7 @@ func TestGetWorkflowRunEventsReturnsEventsAfterQueryCursorAndSanitizesPayload(t 
 					"artifact_object_key": "projects/project-123/artifacts/artifact-123.txt",
 					"segment_object_key":  "projects/project-123/segments/segment-123.txt",
 					"source_sha256":       "sha-private",
+					"provider":            "raw provider response",
 					"raw_text":            "private source text",
 					"credential_ref":      "cred-1",
 					"nested": map[string]any{
@@ -13599,15 +14001,19 @@ func TestGetWorkflowRunEventsReturnsEventsAfterQueryCursorAndSanitizesPayload(t 
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorkflowEventReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: runReader, WorkflowEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/workflow-runs/run-123/events?after_event_id=evt-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if runReader.input.TenantID != "tenant-123" || runReader.input.RunID != "run-123" {
+		t.Fatalf("run reader lost owner lookup context: %#v", runReader.input)
 	}
 	if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" || reader.input.AfterEventID != "evt-1" {
 		t.Fatalf("reader lost resume context: %#v", reader.input)
@@ -13622,7 +14028,7 @@ func TestGetWorkflowRunEventsReturnsEventsAfterQueryCursorAndSanitizesPayload(t 
 	if body.Items[0].Payload["source_file_id"] != "file-123" {
 		t.Fatalf("workflow event lost safe source file id: %#v", body.Items[0].Payload)
 	}
-	for _, forbidden := range []string{"credential_ref", "object_key", "source_object_key", "artifact_object_key", "segment_object_key", "source_sha256", "raw_text"} {
+	for _, forbidden := range []string{"provider", "credential_ref", "object_key", "source_object_key", "artifact_object_key", "segment_object_key", "source_sha256", "raw_text"} {
 		if _, ok := body.Items[0].Payload[forbidden]; ok {
 			t.Fatalf("workflow event leaked forbidden field %q: %#v", forbidden, body.Items[0].Payload)
 		}
@@ -13640,6 +14046,13 @@ func TestGetWorkflowRunEventsReturnsEventsAfterQueryCursorAndSanitizesPayload(t 
 }
 
 func TestGetWorkflowRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
+	runReader := &recordingWorkflowReader{
+		run: workflows.WorkflowRun{
+			RunID:     "run-123",
+			ProjectID: "project-123",
+			Status:    "running",
+		},
+	}
 	reader := &recordingWorkflowEventReader{
 		events: []workflows.WorkflowEvent{
 			{
@@ -13653,9 +14066,10 @@ func TestGetWorkflowRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorkflowEventReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: runReader, WorkflowEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/workflow-runs/run-123/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Last-Event-ID", "evt-1")
 	response := httptest.NewRecorder()
@@ -13664,6 +14078,9 @@ func TestGetWorkflowRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if runReader.input.TenantID != "tenant-123" || runReader.input.RunID != "run-123" {
+		t.Fatalf("run reader lost owner lookup context: %#v", runReader.input)
 	}
 	if reader.input.AfterEventID != "evt-1" {
 		t.Fatalf("expected Last-Event-ID cursor, got %#v", reader.input)
@@ -13675,6 +14092,13 @@ func TestGetWorkflowRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 }
 
 func TestGetWriterRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
+	runReader := &recordingWriterReader{
+		run: workflows.WriterRun{
+			RunID:     "run-123",
+			ProjectID: "project-123",
+			Status:    "completed",
+		},
+	}
 	reader := &recordingWriterEventReader{
 		events: []workflows.WriterEvent{
 			{
@@ -13688,9 +14112,10 @@ func TestGetWriterRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WriterEventReader: reader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: runReader, WriterEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/writer-runs/run-123/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Last-Event-ID", "evt-1")
 	response := httptest.NewRecorder()
@@ -13699,6 +14124,9 @@ func TestGetWriterRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if runReader.input.TenantID != "tenant-123" || runReader.input.RunID != "run-123" {
+		t.Fatalf("run reader lost owner lookup context: %#v", runReader.input)
 	}
 	if reader.input.AfterEventID != "evt-1" {
 		t.Fatalf("expected Last-Event-ID cursor, got %#v", reader.input)

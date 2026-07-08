@@ -135,6 +135,54 @@ func TestSQLWriterReaderReturnsNotFoundForMissingRun(t *testing.T) {
 	}
 }
 
+func TestSQLWriterReaderSanitizesUnexpectedQueryErrors(t *testing.T) {
+	sensitiveErr := errors.New("driver leaked provider=raw prompt=hidden api_key=sk-hidden credential_ref=cred-1 object_key=projects/private draft=secret manuscript=secret")
+	tests := []struct {
+		name    string
+		queryer WriterEventSQLQueryer
+	}{
+		{
+			name:    "query error",
+			queryer: &recordingWriterEventQueryer{err: sensitiveErr},
+		},
+		{
+			name:    "rows error",
+			queryer: &recordingWriterEventQueryer{rows: &fakeWriterEventRows{err: sensitiveErr}},
+		},
+		{
+			name: "scan error",
+			queryer: &recordingWriterEventQueryer{
+				rows: &fakeWriterEventRows{
+					values:  [][]any{{}},
+					scanErr: sensitiveErr,
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := NewSQLWriterReader(SQLWriterReaderConfig{Queryer: test.queryer})
+
+			_, err := reader.GetWriterRun(context.Background(), GetWriterRunInput{
+				TenantID: "tenant-1",
+				RunID:    "run-1",
+			})
+
+			if code := ErrorCode(err); code != "WORKFLOW_QUERY_FAILED" {
+				t.Fatalf("expected workflow query failed, got %s (%v)", code, err)
+			}
+			if err == nil || err.Error() != "writer run query failed" {
+				t.Fatalf("expected stable sanitized error, got %v", err)
+			}
+			for _, forbidden := range []string{"provider", "prompt", "api_key", "credential_ref", "object_key", "draft", "manuscript", "sk-hidden"} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("writer reader error leaked %q: %v", forbidden, err)
+				}
+			}
+		})
+	}
+}
+
 func TestDisabledManuscriptReaderFailsClosed(t *testing.T) {
 	reader := NewDisabledManuscriptReader()
 

@@ -2368,6 +2368,14 @@ func (s *Server) authorizeProjectRead(response http.ResponseWriter, request *htt
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionProjectRead)
 }
 
+func (s *Server) authorizeGlobalRunOwnerProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
+	if strings.TrimSpace(projectID) == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return s.authorizeProjectRead(response, request, tenantID, projectID)
+}
+
 func (s *Server) authorizeAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionAssetManage)
 }
@@ -2522,7 +2530,8 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		WorkflowType: workflows.WriterWorkflowType,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startWriterRunResponse{
@@ -2581,7 +2590,8 @@ func (s *Server) handleStartSeedRun(response http.ResponseWriter, request *http.
 		Options:         sanitizeWorkflowOptions(payload.Options),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startSeedRunResponse{
@@ -2608,7 +2618,8 @@ func (s *Server) handleListSeedRuns(response http.ResponseWriter, request *http.
 		ProjectID: projectID,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	items := make([]workflowRunResponse, 0, len(runs))
@@ -2674,8 +2685,8 @@ func (s *Server) handleGetSeedRun(response http.ResponseWriter, request *http.Re
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	runID := strings.TrimSpace(strings.TrimPrefix(request.URL.Path, "/v1/seed-runs/"))
-	if runID == "" || strings.Contains(runID, "/") {
+	runID := seedRunPathPart(request.URL.Path)
+	if runID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "seed run route not found", nil)
 		return
 	}
@@ -2684,7 +2695,11 @@ func (s *Server) handleGetSeedRun(response http.ResponseWriter, request *http.Re
 		RunID:    runID,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	writeJSON(response, http.StatusOK, workflowRunToResponse(run))
@@ -2701,11 +2716,16 @@ func (s *Server) handleListSeedRunEvents(response http.ResponseWriter, request *
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "seed run events route not found", nil)
 		return
 	}
-	if _, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
+	run, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
 		TenantID: tenantID,
 		RunID:    runID,
-	}); err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	events, err := s.workflowEventReader.ListWorkflowEvents(request.Context(), workflows.ListWorkflowEventsInput{
@@ -2714,7 +2734,8 @@ func (s *Server) handleListSeedRunEvents(response http.ResponseWriter, request *
 		AfterEventID: afterEventIDFromRequest(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	events = sanitizeWorkflowEvents(events)
@@ -2750,7 +2771,8 @@ func (s *Server) handleCancelSeedRun(response http.ResponseWriter, request *http
 		RequestID:   requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{
@@ -2784,7 +2806,8 @@ func (s *Server) handleRetrySeedRun(response http.ResponseWriter, request *http.
 		RequestID:   requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{
@@ -4001,7 +4024,8 @@ func (s *Server) handleStartAssetIngestion(response http.ResponseWriter, request
 		Options:      cloneOptions(payload.Options),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startAssetIngestionResponse{
@@ -4028,7 +4052,8 @@ func (s *Server) handleGetAssetIngestion(response http.ResponseWriter, request *
 		RunID:    runID,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, workflowRunToResponse(run))
@@ -4066,7 +4091,8 @@ func (s *Server) handleStartStyleExtraction(response http.ResponseWriter, reques
 		Options:       cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startStyleExtractionResponse{
@@ -4093,7 +4119,8 @@ func (s *Server) handleGetStyleExtraction(response http.ResponseWriter, request 
 		RunID:    runID,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, workflowRunToResponse(run))
@@ -5327,8 +5354,8 @@ func (s *Server) handleGetWriterRun(response http.ResponseWriter, request *http.
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	runID := strings.TrimSpace(strings.TrimPrefix(request.URL.Path, "/v1/writer-runs/"))
-	if runID == "" || strings.Contains(runID, "/") {
+	runID := writerRunPathPart(request.URL.Path)
+	if runID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer run route not found", nil)
 		return
 	}
@@ -5337,7 +5364,11 @@ func (s *Server) handleGetWriterRun(response http.ResponseWriter, request *http.
 		RunID:    runID,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	writeJSON(response, http.StatusOK, startWriterRunResponse{
@@ -5354,8 +5385,8 @@ func (s *Server) handleGetWorkflowRun(response http.ResponseWriter, request *htt
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	runID := strings.TrimSpace(strings.TrimPrefix(request.URL.Path, "/v1/workflow-runs/"))
-	if runID == "" || strings.Contains(runID, "/") {
+	runID := workflowRunPathPart(request.URL.Path)
+	if runID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "workflow run route not found", nil)
 		return
 	}
@@ -5364,7 +5395,11 @@ func (s *Server) handleGetWorkflowRun(response http.ResponseWriter, request *htt
 		RunID:    runID,
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	writeJSON(response, http.StatusOK, workflowRunToResponse(run))
@@ -5381,15 +5416,29 @@ func (s *Server) handleListWriterRunEvents(response http.ResponseWriter, request
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer run events route not found", nil)
 		return
 	}
+	run, err := s.writerReader.GetWriterRun(request.Context(), workflows.GetWriterRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
+		return
+	}
 	events, err := s.writerEventReader.ListWriterEvents(request.Context(), workflows.ListWriterEventsInput{
 		TenantID:     tenantID,
 		RunID:        runID,
 		AfterEventID: afterEventIDFromRequest(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
+	events = sanitizeWriterEvents(events)
 	if strings.Contains(request.Header.Get("Accept"), "text/event-stream") {
 		writeWriterEventsSSE(response, events)
 		return
@@ -5408,13 +5457,26 @@ func (s *Server) handleListWorkflowRunEvents(response http.ResponseWriter, reque
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "workflow run events route not found", nil)
 		return
 	}
+	run, err := s.workflowReader.GetWorkflowRun(request.Context(), workflows.GetWorkflowRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
+		return
+	}
 	events, err := s.workflowEventReader.ListWorkflowEvents(request.Context(), workflows.ListWorkflowEventsInput{
 		TenantID:     tenantID,
 		RunID:        runID,
 		AfterEventID: afterEventIDFromRequest(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	events = sanitizeWorkflowEvents(events)
@@ -6614,6 +6676,25 @@ func statusForWorkflowError(err error) int {
 	return statusForAppCode(workflows.ErrorCode(err))
 }
 
+func workflowPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "workflow run not found"
+	case "VALIDATION_FAILED":
+		return "invalid workflow request"
+	case "WORKFLOW_QUERY_FAILED":
+		return "workflow query failed"
+	case "WORKFLOW_EVENT_QUERY_FAILED":
+		return "workflow event query failed"
+	case "EVENT_CURSOR_NOT_FOUND":
+		return "workflow event cursor not found"
+	case "WORKFLOW_BACKEND_UNCONFIGURED":
+		return "workflow backend is not configured"
+	default:
+		return "workflow request failed"
+	}
+}
+
 func publicDraftAdoptionErrorMessage(code string) string {
 	switch code {
 	case "DRAFT_ADOPTION_BACKEND_UNCONFIGURED":
@@ -6881,6 +6962,15 @@ func writeWorkflowEventsSSE(response http.ResponseWriter, events []workflows.Wor
 
 func sanitizeWorkflowEvents(events []workflows.WorkflowEvent) []workflows.WorkflowEvent {
 	sanitized := make([]workflows.WorkflowEvent, 0, len(events))
+	for _, event := range events {
+		event.Payload = workflows.SanitizeWorkflowEventPayload(event.Payload)
+		sanitized = append(sanitized, event)
+	}
+	return sanitized
+}
+
+func sanitizeWriterEvents(events []workflows.WriterEvent) []workflows.WriterEvent {
+	sanitized := make([]workflows.WriterEvent, 0, len(events))
 	for _, event := range events {
 		event.Payload = workflows.SanitizeWorkflowEventPayload(event.Payload)
 		sanitized = append(sanitized, event)

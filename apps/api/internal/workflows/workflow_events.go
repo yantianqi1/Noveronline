@@ -226,7 +226,7 @@ func isSensitiveWorkflowPayloadKey(key string) bool {
 	switch normalized {
 	case "api_key", "apikey", "encrypted_api_key", "encryptedapikey",
 		"credential_ref", "credentialref", "credential", "credentials",
-		"provider_secret", "secret", "key_material",
+		"provider", "provider_response", "providerresponse", "provider_secret", "secret", "key_material",
 		"object_key", "objectkey", "source_object_key", "sourceobjectkey",
 		"artifact_object_key", "artifactobjectkey", "segment_object_key", "segmentobjectkey",
 		"storage_key", "storagekey", "bucket_key", "bucketkey",

@@ -46,13 +46,13 @@ LIMIT 1`
 		strings.TrimSpace(input.RunID),
 	)
 	if err != nil {
-		return WriterRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+		return WriterRun{}, writerRunQueryFailed()
 	}
 	defer rows.Close()
 
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return WriterRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+			return WriterRun{}, writerRunQueryFailed()
 		}
 		return WriterRun{}, &AppError{Code: "NOT_FOUND", Message: "writer run not found"}
 	}
@@ -63,10 +63,10 @@ LIMIT 1`
 		if err == sql.ErrNoRows {
 			return WriterRun{}, &AppError{Code: "NOT_FOUND", Message: "writer run not found"}
 		}
-		return WriterRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+		return WriterRun{}, writerRunQueryFailed()
 	}
 	if err := rows.Err(); err != nil {
-		return WriterRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+		return WriterRun{}, writerRunQueryFailed()
 	}
 	return WriterRun{
 		RunID:     runID,
@@ -75,4 +75,8 @@ LIMIT 1`
 		ProjectID: projectID,
 		Status:    status,
 	}, nil
+}
+
+func writerRunQueryFailed() *AppError {
+	return &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: "writer run query failed"}
 }

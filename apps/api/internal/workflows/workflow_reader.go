@@ -88,13 +88,13 @@ LIMIT 1`
 		strings.TrimSpace(input.RunID),
 	)
 	if err != nil {
-		return WorkflowRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+		return WorkflowRun{}, workflowRunQueryFailed()
 	}
 	defer rows.Close()
 
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return WorkflowRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+			return WorkflowRun{}, workflowRunQueryFailed()
 		}
 		return WorkflowRun{}, &AppError{Code: "NOT_FOUND", Message: "workflow run not found"}
 	}
@@ -123,10 +123,10 @@ LIMIT 1`
 		if err == sql.ErrNoRows {
 			return WorkflowRun{}, &AppError{Code: "NOT_FOUND", Message: "workflow run not found"}
 		}
-		return WorkflowRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+		return WorkflowRun{}, workflowRunQueryFailed()
 	}
 	if err := rows.Err(); err != nil {
-		return WorkflowRun{}, &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: err.Error()}
+		return WorkflowRun{}, workflowRunQueryFailed()
 	}
 	return WorkflowRun{
 		RunID:        runID,
@@ -140,4 +140,8 @@ LIMIT 1`
 		CreatedAt:    createdAt,
 		UpdatedAt:    updatedAt,
 	}, nil
+}
+
+func workflowRunQueryFailed() *AppError {
+	return &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: "workflow run query failed"}
 }
