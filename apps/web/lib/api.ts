@@ -73,6 +73,21 @@ export type SessionRotationSummary =
     }
   | ApiFailure;
 
+export type CurrentUserSessionRecord = {
+  session_id: string;
+  status: string;
+  expires_at: string;
+  last_seen_at: string;
+  current: boolean;
+};
+
+export type CurrentUserSessionsSummary =
+  | {
+      ok: true;
+      sessions: CurrentUserSessionRecord[];
+    }
+  | ApiFailure;
+
 export type WriterRunSummary =
   | {
       ok: true;
@@ -1394,6 +1409,64 @@ export async function getSessionCSRFToken(input: { sessionCookie?: string }): Pr
     };
   } catch (error) {
     return networkFailure(error, "SESSION_CSRF_TOKEN_FAILED");
+  }
+}
+
+export async function getCurrentUserSessions(input: { sessionCookie?: string }): Promise<CurrentUserSessionsSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/auth/sessions`, {
+      method: "GET",
+      headers: sessionCookieHeaders(input),
+      cache: "no-store",
+    });
+    const payload = await readLLMPayload(response);
+    if (isApiFailure(payload)) {
+      return payload;
+    }
+    if (!response.ok) {
+      return decodeError(payload, response.status, "SESSION_LIST_FAILED");
+    }
+
+    const sessions = requiredArray(payload, "sessions");
+    if (sessions === null) {
+      return invalidApiResponse("current user sessions response missing required fields");
+    }
+    return {
+      ok: true,
+      sessions: sessions.map((value) => {
+        const session = recordFromUnknown(value);
+        return {
+          session_id: requiredString(session, "session_id"),
+          status: requiredString(session, "status"),
+          expires_at: requiredString(session, "expires_at"),
+          last_seen_at: requiredString(session, "last_seen_at"),
+          current: requiredBoolean(session, "current"),
+        };
+      }),
+    };
+  } catch (error) {
+    return networkFailure(error, "SESSION_LIST_FAILED");
+  }
+}
+
+export async function revokeAllCurrentUserSessions(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/auth/sessions`, {
+      method: "DELETE",
+      headers: sessionCookieHeaders(input),
+      cache: "no-store",
+    });
+    if (response.ok) {
+      return { ok: true };
+    }
+
+    const payload = await readLLMPayload(response);
+    if (isApiFailure(payload)) {
+      return payload;
+    }
+    return decodeError(payload, response.status, "SESSION_REVOKE_ALL_FAILED");
+  } catch (error) {
+    return networkFailure(error, "SESSION_REVOKE_ALL_FAILED");
   }
 }
 
@@ -5101,6 +5174,14 @@ function arrayFromUnknown(value: unknown): unknown[] {
 function requiredArray(payload: Record<string, unknown>, key: string): unknown[] | null {
   const value = payload[key];
   return Array.isArray(value) ? value : null;
+}
+
+function requiredBoolean(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  if (typeof value !== "boolean") {
+    throw new Error(`invalid API response: ${key} must be a boolean`);
+  }
+  return value;
 }
 
 function stringArrayFromUnknown(value: unknown): string[] {

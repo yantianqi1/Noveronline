@@ -2,7 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { CurrentUserSummary, ProjectMembershipSummary, TenantMembershipSummary } from "../lib/api";
+import type {
+  CurrentUserSessionsSummary,
+  CurrentUserSummary,
+  ProjectMembershipSummary,
+  TenantMembershipSummary,
+} from "../lib/api";
 
 const navItems = [
   { label: "Overview", path: "/overview" },
@@ -18,7 +23,9 @@ const navItems = [
 type ProjectNavProps = {
   basePath: string;
   currentUser: CurrentUserSummary;
+  currentUserSessions?: CurrentUserSessionsSummary;
   logoutAction: () => Promise<void>;
+  revokeAllSessionsAction: () => Promise<void>;
   rotateSessionAction: () => Promise<void>;
   tenantSlug: string;
   projectId: string;
@@ -27,7 +34,9 @@ type ProjectNavProps = {
 export function ProjectNav({
   basePath,
   currentUser,
+  currentUserSessions,
   logoutAction,
+  revokeAllSessionsAction,
   rotateSessionAction,
   tenantSlug,
   projectId,
@@ -62,6 +71,32 @@ export function ProjectNav({
         <form action={rotateSessionAction}>
           <button className="nav-link nav-button" type="submit">
             Refresh session
+          </button>
+        </form>
+      </section>
+
+      <section className="sidebar-section" aria-label="Sessions">
+        <p className="eyebrow">Active sessions</p>
+        {currentUserSessions?.ok ? (
+          <div className="nav-list">
+            {currentUserSessions.sessions.map((session) => (
+              <div className="nav-link" key={session.session_id}>
+                <strong>{session.current ? "Current" : session.status}</strong>
+                <span>Expires {formatSessionTimestamp(session.expires_at)}</span>
+                <span>Last seen {formatSessionTimestamp(session.last_seen_at)}</span>
+              </div>
+            ))}
+          </div>
+        ) : currentUserSessions ? (
+          <div className="panel error-box">
+            <strong>Sessions unavailable</strong>
+            <p>{currentUserSessions.code}</p>
+            <p>{currentUserSessions.message}</p>
+          </div>
+        ) : null}
+        <form action={revokeAllSessionsAction}>
+          <button className="nav-link nav-button" type="submit">
+            Sign out everywhere
           </button>
         </form>
       </section>
@@ -173,4 +208,15 @@ function TenantChoice({
 
 function hrefForProject(tenantId: string, projectId: string, sectionPath: string) {
   return `/${tenantId}/projects/${projectId}${sectionPath}`;
+}
+
+function formatSessionTimestamp(value: string) {
+  if (!value) {
+    return "unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }

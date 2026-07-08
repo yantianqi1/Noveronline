@@ -4,7 +4,9 @@ import { ProjectNav } from "../../../../../components/project-nav";
 import { SessionAutoRefresh } from "../../../../../components/session-auto-refresh";
 import {
   getCurrentUser,
+  getCurrentUserSessions,
   getSessionCSRFToken,
+  revokeAllCurrentUserSessions,
   revokeCurrentSession,
   rotateCurrentSession,
   type CurrentUserSummary,
@@ -22,6 +24,24 @@ export default async function ProjectLayout({
   const cookieStore = await cookies();
   const sessionCookie = cookieStore.get("mirofish_session")?.value?.trim();
   const actorUserId = process.env.MIROFISH_WEB_DEV_ACTOR_USER_ID?.trim();
+  async function revokeAllSessionsAction() {
+    "use server";
+
+    const actionCookieStore = await cookies();
+    const actionSessionCookie = actionCookieStore.get("mirofish_session")?.value?.trim();
+    if (!actionSessionCookie) {
+      return;
+    }
+    const csrfResult = await getSessionCSRFToken({ sessionCookie: actionSessionCookie });
+    if (!csrfResult.ok) {
+      return;
+    }
+    const result = await revokeAllCurrentUserSessions({ sessionCookie: actionSessionCookie, csrfToken: csrfResult.csrf_token });
+    if (result.ok) {
+      actionCookieStore.delete("mirofish_session");
+    }
+  }
+
   async function rotateSessionAction() {
     "use server";
 
@@ -68,6 +88,7 @@ export default async function ProjectLayout({
     }
   }
 
+  const currentUserSessions = sessionCookie ? await getCurrentUserSessions({ sessionCookie }) : undefined;
   const currentUser: CurrentUserSummary = sessionCookie || actorUserId
     ? await getCurrentUser({
         actorUserId: sessionCookie ? undefined : actorUserId,
@@ -87,8 +108,10 @@ export default async function ProjectLayout({
         <ProjectNav
           basePath={basePath}
           currentUser={currentUser}
+          currentUserSessions={currentUserSessions}
           logoutAction={logoutAction}
           projectId={projectId}
+          revokeAllSessionsAction={revokeAllSessionsAction}
           rotateSessionAction={rotateSessionAction}
           tenantSlug={tenantSlug}
         />

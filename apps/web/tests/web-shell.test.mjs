@@ -256,6 +256,57 @@ test("project shell exposes current-session rotation without leaking the session
   assert.doesNotMatch(nav, /mirofish_session|sessionCookie|api_key|credential_ref|draft|manuscript|prompt|provider/i);
 });
 
+test("project shell exposes session management metadata without leaking token material", async () => {
+  const client = await fileText("lib/api.ts");
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+  const listClient = sourceSlice(client, "export async function getCurrentUserSessions", "export async function revokeAllCurrentUserSessions");
+  const revokeAllClient = sourceSlice(client, "export async function revokeAllCurrentUserSessions", "export async function startWriterRun");
+  const revokeAllAction = sourceSlice(layout, "async function revokeAllSessionsAction", "async function rotateSessionAction");
+
+  assert.match(client, /export type CurrentUserSessionRecord/);
+  assert.match(client, /export type CurrentUserSessionsSummary/);
+  assert.match(client, /export async function getCurrentUserSessions\(input:\s*\{\s*sessionCookie\?:\s*string;?\s*\}\)/);
+  assert.match(listClient, /\/v1\/auth\/sessions/);
+  assert.match(listClient, /method:\s*"GET"/);
+  assert.match(listClient, /headers:\s*sessionCookieHeaders\(input\)/);
+  assert.match(listClient, /requiredString\(session,\s*"session_id"\)/);
+  assert.match(listClient, /requiredString\(session,\s*"expires_at"\)/);
+  assert.match(listClient, /requiredBoolean\(session,\s*"current"\)/);
+  assert.match(listClient, /networkFailure\(error,\s*"SESSION_LIST_FAILED"\)/);
+  assert.doesNotMatch(listClient, /X-User-Id|actorUserId|body|JSON\.stringify|csrfToken/);
+
+  assert.match(client, /export async function revokeAllCurrentUserSessions\(input:\s*\{\s*sessionCookie\?:\s*string;\s*csrfToken\?:\s*string;?\s*\}\)/);
+  assert.match(revokeAllClient, /\/v1\/auth\/sessions/);
+  assert.match(revokeAllClient, /method:\s*"DELETE"/);
+  assert.match(revokeAllClient, /headers:\s*sessionCookieHeaders\(input\)/);
+  assert.match(revokeAllClient, /networkFailure\(error,\s*"SESSION_REVOKE_ALL_FAILED"\)/);
+  assert.doesNotMatch(revokeAllClient, /X-User-Id|actorUserId|body|JSON\.stringify/);
+
+  assert.match(layout, /getCurrentUserSessions/);
+  assert.match(layout, /revokeAllCurrentUserSessions/);
+  assert.match(layout, /const\s+currentUserSessions\s*=\s*sessionCookie\s*\?\s*await\s+getCurrentUserSessions\(\{\s*sessionCookie\s*\}\)\s*:\s*undefined/s);
+  assert.match(revokeAllAction, /"use server"/);
+  assert.match(revokeAllAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(revokeAllAction, /const\s+csrfResult\s*=\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(revokeAllAction, /await\s+revokeAllCurrentUserSessions\(\{\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
+  assert.match(layout, /currentUserSessions=\{currentUserSessions\}/);
+  assert.match(layout, /revokeAllSessionsAction=\{revokeAllSessionsAction\}/);
+  assert.doesNotMatch(revokeAllAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify|sessionCookie\s*\}/);
+
+  assert.match(nav, /currentUserSessions\?:\s*CurrentUserSessionsSummary/);
+  assert.match(nav, /revokeAllSessionsAction:\s*\(\)\s*=>\s*Promise<void>/);
+  assert.match(nav, /aria-label="Sessions"/);
+  assert.match(nav, /Active sessions/);
+  assert.match(nav, /currentUserSessions\.sessions\.map/);
+  assert.match(nav, /session\.current/);
+  assert.match(nav, /expires_at/);
+  assert.match(nav, /last_seen_at/);
+  assert.match(nav, /<form\s+action=\{revokeAllSessionsAction\}/);
+  assert.match(nav, /Sign out everywhere/);
+  assert.doesNotMatch(nav, /mirofish_session|sessionCookie|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
+});
+
 test("project shell triggers automatic session refresh without exposing the session token", async () => {
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const trigger = await fileText("components/session-auto-refresh.tsx");
