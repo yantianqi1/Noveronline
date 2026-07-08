@@ -94,11 +94,7 @@ export function StoryGraphShell({
           <section className="panel" aria-labelledby="graph-canvas-heading">
             <p className="eyebrow">Explore</p>
             <h2 id="graph-canvas-heading">Graph canvas</h2>
-            <div className="graph-canvas-skeleton" aria-label="Story graph snapshot canvas">
-              <div className="graph-node primary-node">Nodes {current.ok ? current.node_count : 0}</div>
-              <div className="graph-edge-line" />
-              <div className="graph-node accent-node">Edges {current.ok ? current.edge_count : 0}</div>
-            </div>
+            <GraphCanvas view={view} />
           </section>
 
           <section className={`panel ${view.ok ? "" : "error-box"}`} aria-labelledby="graph-view-heading">
@@ -270,6 +266,72 @@ function defaultBondNodeIds(view: StoryGraphViewSummary) {
     return "";
   }
   return view.nodes.slice(0, 2).map((node) => node.node_id).join("\n");
+}
+
+function GraphCanvas({ view }: { view: StoryGraphViewSummary }) {
+  if (!view.ok) {
+    return (
+      <div className="story-graph-canvas story-graph-canvas-empty" aria-label="Story graph metadata canvas">
+        <p className="form-hint">{view.code}: {view.message}</p>
+      </div>
+    );
+  }
+  if (view.nodes.length === 0) {
+    return (
+      <div className="story-graph-canvas story-graph-canvas-empty" aria-label="Story graph metadata canvas">
+        <strong>No graph nodes available</strong>
+        <p className="form-hint">Run a Story Graph build to populate the public viewport.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="story-graph-canvas" aria-label="Story graph metadata canvas">
+      <div className="story-graph-node-list" aria-label="Graph nodes">
+        {view.nodes.map((node) => (
+          <article className="story-graph-node-card" key={node.node_id}>
+            <div>
+              <strong>{node.title || node.node_id}</strong>
+              <span>{node.node_type}</span>
+            </div>
+            <dl>
+              <dt>Lifecycle</dt>
+              <dd>{node.lifecycle || "unknown"}</dd>
+              <dt>Importance</dt>
+              <dd>{node.importance}</dd>
+              <dt>Evidence</dt>
+              <dd>{node.evidence_count}</dd>
+            </dl>
+          </article>
+        ))}
+      </div>
+      <div className="story-graph-edge-list" aria-label="Graph edges">
+        <div className="story-graph-edge-header">
+          <strong>{view.edges.length} edges</strong>
+          <span>{view.graph_id}</span>
+        </div>
+        {view.edges.length === 0 ? (
+          <p className="form-hint">No graph edges available for this viewport.</p>
+        ) : (
+          view.edges.map((edge) => (
+            <article className="story-graph-edge-card" key={edge.edge_id}>
+              <div className="story-graph-edge-line" aria-hidden="true" />
+              <strong>{edge.label || edge.edge_id}</strong>
+              <span>{edge.edge_type}</span>
+              <p>
+                {edge.source_node_id} to {edge.target_node_id}
+              </p>
+              <dl>
+                <dt>Weight</dt>
+                <dd>{edge.weight}</dd>
+                <dt>Evidence</dt>
+                <dd>{edge.evidence_count}</dd>
+              </dl>
+            </article>
+          ))
+        )}
+      </div>
+    </div>
+  );
 }
 
 function GraphViewport({ view }: { view: StoryGraphViewSummary }) {

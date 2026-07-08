@@ -1385,6 +1385,44 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.doesNotMatch(shell, /mock/i);
 });
 
+test("Story Graph shell renders a metadata-only canvas from public viewport records", async () => {
+  const shell = await fileText("components/story-graph-shell.tsx");
+  const styles = await fileText("app/globals.css");
+  const canvasSlice = sourceSlice(shell, "function GraphCanvas", "function GraphViewport");
+  const edgeHeaderStyle = sourceSlice(styles, ".story-graph-node-card span,", ".story-graph-node-card dl");
+
+  assert.match(shell, /<GraphCanvas\s+view=\{view\}/);
+  assert.match(canvasSlice, /StoryGraphViewSummary/);
+  assert.match(canvasSlice, /view\.ok/);
+  assert.match(canvasSlice, /view\.nodes\.length\s*===\s*0/);
+  assert.match(canvasSlice, /No graph nodes available/);
+  assert.match(canvasSlice, /view\.nodes\.map/);
+  assert.match(canvasSlice, /view\.edges\.map/);
+  assert.match(canvasSlice, /node\.node_id/);
+  assert.match(canvasSlice, /node\.node_type/);
+  assert.match(canvasSlice, /node\.title/);
+  assert.match(canvasSlice, /node\.lifecycle/);
+  assert.match(canvasSlice, /node\.importance/);
+  assert.match(canvasSlice, /node\.evidence_count/);
+  assert.match(canvasSlice, /edge\.edge_id/);
+  assert.match(canvasSlice, /edge\.edge_type/);
+  assert.match(canvasSlice, /edge\.label/);
+  assert.match(canvasSlice, /edge\.source_node_id/);
+  assert.match(canvasSlice, /edge\.target_node_id/);
+  assert.match(canvasSlice, /edge\.weight/);
+  assert.doesNotMatch(canvasSlice, /current\.node_count|current\.edge_count|graph-canvas-skeleton/);
+  assert.doesNotMatch(canvasSlice, /prompt|provider|response|raw_body|content_text|api_key|encrypted_api_key|credential_ref|object_key|draft|manuscript|candidate payload|evidence snippet/i);
+  assert.match(styles, /\.story-graph-canvas/);
+  assert.match(styles, /min-height:\s*360px/);
+  assert.match(styles, /grid-template-columns:\s*minmax\(0,\s*2fr\)\s*minmax\(220px,\s*1fr\)/);
+  assert.match(styles, /\.story-graph-node-list/);
+  assert.match(styles, /\.story-graph-edge-list/);
+  assert.match(edgeHeaderStyle, /\.story-graph-edge-header span/);
+  assert.match(edgeHeaderStyle, /overflow-wrap:\s*anywhere/);
+  assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*\.story-graph-canvas[\s\S]*grid-template-columns:\s*1fr/);
+  assert.doesNotMatch(styles, /graph-canvas-skeleton/);
+});
+
 test("Story Graph page loads graph candidates and wires explicit adoption action", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/graph/page.tsx");
 
