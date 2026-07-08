@@ -26,6 +26,7 @@ type ProjectNavProps = {
   currentUserSessions?: CurrentUserSessionsSummary;
   logoutAction: () => Promise<void>;
   revokeAllSessionsAction: () => Promise<void>;
+  revokeTenantSessionsAction: () => Promise<void>;
   rotateSessionAction: () => Promise<void>;
   tenantSlug: string;
   projectId: string;
@@ -37,6 +38,7 @@ export function ProjectNav({
   currentUserSessions,
   logoutAction,
   revokeAllSessionsAction,
+  revokeTenantSessionsAction,
   rotateSessionAction,
   tenantSlug,
   projectId,
@@ -46,6 +48,8 @@ export function ProjectNav({
   const routeTenantProjects = activeProjects.filter((project) => project.tenant_id === tenantSlug);
   const currentProject = routeTenantProjects.find((project) => project.project_id === projectId);
   const currentSectionPath = navItems.find((item) => pathname === `${basePath}${item.path}`)?.path ?? "/overview";
+  const currentTenant = currentUser.ok ? currentUser.active_tenants.find((tenant) => tenant.tenant_id === tenantSlug) : undefined;
+  const canManageTenantSessions = currentTenant ? ["owner", "admin"].includes(currentTenant.role) : false;
 
   return (
     <div className="sidebar-stack">
@@ -99,6 +103,13 @@ export function ProjectNav({
             Sign out everywhere
           </button>
         </form>
+        {canManageTenantSessions ? (
+          <form action={revokeTenantSessionsAction}>
+            <button className="nav-link nav-button" type="submit">
+              Revoke tenant sessions
+            </button>
+          </form>
+        ) : null}
       </section>
 
       <section className="sidebar-section" aria-label="Tenants">

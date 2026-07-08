@@ -1516,6 +1516,27 @@ export async function revokeAllCurrentUserSessions(input: { sessionCookie?: stri
   }
 }
 
+export async function revokeTenantSessions(input: { tenantId: string; sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/tenants/${encodeURIComponent(input.tenantId)}/sessions`, {
+      method: "DELETE",
+      headers: sessionCookieHeaders(input),
+      cache: "no-store",
+    });
+    if (response.ok) {
+      return { ok: true };
+    }
+
+    const payload = await readLLMPayload(response);
+    if (isApiFailure(payload)) {
+      return payload;
+    }
+    return decodeError(payload, response.status, "TENANT_SESSION_REVOKE_FAILED");
+  } catch (error) {
+    return networkFailure(error, "TENANT_SESSION_REVOKE_FAILED");
+  }
+}
+
 function sessionCookieHeaders(input: { sessionCookie?: string; csrfToken?: string }) {
   const headers: Record<string, string> = {};
   const sessionCookie = input.sessionCookie?.trim();

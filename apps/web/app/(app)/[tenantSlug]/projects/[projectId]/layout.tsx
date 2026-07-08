@@ -8,6 +8,7 @@ import {
   getSessionCSRFToken,
   revokeAllCurrentUserSessions,
   revokeCurrentSession,
+  revokeTenantSessions,
   rotateCurrentSession,
   type CurrentUserSummary,
 } from "../../../../../lib/api";
@@ -24,6 +25,24 @@ export default async function ProjectLayout({
   const cookieStore = await cookies();
   const sessionCookie = cookieStore.get("mirofish_session")?.value?.trim();
   const actorUserId = process.env.MIROFISH_WEB_DEV_ACTOR_USER_ID?.trim();
+  async function revokeTenantSessionsAction() {
+    "use server";
+
+    const actionCookieStore = await cookies();
+    const actionSessionCookie = actionCookieStore.get("mirofish_session")?.value?.trim();
+    if (!actionSessionCookie) {
+      return;
+    }
+    const csrfResult = await getSessionCSRFToken({ sessionCookie: actionSessionCookie });
+    if (!csrfResult.ok) {
+      return;
+    }
+    const result = await revokeTenantSessions({ tenantId: tenantSlug, sessionCookie: actionSessionCookie, csrfToken: csrfResult.csrf_token });
+    if (result.ok) {
+      actionCookieStore.delete("mirofish_session");
+    }
+  }
+
   async function revokeAllSessionsAction() {
     "use server";
 
@@ -112,6 +131,7 @@ export default async function ProjectLayout({
           currentUserSessions={currentUserSessions}
           logoutAction={logoutAction}
           projectId={projectId}
+          revokeTenantSessionsAction={revokeTenantSessionsAction}
           revokeAllSessionsAction={revokeAllSessionsAction}
           rotateSessionAction={rotateSessionAction}
           tenantSlug={tenantSlug}

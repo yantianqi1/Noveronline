@@ -351,6 +351,37 @@ test("project shell exposes session management metadata without leaking token ma
   assert.doesNotMatch(nav, /mirofish_session|sessionCookie|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
 });
 
+test("project shell exposes tenant-wide session revocation for tenant admins without leaking token material", async () => {
+  const client = await fileText("lib/api.ts");
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+  const revokeTenantClient = sourceSlice(client, "export async function revokeTenantSessions", "export async function startWriterRun");
+  const revokeTenantAction = sourceSlice(layout, "async function revokeTenantSessionsAction", "async function revokeAllSessionsAction");
+
+  assert.match(client, /export async function revokeTenantSessions\(input:\s*\{\s*tenantId:\s*string;\s*sessionCookie\?:\s*string;\s*csrfToken\?:\s*string;?\s*\}\)/);
+  assert.match(revokeTenantClient, /\/v1\/tenants\/\$\{encodeURIComponent\(input\.tenantId\)\}\/sessions/);
+  assert.match(revokeTenantClient, /method:\s*"DELETE"/);
+  assert.match(revokeTenantClient, /headers:\s*sessionCookieHeaders\(input\)/);
+  assert.match(revokeTenantClient, /networkFailure\(error,\s*"TENANT_SESSION_REVOKE_FAILED"\)/);
+  assert.doesNotMatch(revokeTenantClient, /X-User-Id|actorUserId|body|JSON\.stringify|password|token_hash/);
+
+  assert.match(layout, /revokeTenantSessions/);
+  assert.match(revokeTenantAction, /"use server"/);
+  assert.match(revokeTenantAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(revokeTenantAction, /getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(revokeTenantAction, /revokeTenantSessions\(\{\s*tenantId:\s*tenantSlug,\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
+  assert.match(revokeTenantAction, /actionCookieStore\.delete\("mirofish_session"\)/);
+  assert.match(layout, /revokeTenantSessionsAction=\{revokeTenantSessionsAction\}/);
+  assert.doesNotMatch(revokeTenantAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
+
+  assert.match(nav, /revokeTenantSessionsAction:\s*\(\)\s*=>\s*Promise<void>/);
+  assert.match(nav, /const\s+currentTenant\s*=\s*currentUser\.ok\s*\?\s*currentUser\.active_tenants\.find\(\(tenant\)\s*=>\s*tenant\.tenant_id\s*===\s*tenantSlug\)\s*:\s*undefined/s);
+  assert.match(nav, /const\s+canManageTenantSessions\s*=\s*currentTenant\s*\?\s*\["owner",\s*"admin"\]\.includes\(currentTenant\.role\)\s*:\s*false/s);
+  assert.match(nav, /<form\s+action=\{revokeTenantSessionsAction\}/);
+  assert.match(nav, /Revoke tenant sessions/);
+  assert.doesNotMatch(nav, /mirofish_session|sessionCookie|csrf|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
+});
+
 test("project shell triggers automatic session refresh without exposing the session token", async () => {
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const trigger = await fileText("components/session-auto-refresh.tsx");
