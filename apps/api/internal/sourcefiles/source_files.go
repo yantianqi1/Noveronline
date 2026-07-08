@@ -37,6 +37,15 @@ type GetUploadObjectInput struct {
 	UploadID string
 }
 
+type GetUploadOwnerInput struct {
+	TenantID string
+	UploadID string
+}
+
+type UploadOwner struct {
+	ProjectID string
+}
+
 type ValidateInput struct {
 	TenantID  string
 	ProjectID string
@@ -102,6 +111,7 @@ type ObjectWriter interface {
 
 type Store interface {
 	CreateSourceFile(context.Context, CreateInput) (Record, error)
+	GetUploadOwner(context.Context, GetUploadOwnerInput) (UploadOwner, error)
 	GetUploadObject(context.Context, GetUploadObjectInput) (ObjectWriteInput, error)
 	CompleteUpload(context.Context, CompleteInput) (Record, error)
 	ListSourceFiles(context.Context, ListInput) ([]Record, error)
@@ -149,6 +159,10 @@ func IsConfigured(store Store) bool {
 
 func (DisabledStore) CreateSourceFile(context.Context, CreateInput) (Record, error) {
 	return Record{}, &AppError{Code: "SOURCE_FILE_BACKEND_UNCONFIGURED", Message: "source file backend is not configured"}
+}
+
+func (DisabledStore) GetUploadOwner(context.Context, GetUploadOwnerInput) (UploadOwner, error) {
+	return UploadOwner{}, &AppError{Code: "SOURCE_FILE_BACKEND_UNCONFIGURED", Message: "source file backend is not configured"}
 }
 
 func (DisabledStore) GetUploadObject(context.Context, GetUploadObjectInput) (ObjectWriteInput, error) {
@@ -436,6 +450,39 @@ func (s *SQLStore) CompleteUpload(ctx context.Context, input CompleteInput) (Rec
 		return Record{}, sourceFileCompleteFailed()
 	}
 	return record, nil
+}
+
+func (s *SQLStore) GetUploadOwner(ctx context.Context, input GetUploadOwnerInput) (UploadOwner, error) {
+	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.UploadID) == "" {
+		return UploadOwner{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and upload_id are required"}
+	}
+	if s.queryer == nil {
+		return UploadOwner{}, &AppError{Code: "SOURCE_FILE_BACKEND_UNCONFIGURED", Message: "source file backend is not configured"}
+	}
+	query := `SELECT
+  project_id::text
+FROM source_files
+WHERE tenant_id::text = $1
+  AND upload_id::text = $2
+LIMIT 1`
+	var owner UploadOwner
+	err := s.scanRow(
+		ctx,
+		strings.TrimSpace(input.TenantID),
+		query,
+		[]any{
+			strings.TrimSpace(input.TenantID),
+			strings.TrimSpace(input.UploadID),
+		},
+		&owner.ProjectID,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return UploadOwner{}, &AppError{Code: "NOT_FOUND", Message: "source file upload not found"}
+		}
+		return UploadOwner{}, sourceFileQueryFailed()
+	}
+	return owner, nil
 }
 
 func (s *SQLStore) GetUploadObject(ctx context.Context, input GetUploadObjectInput) (ObjectWriteInput, error) {

@@ -1271,6 +1271,10 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(path, "chapter-drafts"):
 		return true
+	case request.Method == http.MethodPut && isUploadSourceObjectPath(path):
+		return true
+	case request.Method == http.MethodPost && isCompleteUploadPath(path):
+		return true
 	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(path):
 		return true
 	case request.Method == http.MethodGet && path == "/v1/llm/settings":
@@ -1723,11 +1727,11 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleRetrySeedRun(response, request)
 	case request.Method == http.MethodGet && isSeedRunDetailPath(request.URL.Path):
 		s.handleGetSeedRun(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/uploads"):
+	case request.Method == http.MethodPost && hasProjectSuffixPathShape(request.URL.Path, "uploads"):
 		s.handleCreateUpload(response, request)
-	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/v1/uploads/") && strings.HasSuffix(request.URL.Path, "/object"):
+	case request.Method == http.MethodPut && isUploadSourceObjectPath(request.URL.Path):
 		s.handleUploadSourceObject(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/uploads/") && strings.HasSuffix(request.URL.Path, "/complete"):
+	case request.Method == http.MethodPost && isCompleteUploadPath(request.URL.Path):
 		s.handleCompleteUpload(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/source-files"):
 		s.handleListSourceFiles(response, request)
@@ -2956,6 +2960,9 @@ func (s *Server) handleCreateUpload(response http.ResponseWriter, request *http.
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project upload route not found", nil)
 		return
 	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
 	var payload createUploadRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -2995,6 +3002,9 @@ func (s *Server) handleCompleteUpload(response http.ResponseWriter, request *htt
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "upload complete route not found", nil)
 		return
 	}
+	if !s.authorizeUploadOwnerCreativeWrite(response, request, tenantID, uploadID) {
+		return
+	}
 	record, err := s.sourceFileStore.CompleteUpload(request.Context(), sourcefiles.CompleteInput{
 		TenantID: tenantID,
 		UploadID: uploadID,
@@ -3012,13 +3022,16 @@ func (s *Server) handleUploadSourceObject(response http.ResponseWriter, request 
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
 		return
 	}
-	if !sourcefiles.IsObjectWriterConfigured(s.sourceFileObjectWriter) {
-		writeSourceFileError(response, request, sourcefiles.NewAppError("SOURCE_FILE_STORAGE_BACKEND_UNCONFIGURED", "object storage backend is not configured"))
-		return
-	}
 	uploadID := uploadIDFromObjectPath(request.URL.Path)
 	if uploadID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "upload object route not found", nil)
+		return
+	}
+	if !s.authorizeUploadOwnerCreativeWrite(response, request, tenantID, uploadID) {
+		return
+	}
+	if !sourcefiles.IsObjectWriterConfigured(s.sourceFileObjectWriter) {
+		writeSourceFileError(response, request, sourcefiles.NewAppError("SOURCE_FILE_STORAGE_BACKEND_UNCONFIGURED", "object storage backend is not configured"))
 		return
 	}
 	metadata, err := s.sourceFileStore.GetUploadObject(request.Context(), sourcefiles.GetUploadObjectInput{
@@ -3037,6 +3050,18 @@ func (s *Server) handleUploadSourceObject(response http.ResponseWriter, request 
 		"upload_id": uploadID,
 		"status":    "stored",
 	})
+}
+
+func (s *Server) authorizeUploadOwnerCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, uploadID string) bool {
+	owner, err := s.sourceFileStore.GetUploadOwner(request.Context(), sourcefiles.GetUploadOwnerInput{
+		TenantID: tenantID,
+		UploadID: uploadID,
+	})
+	if err != nil {
+		writeSourceFileError(response, request, err)
+		return false
+	}
+	return s.authorizeGlobalRunOwnerCreativeWrite(response, request, tenantID, owner.ProjectID)
 }
 
 func (s *Server) handleListSourceFiles(response http.ResponseWriter, request *http.Request) {
@@ -6054,7 +6079,14 @@ func uploadIDFromCompletePath(path string) string {
 	if !ok || suffix != "complete" {
 		return ""
 	}
+	if !isSinglePathSegment(uploadID) {
+		return ""
+	}
 	return strings.TrimSpace(uploadID)
+}
+
+func isCompleteUploadPath(path string) bool {
+	return uploadIDFromCompletePath(path) != ""
 }
 
 func uploadIDFromObjectPath(path string) string {
@@ -6063,7 +6095,14 @@ func uploadIDFromObjectPath(path string) string {
 	if !ok || suffix != "object" {
 		return ""
 	}
+	if !isSinglePathSegment(uploadID) {
+		return ""
+	}
 	return strings.TrimSpace(uploadID)
+}
+
+func isUploadSourceObjectPath(path string) bool {
+	return uploadIDFromObjectPath(path) != ""
 }
 
 func assetIngestionRunPathPart(path string) string {

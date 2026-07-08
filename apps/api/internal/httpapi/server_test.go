@@ -1015,13 +1015,16 @@ type recordingSourceFileStore struct {
 	completeInput sourcefiles.CompleteInput
 	listInput     sourcefiles.ListInput
 	validateInput sourcefiles.ValidateInput
+	ownerInput    sourcefiles.GetUploadOwnerInput
 	objectInput   sourcefiles.GetUploadObjectInput
 	created       sourcefiles.Record
 	completed     sourcefiles.Record
+	owner         sourcefiles.UploadOwner
 	validated     sourcefiles.ValidatedSourceFile
 	object        sourcefiles.ObjectWriteInput
 	items         []sourcefiles.Record
 	validateErr   error
+	ownerErr      error
 	err           error
 }
 
@@ -1045,6 +1048,20 @@ func (s *recordingSourceFileStore) CreateSourceFile(ctx context.Context, input s
 		ParseStatus: "pending",
 		CreatedAt:   "2026-07-04T10:00:00Z",
 	}, nil
+}
+
+func (s *recordingSourceFileStore) GetUploadOwner(ctx context.Context, input sourcefiles.GetUploadOwnerInput) (sourcefiles.UploadOwner, error) {
+	s.ownerInput = input
+	if s.ownerErr != nil {
+		return sourcefiles.UploadOwner{}, s.ownerErr
+	}
+	if s.err != nil {
+		return sourcefiles.UploadOwner{}, s.err
+	}
+	if s.owner.ProjectID != "" {
+		return s.owner, nil
+	}
+	return sourcefiles.UploadOwner{ProjectID: "project-123"}, nil
 }
 
 func (s *recordingSourceFileStore) CompleteUpload(ctx context.Context, input sourcefiles.CompleteInput) (sourcefiles.Record, error) {
@@ -5131,12 +5148,14 @@ func TestListDraftReviewsSanitizesStoreReturnedIssueTextAtHTTPBoundary(t *testin
 
 func TestCreateUploadCarriesTenantProjectActorAndReturnsSanitizedSourceFile(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
 	requestBody := bytes.NewBufferString(`{"tenant_id":"evil-tenant","filename":"novel.md","mime_type":"text/markdown","size_bytes":2048,"sha256":"abc123","purpose":"seed"}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", requestBody)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-create-upload")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5150,6 +5169,7 @@ func TestCreateUploadCarriesTenantProjectActorAndReturnsSanitizedSourceFile(t *t
 	if store.createInput.ActorUserID != "user-123" || store.createInput.Filename != "novel.md" || store.createInput.Purpose != "seed" {
 		t.Fatalf("store lost upload metadata: %#v", store.createInput)
 	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-123", "req-create-upload")
 	var body map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -5165,9 +5185,44 @@ func TestCreateUploadCarriesTenantProjectActorAndReturnsSanitizedSourceFile(t *t
 	}
 }
 
+func TestCreateUploadRequiresCreativeWriteBeforeDecodeAndStore(t *testing.T) {
+	store := &recordingSourceFileStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "denied prompt api_key credential_ref draft manuscript",
+	}}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
+		"filename":"novel.md",
+		"mime_type":"text/markdown",
+		"api_key":"sk-hidden",
+		"prompt":"private"
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-upload-rbac")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected creative_write denial before decode, got %d: %s", response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-123", "req-upload-rbac")
+	if store.createInput.TenantID != "" {
+		t.Fatalf("denied upload create should stop before source file store: %#v", store.createInput)
+	}
+	for _, forbidden := range []string{"api_key", "sk-hidden", "prompt", "credential_ref", "draft", "manuscript", "user-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("create upload denial leaked forbidden text %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
 func TestCreateUploadValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
 		"filename":"novel.md",
 		"mime_type":"text/markdown",
@@ -5201,7 +5256,7 @@ func TestCreateUploadValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.
 
 func TestCreateUploadRejectsUnsupportedSourceMimeBeforeStore(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
 		"filename":"notes.json",
 		"mime_type":"application/json",
@@ -5235,17 +5290,129 @@ func TestCreateUploadRejectsUnsupportedSourceMimeBeforeStore(t *testing.T) {
 	}
 }
 
+func TestCreateUploadRequiresCredentialAndCookieCSRFBeforeDecodeOrStore(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		setup      func(*http.Request)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "invalid bearer",
+			setup:      func(r *http.Request) { r.Header.Set("Authorization", "Bearer v1:route-user:deadbeef") },
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   auth.CodeUnauthenticated,
+		},
+		{
+			name: "missing csrf",
+			setup: func(r *http.Request) {
+				r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
+			},
+			wantStatus: http.StatusForbidden,
+			wantCode:   auth.CodeAccessDenied,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingSourceFileStore{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{
+				WriterStarter:     &recordingStarter{},
+				SourceFileStore:   store,
+				Authorizer:        authorizer,
+				SessionAuthSecret: "test-secret",
+			})
+			request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
+				"filename":"novel.md",
+				"mime_type":"text/markdown",
+				"api_key":"sk-hidden",
+				"prompt":"private"
+			}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("X-Request-Id", "req-create-upload-credential")
+			tt.setup(request)
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+			if authorizer.called || store.createInput.TenantID != "" {
+				t.Fatalf("credential/CSRF preflight reached create side effects: authorizer=%#v store=%#v", authorizer.inputs, store.createInput)
+			}
+			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef", "cookie-user", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("create upload credential response leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestCreateUploadAuthorizesPathProjectBeforeDecodeOrStore(t *testing.T) {
+	store := &recordingSourceFileStore{}
+	authorizer := &recordingAuthorizer{
+		err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret actor=user-123"},
+	}
+	server := NewServer(Config{
+		WriterStarter:   &recordingStarter{},
+		SourceFileStore: store,
+		Authorizer:      authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{"api_key":"sk-hidden"`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-create-upload-auth")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected auth failure %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-123" ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+		authorizer.inputs[0].RequestID != "req-create-upload-auth" {
+		t.Fatalf("unexpected upload authorizer input: %#v", authorizer.inputs)
+	}
+	if store.createInput.TenantID != "" {
+		t.Fatalf("authorization failure must stop before create store side effects: %#v", store.createInput)
+	}
+	for _, forbidden := range []string{"api_key", "sk-hidden", "prompt", "credential_ref", "actor=user-123", "user-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("create upload auth error leaked forbidden text %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
 func TestUploadSourceObjectUsesTenantUploadScopeAndDoesNotExposeObjectMetadata(t *testing.T) {
 	store := &recordingSourceFileStore{}
 	writer := &recordingSourceFileObjectWriter{}
+	authorizer := &recordingAuthorizer{}
 	server := NewServer(Config{
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
+		Authorizer:             authorizer,
 	})
 	request := httptest.NewRequest(http.MethodPut, "/v1/uploads/upload-123/object", strings.NewReader("hello"))
 	request.Header.Set("Content-Type", "text/plain")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-object-upload")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5256,6 +5423,10 @@ func TestUploadSourceObjectUsesTenantUploadScopeAndDoesNotExposeObjectMetadata(t
 	if store.objectInput.TenantID != "tenant-123" || store.objectInput.UploadID != "upload-123" {
 		t.Fatalf("store lost trusted tenant/upload context: %#v", store.objectInput)
 	}
+	if store.ownerInput.TenantID != "tenant-123" || store.ownerInput.UploadID != "upload-123" {
+		t.Fatalf("owner lookup lost trusted tenant/upload context: %#v", store.ownerInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-123", "project-123", "req-object-upload")
 	if writer.input.ObjectKey != "projects/project-123/source-files/upload-123/book.txt" ||
 		writer.input.TenantID != "tenant-123" ||
 		writer.input.UploadID != "upload-123" ||
@@ -5276,9 +5447,227 @@ func TestUploadSourceObjectUsesTenantUploadScopeAndDoesNotExposeObjectMetadata(t
 	}
 }
 
+func TestUploadSourceObjectAuthorizesOwnerProjectBeforeObjectSideEffects(t *testing.T) {
+	store := &recordingSourceFileStore{owner: sourcefiles.UploadOwner{ProjectID: "project-owner"}}
+	writer := &recordingSourceFileObjectWriter{}
+	authorizer := &recordingAuthorizer{
+		err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret object_key=private actor=user-123"},
+	}
+	server := NewServer(Config{
+		WriterStarter:          &recordingStarter{},
+		SourceFileStore:        store,
+		SourceFileObjectWriter: writer,
+		Authorizer:             authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPut, "/v1/uploads/upload-123/object", strings.NewReader("private raw body api_key=sk-hidden"))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-object-owner-auth")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected owner auth failure %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if store.ownerInput.TenantID != "tenant-123" || store.ownerInput.UploadID != "upload-123" {
+		t.Fatalf("owner lookup lost trusted tenant/upload scope: %#v", store.ownerInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-owner" ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("unexpected owner authorizer input: %#v", authorizer.inputs)
+	}
+	if store.objectInput.TenantID != "" || writer.body != "" {
+		t.Fatalf("owner auth failure must stop before object metadata/writer side effects: store=%#v writer=%#v", store, writer)
+	}
+	for _, forbidden := range []string{"private raw body", "api_key", "sk-hidden", "prompt", "credential_ref", "object_key", "actor=user-123", "user-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("object owner auth error leaked forbidden text %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestUploadObjectAndCompleteAuthorizeOwnerProjectBeforeSideEffects(t *testing.T) {
+	tests := []struct {
+		name             string
+		method           string
+		path             string
+		body             string
+		assertNoSideFx   func(*testing.T, *recordingSourceFileStore, *recordingSourceFileObjectWriter)
+		expectedStoreHit func(*recordingSourceFileStore) bool
+	}{
+		{
+			name:   "object upload",
+			method: http.MethodPut,
+			path:   "/v1/uploads/upload-123/object",
+			body:   "raw manuscript content prompt api_key credential_ref draft manuscript",
+			assertNoSideFx: func(t *testing.T, store *recordingSourceFileStore, writer *recordingSourceFileObjectWriter) {
+				t.Helper()
+				if store.objectInput.TenantID != "" || writer.body != "" {
+					t.Fatalf("object side effect ran before authorization: store=%#v writer=%#v", store.objectInput, writer)
+				}
+			},
+			expectedStoreHit: func(store *recordingSourceFileStore) bool {
+				return store.ownerInput.TenantID == "tenant-123" && store.ownerInput.UploadID == "upload-123"
+			},
+		},
+		{
+			name:   "complete upload",
+			method: http.MethodPost,
+			path:   "/v1/uploads/upload-123/complete",
+			body:   `{"project_id":"body-project","api_key":"sk-hidden","prompt":"private"}`,
+			assertNoSideFx: func(t *testing.T, store *recordingSourceFileStore, writer *recordingSourceFileObjectWriter) {
+				t.Helper()
+				if store.completeInput.TenantID != "" || writer.body != "" {
+					t.Fatalf("complete side effect ran before authorization: store=%#v writer=%#v", store.completeInput, writer)
+				}
+			},
+			expectedStoreHit: func(store *recordingSourceFileStore) bool {
+				return store.ownerInput.TenantID == "tenant-123" && store.ownerInput.UploadID == "upload-123"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingSourceFileStore{owner: sourcefiles.UploadOwner{ProjectID: "project-owner"}}
+			writer := &recordingSourceFileObjectWriter{}
+			authorizer := &recordingAuthorizer{err: &auth.AppError{
+				Code:    auth.CodeAccessDenied,
+				Message: "denied prompt api_key credential_ref draft manuscript",
+			}}
+			server := NewServer(Config{
+				WriterStarter:          &recordingStarter{},
+				SourceFileStore:        store,
+				SourceFileObjectWriter: writer,
+				Authorizer:             authorizer,
+			})
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			request.Header.Set("X-Request-Id", "req-upload-owner-rbac")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected owner creative_write denial, got %d: %s", response.Code, response.Body.String())
+			}
+			if !tt.expectedStoreHit(store) {
+				t.Fatalf("owner lookup did not use tenant/upload path scope: %#v", store.ownerInput)
+			}
+			assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "actor-123", "project-owner", "req-upload-owner-rbac")
+			tt.assertNoSideFx(t, store, writer)
+			for _, forbidden := range []string{"body-project", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript", "actor-123"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("upload owner auth response leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestUploadObjectAndCompleteRequireCredentialAndCookieCSRFBeforeStoreOrWriter(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		setup      func(*http.Request)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "object invalid bearer",
+			method:     http.MethodPut,
+			path:       "/v1/uploads/upload-123/object",
+			body:       "private body",
+			setup:      func(r *http.Request) { r.Header.Set("Authorization", "Bearer v1:route-user:deadbeef") },
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   auth.CodeUnauthenticated,
+		},
+		{
+			name:   "object missing csrf",
+			method: http.MethodPut,
+			path:   "/v1/uploads/upload-123/object",
+			body:   "private body",
+			setup: func(r *http.Request) {
+				r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
+			},
+			wantStatus: http.StatusForbidden,
+			wantCode:   auth.CodeAccessDenied,
+		},
+		{
+			name:       "complete invalid bearer",
+			method:     http.MethodPost,
+			path:       "/v1/uploads/upload-123/complete",
+			body:       `{"prompt":"private","api_key":"sk-hidden"}`,
+			setup:      func(r *http.Request) { r.Header.Set("Authorization", "Bearer v1:route-user:deadbeef") },
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   auth.CodeUnauthenticated,
+		},
+		{
+			name:   "complete missing csrf",
+			method: http.MethodPost,
+			path:   "/v1/uploads/upload-123/complete",
+			body:   `{"prompt":"private","api_key":"sk-hidden"}`,
+			setup: func(r *http.Request) {
+				r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
+			},
+			wantStatus: http.StatusForbidden,
+			wantCode:   auth.CodeAccessDenied,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingSourceFileStore{}
+			writer := &recordingSourceFileObjectWriter{}
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(Config{
+				WriterStarter:          &recordingStarter{},
+				SourceFileStore:        store,
+				SourceFileObjectWriter: writer,
+				Authorizer:             authorizer,
+				SessionAuthSecret:      "test-secret",
+			})
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.Header.Set("X-Request-Id", "req-upload-credential")
+			tt.setup(request)
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Fatalf("unexpected error body: %#v", body)
+			}
+			if authorizer.called || store.ownerInput.TenantID != "" || store.objectInput.TenantID != "" || store.completeInput.TenantID != "" || writer.body != "" {
+				t.Fatalf("credential/CSRF preflight reached side effects: authorizer=%#v store=%#v writer=%#v", authorizer.inputs, store, writer)
+			}
+			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef", "cookie-user", "prompt", "api_key", "sk-hidden", "credential_ref", "private body", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("credential/CSRF response leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestUploadSourceObjectFailsClosedWithoutObjectWriter(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodPut, "/v1/uploads/upload-123/object", strings.NewReader("hello"))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -5310,6 +5699,7 @@ func TestUploadSourceObjectSanitizesWriterErrorsAtHTTPBoundary(t *testing.T) {
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
+		Authorizer:             &recordingAuthorizer{},
 	})
 	request := httptest.NewRequest(http.MethodPut, "/v1/uploads/upload-123/object", strings.NewReader("hello"))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5343,6 +5733,7 @@ func TestUploadSourceObjectRejectsNonWritableUploadStatusAtHTTPBoundary(t *testi
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
+		Authorizer:             &recordingAuthorizer{},
 	})
 	request := httptest.NewRequest(http.MethodPut, "/v1/uploads/upload-123/object", strings.NewReader("hello"))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5375,10 +5766,12 @@ func TestUploadSourceObjectRejectsNonWritableUploadStatusAtHTTPBoundary(t *testi
 
 func TestCompleteUploadUsesTenantUploadScopeAndReturnsSanitizedSourceFile(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	authorizer := &recordingAuthorizer{}
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/uploads/upload-123/complete", bytes.NewBufferString(`{"tenant_id":"evil-tenant","object_key":"must-not-be-used"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-Request-Id", "req-complete-upload")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5389,6 +5782,10 @@ func TestCompleteUploadUsesTenantUploadScopeAndReturnsSanitizedSourceFile(t *tes
 	if store.completeInput.TenantID != "tenant-123" || store.completeInput.UploadID != "upload-123" {
 		t.Fatalf("store lost trusted tenant/upload context: %#v", store.completeInput)
 	}
+	if store.ownerInput.TenantID != "tenant-123" || store.ownerInput.UploadID != "upload-123" {
+		t.Fatalf("owner lookup lost trusted tenant/upload context: %#v", store.ownerInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "", "project-123", "req-complete-upload")
 	var body map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -5401,6 +5798,48 @@ func TestCompleteUploadUsesTenantUploadScopeAndReturnsSanitizedSourceFile(t *tes
 	}
 	if _, ok := body["presigned_url"]; ok {
 		t.Fatalf("complete response leaked presigned URL: %#v", body)
+	}
+}
+
+func TestCompleteUploadAuthorizesOwnerProjectBeforeCompleteSideEffects(t *testing.T) {
+	store := &recordingSourceFileStore{owner: sourcefiles.UploadOwner{ProjectID: "project-owner"}}
+	authorizer := &recordingAuthorizer{
+		err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret object_key=private actor=user-123"},
+	}
+	server := NewServer(Config{
+		WriterStarter:   &recordingStarter{},
+		SourceFileStore: store,
+		Authorizer:      authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/uploads/upload-123/complete", strings.NewReader(`{"tenant_id":"evil","project_id":"body-project","api_key":"sk-hidden","draft":"private"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-complete-owner-auth")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected owner auth failure %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if store.ownerInput.TenantID != "tenant-123" || store.ownerInput.UploadID != "upload-123" {
+		t.Fatalf("owner lookup lost trusted tenant/upload scope: %#v", store.ownerInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-owner" ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("unexpected owner authorizer input: %#v", authorizer.inputs)
+	}
+	if store.completeInput.TenantID != "" {
+		t.Fatalf("owner auth failure must stop before complete mutation: %#v", store.completeInput)
+	}
+	for _, forbidden := range []string{"body-project", "api_key", "sk-hidden", "prompt", "credential_ref", "object_key", "draft", "actor=user-123", "user-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("complete owner auth error leaked forbidden text %q: %s", forbidden, response.Body.String())
+		}
 	}
 }
 
@@ -5421,6 +5860,158 @@ func TestCompleteUploadFailsClosedWithoutSourceFileBackend(t *testing.T) {
 	}
 	if body.Error.Code != "SOURCE_FILE_BACKEND_UNCONFIGURED" {
 		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestUploadIDRoutesRejectInvalidActorCredentialBeforeFallbackOrSideEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		writer bool
+	}{
+		{name: "object", method: http.MethodPut, path: "/v1/uploads/upload-123/object", body: "private raw body", writer: true},
+		{name: "complete", method: http.MethodPost, path: "/v1/uploads/upload-123/complete", body: `{"api_key":"sk-hidden"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &recordingSourceFileStore{}
+			writer := &recordingSourceFileObjectWriter{}
+			config := Config{
+				SessionAuthSecret: "test-secret",
+				WriterStarter:     &recordingStarter{},
+				SourceFileStore:   store,
+				Authorizer:        &recordingAuthorizer{},
+			}
+			if test.writer {
+				config.SourceFileObjectWriter = writer
+			}
+			server := NewServer(config)
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Token broken")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-actor")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("expected invalid actor credential 401, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.ownerInput.TenantID != "" || store.objectInput.TenantID != "" || store.completeInput.TenantID != "" || writer.body != "" {
+				t.Fatalf("invalid actor credential reached side effects: store=%#v writer=%#v", store, writer)
+			}
+			for _, forbidden := range []string{"fallback-actor", "private raw body", "api_key", "sk-hidden", "prompt", "credential_ref", "object_key", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("invalid actor response leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestUploadIDRoutesRequireCookieCSRFBeforeActorFallbackOrSideEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		writer bool
+	}{
+		{name: "object", method: http.MethodPut, path: "/v1/uploads/upload-123/object", body: "private raw body", writer: true},
+		{name: "complete", method: http.MethodPost, path: "/v1/uploads/upload-123/complete", body: `{"api_key":"sk-hidden"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &recordingSourceFileStore{}
+			writer := &recordingSourceFileObjectWriter{}
+			sessionStore := &recordingAuthSessionStore{}
+			config := Config{
+				SessionAuthSecret: "test-secret",
+				AuthSessionStore:  sessionStore,
+				WriterStarter:     &recordingStarter{},
+				SourceFileStore:   store,
+				Authorizer:        &recordingAuthorizer{},
+			}
+			if test.writer {
+				config.SourceFileObjectWriter = writer
+			}
+			server := NewServer(config)
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-actor")})
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-actor")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected missing csrf 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.validateCalled || store.ownerInput.TenantID != "" || store.objectInput.TenantID != "" || store.completeInput.TenantID != "" || writer.body != "" {
+				t.Fatalf("missing csrf reached actor/store/writer side effects: session=%#v store=%#v writer=%#v", sessionStore, store, writer)
+			}
+			for _, forbidden := range []string{"fallback-actor", "cookie-actor", "private raw body", "api_key", "sk-hidden", "prompt", "credential_ref", "object_key", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("missing csrf response leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedUploadIDPathsStay404WithoutActorOrSideEffects(t *testing.T) {
+	store := &recordingSourceFileStore{}
+	writer := &recordingSourceFileObjectWriter{}
+	authorizer := &recordingAuthorizer{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		SessionAuthSecret:      "test-secret",
+		AuthSessionStore:       sessionStore,
+		WriterStarter:          &recordingStarter{},
+		SourceFileStore:        store,
+		SourceFileObjectWriter: writer,
+		Authorizer:             authorizer,
+	})
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPut, path: "/v1/uploads//object"},
+		{method: http.MethodPut, path: "/v1/uploads/upload-123/object/extra"},
+		{method: http.MethodPut, path: "/v1/uploads/upload-123//object"},
+		{method: http.MethodPost, path: "/v1/uploads//complete"},
+		{method: http.MethodPost, path: "/v1/uploads/upload-123/complete/extra"},
+		{method: http.MethodPost, path: "/v1/uploads/upload-123//complete"},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			*store = recordingSourceFileStore{}
+			*writer = recordingSourceFileObjectWriter{}
+			*authorizer = recordingAuthorizer{}
+			*sessionStore = recordingAuthSessionStore{}
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(`{"api_key":"sk-hidden","prompt":"private"}`))
+			request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "actor-123"))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-actor")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected malformed upload route 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.validateCalled || authorizer.called || store.ownerInput.TenantID != "" || store.objectInput.TenantID != "" || store.completeInput.TenantID != "" || writer.body != "" {
+				t.Fatalf("malformed upload path triggered side effects: session=%#v authorizer=%#v store=%#v writer=%#v", sessionStore, authorizer, store, writer)
+			}
+			for _, forbidden := range []string{"actor-123", "fallback-actor", "api_key", "sk-hidden", "prompt", "private", "object_key", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("malformed upload response leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
 	}
 }
 
@@ -5498,7 +6089,7 @@ func TestSourceFileRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T) 
 			path:   "/v1/uploads/upload-123/complete",
 			body:   `{}`,
 			expectedInput: func(store *recordingSourceFileStore) bool {
-				return store.completeInput.TenantID == "tenant-123" && store.completeInput.UploadID == "upload-123"
+				return store.ownerInput.TenantID == "tenant-123" && store.ownerInput.UploadID == "upload-123"
 			},
 		},
 		{
@@ -5514,7 +6105,7 @@ func TestSourceFileRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T) 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := &recordingSourceFileStore{err: sensitiveErr}
-			config := Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}
+			config := Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: &recordingAuthorizer{}}
 			if test.method == http.MethodGet && strings.HasSuffix(test.path, "/source-files") {
 				config = projectReadAllowedConfig(config)
 			}
@@ -5522,6 +6113,7 @@ func TestSourceFileRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T) 
 			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
 			request.Header.Set("X-Request-Id", "req-source-error")
 			response := httptest.NewRecorder()
 
@@ -5549,10 +6141,11 @@ func TestSourceFileRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T) 
 }
 
 func TestCreateUploadFailsClosedWithoutSourceFileBackend(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", bytes.NewBufferString(`{"filename":"novel.md","mime_type":"text/markdown","size_bytes":2048,"sha256":"abc123","purpose":"seed"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
