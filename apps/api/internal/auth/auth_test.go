@@ -113,6 +113,39 @@ func TestSQLReaderActiveProjectsQueryFiltersInactiveProjectMemberOverrides(t *te
 	}
 }
 
+func TestSQLReaderUsesAuthContextForMembershipDiscovery(t *testing.T) {
+	queryer := &fakeAuthContextQueryer{
+		fakeAuthQueryer: fakeAuthQueryer{
+			rows: []SQLRows{
+				&fakeAuthRows{rows: [][]any{{
+					"user-123",
+					"author@example.test",
+					"Author",
+					"",
+				}}},
+				&fakeAuthRows{rows: [][]any{{"tenant-123", "Studio", "owner", "active"}}},
+				&fakeAuthRows{rows: [][]any{{"tenant-123", "project-123", "Long Novel", "editor", "owner", "active"}}},
+			},
+		},
+	}
+	reader := NewSQLReader(SQLReaderConfig{Queryer: queryer})
+
+	_, err := reader.GetCurrentUser(context.Background(), GetCurrentUserInput{UserID: " user-123 "})
+
+	if err != nil {
+		t.Fatalf("GetCurrentUser returned error: %v", err)
+	}
+	if len(queryer.queries) != 3 {
+		t.Fatalf("expected three queries, got %d", len(queryer.queries))
+	}
+	if len(queryer.authUserIDs) != 2 {
+		t.Fatalf("expected tenant/project discovery to use auth context, got %#v", queryer.authUserIDs)
+	}
+	if queryer.authUserIDs[0] != "user-123" || queryer.authUserIDs[1] != "user-123" {
+		t.Fatalf("auth context lost normalized user id: %#v", queryer.authUserIDs)
+	}
+}
+
 func TestSQLReaderMapsInactiveOrMissingUserToUserNotFound(t *testing.T) {
 	queryer := &fakeAuthQueryer{
 		rows: []SQLRows{&fakeAuthRows{}},
@@ -1447,6 +1480,11 @@ type fakeAuthQueryer struct {
 	errs    []error
 }
 
+type fakeAuthContextQueryer struct {
+	fakeAuthQueryer
+	authUserIDs []string
+}
+
 type fakeAuthExecer struct {
 	queries []string
 	args    [][]any
@@ -1487,6 +1525,11 @@ func (q *fakeAuthQueryer) QueryContext(ctx context.Context, query string, args .
 	rows := q.rows[0]
 	q.rows = q.rows[1:]
 	return rows, nil
+}
+
+func (q *fakeAuthContextQueryer) QueryAuthContext(ctx context.Context, userID string, query string, args ...any) (SQLRows, error) {
+	q.authUserIDs = append(q.authUserIDs, strings.TrimSpace(userID))
+	return q.QueryContext(ctx, query, args...)
 }
 
 type fakeAuthRows struct {

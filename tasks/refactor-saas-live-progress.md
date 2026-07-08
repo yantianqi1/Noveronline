@@ -55,7 +55,7 @@
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
 | Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S4o Story Graph evidence project-read RBAC、W2-S4p Worldline preparation read RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam、W2-S5f Web logout UI/action、W2-S5g nonce session token groundwork、W2-S5h current-session rotation API seam、W2-S5i cookie current-session CSRF seam、W2-S5j Web session refresh action、W2-S5k automatic project-shell session refresh trigger、W2-S5l current-user all-session revocation seam、W2-S5m admin tenant-wide session revocation seam、W2-S5n route-wide unsafe cookie CSRF guard、W2-S5o current-user session listing metadata API、W2-S5p Web session management panel、W2-S5q production password login session issuance seam、W2-S5r Web password login action/page、W2-S5s JWT bearer subject resolver seam、W2-S5t Web session renewal threshold hardening、W2-S5u Web tenant-wide session revocation action、W2-S5v JWT cookie rotation seam、W2-S5w JWT bearer access-token issuance seam、W2-S5x JWT bearer refresh seam、W2-S5y global run read/replay credential preflight、W2-S5z global run read/replay owner-aware project-read authorization、W2-S5za global run cancel/retry owner-aware authorization、W2-S5zb Source upload route auth/RBAC hardening 和 W2-S5zc actor-sensitive protected route inventory guard 已接入；完整 compose health、真实 Temporal handoff、完整 production login/session lifecycle、refresh token/session renewal、full route-wide auth middleware、production-grade cookie/session management UI 和其他 remaining owner-aware/global non-asset RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
-| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`sequential_reading` / `anchor_point_summary` / `story_ontology` / `entity_resolution` / `character_agent_profile` / `narrative_archives` / `graph_bond_generator` LLM Facility runner path、`sequential_reading` Postgres/MinIO/local-provider harness、`anchor_point_summary` global aggregation Postgres/local-provider harness、`story_ontology` Postgres/local-provider harness、`entity_resolution` Postgres/local-provider harness、`character_agent_profile` Postgres/local-provider harness、`narrative_archives` archive candidate Postgres/local-provider harness、`finalize_seed_activity` readiness/status Postgres harness、Story Graph candidate adoption backend API/store、metadata-only Graph candidate viewer/adoption UI 和 repository-native metadata graph canvas 已补；其中 sequential/global-aggregation/ontology/entity/profile/archive/finalize variants 已在本机 live Postgres 执行通过，Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、finalize full-chain readiness beyond harness、vector/hybrid search、React Flow/library hardening、Graph live DB/browser E2E 和 richer semantic merge/layout 待补 |
+| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`sequential_reading` / `anchor_point_summary` / `story_ontology` / `entity_resolution` / `character_agent_profile` / `narrative_archives` / `graph_bond_generator` LLM Facility runner path、`sequential_reading` Postgres/MinIO/local-provider harness、`anchor_point_summary` global aggregation Postgres/local-provider harness、`story_ontology` Postgres/local-provider harness、`entity_resolution` Postgres/local-provider harness、`character_agent_profile` Postgres/local-provider harness、`narrative_archives` archive candidate Postgres/local-provider harness、`finalize_seed_activity` readiness/status Postgres harness、Go API upload/complete -> Temporal worker -> Python semantic chain live harness（parse/segment/sequential/runtime-facts/global-aggregation 后在未绑定 `story_ontology` 时 `LLM_MODULE_UNBOUND` fail closed）、Story Graph candidate adoption backend API/store、metadata-only Graph candidate viewer/adoption UI 和 repository-native metadata graph canvas 已补；其中 sequential/global-aggregation/ontology/entity/profile/archive/finalize variants 已在本机 live Postgres 执行通过，Asset search 版本/collection metadata 已补；完整 browser/provider Seed success-chain E2E、扫描/OCR PDF、完整智能分段、finalize full-chain readiness beyond harness、vector/hybrid search、React Flow/library hardening、Graph live DB/browser E2E 和 richer semantic merge/layout 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
 | Phase 7 | 0%-10% | Legacy import report skeleton blocked，旧架构清理未开始 |
 | Phase 8 | 0%-10% | Ops/Billing/Security/Production hardening 仍主要停留在设计和少量底座 |
@@ -64,11 +64,11 @@
 
 | 项 | 内容 |
 |---|---|
-| 当前主线 | Phase 5：Seed browser upload / product closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff；archive candidate、finalize readiness/status 和 global aggregation live Postgres/local-provider variants 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化 |
+| 当前主线 | Phase 5：Seed live chain / product closure |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants 和 Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化 |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Story Graph metadata canvas：Next `/graph` 用 public viewport node/edge metadata 渲染 repository-native canvas，替代 counts-only placeholder；不读取或展示私密 graph payload |
-| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 full browser/provider Seed pipeline E2E、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+| 本轮开发 slice | P5 Seed live semantic chain：Go API upload/complete -> Temporal cluster -> Python worker 执行 parse/segment/sequential-reading/runtime-facts/global-aggregation，并在未绑定 `story_ontology` 时 fail closed |
+| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进完整 Seed provider success-chain E2E、browser upload/complete live check、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
 
 ## Phase 5 P5 Story Graph metadata canvas
 
@@ -3496,6 +3496,61 @@ Next:
 
 - 继续推进 Go API upload/complete -> Temporal cluster -> Python worker parse/segment 的真实 live E2E。
 - Browser upload/complete、sequential-reading provider/live LLM、扫描/OCR PDF、更完整语义分段、retry failed segments 和真实 ontology/entity resolution/profile/finalize runners 仍 pending。
+
+### 2026-07-09 当前会话：P5 Seed live semantic chain to global aggregation fail-closed ontology
+
+Context:
+
+- 继续沿 Phase 5 收口真实 Seed live chain，不把 activity-level harness 当完整产品闭环。
+- 当前分支仍为 `codex/saas-mainline`；本轮只在 `/Users/yantianqi/Documents/Noveronline-saas-mainline` 工作。
+- W2-S4m 已在当前文档和看板登记完成，本轮不回退重做旧 Character Console RBAC slice。
+
+Scope:
+
+- 目标：证明 Go API upload/complete/start + Temporal cluster + Python `SeedPipelineWorkflow` worker 能在真实 Postgres/MinIO/local provider 环境下执行到 `parse_file`、`segment_text`、`sequential_reading`、`persist_runtime_facts`、`global_aggregation`，随后在未绑定 `story_ontology` 时以 `LLM_MODULE_UNBOUND` fail closed。
+- 边界：不伪造 ontology/entity/profile/finalize 成功；不声明完整 Seed provider success-chain、browser E2E、OCR、retry、vector/hybrid 或 100% 产品闭环完成。
+
+RED / Investigation:
+
+- 继承未提交 RED/GREEN 切片后，先运行 live semantic E2E，链路已执行到断言阶段，但 `reading_segment_notes` 断言按 UUID 排序导致顺序不稳定。
+- 第二次运行发现 failed event 已使用既有 public shape `error_code` / `error_message`，测试错误地期待嵌套 `error.code`。
+
+Implementation:
+
+- `_SeedWorker` live harness 注册完整 Seed activity 集合，使真实 Temporal worker 可继续执行 runtime-facts、global-aggregation 和后续 stages，而不是停在 parse/segment/sequential。
+- 新增 live semantic E2E：通过 Go API 上传 TXT、写 MinIO object、complete upload、start Seed run；local OpenAI-compatible provider 只绑定 `sequential_reading` 与 `anchor_point_summary`，故意不绑定 `story_ontology`。
+- provider 返回包含 prompt/provider/raw/API key/`credential_ref`/draft/manuscript marker 的 payload，用于验证 public event / run status / API replay 不泄露高风险字段。
+- `ontology_activity` terminal failure 现在会解析/使用 workflow status writer，把 admitted Seed run 标为 `failed`，并保留稳定 public error code。
+- Go auth membership discovery 在 app-role/RLS path 下新增 current-user scoped read-only query context，配合 baseline RLS policy 允许 `/v1/me`/authorizer 在不绕过 RLS 的情况下读取当前用户 membership。
+
+Verification:
+
+- Live semantic E2E：
+  `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL=... MIROFISH_SEED_LIVE_TEMPORAL_ADDRESS=... MIROFISH_SEED_LIVE_OBJECT_STORAGE_*... .venv/bin/python -m pytest tests/test_seed_live_e2e.py::test_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_fails_ontology_unbound -q`
+  passed, 1 passed.
+- Existing live parse/segment Go API harness passed, 1 passed.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'story_ontology_activity_marks_workflow_failed_on_terminal_unbound or story_ontology_activity_fails_closed_without_runner or story_ontology_activity_records_sanitized_metadata_from_runner'` passed, 3 passed.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q` passed, 135 passed.
+- `cd apps/api && go test ./internal/auth -run 'SQLReader|AuthContext' -count=1` passed.
+- `cd apps/api && go test ./internal/auth ./internal/httpapi ./cmd/api -run 'Auth|Seed|Upload|SourceFile|Workflow' -count=1` passed.
+- `cd apps/api && go test ./... -count=1` passed.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` passed as default-skip without live env, 11 skipped.
+- `git diff --check` passed.
+
+Docs synced:
+
+- `tasks/refactor-saas-live-progress.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+- `docs/refactor-saas/14-data-model.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+
+Next:
+
+- Finish review/commit for this slice.
+- Next code slice should bind the remaining Seed semantic modules for an opt-in full provider success-chain through ontology/entity-resolution/agent-profile/archive/index/finalize, or run a browser upload/complete live check against the existing Overview file-first flow.
+- Scanned/OCR PDF, richer semantic segmentation, retry failed segments, vector/hybrid search, external provider/cluster E2E and complete Seed product closure remain pending.
 
 ### 2026-07-07 当前会话：W1-S3 manuscript metadata/export manifest
 

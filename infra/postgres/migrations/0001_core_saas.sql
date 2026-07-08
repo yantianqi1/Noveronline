@@ -107,11 +107,15 @@ CREATE TABLE IF NOT EXISTS project_members (
   project_id UUID NOT NULL,
   user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
   role TEXT NOT NULL CHECK (role IN ('project_owner', 'editor', 'writer', 'analyst', 'viewer')),
+  status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, project_id, user_id),
   FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
 );
+
+ALTER TABLE project_members
+ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 
 CREATE TABLE IF NOT EXISTS source_files (
   tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -1367,6 +1371,11 @@ ON tenant_memberships
 FOR ALL
 USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
 WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+DROP POLICY IF EXISTS current_user_select_tenant_memberships ON tenant_memberships;
+CREATE POLICY current_user_select_tenant_memberships
+ON tenant_memberships
+FOR SELECT
+USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::UUID);
 
 ALTER TABLE project_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE project_members FORCE ROW LEVEL SECURITY;
@@ -1376,6 +1385,11 @@ ON project_members
 FOR ALL
 USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
 WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+DROP POLICY IF EXISTS current_user_select_project_members ON project_members;
+CREATE POLICY current_user_select_project_members
+ON project_members
+FOR SELECT
+USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::UUID);
 
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE projects FORCE ROW LEVEL SECURITY;
@@ -1385,6 +1399,19 @@ ON projects
 FOR ALL
 USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
 WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+DROP POLICY IF EXISTS current_user_membership_select_projects ON projects;
+CREATE POLICY current_user_membership_select_projects
+ON projects
+FOR SELECT
+USING (
+  EXISTS (
+    SELECT 1
+    FROM tenant_memberships tm
+    WHERE tm.tenant_id = projects.tenant_id
+      AND tm.user_id = NULLIF(current_setting('app.current_user_id', true), '')::UUID
+      AND tm.status = 'active'
+  )
+);
 
 ALTER TABLE source_files ENABLE ROW LEVEL SECURITY;
 ALTER TABLE source_files FORCE ROW LEVEL SECURITY;

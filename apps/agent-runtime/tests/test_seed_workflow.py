@@ -1437,6 +1437,34 @@ def test_story_ontology_activity_fails_closed_without_runner() -> None:
     ]
 
 
+def test_story_ontology_activity_marks_workflow_failed_on_terminal_unbound() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+
+    result = seed_module.ontology_activity(
+        {"context": _context().model_dump()},
+        workflow_event_writer=workflow_writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["stage"] == "story_ontology"
+    assert result["error"]["code"] == "ONTOLOGY_RUNNER_UNCONFIGURED"
+    assert result["workflow_status_persisted"] is True
+    assert status_writer.failed == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "code": "ONTOLOGY_RUNNER_UNCONFIGURED",
+            "message": "ontology runner is unconfigured",
+        }
+    ]
+    public_body = json.dumps([result, workflow_writer.events, status_writer.failed], ensure_ascii=False)
+    for forbidden in ("prompt", "api_key", "credential_ref", "object_key", "draft", "manuscript"):
+        assert forbidden not in public_body
+
+
 def test_story_ontology_activity_records_sanitized_metadata_from_runner() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
     runner = RecordingOntologyRunner()

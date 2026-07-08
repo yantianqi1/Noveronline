@@ -5202,6 +5202,7 @@ def _ontology_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     _record_failed_ontology_event(
         context=context,
@@ -5209,11 +5210,29 @@ def _ontology_failed_result(
         error_message=public_message,
         workflow_event_writer=workflow_event_writer,
     )
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=code,
+            message=public_message,
+        )
+    except Exception:
+        return _error_result(
+            base=base,
+            code="WORKFLOW_STATUS_WRITE_FAILED",
+            message="seed workflow status write failed",
+            extra={"stage": "story_ontology", "module_key": STORY_ONTOLOGY_MODULE_KEY},
+        )
     return _error_result(
         base=base,
         code=code,
         message=message,
-        extra={"stage": "story_ontology", "module_key": STORY_ONTOLOGY_MODULE_KEY},
+        extra={
+            "stage": "story_ontology",
+            "module_key": STORY_ONTOLOGY_MODULE_KEY,
+            "workflow_status_persisted": workflow_status_persisted,
+        },
     )
 
 
@@ -6262,6 +6281,7 @@ def ontology_activity(
     payload: dict[str, Any],
     ontology_runner: OntologyRunner | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -6280,6 +6300,11 @@ def ontology_activity(
             stage="story_ontology",
             module_key=STORY_ONTOLOGY_MODULE_KEY,
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            workflow_status_writer = _UnavailableWorkflowRunStatusWriter()
     runner = ontology_runner if ontology_runner is not None else _ontology_runner_from_env()
     if runner is None:
         return _ontology_failed_result(
@@ -6292,6 +6317,7 @@ def ontology_activity(
             ),
             public_message="ontology runner is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         ontology_result = runner.generate(context=context, module_key=STORY_ONTOLOGY_MODULE_KEY)
@@ -6303,6 +6329,7 @@ def ontology_activity(
             message=str(exc),
             public_message="story ontology generation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if ontology_result.get("status") != "completed":
         error = ontology_result.get("error") if isinstance(ontology_result.get("error"), dict) else {}
@@ -6315,6 +6342,7 @@ def ontology_activity(
             message=message,
             public_message=_public_ontology_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         module_key = _optional_result_text(ontology_result, "module_key") or STORY_ONTOLOGY_MODULE_KEY
@@ -6342,6 +6370,7 @@ def ontology_activity(
             message=str(exc),
             public_message="ontology output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     event_persisted = _record_completed_ontology_event(
         context=context,

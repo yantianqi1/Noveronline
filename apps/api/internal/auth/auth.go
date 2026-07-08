@@ -163,6 +163,10 @@ type SQLQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
 }
 
+type SQLAuthQueryer interface {
+	QueryAuthContext(ctx context.Context, userID string, query string, args ...any) (SQLRows, error)
+}
+
 type SQLExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
@@ -186,8 +190,51 @@ func (q *SQLDBQueryer) QueryContext(ctx context.Context, query string, args ...a
 	return q.db.QueryContext(ctx, query, args...)
 }
 
+func (q *SQLDBQueryer) QueryAuthContext(ctx context.Context, userID string, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('app.current_user_id', $1, true)", strings.TrimSpace(userID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &authScopedRows{rows: rows, tx: tx}, nil
+}
+
 func (q *SQLDBQueryer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	return q.db.ExecContext(ctx, query, args...)
+}
+
+type authScopedRows struct {
+	rows SQLRows
+	tx   *sql.Tx
+}
+
+func (r *authScopedRows) Next() bool {
+	return r.rows.Next()
+}
+
+func (r *authScopedRows) Scan(dest ...any) error {
+	return r.rows.Scan(dest...)
+}
+
+func (r *authScopedRows) Err() error {
+	return r.rows.Err()
+}
+
+func (r *authScopedRows) Close() error {
+	rowsErr := r.rows.Close()
+	if rowsErr != nil {
+		_ = r.tx.Rollback()
+		return rowsErr
+	}
+	return r.tx.Commit()
 }
 
 type SQLReaderConfig struct {
@@ -788,7 +835,7 @@ LIMIT 1
 }
 
 func (r *SQLReader) readActiveTenants(ctx context.Context, userID string) ([]TenantMembershipSummary, error) {
-	rows, err := r.queryer.QueryContext(ctx, `
+	rows, err := r.queryAuthContext(ctx, userID, `
 SELECT t.tenant_id::text, t.name, tm.role, tm.status
 FROM tenant_memberships tm
 JOIN tenants t ON t.tenant_id = tm.tenant_id AND t.status = 'active'
@@ -819,7 +866,7 @@ ORDER BY t.name, t.tenant_id
 }
 
 func (r *SQLReader) readActiveProjects(ctx context.Context, userID string) ([]ProjectMembershipSummary, error) {
-	rows, err := r.queryer.QueryContext(ctx, `
+	rows, err := r.queryAuthContext(ctx, userID, `
 SELECT p.tenant_id::text, p.project_id::text, p.title, pm.role, tm.role, p.status
 FROM tenant_memberships tm
 JOIN tenants t ON t.tenant_id = tm.tenant_id AND t.status = 'active'
@@ -859,6 +906,13 @@ ORDER BY p.title, p.project_id
 		return nil, authLookupFailed()
 	}
 	return projects, nil
+}
+
+func (r *SQLReader) queryAuthContext(ctx context.Context, userID string, query string, args ...any) (SQLRows, error) {
+	if authQueryer, ok := r.queryer.(SQLAuthQueryer); ok {
+		return authQueryer.QueryAuthContext(ctx, userID, query, args...)
+	}
+	return r.queryer.QueryContext(ctx, query, args...)
 }
 
 func authLookupFailed() *AppError {
