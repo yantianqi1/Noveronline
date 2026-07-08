@@ -39,6 +39,40 @@ func signedSessionTokenForTest(t *testing.T, secret string, userID string) strin
 	return message + ":" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func TestSignSessionTokenUsesNonceBearingFormatForRotation(t *testing.T) {
+	server := NewServer(Config{SessionAuthSecret: "test-secret"})
+
+	first, ok := server.signSessionToken("user-session")
+	if !ok {
+		t.Fatal("expected first session token to sign")
+	}
+	second, ok := server.signSessionToken("user-session")
+	if !ok {
+		t.Fatal("expected second session token to sign")
+	}
+	if first == second {
+		t.Fatalf("session tokens for the same user must rotate, got identical token %q", first)
+	}
+	firstParts := strings.Split(first, ":")
+	secondParts := strings.Split(second, ":")
+	if len(firstParts) != 4 || len(secondParts) != 4 || firstParts[0] != "v2" || secondParts[0] != "v2" {
+		t.Fatalf("expected nonce-bearing v2 tokens, got first=%q second=%q", first, second)
+	}
+	if firstParts[2] == "" || secondParts[2] == "" || firstParts[2] == secondParts[2] {
+		t.Fatalf("expected distinct non-empty nonce segments, got first=%q second=%q", firstParts[2], secondParts[2])
+	}
+	if len(firstParts[2]) != 32 || len(secondParts[2]) != 32 {
+		t.Fatalf("expected 16-byte hex nonce segments, got first=%q second=%q", firstParts[2], secondParts[2])
+	}
+	userID, tokenHash, ok := server.verifySignedSessionToken(first)
+	if !ok || userID != "user-session" || strings.TrimSpace(tokenHash) == "" {
+		t.Fatalf("v2 session token did not verify with hash: user=%q hash=%q ok=%v", userID, tokenHash, ok)
+	}
+	if strings.Contains(tokenHash, first) || strings.Contains(tokenHash, "test-secret") {
+		t.Fatalf("token hash leaked raw token or secret: %q", tokenHash)
+	}
+}
+
 type recordingStarter struct {
 	input workflows.StartWriterRunInput
 	err   error
@@ -1997,6 +2031,49 @@ func TestCreateDevSessionPersistsSessionBeforeIssuingCookie(t *testing.T) {
 	}
 	if strings.Contains(sessionStore.createInput.TokenHash, cookies[0].Value) || strings.Contains(sessionStore.createInput.TokenHash, "test-secret") {
 		t.Fatalf("session store must receive token hash only, got %#v", sessionStore.createInput)
+	}
+}
+
+func TestCreateDevSessionIssuesDistinctNonceCookiesForSameUser(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "user-session"},
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: &recordingAuthSessionStore{}, SessionAuthSecret: "test-secret"})
+	issuedCookies := make([]string, 0, 2)
+	persistedHashes := make([]string, 0, 2)
+
+	for i := 0; i < 2; i++ {
+		sessionStore := &recordingAuthSessionStore{}
+		server.authSessionStore = sessionStore
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusCreated {
+			t.Fatalf("expected 201 on issuance %d, got %d: %s", i, response.Code, response.Body.String())
+		}
+		cookies := response.Result().Cookies()
+		if len(cookies) != 1 || cookies[0].Name != sessionCookieName || cookies[0].Value == "" {
+			t.Fatalf("expected issued cookie on issuance %d, got %#v", i, cookies)
+		}
+		if !sessionStore.createCalled || strings.TrimSpace(sessionStore.createInput.TokenHash) == "" {
+			t.Fatalf("session hash was not persisted on issuance %d: %#v", i, sessionStore.createInput)
+		}
+		if strings.Contains(response.Body.String(), cookies[0].Value) || strings.Contains(response.Body.String(), sessionStore.createInput.TokenHash) {
+			t.Fatalf("dev session response leaked token material on issuance %d: %s", i, response.Body.String())
+		}
+		issuedCookies = append(issuedCookies, cookies[0].Value)
+		persistedHashes = append(persistedHashes, sessionStore.createInput.TokenHash)
+	}
+	if issuedCookies[0] == issuedCookies[1] {
+		t.Fatalf("same user received identical session cookies: %#v", issuedCookies)
+	}
+	if persistedHashes[0] == persistedHashes[1] {
+		t.Fatalf("same user persisted identical session token hashes: %#v", persistedHashes)
 	}
 }
 

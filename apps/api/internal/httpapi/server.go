@@ -962,22 +962,39 @@ func (s *Server) verifySignedSessionToken(token string) (string, string, bool) {
 	}
 	token = strings.TrimSpace(token)
 	parts := strings.Split(token, ":")
-	if len(parts) != 3 || parts[0] != "v1" {
+	if len(parts) == 3 && parts[0] == "v1" {
+		userID := strings.TrimSpace(parts[1])
+		if userID == "" {
+			return "", "", false
+		}
+		signature, err := hex.DecodeString(parts[2])
+		if err != nil {
+			return "", "", false
+		}
+		if !hmac.Equal(signature, signSessionMessage(secret, "v1:"+userID)) {
+			return "", "", false
+		}
+		return userID, hashSessionToken(token), true
+	}
+	if len(parts) != 4 || parts[0] != "v2" {
 		return "", "", false
 	}
 	userID := strings.TrimSpace(parts[1])
 	if userID == "" {
 		return "", "", false
 	}
-	signature, err := hex.DecodeString(parts[2])
+	nonce := strings.TrimSpace(parts[2])
+	if nonce == "" {
+		return "", "", false
+	}
+	if _, err := hex.DecodeString(nonce); err != nil {
+		return "", "", false
+	}
+	signature, err := hex.DecodeString(parts[3])
 	if err != nil {
 		return "", "", false
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	if _, err := mac.Write([]byte("v1:" + userID)); err != nil {
-		return "", "", false
-	}
-	if !hmac.Equal(signature, mac.Sum(nil)) {
+	if !hmac.Equal(signature, signSessionMessage(secret, "v2:"+userID+":"+nonce)) {
 		return "", "", false
 	}
 	return userID, hashSessionToken(token), true
@@ -989,11 +1006,19 @@ func (s *Server) signSessionToken(userID string) (string, bool) {
 	if secret == "" || userID == "" {
 		return "", false
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	if _, err := mac.Write([]byte("v1:" + userID)); err != nil {
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
 		return "", false
 	}
-	return "v1:" + userID + ":" + hex.EncodeToString(mac.Sum(nil)), true
+	nonce := hex.EncodeToString(nonceBytes)
+	message := "v2:" + userID + ":" + nonce
+	return message + ":" + hex.EncodeToString(signSessionMessage(secret, message)), true
+}
+
+func signSessionMessage(secret string, message string) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(message))
+	return mac.Sum(nil)
 }
 
 func hashSessionToken(token string) string {
