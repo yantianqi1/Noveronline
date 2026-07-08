@@ -461,12 +461,14 @@ func (r *recordingWorkflowEventReader) ListWorkflowEvents(ctx context.Context, i
 }
 
 type recordingWriterCanceller struct {
-	input workflows.CancelWriterRunInput
-	err   error
+	input  workflows.CancelWriterRunInput
+	err    error
+	called bool
 }
 
 func (c *recordingWriterCanceller) CancelWriterRun(ctx context.Context, input workflows.CancelWriterRunInput) (workflows.WriterRunCancellation, error) {
 	c.input = input
+	c.called = true
 	if c.err != nil {
 		return workflows.WriterRunCancellation{}, c.err
 	}
@@ -13497,6 +13499,985 @@ func TestGlobalRunReadPathHelpersRequireStrictSingleSegmentRunIDs(t *testing.T) 
 	}
 }
 
+func TestGlobalRunControlsAuthorizeOwnerCreativeWriteBeforeSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		path              string
+		config            func(*recordingAuthorizer) (Config, func(t *testing.T))
+		expectedProjectID string
+	}{
+		{
+			name: "workflow cancel",
+			path: "/v1/workflow-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-workflow"}}
+				canceller := &recordingWorkflowCanceller{}
+				return Config{WorkflowReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+						t.Fatalf("workflow cancel owner lookup lost tenant/run scope: %#v", reader.input)
+					}
+					if !canceller.called || canceller.input.TenantID != "tenant-123" || canceller.input.RunID != "run-123" {
+						t.Fatalf("workflow cancel side effect did not run with tenant/run scope: %#v", canceller.input)
+					}
+				}
+			},
+			expectedProjectID: "project-workflow",
+		},
+		{
+			name: "workflow retry",
+			path: "/v1/workflow-runs/run-123/retry",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-workflow"}}
+				retrier := &recordingWorkflowRetrier{}
+				return Config{WorkflowReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+						t.Fatalf("workflow retry owner lookup lost tenant/run scope: %#v", reader.input)
+					}
+					if !retrier.called || retrier.input.TenantID != "tenant-123" || retrier.input.RunID != "run-123" {
+						t.Fatalf("workflow retry side effect did not run with tenant/run scope: %#v", retrier.input)
+					}
+				}
+			},
+			expectedProjectID: "project-workflow",
+		},
+		{
+			name: "seed cancel",
+			path: "/v1/seed-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}}
+				canceller := &recordingWorkflowCanceller{}
+				return Config{SeedRunReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.TenantID != "tenant-123" || reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed cancel owner lookup lost tenant/run scope: %#v", reader.getInput)
+					}
+					if !canceller.called || canceller.input.TenantID != "tenant-123" || canceller.input.RunID != "run-123" {
+						t.Fatalf("seed cancel side effect did not run with tenant/run scope: %#v", canceller.input)
+					}
+				}
+			},
+			expectedProjectID: "project-seed",
+		},
+		{
+			name: "seed retry",
+			path: "/v1/seed-runs/run-123/retry",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}}
+				retrier := &recordingWorkflowRetrier{}
+				return Config{SeedRunReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.TenantID != "tenant-123" || reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed retry owner lookup lost tenant/run scope: %#v", reader.getInput)
+					}
+					if !retrier.called || retrier.input.TenantID != "tenant-123" || retrier.input.RunID != "run-123" {
+						t.Fatalf("seed retry side effect did not run with tenant/run scope: %#v", retrier.input)
+					}
+				}
+			},
+			expectedProjectID: "project-seed",
+		},
+		{
+			name: "writer cancel",
+			path: "/v1/writer-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-writer"}}
+				canceller := &recordingWriterCanceller{}
+				return Config{WriterReader: reader, WriterCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+						t.Fatalf("writer cancel owner lookup lost tenant/run scope: %#v", reader.input)
+					}
+					if !canceller.called || canceller.input.TenantID != "tenant-123" || canceller.input.RunID != "run-123" {
+						t.Fatalf("writer cancel side effect did not run with tenant/run scope: %#v", canceller.input)
+					}
+				}
+			},
+			expectedProjectID: "project-writer",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			config, assertSideEffect := tt.config(authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"project_id":"body-project","prompt":"private","api_key":"sk-hidden"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			request.Header.Set("X-Request-Id", "req-run-control")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("expected accepted status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+			}
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != tt.expectedProjectID ||
+				authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+				authorizer.inputs[0].UserID != "actor-123" ||
+				authorizer.inputs[0].RequestID != "req-run-control" {
+				t.Fatalf("unexpected run control authorization inputs: %#v", authorizer.inputs)
+			}
+			assertSideEffect(t)
+			for _, forbidden := range []string{"body-project", "prompt", "api_key", "sk-hidden", "actor-123"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("run control response leaked forbidden payload %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalWorkflowRunControlsUseCreativeWriteForCreativeWorkflows(t *testing.T) {
+	for _, workflowType := range []string{
+		workflows.WriterWorkflowType,
+		workflows.WriterReviewWorkflowType,
+		workflows.SeedWorkflowType,
+		workflows.StoryGraphBuildWorkflowType,
+		workflows.StoryGraphBondGenerationWorkflowType,
+		workflows.HelloAgentWorkflowType,
+		worldlineSessionWorkflowType,
+		worldlineStepWorkflowType,
+		worldlinePreparationWorkflowType,
+	} {
+		for _, tt := range []struct {
+			name string
+			path string
+		}{
+			{name: "cancel", path: "/v1/workflow-runs/run-creative/cancel"},
+			{name: "retry", path: "/v1/workflow-runs/run-creative/retry"},
+		} {
+			t.Run(workflowType+" "+tt.name, func(t *testing.T) {
+				reader := &recordingWorkflowReader{
+					run: workflows.WorkflowRun{
+						RunID:        "run-creative",
+						WorkflowType: workflowType,
+						ProjectID:    "creative-project",
+						Status:       "running",
+					},
+				}
+				authorizer := &recordingAuthorizer{err: &auth.AppError{
+					Code:    auth.CodeAccessDenied,
+					Message: "denied prompt api_key credential_ref draft manuscript",
+				}}
+				canceller := &recordingWorkflowCanceller{}
+				retrier := &recordingWorkflowRetrier{}
+				server := NewServer(Config{
+					WorkflowReader:    reader,
+					WorkflowCanceller: canceller,
+					WorkflowRetrier:   retrier,
+					Authorizer:        authorizer,
+				})
+				request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"prompt":"private","api_key":"sk-hidden"}`))
+				request.Header.Set("X-Tenant-Id", "tenant-123")
+				request.Header.Set("X-User-Id", "actor-123")
+				request.Header.Set("X-Request-Id", "req-creative-control")
+				response := httptest.NewRecorder()
+
+				server.ServeHTTP(response, request)
+
+				if response.Code != http.StatusForbidden {
+					t.Fatalf("expected creative workflow control to be denied by test authorizer, got %d: %s", response.Code, response.Body.String())
+				}
+				if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-creative" {
+					t.Fatalf("creative workflow owner lookup lost tenant/run scope: %#v", reader.input)
+				}
+				if len(authorizer.inputs) != 1 ||
+					authorizer.inputs[0].TenantID != "tenant-123" ||
+					authorizer.inputs[0].ProjectID != "creative-project" ||
+					authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+					authorizer.inputs[0].UserID != "actor-123" {
+					t.Fatalf("expected creative_write authorization for creative workflow control, got %#v", authorizer.inputs)
+				}
+				if canceller.called || retrier.called {
+					t.Fatalf("creative workflow side effect ran before authorization: canceller=%#v retrier=%#v", canceller.input, retrier.input)
+				}
+				assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+			})
+		}
+	}
+}
+
+func TestGlobalWorkflowRunControlsReachSideEffectsAfterMappedAuthorization(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		workflowType       string
+		path               string
+		expectedPermission auth.Permission
+		expectCancel       bool
+	}{
+		{
+			name:               "asset ingestion cancel",
+			workflowType:       workflows.AssetIngestionWorkflowType,
+			path:               "/v1/workflow-runs/run-mapped/cancel",
+			expectedPermission: auth.PermissionAssetManage,
+			expectCancel:       true,
+		},
+		{
+			name:               "style extraction retry",
+			workflowType:       workflows.StyleExtractionWorkflowType,
+			path:               "/v1/workflow-runs/run-mapped/retry",
+			expectedPermission: auth.PermissionAssetManage,
+		},
+		{
+			name:               "worldline session cancel",
+			workflowType:       worldlineSessionWorkflowType,
+			path:               "/v1/workflow-runs/run-mapped/cancel",
+			expectedPermission: auth.PermissionCreativeWrite,
+			expectCancel:       true,
+		},
+		{
+			name:               "worldline step retry",
+			workflowType:       worldlineStepWorkflowType,
+			path:               "/v1/workflow-runs/run-mapped/retry",
+			expectedPermission: auth.PermissionCreativeWrite,
+		},
+		{
+			name:               "worldline preparation cancel",
+			workflowType:       worldlinePreparationWorkflowType,
+			path:               "/v1/workflow-runs/run-mapped/cancel",
+			expectedPermission: auth.PermissionCreativeWrite,
+			expectCancel:       true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorkflowReader{
+				run: workflows.WorkflowRun{
+					RunID:        "run-mapped",
+					WorkflowType: tt.workflowType,
+					ProjectID:    "mapped-project",
+					Status:       "running",
+				},
+			}
+			authorizer := &recordingAuthorizer{}
+			canceller := &recordingWorkflowCanceller{}
+			retrier := &recordingWorkflowRetrier{}
+			server := NewServer(Config{
+				WorkflowReader:    reader,
+				WorkflowCanceller: canceller,
+				WorkflowRetrier:   retrier,
+				Authorizer:        authorizer,
+			})
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"project_id":"body-project","prompt":"private","api_key":"sk-hidden"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			request.Header.Set("X-Request-Id", "req-mapped-control")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("expected mapped workflow control to succeed, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-mapped" {
+				t.Fatalf("mapped workflow owner lookup lost tenant/run scope: %#v", reader.input)
+			}
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != "mapped-project" ||
+				authorizer.inputs[0].Permission != tt.expectedPermission ||
+				authorizer.inputs[0].UserID != "actor-123" ||
+				authorizer.inputs[0].RequestID != "req-mapped-control" {
+				t.Fatalf("unexpected mapped workflow authorization inputs: %#v", authorizer.inputs)
+			}
+			if tt.expectCancel {
+				if !canceller.called || canceller.input.TenantID != "tenant-123" || canceller.input.RunID != "run-mapped" {
+					t.Fatalf("mapped cancel side effect did not run with tenant/run scope: %#v", canceller.input)
+				}
+				if retrier.called {
+					t.Fatalf("retry side effect should not run for cancel path: %#v", retrier.input)
+				}
+			} else {
+				if !retrier.called || retrier.input.TenantID != "tenant-123" || retrier.input.RunID != "run-mapped" {
+					t.Fatalf("mapped retry side effect did not run with tenant/run scope: %#v", retrier.input)
+				}
+				if canceller.called {
+					t.Fatalf("cancel side effect should not run for retry path: %#v", canceller.input)
+				}
+			}
+			for _, forbidden := range []string{"body-project", "prompt", "api_key", "sk-hidden", "actor-123"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("mapped workflow control response leaked forbidden payload %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalWorkflowRunControlsUseAssetManageForAssetWorkflows(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		workflowType string
+		path         string
+		config       func(*recordingWorkflowReader, *recordingAuthorizer) (Config, func(t *testing.T))
+	}{
+		{
+			name:         "asset ingestion cancel",
+			workflowType: workflows.AssetIngestionWorkflowType,
+			path:         "/v1/workflow-runs/run-asset/cancel",
+			config: func(reader *recordingWorkflowReader, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				canceller := &recordingWorkflowCanceller{}
+				return Config{WorkflowReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if canceller.called {
+						t.Fatalf("asset ingestion cancel ran before asset_manage authorization: %#v", canceller.input)
+					}
+				}
+			},
+		},
+		{
+			name:         "style extraction retry",
+			workflowType: workflows.StyleExtractionWorkflowType,
+			path:         "/v1/workflow-runs/run-asset/retry",
+			config: func(reader *recordingWorkflowReader, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				retrier := &recordingWorkflowRetrier{}
+				return Config{WorkflowReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if retrier.called {
+						t.Fatalf("style extraction retry ran before asset_manage authorization: %#v", retrier.input)
+					}
+				}
+			},
+		},
+		{
+			name:         "asset reindex cancel",
+			workflowType: workflows.AssetReindexWorkflowType,
+			path:         "/v1/workflow-runs/run-asset/cancel",
+			config: func(reader *recordingWorkflowReader, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				canceller := &recordingWorkflowCanceller{}
+				return Config{WorkflowReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if canceller.called {
+						t.Fatalf("asset reindex cancel ran before asset_manage authorization: %#v", canceller.input)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &recordingWorkflowReader{
+				run: workflows.WorkflowRun{
+					RunID:        "run-asset",
+					WorkflowType: tt.workflowType,
+					ProjectID:    "asset-project",
+					Status:       "running",
+				},
+			}
+			authorizer := &recordingAuthorizer{err: &auth.AppError{
+				Code:    auth.CodeAccessDenied,
+				Message: "creative writer denied prompt api_key credential_ref draft manuscript",
+			}}
+			config, assertNoSideEffect := tt.config(reader, authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"prompt":"private","api_key":"sk-hidden"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			request.Header.Set("X-Request-Id", "req-asset-control")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected asset workflow control to be denied by test authorizer, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-asset" {
+				t.Fatalf("asset workflow owner lookup lost tenant/run scope: %#v", reader.input)
+			}
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != "asset-project" ||
+				authorizer.inputs[0].Permission != auth.PermissionAssetManage ||
+				authorizer.inputs[0].UserID != "actor-123" {
+				t.Fatalf("expected asset_manage authorization for asset workflow control, got %#v", authorizer.inputs)
+			}
+			assertNoSideEffect(t)
+			assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestGlobalWorkflowRunControlsFailClosedForUnknownWorkflowType(t *testing.T) {
+	for _, path := range []string{"/v1/workflow-runs/run-unknown/cancel", "/v1/workflow-runs/run-unknown/retry"} {
+		t.Run(path, func(t *testing.T) {
+			reader := &recordingWorkflowReader{
+				run: workflows.WorkflowRun{
+					RunID:        "run-unknown",
+					WorkflowType: "billing_export",
+					ProjectID:    "project-unknown",
+					Status:       "running",
+				},
+			}
+			authorizer := &recordingAuthorizer{}
+			canceller := &recordingWorkflowCanceller{}
+			retrier := &recordingWorkflowRetrier{}
+			server := NewServer(Config{
+				WorkflowReader:    reader,
+				WorkflowCanceller: canceller,
+				WorkflowRetrier:   retrier,
+				Authorizer:        authorizer,
+			})
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected unknown workflow type to fail closed, got %d: %s", response.Code, response.Body.String())
+			}
+			if len(authorizer.inputs) != 0 {
+				t.Fatalf("unknown workflow type should fail before authorizer: %#v", authorizer.inputs)
+			}
+			if canceller.called || retrier.called {
+				t.Fatalf("unknown workflow type should not reach side effects: canceller=%#v retrier=%#v", canceller.input, retrier.input)
+			}
+			assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestGlobalRunControlsDenyOwnerCreativeWriteBeforeSideEffectsAndSanitize(t *testing.T) {
+	deniedErr := &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "denied actor-123 prompt provider_response api_key credential_ref object-key draft manuscript driver text",
+	}
+	for _, tt := range []struct {
+		name              string
+		path              string
+		config            func(*recordingAuthorizer) (Config, func(t *testing.T))
+		expectedProjectID string
+	}{
+		{
+			name: "workflow cancel",
+			path: "/v1/workflow-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-workflow"}}
+				canceller := &recordingWorkflowCanceller{}
+				return Config{WorkflowReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("workflow cancel owner lookup did not run before denial: %#v", reader.input)
+					}
+					if canceller.called {
+						t.Fatalf("workflow cancel side effect ran after RBAC denial: %#v", canceller.input)
+					}
+				}
+			},
+			expectedProjectID: "project-workflow",
+		},
+		{
+			name: "workflow retry",
+			path: "/v1/workflow-runs/run-123/retry",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-workflow"}}
+				retrier := &recordingWorkflowRetrier{}
+				return Config{WorkflowReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("workflow retry owner lookup did not run before denial: %#v", reader.input)
+					}
+					if retrier.called {
+						t.Fatalf("workflow retry side effect ran after RBAC denial: %#v", retrier.input)
+					}
+				}
+			},
+			expectedProjectID: "project-workflow",
+		},
+		{
+			name: "seed cancel",
+			path: "/v1/seed-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}}
+				canceller := &recordingWorkflowCanceller{}
+				return Config{SeedRunReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed cancel owner lookup did not run before denial: %#v", reader.getInput)
+					}
+					if canceller.called {
+						t.Fatalf("seed cancel side effect ran after RBAC denial: %#v", canceller.input)
+					}
+				}
+			},
+			expectedProjectID: "project-seed",
+		},
+		{
+			name: "seed retry",
+			path: "/v1/seed-runs/run-123/retry",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}}
+				retrier := &recordingWorkflowRetrier{}
+				return Config{SeedRunReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed retry owner lookup did not run before denial: %#v", reader.getInput)
+					}
+					if retrier.called {
+						t.Fatalf("seed retry side effect ran after RBAC denial: %#v", retrier.input)
+					}
+				}
+			},
+			expectedProjectID: "project-seed",
+		},
+		{
+			name: "writer cancel",
+			path: "/v1/writer-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-writer"}}
+				canceller := &recordingWriterCanceller{}
+				return Config{WriterReader: reader, WriterCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("writer cancel owner lookup did not run before denial: %#v", reader.input)
+					}
+					if canceller.called {
+						t.Fatalf("writer cancel side effect ran after RBAC denial: %#v", canceller.input)
+					}
+				}
+			},
+			expectedProjectID: "project-writer",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{err: deniedErr}
+			config, assertNoSideEffect := tt.config(authorizer)
+			server := NewServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"mode":,"project_id":"body-project","draft":"private manuscript"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			request.Header.Set("X-Request-Id", "req-run-control-denied")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected forbidden status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+			}
+			if len(authorizer.inputs) != 1 ||
+				authorizer.inputs[0].TenantID != "tenant-123" ||
+				authorizer.inputs[0].ProjectID != tt.expectedProjectID ||
+				authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+				authorizer.inputs[0].UserID != "actor-123" ||
+				authorizer.inputs[0].RequestID != "req-run-control-denied" {
+				t.Fatalf("unexpected run control denial authorization inputs: %#v", authorizer.inputs)
+			}
+			assertNoSideEffect(t)
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != authPublicErrorMessage(auth.CodeAccessDenied) {
+				t.Fatalf("unexpected run control denial body: %#v", body)
+			}
+			assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestGlobalRunControlsOwnerLookupErrorsAndBlankProjectFailClosedBeforeAuthOrSideEffects(t *testing.T) {
+	lookupErr := &workflows.AppError{
+		Code:    "WORKFLOW_QUERY_FAILED",
+		Message: "driver raw prompt sk-hidden credential_ref object-key draft manuscript actor-123 store text",
+	}
+	for _, tt := range []struct {
+		name   string
+		path   string
+		config func(bool, *recordingAuthorizer) (Config, func(t *testing.T))
+	}{
+		{
+			name: "workflow cancel",
+			path: "/v1/workflow-runs/run-123/cancel",
+			config: func(useLookupErr bool, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "  "}}
+				if useLookupErr {
+					reader.err = lookupErr
+				}
+				canceller := &recordingWorkflowCanceller{}
+				return Config{WorkflowReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("workflow cancel owner lookup did not run: %#v", reader.input)
+					}
+					if canceller.called {
+						t.Fatalf("workflow cancel side effect ran before owner preflight completed: %#v", canceller.input)
+					}
+				}
+			},
+		},
+		{
+			name: "workflow retry",
+			path: "/v1/workflow-runs/run-123/retry",
+			config: func(useLookupErr bool, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "  "}}
+				if useLookupErr {
+					reader.err = lookupErr
+				}
+				retrier := &recordingWorkflowRetrier{}
+				return Config{WorkflowReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("workflow retry owner lookup did not run: %#v", reader.input)
+					}
+					if retrier.called {
+						t.Fatalf("workflow retry side effect ran before owner preflight completed: %#v", retrier.input)
+					}
+				}
+			},
+		},
+		{
+			name: "seed cancel",
+			path: "/v1/seed-runs/run-123/cancel",
+			config: func(useLookupErr bool, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "  "}}
+				if useLookupErr {
+					reader.getErr = lookupErr
+				}
+				canceller := &recordingWorkflowCanceller{}
+				return Config{SeedRunReader: reader, WorkflowCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed cancel owner lookup did not run: %#v", reader.getInput)
+					}
+					if canceller.called {
+						t.Fatalf("seed cancel side effect ran before owner preflight completed: %#v", canceller.input)
+					}
+				}
+			},
+		},
+		{
+			name: "seed retry",
+			path: "/v1/seed-runs/run-123/retry",
+			config: func(useLookupErr bool, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "  "}}
+				if useLookupErr {
+					reader.getErr = lookupErr
+				}
+				retrier := &recordingWorkflowRetrier{}
+				return Config{SeedRunReader: reader, WorkflowRetrier: retrier, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.getInput.RunID != "run-123" {
+						t.Fatalf("seed retry owner lookup did not run: %#v", reader.getInput)
+					}
+					if retrier.called {
+						t.Fatalf("seed retry side effect ran before owner preflight completed: %#v", retrier.input)
+					}
+				}
+			},
+		},
+		{
+			name: "writer cancel",
+			path: "/v1/writer-runs/run-123/cancel",
+			config: func(useLookupErr bool, authorizer *recordingAuthorizer) (Config, func(t *testing.T)) {
+				reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "  "}}
+				if useLookupErr {
+					reader.err = lookupErr
+				}
+				canceller := &recordingWriterCanceller{}
+				return Config{WriterReader: reader, WriterCanceller: canceller, Authorizer: authorizer}, func(t *testing.T) {
+					if reader.input.RunID != "run-123" {
+						t.Fatalf("writer cancel owner lookup did not run: %#v", reader.input)
+					}
+					if canceller.called {
+						t.Fatalf("writer cancel side effect ran before owner preflight completed: %#v", canceller.input)
+					}
+				}
+			},
+		},
+	} {
+		for _, useLookupErr := range []bool{true, false} {
+			name := "blank project"
+			if useLookupErr {
+				name = "lookup error"
+			}
+			t.Run(tt.name+" "+name, func(t *testing.T) {
+				authorizer := &recordingAuthorizer{}
+				config, assertNoSideEffect := tt.config(useLookupErr, authorizer)
+				server := NewServer(config)
+				request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"mode":,"api_key":"sk-hidden","prompt":"private"}`))
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("X-Tenant-Id", "tenant-123")
+				request.Header.Set("X-User-Id", "actor-123")
+				request.Header.Set("X-Request-Id", "req-run-control-preflight")
+				response := httptest.NewRecorder()
+
+				server.ServeHTTP(response, request)
+
+				expectedStatus := http.StatusForbidden
+				expectedCode := auth.CodeAccessDenied
+				expectedMessage := authPublicErrorMessage(auth.CodeAccessDenied)
+				if useLookupErr {
+					expectedStatus = http.StatusServiceUnavailable
+					expectedCode = "WORKFLOW_QUERY_FAILED"
+					expectedMessage = workflowPublicErrorMessage(expectedCode)
+				}
+				if response.Code != expectedStatus {
+					t.Fatalf("expected status %d, got %d: %s", expectedStatus, response.Code, response.Body.String())
+				}
+				if len(authorizer.inputs) != 0 {
+					t.Fatalf("authorizer ran before owner preflight succeeded: %#v", authorizer.inputs)
+				}
+				assertNoSideEffect(t)
+				var body errorEnvelope
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if body.Error.Code != expectedCode || body.Error.Message != expectedMessage {
+					t.Fatalf("unexpected owner preflight body: %#v", body)
+				}
+				assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+			})
+		}
+	}
+}
+
+func TestGlobalRunControlSideEffectErrorsAreSanitized(t *testing.T) {
+	sideEffectErr := &workflows.AppError{
+		Code:    "WORKFLOW_FAILED",
+		Message: "temporal/store prompt provider_response api_key sk-hidden credential_ref object-key draft manuscript actor-123",
+	}
+	for _, tt := range []struct {
+		name   string
+		path   string
+		config func(*recordingAuthorizer) Config
+	}{
+		{
+			name: "workflow cancel",
+			path: "/v1/workflow-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) Config {
+				return Config{
+					WorkflowReader:    &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-workflow"}},
+					WorkflowCanceller: &recordingWorkflowCanceller{err: sideEffectErr},
+					Authorizer:        authorizer,
+				}
+			},
+		},
+		{
+			name: "workflow retry",
+			path: "/v1/workflow-runs/run-123/retry",
+			config: func(authorizer *recordingAuthorizer) Config {
+				return Config{
+					WorkflowReader:  &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-workflow"}},
+					WorkflowRetrier: &recordingWorkflowRetrier{err: sideEffectErr},
+					Authorizer:      authorizer,
+				}
+			},
+		},
+		{
+			name: "seed cancel",
+			path: "/v1/seed-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) Config {
+				return Config{
+					SeedRunReader:     &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}},
+					WorkflowCanceller: &recordingWorkflowCanceller{err: sideEffectErr},
+					Authorizer:        authorizer,
+				}
+			},
+		},
+		{
+			name: "seed retry",
+			path: "/v1/seed-runs/run-123/retry",
+			config: func(authorizer *recordingAuthorizer) Config {
+				return Config{
+					SeedRunReader:   &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}},
+					WorkflowRetrier: &recordingWorkflowRetrier{err: sideEffectErr},
+					Authorizer:      authorizer,
+				}
+			},
+		},
+		{
+			name: "writer cancel",
+			path: "/v1/writer-runs/run-123/cancel",
+			config: func(authorizer *recordingAuthorizer) Config {
+				return Config{
+					WriterReader:    &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-writer"}},
+					WriterCanceller: &recordingWriterCanceller{err: sideEffectErr},
+					Authorizer:      authorizer,
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{}
+			server := NewServer(tt.config(authorizer))
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"prompt":"private","api_key":"sk-hidden"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "actor-123")
+			request.Header.Set("X-Request-Id", "req-run-control-side-effect")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected side-effect failure status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+			}
+			if len(authorizer.inputs) != 1 || authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+				t.Fatalf("expected owner creative write authorization before side effect: %#v", authorizer.inputs)
+			}
+			var body errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != "WORKFLOW_FAILED" || body.Error.Message != workflowPublicErrorMessage("WORKFLOW_FAILED") {
+				t.Fatalf("unexpected side-effect error body: %#v", body)
+			}
+			assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestMalformedGlobalRunControlPathsStay404WithoutActorOrSideEffects(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{}
+	authorizer := &recordingAuthorizer{}
+	workflowReader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-workflow"}}
+	seedReader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "run-123", ProjectID: "project-seed"}}
+	writerReader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-writer"}}
+	workflowCanceller := &recordingWorkflowCanceller{}
+	workflowRetrier := &recordingWorkflowRetrier{}
+	writerCanceller := &recordingWriterCanceller{}
+	writerStarter := &recordingStarter{}
+	server := NewServer(Config{
+		SessionAuthSecret: "test-secret",
+		AuthSessionStore:  sessionStore,
+		Authorizer:        authorizer,
+		WorkflowReader:    workflowReader,
+		SeedRunReader:     seedReader,
+		WriterReader:      writerReader,
+		WorkflowCanceller: workflowCanceller,
+		WorkflowRetrier:   workflowRetrier,
+		WriterCanceller:   writerCanceller,
+		WriterStarter:     writerStarter,
+	})
+	token := signedSessionTokenForTest(t, "test-secret", "actor-123")
+	for _, path := range []string{
+		"/v1/workflow-runs//cancel",
+		"/v1/workflow-runs/run-123/cancel/extra",
+		"/v1/workflow-runs//retry",
+		"/v1/workflow-runs/run-123/retry/extra",
+		"/v1/seed-runs//cancel",
+		"/v1/seed-runs/run-123/cancel/extra",
+		"/v1/seed-runs//retry",
+		"/v1/seed-runs/run-123/retry/extra",
+		"/v1/writer-runs//cancel",
+		"/v1/writer-runs/run-123/cancel/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"prompt":"private","api_key":"sk-hidden"}`))
+			request.Header.Set("Authorization", "Bearer "+token)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-actor")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if sessionStore.validateCalled ||
+				workflowReader.input.RunID != "" ||
+				seedReader.getInput.RunID != "" ||
+				writerReader.input.RunID != "" ||
+				authorizer.called ||
+				workflowCanceller.called ||
+				workflowRetrier.called ||
+				writerCanceller.called ||
+				writerStarter.input.ProjectID != "" {
+				t.Fatalf("malformed run control path triggered side effects: session=%#v workflowReader=%#v seedReader=%#v writerReader=%#v authorizer=%#v workflowCanceller=%#v workflowRetrier=%#v writerCanceller=%#v writerStarter=%#v", sessionStore, workflowReader, seedReader, writerReader, authorizer, workflowCanceller, workflowRetrier, writerCanceller, writerStarter)
+			}
+			assertGlobalRunControlErrorHasNoPrivateLeaks(t, response.Body.String())
+		})
+	}
+}
+
+func TestGlobalRunControlPathHelpersRequireStrictSingleSegmentRunIDs(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		part    func(string) string
+		valid   string
+		invalid []string
+	}{
+		{
+			name:  "workflow cancel",
+			part:  workflowRunCancelPathPart,
+			valid: "/v1/workflow-runs/run-1/cancel",
+			invalid: []string{
+				"/v1/workflow-runs//cancel",
+				"/v1/workflow-runs/run-1/cancel/extra",
+				"/v1/workflow-runs/run-1/retry",
+				"/api/v1/workflow-runs/run-1/cancel",
+			},
+		},
+		{
+			name:  "workflow retry",
+			part:  workflowRunRetryPathPart,
+			valid: "/v1/workflow-runs/run-1/retry",
+			invalid: []string{
+				"/v1/workflow-runs//retry",
+				"/v1/workflow-runs/run-1/retry/extra",
+				"/v1/workflow-runs/run-1/cancel",
+				"/api/v1/workflow-runs/run-1/retry",
+			},
+		},
+		{
+			name:  "seed cancel",
+			part:  seedRunCancelPathPart,
+			valid: "/v1/seed-runs/run-1/cancel",
+			invalid: []string{
+				"/v1/seed-runs//cancel",
+				"/v1/seed-runs/run-1/cancel/extra",
+				"/v1/seed-runs/run-1/retry",
+				"/api/v1/seed-runs/run-1/cancel",
+			},
+		},
+		{
+			name:  "seed retry",
+			part:  seedRunRetryPathPart,
+			valid: "/v1/seed-runs/run-1/retry",
+			invalid: []string{
+				"/v1/seed-runs//retry",
+				"/v1/seed-runs/run-1/retry/extra",
+				"/v1/seed-runs/run-1/cancel",
+				"/api/v1/seed-runs/run-1/retry",
+			},
+		},
+		{
+			name:  "writer cancel",
+			part:  writerRunCancelPathPart,
+			valid: "/v1/writer-runs/run-1/cancel",
+			invalid: []string{
+				"/v1/writer-runs//cancel",
+				"/v1/writer-runs/run-1/cancel/extra",
+				"/v1/writer-runs/run-1/retry",
+				"/api/v1/writer-runs/run-1/cancel",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.part(tt.valid); got != "run-1" {
+				t.Fatalf("expected canonical path to return run id, got %q", got)
+			}
+			for _, path := range tt.invalid {
+				if got := tt.part(path); got != "" {
+					t.Fatalf("expected malformed or non-canonical path not to match: %s returned %q", path, got)
+				}
+			}
+		})
+	}
+}
+
+func assertGlobalRunControlErrorHasNoPrivateLeaks(t *testing.T, body string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"actor-123",
+		"fallback-actor",
+		"private",
+		"body-project",
+		"prompt",
+		"provider_response",
+		"api_key",
+		"sk-hidden",
+		"encrypted_credential",
+		"credential_ref",
+		"object-key",
+		"draft",
+		"manuscript",
+		"driver",
+		"store text",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("run control response leaked forbidden detail %q: %s", forbidden, body)
+		}
+	}
+}
+
 func TestGetWriterRunUsesConfiguredReader(t *testing.T) {
 	reader := &recordingWriterReader{
 		run: workflows.WriterRun{
@@ -14138,8 +15119,9 @@ func TestGetWriterRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 }
 
 func TestCancelWriterRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
+	reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-123", Status: "running"}}
 	canceller := &recordingWriterCanceller{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WriterCanceller: canceller})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: reader, WriterCanceller: canceller})
 	request := httptest.NewRequest(http.MethodPost, "/v1/writer-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -14157,6 +15139,9 @@ func TestCancelWriterRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 	}
 	if body["run_id"] != "run-123" || body["status"] != "cancel_requested" {
 		t.Fatalf("unexpected cancel response: %#v", body)
+	}
+	if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+		t.Fatalf("writer run reader lost owner lookup context: %#v", reader.input)
 	}
 	if canceller.input.TenantID != "tenant-123" || canceller.input.RunID != "run-123" {
 		t.Fatalf("canceller lost tenant/run context: %#v", canceller.input)
@@ -14558,8 +15543,9 @@ func TestAdoptDraftFailsClosedWithoutConfiguredStore(t *testing.T) {
 }
 
 func TestCancelWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
+	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "running"}}
 	canceller := &recordingWorkflowCanceller{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorkflowCanceller: canceller})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader, WorkflowCanceller: canceller})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -14570,6 +15556,9 @@ func TestCancelWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+		t.Fatalf("workflow reader lost owner lookup context: %#v", reader.input)
 	}
 	if canceller.input.TenantID != "tenant-123" || canceller.input.RunID != "run-123" {
 		t.Fatalf("canceller lost tenant/run context: %#v", canceller.input)
@@ -14597,6 +15586,7 @@ func TestCancelSeedRunVerifiesSeedRunAndCarriesActorContext(t *testing.T) {
 	}
 	canceller := &recordingWorkflowCanceller{}
 	server := NewServer(Config{
+		Authorizer:        &recordingAuthorizer{},
 		WriterStarter:     &recordingStarter{},
 		SeedRunReader:     seedReader,
 		WorkflowCanceller: canceller,
@@ -14655,9 +15645,11 @@ func TestCancelSeedRunRejectsNonSeedRunBeforeCallingBackend(t *testing.T) {
 }
 
 func TestCancelWorkflowRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "running"}}
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-cancel")
 	response := httptest.NewRecorder()
 
@@ -14686,6 +15678,7 @@ func TestRetrySeedRunVerifiesSeedRunAndCarriesActorContext(t *testing.T) {
 	}
 	retrier := &recordingWorkflowRetrier{}
 	server := NewServer(Config{
+		Authorizer:      &recordingAuthorizer{},
 		WriterStarter:   &recordingStarter{},
 		SeedRunReader:   seedReader,
 		WorkflowRetrier: retrier,
@@ -14728,9 +15721,10 @@ func TestRetrySeedRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 			Status:       "failed",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: seedReader})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedRunReader: seedReader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/retry", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-seed-retry")
 	response := httptest.NewRecorder()
 
@@ -14749,8 +15743,9 @@ func TestRetrySeedRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 }
 
 func TestRetryWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
+	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "failed"}}
 	retrier := &recordingWorkflowRetrier{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, WorkflowRetrier: retrier})
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader, WorkflowRetrier: retrier})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/retry", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -14761,6 +15756,9 @@ func TestRetryWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	if reader.input.TenantID != "tenant-123" || reader.input.RunID != "run-123" {
+		t.Fatalf("workflow reader lost owner lookup context: %#v", reader.input)
 	}
 	if retrier.input.TenantID != "tenant-123" || retrier.input.RunID != "run-123" {
 		t.Fatalf("retrier lost tenant/run context: %#v", retrier.input)
@@ -14778,9 +15776,11 @@ func TestRetryWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 }
 
 func TestRetryWorkflowRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "failed"}}
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/retry", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-retry")
 	response := httptest.NewRecorder()
 
@@ -14799,9 +15799,11 @@ func TestRetryWorkflowRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 }
 
 func TestCancelWriterRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-123", Status: "running"}}
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/writer-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-cancel")
 	response := httptest.NewRecorder()
 

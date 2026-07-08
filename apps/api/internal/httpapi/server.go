@@ -1239,13 +1239,13 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodGet && isWriterRunEventsPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/workflow-runs/") && strings.HasSuffix(path, "/cancel"):
+	case request.Method == http.MethodPost && isWorkflowRunCancelPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/workflow-runs/") && strings.HasSuffix(path, "/retry"):
+	case request.Method == http.MethodPost && isWorkflowRunRetryPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/seed-runs/") && strings.HasSuffix(path, "/cancel"):
+	case request.Method == http.MethodPost && isSeedRunCancelPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/seed-runs/") && strings.HasSuffix(path, "/retry"):
+	case request.Method == http.MethodPost && isSeedRunRetryPath(path):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/worldline-sessions/") && strings.HasSuffix(path, "/steps"):
 		return true
@@ -1281,7 +1281,7 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		return true
 	case request.Method == http.MethodDelete && isTenantSessionsPath(path):
 		return true
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/writer-runs/") && strings.HasSuffix(path, "/cancel"):
+	case request.Method == http.MethodPost && isWriterRunCancelPath(path):
 		return true
 	case request.Method == http.MethodPost && strings.HasPrefix(path, "/v1/drafts/") && strings.HasSuffix(path, "/adoptions"):
 		return true
@@ -1585,12 +1585,32 @@ func isSeedRunEventsPath(path string) bool {
 	return seedRunEventsPathPart(path) != ""
 }
 
+func isSeedRunCancelPath(path string) bool {
+	return seedRunCancelPathPart(path) != ""
+}
+
+func isSeedRunRetryPath(path string) bool {
+	return seedRunRetryPathPart(path) != ""
+}
+
 func isWriterRunDetailPath(path string) bool {
 	return writerRunPathPart(path) != ""
 }
 
 func isWriterRunEventsPath(path string) bool {
 	return writerRunEventsPathPart(path) != ""
+}
+
+func isWriterRunCancelPath(path string) bool {
+	return writerRunCancelPathPart(path) != ""
+}
+
+func isWorkflowRunCancelPath(path string) bool {
+	return workflowRunCancelPathPart(path) != ""
+}
+
+func isWorkflowRunRetryPath(path string) bool {
+	return workflowRunRetryPathPart(path) != ""
 }
 
 func isSinglePathSegment(value string) bool {
@@ -1642,9 +1662,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetCurrentUser(response, request)
 	case request.Method == http.MethodGet && isWorkflowRunEventsPath(request.URL.Path):
 		s.handleListWorkflowRunEvents(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
+	case request.Method == http.MethodPost && isWorkflowRunCancelPath(request.URL.Path):
 		s.handleCancelWorkflowRun(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/retry"):
+	case request.Method == http.MethodPost && isWorkflowRunRetryPath(request.URL.Path):
 		s.handleRetryWorkflowRun(response, request)
 	case request.Method == http.MethodGet && isWorkflowRunDetailPath(request.URL.Path):
 		s.handleGetWorkflowRun(response, request)
@@ -1662,9 +1682,9 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetManuscript(response, request)
 	case request.Method == http.MethodGet && isSeedRunEventsPath(request.URL.Path):
 		s.handleListSeedRunEvents(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
+	case request.Method == http.MethodPost && isSeedRunCancelPath(request.URL.Path):
 		s.handleCancelSeedRun(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/seed-runs/") && strings.HasSuffix(request.URL.Path, "/retry"):
+	case request.Method == http.MethodPost && isSeedRunRetryPath(request.URL.Path):
 		s.handleRetrySeedRun(response, request)
 	case request.Method == http.MethodGet && isSeedRunDetailPath(request.URL.Path):
 		s.handleGetSeedRun(response, request)
@@ -1778,7 +1798,7 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetCharacterInteraction(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/writer-runs"):
 		s.handleStartWriterRun(response, request)
-	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/writer-runs/") && strings.HasSuffix(request.URL.Path, "/cancel"):
+	case request.Method == http.MethodPost && isWriterRunCancelPath(request.URL.Path):
 		s.handleCancelWriterRun(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/adoptions"):
 		s.handleAdoptDraft(response, request)
@@ -2376,6 +2396,49 @@ func (s *Server) authorizeGlobalRunOwnerProjectRead(response http.ResponseWriter
 	return s.authorizeProjectRead(response, request, tenantID, projectID)
 }
 
+func (s *Server) authorizeGlobalRunOwnerCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite)
+}
+
+func (s *Server) authorizeGlobalWorkflowRunControl(response http.ResponseWriter, request *http.Request, tenantID string, run workflows.WorkflowRun) bool {
+	projectID := strings.TrimSpace(run.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	permission, ok := permissionForWorkflowRunControl(run.WorkflowType)
+	if !ok {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return s.authorizeProject(response, request, tenantID, projectID, permission)
+}
+
+const (
+	worldlineSessionWorkflowType     = "worldline_session"
+	worldlineStepWorkflowType        = "worldline_step"
+	worldlinePreparationWorkflowType = "worldline_preparation"
+)
+
+func permissionForWorkflowRunControl(workflowType string) (auth.Permission, bool) {
+	switch strings.TrimSpace(workflowType) {
+	case workflows.AssetIngestionWorkflowType, workflows.StyleExtractionWorkflowType, workflows.AssetReindexWorkflowType:
+		return auth.PermissionAssetManage, true
+	case workflows.WriterWorkflowType, workflows.WriterReviewWorkflowType, workflows.SeedWorkflowType,
+		workflows.StoryGraphBuildWorkflowType, workflows.StoryGraphBondGenerationWorkflowType,
+		workflows.HelloAgentWorkflowType, worldlineSessionWorkflowType, worldlineStepWorkflowType,
+		worldlinePreparationWorkflowType:
+		return auth.PermissionCreativeWrite, true
+	default:
+		return "", false
+	}
+}
+
 func (s *Server) authorizeAssetManage(response http.ResponseWriter, request *http.Request, tenantID string, projectID string) bool {
 	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionAssetManage)
 }
@@ -2757,11 +2820,16 @@ func (s *Server) handleCancelSeedRun(response http.ResponseWriter, request *http
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "seed run cancel route not found", nil)
 		return
 	}
-	if _, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
+	run, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
 		TenantID: tenantID,
 		RunID:    runID,
-	}); err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerCreativeWrite(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	cancelled, err := s.workflowCanceller.CancelWorkflowRun(request.Context(), workflows.CancelWorkflowRunInput{
@@ -2792,11 +2860,16 @@ func (s *Server) handleRetrySeedRun(response http.ResponseWriter, request *http.
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "seed run retry route not found", nil)
 		return
 	}
-	if _, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
+	run, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
 		TenantID: tenantID,
 		RunID:    runID,
-	}); err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerCreativeWrite(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	retried, err := s.workflowRetrier.RetryWorkflowRun(request.Context(), workflows.RetryWorkflowRunInput{
@@ -4157,7 +4230,8 @@ func (s *Server) handleStartAssetReindex(response http.ResponseWriter, request *
 		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startAssetReindexResponse{
@@ -4195,7 +4269,8 @@ func (s *Server) handleStartStoryGraphBuild(response http.ResponseWriter, reques
 		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startStoryGraphBuildResponse{
@@ -4235,7 +4310,8 @@ func (s *Server) handleStartStoryGraphBondGeneration(response http.ResponseWrite
 		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startStoryGraphBondGenerationResponse{
@@ -5337,7 +5413,8 @@ func (s *Server) handleStartHelloAgent(response http.ResponseWriter, request *ht
 		RequestID:   requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startHelloAgentResponse{
@@ -5498,6 +5575,18 @@ func (s *Server) handleCancelWriterRun(response http.ResponseWriter, request *ht
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer run cancel route not found", nil)
 		return
 	}
+	run, err := s.writerReader.GetWriterRun(request.Context(), workflows.GetWriterRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerCreativeWrite(response, request, tenantID, run.ProjectID) {
+		return
+	}
 	cancelled, err := s.writerCanceller.CancelWriterRun(request.Context(), workflows.CancelWriterRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
@@ -5505,7 +5594,8 @@ func (s *Server) handleCancelWriterRun(response http.ResponseWriter, request *ht
 		RequestID:   requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{
@@ -5692,6 +5782,18 @@ func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "workflow run cancel route not found", nil)
 		return
 	}
+	run, err := s.workflowReader.GetWorkflowRun(request.Context(), workflows.GetWorkflowRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalWorkflowRunControl(response, request, tenantID, run) {
+		return
+	}
 	cancelled, err := s.workflowCanceller.CancelWorkflowRun(request.Context(), workflows.CancelWorkflowRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
@@ -5699,7 +5801,8 @@ func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *
 		RequestID:   requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{
@@ -5719,6 +5822,18 @@ func (s *Server) handleRetryWorkflowRun(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "workflow run retry route not found", nil)
 		return
 	}
+	run, err := s.workflowReader.GetWorkflowRun(request.Context(), workflows.GetWorkflowRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalWorkflowRunControl(response, request, tenantID, run) {
+		return
+	}
 	retried, err := s.workflowRetrier.RetryWorkflowRun(request.Context(), workflows.RetryWorkflowRunInput{
 		TenantID:    tenantID,
 		RunID:       runID,
@@ -5726,7 +5841,8 @@ func (s *Server) handleRetryWorkflowRun(response http.ResponseWriter, request *h
 		RequestID:   requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForWorkflowError(err), workflows.ErrorCode(err), err.Error(), nil)
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]string{
@@ -6476,27 +6592,39 @@ func seedRunPathPart(path string) string {
 }
 
 func seedRunCancelPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/seed-runs/")
+	const prefix = "/v1/seed-runs/"
+	remainder, prefixOK := strings.CutPrefix(path, prefix)
+	if !prefixOK {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "cancel" {
+	if !ok || suffix != "cancel" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
 }
 
 func seedRunRetryPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/seed-runs/")
+	const prefix = "/v1/seed-runs/"
+	remainder, prefixOK := strings.CutPrefix(path, prefix)
+	if !prefixOK {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "retry" {
+	if !ok || suffix != "retry" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
 }
 
 func writerRunCancelPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/writer-runs/")
+	const prefix = "/v1/writer-runs/"
+	remainder, prefixOK := strings.CutPrefix(path, prefix)
+	if !prefixOK {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "cancel" {
+	if !ok || suffix != "cancel" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
@@ -6547,18 +6675,26 @@ func characterInteractionPathPart(path string) string {
 }
 
 func workflowRunCancelPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/workflow-runs/")
+	const prefix = "/v1/workflow-runs/"
+	remainder, prefixOK := strings.CutPrefix(path, prefix)
+	if !prefixOK {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "cancel" {
+	if !ok || suffix != "cancel" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
 }
 
 func workflowRunRetryPathPart(path string) string {
-	remainder := strings.TrimPrefix(path, "/v1/workflow-runs/")
+	const prefix = "/v1/workflow-runs/"
+	remainder, prefixOK := strings.CutPrefix(path, prefix)
+	if !prefixOK {
+		return ""
+	}
 	runID, suffix, ok := strings.Cut(remainder, "/")
-	if !ok || suffix != "retry" {
+	if !ok || suffix != "retry" || !isSinglePathSegment(runID) {
 		return ""
 	}
 	return strings.TrimSpace(runID)
