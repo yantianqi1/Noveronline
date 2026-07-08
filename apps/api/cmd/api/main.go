@@ -44,6 +44,17 @@ func main() {
 			}
 		}()
 	}
+	passwordAuthenticator, closePasswordAuthenticator, err := newPasswordAuthenticator(databaseURL)
+	if err != nil {
+		log.Fatalf("configure password authenticator: %v", err)
+	}
+	if closePasswordAuthenticator != nil {
+		defer func() {
+			if err := closePasswordAuthenticator(); err != nil {
+				log.Printf("close password authenticator: %v", err)
+			}
+		}()
+	}
 	authSessionStore, closeAuthSessionStore, err := newAuthSessionStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure auth session store: %v", err)
@@ -641,6 +652,7 @@ func main() {
 
 	serverConfig := withSessionAuthSecret(httpapi.Config{
 		AuthReader:                      authReader,
+		PasswordAuthenticator:           passwordAuthenticator,
 		AuthSessionStore:                authSessionStore,
 		Authorizer:                      auth.NewReaderBackedAuthorizer(authReader),
 		WriterStarter:                   writerStarter,
@@ -727,6 +739,21 @@ func newAuthReader(databaseURL string) (auth.Reader, func() error, error) {
 	}
 	return auth.NewSQLReader(auth.SQLReaderConfig{
 		Queryer: auth.NewSQLDBQueryer(db),
+	}), db.Close, nil
+}
+
+func newPasswordAuthenticator(databaseURL string) (auth.PasswordAuthenticator, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	queryer := auth.NewSQLDBQueryer(db)
+	return auth.NewSQLPasswordAuthenticator(auth.SQLPasswordAuthenticatorConfig{
+		Queryer: queryer,
+		Reader:  auth.NewSQLReader(auth.SQLReaderConfig{Queryer: queryer}),
 	}), db.Close, nil
 }
 

@@ -26,6 +26,7 @@ def test_core_saas_schema_declares_minimum_phase3_tables() -> None:
     sql = _schema_sql()
     for table_name in (
         "users",
+        "user_password_credentials",
         "user_sessions",
         "tenants",
         "tenant_memberships",

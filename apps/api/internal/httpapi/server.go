@@ -31,6 +31,7 @@ import (
 type Config struct {
 	SessionAuthSecret               string
 	AuthReader                      auth.Reader
+	PasswordAuthenticator           auth.PasswordAuthenticator
 	AuthSessionStore                auth.SessionStore
 	Authorizer                      auth.Authorizer
 	WriterStarter                   workflows.WriterStarter
@@ -94,6 +95,7 @@ type Config struct {
 type Server struct {
 	sessionAuthSecret               string
 	authReader                      auth.Reader
+	passwordAuthenticator           auth.PasswordAuthenticator
 	authSessionStore                auth.SessionStore
 	authorizer                      auth.Authorizer
 	writerStarter                   workflows.WriterStarter
@@ -178,6 +180,11 @@ type startWriterRunRequest struct {
 
 type createDevSessionRequest struct {
 	UserID string `json:"user_id"`
+}
+
+type passwordLoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type startWriterRunResponse struct {
@@ -812,6 +819,7 @@ func NewServer(config Config) *Server {
 	return &Server{
 		sessionAuthSecret:               strings.TrimSpace(config.SessionAuthSecret),
 		authReader:                      authReader,
+		passwordAuthenticator:           config.PasswordAuthenticator,
 		authSessionStore:                config.AuthSessionStore,
 		authorizer:                      authorizer,
 		writerStarter:                   starter,
@@ -1448,6 +1456,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 			"status":  "ok",
 			"service": "mirofish-api",
 		})
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/login":
+		s.handlePasswordLogin(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/dev-sessions":
 		s.handleCreateDevSession(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/auth/csrf-token":
@@ -1679,6 +1689,35 @@ func (s *Server) handleCreateDevSession(response http.ResponseWriter, request *h
 		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
 		return
 	}
+	s.issueSessionCookie(response, request, currentUser)
+}
+
+func (s *Server) handlePasswordLogin(response http.ResponseWriter, request *http.Request) {
+	if s.passwordAuthenticator == nil || s.authSessionStore == nil || strings.TrimSpace(s.sessionAuthSecret) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "auth password login backend is not configured", nil)
+		return
+	}
+	var payload passwordLoginRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, auth.CodeValidationFailed, "invalid login payload", nil)
+		return
+	}
+	currentUser, err := s.passwordAuthenticator.AuthenticatePassword(request.Context(), auth.PasswordLoginInput{
+		Email:     strings.TrimSpace(payload.Email),
+		Password:  payload.Password,
+		RequestID: requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	s.issueSessionCookie(response, request, currentUser)
+}
+
+func (s *Server) issueSessionCookie(response http.ResponseWriter, request *http.Request, currentUser auth.CurrentUser) {
 	token, ok := s.signSessionToken(currentUser.User.UserID)
 	if !ok {
 		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "session auth secret is not configured", nil)

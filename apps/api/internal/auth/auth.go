@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -52,6 +54,16 @@ type CurrentUser struct {
 
 type Reader interface {
 	GetCurrentUser(context.Context, GetCurrentUserInput) (CurrentUser, error)
+}
+
+type PasswordLoginInput struct {
+	Email     string
+	Password  string
+	RequestID string
+}
+
+type PasswordAuthenticator interface {
+	AuthenticatePassword(context.Context, PasswordLoginInput) (CurrentUser, error)
 }
 
 type CreateSessionInput struct {
@@ -182,8 +194,18 @@ type SQLReaderConfig struct {
 	Queryer SQLQueryer
 }
 
+type SQLPasswordAuthenticatorConfig struct {
+	Queryer SQLQueryer
+	Reader  Reader
+}
+
 type SQLReader struct {
 	queryer SQLQueryer
+}
+
+type SQLPasswordAuthenticator struct {
+	queryer SQLQueryer
+	reader  Reader
 }
 
 type SQLSessionStoreConfig struct {
@@ -198,6 +220,14 @@ type SQLSessionStore struct {
 
 func NewSQLReader(config SQLReaderConfig) *SQLReader {
 	return &SQLReader{queryer: config.Queryer}
+}
+
+func NewSQLPasswordAuthenticator(config SQLPasswordAuthenticatorConfig) *SQLPasswordAuthenticator {
+	reader := config.Reader
+	if reader == nil {
+		reader = NewSQLReader(SQLReaderConfig{Queryer: config.Queryer})
+	}
+	return &SQLPasswordAuthenticator{queryer: config.Queryer, reader: reader}
 }
 
 func NewSQLSessionStore(config SQLSessionStoreConfig) *SQLSessionStore {
@@ -237,6 +267,13 @@ func (DisabledReader) GetCurrentUser(context.Context, GetCurrentUserInput) (Curr
 func ValidateGetCurrentUserInput(input GetCurrentUserInput) error {
 	if strings.TrimSpace(input.UserID) == "" {
 		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	return nil
+}
+
+func ValidatePasswordLoginInput(input PasswordLoginInput) error {
+	if strings.TrimSpace(input.Email) == "" || strings.TrimSpace(input.Password) == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "email and password are required"}
 	}
 	return nil
 }
@@ -331,6 +368,71 @@ func (r *SQLReader) GetCurrentUser(ctx context.Context, input GetCurrentUserInpu
 		ActiveTenants:  tenants,
 		ActiveProjects: projects,
 	}, nil
+}
+
+func (a *SQLPasswordAuthenticator) AuthenticatePassword(ctx context.Context, input PasswordLoginInput) (CurrentUser, error) {
+	if err := ValidatePasswordLoginInput(input); err != nil {
+		return CurrentUser{}, err
+	}
+	if a.queryer == nil || a.reader == nil {
+		return CurrentUser{}, authLookupFailed()
+	}
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	password := input.Password
+	userID, passwordHash, err := a.readActivePasswordCredential(ctx, email)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) != nil {
+		return CurrentUser{}, invalidEmailOrPassword()
+	}
+	return a.reader.GetCurrentUser(ctx, GetCurrentUserInput{
+		UserID:    userID,
+		RequestID: input.RequestID,
+	})
+}
+
+func (a *SQLPasswordAuthenticator) readActivePasswordCredential(ctx context.Context, email string) (string, string, error) {
+	rows, err := a.queryer.QueryContext(ctx, `
+SELECT u.user_id, c.password_hash
+FROM users u
+JOIN user_password_credentials c ON c.user_id = u.user_id
+WHERE lower(u.email) = $1
+  AND u.status = 'active'
+  AND c.status = 'active'
+LIMIT 1
+`, email)
+	if err != nil {
+		return "", "", authLookupFailed()
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return "", "", authLookupFailed()
+		}
+		if err := rows.Close(); err != nil {
+			return "", "", authLookupFailed()
+		}
+		return "", "", invalidEmailOrPassword()
+	}
+	var userID string
+	var passwordHash string
+	if err := rows.Scan(&userID, &passwordHash); err != nil {
+		_ = rows.Close()
+		return "", "", authLookupFailed()
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(passwordHash) == "" {
+		_ = rows.Close()
+		return "", "", invalidEmailOrPassword()
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", "", authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return "", "", authLookupFailed()
+	}
+	return strings.TrimSpace(userID), strings.TrimSpace(passwordHash), nil
 }
 
 func (s *SQLSessionStore) CreateSession(ctx context.Context, input CreateSessionInput) error {
@@ -761,6 +863,10 @@ ORDER BY p.title, p.project_id
 
 func authLookupFailed() *AppError {
 	return &AppError{Code: CodeLookupFailed, Message: "auth lookup failed"}
+}
+
+func invalidEmailOrPassword() *AppError {
+	return &AppError{Code: CodeUnauthenticated, Message: "invalid email or password"}
 }
 
 func accessDenied() *AppError {

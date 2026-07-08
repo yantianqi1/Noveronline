@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS user_password_credentials (
+  user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+  password_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'reset_required')),
+  password_updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS user_sessions (
   user_session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1195,6 +1204,7 @@ CREATE TABLE IF NOT EXISTS manuscript_blocks (
 
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_status ON user_sessions (user_id, status, expires_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_token_hash ON user_sessions (token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_password_credentials_status ON user_password_credentials (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_projects_tenant_status ON projects (tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_source_files_tenant_project ON source_files (tenant_id, project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_source_files_upload ON source_files (tenant_id, project_id, upload_id);
@@ -1304,6 +1314,7 @@ CREATE INDEX IF NOT EXISTS idx_resource_locks_expiry ON resource_locks (tenant_i
 
 GRANT USAGE ON SCHEMA public TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mirofish_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON user_password_credentials TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON user_sessions TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON story_graph_snapshots TO mirofish_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON story_graph_nodes TO mirofish_app;

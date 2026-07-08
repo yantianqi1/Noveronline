@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestSQLReaderReturnsPublicCurrentUserWithActiveTenantsAndProjects(t *testing.T) {
@@ -1347,6 +1349,96 @@ func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
 		assertNoSensitiveAuthError(t, err)
 	})
+}
+
+func TestSQLPasswordAuthenticatorAuthenticatesActiveUserWithBcryptHashOnly(t *testing.T) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("correct horse battery staple"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	queryer := &fakeAuthQueryer{
+		rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"user-login", string(passwordHash)}}}},
+	}
+	reader := staticCurrentUserReader(CurrentUser{
+		User: UserSummary{
+			UserID:      "user-login",
+			Email:       "author@example.test",
+			DisplayName: "Author",
+		},
+		ActiveTenants: []TenantMembershipSummary{{
+			TenantID: "tenant-123",
+			Name:     "Studio",
+			Role:     "owner",
+			Status:   "active",
+		}},
+	})
+	authenticator := NewSQLPasswordAuthenticator(SQLPasswordAuthenticatorConfig{Queryer: queryer, Reader: reader})
+
+	currentUser, err := authenticator.AuthenticatePassword(context.Background(), PasswordLoginInput{
+		Email:     " AUTHOR@example.test ",
+		Password:  "correct horse battery staple",
+		RequestID: "req_login",
+	})
+
+	if err != nil {
+		t.Fatalf("AuthenticatePassword returned error: %v", err)
+	}
+	if currentUser.User.UserID != "user-login" || currentUser.User.Email != "author@example.test" || len(currentUser.ActiveTenants) != 1 {
+		t.Fatalf("unexpected public current user: %#v", currentUser)
+	}
+	if len(queryer.queries) != 1 {
+		t.Fatalf("expected one credential query, got %d", len(queryer.queries))
+	}
+	query := queryer.queries[0]
+	for required := range map[string]struct{}{
+		"users":                     {},
+		"user_password_credentials": {},
+		"password_hash":             {},
+		"lower(u.email)":            {},
+		"u.status = 'active'":       {},
+		"c.status = 'active'":       {},
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("credential query missing %q: %s", required, query)
+		}
+	}
+	for _, forbidden := range []string{"session_token", "token_hash", "api_key", "credential_ref", "object_key", "draft", "manuscript", "prompt", "response"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("credential query leaked forbidden column %q: %s", forbidden, query)
+		}
+	}
+}
+
+func TestSQLPasswordAuthenticatorRejectsInvalidPasswordAndSanitizesErrors(t *testing.T) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("correct password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	authenticator := NewSQLPasswordAuthenticator(SQLPasswordAuthenticatorConfig{
+		Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"user-login", string(passwordHash)}}}}},
+		Reader:  staticCurrentUserReader(CurrentUser{User: UserSummary{UserID: "user-login"}}),
+	})
+
+	_, err = authenticator.AuthenticatePassword(context.Background(), PasswordLoginInput{
+		Email:    "author@example.test",
+		Password: "wrong password",
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "invalid email or password")
+	assertNoSensitiveAuthError(t, err)
+
+	maliciousErr := errors.New("driver leaked prompt=hidden api_key=sk-hidden credential_ref=cred object_key=obj draft=private manuscript=private")
+	authenticator = NewSQLPasswordAuthenticator(SQLPasswordAuthenticatorConfig{
+		Queryer: &fakeAuthQueryer{errs: []error{maliciousErr}},
+		Reader:  staticCurrentUserReader(CurrentUser{User: UserSummary{UserID: "user-login"}}),
+	})
+	_, err = authenticator.AuthenticatePassword(context.Background(), PasswordLoginInput{
+		Email:    "author@example.test",
+		Password: "correct password",
+	})
+
+	assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+	assertNoSensitiveAuthError(t, err)
 }
 
 type fakeAuthQueryer struct {

@@ -89,6 +89,41 @@ func TestNewAuthSessionStoreUsesSQLSessionStoreWithDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestNewPasswordAuthenticatorUsesNilWithoutDatabaseURL(t *testing.T) {
+	authenticator, closeAuthenticator, err := newPasswordAuthenticator("")
+
+	if err != nil {
+		t.Fatalf("new password authenticator: %v", err)
+	}
+	if closeAuthenticator != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if authenticator != nil {
+		t.Fatalf("expected nil password authenticator without database URL, got %T", authenticator)
+	}
+}
+
+func TestNewPasswordAuthenticatorUsesSQLPasswordAuthenticatorWithDatabaseURL(t *testing.T) {
+	authenticator, closeAuthenticator, err := newPasswordAuthenticator("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeAuthenticator != nil {
+		defer func() {
+			if err := closeAuthenticator(); err != nil {
+				t.Fatalf("close password authenticator: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new password authenticator: %v", err)
+	}
+	if _, ok := authenticator.(*auth.SQLPasswordAuthenticator); !ok {
+		t.Fatalf("expected SQL password authenticator, got %T", authenticator)
+	}
+	if closeAuthenticator == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestAuthSessionSecretEnvIsCarriedIntoHTTPConfig(t *testing.T) {
 	t.Setenv("MIROFISH_AUTH_SESSION_SECRET", "session-secret")
 

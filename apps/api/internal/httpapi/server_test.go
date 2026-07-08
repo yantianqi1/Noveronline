@@ -116,6 +116,22 @@ func (r *recordingAuthReader) GetCurrentUser(ctx context.Context, input auth.Get
 	return r.result, nil
 }
 
+type recordingPasswordAuthenticator struct {
+	input  auth.PasswordLoginInput
+	result auth.CurrentUser
+	err    error
+	called bool
+}
+
+func (a *recordingPasswordAuthenticator) AuthenticatePassword(ctx context.Context, input auth.PasswordLoginInput) (auth.CurrentUser, error) {
+	a.input = input
+	a.called = true
+	if a.err != nil {
+		return auth.CurrentUser{}, a.err
+	}
+	return a.result, nil
+}
+
 type recordingAuthSessionStore struct {
 	createInput        auth.CreateSessionInput
 	validateInput      auth.ValidateSessionInput
@@ -2187,6 +2203,179 @@ func TestCreateDevSessionFailsClosedWhenSessionPersistenceFailsBeforeCookie(t *t
 	for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript", "user-session"} {
 		if strings.Contains(rawBody, forbidden) {
 			t.Fatalf("session persistence error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestPasswordLoginIssuesPersistedSignedHttpOnlyCookieWithoutSecretLeak(t *testing.T) {
+	authenticator := &recordingPasswordAuthenticator{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{
+				UserID:      "user-login",
+				Email:       "author@example.test",
+				DisplayName: "Author",
+			},
+			ActiveTenants: []auth.TenantMembershipSummary{{
+				TenantID: "tenant-123",
+				Name:     "Studio",
+				Role:     "owner",
+				Status:   "active",
+			}},
+			ActiveProjects: []auth.ProjectMembershipSummary{{
+				TenantID:  "tenant-123",
+				ProjectID: "project-123",
+				Name:      "Novel",
+				Role:      "writer",
+				Status:    "active",
+			}},
+		},
+	}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		PasswordAuthenticator: authenticator,
+		AuthSessionStore:      sessionStore,
+		SessionAuthSecret:     "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":" author@example.test ","password":"correct password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-Id", "req_login")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if !authenticator.called ||
+		authenticator.input.Email != "author@example.test" ||
+		authenticator.input.Password != "correct password" ||
+		authenticator.input.RequestID != "req_login" {
+		t.Fatalf("password authenticator did not receive sanitized login input: %#v", authenticator.input)
+	}
+	if !sessionStore.createCalled ||
+		sessionStore.createInput.UserID != "user-login" ||
+		sessionStore.createInput.RequestID != "req_login" ||
+		strings.TrimSpace(sessionStore.createInput.TokenHash) == "" ||
+		!sessionStore.createInput.ExpiresAt.After(time.Now()) {
+		t.Fatalf("login did not persist session before issuing cookie: %#v", sessionStore.createInput)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected exactly one session cookie, got %#v", cookies)
+	}
+	cookie := cookies[0]
+	if cookie.Name != sessionCookieName ||
+		cookie.Value == "" ||
+		!cookie.HttpOnly ||
+		cookie.Path != "/" ||
+		cookie.SameSite != http.SameSiteLaxMode ||
+		cookie.MaxAge <= 0 {
+		t.Fatalf("login session cookie missing browser safety attributes: %#v", cookie)
+	}
+	userID, tokenHash, ok := server.verifySignedSessionToken(cookie.Value)
+	if !ok || userID != "user-login" || tokenHash != sessionStore.createInput.TokenHash {
+		t.Fatalf("login cookie was not the persisted signed session: user=%q hash=%q input=%#v ok=%v", userID, tokenHash, sessionStore.createInput, ok)
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{
+		cookie.Value,
+		sessionStore.createInput.TokenHash,
+		"correct password",
+		"test-secret",
+		"api_key",
+		"credential_ref",
+		"object_key",
+		"draft",
+		"manuscript",
+		"prompt",
+	} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("login response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+	var body auth.CurrentUser
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if body.User.UserID != "user-login" || len(body.ActiveTenants) != 1 || len(body.ActiveProjects) != 1 {
+		t.Fatalf("unexpected login public user response: %#v", body)
+	}
+}
+
+func TestPasswordLoginFailsClosedWithoutAuthenticatorStoreOrSecretBeforeSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		config Config
+	}{
+		{
+			name: "missing authenticator",
+			config: Config{
+				AuthSessionStore:  &recordingAuthSessionStore{},
+				SessionAuthSecret: "test-secret",
+			},
+		},
+		{
+			name: "missing session store",
+			config: Config{
+				PasswordAuthenticator: &recordingPasswordAuthenticator{},
+				SessionAuthSecret:     "test-secret",
+			},
+		},
+		{
+			name: "missing session secret",
+			config: Config{
+				PasswordAuthenticator: &recordingPasswordAuthenticator{},
+				AuthSessionStore:      &recordingAuthSessionStore{},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(tt.config)
+			request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":"author@example.test","password":"correct password"}`))
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+			}
+			if authenticator, ok := tt.config.PasswordAuthenticator.(*recordingPasswordAuthenticator); ok && authenticator.called {
+				t.Fatalf("password authenticator was called despite missing dependency: %#v", authenticator.input)
+			}
+			if sessionStore, ok := tt.config.AuthSessionStore.(*recordingAuthSessionStore); ok && sessionStore.createCalled {
+				t.Fatalf("session store was called despite missing dependency: %#v", sessionStore.createInput)
+			}
+			for _, forbidden := range []string{"correct password", "author@example.test", "test-secret", "api_key", "credential_ref", "draft", "manuscript", "prompt"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("login failure leaked forbidden text %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestPasswordLoginMalformedPathsStay404WithoutAuthenticatorOrSessionStore(t *testing.T) {
+	authenticator := &recordingPasswordAuthenticator{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		PasswordAuthenticator: authenticator,
+		AuthSessionStore:      sessionStore,
+		SessionAuthSecret:     "test-secret",
+	})
+	for _, path := range []string{"/v1/auth//login", "/v1/auth/login/extra"} {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"email":"author@example.test","password":"correct password"}`))
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected malformed path %s to remain 404, got %d: %s", path, response.Code, response.Body.String())
+		}
+		if authenticator.called {
+			t.Fatalf("password authenticator was called for malformed path %s: %#v", path, authenticator.input)
+		}
+		if sessionStore.createCalled {
+			t.Fatalf("session store was called for malformed path %s: %#v", path, sessionStore.createInput)
 		}
 	}
 }
