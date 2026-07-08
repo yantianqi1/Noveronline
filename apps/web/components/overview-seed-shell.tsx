@@ -30,8 +30,7 @@ type OverviewSeedShellProps = {
   seedEvents: WorkflowRunEventsSummary | null;
   sourceStatus: ActionStatus | null;
   seedStatus: ActionStatus | null;
-  admitSourceFileAction: (formData: FormData) => Promise<void>;
-  uploadSourceObjectAction: (formData: FormData) => Promise<void>;
+  uploadAndStartSeedAction: (formData: FormData) => Promise<void>;
   completeUploadAction: (formData: FormData) => Promise<void>;
   startSeedRunAction: (formData: FormData) => Promise<void>;
   cancelSeedRunAction: (formData: FormData) => Promise<void>;
@@ -51,14 +50,12 @@ export function OverviewSeedShell({
   seedEvents,
   sourceStatus,
   seedStatus,
-  admitSourceFileAction,
-  uploadSourceObjectAction,
+  uploadAndStartSeedAction,
   completeUploadAction,
   startSeedRunAction,
   cancelSeedRunAction,
   retrySeedRunAction,
 }: OverviewSeedShellProps) {
-  const firstUploadId = firstUsableUploadId(sourceFiles);
   const hasSelectedRun = Boolean(selectedRunId);
 
   return (
@@ -102,7 +99,11 @@ export function OverviewSeedShell({
           <section className={`panel ${sourceFiles.ok ? "" : "error-box"}`} aria-labelledby="source-files-heading">
             <p className="eyebrow">Source files</p>
             <h2 id="source-files-heading">Source files</h2>
-            <SourceFilesTable sourceFiles={sourceFiles} completeUploadAction={completeUploadAction} />
+            <SourceFilesTable
+              completeUploadAction={completeUploadAction}
+              sourceFiles={sourceFiles}
+              startSeedRunAction={startSeedRunAction}
+            />
           </section>
 
           <section className={`panel ${seedRuns.ok ? "" : "error-box"}`} aria-labelledby="seed-runs-heading">
@@ -131,78 +132,30 @@ export function OverviewSeedShell({
         </main>
 
         <aside>
-          <section className="panel" aria-labelledby="admit-source-file-heading">
-            <p className="eyebrow">Upload admission</p>
-            <h2 id="admit-source-file-heading">Admit source file</h2>
+          <section className="panel" aria-labelledby="upload-and-start-seed-heading">
+            <p className="eyebrow">Seed pipeline</p>
+            <h2 id="upload-and-start-seed-heading">Upload and start Seed</h2>
             <StatusLine status={sourceStatus} />
-            <form action={admitSourceFileAction} className="binding-form">
-              <label htmlFor="source-filename">Filename</label>
-              <input id="source-filename" name="filename" placeholder="novel.txt" required />
-              <label htmlFor="source-mime-type">MIME type</label>
-              <select id="source-mime-type" name="mimeType" defaultValue="text/plain">
-                <option value="text/plain">text/plain</option>
-                <option value="text/markdown">text/markdown</option>
-                <option value="application/pdf">application/pdf</option>
-              </select>
-              <label htmlFor="source-size">Size bytes</label>
-              <input id="source-size" name="sizeBytes" inputMode="numeric" min="1" type="number" required />
-              <label htmlFor="source-sha256">SHA-256</label>
-              <input id="source-sha256" name="sha256" placeholder="hex digest" required />
-              <label htmlFor="source-purpose">Purpose</label>
-              <select id="source-purpose" name="purpose" defaultValue="seed">
-                <option value="seed">Seed</option>
-                <option value="material">Material</option>
-              </select>
-              <button type="submit">Admit source file</button>
-            </form>
-            <p className="form-hint">
-              Fail-closed source backend errors are shown as SOURCE_FILE_BACKEND_UNCONFIGURED.
-            </p>
-          </section>
-
-          <section className="panel" aria-labelledby="upload-source-object-heading">
-            <p className="eyebrow">Upload admission</p>
-            <h2 id="upload-source-object-heading">Upload object</h2>
-            <form action={uploadSourceObjectAction} className="binding-form">
-              <label htmlFor="object-upload-id">Upload ID</label>
-              <input id="object-upload-id" name="uploadId" defaultValue={firstUploadId} required />
-              <label htmlFor="source-file-object">Object bytes</label>
+            <StatusLine status={seedStatus} />
+            <form action={uploadAndStartSeedAction} className="binding-form">
+              <label htmlFor="source-file">Source file</label>
               <input
                 accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
-                id="source-file-object"
+                id="source-file"
                 name="file"
                 required
                 type="file"
               />
-              <button type="submit">Upload object</button>
-            </form>
-            <p className="form-hint">The API stores bytes internally and returns only upload status.</p>
-          </section>
-
-          <section className="panel" aria-labelledby="complete-upload-heading">
-            <p className="eyebrow">Upload admission</p>
-            <h2 id="complete-upload-heading">Complete upload</h2>
-            <form action={completeUploadAction} className="binding-form">
-              <label htmlFor="complete-upload-id">Upload ID</label>
-              <input id="complete-upload-id" name="uploadId" defaultValue={firstUploadId} required />
-              <button type="submit">Complete upload</button>
-            </form>
-          </section>
-
-          <section className="panel" aria-labelledby="start-seed-heading">
-            <p className="eyebrow">Seed pipeline</p>
-            <h2 id="start-seed-heading">Start Seed run</h2>
-            <StatusLine status={seedStatus} />
-            <form action={startSeedRunAction} className="binding-form">
-              <label htmlFor="seed-upload-id">Upload ID</label>
-              <input id="seed-upload-id" name="uploadId" defaultValue={firstUploadId} required />
               <label htmlFor="seed-mode">Mode</label>
               <select id="seed-mode" name="mode" defaultValue="full">
                 <option value="full">Full</option>
                 <option value="resume">Resume</option>
               </select>
-              <button type="submit">Start Seed run</button>
+              <button type="submit">Upload and start Seed</button>
             </form>
+            <p className="form-hint">
+              Files up to 64 MB are read server-side, checked, stored, completed, and admitted into Seed. Missing source backends remain explicit SOURCE_FILE_BACKEND_UNCONFIGURED errors.
+            </p>
           </section>
 
           <section className="panel" aria-labelledby="control-seed-heading">
@@ -258,7 +211,7 @@ export function sourceFileActionStatus(result: SourceFileSummary): ActionStatus 
   return {
     status: "success",
     code: result.parse_status || "SOURCE_FILE_ADMITTED",
-    message: `${result.filename} / upload ${result.upload_id}`,
+    message: "source file accepted",
   };
 }
 
@@ -316,11 +269,13 @@ export function seedRunControlStatus(
 }
 
 function SourceFilesTable({
-  sourceFiles,
   completeUploadAction,
+  sourceFiles,
+  startSeedRunAction,
 }: {
-  sourceFiles: SourceFilesSummary;
   completeUploadAction: (formData: FormData) => Promise<void>;
+  sourceFiles: SourceFilesSummary;
+  startSeedRunAction: (formData: FormData) => Promise<void>;
 }) {
   if (!sourceFiles.ok) {
     return <p className="form-hint">{sourceFiles.code}: {sourceFiles.message}</p>;
@@ -352,12 +307,23 @@ function SourceFilesTable({
               <td>{file.purpose}</td>
               <td>{file.created_at}</td>
               <td>
-                <form action={completeUploadAction} className="inline-action-form">
-                  <input type="hidden" name="uploadId" value={file.upload_id} />
-                  <button disabled={file.parse_status === "uploaded"} type="submit">
-                    Complete this upload
-                  </button>
-                </form>
+                <div className="compact-action-list">
+                  <form action={completeUploadAction} className="inline-action-form">
+                    <input type="hidden" name="uploadId" value={file.upload_id} />
+                    <span>Complete upload</span>
+                    <button disabled={file.parse_status !== "pending"} type="submit">
+                      Complete
+                    </button>
+                  </form>
+                  <form action={startSeedRunAction} className="inline-action-form">
+                    <input type="hidden" name="uploadId" value={file.upload_id} />
+                    <input type="hidden" name="mode" value="full" />
+                    <span>Start Seed</span>
+                    <button disabled={file.parse_status !== "uploaded"} type="submit">
+                      Start
+                    </button>
+                  </form>
+                </div>
               </td>
             </tr>
           ))}
@@ -619,15 +585,6 @@ function StatusLine({ status }: { status: ActionStatus | null }) {
       {status.code}: {status.message}
     </p>
   );
-}
-
-function firstUsableUploadId(sourceFiles: SourceFilesSummary) {
-  if (!sourceFiles.ok) {
-    return "";
-  }
-  return sourceFiles.items.find((file) => file.parse_status === "uploaded")?.upload_id
-    ?? sourceFiles.items[0]?.upload_id
-    ?? "";
 }
 
 function activeWorkflowSummary(projectOverview: ProjectOverviewSummary) {

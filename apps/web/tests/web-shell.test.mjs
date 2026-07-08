@@ -502,10 +502,10 @@ test("Next app shell declares tenant/project Overview route for source files and
   assert.match(page, /getSeedRunEvents/);
   assert.match(page, /cancelSeedRun/);
   assert.match(page, /retrySeedRun/);
-  assert.match(page, /admitSourceFileAction/);
-  assert.match(page, /uploadSourceObjectAction/);
+  assert.match(page, /uploadAndStartSeedAction/);
   assert.match(page, /completeUploadAction/);
   assert.match(page, /startSeedRunAction/);
+  assert.doesNotMatch(page, /admitSourceFileAction|uploadSourceObjectAction/);
   assert.match(page, /cancelSeedRunAction/);
   assert.match(page, /retrySeedRunAction/);
   assert.match(page, /OverviewSeedShell/);
@@ -599,6 +599,39 @@ test("source file, Seed, readiness, and overview API client uses sanitized Go en
   assert.doesNotMatch(client, /latest_failed_workflow_error_message/);
 });
 
+test("Overview page exposes one-step upload and Seed start server action", async () => {
+  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
+  const action = sourceSlice(page, "async function uploadAndStartSeedAction", "async function cancelSeedRunAction");
+  const nextConfig = await fileText("next.config.ts");
+
+  assert.match(action, /"use server"/);
+  assert.match(action, /fileFromFormData\(formData,\s*"file"\)/);
+  assert.match(action, /await\s+file\.arrayBuffer\(\)/);
+  assert.match(action, /createHash\("sha256"\)/);
+  assert.match(action, /sizeBytes:\s*file\.size/);
+  assert.match(action, /filename:\s*fileNameFromUpload\(file\)/);
+  assert.match(action, /const\s+mimeType\s*=\s*supportedSourceMimeType\(file\)/);
+  assert.match(page, /function\s+supportedSourceMimeType/);
+  assert.match(page, /filename\.endsWith\("\.md"\)/);
+  assert.match(page, /filename\.endsWith\("\.pdf"\)/);
+  assert.match(page, /SOURCE_FILE_TYPE_UNSUPPORTED/);
+  assert.match(action, /mimeType,?/);
+  assert.doesNotMatch(action, /application\/octet-stream/);
+  assert.match(action, /createSourceFileUpload\(/);
+  assert.match(action, /uploadSourceFileObject\(/);
+  assert.match(action, /completeSourceFileUpload\(/);
+  assert.match(action, /startSeedRun\(/);
+  assert.match(action, /uploadId:\s*admitted\.upload_id/);
+  assert.match(action, /mode:\s*stringFromFormData\(formData,\s*"mode"\)\s*\|\|\s*"full"/);
+  assert.match(action, /if\s*\(!admitted\.ok\)[\s\S]*return\s+redirect\(/);
+  assert.match(action, /if\s*\(!uploaded\.ok\)[\s\S]*return\s+redirect\(/);
+  assert.match(action, /if\s*\(!completed\.ok\)[\s\S]*return\s+redirect\(/);
+  assert.match(action, /return\s+redirect\(overviewRoute/);
+  assert.doesNotMatch(action, /mock|fake|MIROFISH_.*LLM|OPENAI_API_KEY|api_key|credential_ref|encrypted_api_key/i);
+  assert.match(nextConfig, /serverActions:\s*\{/);
+  assert.match(nextConfig, /bodySizeLimit:\s*"64mb"/);
+});
+
 test("Overview Seed shell renders explicit source file and Seed run states", async () => {
   const shell = await fileText("components/overview-seed-shell.tsx");
 
@@ -659,15 +692,19 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /ready_entity_count/);
   assert.match(shell, /ready_relationship_count/);
   assert.match(shell, /ready_world_rule_count/);
-  assert.match(shell, /Admit source file/);
-  assert.match(shell, /Upload object/);
-  assert.match(shell, /uploadSourceObjectAction/);
+  assert.match(shell, /Upload and start Seed/);
+  assert.match(shell, /uploadAndStartSeedAction/);
   assert.match(shell, /type="file"/);
   assert.match(shell, /name="file"/);
+  assert.match(shell, /name="mode"/);
   assert.match(shell, /Complete upload/);
-  assert.match(shell, /Complete this upload/);
-  assert.match(shell, /name="uploadId"/);
-  assert.match(shell, /value=\{file\.upload_id\}/);
+  assert.match(shell, /Start Seed/);
+  assert.match(shell, /completeUploadAction/);
+  assert.match(shell, /startSeedRunAction/);
+  assert.match(shell, /type="hidden"\s+name="uploadId"\s+value=\{file\.upload_id\}/);
+  assert.match(shell, /file\.parse_status !== "pending"/);
+  assert.match(shell, /file\.parse_status !== "uploaded"/);
+  assert.doesNotMatch(shell, /Admit source file|Upload object|Complete this upload|uploadSourceObjectAction|<label htmlFor=".*upload-id"|placeholder=".*upload/i);
   assert.match(shell, /Seed pipeline/);
   assert.match(shell, /Seed runs/);
   assert.match(shell, /Inspect Seed run/);
@@ -676,10 +713,8 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /name="after_event_id"/);
   assert.match(shell, /Event cursor/);
   assert.match(shell, /Seed events/);
-  assert.match(shell, /startSeedRunAction/);
   assert.match(shell, /cancelSeedRunAction/);
   assert.match(shell, /retrySeedRunAction/);
-  assert.match(shell, /completeUploadAction/);
   assert.match(shell, /Cancel Seed run/);
   assert.match(shell, /Retry Seed run/);
   assert.match(shell, /PROJECT_READINESS_BACKEND_UNCONFIGURED/);
@@ -690,6 +725,7 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /SOURCE_FILE_BACKEND_UNCONFIGURED/);
   assert.doesNotMatch(shell, /object key/i);
   assert.doesNotMatch(shell, /presigned/i);
+  assert.doesNotMatch(shell, /raw text|prompt|credential|draft|manuscript/i);
   assert.doesNotMatch(shell, /readiness report body/i);
   assert.doesNotMatch(shell, /mock/i);
 });

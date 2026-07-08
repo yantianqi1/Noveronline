@@ -466,6 +466,10 @@ POST /v1/seed-runs/{runId}/cancel
 POST /v1/seed-runs/{runId}/retry
 ```
 
+### 2026-07-08 Browser Upload/Start Update
+
+Next Overview now exposes a file-first Seed entry action. The server action reads the selected browser file, derives filename, supported MIME, size and SHA-256, then calls the existing Go APIs in this order: create source upload, upload object bytes, complete upload, and start the Seed run. Each failed step redirects with a stable public status and stops before the next side effect. Unknown file types fail closed as `SOURCE_FILE_TYPE_UNSUPPORTED`; empty browser MIME is inferred only for `.txt`, `.md`, `.markdown`, and `.pdf`, and `application/octet-stream` is not used for upload admission. The Web app sets a 64 MB server-action body limit and names that limit in the UI. Overview also keeps row-scoped recovery actions so already admitted `pending` uploads can be completed and `uploaded` sources can start Seed without user-entered upload ids. Public query status and UI do not include object keys, raw text, prompt/provider data, API keys, `credential_ref`, draft, manuscript, filename, or upload id. This is a browser handoff improvement only; full browser/provider Seed E2E, sequential-reading/provider success, OCR PDF, profile/finalize runner, vector/hybrid search, and complete Seed pipeline closure remain pending.
+
 ### 2026-07-07 Status Handoff Update
 
 Python Seed worker can now update admitted `workflow_runs.workflow_type = seed_pipeline` rows through `PostgresSeedWorkflowRunStatusWriter`. `seed_pipeline_activity` marks the run `running` after the worker accepts the run and records the sanitized pending stage event while still returning `queued` to the Temporal workflow as its internal control signal. Terminal sequential-reading failures mark the run `failed` with stable public error metadata, and successful `finalize_seed_activity` marks the run `completed` with only stage, readiness snapshot id, and ready counts. The writer uses tenant/project context under app-role/RLS and must not expose object keys, raw segment text, prompt, API keys, `credential_ref`, drafts/manuscripts, or readiness report body in public status.

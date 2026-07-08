@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { redirect } from "next/navigation";
 import {
   OverviewSeedShell,
@@ -64,29 +66,131 @@ export default async function OverviewPage({
       })
     : null;
 
-  async function admitSourceFileAction(formData: FormData) {
+  async function uploadAndStartSeedAction(formData: FormData) {
     "use server";
 
-    const result = await createSourceFileUpload({
+    const file = fileFromFormData(formData, "file");
+    if (!file) {
+      const status = sourceFileObjectActionStatus(sourceFileObjectRequired());
+      return redirect(overviewRoute({
+        tenantSlug,
+        projectId,
+        sourceStatus: status.status,
+        sourceCode: status.code,
+        sourceMessage: status.message,
+        seedStatus: query.seedStatus ?? "",
+        seedCode: query.seedCode ?? "",
+        seedMessage: query.seedMessage ?? "",
+        runId: query.runId ?? "",
+        afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      }));
+    }
+
+    const mimeType = supportedSourceMimeType(file);
+    if (!mimeType) {
+      const status = unsupportedSourceFileType();
+      return redirect(overviewRoute({
+        tenantSlug,
+        projectId,
+        sourceStatus: status.status,
+        sourceCode: status.code,
+        sourceMessage: status.message,
+        seedStatus: query.seedStatus ?? "",
+        seedCode: query.seedCode ?? "",
+        seedMessage: query.seedMessage ?? "",
+        runId: query.runId ?? "",
+        afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      }));
+    }
+
+    const fileBytes = await file.arrayBuffer();
+    const sha256 = createHash("sha256").update(Buffer.from(fileBytes)).digest("hex");
+    const admitted = await createSourceFileUpload({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
-      filename: stringFromFormData(formData, "filename"),
-      mimeType: stringFromFormData(formData, "mimeType"),
-      sizeBytes: positiveNumberFromFormData(formData, "sizeBytes"),
-      sha256: stringFromFormData(formData, "sha256"),
-      purpose: stringFromFormData(formData, "purpose") || "seed",
+      filename: fileNameFromUpload(file),
+      mimeType,
+      sizeBytes: file.size,
+      sha256,
+      purpose: "seed",
     });
-    const status = sourceFileActionStatus(result);
-    redirect(overviewRoute({
+    if (!admitted.ok) {
+      const status = sourceFileActionStatus(admitted);
+      return redirect(overviewRoute({
+        tenantSlug,
+        projectId,
+        sourceStatus: status.status,
+        sourceCode: status.code,
+        sourceMessage: status.message,
+        seedStatus: query.seedStatus ?? "",
+        seedCode: query.seedCode ?? "",
+        seedMessage: query.seedMessage ?? "",
+        runId: query.runId ?? "",
+        afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      }));
+    }
+
+    const uploaded = await uploadSourceFileObject({
+      ...(await webApiContext({ tenantId: tenantSlug })),
+      uploadId: admitted.upload_id,
+      file,
+    });
+    if (!uploaded.ok) {
+      const status = sourceFileObjectActionStatus(uploaded);
+      return redirect(overviewRoute({
+        tenantSlug,
+        projectId,
+        sourceStatus: status.status,
+        sourceCode: status.code,
+        sourceMessage: status.message,
+        seedStatus: query.seedStatus ?? "",
+        seedCode: query.seedCode ?? "",
+        seedMessage: query.seedMessage ?? "",
+        runId: query.runId ?? "",
+        afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      }));
+    }
+
+    const completed = await completeSourceFileUpload({
+      ...(await webApiContext({ tenantId: tenantSlug })),
+      uploadId: admitted.upload_id,
+    });
+    if (!completed.ok) {
+      const status = sourceFileActionStatus(completed);
+      return redirect(overviewRoute({
+        tenantSlug,
+        projectId,
+        sourceStatus: status.status,
+        sourceCode: status.code,
+        sourceMessage: status.message,
+        seedStatus: query.seedStatus ?? "",
+        seedCode: query.seedCode ?? "",
+        seedMessage: query.seedMessage ?? "",
+        runId: query.runId ?? "",
+        afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      }));
+    }
+
+    const result = await startSeedRun({
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
+      projectId,
+      uploadId: admitted.upload_id,
+      options: {
+        mode: stringFromFormData(formData, "mode") || "full",
+      },
+    });
+    const sourceStatus = sourceFileActionStatus(completed);
+    const status = seedRunActionStatus(result);
+    return redirect(overviewRoute({
       tenantSlug,
       projectId,
-      sourceStatus: status.status,
-      sourceCode: status.code,
-      sourceMessage: status.message,
-      seedStatus: query.seedStatus ?? "",
-      seedCode: query.seedCode ?? "",
-      seedMessage: query.seedMessage ?? "",
-      runId: query.runId ?? "",
+      sourceStatus: sourceStatus.status,
+      sourceCode: sourceStatus.code,
+      sourceMessage: sourceStatus.message,
+      seedStatus: status.status,
+      seedCode: status.code,
+      seedMessage: status.message,
+      runId: status.runId || query.runId || "",
       afterEventId: query.after_event_id ?? query.afterEventId ?? "",
     }));
   }
@@ -99,34 +203,7 @@ export default async function OverviewPage({
       uploadId: stringFromFormData(formData, "uploadId"),
     });
     const status = sourceFileActionStatus(result);
-    redirect(overviewRoute({
-      tenantSlug,
-      projectId,
-      sourceStatus: status.status,
-      sourceCode: status.code,
-      sourceMessage: status.message,
-      seedStatus: query.seedStatus ?? "",
-      seedCode: query.seedCode ?? "",
-      seedMessage: query.seedMessage ?? "",
-      runId: query.runId ?? "",
-      afterEventId: query.after_event_id ?? query.afterEventId ?? "",
-    }));
-  }
-
-  async function uploadSourceObjectAction(formData: FormData) {
-    "use server";
-
-    const uploadId = stringFromFormData(formData, "uploadId");
-    const file = fileFromFormData(formData, "file");
-    const result = file
-      ? await uploadSourceFileObject({
-          ...(await webApiContext({ tenantId: tenantSlug })),
-          uploadId,
-          file,
-        })
-      : sourceFileObjectRequired();
-    const status = sourceFileObjectActionStatus(result);
-    redirect(overviewRoute({
+    return redirect(overviewRoute({
       tenantSlug,
       projectId,
       sourceStatus: status.status,
@@ -152,7 +229,7 @@ export default async function OverviewPage({
       },
     });
     const status = seedRunActionStatus(result);
-    redirect(overviewRoute({
+    return redirect(overviewRoute({
       tenantSlug,
       projectId,
       sourceStatus: query.sourceStatus ?? "",
@@ -242,8 +319,7 @@ export default async function OverviewPage({
             }
           : null
       }
-      admitSourceFileAction={admitSourceFileAction}
-      uploadSourceObjectAction={uploadSourceObjectAction}
+      uploadAndStartSeedAction={uploadAndStartSeedAction}
       completeUploadAction={completeUploadAction}
       startSeedRunAction={startSeedRunAction}
       cancelSeedRunAction={cancelSeedRunAction}
@@ -289,7 +365,11 @@ function stringFromFormData(formData: FormData, key: string) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function fileFromFormData(formData: FormData, key: string) {
+type UploadedSourceFile = Blob & {
+  name?: string;
+};
+
+function fileFromFormData(formData: FormData, key: string): UploadedSourceFile | null {
   const value = formData.get(key);
   if (
     value &&
@@ -299,7 +379,7 @@ function fileFromFormData(formData: FormData, key: string) {
     typeof value.size === "number" &&
     value.size > 0
   ) {
-    return value as Blob;
+    return value as UploadedSourceFile;
   }
   return null;
 }
@@ -313,9 +393,49 @@ function sourceFileObjectRequired() {
   };
 }
 
-function positiveNumberFromFormData(formData: FormData, key: string) {
-  const value = Number(stringFromFormData(formData, key));
-  return Number.isFinite(value) && value > 0 ? value : 0;
+function unsupportedSourceFileType() {
+  return {
+    status: "error",
+    code: "SOURCE_FILE_TYPE_UNSUPPORTED",
+    message: "source file type is unsupported",
+  };
+}
+
+function fileNameFromUpload(file: UploadedSourceFile) {
+  const name = typeof file.name === "string" ? file.name.trim() : "";
+  return name || "source-file";
+}
+
+function supportedSourceMimeType(file: UploadedSourceFile) {
+  const explicit = sanitizeSupportedSourceMime(file.type);
+  if (explicit) {
+    return explicit;
+  }
+  const filename = fileNameFromUpload(file).toLowerCase();
+  if (filename.endsWith(".txt")) {
+    return "text/plain";
+  }
+  if (filename.endsWith(".md") || filename.endsWith(".markdown")) {
+    return "text/markdown";
+  }
+  if (filename.endsWith(".pdf")) {
+    return "application/pdf";
+  }
+  return "";
+}
+
+function sanitizeSupportedSourceMime(mimeType: string) {
+  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (
+    normalized === "text/plain" ||
+    normalized === "text/markdown" ||
+    normalized === "text/x-markdown" ||
+    normalized === "application/x-markdown" ||
+    normalized === "application/pdf"
+  ) {
+    return normalized;
+  }
+  return "";
 }
 
 function setQueryIfPresent(query: URLSearchParams, key: string, value: string) {
