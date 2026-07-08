@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
@@ -170,6 +171,10 @@ type startWriterRunRequest struct {
 	Mode        string         `json:"mode"`
 	Instruction string         `json:"instruction"`
 	Options     map[string]any `json:"options"`
+}
+
+type createDevSessionRequest struct {
+	UserID string `json:"user_id"`
 }
 
 type startWriterRunResponse struct {
@@ -949,6 +954,19 @@ func (s *Server) verifySessionToken(token string) (string, bool) {
 	return userID, true
 }
 
+func (s *Server) signSessionToken(userID string) (string, bool) {
+	secret := strings.TrimSpace(s.sessionAuthSecret)
+	userID = strings.TrimSpace(userID)
+	if secret == "" || userID == "" {
+		return "", false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write([]byte("v1:" + userID)); err != nil {
+		return "", false
+	}
+	return "v1:" + userID + ":" + hex.EncodeToString(mac.Sum(nil)), true
+}
+
 func isActorSensitiveRoute(request *http.Request) bool {
 	path := request.URL.Path
 	switch {
@@ -1284,6 +1302,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 			"status":  "ok",
 			"service": "mirofish-api",
 		})
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/dev-sessions":
+		s.handleCreateDevSession(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		s.handleGetCurrentUser(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/workflow-runs/") && strings.HasSuffix(request.URL.Path, "/events"):
@@ -1473,6 +1493,49 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 	default:
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
 	}
+}
+
+func (s *Server) handleCreateDevSession(response http.ResponseWriter, request *http.Request) {
+	if strings.TrimSpace(s.sessionAuthSecret) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "session auth secret is not configured", nil)
+		return
+	}
+	var payload createDevSessionRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, auth.CodeValidationFailed, "invalid dev session payload", nil)
+		return
+	}
+	userID := strings.TrimSpace(payload.UserID)
+	if userID == "" {
+		writeError(response, request, http.StatusBadRequest, auth.CodeValidationFailed, "user_id is required", nil)
+		return
+	}
+	currentUser, err := s.authReader.GetCurrentUser(request.Context(), auth.GetCurrentUserInput{
+		UserID:    userID,
+		RequestID: requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	token, ok := s.signSessionToken(currentUser.User.UserID)
+	if !ok {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "session auth secret is not configured", nil)
+		return
+	}
+	http.SetCookie(response, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   request.TLS != nil,
+	})
+	writeJSON(response, http.StatusCreated, currentUser)
 }
 
 func (s *Server) handleGetCurrentUser(response http.ResponseWriter, request *http.Request) {

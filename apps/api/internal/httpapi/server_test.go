@@ -1856,6 +1856,186 @@ func TestGetCurrentUserUsesInjectedReaderAndReturnsOnlyPublicSummary(t *testing.
 	}
 }
 
+func TestCreateDevSessionIssuesSignedHttpOnlyCookieWithoutTokenLeak(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{
+				UserID:      "user-session",
+				Email:       "session@example.test",
+				DisplayName: "Session User",
+			},
+			ActiveTenants: []auth.TenantMembershipSummary{{
+				TenantID: "tenant-123",
+				Name:     "Studio",
+				Role:     "owner",
+				Status:   "active",
+			}},
+			ActiveProjects: []auth.ProjectMembershipSummary{{
+				TenantID:  "tenant-123",
+				ProjectID: "project-123",
+				Name:      "Novel",
+				Role:      "writer",
+				Status:    "active",
+			}},
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":" user-session "}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-Id", "req_dev_session")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if !reader.called || reader.input.UserID != "user-session" || reader.input.RequestID != "req_dev_session" {
+		t.Fatalf("auth reader did not verify requested user before issuing session: %#v", reader.input)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected exactly one session cookie, got %#v", cookies)
+	}
+	cookie := cookies[0]
+	if cookie.Name != sessionCookieName ||
+		cookie.Value == "" ||
+		!cookie.HttpOnly ||
+		cookie.Path != "/" ||
+		cookie.SameSite != http.SameSiteLaxMode ||
+		cookie.MaxAge <= 0 {
+		t.Fatalf("session cookie missing expected browser safety attributes: %#v", cookie)
+	}
+	if userID, ok := server.verifySessionToken(cookie.Value); !ok || userID != "user-session" {
+		t.Fatalf("issued cookie token is not accepted by existing session verifier: user=%q ok=%v", userID, ok)
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{
+		cookie.Value,
+		"v1:user-session",
+		"test-secret",
+		"api_key",
+		"must-not-echo",
+		"credential_ref",
+		"draft",
+		"manuscript",
+	} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("dev session response leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+	var body auth.CurrentUser
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode dev session response: %v", err)
+	}
+	if body.User.UserID != "user-session" || len(body.ActiveTenants) != 1 || len(body.ActiveProjects) != 1 {
+		t.Fatalf("unexpected dev session public user response: %#v", body)
+	}
+}
+
+func TestCreateDevSessionFailsClosedWithoutSessionSecretBeforeReader(t *testing.T) {
+	reader := &recordingAuthReader{}
+	server := NewServer(Config{AuthReader: reader})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-Id", "req_dev_session_no_secret")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called {
+		t.Fatalf("auth reader should not be called when session secret is missing: %#v", reader.input)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("session cookie was issued on missing-secret failure: %#v", response.Result().Cookies())
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeBackendUnconfigured ||
+		body.Error.Message != "session auth secret is not configured" ||
+		body.Error.RequestID != "req_dev_session_no_secret" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestCreateDevSessionVerifiesUserAndSanitizesReaderErrors(t *testing.T) {
+	reader := &recordingAuthReader{
+		err: &auth.AppError{
+			Code:    auth.CodeUserNotFound,
+			Message: "user missing prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"missing-user"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-Id", "req_dev_session_missing_user")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+	}
+	if !reader.called || reader.input.UserID != "missing-user" {
+		t.Fatalf("auth reader did not receive requested user: %#v", reader.input)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("session cookie was issued for failed user lookup: %#v", response.Result().Cookies())
+	}
+	rawBody := response.Body.String()
+	var body errorEnvelope
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeUserNotFound || body.Error.Message != "current user was not found" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+	for _, forbidden := range []string{"prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript", "missing-user"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("dev session error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestCreateDevSessionMalformedPathsStayNotFoundWithoutReader(t *testing.T) {
+	for _, path := range []string{
+		"/v1/auth//dev-sessions",
+		"/v1/auth/dev-sessions/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			reader := &recordingAuthReader{}
+			server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"user_id":"user-session"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer v1:bad-user:deadbeef")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.called {
+				t.Fatalf("malformed auth route should not call auth reader: %#v", reader.input)
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatalf("session cookie was issued for malformed path: %#v", response.Result().Cookies())
+			}
+			rawBody := response.Body.String()
+			for _, forbidden := range []string{"bad-user", "deadbeef", "user-session"} {
+				if strings.Contains(rawBody, forbidden) {
+					t.Fatalf("malformed path response leaked forbidden credential/body payload %q: %s", forbidden, rawBody)
+				}
+			}
+		})
+	}
+}
+
 func TestAuthSubjectGetAssetRejectsInvalidBearerBeforeFallbackAuthorizerAndReader(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	reader := &recordingAssetReader{
