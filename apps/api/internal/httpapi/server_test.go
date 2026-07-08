@@ -3640,6 +3640,270 @@ func TestMalformedCurrentSessionAccessTokenPathsStay404WithoutSideEffects(t *tes
 	}
 }
 
+func TestJWTBearerRefreshAtomicallyRotatesPersistedJWT(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	oldToken, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC().Add(-1*time.Minute))
+	if !ok {
+		t.Fatal("expected old jwt to sign")
+	}
+	oldTokenHash := hashSessionToken(oldToken)
+	sessionStore.calls = nil
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", strings.NewReader(`{"tenant_id":"evil","project_id":"evil"}`))
+	request.Header.Set("X-Request-Id", "req_jwt_refresh")
+	request.Header.Set("Authorization", "Bearer "+oldToken)
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.createCalled || sessionStore.revokeCalled || sessionStore.revokeAllCalled || sessionStore.revokeTenantCalled || sessionStore.listCalled {
+		t.Fatalf("jwt refresh used unexpected reader/store path: reader=%v store=%#v", reader.called, sessionStore)
+	}
+	if !reflect.DeepEqual(sessionStore.calls, []string{"rotate"}) {
+		t.Fatalf("expected atomic rotate as the only store side effect, got calls=%#v store=%#v", sessionStore.calls, sessionStore)
+	}
+	if sessionStore.rotateInput.UserID != "user-session" ||
+		sessionStore.rotateInput.OldTokenHash != oldTokenHash ||
+		strings.TrimSpace(sessionStore.rotateInput.NewTokenHash) == "" ||
+		sessionStore.rotateInput.NewTokenHash == oldTokenHash ||
+		sessionStore.rotateInput.RequestID != "req_jwt_refresh" ||
+		sessionStore.rotateInput.Now.IsZero() ||
+		!sessionStore.rotateInput.ExpiresAt.After(time.Now()) {
+		t.Fatalf("new bearer jwt was not rotated into the session store: %#v", sessionStore.rotateInput)
+	}
+	var body struct {
+		AccessToken string    `json:"access_token"`
+		TokenType   string    `json:"token_type"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode jwt-refresh response: %v", err)
+	}
+	var rawBody map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &rawBody); err != nil {
+		t.Fatalf("decode jwt-refresh raw response: %v", err)
+	}
+	if len(rawBody) != 3 || rawBody["access_token"] == nil || rawBody["token_type"] == nil || rawBody["expires_at"] == nil {
+		t.Fatalf("jwt-refresh response exposed unexpected keys: %#v", rawBody)
+	}
+	if body.AccessToken == "" || strings.Count(body.AccessToken, ".") != 2 || body.AccessToken == oldToken || body.TokenType != "Bearer" || !body.ExpiresAt.After(time.Now()) {
+		t.Fatalf("unexpected jwt-refresh response: %#v", body)
+	}
+	userID, newTokenHash, ok := server.verifySignedSessionToken(body.AccessToken)
+	if !ok || userID != "user-session" || newTokenHash != sessionStore.rotateInput.NewTokenHash {
+		t.Fatalf("returned refreshed JWT was not persisted as rotate token hash: user=%q hash=%q input=%#v ok=%v", userID, newTokenHash, sessionStore.rotateInput, ok)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("jwt refresh must not mutate browser cookies: %#v", response.Result().Cookies())
+	}
+	for _, forbidden := range []string{oldToken, oldTokenHash, "old-session-id", "test-secret", "fallback-user", "cookie-user", "evil"} {
+		if strings.Contains(sessionStore.rotateInput.NewTokenHash, forbidden) || strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("jwt-refresh response/hash leaked forbidden material %q: hash=%q body=%s", forbidden, sessionStore.rotateInput.NewTokenHash, response.Body.String())
+		}
+	}
+}
+
+func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFallback(t *testing.T) {
+	t.Run("rejects_cookie_and_development_without_bearer", func(t *testing.T) {
+		reader := &recordingAuthReader{}
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+		request.Header.Set("X-User-Id", "fallback-user")
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+		}
+		if reader.called || sessionStore.validateCalled || sessionStore.rotateCalled || sessionStore.createCalled {
+			t.Fatalf("jwt refresh used cookie/dev fallback: reader=%v store=%#v", reader.called, sessionStore)
+		}
+		if strings.Contains(response.Body.String(), "access_token") || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("non-bearer jwt refresh returned token or cookie: body=%s cookies=%#v", response.Body.String(), response.Result().Cookies())
+		}
+	})
+
+	t.Run("rejects_duplicate_authorization_headers_before_store", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		first, ok := server.signJWTSessionToken("user-session", "sid-one", time.Now().UTC())
+		if !ok {
+			t.Fatal("expected first jwt to sign")
+		}
+		second, ok := server.signJWTSessionToken("user-session", "sid-two", time.Now().UTC())
+		if !ok {
+			t.Fatal("expected second jwt to sign")
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+		request.Header.Add("Authorization", "Bearer "+first)
+		request.Header.Add("Authorization", "Bearer "+second)
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.validateCalled || sessionStore.rotateCalled {
+			t.Fatalf("duplicate authorization reached store: %#v", sessionStore)
+		}
+	})
+
+	t.Run("rejects_legacy_bearer_before_store", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+		request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "legacy-user"))
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.validateCalled || sessionStore.rotateCalled {
+			t.Fatalf("legacy bearer reached store: %#v", sessionStore)
+		}
+	})
+
+	t.Run("rejects_legacy_v2_bearer_before_store", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		legacyV2, ok := server.signSessionToken("legacy-user")
+		if !ok {
+			t.Fatal("expected legacy v2 token to sign")
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+		request.Header.Set("Authorization", "Bearer "+legacyV2)
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.validateCalled || sessionStore.rotateCalled {
+			t.Fatalf("legacy v2 bearer reached store: %#v", sessionStore)
+		}
+	})
+
+	t.Run("missing_store_fails_before_rotate", func(t *testing.T) {
+		server := NewServer(Config{SessionAuthSecret: "test-secret"})
+		token, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC())
+		if !ok {
+			t.Fatal("expected jwt to sign")
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "access_token") || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("missing store returned token or cookie: body=%s cookies=%#v", response.Body.String(), response.Result().Cookies())
+		}
+	})
+
+	t.Run("missing_secret_fails_before_store", func(t *testing.T) {
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{AuthSessionStore: sessionStore})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+		request.Header.Set("Authorization", "Bearer header.claims.signature")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+		}
+		if sessionStore.validateCalled || sessionStore.rotateCalled {
+			t.Fatalf("missing secret reached store: %#v", sessionStore)
+		}
+	})
+}
+
+func TestJWTBearerRefreshSanitizesRotateFailure(t *testing.T) {
+	sessionStore := &recordingAuthSessionStore{
+		rotateErr: &auth.AppError{
+			Code:    auth.CodeLookupFailed,
+			Message: "rotate leaked jwt claim api_key=sk-hidden credential_ref=secret prompt=hidden draft=private manuscript=private",
+		},
+	}
+	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	token, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC())
+	if !ok {
+		t.Fatal("expected jwt to sign")
+	}
+	sessionStore.calls = nil
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if !reflect.DeepEqual(sessionStore.calls, []string{"rotate"}) {
+		t.Fatalf("unexpected store calls: got %#v store=%#v", sessionStore.calls, sessionStore)
+	}
+	rawBody := response.Body.String()
+	if strings.Contains(rawBody, "access_token") || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("store failure returned token or cookie: body=%s cookies=%#v", rawBody, response.Result().Cookies())
+	}
+	for _, forbidden := range []string{"user-session", "old-session-id", "jwt", "claim", "prompt", "api_key", "sk-hidden", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("jwt refresh error leaked forbidden text %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestMalformedJWTBearerRefreshPathsStay404WithoutSideEffects(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	token, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC())
+	if !ok {
+		t.Fatal("expected jwt to sign")
+	}
+	for _, path := range []string{
+		"/v1/auth//session/jwt-refresh",
+		"/v1/auth/session/jwt-refresh/extra",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			request.Header.Set("X-User-Id", "fallback-user")
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if reader.called || sessionStore.validateCalled || sessionStore.rotateCalled || sessionStore.createCalled {
+				t.Fatalf("malformed path caused actor/store side effects: reader=%v store=%#v", reader.called, sessionStore)
+			}
+			if strings.Contains(response.Body.String(), "access_token") || len(response.Result().Cookies()) != 0 {
+				t.Fatalf("malformed path returned token or cookie: body=%s cookies=%#v", response.Body.String(), response.Result().Cookies())
+			}
+		})
+	}
+}
+
 func TestMalformedRevokeCurrentSessionPathsStay404WithoutSideEffects(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
 	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})

@@ -1592,6 +1592,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleRevokeCurrentSession(response, request)
 	case request.Method == http.MethodDelete && request.URL.Path == "/v1/auth/sessions":
 		s.handleRevokeAllCurrentUserSessions(response, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/jwt-refresh":
+		s.handleRefreshJWTBearerSession(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/access-token":
 		s.handleCreateCurrentSessionAccessToken(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/session/jwt-rotation":
@@ -2224,6 +2226,58 @@ func (s *Server) handleCreateCurrentSessionAccessToken(response http.ResponseWri
 		TokenHash: hashSessionToken(accessToken),
 		ExpiresAt: expiresAt,
 		RequestID: requestID(request),
+	}); err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, sessionAccessTokenResponse{
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresAt:   expiresAt,
+	})
+}
+
+func (s *Server) handleRefreshJWTBearerSession(response http.ResponseWriter, request *http.Request) {
+	if strings.TrimSpace(s.sessionAuthSecret) == "" || s.authSessionStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	authorizationValues := request.Header.Values("Authorization")
+	if len(authorizationValues) != 1 {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	token, ok := bearerToken(authorizationValues[0])
+	if !ok || strings.Count(token, ".") != 2 {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	userID, oldTokenHash, ok := s.verifyJWTSessionToken(token)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	now := time.Now().UTC()
+	sessionID, ok := randomSessionID()
+	if !ok {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	accessToken, ok := s.signJWTSessionToken(userID, sessionID, now)
+	if !ok {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
+		return
+	}
+	newTokenHash := hashSessionToken(accessToken)
+	expiresAt := now.Add(sessionTTL)
+	if err := s.authSessionStore.RotateSession(request.Context(), auth.RotateSessionInput{
+		UserID:       userID,
+		OldTokenHash: oldTokenHash,
+		NewTokenHash: newTokenHash,
+		ExpiresAt:    expiresAt,
+		Now:          now,
+		RequestID:    requestID(request),
 	}); err != nil {
 		code := publicAuthCode(auth.ErrorCode(err))
 		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
