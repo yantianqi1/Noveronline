@@ -131,6 +131,8 @@ Python Seed parse/segment/sequential-reading/runtime-facts/global-aggregation/st
 
 `PostgresEntityResolutionSnapshotWriter` 是 entity resolution 的 DB-backed private snapshot writer，也必须在写 `seed_entity_resolution_snapshots` 前设置 app-role tenant context。普通 DB/driver write exception 稳定为 `ENTITY_RESOLUTION_SNAPSHOT_WRITE_FAILED` / `entity resolution snapshot write failed`，不得把底层 SQL/driver 文本、resolution body、prompt、API key、`credential_ref` 或 raw text 传给 provider-facing result、workflow event 或公开错误。
 
+`entity_resolution` live Postgres/app-role + local-provider harness 已验证同一 tenant/project/run/module 重复执行时只保留一条 `seed_entity_resolution_snapshots` row，并且公开 activity result / `workflow_events` 只引用 snapshot id、model id 和 merged/alias/conflict counts。`resolution_jsonb` 正文与 private note 不进入公开事件或 API replay。该 harness 不代表完整 Seed browser/provider pipeline、archive/finalize live provider closure 或 finalize/full-chain readiness 完成。
+
 Go `SQLSeedRunReader` 是 Seed run list/detail 的 DB-backed read side。配置 `DATABASE_URL` 时，它会在支持的 queryer 上通过 app-role tenant context 读取 `workflow_runs.workflow_type = seed_pipeline` 的 public columns；普通 query、scan 或 rows iteration failure 稳定为 `WORKFLOW_QUERY_FAILED` / `seed run query failed`，不公开底层 driver 文本、prompt、API key、`credential_ref`、object key、source/raw text、draft 或 manuscript。
 
 Go `SQLWorkflowEventReader` 是 Seed run event replay 和通用 workflow event replay 的 DB-backed read side。配置 `DATABASE_URL` 时，它会在支持的 queryer 上通过 app-role tenant context 读取 `workflow_events` public columns；普通 query、scan 或 rows iteration failure 稳定为 `WORKFLOW_EVENT_QUERY_FAILED` / `workflow event query failed`，不公开底层 driver 文本、prompt、API key、`credential_ref`、object key、source/raw text、draft 或 manuscript。event payload 仍会递归移除 credential/prompt/body/content/draft/manuscript/source object key/artifact object key/segment object key 等高风险字段。
@@ -187,6 +189,8 @@ seed_entity_resolution_snapshots
 ```
 
 表必须启用 tenant RLS，并通过 `(tenant_id, project_id, run_id, module_key)` 保持同一 Seed run / module 的 upsert 幂等性。`PostgresEntityResolutionSnapshotWriter` 写入前设置 `app_set_tenant_context`，并清洗 prompt/API key/`credential_ref`/raw content 等高风险字段；普通 DB/driver failure 稳定为 `ENTITY_RESOLUTION_SNAPSHOT_WRITE_FAILED`。
+
+`entity_resolution` opt-in live harness 已用真实 app-role Postgres、AES-GCM credential decrypt 和本地 OpenAI-compatible JSON provider 验证该 upsert/idempotency contract；公开 workflow event 仍只暴露 snapshot/model/count metadata，不暴露 `resolution_jsonb` 正文或 provider/prompt/credential/object/draft/manuscript 字段。
 
 ## Seed Agent Profile Snapshots
 

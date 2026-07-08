@@ -55,7 +55,7 @@
 | Phase 2 | 70%-80% | Writer read tools 已接入 assets、graph、worldline paths；picker/right rail 已有实现；live LLM reference E2E 和 proposal tools 待补 |
 | Phase 3 | 70%-80% | Go API、Next shell、Postgres/RLS、Temporal/Python/Pi worker skeleton 已落地；W2-S1 `/v1/me` auth reader seam、W2-S2 DB-backed auth membership read side、W2-S3 Next tenant/project picker、W2-S4a Go HTTP RBAC seam、W2-S4b trace RBAC seam、W2-S4c signed HTTP auth subject resolver seam、W2-S4d 首批 project-scoped read RBAC expansion、W2-S4e actor-sensitive route predicate hardening、W2-S4f 首批 project-scoped asset mutation RBAC、W2-S4g asset detail owner-aware read RBAC、W2-S4h-a single-asset mutation owner-aware RBAC、W2-S4h-b bulk asset action RBAC、W2-S4h-c archive memory review owner-aware RBAC、W2-S4i 首批 project-scoped creative mutation RBAC、W2-S4j owner-aware worldline session mutation RBAC、W2-S4k owner-aware worldline session read RBAC、W2-S4l owner-aware worldline event mutation RBAC、W2-S4m Character Console interaction owner-aware RBAC、W2-S4n tenant-level LLM management RBAC、W2-S4o Story Graph evidence project-read RBAC、W2-S4p Worldline preparation read RBAC、W2-S5a dev session cookie issuance seam、W2-S5b Next shell `/v1/me` cookie consumption、W2-S5c downstream Web API session propagation、W2-S5d persisted session revocation groundwork、W2-S5e current-session logout/revocation seam、W2-S5f Web logout UI/action、W2-S5g nonce session token groundwork、W2-S5h current-session rotation API seam、W2-S5i cookie current-session CSRF seam、W2-S5j Web session refresh action、W2-S5k automatic project-shell session refresh trigger、W2-S5l current-user all-session revocation seam、W2-S5m admin tenant-wide session revocation seam、W2-S5n route-wide unsafe cookie CSRF guard、W2-S5o current-user session listing metadata API、W2-S5p Web session management panel、W2-S5q production password login session issuance seam、W2-S5r Web password login action/page、W2-S5s JWT bearer subject resolver seam、W2-S5t Web session renewal threshold hardening、W2-S5u Web tenant-wide session revocation action、W2-S5v JWT cookie rotation seam、W2-S5w JWT bearer access-token issuance seam、W2-S5x JWT bearer refresh seam、W2-S5y global run read/replay credential preflight、W2-S5z global run read/replay owner-aware project-read authorization、W2-S5za global run cancel/retry owner-aware authorization、W2-S5zb Source upload route auth/RBAC hardening 和 W2-S5zc actor-sensitive protected route inventory guard 已接入；完整 compose health、真实 Temporal handoff、完整 production login/session lifecycle、refresh token/session renewal、full route-wide auth middleware、production-grade cookie/session management UI 和其他 remaining owner-aware/global non-asset RBAC 待补 |
 | Phase 4 | 75%-85% | LLM Facility schema/API/UI、binding、channel CRUD、model sync、trace/usage、secure key handoff、concurrency lease 已大体完成；live provider/cluster E2E、retry backend、quota/billing 待补 |
-| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`sequential_reading` / `story_ontology` / `entity_resolution` / `character_agent_profile` / `graph_bond_generator` LLM Facility runner path、`sequential_reading` Postgres/MinIO/local-provider harness、`story_ontology` Postgres/local-provider harness 和 `character_agent_profile` Postgres/local-provider harness 已在本机 live Postgres 执行通过，以及 Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、Seed remaining semantic stage live provider E2E（`entity_resolution` / archive/finalize）、finalize full-chain readiness、vector/hybrid search 和 Graph candidate adoption 待补 |
+| Phase 5 | 50%-65% | Seed/Assets/Graph 有大量 DB-backed skeleton 和部分真实持久化；可提取文本 PDF parse、Python source parse-status 完成/失败回写、opt-in Go API upload/complete -> Temporal cluster -> Python parse/segment live harness、MinIO/Postgres object/row/event readback、真实 Temporal worker event-writer handoff、Seed running/terminal run status handoff（含 parse/segment 早期失败）、Next Overview file-first browser upload/start action、`sequential_reading` / `story_ontology` / `entity_resolution` / `character_agent_profile` / `graph_bond_generator` LLM Facility runner path、`sequential_reading` Postgres/MinIO/local-provider harness、`story_ontology` Postgres/local-provider harness、`entity_resolution` Postgres/local-provider harness 和 `character_agent_profile` Postgres/local-provider harness 已在本机 live Postgres 执行通过，以及 Asset search 版本/collection metadata 已补；完整 browser/provider Seed pipeline E2E、扫描/OCR PDF、完整智能分段、Seed remaining semantic stage live provider E2E（archive/finalize）、finalize full-chain readiness、vector/hybrid search 和 Graph candidate adoption 待补 |
 | Phase 6 | 35%-45% | Worldline metadata side、step admission、最小 LLM-backed candidate event metadata producer 已推进；Character Console metadata skeleton 已落地并硬化；runtime、saved-path runtime producer、prepare runtime、richer director tools 待补 |
 | Phase 7 | 0%-10% | Legacy import report skeleton blocked，旧架构清理未开始 |
 | Phase 8 | 0%-10% | Ops/Billing/Security/Production hardening 仍主要停留在设计和少量底座 |
@@ -67,8 +67,35 @@
 | 当前主线 | Phase 5：Seed browser upload / product closure |
 | 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed `story_ontology` live provider harness：验证真实 app-role Postgres + local OpenAI-compatible provider + LLM Facility binding/credential 可 upsert `seed_ontology_snapshots` 并写 sanitized workflow event；同一 tenant/project/run 重跑保持 snapshot id 幂等 |
-| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 full browser/provider Seed pipeline E2E、`entity_resolution` / archive/finalize live provider E2E、LLM live provider/cluster E2E、Graph candidate adoption 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+| 本轮开发 slice | P5 Seed `entity_resolution` live provider harness：验证真实 app-role Postgres + local OpenAI-compatible provider + LLM Facility binding/credential 可 upsert `seed_entity_resolution_snapshots` 并写 sanitized workflow event；同一 tenant/project/run 重跑保持 snapshot id 幂等 |
+| 推荐下一步 | 继续 Phase 5/4 产品闭环：推进 full browser/provider Seed pipeline E2E、archive/finalize live provider E2E、LLM live provider/cluster E2E、Graph candidate adoption 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+
+## Phase 5 P5 Seed entity resolution live provider harness
+
+Context:
+
+- Previous slices added the DB-backed `entity_resolution` runner and private snapshot writer, but live coverage stopped at unit/integration-style tests.
+- This slice keeps scope to `entity_resolution_activity` with real Postgres app-role + local OpenAI-compatible provider. It does not claim full browser/provider Seed pipeline closure or downstream archive/finalize closure.
+
+TDD / Review:
+
+- RED / harness：`test_seed_entity_resolution_live_postgres_provider_upserts_snapshot_and_public_event` was added to `apps/agent-runtime/tests/test_seed_live_e2e.py`; default env skips without `MIROFISH_SEED_LIVE_DATABASE_URL`, while live env seeds workflow admission, encrypted LLM channel credential, model, and `entity_resolution` binding rows.
+- Implementation：the harness starts a local OpenAI-compatible JSON provider, runs `entity_resolution_activity` twice with app-role `DATABASE_URL`, verifies both provider requests use the explicit decrypted credential plus tenant/project/run/module headers, and verifies `seed_entity_resolution_snapshots` contains exactly one upserted row for the run/module.
+- Privacy boundary：provider output deliberately includes `prompt`, `provider_response`, `raw_body`, `credential_ref`, `api_key`, `draft`, `manuscript`, object-key-shaped fields, and raw manuscript markers. Public activity result and `workflow_events` expose only snapshot/model/count metadata and do not leak provider/API key/prompt/raw body/credential/object key/draft/manuscript/private resolution note fields.
+- Review：implementer subagent started but was closed after local Coordinator implementation; its partial same-file improvements were retained after focused re-verification. Read-only spec reviewer pending/ran in parallel during doc sync; Coordinator local review found no product-path mock/fallback changes because only the opt-in live harness changed.
+
+Verification:
+
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k entity_resolution` passed default opt-in skip, 1 skipped / 6 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k entity_resolution` passed, 1 passed / 6 deselected.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'entity_resolution or entity_resolution_snapshot_writer'` passed, 8 passed / 122 deselected.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` passed default opt-in skip, 7 skipped.
+- `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` passed, 238 passed / 8 skipped.
+- `cd apps/api && go test ./... -count=1` passed.
+
+Next:
+
+- Continue archive/finalize live provider/readiness closure, full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
 
 ## Phase 5 P5 Seed sequential-reading live provider harness
 
@@ -88,21 +115,21 @@ Verification:
 
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k sequential` passed default opt-in skip, 1 skipped / 4 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_sequential_reader.py tests/test_seed_workflow.py -q -k 'sequential_reading or reading_notes_writer or calls_provider_with_explicit_key'` passed, 14 passed / 129 deselected.
-- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='127.0.0.1:9000' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='mirofish-uploads' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='mirofish_dev_password' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k sequential` passed, 1 passed / 4 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='<local-object-storage-endpoint>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='<local-bucket>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='<local-access-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='<local-secret-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k sequential` passed, 1 passed / 4 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` passed, 238 passed / 6 skipped.
 - `cd apps/api && go test ./... -count=1` passed.
 - Documentation synchronized in `docs/refactor-saas/06-seed-pipeline.md`, `docs/refactor-saas/13-agent-runtime.md`, `docs/refactor-saas/14-data-model.md`, `docs/refactor-saas/18-legacy-coverage-matrix.md`, and `tasks/refactor-saas-parallel-board.md`.
 
 Next:
 
-- Continue full browser/provider Seed pipeline E2E and remaining semantic stage live provider harnesses (`entity_resolution`, archive/finalize), plus OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
+- Continue full browser/provider Seed pipeline E2E and remaining semantic stage live provider harnesses (archive/finalize), plus OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
 
 ## Phase 5 P5 Seed story ontology live provider harness
 
 Context:
 
 - Previous slices added the DB-backed `story_ontology` runner and private ontology snapshot writer, but live coverage stopped at unit/integration-style tests.
-- This slice keeps scope to `ontology_activity` with real Postgres app-role + local OpenAI-compatible provider. It does not claim full browser/provider Seed pipeline closure or downstream entity/archive/finalize closure.
+- This slice keeps scope to `ontology_activity` with real Postgres app-role + local OpenAI-compatible provider. It does not claim full browser/provider Seed pipeline closure or downstream archive/finalize closure.
 
 TDD / Review:
 
@@ -115,27 +142,27 @@ Verification:
 
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k ontology` passed default opt-in skip, 1 skipped / 5 deselected.
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'ontology or ontology_snapshot_writer'` passed, 8 passed / 122 deselected.
-- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k ontology` passed, 1 passed / 5 deselected.
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k ontology` passed, 1 passed / 5 deselected.
 
 Next:
 
-- Continue entity resolution live provider harness, archive/finalize live provider/readiness closure, full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
+- Continue archive/finalize live provider/readiness closure, full browser/provider Seed pipeline E2E, OCR/scanned PDF, retry failed segments, vector/hybrid search, Graph candidate adoption, and Writer live reference E2E. Do not mark Phase 5 complete from this harness alone.
 
 ## Phase 5 P5 Seed character agent profile live harness execution
 
 Context:
 
 - Previous slice added the opt-in `character_agent_profile` Postgres/local-provider harness but default verification skipped without `MIROFISH_SEED_LIVE_DATABASE_URL`.
-- Local Docker compose currently provides live Postgres at `127.0.0.1:54329`, so this slice executes the harness against real Postgres/RLS/app-role setup.
+- Local Docker compose currently provides live Postgres at `<local-postgres-host>`, so this slice executes the harness against real Postgres/RLS/app-role setup.
 
 TDD / Fix:
 
-- RED：`MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k agent_profile` failed with `segment_summaries_segment_id_fkey`; the live fixture inserted `segment_summaries.segment_id` without a parent `text_segments` row.
+- RED：`MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k agent_profile` failed with `segment_summaries_segment_id_fkey`; the live fixture inserted `segment_summaries.segment_id` without a parent `text_segments` row.
 - Implementation：`tests/test_seed_live_e2e.py` now creates a fixed live `text_segments` row before inserting its `segment_summaries` row, matching the real schema instead of relying on loose fixture data.
 
 Verification:
 
-- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k agent_profile` 通过，1 passed / 3 deselected。
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k agent_profile` 通过，1 passed / 3 deselected。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k agent_profile` 通过默认 opt-in skip，1 skipped / 3 deselected。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'agent_profile or ontology_snapshot_writer'` 通过，17 passed / 113 deselected。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q` 通过，130 passed。
@@ -5463,7 +5490,7 @@ Verification:
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'source_object_integrity_mismatches or parse_file_activity_writes_extracted_text_artifact_without_returning_raw_text or workflow_locally_chains_uploaded_text_source'` 通过，3 passed / 79 deselected。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q` 通过，82 passed。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` 通过，181 passed / 3 skipped。
-- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='127.0.0.1:9000' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='mirofish-uploads' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='mirofish_dev_password' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` 通过，2 passed。
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='<local-object-storage-endpoint>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='<local-bucket>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='<local-access-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='<local-secret-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` 通过，2 passed。
 - `cd apps/api && go test ./internal/workflows -run 'Seed|WorkflowEvent|WorkflowRun|LiveSeed' -count=1` 通过。
 - `cd apps/api && go test ./internal/httpapi -run 'Seed|Upload|SourceFile' -count=1` 通过。
 - `cd apps/api && go test ./cmd/api -run 'Seed|Upload|SourceFile|ObjectWriter|ObjectVerifier|NewSeedAdmissionStore' -count=1` 通过。
@@ -5548,7 +5575,7 @@ Next:
 
 Context:
 
-- `127.0.0.1:54329` 本地 Postgres 可连；`MIROFISH_SEED_LIVE_DATABASE_URL` 环境变量默认未设置。
+- `<local-postgres-host>` 本地 Postgres 可连；`MIROFISH_SEED_LIVE_DATABASE_URL` 环境变量默认未设置。
 - 使用 compose 默认连接串执行 `apps/agent-runtime/tests/test_seed_live_e2e.py` 后，live harness 从 skipped 进入真实执行但失败。
 - 诊断复现显示 `run_seed_workflow_locally` 返回 `TEXT_ARTIFACT_WRITE_FAILED`，只落了 `seed.stage.pending` event，`source_files.parse_status` 被标记为 `failed`，`project_text_artifacts` / `text_segments` 未落库。
 - 直接调用 `PostgresTextArtifactWriter` 捕获到底层 root cause：`psycopg.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification`。
@@ -5577,7 +5604,7 @@ Verification:
 
 - `cd backend && env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest tests/test_saas_phase3_rls_schema.py -q` 通过，18 passed。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q -k 'seed_workflow_locally_reuses_env_workflow_event_writer_for_chained_stages or locally_chains_uploaded_text_source_into_parse_and_segment_activities or local_events_do_not_expose_object_storage_keys'` 通过，3 passed / 78 deselected。
-- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` 通过，1 passed。
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` 通过，1 passed。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q` 通过，81 passed。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` 通过，180 passed / 2 skipped。
 - `git diff --check` 通过。
@@ -5600,9 +5627,9 @@ Next:
 
 Context:
 
-- 本地 Docker/Compose 可用；`mirofish-saas-postgres-1` 已健康运行在 `127.0.0.1:54329`。
-- 本轮启动了 `infra/docker-compose.yml` 中的 `minio` / `minio-init`，MinIO health endpoint `http://127.0.0.1:9000/minio/health/ready` 返回 ready。
-- 直接使用 Python `S3CompatibleObjectStore` 对 `mirofish-uploads` bucket 做真实 PUT/GET 探测，返回 `hello minio`。
+- 本地 Docker/Compose 可用；`mirofish-saas-postgres-1` 已健康运行在 `<local-postgres-host>`。
+- 本轮启动了 `infra/docker-compose.yml` 中的 `minio` / `minio-init`，MinIO health endpoint `http://<local-object-storage-endpoint>/minio/health/ready` 返回 ready。
+- 直接使用 Python `S3CompatibleObjectStore` 对 `<local-bucket>` bucket 做真实 PUT/GET 探测，返回 `hello minio`。
 
 Active slice:
 
@@ -5611,7 +5638,7 @@ Active slice:
 
 TDD:
 
-- RED：`cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='127.0.0.1:9000' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='mirofish-uploads' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='mirofish_dev_password' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k minio` 失败，缺 `_live_object_store` helper。
+- RED：`cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='<local-object-storage-endpoint>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='<local-bucket>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='<local-access-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='<local-secret-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q -k minio` 失败，缺 `_live_object_store` helper。
 - GREEN：同一 MinIO live test 通过，1 passed / 1 deselected；新增 helper 按 `MIROFISH_SEED_LIVE_OBJECT_STORAGE_*` 读取真实 S3-compatible object store 配置，测试会先把 source bytes 写入 MinIO，再让 parse/segment 从 MinIO 读 source、写 extracted artifact 和 segment objects。
 
 Implementation:
@@ -5622,7 +5649,7 @@ Implementation:
 
 Verification:
 
-- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='postgresql://mirofish:mirofish_dev_password@127.0.0.1:54329/mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='127.0.0.1:9000' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='mirofish-uploads' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='mirofish' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='mirofish_dev_password' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` 通过，2 passed。
+- `cd apps/agent-runtime && MIROFISH_SEED_LIVE_DATABASE_URL='<local-postgres-url>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ENDPOINT='<local-object-storage-endpoint>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_BUCKET='<local-bucket>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_ACCESS_KEY='<local-access-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_SECRET_KEY='<local-secret-key>' MIROFISH_SEED_LIVE_OBJECT_STORAGE_USE_SSL='false' .venv/bin/python -m pytest tests/test_seed_live_e2e.py -q` 通过，2 passed。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests/test_seed_workflow.py -q` 通过，81 passed。
 - `cd apps/agent-runtime && .venv/bin/python -m pytest tests -q` 通过，180 passed / 3 skipped。
 - `git diff --check` 通过。

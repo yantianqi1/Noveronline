@@ -29,6 +29,7 @@ from mirofish_agents.temporal.seed import (
     SeedPipelineWorkflow,
     S3CompatibleObjectStore,
     agent_profile_activity,
+    entity_resolution_activity,
     ontology_activity,
     parse_file_activity,
     seed_pipeline_activity,
@@ -612,6 +613,169 @@ def test_seed_story_ontology_live_postgres_provider_persists_snapshot_and_public
         assert forbidden not in encoded
 
 
+def test_seed_entity_resolution_live_postgres_provider_upserts_snapshot_and_public_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    with _LiveEntityResolutionProvider() as provider:
+        _prepare_live_entity_resolution_database(admin_url, provider.base_url)
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+
+        result = entity_resolution_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-entity-resolution",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+        repeat_result = entity_resolution_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-entity-resolution-repeat",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+
+    assert result == {
+        "tenant_id": TENANT_ID,
+        "project_id": PROJECT_ID,
+        "run_id": RUN_ID,
+        "workflow_type": "seed_pipeline",
+        "upload_id": None,
+        "status": "completed",
+        "stage": "entity_resolution",
+        "next_stage": "agent_profiles",
+        "module_key": "entity_resolution",
+        "resolution_snapshot_id": result["resolution_snapshot_id"],
+        "merged_entity_count": 1,
+        "alias_count": 2,
+        "conflict_count": 1,
+        "stage_event_persisted": True,
+        "model_id": "model-seed-entity-resolution-live",
+    }
+    assert repeat_result["status"] == "completed"
+    assert repeat_result["resolution_snapshot_id"] == result["resolution_snapshot_id"]
+    assert len(provider.requests) == 2
+    for recorded_request in provider.requests:
+        assert _header(recorded_request["headers"], "Authorization") == "Bearer sk-live-seed-entity-resolution"
+        assert _header(recorded_request["headers"], "X-MiroFish-Tenant-Id") == TENANT_ID
+        assert _header(recorded_request["headers"], "X-MiroFish-Project-Id") == PROJECT_ID
+        assert _header(recorded_request["headers"], "X-MiroFish-Run-Id") == RUN_ID
+        assert _header(recorded_request["headers"], "X-MiroFish-Module-Key") == "entity_resolution"
+    provider_body = json.dumps(provider.requests[0]["body"], ensure_ascii=False, sort_keys=True)
+    assert "model-seed-entity-resolution-live" in provider_body
+    assert "entity_resolution" in provider_body
+    for forbidden in (
+        "credential_ref",
+        "sk-live-seed-entity-resolution",
+        "api_key",
+        "provider_response",
+        "raw_body",
+        "raw manuscript sentence",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in provider_body
+
+    persisted = _read_seed_entity_resolution_live_rows(admin_url)
+    assert persisted["workflow_runs"] == [{"status": "running", "progress": 70}]
+    assert persisted["seed_entity_resolution_snapshots"] == [
+        {
+            "module_key": "entity_resolution",
+            "model_id": "model-seed-entity-resolution-live",
+            "merged_entity_count": 1,
+            "alias_count": 2,
+            "conflict_count": 1,
+            "resolution_jsonb": {
+                "merged_entities": [
+                    {
+                        "canonical_name": "林舟",
+                        "entity_type": "character",
+                        "aliases": ["小舟", "雨港守夜人"],
+                    }
+                ],
+                "aliases": [
+                    {"alias": "小舟", "canonical_name": "林舟"},
+                    {"alias": "雨港守夜人", "canonical_name": "林舟"},
+                ],
+                "conflicts": [{"name": "林舟", "reason": "章节称谓不一致"}],
+                "private_notes": "allowed only in private resolution snapshot",
+            },
+        }
+    ]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "entity_resolution",
+                "status": "completed",
+                "activity": "entity_resolution_activity",
+                "module_key": "entity_resolution",
+                "resolution_snapshot_id": result["resolution_snapshot_id"],
+                "merged_entity_count": 1,
+                "alias_count": 2,
+                "conflict_count": 1,
+                "model_id": "model-seed-entity-resolution-live",
+            },
+        },
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "entity_resolution",
+                "status": "completed",
+                "activity": "entity_resolution_activity",
+                "module_key": "entity_resolution",
+                "resolution_snapshot_id": result["resolution_snapshot_id"],
+                "merged_entity_count": 1,
+                "alias_count": 2,
+                "conflict_count": 1,
+                "model_id": "model-seed-entity-resolution-live",
+            },
+        },
+    ]
+    public_event_body = json.dumps(persisted["workflow_events"], ensure_ascii=False, sort_keys=True)
+    encoded = json.dumps(
+        {"result": result, "repeat_result": repeat_result, "events": persisted["workflow_events"]},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    for forbidden in (
+        "prompt",
+        "sk-live-seed-entity-resolution",
+        "sk-provider-leak",
+        "secret-ref",
+        "credential_ref",
+        "provider_response",
+        "provider_raw_body",
+        "raw_body",
+        "object_key",
+        "source_object_key",
+        "artifact_object_key",
+        "segment_object_key",
+        "raw manuscript sentence",
+        "private prompt",
+        "draft",
+        "manuscript",
+        "allowed only in private resolution snapshot",
+    ):
+        assert forbidden not in public_event_body
+        assert forbidden not in encoded
+
+
 def test_seed_sequential_reading_live_postgres_provider_object_store_persists_notes_and_public_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1003,10 +1167,96 @@ class _LiveOntologyProvider:
         return Handler
 
 
+class _LiveEntityResolutionProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_LiveEntityResolutionProvider":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(body),
+                    }
+                )
+                content = {
+                    "entity_resolution": {
+                        "merged_entities": [
+                            {
+                                "canonical_name": "林舟",
+                                "entity_type": "character",
+                                "aliases": ["小舟", "雨港守夜人"],
+                                "object_key": "provider/leaked/object.txt",
+                                "text": "must be sanitized",
+                                "source_text": "must be sanitized",
+                            }
+                        ],
+                        "aliases": [
+                            {
+                                "alias": "小舟",
+                                "canonical_name": "林舟",
+                                "provider_response": "must be sanitized",
+                            },
+                            {
+                                "alias": "雨港守夜人",
+                                "canonical_name": "林舟",
+                                "api_key": "sk-provider-leak",
+                            },
+                        ],
+                        "conflicts": [{"name": "林舟", "reason": "章节称谓不一致", "raw_body": "raw manuscript sentence"}],
+                        "source_object_key": "provider/leaked/source.txt",
+                        "artifact_object_key": "provider/leaked/artifact.txt",
+                        "segment_object_key": "provider/leaked/segment.txt",
+                        "private_notes": "allowed only in private resolution snapshot",
+                        "prompt": "private prompt",
+                        "credential_ref": "secret-ref",
+                        "draft": "private draft",
+                        "manuscript": "private manuscript",
+                    }
+                }
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {
+                        "prompt_tokens": 17,
+                        "completion_tokens": 21,
+                        "total_tokens": 38,
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        return Handler
+
+
 def _live_database_url() -> str:
     database_url = os.environ.get("MIROFISH_SEED_LIVE_DATABASE_URL", "").strip()
     if not database_url:
-        pytest.skip("set MIROFISH_SEED_LIVE_DATABASE_URL to run the live Seed Postgres parse/segment E2E")
+        pytest.skip("set MIROFISH_SEED_LIVE_DATABASE_URL to run opt-in live Seed Postgres E2E tests")
     return database_url
 
 
@@ -1210,6 +1460,40 @@ def _prepare_live_ontology_database(admin_url: str, provider_base_url: str) -> N
                      tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
                    )
                    VALUES (%s, %s, 'story_ontology', %s, 'model-seed-ontology-live', '{"temperature":0}'::jsonb, %s)""",
+                (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+
+
+def _prepare_live_entity_resolution_database(admin_url: str, provider_base_url: str) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 70, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_channels (
+                     tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+                   )
+                   VALUES (%s, %s, 'Seed Entity Resolution Live Provider', 'openai-compatible', %s, %s, 1, true)""",
+                (TENANT_ID, CHANNEL_ID, provider_base_url, _encrypt_api_key("sk-live-seed-entity-resolution")),
+            )
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES (%s, %s, 'model-seed-entity-resolution-live', 'live-provider', true, false)""",
+                (TENANT_ID, CHANNEL_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES (%s, %s, 'entity_resolution', %s, 'model-seed-entity-resolution-live', '{"temperature":0}'::jsonb, %s)""",
                 (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
             )
 
@@ -1497,6 +1781,41 @@ def _read_seed_ontology_live_rows(admin_url: str) -> dict[str, list[dict[str, An
             workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
     return {
         "seed_ontology_snapshots": seed_ontology_snapshots,
+        "workflow_events": workflow_events,
+    }
+
+
+def _read_seed_entity_resolution_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT status, progress
+                   FROM workflow_runs
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_runs = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT
+                     module_key, model_id, merged_entity_count,
+                     alias_count, conflict_count, resolution_jsonb
+                   FROM seed_entity_resolution_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            seed_entity_resolution_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "workflow_runs": workflow_runs,
+        "seed_entity_resolution_snapshots": seed_entity_resolution_snapshots,
         "workflow_events": workflow_events,
     }
 
