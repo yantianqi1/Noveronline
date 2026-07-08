@@ -95,6 +95,34 @@ func TestSignSessionTokenUsesNonceBearingFormatForRotation(t *testing.T) {
 	}
 }
 
+func TestJWTSessionTokenUsesStableClaimsAndVerifiesWithHash(t *testing.T) {
+	server := NewServer(Config{SessionAuthSecret: "test-secret"})
+	now := time.Now().UTC()
+
+	token, ok := server.signJWTSessionToken(" jwt-user ", " session-123 ", now)
+	if !ok {
+		t.Fatal("expected JWT session token to sign")
+	}
+	if strings.Count(token, ".") != 2 || strings.Contains(token, "jwt-user") || strings.Contains(token, "session-123") || strings.Contains(token, "test-secret") {
+		t.Fatalf("JWT token is not compact or leaked raw claim/secret material: %q", token)
+	}
+	userID, tokenHash, ok := server.verifySignedSessionToken(token)
+	if !ok || userID != "jwt-user" || strings.TrimSpace(tokenHash) == "" {
+		t.Fatalf("JWT session token did not verify with hash: user=%q hash=%q ok=%v", userID, tokenHash, ok)
+	}
+	if strings.Contains(tokenHash, token) || strings.Contains(tokenHash, "test-secret") || strings.Contains(tokenHash, "jwt-user") {
+		t.Fatalf("JWT token hash leaked raw token/secret/user: %q", tokenHash)
+	}
+	expiredToken, ok := server.signJWTSessionToken("jwt-user", "session-123", now.Add(-(sessionTTL + time.Minute)))
+	if !ok {
+		t.Fatal("expected expired JWT fixture to sign")
+	}
+	expiredUserID, _, expiredOK := server.verifySignedSessionToken(expiredToken)
+	if expiredOK || expiredUserID != "" {
+		t.Fatalf("expired JWT verified unexpectedly: user=%q ok=%v", expiredUserID, expiredOK)
+	}
+}
+
 type recordingStarter struct {
 	input workflows.StartWriterRunInput
 	err   error
@@ -2005,6 +2033,94 @@ func TestGetCurrentUserUsesInjectedReaderAndReturnsOnlyPublicSummary(t *testing.
 	project := projects[0].(map[string]any)
 	if project["project_id"] != "project-123" || project["tenant_id"] != "tenant-123" || project["role"] != "editor" {
 		t.Fatalf("unexpected project summary: %#v", project)
+	}
+}
+
+func TestGetCurrentUserAcceptsJWTBearerThroughSessionStoreBeforeReader(t *testing.T) {
+	reader := &recordingAuthReader{
+		result: auth.CurrentUser{
+			User: auth.UserSummary{UserID: "jwt-user", Email: "jwt@example.test"},
+			ActiveTenants: []auth.TenantMembershipSummary{{
+				TenantID: "tenant-123",
+				Name:     "Studio",
+				Role:     "owner",
+				Status:   "active",
+			}},
+			ActiveProjects: []auth.ProjectMembershipSummary{{
+				TenantID:  "tenant-123",
+				ProjectID: "project-123",
+				Name:      "Novel",
+				Role:      "editor",
+				Status:    "active",
+			}},
+		},
+	}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		AuthReader:        reader,
+		AuthSessionStore:  sessionStore,
+		SessionAuthSecret: "test-secret",
+	})
+	token, ok := server.signJWTSessionToken("jwt-user", "session-123", time.Now().UTC())
+	if !ok {
+		t.Fatal("expected JWT session token to sign")
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-User-Id", "fallback-user")
+	request.Header.Set("X-Request-Id", "req-jwt-me")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if !sessionStore.validateCalled {
+		t.Fatal("session store was not used for JWT bearer validation")
+	}
+	if sessionStore.validateInput.UserID != "jwt-user" ||
+		sessionStore.validateInput.TokenHash != hashSessionToken(token) ||
+		sessionStore.validateInput.RequestID != "req-jwt-me" {
+		t.Fatalf("session store received wrong JWT validation input: %#v", sessionStore.validateInput)
+	}
+	if reader.input.UserID != "jwt-user" || reader.input.UserID == "fallback-user" {
+		t.Fatalf("reader did not receive JWT subject: %#v", reader.input)
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{"session-123", "fallback-user", "test-secret", token, hashSessionToken(token)} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("JWT /v1/me response leaked forbidden token material %q: %s", forbidden, rawBody)
+		}
+	}
+}
+
+func TestGetCurrentUserRejectsMalformedJWTBearerBeforeFallbackReaderOrSessionStore(t *testing.T) {
+	reader := &recordingAuthReader{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := NewServer(Config{
+		AuthReader:        reader,
+		AuthSessionStore:  sessionStore,
+		SessionAuthSecret: "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	request.Header.Set("Authorization", "Bearer eyJhbGciOiJub25lIn0.private-claim-material.")
+	request.Header.Set("X-User-Id", "fallback-user")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", response.Code, response.Body.String())
+	}
+	if reader.called || sessionStore.validateCalled {
+		t.Fatalf("malformed JWT caused side effects: reader=%v session=%v", reader.called, sessionStore.validateCalled)
+	}
+	rawBody := response.Body.String()
+	for _, forbidden := range []string{"private-claim-material", "fallback-user", "test-secret"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("malformed JWT error leaked forbidden material %q: %s", forbidden, rawBody)
+		}
 	}
 }
 

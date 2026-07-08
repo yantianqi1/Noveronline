@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -165,6 +166,9 @@ type apiError struct {
 
 const sessionCookieName = "mirofish_session"
 const csrfHeaderName = "X-CSRF-Token"
+const jwtSessionIssuer = "mirofish-auth"
+const jwtSessionAudience = "mirofish-api"
+const sessionTTL = 7 * 24 * time.Hour
 
 type actorUserIDContextKey struct{}
 
@@ -970,6 +974,9 @@ func (s *Server) verifySignedSessionToken(token string) (string, string, bool) {
 		return "", "", false
 	}
 	token = strings.TrimSpace(token)
+	if strings.Count(token, ".") == 2 {
+		return s.verifyJWTSessionToken(token)
+	}
 	parts := strings.Split(token, ":")
 	if len(parts) == 3 && parts[0] == "v1" {
 		userID := strings.TrimSpace(parts[1])
@@ -1007,6 +1014,110 @@ func (s *Server) verifySignedSessionToken(token string) (string, string, bool) {
 		return "", "", false
 	}
 	return userID, hashSessionToken(token), true
+}
+
+type jwtSessionHeader struct {
+	Algorithm string `json:"alg"`
+	Type      string `json:"typ"`
+}
+
+type jwtSessionClaims struct {
+	Issuer    string `json:"iss"`
+	Audience  string `json:"aud"`
+	Subject   string `json:"sub"`
+	SessionID string `json:"sid"`
+	IssuedAt  int64  `json:"iat"`
+	ExpiresAt int64  `json:"exp"`
+}
+
+func (s *Server) signJWTSessionToken(userID string, sessionID string, issuedAt time.Time) (string, bool) {
+	secret := strings.TrimSpace(s.sessionAuthSecret)
+	userID = strings.TrimSpace(userID)
+	sessionID = strings.TrimSpace(sessionID)
+	if secret == "" || userID == "" || sessionID == "" {
+		return "", false
+	}
+	if issuedAt.IsZero() {
+		issuedAt = time.Now().UTC()
+	}
+	header := jwtSessionHeader{Algorithm: "HS256", Type: "JWT"}
+	claims := jwtSessionClaims{
+		Issuer:    jwtSessionIssuer,
+		Audience:  jwtSessionAudience,
+		Subject:   userID,
+		SessionID: sessionID,
+		IssuedAt:  issuedAt.UTC().Unix(),
+		ExpiresAt: issuedAt.UTC().Add(sessionTTL).Unix(),
+	}
+	headerPart, ok := encodeJWTPart(header)
+	if !ok {
+		return "", false
+	}
+	claimsPart, ok := encodeJWTPart(claims)
+	if !ok {
+		return "", false
+	}
+	signingInput := headerPart + "." + claimsPart
+	signature := base64.RawURLEncoding.EncodeToString(signSessionMessage(secret, signingInput))
+	return signingInput + "." + signature, true
+}
+
+func encodeJWTPart(value any) (string, bool) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(payload), true
+}
+
+func (s *Server) verifyJWTSessionToken(token string) (string, string, bool) {
+	secret := strings.TrimSpace(s.sessionAuthSecret)
+	parts := strings.Split(token, ".")
+	if secret == "" || len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	var header jwtSessionHeader
+	if !decodeJWTPart(parts[0], &header) {
+		return "", "", false
+	}
+	if header.Algorithm != "HS256" || header.Type != "JWT" {
+		return "", "", false
+	}
+	var claims jwtSessionClaims
+	if !decodeJWTPart(parts[1], &claims) {
+		return "", "", false
+	}
+	userID := strings.TrimSpace(claims.Subject)
+	sessionID := strings.TrimSpace(claims.SessionID)
+	now := time.Now().UTC().Unix()
+	if claims.Issuer != jwtSessionIssuer ||
+		claims.Audience != jwtSessionAudience ||
+		userID == "" ||
+		sessionID == "" ||
+		claims.IssuedAt <= 0 ||
+		claims.IssuedAt > now+300 ||
+		claims.ExpiresAt <= now {
+		return "", "", false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "", "", false
+	}
+	signingInput := parts[0] + "." + parts[1]
+	if !hmac.Equal(signature, signSessionMessage(secret, signingInput)) {
+		return "", "", false
+	}
+	return userID, hashSessionToken(token), true
+}
+
+func decodeJWTPart(part string, value any) bool {
+	payload, err := base64.RawURLEncoding.DecodeString(part)
+	if err != nil {
+		return false
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(value) == nil
 }
 
 func (s *Server) signSessionToken(userID string) (string, bool) {
