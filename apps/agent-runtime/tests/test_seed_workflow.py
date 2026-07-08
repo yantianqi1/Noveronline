@@ -6381,6 +6381,9 @@ def test_postgres_ontology_snapshot_writer_upserts_sanitized_private_snapshot() 
             "private_notes": "private ontology body is allowed only in seed_ontology_snapshots",
             "prompt": "must not be stored",
             "raw_content": "full novel text must not be stored",
+            "raw_body": "raw provider body must not be stored",
+            "provider_raw_body": "provider body must not be stored",
+            "provider_response": {"text": "provider response must not be stored"},
             "credential_ref": "secret-ref",
             "api_key": "sk-test",
         },
@@ -6414,7 +6417,16 @@ def test_postgres_ontology_snapshot_writer_upserts_sanitized_private_snapshot() 
     }
     assert connection.cursor_instance.params[6:] == (1, 1, 1)
     joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
-    for forbidden in ("must not be stored", "full novel text", "credential_ref", "api_key", "sk-test"):
+    for forbidden in (
+        "must not be stored",
+        "full novel text",
+        "raw provider body",
+        "provider body",
+        "provider response",
+        "credential_ref",
+        "api_key",
+        "sk-test",
+    ):
         assert forbidden not in joined_params
     assert connection.committed is True
     assert connection.closed is True
@@ -6661,6 +6673,9 @@ def test_postgres_agent_profile_snapshot_writer_upserts_sanitized_private_snapsh
             "private_notes": "private profile body is allowed only in seed_agent_profile_snapshots",
             "prompt": "must not be stored",
             "raw_content": "full novel text must not be stored",
+            "raw_body": "raw provider body must not be stored",
+            "provider_raw_body": "provider body must not be stored",
+            "provider_response": {"text": "provider response must not be stored"},
             "credential_ref": "secret-ref",
             "api_key": "sk-test",
         },
@@ -6694,7 +6709,16 @@ def test_postgres_agent_profile_snapshot_writer_upserts_sanitized_private_snapsh
     }
     assert connection.cursor_instance.params[6:] == (1, 1, 1)
     joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
-    for forbidden in ("must not be stored", "full novel text", "credential_ref", "api_key", "sk-test"):
+    for forbidden in (
+        "must not be stored",
+        "full novel text",
+        "raw provider body",
+        "provider body",
+        "provider response",
+        "credential_ref",
+        "api_key",
+        "sk-test",
+    ):
         assert forbidden not in joined_params
     assert connection.committed is True
     assert connection.closed is True
@@ -6757,6 +6781,53 @@ def test_llm_facility_agent_profile_runner_loads_context_before_binding_credenti
     assert result["status"] == "completed"
     assert loader.calls == [{"tenant_id": "tenant-1", "project_id": "project-1", "run_id": "run-1"}]
     assert call_order == ["context_loader", "binding", "credential", "provider"]
+
+
+def test_llm_facility_agent_profile_runner_rejects_resolution_without_provider_before_credential_call() -> None:
+    resolution = _agent_profile_resolution()
+    credentials = RecordingCredentialProvider(api_key="sk-profile")
+    chat_client = RecordingJSONChatClient(
+        response_json={
+            "agent_profiles": {
+                "profiles": [],
+                "memory_seeds": [],
+                "relationship_views": [],
+            }
+        }
+    )
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=RecordingBindingResolver(
+            ModuleBindingResolution(
+                tenant_id=resolution.tenant_id,
+                project_id=resolution.project_id,
+                module_key=resolution.module_key,
+                channel_id=resolution.channel_id,
+                model_id=resolution.model_id,
+                provider="",
+                base_url=resolution.base_url,
+                credential_ref=resolution.credential_ref,
+                supports_json=resolution.supports_json,
+                settings=resolution.settings,
+            )
+        ),
+        credential_provider=credentials,
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=RecordingAgentProfileSnapshotWriter(),
+        agent_profile_context_loader=RecordingAgentProfileContextLoader(),
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result == {
+        "status": "failed",
+        "module_key": "character_agent_profile",
+        "error": {
+            "code": "LLM_PROVIDER_ERROR",
+            "message": "resolved LLM module is missing provider",
+        },
+    }
+    assert credentials.calls == []
+    assert chat_client.calls == []
 
 
 def test_llm_facility_agent_profile_runner_includes_sanitized_context_in_provider_request() -> None:

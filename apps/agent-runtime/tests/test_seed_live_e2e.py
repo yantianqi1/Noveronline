@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import socket
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -14,6 +17,7 @@ from urllib.request import Request, urlopen
 
 import psycopg
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
@@ -23,6 +27,7 @@ from temporalio.worker import Worker
 from mirofish_agents.temporal.seed import (
     SeedPipelineWorkflow,
     S3CompatibleObjectStore,
+    agent_profile_activity,
     parse_file_activity,
     seed_pipeline_activity,
     segment_text_activity,
@@ -42,6 +47,8 @@ RUN_ID = "74444444-4444-4444-4444-444444444444"
 SOURCE_FILE_ID = "75555555-5555-5555-5555-555555555555"
 UPLOAD_ID = "76666666-6666-6666-6666-666666666666"
 SOURCE_OBJECT_KEY = "projects/live-seed/source-files/upload-1/book.txt"
+CHANNEL_ID = "77777777-7777-7777-7777-777777777777"
+KEY_MATERIAL = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 
 
 def test_seed_live_go_api_upload_complete_temporal_worker_parse_segment_e2e(
@@ -372,6 +379,96 @@ def test_seed_live_minio_postgres_app_role_parse_segment_reads_and_writes_real_o
         assert forbidden not in public_event_body
 
 
+def test_seed_agent_profile_live_postgres_provider_chain_persists_snapshot_and_public_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    with _LiveAgentProfileProvider() as provider:
+        _prepare_live_agent_profile_database(admin_url, provider.base_url)
+        app_url = _app_database_url(admin_url)
+        monkeypatch.setenv("DATABASE_URL", app_url)
+        monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+
+        result = agent_profile_activity(
+            {
+                "context": {
+                    "tenant_id": TENANT_ID,
+                    "project_id": PROJECT_ID,
+                    "run_id": RUN_ID,
+                    "workflow_type": "seed_pipeline",
+                    "actor_user_id": USER_ID,
+                    "trace_id": "trace-live-seed-agent-profile",
+                    "permissions": {"seed_pipeline": ["run"]},
+                }
+            }
+        )
+
+    assert result["status"] == "completed"
+    assert result["stage"] == "agent_profiles"
+    assert result["module_key"] == "character_agent_profile"
+    assert result["profile_count"] == 1
+    assert result["memory_seed_count"] == 1
+    assert result["relationship_view_count"] == 1
+    assert len(provider.requests) == 1
+    assert _header(provider.requests[0]["headers"], "Authorization") == "Bearer sk-live-seed-profile"
+    assert _header(provider.requests[0]["headers"], "X-MiroFish-Run-Id") == RUN_ID
+    provider_body = json.dumps(provider.requests[0]["body"], ensure_ascii=False, sort_keys=True)
+    assert "source_context" in provider_body
+    assert "林舟" in provider_body
+    for forbidden in (
+        "credential_ref",
+        "source_object_key",
+        "object_key",
+        "private_notes",
+        "provider_raw_body",
+        "api_key",
+        "sk-provider-leak",
+        "raw manuscript sentence",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in provider_body
+
+    persisted = _read_seed_agent_profile_live_rows(admin_url)
+    assert len(persisted["seed_agent_profile_snapshots"]) == 1
+    snapshot = persisted["seed_agent_profile_snapshots"][0]
+    assert snapshot["module_key"] == "character_agent_profile"
+    assert snapshot["model_id"] == "model-seed-profile-live"
+    assert snapshot["profile_count"] == 1
+    assert snapshot["memory_seed_count"] == 1
+    assert snapshot["relationship_view_count"] == 1
+    assert snapshot["profiles_jsonb"]["profiles"] == [{"name": "林舟", "voice": "quiet resolve"}]
+    assert persisted["workflow_events"] == [
+        {
+            "event_type": "seed.stage.completed",
+            "payload_jsonb": {
+                "stage": "agent_profiles",
+                "status": "completed",
+                "activity": "agent_profile_activity",
+                "module_key": "character_agent_profile",
+                "profile_snapshot_id": result["profile_snapshot_id"],
+                "profile_count": 1,
+                "memory_seed_count": 1,
+                "relationship_view_count": 1,
+                "model_id": "model-seed-profile-live",
+            },
+        }
+    ]
+    encoded = json.dumps({"result": result, "persisted": persisted}, ensure_ascii=False, default=str)
+    for forbidden in (
+        "sk-live-seed-profile",
+        "sk-provider-leak",
+        "secret-ref",
+        "credential_ref",
+        "provider_raw_body",
+        "raw manuscript sentence",
+        "private prompt",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in encoded
+
+
 class _InMemoryObjectStore:
     def __init__(self, objects: dict[str, bytes]) -> None:
         self.objects = dict(objects)
@@ -381,6 +478,71 @@ class _InMemoryObjectStore:
 
     def write_bytes(self, object_key: str, data: bytes, content_type: str) -> None:
         self.objects[object_key] = data
+
+
+class _LiveAgentProfileProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_LiveAgentProfileProvider":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": json.loads(body),
+                    }
+                )
+                content = {
+                    "agent_profiles": {
+                        "profiles": [
+                            {
+                                "name": "林舟",
+                                "voice": "quiet resolve",
+                                "provider_raw_body": "must not persist",
+                                "api_key": "sk-provider-leak",
+                            }
+                        ],
+                        "memory_seeds": [{"title": "雨港承诺", "summary": "Keeps one promise."}],
+                        "relationship_views": [{"name": "林舟 / 陆晚", "summary": "Careful alliance."}],
+                    }
+                }
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {
+                        "prompt_tokens": 11,
+                        "completion_tokens": 17,
+                        "total_tokens": 28,
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        return Handler
 
 
 def _live_database_url() -> str:
@@ -465,6 +627,93 @@ def _prepare_live_database(admin_url: str, source_bytes: bytes) -> None:
             )
 
 
+def _prepare_live_agent_profile_database(admin_url: str, provider_base_url: str) -> None:
+    _prepare_live_database_foundation(admin_url)
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO workflow_runs (
+                     tenant_id, run_id, workflow_type, project_id, status, progress, started_by
+                   )
+                   VALUES (%s, %s, 'seed_pipeline', %s, 'running', 80, %s)""",
+                (TENANT_ID, RUN_ID, PROJECT_ID, USER_ID),
+            )
+            cursor.execute(
+                """INSERT INTO seed_entity_resolution_snapshots (
+                     tenant_id, project_id, run_id, module_key, model_id,
+                     resolution_jsonb, merged_entity_count, alias_count, conflict_count
+                   )
+                   VALUES (
+                     %s, %s, %s, 'entity_resolution', 'model-entity-resolution-live',
+                     %s::jsonb, 1, 1, 0
+                   )""",
+                (
+                    TENANT_ID,
+                    PROJECT_ID,
+                    RUN_ID,
+                    json.dumps(
+                        {
+                            "merged_entities": [
+                                {
+                                    "canonical_name": "林舟",
+                                    "entity_type": "character",
+                                    "aliases": ["小舟"],
+                                    "private_notes": "must not reach provider",
+                                    "credential_ref": "secret-ref",
+                                }
+                            ],
+                            "prompt": "private prompt must not reach provider",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            cursor.execute(
+                """INSERT INTO entities (
+                     tenant_id, entity_id, project_id, entity_type, canonical_name,
+                     importance, state_summary, source_run_id
+                   )
+                   VALUES (%s, gen_random_uuid(), %s, 'character', '林舟', 8, '守住雨港秘密。', %s)""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            cursor.execute(
+                """INSERT INTO relationships (
+                     tenant_id, relationship_id, project_id, source_entity_name,
+                     target_entity_name, relationship_type, summary, source_run_id
+                   )
+                   VALUES (%s, gen_random_uuid(), %s, '林舟', '陆晚', 'ally', '互相试探。', %s)""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            cursor.execute(
+                """INSERT INTO segment_summaries (
+                     tenant_id, segment_id, project_id, run_id, summary
+                   )
+                   VALUES (%s, gen_random_uuid(), %s, %s, '雨夜相遇。')""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_channels (
+                     tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+                   )
+                   VALUES (%s, %s, 'Seed Profile Live Provider', 'openai-compatible', %s, %s, 1, true)""",
+                (TENANT_ID, CHANNEL_ID, provider_base_url, _encrypt_api_key("sk-live-seed-profile")),
+            )
+            cursor.execute(
+                """INSERT INTO llm_models (
+                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                   )
+                   VALUES (%s, %s, 'model-seed-profile-live', 'live-provider', true, false)""",
+                (TENANT_ID, CHANNEL_ID),
+            )
+            cursor.execute(
+                """INSERT INTO llm_module_bindings (
+                     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+                   )
+                   VALUES (%s, %s, 'character_agent_profile', %s, 'model-seed-profile-live', '{"temperature":0.1}'::jsonb, %s)""",
+                (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+
+
 def _prepare_live_database_foundation(admin_url: str) -> None:
     with psycopg.connect(admin_url, autocommit=True) as connection:
         with connection.cursor() as cursor:
@@ -522,6 +771,18 @@ def _app_database_url(admin_url: str) -> str:
     parts["user"] = APP_ROLE
     parts["password"] = APP_PASSWORD
     return make_conninfo(**parts)
+
+
+def _encrypt_api_key(api_key: str) -> str:
+    key = bytes.fromhex(KEY_MATERIAL)
+    iv = bytes.fromhex("00112233445566778899aabb")
+    sealed = AESGCM(key).encrypt(iv, api_key.encode("utf-8"), None)
+    ciphertext, tag = sealed[:-16], sealed[-16:]
+    return "aes-256-gcm:v1:%s:%s:%s" % (
+        base64.b64encode(iv).decode("ascii"),
+        base64.b64encode(tag).decode("ascii"),
+        base64.b64encode(ciphertext).decode("ascii"),
+    )
 
 
 def _read_seed_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
@@ -596,8 +857,43 @@ def _read_seed_live_rows_for(admin_url: str, run_id: str, source_file_id: str) -
     }
 
 
+def _read_seed_agent_profile_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT
+                     module_key, model_id, profile_count, memory_seed_count,
+                     relationship_view_count, profiles_jsonb
+                   FROM seed_agent_profile_snapshots
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY updated_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            seed_agent_profile_snapshots = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "seed_agent_profile_snapshots": seed_agent_profile_snapshots,
+        "workflow_events": workflow_events,
+    }
+
+
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items()}
+
+
+def _header(headers: dict[str, str], name: str) -> str:
+    normalized = name.lower()
+    for key, value in headers.items():
+        if key.lower() == normalized:
+            return value
+    raise KeyError(name)
 
 
 def _wait_for_seed_live_parse_segment_rows(admin_url: str, run_id: str, source_file_id: str) -> dict[str, list[dict[str, Any]]]:

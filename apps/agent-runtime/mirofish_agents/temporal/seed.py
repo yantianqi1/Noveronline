@@ -35,6 +35,9 @@ SENSITIVE_WORKFLOW_EVENT_KEYS = {
     "manuscript",
     "object_key",
     "prompt",
+    "provider_raw_body",
+    "provider_response",
+    "raw_body",
     "raw_content",
     "response",
     "segment_object_key",
@@ -2963,6 +2966,9 @@ AGENT_PROFILE_PRIVATE_SNAPSHOT_BLOCKED_KEYS = {
     "metadata_jsonb",
     "object_key",
     "prompt",
+    "provider_raw_body",
+    "provider_response",
+    "raw_body",
     "raw_content",
     "raw_text",
     "response",
@@ -3018,7 +3024,7 @@ def _validate_ontology_resolution(resolution: Any) -> None:
             "LLM_MODULE_CAPABILITY_MISSING",
             f"{STORY_ONTOLOGY_MODULE_KEY} requires a JSON-capable model",
         )
-    for field_name in ("channel_id", "model_id", "base_url", "credential_ref"):
+    for field_name in ("channel_id", "model_id", "provider", "base_url", "credential_ref"):
         value = getattr(resolution, field_name, None)
         if not isinstance(value, str) or not value.strip():
             raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
@@ -3035,7 +3041,7 @@ def _validate_entity_resolution_resolution(resolution: Any) -> None:
             "LLM_MODULE_CAPABILITY_MISSING",
             f"{ENTITY_RESOLUTION_MODULE_KEY} requires a JSON-capable model",
         )
-    for field_name in ("channel_id", "model_id", "base_url", "credential_ref"):
+    for field_name in ("channel_id", "model_id", "provider", "base_url", "credential_ref"):
         value = getattr(resolution, field_name, None)
         if not isinstance(value, str) or not value.strip():
             raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
@@ -3052,7 +3058,7 @@ def _validate_agent_profile_resolution(resolution: Any) -> None:
             "LLM_MODULE_CAPABILITY_MISSING",
             f"{CHARACTER_AGENT_PROFILE_MODULE_KEY} requires a JSON-capable model",
         )
-    for field_name in ("channel_id", "model_id", "base_url", "credential_ref"):
+    for field_name in ("channel_id", "model_id", "provider", "base_url", "credential_ref"):
         value = getattr(resolution, field_name, None)
         if not isinstance(value, str) or not value.strip():
             raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")

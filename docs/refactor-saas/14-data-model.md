@@ -207,7 +207,7 @@ seed_agent_profile_snapshots
   updated_at
 ```
 
-表必须启用 tenant RLS，并通过 `(tenant_id, project_id, run_id, module_key)` 保持同一 Seed run / module 的 upsert 幂等性。`PostgresAgentProfileSnapshotWriter` 写入前设置 `app_set_tenant_context`，并清洗 prompt/API key/`credential_ref`/raw content/object key/draft/manuscript 等高风险字段；普通 DB/driver failure 稳定为 `AGENT_PROFILE_SNAPSHOT_WRITE_FAILED`。
+表必须启用 tenant RLS，并通过 `(tenant_id, project_id, run_id, module_key)` 保持同一 Seed run / module 的 upsert 幂等性。`PostgresAgentProfileSnapshotWriter` 写入前设置 `app_set_tenant_context`，并清洗 prompt/API key/`credential_ref`/raw content/object key/provider raw body/provider response/draft/manuscript 等高风险字段；普通 DB/driver failure 稳定为 `AGENT_PROFILE_SNAPSHOT_WRITE_FAILED`。`character_agent_profile` live harness 已覆盖 opt-in Postgres/app-role + local provider 写入链路，但默认无 live DB env 时 skipped，不能视为完整 Seed provider E2E 已执行。
 
 ## Asset Tables
 
