@@ -2217,6 +2217,72 @@ func TestSessionCSRFTokenRequiresSessionCookieAndDoesNotLeakTokenMaterial(t *tes
 	}
 }
 
+func TestUnsafeActorSensitiveCookieRoutesRequireCSRFBeforeAuthorizerAndStores(t *testing.T) {
+	token := signedSessionTokenForTest(t, "test-secret", "user-123")
+
+	t.Run("project_asset_create", func(t *testing.T) {
+		authorizer := &recordingAuthorizer{}
+		store := &recordingAssetMutationStore{}
+		server := NewServer(Config{
+			Authorizer:         authorizer,
+			AssetMutationStore: store,
+			SessionAuthSecret:  "test-secret",
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/assets", strings.NewReader(`{
+			"scope":"project",
+			"asset_type":"world_rule",
+			"category":"world",
+			"lifecycle":"draft",
+			"title":"公开资产",
+			"summary":"公开摘要"
+		}`))
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("expected missing CSRF to fail with 403, got %d: %s", response.Code, response.Body.String())
+		}
+		if authorizer.called || store.createInput.ProjectID != "" {
+			t.Fatalf("missing CSRF reached authorizer/store: authorizer=%#v store=%#v", authorizer, store.createInput)
+		}
+		for _, forbidden := range []string{"user-123", "公开资产", token, "prompt", "api_key", "credential_ref", "draft", "manuscript"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("missing CSRF response leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("tenant_session_revoke", func(t *testing.T) {
+		authorizer := &recordingAuthorizer{}
+		sessionStore := &recordingAuthSessionStore{}
+		server := NewServer(Config{
+			Authorizer:        authorizer,
+			AuthSessionStore:  sessionStore,
+			SessionAuthSecret: "test-secret",
+		})
+		request := httptest.NewRequest(http.MethodDelete, "/v1/tenants/tenant-123/sessions", nil)
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("expected missing CSRF to fail with 403, got %d: %s", response.Code, response.Body.String())
+		}
+		if authorizer.called || sessionStore.validateCalled || sessionStore.revokeTenantCalled {
+			t.Fatalf("missing CSRF reached actor/session side effects: authorizer=%#v store=%#v", authorizer, sessionStore)
+		}
+		for _, forbidden := range []string{"user-123", token, "prompt", "api_key", "credential_ref", "draft", "manuscript"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("missing CSRF response leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+}
+
 func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
@@ -3534,12 +3600,14 @@ func TestAuthSubjectWriterRunUsesSignedCookieForRBACAndStarter(t *testing.T) {
 		LLMResolver:       boundWriterComposerResolver(),
 		SessionAuthSecret: "test-secret",
 	})
+	token := signedSessionTokenForTest(t, "test-secret", "user-cookie")
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
 	request.AddCookie(&http.Cookie{
 		Name:  "mirofish_session",
-		Value: signedSessionTokenForTest(t, "test-secret", "user-cookie"),
+		Value: token,
 	})
 	response := httptest.NewRecorder()
 
@@ -14595,12 +14663,14 @@ func TestAuthSubjectTraceExportUsesSignedCookieForFullAccessAndAudit(t *testing.
 		TraceExportAuditor: auditor,
 		SessionAuthSecret:  "test-secret",
 	})
+	token := signedSessionTokenForTest(t, "test-secret", "trace-user")
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
 	request.AddCookie(&http.Cookie{
 		Name:  "mirofish_session",
-		Value: signedSessionTokenForTest(t, "test-secret", "trace-user"),
+		Value: token,
 	})
 	response := httptest.NewRecorder()
 

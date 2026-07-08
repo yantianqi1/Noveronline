@@ -4,6 +4,7 @@ export type ApiContext = {
   tenantId: string;
   actorUserId?: string;
   sessionCookie?: string;
+  csrfToken?: string;
 };
 
 export type ApiFailure = {
@@ -5020,6 +5021,10 @@ function contextHeaders(input: ApiContext) {
 
   if (sessionCookie) {
     headers.Cookie = `mirofish_session=${sessionCookie}`;
+    const csrfToken = input.csrfToken?.trim();
+    if (csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken;
+    }
   } else if (actorUserId) {
     headers["X-User-Id"] = actorUserId;
   }

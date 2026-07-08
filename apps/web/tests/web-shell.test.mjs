@@ -305,9 +305,14 @@ test("project pages resolve API context from browser session cookie instead of h
   assert.match(helper, /export\s+async\s+function\s+webApiContext/);
   assert.match(helper, /cookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
   assert.match(helper, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
+  assert.match(helper, /getSessionCSRFToken/);
+  assert.match(helper, /const\s+csrfResult\s*=\s*sessionCookie\s*\?\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie\s*\}\)\s*:\s*undefined/s);
   assert.match(helper, /actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId/);
+  assert.match(helper, /csrfToken:\s*csrfResult\?\.ok\s*\?\s*csrfResult\.csrf_token\s*:\s*undefined/);
   assert.match(client, /sessionCookie\?:\s*string/);
+  assert.match(client, /csrfToken\?:\s*string/);
   assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
+  assert.match(client, /headers\["X-CSRF-Token"\]\s*=\s*csrfToken/);
   assert.match(client, /else if\s*\(actorUserId\)\s*\{\s*headers\["X-User-Id"\]\s*=\s*actorUserId;\s*\}/s);
   assert.match(client, /function contextHeaders\(input:\s*ApiContext\)/);
   assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);

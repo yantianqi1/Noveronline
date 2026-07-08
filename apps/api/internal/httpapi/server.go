@@ -1053,6 +1053,43 @@ func (s *Server) verifySessionCSRFToken(tokenHash string, presented string) bool
 	return hmac.Equal(presentedBytes, expectedBytes)
 }
 
+func unsafeActorSensitiveCookieRequest(request *http.Request) bool {
+	if !isActorSensitiveRoute(request) {
+		return false
+	}
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	if len(request.Header.Values("Authorization")) > 0 {
+		return false
+	}
+	if _, err := request.Cookie(sessionCookieName); err == nil {
+		return true
+	}
+	return false
+}
+
+func (s *Server) verifyUnsafeActorSensitiveCookieCSRF(response http.ResponseWriter, request *http.Request) bool {
+	if !unsafeActorSensitiveCookieRequest(request) {
+		return true
+	}
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return true
+	}
+	_, tokenHash, ok := s.verifySignedSessionToken(cookie.Value)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return false
+	}
+	if !s.verifySessionCSRFToken(tokenHash, request.Header.Get(csrfHeaderName)) {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return false
+	}
+	return true
+}
+
 func isActorSensitiveRoute(request *http.Request) bool {
 	path := request.URL.Path
 	switch {
@@ -1394,6 +1431,9 @@ func isSinglePathSegment(value string) bool {
 }
 
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if !s.verifyUnsafeActorSensitiveCookieCSRF(response, request) {
+		return
+	}
 	if isActorSensitiveRoute(request) {
 		var ok bool
 		request, ok = s.withResolvedActorUserID(response, request)
