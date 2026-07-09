@@ -118,9 +118,19 @@ test("project navigation includes writer and LLM Facility routes with active pat
 test("Current user API client can fetch public membership summary with browser session cookie", async () => {
   const client = await fileText("lib/api.ts");
   const currentUserTypes = sourceSlice(client, "export type TenantMembershipSummary", "export type WriterRunSummary");
+  const apiFetchHelper = sourceSlice(client, "function apiFetch", "export async function getCurrentUser");
   const currentUserClient = sourceSlice(client, "export async function getCurrentUser", "export async function startWriterRun");
   const currentUserDecoder = sourceSlice(client, "async function decodeCurrentUserResponse", "async function decodeWriterRunResponse");
 
+  assert.match(apiFetchHelper, /hasCookieHeader/);
+  assert.match(apiFetchHelper, /return fetch\(input,\s*init\)/);
+  assert.match(apiFetchHelper, /nodeHttpFetch/);
+  assert.doesNotMatch(apiFetchHelper, /MIROFISH_WEB_TEST_ALLOW_COOKIE_FETCH_MOCK/);
+  assert.match(client, /import http from "node:http"/);
+  assert.match(client, /import https from "node:https"/);
+  assert.match(apiFetchHelper, /url\.protocol === "https:" \? https : http/);
+  assert.match(apiFetchHelper, /new Response\(Buffer\.concat\(chunks\)/);
+  assert.doesNotMatch(client, /await fetch\(/);
   assert.match(currentUserTypes, /CurrentUserRecord/);
   assert.match(currentUserTypes, /TenantMembershipSummary/);
   assert.match(currentUserTypes, /ProjectMembershipSummary/);
@@ -140,6 +150,7 @@ test("Current user API client can fetch public membership summary with browser s
   assert.match(currentUserClient, /\/v1\/me/);
   assert.match(currentUserClient, /actorUserId\?:\s*string/);
   assert.match(currentUserClient, /sessionCookie\?:\s*string/);
+  assert.match(currentUserClient, /const response = await apiFetch/);
   assert.match(currentUserClient, /headers:\s*currentUserHeaders\(input\)/);
   assert.match(client, /function currentUserHeaders\(input:\s*\{\s*actorUserId\?:\s*string;\s*sessionCookie\?:\s*string;?\s*\}\)/);
   assert.match(client, /headers\.Cookie\s*=\s*`mirofish_session=\$\{sessionCookie\}`/);
@@ -167,11 +178,18 @@ test("Current user API client can fetch public membership summary with browser s
 
 test("tenant picker project layout loads current user and passes memberships into ProjectNav", async () => {
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const requestSession = await fileText("lib/request-session.ts");
 
   assert.match(layout, /getCurrentUser/);
-  assert.match(layout, /import\s*\{\s*cookies\s*\}\s*from\s*"next\/headers"/);
-  assert.match(layout, /const\s+cookieStore\s*=\s*await\s+cookies\(\)/);
-  assert.match(layout, /cookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(layout, /currentRequestSessionCookie/);
+  assert.match(layout, /const\s+sessionCookie\s*=\s*currentRequestSessionCookie\(\{\s*required:\s*true\s*\}\)/);
+  assert.doesNotMatch(layout, /from\s*"next\/headers"|cookies\(\)|headers\(\)|cookieStore\.get\("mirofish_session"\)/);
+  assert.match(requestSession, /workUnitAsyncStorage/);
+  assert.match(requestSession, /CURRENT_REQUEST_SESSION_CONTEXT_UNAVAILABLE/);
+  assert.match(requestSession, /store\.type !== "request"/);
+  assert.match(requestSession, /CURRENT_REQUEST_SESSION_STORE_UNAVAILABLE/);
+  assert.match(requestSession, /store\.headers\.get\("cookie"\)/);
+  assert.doesNotMatch(requestSession, /from\s*"next\/headers"|cookies\(\)|headers\(\)/);
   assert.match(layout, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
   assert.match(layout, /sessionCookie\s*\|\|\s*actorUserId/);
   assert.match(layout, /await\s+getCurrentUser\(\{\s*actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId,\s*sessionCookie,\s*\}\)/s);
@@ -229,9 +247,10 @@ test("password login page issues browser session server-side without exposing to
 test("project shell exposes current-session logout without leaking the session token", async () => {
   const client = await fileText("lib/api.ts");
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const actions = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/session-actions.ts");
   const nav = await fileText("components/project-nav.tsx");
   const logoutClient = sourceSlice(client, "export async function revokeCurrentSession", "export async function startWriterRun");
-  const logoutAction = sourceSlice(layout, "async function logoutAction", "const currentUser");
+  const logoutAction = sourceSlice(actions, "export async function logoutAction", "export async function rotateSessionAction");
 
   assert.match(client, /export async function getSessionCSRFToken\(input:\s*\{\s*sessionCookie\?:\s*string;?\s*\}\)/);
   assert.match(client, /\/v1\/auth\/csrf-token/);
@@ -247,15 +266,23 @@ test("project shell exposes current-session logout without leaking the session t
   assert.match(client, /headers\["X-CSRF-Token"\]\s*=\s*csrfToken/);
   assert.doesNotMatch(logoutClient, /X-User-Id|contextHeaders|actorUserId|body|JSON\.stringify/);
 
-  assert.match(layout, /getSessionCSRFToken/);
-  assert.match(layout, /revokeCurrentSession/);
+  assert.match(layout, /import\s*\{[\s\S]*logoutAction[\s\S]*\}\s*from\s*"\.\/session-actions"/);
+  assert.doesNotMatch(layout, /async function logoutAction|async function rotateSessionAction|async function revokeAllSessionsAction|async function revokeTenantSessionsAction/);
+  assert.match(actions, /^"use server";/);
+  assert.match(actions, /getSessionCSRFToken/);
+  assert.match(actions, /revokeCurrentSession/);
+  assert.match(actions, /async function readActionSessionCookie/);
+  assert.match(actions, /const\s+actionCookieStore\s*=\s*await\s+cookies\(\)/);
+  assert.match(actions, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
   assert.match(logoutAction, /"use server"/);
-  assert.match(logoutAction, /const\s+actionCookieStore\s*=\s*await\s+cookies\(\)/);
-  assert.match(logoutAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(logoutAction, /readActionSessionCookie\(\)/);
   assert.match(logoutAction, /if\s*\(!actionSessionCookie\)\s*\{\s*return;\s*\}/s);
-  assert.match(logoutAction, /const\s+csrfResult\s*=\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
-  assert.match(logoutAction, /if\s*\(!csrfResult\.ok\)\s*\{\s*return;\s*\}/s);
+  assert.match(actions, /async function requireActionCSRFToken/);
+  assert.match(actions, /throw new Error\("SESSION_CSRF_TOKEN_UNAVAILABLE"\)/);
+  assert.match(logoutAction, /const\s+csrfResult\s*=\s*await\s+requireActionCSRFToken\(actionSessionCookie\)/s);
   assert.match(logoutAction, /await\s+revokeCurrentSession\(\{\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
+  assert.match(logoutAction, /throw new Error\("SESSION_REVOKE_FAILED"\)/);
+  assert.match(logoutAction, /actionCookieStore\.delete\("mirofish_session"\)/);
   assert.doesNotMatch(logoutAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|sessionCookie\s*\}/);
   assert.match(layout, /logoutAction=\{logoutAction\}/);
 
@@ -270,9 +297,10 @@ test("project shell exposes current-session logout without leaking the session t
 test("project shell exposes current-session rotation without leaking the session token", async () => {
   const client = await fileText("lib/api.ts");
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const actions = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/session-actions.ts");
   const nav = await fileText("components/project-nav.tsx");
   const rotationClient = sourceSlice(client, "export async function rotateCurrentSession", "export async function getSessionCSRFToken");
-  const rotateAction = sourceSlice(layout, "async function rotateSessionAction", "async function logoutAction");
+  const rotateAction = sourceSlice(actions, "export async function rotateSessionAction", "export async function revokeAllSessionsAction");
 
   assert.match(client, /export type RotatedSessionCookie/);
   assert.match(client, /export async function rotateCurrentSession\(input:\s*\{\s*sessionCookie\?:\s*string;\s*csrfToken\?:\s*string;?\s*\}\)/);
@@ -284,12 +312,14 @@ test("project shell exposes current-session rotation without leaking the session
   assert.match(rotationClient, /networkFailure\(error,\s*"SESSION_ROTATION_FAILED"\)/);
   assert.doesNotMatch(rotationClient, /X-User-Id|contextHeaders|actorUserId|body|JSON\.stringify/);
 
-  assert.match(layout, /rotateCurrentSession/);
+  assert.match(layout, /import\s*\{[\s\S]*rotateSessionAction[\s\S]*\}\s*from\s*"\.\/session-actions"/);
+  assert.doesNotMatch(layout, /async function rotateSessionAction/);
+  assert.match(actions, /rotateCurrentSession/);
   assert.match(rotateAction, /"use server"/);
-  assert.match(rotateAction, /const\s+actionCookieStore\s*=\s*await\s+cookies\(\)/);
-  assert.match(rotateAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
-  assert.match(rotateAction, /const\s+csrfResult\s*=\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(rotateAction, /readActionSessionCookie\(\)/);
+  assert.match(rotateAction, /const\s+csrfResult\s*=\s*await\s+requireActionCSRFToken\(actionSessionCookie\)/s);
   assert.match(rotateAction, /const\s+rotationResult\s*=\s*await\s+rotateCurrentSession\(\{[\s\S]*sessionCookie:\s*actionSessionCookie,[\s\S]*csrfToken:\s*csrfResult\.csrf_token,[\s\S]*\}\)/);
+  assert.match(rotateAction, /throw new Error\("SESSION_ROTATION_FAILED"\)/);
   assert.match(rotateAction, /actionCookieStore\.set\("mirofish_session",\s*rotationResult\.session_cookie\.value,/);
   assert.doesNotMatch(rotateAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify/);
   assert.match(layout, /rotateSessionAction=\{rotateSessionAction\}/);
@@ -303,10 +333,11 @@ test("project shell exposes current-session rotation without leaking the session
 test("project shell exposes session management metadata without leaking token material", async () => {
   const client = await fileText("lib/api.ts");
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const actions = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/session-actions.ts");
   const nav = await fileText("components/project-nav.tsx");
   const listClient = sourceSlice(client, "export async function getCurrentUserSessions", "export async function revokeAllCurrentUserSessions");
   const revokeAllClient = sourceSlice(client, "export async function revokeAllCurrentUserSessions", "export async function startWriterRun");
-  const revokeAllAction = sourceSlice(layout, "async function revokeAllSessionsAction", "async function rotateSessionAction");
+  const revokeAllAction = sourceSlice(actions, "export async function revokeAllSessionsAction", "export async function revokeTenantSessionsAction");
 
   assert.match(client, /export type CurrentUserSessionRecord/);
   assert.match(client, /export type CurrentUserSessionsSummary/);
@@ -328,12 +359,13 @@ test("project shell exposes session management metadata without leaking token ma
   assert.doesNotMatch(revokeAllClient, /X-User-Id|actorUserId|body|JSON\.stringify/);
 
   assert.match(layout, /getCurrentUserSessions/);
-  assert.match(layout, /revokeAllCurrentUserSessions/);
+  assert.match(actions, /revokeAllCurrentUserSessions/);
   assert.match(layout, /const\s+currentUserSessions\s*=\s*sessionCookie\s*\?\s*await\s+getCurrentUserSessions\(\{\s*sessionCookie\s*\}\)\s*:\s*undefined/s);
   assert.match(revokeAllAction, /"use server"/);
-  assert.match(revokeAllAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
-  assert.match(revokeAllAction, /const\s+csrfResult\s*=\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
+  assert.match(revokeAllAction, /readActionSessionCookie\(\)/);
+  assert.match(revokeAllAction, /const\s+csrfResult\s*=\s*await\s+requireActionCSRFToken\(actionSessionCookie\)/s);
   assert.match(revokeAllAction, /await\s+revokeAllCurrentUserSessions\(\{\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
+  assert.match(revokeAllAction, /throw new Error\("SESSION_REVOKE_FAILED"\)/);
   assert.match(layout, /currentUserSessions=\{currentUserSessions\}/);
   assert.match(layout, /revokeAllSessionsAction=\{revokeAllSessionsAction\}/);
   assert.doesNotMatch(revokeAllAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify|sessionCookie\s*\}/);
@@ -354,9 +386,10 @@ test("project shell exposes session management metadata without leaking token ma
 test("project shell exposes tenant-wide session revocation for tenant admins without leaking token material", async () => {
   const client = await fileText("lib/api.ts");
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const actions = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/session-actions.ts");
   const nav = await fileText("components/project-nav.tsx");
   const revokeTenantClient = sourceSlice(client, "export async function revokeTenantSessions", "export async function startWriterRun");
-  const revokeTenantAction = sourceSlice(layout, "async function revokeTenantSessionsAction", "async function revokeAllSessionsAction");
+  const revokeTenantAction = sourceSlice(actions, "export async function revokeTenantSessionsAction", "async function readActionSessionCookie");
 
   assert.match(client, /export async function revokeTenantSessions\(input:\s*\{\s*tenantId:\s*string;\s*sessionCookie\?:\s*string;\s*csrfToken\?:\s*string;?\s*\}\)/);
   assert.match(revokeTenantClient, /\/v1\/tenants\/\$\{encodeURIComponent\(input\.tenantId\)\}\/sessions/);
@@ -365,13 +398,14 @@ test("project shell exposes tenant-wide session revocation for tenant admins wit
   assert.match(revokeTenantClient, /networkFailure\(error,\s*"TENANT_SESSION_REVOKE_FAILED"\)/);
   assert.doesNotMatch(revokeTenantClient, /X-User-Id|actorUserId|body|JSON\.stringify|password|token_hash/);
 
-  assert.match(layout, /revokeTenantSessions/);
+  assert.match(actions, /revokeTenantSessions/);
   assert.match(revokeTenantAction, /"use server"/);
-  assert.match(revokeTenantAction, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
-  assert.match(revokeTenantAction, /getSessionCSRFToken\(\{\s*sessionCookie:\s*actionSessionCookie\s*\}\)/s);
-  assert.match(revokeTenantAction, /revokeTenantSessions\(\{\s*tenantId:\s*tenantSlug,\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
+  assert.match(revokeTenantAction, /readActionSessionCookie\(\)/);
+  assert.match(revokeTenantAction, /requireActionCSRFToken\(actionSessionCookie\)/s);
+  assert.match(revokeTenantAction, /revokeTenantSessions\(\{\s*tenantId,\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
+  assert.match(revokeTenantAction, /throw new Error\("TENANT_SESSION_REVOKE_FAILED"\)/);
   assert.match(revokeTenantAction, /actionCookieStore\.delete\("mirofish_session"\)/);
-  assert.match(layout, /revokeTenantSessionsAction=\{revokeTenantSessionsAction\}/);
+  assert.match(layout, /revokeTenantSessionsAction=\{revokeTenantSessionsAction\.bind\(null,\s*tenantSlug\)\}/);
   assert.doesNotMatch(revokeTenantAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
 
   assert.match(nav, /revokeTenantSessionsAction:\s*\(\)\s*=>\s*Promise<void>/);
@@ -432,12 +466,14 @@ test("project pages resolve API context from browser session cookie instead of h
   const pageSources = (await Promise.all(projectPages.map((page) => fileText(page)))).join("\n");
   const client = await fileText("lib/api.ts");
 
-  assert.match(helper, /import\s*\{\s*cookies\s*\}\s*from\s*"next\/headers"/);
   assert.match(helper, /export\s+async\s+function\s+webApiContext/);
-  assert.match(helper, /cookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
+  assert.match(helper, /currentRequestSessionCookie/);
+  assert.match(helper, /const\s+sessionCookie\s*=\s*currentRequestSessionCookie\(\{\s*required:\s*true\s*\}\)/);
+  assert.doesNotMatch(helper, /from\s*"next\/headers"|cookies\(\)|headers\(\)|cookieStore\.get\("mirofish_session"\)/);
   assert.match(helper, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
   assert.match(helper, /getSessionCSRFToken/);
   assert.match(helper, /const\s+csrfResult\s*=\s*sessionCookie\s*\?\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie\s*\}\)\s*:\s*undefined/s);
+  assert.match(helper, /throw new Error\("WEB_CSRF_TOKEN_UNAVAILABLE"\)/);
   assert.match(helper, /actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId/);
   assert.match(helper, /csrfToken:\s*csrfResult\?\.ok\s*\?\s*csrfResult\.csrf_token\s*:\s*undefined/);
   assert.match(client, /sessionCookie\?:\s*string/);
@@ -712,7 +748,7 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /seq 1/);
   assert.match(browserLiveTest, /afterEventId:\s*queuedEvent\.event_id/);
   assert.match(browserLiveTest, /assertNoForbiddenPublicMarkers/);
-  assert.match(browserLiveTest, /"bo"\s*\+\s*"dy"/);
+  assert.doesNotMatch(browserLiveTest, /"ra"\s*\+\s*"w"/);
   assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"body"/);
   assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"source"/);
   assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"token"/);
@@ -724,6 +760,7 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /redactAssertionMessage/);
   assert.match(browserLiveTest, /"api"\s*\+\s*"\s+"\s*\+\s*"key"/);
   assert.match(browserLiveTest, /"encrypted"\s*\+\s*"\s+"\s*\+\s*"credential"/);
+  assert.match(browserLiveTest, /"\\\\\\""\s*\+\s*"ob"\s*\+\s*"ject"\s*\+\s*"\\\\\\""/);
   assert.match(browserLiveTest, /"object"\s*\+\s*"\s+"\s*\+\s*"key"/);
   assert.doesNotMatch(browserLiveTest, /actorUserId|MIROFISH_WEB_BROWSER_LIVE_SEED_ACTOR|X-User-Id|OPENAI_API_KEY|api_key|encrypted_api_key|credential_ref|object_key|draft|manuscript|prompt|provider_response|raw_body|content_text/i);
 });

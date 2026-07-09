@@ -1,3 +1,6 @@
+import http from "node:http";
+import https from "node:https";
+
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8080";
 
 export type ApiContext = {
@@ -1334,10 +1337,146 @@ export function apiBaseUrl() {
   return process.env.MIROFISH_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 }
 
-export async function getCurrentUser(input: { actorUserId?: string; sessionCookie?: string }): Promise<CurrentUserSummary> {
+function apiFetch(input: string | URL, init: RequestInit = {}) {
+  const headers = headersFromInit(init.headers);
+  if (!hasCookieHeader(headers)) {
+    return fetch(input, init);
+  }
+  return nodeHttpFetch(input, init);
+}
+
+function headersFromInit(headers: HeadersInit | undefined) {
+  const result: Record<string, string> = {};
+  if (!headers) {
+    return result;
+  }
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => {
+      result[key] = value;
+    });
+    return result;
+  }
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      result[key] = value;
+    }
+    return result;
+  }
+  return { ...headers };
+}
+
+function hasCookieHeader(headers: Record<string, string>) {
+  return Object.keys(headers).some((key) => key.toLowerCase() === "cookie");
+}
+
+function nodeHttpFetch(input: string | URL, init: RequestInit) {
+  const url = typeof input === "string" ? new URL(input) : input;
+  const requestHeaders = headersFromInit(init.headers);
+  const transport = url.protocol === "https:" ? https : http;
+
+  return Promise.resolve(bodyBuffer(init.body)).then((requestBody) => new Promise<Response>((resolve, reject) => {
+    if (init.signal?.aborted) {
+      reject(new Error("cookie-backed API request aborted"));
+      return;
+    }
+    if (requestBody && !hasHeader(requestHeaders, "content-length")) {
+      requestHeaders["Content-Length"] = String(requestBody.byteLength);
+    }
+    let settled = false;
+    const settleReject = (error: Error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+    const request = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: `${url.pathname}${url.search}`,
+        method: init.method ?? "GET",
+        headers: requestHeaders,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        response.on("error", settleReject);
+        response.on("aborted", () => settleReject(new Error("cookie-backed API response aborted")));
+        response.on("end", () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          const responseHeaders = new Headers();
+          for (const [key, value] of Object.entries(response.headers)) {
+            if (Array.isArray(value)) {
+              for (const item of value) {
+                responseHeaders.append(key, item);
+              }
+            } else if (value !== undefined) {
+              responseHeaders.set(key, String(value));
+            }
+          }
+          resolve(
+            new Response(Buffer.concat(chunks), {
+              status: response.statusCode ?? 599,
+              statusText: response.statusMessage,
+              headers: responseHeaders,
+            }),
+          );
+        });
+      },
+    );
+    const abortRequest = () => {
+      request.destroy(new Error("cookie-backed API request aborted"));
+    };
+    init.signal?.addEventListener("abort", abortRequest, { once: true });
+    request.on("error", settleReject);
+    request.on("close", () => {
+      init.signal?.removeEventListener("abort", abortRequest);
+    });
+    if (requestBody) {
+      request.write(requestBody);
+    }
+    request.end();
+  }));
+}
+
+function hasHeader(headers: Record<string, string>, target: string) {
+  const lowerTarget = target.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === lowerTarget);
+}
+
+async function bodyBuffer(body: BodyInit | null | undefined) {
+  if (body === undefined || body === null) {
+    return undefined;
+  }
+  if (typeof body === "string") {
+    return Buffer.from(body);
+  }
+  if (body instanceof URLSearchParams) {
+    return Buffer.from(body.toString());
+  }
+  if (body instanceof ArrayBuffer) {
+    return Buffer.from(body);
+  }
+  if (ArrayBuffer.isView(body)) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  }
+  if (typeof body === "object" && "arrayBuffer" in body && typeof body.arrayBuffer === "function") {
+    return Buffer.from(await body.arrayBuffer());
+  }
+  throw new Error("unsupported cookie-backed API request body");
+}
+
+export async function getCurrentUser(input: { actorUserId?: string; sessionCookie?: string; signal?: AbortSignal }): Promise<CurrentUserSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/me`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/me`, {
       headers: currentUserHeaders(input),
+      signal: input.signal,
       cache: "no-store",
     });
 
@@ -1363,7 +1502,7 @@ function currentUserHeaders(input: { actorUserId?: string; sessionCookie?: strin
 
 export async function loginWithPassword(input: { email: string; password: string }): Promise<PasswordLoginSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/auth/login`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1402,7 +1541,7 @@ export async function loginWithPassword(input: { email: string; password: string
 
 export async function revokeCurrentSession(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/auth/session`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/session`, {
       method: "DELETE",
       headers: sessionCookieHeaders(input),
       cache: "no-store",
@@ -1423,7 +1562,7 @@ export async function revokeCurrentSession(input: { sessionCookie?: string; csrf
 
 export async function rotateCurrentSession(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRotationSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/auth/session/rotation`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/session/rotation`, {
       method: "POST",
       headers: sessionCookieHeaders(input),
       cache: "no-store",
@@ -1451,7 +1590,7 @@ export async function rotateCurrentSession(input: { sessionCookie?: string; csrf
 
 export async function getSessionCSRFToken(input: { sessionCookie?: string }): Promise<SessionCSRFTokenSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/auth/csrf-token`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/csrf-token`, {
       headers: sessionCookieHeaders(input),
       cache: "no-store",
     });
@@ -1478,7 +1617,7 @@ export async function getSessionCSRFToken(input: { sessionCookie?: string }): Pr
 
 export async function getCurrentUserSessions(input: { sessionCookie?: string }): Promise<CurrentUserSessionsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/auth/sessions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/sessions`, {
       method: "GET",
       headers: sessionCookieHeaders(input),
       cache: "no-store",
@@ -1515,7 +1654,7 @@ export async function getCurrentUserSessions(input: { sessionCookie?: string }):
 
 export async function revokeAllCurrentUserSessions(input: { sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/auth/sessions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/sessions`, {
       method: "DELETE",
       headers: sessionCookieHeaders(input),
       cache: "no-store",
@@ -1536,7 +1675,7 @@ export async function revokeAllCurrentUserSessions(input: { sessionCookie?: stri
 
 export async function revokeTenantSessions(input: { tenantId: string; sessionCookie?: string; csrfToken?: string }): Promise<SessionRevokeSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/tenants/${encodeURIComponent(input.tenantId)}/sessions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/tenants/${encodeURIComponent(input.tenantId)}/sessions`, {
       method: "DELETE",
       headers: sessionCookieHeaders(input),
       cache: "no-store",
@@ -1574,6 +1713,23 @@ function parseSessionCookieSetCookie(setCookieHeader: string | null): RotatedSes
   if (!setCookieHeader) {
     return null;
   }
+  for (const cookieHeader of splitSetCookieHeader(setCookieHeader)) {
+    const cookie = parseSingleSessionCookie(cookieHeader);
+    if (cookie) {
+      return cookie;
+    }
+  }
+  return null;
+}
+
+function splitSetCookieHeader(setCookieHeader: string) {
+  return setCookieHeader
+    .split(/,(?=\s*[^;,=]+=[^;,]+)/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function parseSingleSessionCookie(setCookieHeader: string): RotatedSessionCookie | null {
   const parts = setCookieHeader
     .split(";")
     .map((part) => part.trim())
@@ -1623,7 +1779,7 @@ function parseSessionCookieSetCookie(setCookieHeader: string | null): RotatedSes
 }
 
 export async function startWriterRun(input: StartWriterRunInput): Promise<WriterRunSummary> {
-  const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/writer-runs`, {
+  const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/writer-runs`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1641,7 +1797,7 @@ export async function startWriterRun(input: StartWriterRunInput): Promise<Writer
 }
 
 export async function getWriterRunSummary(input: ApiContext & { runId: string }) {
-  const response = await fetch(`${apiBaseUrl()}/v1/writer-runs/${input.runId}`, {
+  const response = await apiFetch(`${apiBaseUrl()}/v1/writer-runs/${input.runId}`, {
     headers: contextHeaders(input),
     cache: "no-store",
   });
@@ -1657,7 +1813,7 @@ export async function getWriterRunEvents(
     if (input.afterEventId) {
       url.searchParams.set("after_event_id", input.afterEventId);
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1672,7 +1828,7 @@ export async function getProjectManuscript(
   input: ApiContext & { projectId: string },
 ): Promise<ProjectManuscriptSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1687,7 +1843,7 @@ export async function getProjectManuscriptExportManifest(
   input: ApiContext & { projectId: string },
 ): Promise<ProjectManuscriptExportManifestSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript/export`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript/export`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1702,7 +1858,7 @@ export async function getWorkflowRunSummary(
   input: ApiContext & { runId: string },
 ): Promise<WorkflowRunSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/workflow-runs/${input.runId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/workflow-runs/${input.runId}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1721,7 +1877,7 @@ export async function getWorkflowRunEvents(
     if (input.afterEventId) {
       url.searchParams.set("after_event_id", input.afterEventId);
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1736,7 +1892,7 @@ export async function getProjectSourceFiles(
   input: ApiContext & { projectId: string },
 ): Promise<SourceFilesSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/source-files`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/source-files`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1751,7 +1907,7 @@ export async function getProjectOverview(
   input: ApiContext & { projectId: string },
 ): Promise<ProjectOverviewSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/overview`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/overview`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1766,7 +1922,7 @@ export async function getProjectReadinessSnapshot(
   input: ApiContext & { projectId: string },
 ): Promise<ProjectReadinessSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/readiness`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/readiness`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1781,7 +1937,7 @@ export async function createSourceFileUpload(
   input: CreateSourceFileUploadInput,
 ): Promise<SourceFileSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/uploads`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/uploads`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -1807,7 +1963,7 @@ export async function completeSourceFileUpload(
   input: CompleteSourceFileUploadInput,
 ): Promise<SourceFileSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/uploads/${input.uploadId}/complete`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/uploads/${input.uploadId}/complete`, {
       method: "POST",
       headers: contextHeaders(input),
       cache: "no-store",
@@ -1824,7 +1980,7 @@ export async function uploadSourceFileObject(
 ): Promise<SourceFileObjectUploadSummary> {
   try {
     const contentType = input.mimeType?.trim() || input.file.type || "application/octet-stream";
-    const response = await fetch(`${apiBaseUrl()}/v1/uploads/${input.uploadId}/object`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/uploads/${input.uploadId}/object`, {
       method: "PUT",
       headers: {
         ...contextHeaders(input),
@@ -1842,7 +1998,7 @@ export async function uploadSourceFileObject(
 
 export async function startSeedRun(input: StartSeedRunInput): Promise<SeedRunStartSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/seed-runs`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/seed-runs`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -1863,7 +2019,7 @@ export async function startSeedRun(input: StartSeedRunInput): Promise<SeedRunSta
 
 export async function cancelSeedRun(input: ApiContext & { runId: string }): Promise<WorkflowControlSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}/cancel`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}/cancel`, {
       method: "POST",
       headers: contextHeaders(input),
       cache: "no-store",
@@ -1877,7 +2033,7 @@ export async function cancelSeedRun(input: ApiContext & { runId: string }): Prom
 
 export async function retrySeedRun(input: ApiContext & { runId: string }): Promise<WorkflowControlSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}/retry`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}/retry`, {
       method: "POST",
       headers: contextHeaders(input),
       cache: "no-store",
@@ -1893,7 +2049,7 @@ export async function getProjectSeedRuns(
   input: ApiContext & { projectId: string },
 ): Promise<SeedRunsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/seed-runs`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/seed-runs`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1906,7 +2062,7 @@ export async function getProjectSeedRuns(
 
 export async function getSeedRunSummary(input: ApiContext & { runId: string }): Promise<WorkflowRunSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1925,7 +2081,7 @@ export async function getSeedRunEvents(
     if (input.afterEventId) {
       url.searchParams.set("after_event_id", input.afterEventId);
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -1946,7 +2102,7 @@ export async function getAgentTraceEvents(
     url.searchParams.set("include_full", "true");
   }
 
-  const response = await fetch(url, {
+  const response = await apiFetch(url, {
     headers: contextHeaders(input),
     cache: "no-store",
   });
@@ -1957,7 +2113,7 @@ export async function getAgentTraceEvents(
 export async function exportAgentTrace(
   input: ApiContext & { projectId: string; traceId: string; includeFull?: boolean },
 ): Promise<AgentTraceEventsSummary> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${apiBaseUrl()}/v1/projects/${input.projectId}/agent-traces/${input.traceId}/export`,
     {
       method: "POST",
@@ -1977,7 +2133,7 @@ export async function resolveLLMModuleBinding(
   input: ApiContext & { projectId: string; moduleKey: string },
 ): Promise<LLMModuleResolutionSummary> {
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       `${apiBaseUrl()}/v1/projects/${input.projectId}/llm/module-bindings/${input.moduleKey}/resolution`,
       {
         headers: contextHeaders(input),
@@ -1995,7 +2151,7 @@ export async function getLLMModuleBindings(
   input: ApiContext & { projectId: string },
 ): Promise<LLMModuleBindingsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/module-bindings`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/module-bindings`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2008,7 +2164,7 @@ export async function getLLMModuleBindings(
 
 export async function getLLMModules(input: ApiContext & { projectId: string }): Promise<LLMModulesSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/modules`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/modules`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2021,7 +2177,7 @@ export async function getLLMModules(input: ApiContext & { projectId: string }): 
 
 export async function getLLMSettings(input: ApiContext): Promise<LLMSettingsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/llm/settings`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/llm/settings`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2036,7 +2192,7 @@ export async function getLLMChannels(
   input: ApiContext & { projectId: string },
 ): Promise<LLMChannelsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/channels`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/channels`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2051,7 +2207,7 @@ export async function getLLMChannelModels(
   input: ApiContext & { projectId: string; channelId: string },
 ): Promise<LLMChannelModelsSummary> {
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       `${apiBaseUrl()}/v1/projects/${input.projectId}/llm/channels/${input.channelId}/models`,
       {
         headers: contextHeaders(input),
@@ -2067,7 +2223,7 @@ export async function getLLMChannelModels(
 
 export async function createLLMChannel(input: CreateLLMChannelInput): Promise<LLMChannelSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/llm/channels`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/llm/channels`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2092,7 +2248,7 @@ export async function createLLMChannel(input: CreateLLMChannelInput): Promise<LL
 
 export async function updateLLMChannel(input: UpdateLLMChannelInput): Promise<LLMChannelSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/llm/channels/${input.channelId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/llm/channels/${input.channelId}`, {
       method: "PATCH",
       headers: {
         ...contextHeaders(input),
@@ -2118,7 +2274,7 @@ export async function deleteLLMChannel(
   input: ApiContext & { channelId: string },
 ): Promise<LLMChannelSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/llm/channels/${input.channelId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/llm/channels/${input.channelId}`, {
       method: "DELETE",
       headers: contextHeaders(input),
       cache: "no-store",
@@ -2134,7 +2290,7 @@ export async function syncLLMChannelModels(
   input: ApiContext & { channelId: string },
 ): Promise<LLMModelSyncSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/llm/channels/${input.channelId}/sync-models`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/llm/channels/${input.channelId}/sync-models`, {
       method: "POST",
       headers: contextHeaders(input),
       cache: "no-store",
@@ -2156,7 +2312,7 @@ export async function upsertLLMModuleBinding(
   },
 ): Promise<LLMModuleBindingSummary> {
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       `${apiBaseUrl()}/v1/projects/${input.projectId}/llm/module-bindings/${input.moduleKey}`,
       {
         method: "PUT",
@@ -2183,7 +2339,7 @@ export async function deleteLLMModuleBinding(
   input: ApiContext & { projectId: string; moduleKey: string },
 ): Promise<LLMModuleBindingSummary> {
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       `${apiBaseUrl()}/v1/projects/${input.projectId}/llm/module-bindings/${input.moduleKey}`,
       {
         method: "DELETE",
@@ -2205,7 +2361,7 @@ export async function getLLMActivity(
     const url = new URL(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/activity`);
     addTelemetryFilters(url, input);
 
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2223,7 +2379,7 @@ export async function getLLMUsage(
     const url = new URL(`${apiBaseUrl()}/v1/projects/${input.projectId}/llm/usage`);
     addTelemetryFilters(url, input);
 
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2238,7 +2394,7 @@ export async function getProjectAssets(
   input: ApiContext & { projectId: string },
 ): Promise<AssetListSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2253,7 +2409,7 @@ export async function getWorldlineSavedPaths(
   input: ApiContext & { projectId: string },
 ): Promise<WorldlineSavedPathsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline/saved-paths`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline/saved-paths`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2268,7 +2424,7 @@ export async function getWorldlineSessions(
   input: ApiContext & { projectId: string },
 ): Promise<WorldlineSessionsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline-sessions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline-sessions`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2283,7 +2439,7 @@ export async function getWorldlineSession(
   input: ApiContext & { sessionId: string },
 ): Promise<WorldlineSessionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2298,7 +2454,7 @@ export async function getWorldlineTimeline(
   input: ApiContext & { sessionId: string },
 ): Promise<WorldlineTimelineSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/timeline`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/timeline`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2314,7 +2470,7 @@ export async function getWorldlineEvents(
 ): Promise<WorldlineEventsSummary> {
   try {
     const query = input.status ? `?status=${encodeURIComponent(input.status)}` : "";
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/events${query}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/events${query}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2329,7 +2485,7 @@ export async function createWorldlineSavedPath(
   input: CreateWorldlineSavedPathInput,
 ): Promise<WorldlineSavedPathSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/saved-paths`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/saved-paths`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2354,7 +2510,7 @@ export async function adoptWorldlineEvent(
   input: AdoptWorldlineEventInput,
 ): Promise<WorldlineEventSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-events/${input.eventId}/adoptions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-events/${input.eventId}/adoptions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2376,7 +2532,7 @@ export async function updateWorldlineEvent(
   input: UpdateWorldlineEventInput,
 ): Promise<WorldlineEventSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-events/${input.eventId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-events/${input.eventId}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
@@ -2400,7 +2556,7 @@ export async function startWorldlineSession(
   input: StartWorldlineSessionInput,
 ): Promise<WorldlineSessionStartSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline-sessions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline-sessions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2424,7 +2580,7 @@ export async function startWorldlineStep(
   input: StartWorldlineStepInput,
 ): Promise<WorldlineStepStartSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/steps`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/steps`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2447,7 +2603,7 @@ export async function injectWorldlineVariable(
   input: InjectWorldlineVariableInput,
 ): Promise<WorldlineVariableSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/variables`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/variables`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2477,7 +2633,7 @@ export async function listCharacterInteractions(
     if (input.status) {
       url.searchParams.set("status", input.status);
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2492,7 +2648,7 @@ export async function createCharacterInteraction(
   input: CreateCharacterInteractionInput,
 ): Promise<CharacterInteractionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/character-interactions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/character-interactions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2521,7 +2677,7 @@ export async function updateCharacterInteractionStatus(
   input: UpdateCharacterInteractionStatusInput,
 ): Promise<CharacterInteractionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
@@ -2543,7 +2699,7 @@ export async function getCharacterInteraction(
   input: ApiContext & { interactionId: string },
 ): Promise<CharacterInteractionDetailSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2558,7 +2714,7 @@ export async function listCharacterInteractionTurns(
   input: ApiContext & { interactionId: string },
 ): Promise<CharacterInteractionTurnsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/turns`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/turns`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2582,7 +2738,7 @@ export async function appendCharacterInteractionTurn(
   },
 ): Promise<CharacterInteractionTurnSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/turns`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/turns`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2614,7 +2770,7 @@ export async function getCharacterInteractionEvents(
     if (input.afterEventId) {
       url.searchParams.set("after_event_id", input.afterEventId);
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2635,7 +2791,7 @@ export async function convertCharacterInteractionToChapterDraft(
   },
 ): Promise<CharacterInteractionChapterDraftSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/chapter-drafts`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/chapter-drafts`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2660,7 +2816,7 @@ export async function createWorldlinePreparation(
   input: CreateWorldlinePreparationInput,
 ): Promise<WorldlinePreparationSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldlines/preparations`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldlines/preparations`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2684,7 +2840,7 @@ export async function getWorldlinePreparation(
   input: ApiContext & { prepareId: string },
 ): Promise<WorldlinePreparationSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-preparations/${input.prepareId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-preparations/${input.prepareId}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2699,7 +2855,7 @@ export async function getWorldlinePreparedAgents(
   input: ApiContext & { prepareId: string },
 ): Promise<WorldlinePreparedAgentsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/worldline-preparations/${input.prepareId}/agents`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-preparations/${input.prepareId}/agents`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2714,7 +2870,7 @@ export async function getAssetFacets(
   input: ApiContext & { projectId: string },
 ): Promise<AssetFacetsSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets/facets`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets/facets`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2729,7 +2885,7 @@ export async function searchAssets(
   input: ApiContext & { projectId: string; query: string },
 ): Promise<AssetSearchSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/assets/search`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/assets/search`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2754,7 +2910,7 @@ export async function getArchiveAssetMemories(
   try {
     const url = new URL(`${apiBaseUrl()}/v1/archive-assets/${input.assetId}/memories`);
     url.searchParams.set("project_id", input.projectId);
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2771,7 +2927,7 @@ export async function getArchiveAssetMemoryEvents(
   try {
     const url = new URL(`${apiBaseUrl()}/v1/archive-assets/${input.assetId}/memory-events`);
     url.searchParams.set("project_id", input.projectId);
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -2786,7 +2942,7 @@ export async function adoptArchiveMemory(
   input: ApiContext & { projectId: string; memoryId: string },
 ): Promise<ArchiveMemoryReviewSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/archive-memories/${input.memoryId}/adoptions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/archive-memories/${input.memoryId}/adoptions`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2808,7 +2964,7 @@ export async function rejectArchiveMemory(
   input: ApiContext & { projectId: string; memoryId: string },
 ): Promise<ArchiveMemoryReviewSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/archive-memories/${input.memoryId}/rejections`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/archive-memories/${input.memoryId}/rejections`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2828,7 +2984,7 @@ export async function rejectArchiveMemory(
 
 export async function createAsset(input: CreateAssetInput): Promise<AssetSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2860,7 +3016,7 @@ export async function createAsset(input: CreateAssetInput): Promise<AssetSummary
 
 export async function updateAsset(input: UpdateAssetInput): Promise<AssetSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/assets/${input.assetId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/assets/${input.assetId}`, {
       method: "PATCH",
       headers: {
         ...contextHeaders(input),
@@ -2894,7 +3050,7 @@ export async function deleteAsset(
   input: ApiContext & { assetId: string },
 ): Promise<AssetDeleteSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/assets/${input.assetId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/assets/${input.assetId}`, {
       method: "DELETE",
       headers: contextHeaders(input),
       cache: "no-store",
@@ -2910,7 +3066,7 @@ export async function adoptAsset(
   input: ApiContext & { assetId: string; targetLifecycle: "canon" | "material" },
 ): Promise<AssetSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/assets/${input.assetId}/adoptions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/assets/${input.assetId}/adoptions`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2930,7 +3086,7 @@ export async function adoptAsset(
 
 export async function bulkActionAssets(input: BulkActionAssetsInput): Promise<AssetBulkActionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/assets/bulk-actions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/assets/bulk-actions`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2964,7 +3120,7 @@ export async function startAssetIngestion(
   },
 ): Promise<AssetIngestionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/asset-ingestions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/asset-ingestions`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -2987,7 +3143,7 @@ export async function startAssetIngestion(
 
 export async function startAssetReindex(input: StartAssetReindexInput): Promise<AssetReindexSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets/reindex`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets/reindex`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -3011,7 +3167,7 @@ export async function startStyleExtraction(
   input: StartStyleExtractionInput,
 ): Promise<StyleExtractionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/style-extractions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/style-extractions`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -3036,7 +3192,7 @@ export async function getStoryGraphCurrent(
   input: ApiContext & { projectId: string },
 ): Promise<StoryGraphCurrentSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/current`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/current`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -3059,7 +3215,7 @@ export async function getStoryGraphView(input: GetStoryGraphViewInput): Promise<
     if (input.includeEdges) {
       url.searchParams.set("include_edges", "true");
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -3076,7 +3232,7 @@ export async function getStoryGraphEvidence(input: GetStoryGraphEvidenceInput): 
     if (input.limit) {
       url.searchParams.set("limit", String(input.limit));
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -3089,7 +3245,7 @@ export async function getStoryGraphEvidence(input: GetStoryGraphEvidenceInput): 
 
 export async function getStoryGraphLayout(input: GetStoryGraphLayoutInput): Promise<StoryGraphLayoutSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/layouts/${input.viewId}`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/layouts/${input.viewId}`, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -3106,7 +3262,7 @@ export async function getStoryGraphClusters(input: GetStoryGraphClustersInput): 
     if (input.limit) {
       url.searchParams.set("limit", String(input.limit));
     }
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       headers: contextHeaders(input),
       cache: "no-store",
     });
@@ -3121,7 +3277,7 @@ export async function startStoryGraphBuild(
   input: StartStoryGraphBuildInput,
 ): Promise<StoryGraphBuildSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/builds`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/builds`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -3144,7 +3300,7 @@ export async function startStoryGraphBondGeneration(
   input: StartStoryGraphBondGenerationInput,
 ): Promise<StoryGraphBondGenerationSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/bond-generations`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/bond-generations`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),
@@ -3169,7 +3325,7 @@ export async function adoptStoryGraphCandidate(
   input: AdoptStoryGraphCandidateInput,
 ): Promise<StoryGraphCandidateAdoptionSummary> {
   try {
-    const response = await fetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/candidates/${input.assetId}/adoptions`, {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/story-graph/candidates/${input.assetId}/adoptions`, {
       method: "POST",
       headers: {
         ...contextHeaders(input),

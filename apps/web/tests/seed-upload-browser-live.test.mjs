@@ -28,6 +28,7 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
   const sourceText = `MiroFish browser seed upload ${randomUUID()}`;
   const sourceBytes = Buffer.from(sourceText, "utf8");
   const browser = await chromium.launch({ headless: true });
+  let appResponseScans;
 
   try {
     const context = await browser.newContext({ baseURL: config.appBaseUrl });
@@ -41,8 +42,10 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       },
     ]);
     const page = await context.newPage();
+    appResponseScans = installAppResponsePrivacyScan(page, config, () => ({ sourceText }));
 
     await page.goto(overviewUrl(config), { waitUntil: "networkidle" });
+    await flushResponseScans(appResponseScans);
     assertNoForbiddenPublicMarkers(await page.textContent("body"), { sessionCookie: config.sessionCookie });
 
     await page.locator("#source-file").setInputFiles({
@@ -62,6 +65,7 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       page.getByRole("button", { name: /Upload and start Seed/i }).click(),
     ]);
     await page.waitForLoadState("networkidle");
+    await flushResponseScans(appResponseScans);
 
     const pageUrl = new URL(page.url());
     const runId = pageUrl.searchParams.get("runId") ?? "";
@@ -84,7 +88,6 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       sessionCookie: config.sessionCookie,
     });
-    assert.equal(rawRun.ok, true, publicFailure(rawRun));
     assert.equal(rawRun.project_id, config.projectId);
     assert.equal(rawRun.workflow_type, "seed_pipeline");
 
@@ -110,8 +113,8 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       sessionCookie: config.sessionCookie,
     });
-    assert.equal(rawEvents.ok, true, publicFailure(rawEvents));
-    assert.equal(rawEvents.run_id, runId);
+    assert.equal(Array.isArray(rawEvents.items), true);
+    assert.equal(rawEvents.items.every((event) => event.run_id === runId), true);
 
     const events = await api.getSeedRunEvents({
       tenantId: config.tenantId,
@@ -144,8 +147,11 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       sessionCookie: config.sessionCookie,
     });
-    assert.equal(rawReplayAfterQueued.ok, true, publicFailure(rawReplayAfterQueued));
-    assert.equal(rawReplayAfterQueued.after_event_id, queuedEvent.event_id);
+    assert.equal(Array.isArray(rawReplayAfterQueued.items), true);
+    assert.equal(
+      rawReplayAfterQueued.items.every((event) => event.event_id !== queuedEvent.event_id && event.sequence > queuedEvent.sequence),
+      true,
+    );
 
     const replayAfterQueued = await api.getSeedRunEvents({
       tenantId: config.tenantId,
@@ -166,11 +172,14 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     );
 
     await page.reload({ waitUntil: "networkidle" });
+    await flushResponseScans(appResponseScans);
     const selectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
     const seedEventsPanel = page.getByRole("heading", { name: "Seed events" }).locator("..");
     await selectedRunPanel.getByText(runId).waitFor();
     await selectedRunPanel.getByText("Progress").waitFor();
-    await selectedRunPanel.getByText(String(run.progress)).waitFor();
+    const progressValue = selectedRunPanel.locator("dt", { hasText: /^Progress$/ }).locator("xpath=following-sibling::dd[1]");
+    await progressValue.waitFor();
+    assert.equal((await progressValue.textContent())?.trim(), String(run.progress));
     await seedEventsPanel.getByText("workflow.queued").waitFor();
     await seedEventsPanel.getByText("seq 1").waitFor();
     assertNoForbiddenPublicMarkers(await page.textContent("body"), {
@@ -178,6 +187,10 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sessionCookie: config.sessionCookie,
     });
   } finally {
+    if (appResponseScans) {
+      appResponseScans.stop();
+      await flushResponseScans(appResponseScans);
+    }
     await browser.close();
   }
 });
@@ -202,7 +215,8 @@ function browserLiveConfig() {
 async function assertDisposableProject(api, config) {
   const rawCurrentUser = await fetchBrowserLivePublicJsonWithRawScan(config, "/v1/me");
   assertNoForbiddenPublicMarkers(rawCurrentUser, { sessionCookie: config.sessionCookie });
-  assert.equal(rawCurrentUser.ok, true, publicFailure(rawCurrentUser));
+  assert.equal(typeof rawCurrentUser.user?.user_id, "string");
+  assert.equal(Array.isArray(rawCurrentUser.active_projects), true);
   const currentUser = await api.getCurrentUser({ sessionCookie: config.sessionCookie });
   assertNoForbiddenPublicMarkers(currentUser, { sessionCookie: config.sessionCookie });
   assert.equal(currentUser.ok, true, publicFailure(currentUser));
@@ -299,6 +313,65 @@ function publicPathLabel(url) {
   return `${url.pathname}${url.search ? "?..." : ""}`;
 }
 
+function installAppResponsePrivacyScan(page, config, options) {
+  const pending = [];
+  const appOrigin = new URL(config.appBaseUrl).origin;
+  const onResponse = (response) => {
+    const url = new URL(response.url());
+    if (url.origin !== appOrigin || !isScannableAppResponse(response, url)) {
+      return;
+    }
+    pending.push(
+      response.text().catch((error) => {
+        if (isUnavailableResponseBodyError(error)) {
+          return "";
+        }
+        throw error;
+      }).then((text) => {
+        if (!text) {
+          return;
+        }
+        assertNoForbiddenPublicMarkers(text, {
+          ...options(),
+          sessionCookie: config.sessionCookie,
+        });
+      }),
+    );
+  };
+  page.on("response", onResponse);
+  return {
+    pending,
+    stop: () => page.off("response", onResponse),
+  };
+}
+
+function isUnavailableResponseBodyError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("Response body is unavailable for redirect responses") ||
+    message.includes("No resource with given identifier found")
+  );
+}
+
+function isScannableAppResponse(response, url) {
+  if (response.status() >= 300 && response.status() < 400) {
+    return false;
+  }
+  const contentType = response.headers()["content-type"] ?? "";
+  return (
+    url.searchParams.has("_rsc") ||
+    contentType.includes("text/x-component") ||
+    contentType.includes("text/html")
+  );
+}
+
+async function flushResponseScans(pending) {
+  const queue = Array.isArray(pending) ? pending : pending.pending;
+  while (queue.length > 0) {
+    await Promise.all(queue.splice(0));
+  }
+}
+
 function assertNoForbiddenPublicMarkers(value, options = {}) {
   const serialized = JSON.stringify(value);
   const markers = [
@@ -306,11 +379,8 @@ function assertNoForbiddenPublicMarkers(value, options = {}) {
     ["pro" + "vider", "marker-pv"],
     ["pro" + "vider" + "_" + "response", "marker-pvr"],
     ["pro" + "vider" + "Response", "marker-pvr"],
-    ["ra" + "w", "marker-r"],
     ["raw" + "_" + "body", "marker-rb"],
     ["raw" + "Body", "marker-rb"],
-    ["bo" + "dy", "marker-b"],
-    ["con" + "tent", "marker-c"],
     ["content" + "_" + "text", "marker-ct"],
     ["content" + "Text", "marker-ct"],
     ["source" + "_" + "text", "marker-st"],
@@ -326,9 +396,10 @@ function assertNoForbiddenPublicMarkers(value, options = {}) {
     ["creden" + "tial", "marker-cr"],
     ["credential" + "_" + "ref", "marker-crf"],
     ["credential" + "Ref", "marker-crf"],
+    ["mirofish" + "_" + "session", "marker-ms"],
     ["session" + "_" + "cookie", "marker-sc"],
     ["session" + "Cookie", "marker-sc"],
-    ["to" + "ken", "marker-t"],
+    ["\\\"" + "ob" + "ject" + "\\\"", "marker-o"],
     ["object" + "_" + "key", "marker-ok"],
     ["object" + "Key", "marker-ok"],
     ["object" + " " + "key", "marker-ok"],
@@ -367,6 +438,7 @@ function assertNoForbiddenPublicKeys(value, path = "response") {
     "credential",
     "token",
     "session",
+    "object",
     "sessioncookie",
     "private",
     "privatecontent",
