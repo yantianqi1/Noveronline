@@ -75,6 +75,19 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sessionCookie: config.sessionCookie,
     });
 
+    const rawRun = await fetchBrowserLivePublicJsonWithRawScan(
+      config,
+      `/v1/seed-runs/${runId}`,
+      { sourceText },
+    );
+    assertNoForbiddenPublicMarkers(rawRun, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(rawRun.ok, true, publicFailure(rawRun));
+    assert.equal(rawRun.project_id, config.projectId);
+    assert.equal(rawRun.workflow_type, "seed_pipeline");
+
     const run = await api.getSeedRunSummary({
       tenantId: config.tenantId,
       sessionCookie: config.sessionCookie,
@@ -87,6 +100,18 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     assert.equal(run.ok, true, publicFailure(run));
     assert.equal(run.project_id, config.projectId);
     assert.equal(run.workflow_type, "seed_pipeline");
+
+    const rawEvents = await fetchBrowserLivePublicJsonWithRawScan(
+      config,
+      `/v1/seed-runs/${runId}/events`,
+      { sourceText },
+    );
+    assertNoForbiddenPublicMarkers(rawEvents, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(rawEvents.ok, true, publicFailure(rawEvents));
+    assert.equal(rawEvents.run_id, runId);
 
     const events = await api.getSeedRunEvents({
       tenantId: config.tenantId,
@@ -109,6 +134,18 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     assert.notEqual(queuedEvent.payload.upload_id, "");
     assert.equal(typeof queuedEvent.payload.source_file_id, "string");
     assert.notEqual(queuedEvent.payload.source_file_id, "");
+
+    const rawReplayAfterQueued = await fetchBrowserLivePublicJsonWithRawScan(
+      config,
+      `/v1/seed-runs/${runId}/events?after_event_id=${encodeURIComponent(queuedEvent.event_id)}`,
+      { sourceText },
+    );
+    assertNoForbiddenPublicMarkers(rawReplayAfterQueued, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(rawReplayAfterQueued.ok, true, publicFailure(rawReplayAfterQueued));
+    assert.equal(rawReplayAfterQueued.after_event_id, queuedEvent.event_id);
 
     const replayAfterQueued = await api.getSeedRunEvents({
       tenantId: config.tenantId,
@@ -163,6 +200,9 @@ function browserLiveConfig() {
 }
 
 async function assertDisposableProject(api, config) {
+  const rawCurrentUser = await fetchBrowserLivePublicJsonWithRawScan(config, "/v1/me");
+  assertNoForbiddenPublicMarkers(rawCurrentUser, { sessionCookie: config.sessionCookie });
+  assert.equal(rawCurrentUser.ok, true, publicFailure(rawCurrentUser));
   const currentUser = await api.getCurrentUser({ sessionCookie: config.sessionCookie });
   assertNoForbiddenPublicMarkers(currentUser, { sessionCookie: config.sessionCookie });
   assert.equal(currentUser.ok, true, publicFailure(currentUser));
@@ -224,6 +264,39 @@ function assertSafeLocalUrl(value, label) {
 function overviewUrl(config) {
   const url = new URL(`/${config.tenantId}/projects/${config.projectId}/overview`, config.appBaseUrl);
   return url.toString();
+}
+
+async function fetchBrowserLivePublicJsonWithRawScan(config, path, options = {}) {
+  assertSafeLocalUrl(config.apiBaseUrl, "Go API");
+  assert.equal(path.startsWith("/"), true, "browser live public fetch path must be absolute");
+  assert.equal(path.startsWith("//"), false, "browser live public fetch path must stay on API base");
+  const url = new URL(path, config.apiBaseUrl);
+  const apiBase = new URL(config.apiBaseUrl);
+  assert.equal(url.origin, apiBase.origin, "browser live public fetch URL must stay on API base");
+  const response = await fetch(url, {
+    headers: {
+      "X-Tenant-Id": config.tenantId,
+      Cookie: `mirofish_session=${config.sessionCookie}`,
+    },
+  });
+  const rawText = await response.text();
+  const sourceText = options.sourceText;
+  assertNoForbiddenPublicMarkers(rawText, {
+    sourceText,
+    sessionCookie: config.sessionCookie,
+  });
+  let payload;
+  try {
+    payload = JSON.parse(rawText);
+  } catch {
+    assert.fail(`browser live public fetch returned invalid JSON: ${publicPathLabel(url)}`);
+  }
+  assert.equal(response.ok, true, `browser live public fetch failed: ${publicPathLabel(url)}`);
+  return payload;
+}
+
+function publicPathLabel(url) {
+  return `${url.pathname}${url.search ? "?..." : ""}`;
 }
 
 function assertNoForbiddenPublicMarkers(value, options = {}) {
@@ -313,7 +386,7 @@ function assertNoForbiddenPublicKeys(value, path = "response") {
   ]);
   for (const [key, item] of Object.entries(value)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-    assert.equal(forbiddenKeys.has(normalized), false, `browser live response leaked public key ${path}.${key}`);
+    assert.equal(forbiddenKeys.has(normalized), false, "browser live response leaked public key marker");
     assertNoForbiddenPublicKeys(item, `${path}.${key}`);
   }
 }
