@@ -157,6 +157,33 @@ test("live Seed runner passes only required harness env to child tests", async (
   assert.equal(commands[0].options.env.MIROFISH_WEB_LIVE_SEED_FIXTURE_SESSION_COOKIE, undefined);
 });
 
+test("live Seed runner forwards browser worker-retry harness env without ambient secrets", async () => {
+  const commands = [];
+  await runLiveSeedHarness({
+    env: {
+      ...completeEnv,
+      MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY: "1",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_WORKER_RETRY_TIMEOUT_MS: "120000",
+      DATABASE_URL: "postgres://secret-database-url",
+      OPENAI_API_KEY: "sk-secret-provider-key",
+      LLM_CREDENTIAL_ENCRYPTION_KEY: "secret-encryption-key",
+    },
+    argv: ["--mode", "browser"],
+    fetchImpl: async () => ({ ok: true, status: 200 }),
+    runCommand: (command, args, options) => {
+      commands.push({ command, args, options });
+      return { ok: true, status: 0 };
+    },
+  });
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].options.env.MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY, "1");
+  assert.equal(commands[0].options.env.MIROFISH_WEB_BROWSER_LIVE_SEED_WORKER_RETRY_TIMEOUT_MS, "120000");
+  assert.equal(commands[0].options.env.DATABASE_URL, undefined);
+  assert.equal(commands[0].options.env.OPENAI_API_KEY, undefined);
+  assert.equal(commands[0].options.env.LLM_CREDENTIAL_ENCRYPTION_KEY, undefined);
+});
+
 test("live Seed runner returns redacted config without session or project identifiers", async () => {
   const result = await runLiveSeedHarness({
     env: completeEnv,
@@ -187,7 +214,9 @@ test("live Seed runner includes bounded redacted child diagnostics on failure", 
         stderr: [
           "first line",
           "prompt=hidden",
+          "provider=openai",
           "provider_response=raw",
+          "content=private",
           "api_key=sk-secret",
           "credential_ref=credential-a",
           "object_key=tenant/project/source.txt",
@@ -201,7 +230,7 @@ test("live Seed runner includes bounded redacted child diagnostics on failure", 
       assert.match(error.message, /status 1/);
       assert.match(error.message, /child diagnostics/);
       assert.match(error.message, /final public failure line/);
-      assert.doesNotMatch(error.message, /api-secret-session|prompt=hidden|provider_response=raw|sk-secret|credential-a|tenant\/project\/source|draft manuscript/);
+      assert.doesNotMatch(error.message, /api-secret-session|prompt=hidden|provider=openai|provider_response=raw|content=private|sk-secret|credential-a|tenant\/project\/source|draft manuscript/);
       return true;
     },
   );

@@ -13,6 +13,7 @@ import {
   overviewUrl,
   publicFailure,
   redactSensitiveText,
+  waitForSeedWorkerStageEvents,
 } from "./live-seed-harness.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -300,8 +301,8 @@ test("live Seed harness loads strict opt-in configs for isolated prefixes", () =
       MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION: "1",
       MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT: "1",
       MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER: "throwaway",
-      MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN: "1",
-      MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID: "run-retry",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY: "1",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_WORKER_RETRY_TIMEOUT_MS: "120000",
     },
     prefix: BROWSER_LIVE_SEED_PREFIX,
     browser: true,
@@ -309,9 +310,113 @@ test("live Seed harness loads strict opt-in configs for isolated prefixes", () =
   assert.equal(browserConfig.enabled, true);
   assert.equal(browserConfig.appBaseUrl, "http://localhost:3999");
   assert.equal(browserConfig.apiBaseUrl, "http://localhost:3888");
-  assert.equal(browserConfig.consumeRetryRun, true);
-  assert.equal(browserConfig.retryRunId, "run-retry");
+  assert.equal(browserConfig.consumeRetryRun, false);
+  assert.equal(browserConfig.retryRunId, "");
+  assert.equal(browserConfig.requireWorkerRetry, true);
+  assert.equal(browserConfig.workerRetryTimeoutMs, 120000);
   assertDisposableLiveSeedConfig(browserConfig);
+});
+
+test("live Seed harness rejects worker-retry mode with external retry-run fallback", () => {
+  assert.throws(
+    () => loadLiveSeedConfig({
+      env: {
+        MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL: "http://localhost:3999",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL: "http://localhost:3888",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_TENANT_ID: "tenant-browser",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_PROJECT_ID: "project-browser",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE: "session-browser",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION: "1",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT: "1",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER: "throwaway",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY: "1",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN: "1",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID: "run-retry-secret",
+      },
+      prefix: BROWSER_LIVE_SEED_PREFIX,
+      browser: true,
+    }),
+    (error) => {
+      assert.match(error.message, /worker retry mode must retry the browser-uploaded run/);
+      assert.doesNotMatch(error.message, /run-retry-secret|session-browser|tenant-browser|project-browser/);
+      return true;
+    },
+  );
+});
+
+test("live Seed harness waits for worker parse segment and terminal events without leaking public material", async () => {
+  const calls = [];
+  const api = {
+    async getSeedRunEvents(input) {
+      calls.push(input);
+      const base = { ok: true, run_id: input.runId, items: [] };
+      if (calls.length === 1) {
+        return base;
+      }
+      if (calls.length === 2) {
+        return {
+          ...base,
+          items: [
+            { event_id: "evt-1", run_id: input.runId, sequence: 2, event_type: "seed.stage.completed", payload: { stage: "parse_file" } },
+            { event_id: "evt-2", run_id: input.runId, sequence: 3, event_type: "seed.stage.completed", payload: { stage: "segment_text" } },
+          ],
+        };
+      }
+      return {
+        ...base,
+        items: [
+          { event_id: "evt-1", run_id: input.runId, sequence: 2, event_type: "seed.stage.completed", payload: { stage: "parse_file" } },
+          { event_id: "evt-2", run_id: input.runId, sequence: 3, event_type: "seed.stage.completed", payload: { stage: "segment_text" } },
+          { event_id: "evt-3", run_id: input.runId, sequence: 4, event_type: "seed.stage.failed", payload: { stage: "story_ontology", error_code: "LLM_MODULE_UNBOUND" } },
+        ],
+      };
+    },
+  };
+  const result = await waitForSeedWorkerStageEvents(api, {
+    tenantId: "tenant-live",
+    sessionCookie: "session-live",
+  }, "run-live", {
+    afterSequence: 1,
+    timeoutMs: 1000,
+    pollMs: 1,
+  });
+
+  assert.equal(calls.length, 3);
+  assert.equal(result.parseEvent.payload.stage, "parse_file");
+  assert.equal(result.segmentEvent.payload.stage, "segment_text");
+  assert.equal(result.terminalEvent.payload.stage, "story_ontology");
+});
+
+test("live Seed worker event wait rejects public event payload leaks", async () => {
+  const api = {
+    async getSeedRunEvents(input) {
+      return {
+        ok: true,
+        run_id: input.runId,
+        items: [
+          {
+            event_id: "evt-leak",
+            run_id: input.runId,
+            sequence: 2,
+            event_type: "seed.stage.completed",
+            payload: { stage: "parse_file", provider: "openai", content: "source private text" },
+          },
+        ],
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => waitForSeedWorkerStageEvents(api, {
+      tenantId: "tenant-live",
+      sessionCookie: "session-live",
+    }, "run-live", {
+      afterSequence: 1,
+      timeoutMs: 1000,
+      pollMs: 1,
+    }),
+    /live Seed public payload contained forbidden material/,
+  );
 });
 
 test("live Seed harness fails loudly on partial config without echoing env values", () => {
@@ -1025,6 +1130,9 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER/);
   assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID/);
   assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY/);
+  assert.match(browserLiveTest, /waitForSeedWorkerStageEvents/);
+  assert.match(browserLiveTest, /browser Seed worker-retry mode cannot consume an external retry run/);
   assert.match(browserLiveTest, /test\.skip/);
   assert.match(browserLiveTest, /hasAnyBrowserLiveConfig/);
   assert.match(browserLiveTest, /assertBrowserLiveConfigComplete/);

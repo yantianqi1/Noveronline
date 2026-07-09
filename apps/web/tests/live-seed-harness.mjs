@@ -13,7 +13,7 @@ const FORBIDDEN_PUBLIC_MARKER_SOURCE =
 const FORBIDDEN_PUBLIC_VALUE_MARKER_SOURCE =
   String.raw`prompt|provider[_\s-]?response|raw[_\s-]?content|raw[_\s-]?body|content[_\s-]?text|source[_\s-]?text|private[_\s-]?content|api[_\s-]?key|encrypted[_\s-]?(?:api[_\s-]?key|credential)|credential[_\s-]?ref|object[_\s-]?key`;
 const FORBIDDEN_PUBLIC_STRUCTURED_KEY_SOURCE =
-  String.raw`(?:[A-Za-z0-9_-]*(?:prompt|provider[_-]?response|raw[_-]?(?:body|content)|content[_-]?text|source[_-]?text|private[_-]?content|api[_-]?key|encrypted[_-]?(?:api[_-]?key|credential)|credential[_-]?ref|object[_-]?key|draft|manuscript|session[_-]?cookie)[A-Za-z0-9_-]*|token|(?:access|refresh|csrf|session|auth|bearer)[_-]?token)`;
+  String.raw`(?:provider|content|[A-Za-z0-9_-]*(?:prompt|provider[_-]?response|raw[_-]?(?:body|content)|content[_-]?text|source[_-]?text|private[_-]?content|api[_-]?key|encrypted[_-]?(?:api[_-]?key|credential)|credential[_-]?ref|object[_-]?key|draft|manuscript|session[_-]?cookie)[A-Za-z0-9_-]*|token|(?:access|refresh|csrf|session|auth|bearer)[_-]?token)`;
 const FORBIDDEN_PUBLIC_MARKER_PATTERN =
   new RegExp(String.raw`(?:^|["'{\s,;])(?:${FORBIDDEN_PUBLIC_VALUE_MARKER_SOURCE})(?:$|["'}\s:=,;])`, "i");
 const FORBIDDEN_PUBLIC_ASSIGNMENT_PATTERN = new RegExp(
@@ -30,7 +30,9 @@ const EXACT_TOKEN_ASSIGNMENT_PATTERN =
   /\btoken\b"?\s*[:=]\s*("[^"]*"|'[^']*'|[^,;}\]\s]+)/gi;
 const FORBIDDEN_PUBLIC_KEYS = new Set([
   "prompt",
+  "provider",
   "providerresponse",
+  "content",
   "rawcontent",
   "rawbody",
   "contenttext",
@@ -45,6 +47,26 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
   "token",
   "draft",
   "manuscript",
+]);
+const DEFAULT_WORKER_RETRY_TIMEOUT_MS = 120000;
+const SEED_WORKER_EVENT_TYPES = new Set([
+  "seed.stage.pending",
+  "seed.stage.completed",
+  "seed.stage.failed",
+]);
+const SEED_WORKER_TERMINAL_STAGES = new Set([
+  "sequential_reading",
+  "persist_runtime_facts",
+  "global_aggregation",
+  "story_ontology",
+  "entity_resolution",
+  "character_agent_profile",
+  "agent_profiles",
+  "archive_candidate",
+  "archive_candidates",
+  "index_assets",
+  "finalize_seed",
+  "finalize",
 ]);
 
 export function loadLiveSeedConfig(options = {}) {
@@ -71,6 +93,12 @@ export function loadLiveSeedConfig(options = {}) {
     config.appBaseUrl = envText(env, `${prefix}APP_BASE_URL`);
     config.retryRunId = envText(env, `${prefix}RETRY_RUN_ID`);
     config.consumeRetryRun = envText(env, `${prefix}CONSUME_RETRY_RUN`) === "1";
+    config.requireWorkerRetry = envText(env, `${prefix}REQUIRE_WORKER_RETRY`) === "1";
+    config.workerRetryTimeoutMs = envPositiveInt(
+      env,
+      `${prefix}WORKER_RETRY_TIMEOUT_MS`,
+      DEFAULT_WORKER_RETRY_TIMEOUT_MS,
+    );
   }
 
   assertDisposableLiveSeedConfig(config);
@@ -113,6 +141,9 @@ export function assertDisposableLiveSeedConfig(config) {
 
   if (config.browser) {
     assertLocalHttpUrl(config.appBaseUrl, "live Seed app base URL");
+    if (config.requireWorkerRetry && (config.consumeRetryRun || config.retryRunId)) {
+      throw new Error("worker retry mode must retry the browser-uploaded run");
+    }
   }
   assertLocalHttpUrl(config.apiBaseUrl, "live Seed API base URL");
 }
@@ -288,6 +319,51 @@ export async function waitForSeedRunTerminalStatus(api, config, runId, options =
   assert.fail("live Seed run did not reach a terminal status before the timeout");
 }
 
+export async function waitForSeedWorkerStageEvents(api, config, runId, options = {}) {
+  const timeoutMs = options.timeoutMs ?? config.workerRetryTimeoutMs ?? DEFAULT_WORKER_RETRY_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? 500;
+  const afterSequence = Number(options.afterSequence ?? 0);
+  const deadline = Date.now() + timeoutMs;
+  let parseEvent;
+  let segmentEvent;
+  let terminalEvent;
+
+  while (Date.now() <= deadline) {
+    const events = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+    });
+    assertNoForbiddenPublicMarkers(events, {
+      sourceText: options.sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(events.ok, true, publicFailure(events, { sessionCookie: config.sessionCookie }));
+    assert.equal(events.run_id, runId, "live Seed worker event replay returned the wrong run");
+
+    for (const event of events.items ?? []) {
+      if (!isSeedWorkerEventForRun(event, config, runId, afterSequence)) {
+        continue;
+      }
+      if (event.event_type === "seed.stage.completed" && event.payload?.stage === "parse_file") {
+        parseEvent = parseEvent ?? event;
+      }
+      if (event.event_type === "seed.stage.completed" && event.payload?.stage === "segment_text") {
+        segmentEvent = segmentEvent ?? event;
+      }
+      if (isTerminalSeedWorkerEvent(event)) {
+        terminalEvent = terminalEvent ?? event;
+      }
+    }
+
+    if (parseEvent && segmentEvent && terminalEvent) {
+      return { parseEvent, segmentEvent, terminalEvent };
+    }
+    await delay(pollMs);
+  }
+  assert.fail("live Seed worker stage events were not observed before timeout");
+}
+
 export function assertNoForbiddenPublicMarkers(value, options = {}) {
   const serialized = safeSerialize(value);
   const checks = [
@@ -330,6 +406,8 @@ export function assertNoForbiddenPublicKeys(value) {
       isCredentialTokenKey(normalized) ||
       normalized.includes("prompt") ||
       normalized.includes("providerresponse") ||
+      normalized === "provider" ||
+      normalized === "content" ||
       normalized.includes("rawbody") ||
       normalized.includes("rawcontent") ||
       normalized.includes("contenttext") ||
@@ -391,6 +469,45 @@ function hasPrefixedEnv(env, prefix) {
 
 function envText(env, name) {
   return String(env[name] ?? "").trim();
+}
+
+function envPositiveInt(env, name, defaultValue) {
+  const value = envText(env, name);
+  if (!value) {
+    return defaultValue;
+  }
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new Error("live Seed worker retry timeout must be a positive integer");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error("live Seed worker retry timeout must be a positive integer");
+  }
+  return parsed;
+}
+
+function isSeedWorkerEventForRun(event, config, runId, afterSequence) {
+  if (!event || !SEED_WORKER_EVENT_TYPES.has(event.event_type)) {
+    return false;
+  }
+  if (event.run_id !== runId) {
+    return false;
+  }
+  if (event.project_id !== undefined && event.project_id !== config.projectId) {
+    assert.fail("live Seed worker event replay returned the wrong project");
+  }
+  return Number(event.sequence ?? 0) > afterSequence;
+}
+
+function isTerminalSeedWorkerEvent(event) {
+  const stage = event.payload?.stage;
+  if (typeof stage !== "string" || stage === "parse_file" || stage === "segment_text") {
+    return false;
+  }
+  if (event.event_type === "seed.stage.failed") {
+    return true;
+  }
+  return event.event_type === "seed.stage.completed" && SEED_WORKER_TERMINAL_STAGES.has(stage);
 }
 
 function sanitizePublicMessage(value, options = {}) {

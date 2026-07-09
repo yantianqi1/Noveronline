@@ -31,10 +31,12 @@ const LIVE_CHILD_ENV_SUFFIXES = new Set([
   "CONSUME_RETRY_RUN",
   "DISPOSABLE_PROJECT_MARKER",
   "PROJECT_ID",
+  "REQUIRE_WORKER_RETRY",
   "RETRY_RUN_ID",
   "SESSION_COOKIE",
   "TENANT_ID",
   "THROWAWAY_PROJECT",
+  "WORKER_RETRY_TIMEOUT_MS",
 ]);
 const REDACTED = "[redacted]";
 const MAX_CHILD_DIAGNOSTIC_CHARS = 1600;
@@ -231,6 +233,8 @@ function redactedLiveConfig(config, options) {
     disposableProjectMarker: REDACTED,
     retryRunId: config.retryRunId ? REDACTED : "",
     consumeRetryRun: config.consumeRetryRun,
+    requireWorkerRetry: config.requireWorkerRetry,
+    workerRetryTimeoutMs: config.workerRetryTimeoutMs,
   };
   if (options.browser) {
     redacted.appBaseUrl = config.appBaseUrl;
@@ -272,6 +276,9 @@ function assertLiveConfig(config, prefix, options) {
   if (config.consumeRetryRun && !config.retryRunId) {
     missing.push(`${prefix}RETRY_RUN_ID`);
   }
+  if (options.browser && config.requireWorkerRetry && (config.consumeRetryRun || config.retryRunId)) {
+    throw new Error("worker retry mode must retry the browser-uploaded run");
+  }
   if (missing.length > 0) {
     throw new Error(`live Seed runner config is incomplete; missing env names: ${missing.join(", ")}`);
   }
@@ -295,6 +302,8 @@ function readLiveConfig(env, prefix, options) {
   };
   if (options.browser) {
     config.appBaseUrl = envText(env, `${prefix}APP_BASE_URL`);
+    config.requireWorkerRetry = envText(env, `${prefix}REQUIRE_WORKER_RETRY`) === "1";
+    config.workerRetryTimeoutMs = envPositiveInt(env, `${prefix}WORKER_RETRY_TIMEOUT_MS`, 120000);
   }
   return config;
 }
@@ -363,6 +372,21 @@ function parseArgs(argv) {
 
 function envText(env, name) {
   return String(env[name] ?? "").trim();
+}
+
+function envPositiveInt(env, name, defaultValue) {
+  const value = envText(env, name);
+  if (!value) {
+    return defaultValue;
+  }
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new Error("live Seed worker retry timeout must be a positive integer");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error("live Seed worker retry timeout must be a positive integer");
+  }
+  return parsed;
 }
 
 function formatCommandFailure(result, env = {}) {
@@ -439,7 +463,7 @@ function redactDiagnosticText(value, exactValues) {
   text = text.replace(/(bearer\s+)[a-z0-9._~+/=-]+/gi, `$1${REDACTED}`);
   text = text.replace(/\b(v[12]:[a-z0-9_-]+:[a-z0-9:_-]+)\b/gi, REDACTED);
   text = text.replace(/([a-z0-9_-]*(?:api[_-]?key|credential[_-]?ref|encrypted[_-]?credential|token|secret)[a-z0-9_-]*\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`);
-  text = text.replace(/([a-z0-9_-]*(?:prompt|provider[_-]?response|raw[_-]?body|raw[_-]?content|object[_-]?key)[a-z0-9_-]*\s*[:=]\s*)[^\n]+/gi, `$1${REDACTED}`);
+  text = text.replace(/([a-z0-9_-]*(?:prompt|provider(?:[_-]?response)?|raw[_-]?body|raw[_-]?content|content|object[_-]?key)[a-z0-9_-]*\s*[:=]\s*)[^\n]+/gi, `$1${REDACTED}`);
   return text
     .split("\n")
     .map((line) => (/\b(draft|manuscript)\b/i.test(line) ? REDACTED : line))

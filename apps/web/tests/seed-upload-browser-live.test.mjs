@@ -3,6 +3,8 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { afterEach, test } from "node:test";
 
+import { waitForSeedWorkerStageEvents } from "./live-seed-harness.mjs";
+
 const browserSeedUploadTest = hasAnyBrowserLiveConfig() ? test : test.skip;
 const previousApiBaseUrl = process.env.MIROFISH_API_BASE_URL;
 
@@ -79,6 +81,36 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sessionCookie: config.sessionCookie,
     });
 
+    const initialEvents = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+    });
+    assertNoForbiddenPublicMarkers(initialEvents, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(initialEvents.ok, true, publicFailure(initialEvents));
+    assert.equal(initialEvents.run_id, runId);
+    const queuedEvent = initialEvents.items.find((event) => event.event_type === "workflow.queued");
+    assert.ok(queuedEvent, "browser Seed upload did not expose persisted queued progress event");
+    assert.equal(queuedEvent.sequence, 1);
+    assert.equal(queuedEvent.project_id, config.projectId);
+    assert.equal(queuedEvent.payload.status, "queued");
+    assert.equal(queuedEvent.payload.workflow_type, "seed_pipeline");
+    assert.equal(typeof queuedEvent.payload.upload_id, "string");
+    assert.notEqual(queuedEvent.payload.upload_id, "");
+    assert.equal(typeof queuedEvent.payload.source_file_id, "string");
+    assert.notEqual(queuedEvent.payload.source_file_id, "");
+
+    if (config.requireWorkerRetry) {
+      await waitForSeedWorkerStageEvents(api, config, runId, {
+        sourceText,
+        afterSequence: queuedEvent.sequence,
+        timeoutMs: config.workerRetryTimeoutMs,
+      });
+    }
+
     let retryControlRunId = runId;
     const earlySelectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
     const earlyControlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
@@ -141,7 +173,9 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       timeoutMs: 60000,
     });
-    if (preparedRetryRun.status === "completed" && config.consumeRetryRun) {
+    if (preparedRetryRun.status === "completed" && config.requireWorkerRetry) {
+      assert.fail("browser Seed worker-retry mode requires the browser-uploaded run to be retryable after worker evidence");
+    } else if (preparedRetryRun.status === "completed" && config.consumeRetryRun) {
       await assertConsumableRetryableSeedRun(api, config, config.retryRunId);
       retryControlRunId = config.retryRunId;
     } else if (preparedRetryRun.status === "completed") {
@@ -211,16 +245,10 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     });
     assert.equal(events.ok, true, publicFailure(events));
     assert.equal(events.run_id, runId);
-    const queuedEvent = events.items.find((event) => event.event_type === "workflow.queued");
-    assert.ok(queuedEvent, "browser Seed upload did not expose persisted queued progress event");
-    assert.equal(queuedEvent.sequence, 1);
-    assert.equal(queuedEvent.project_id, config.projectId);
-    assert.equal(queuedEvent.payload.status, "queued");
-    assert.equal(queuedEvent.payload.workflow_type, "seed_pipeline");
-    assert.equal(typeof queuedEvent.payload.upload_id, "string");
-    assert.notEqual(queuedEvent.payload.upload_id, "");
-    assert.equal(typeof queuedEvent.payload.source_file_id, "string");
-    assert.notEqual(queuedEvent.payload.source_file_id, "");
+    assert.ok(
+      events.items.some((event) => event.event_id === queuedEvent.event_id && event.sequence === queuedEvent.sequence),
+      "browser Seed upload replay did not preserve the queued event",
+    );
 
     const rawReplayAfterQueued = await fetchBrowserLivePublicJsonWithRawScan(
       config,
@@ -389,10 +417,18 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sessionCookie: config.sessionCookie,
     });
     assert.equal(retriedEvents.ok, true, publicFailure(retriedEvents));
+    const retryRequestedEvent = retriedEvents.items.find((event) => event.event_type === "workflow.retry_requested");
     assert.ok(
-      retriedEvents.items.some((event) => event.event_type === "workflow.retry_requested"),
+      retryRequestedEvent,
       "browser Seed retry control did not expose the accepted retry event",
     );
+    if (config.requireWorkerRetry) {
+      await waitForSeedWorkerStageEvents(api, config, retryControlRunId, {
+        sourceText,
+        afterSequence: retryRequestedEvent.sequence,
+        timeoutMs: config.workerRetryTimeoutMs,
+      });
+    }
     assert.ok(
       retriedEvents.items.some((event) => event.sequence > maxRetryableSequence),
       "browser Seed retry control did not make post-terminal events visible after clearing the cursor",
@@ -419,6 +455,8 @@ function browserLiveConfig() {
     sessionCookie: env("MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE"),
     retryRunId: env("MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID"),
     consumeRetryRun: env("MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN") === "1",
+    requireWorkerRetry: env("MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY") === "1",
+    workerRetryTimeoutMs: envPositiveInt("MIROFISH_WEB_BROWSER_LIVE_SEED_WORKER_RETRY_TIMEOUT_MS", 120000),
     allowMutation: env("MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION") === "1",
     throwawayProject: env("MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT") === "1",
     disposableProjectMarker: env("MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER"),
@@ -472,6 +510,9 @@ function assertBrowserLiveConfigComplete(config) {
   }
   if (config.consumeRetryRun && !config.retryRunId) {
     missing.push("MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID");
+  }
+  if (config.requireWorkerRetry && (config.consumeRetryRun || config.retryRunId)) {
+    assert.fail("browser Seed worker-retry mode cannot consume an external retry run");
   }
   assert.equal(
     missing.length,
@@ -776,4 +817,15 @@ function redactAssertionMessage(message) {
 
 function env(name) {
   return process.env[name]?.trim() ?? "";
+}
+
+function envPositiveInt(name, defaultValue) {
+  const value = env(name);
+  if (!value) {
+    return defaultValue;
+  }
+  assert.match(value, /^[1-9][0-9]*$/, `${name} must be a positive integer`);
+  const parsed = Number(value);
+  assert.equal(Number.isSafeInteger(parsed), true, `${name} must be a positive integer`);
+  return parsed;
 }
