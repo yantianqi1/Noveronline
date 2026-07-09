@@ -87,6 +87,59 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     assert.equal(run.ok, true, publicFailure(run));
     assert.equal(run.project_id, config.projectId);
     assert.equal(run.workflow_type, "seed_pipeline");
+
+    const events = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+    });
+    assertNoForbiddenPublicMarkers(events, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(events.ok, true, publicFailure(events));
+    assert.equal(events.run_id, runId);
+    const queuedEvent = events.items.find((event) => event.event_type === "workflow.queued");
+    assert.ok(queuedEvent, "browser Seed upload did not expose persisted queued progress event");
+    assert.equal(queuedEvent.sequence, 1);
+    assert.equal(queuedEvent.project_id, config.projectId);
+    assert.equal(queuedEvent.payload.status, "queued");
+    assert.equal(queuedEvent.payload.workflow_type, "seed_pipeline");
+    assert.equal(typeof queuedEvent.payload.upload_id, "string");
+    assert.notEqual(queuedEvent.payload.upload_id, "");
+    assert.equal(typeof queuedEvent.payload.source_file_id, "string");
+    assert.notEqual(queuedEvent.payload.source_file_id, "");
+
+    const replayAfterQueued = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+      afterEventId: queuedEvent.event_id,
+    });
+    assertNoForbiddenPublicMarkers(replayAfterQueued, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(replayAfterQueued.ok, true, publicFailure(replayAfterQueued));
+    assert.equal(replayAfterQueued.after_event_id, queuedEvent.event_id);
+    assert.equal(
+      replayAfterQueued.items.every((event) => event.event_id !== queuedEvent.event_id && event.sequence > queuedEvent.sequence),
+      true,
+      "Seed event cursor replay returned the queued event again",
+    );
+
+    await page.reload({ waitUntil: "networkidle" });
+    const selectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
+    const seedEventsPanel = page.getByRole("heading", { name: "Seed events" }).locator("..");
+    await selectedRunPanel.getByText(runId).waitFor();
+    await selectedRunPanel.getByText("Progress").waitFor();
+    await selectedRunPanel.getByText(String(run.progress)).waitFor();
+    await seedEventsPanel.getByText("workflow.queued").waitFor();
+    await seedEventsPanel.getByText("seq 1").waitFor();
+    assertNoForbiddenPublicMarkers(await page.textContent("body"), {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
   } finally {
     await browser.close();
   }

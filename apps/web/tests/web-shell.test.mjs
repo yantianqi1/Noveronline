@@ -690,6 +690,12 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /setInputFiles/);
   assert.match(browserLiveTest, /getByRole\("button",\s*\{\s*name:\s*\/Upload and start Seed\/i\s*\}\)/);
   assert.match(browserLiveTest, /getSeedRunSummary/);
+  assert.match(browserLiveTest, /getSeedRunEvents/);
+  assert.match(browserLiveTest, /workflow\.queued/);
+  assert.match(browserLiveTest, /Selected Seed run/);
+  assert.match(browserLiveTest, /Seed events/);
+  assert.match(browserLiveTest, /seq 1/);
+  assert.match(browserLiveTest, /afterEventId:\s*queuedEvent\.event_id/);
   assert.match(browserLiveTest, /assertNoForbiddenPublicMarkers/);
   assert.match(browserLiveTest, /"bo"\s*\+\s*"dy"/);
   assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"body"/);
