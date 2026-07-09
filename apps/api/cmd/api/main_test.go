@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"go.temporal.io/sdk/client"
@@ -524,7 +525,7 @@ func TestNewWorkflowCancellerUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T
 }
 
 func TestNewWorkflowRetrierUsesDisabledRetrierWithoutBackends(t *testing.T) {
-	retrier, closeRetrier, err := newWorkflowRetrier(nil, "")
+	retrier, closeRetrier, err := newWorkflowRetrier(nil, "", "seed-heavy-test")
 
 	if err != nil {
 		t.Fatalf("new workflow retrier: %v", err)
@@ -541,6 +542,7 @@ func TestNewWorkflowRetrierUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T) 
 	retrier, closeRetrier, err := newWorkflowRetrier(
 		&mainRecordingTemporalClient{},
 		"postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable",
+		"seed-live-retry-test",
 	)
 	if closeRetrier != nil {
 		defer func() {
@@ -555,6 +557,9 @@ func TestNewWorkflowRetrierUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T) 
 	}
 	if _, ok := retrier.(*workflows.TemporalWorkflowRetrier); !ok {
 		t.Fatalf("expected temporal workflow retrier, got %T", retrier)
+	}
+	if taskQueue := reflect.ValueOf(retrier).Elem().FieldByName("taskQueue").String(); taskQueue != "seed-live-retry-test" {
+		t.Fatalf("expected seed retry task queue to follow configured seed queue, got %q", taskQueue)
 	}
 	if closeRetrier == nil {
 		t.Fatal("expected close function with database URL")

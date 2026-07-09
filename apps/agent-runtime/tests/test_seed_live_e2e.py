@@ -73,6 +73,23 @@ def test_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_fails_
     asyncio.run(_run_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_fails_ontology_unbound(monkeypatch))
 
 
+def test_seed_live_go_api_temporal_worker_same_run_retry_reaches_worker_after_ontology_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(_run_seed_live_go_api_temporal_worker_same_run_retry_reaches_worker_after_ontology_unbound(monkeypatch))
+
+
+def test_seed_live_retry_cleanup_includes_deterministic_unrecorded_object_keys() -> None:
+    object_keys = _seed_live_known_retry_object_keys(RUN_ID, SOURCE_FILE_ID)
+    expected_keys = [
+        f"projects/{PROJECT_ID}/seed-runs/{RUN_ID}/extracted/{SOURCE_FILE_ID}.txt",
+        f"projects/{PROJECT_ID}/seed-runs/{RUN_ID}/segments/0000.txt",
+        f"projects/{PROJECT_ID}/seed-runs/{RUN_ID}/segments/0001.txt",
+    ]
+    if object_keys != expected_keys:
+        raise AssertionError("deterministic cleanup object reference set changed")
+
+
 def test_seed_live_go_api_temporal_worker_completes_full_semantic_success_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,6 +286,160 @@ async def _run_seed_live_go_api_temporal_worker_reaches_global_aggregation_then_
         "manuscript",
     ):
         assert forbidden not in public_body
+
+
+async def _run_seed_live_go_api_temporal_worker_same_run_retry_reaches_worker_after_ontology_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_url = _live_database_url()
+    temporal_address = _live_temporal_address()
+    temporal_namespace = os.environ.get("MIROFISH_SEED_LIVE_TEMPORAL_NAMESPACE", "default").strip() or "default"
+    storage_env = _live_object_storage_env()
+    object_store = _object_store_from_env(storage_env)
+    source_text = "第一章 雨夜\n雨声压住脚步。\n\n第二章 破晓\n光落在窗沿。\n"
+    source_bytes = source_text.encode("utf-8")
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    task_queue = f"seed-live-retry-e2e-{os.getpid()}-{int(time.time() * 1000)}"
+    cleanup_context: dict[str, str] = {}
+
+    try:
+        with _LiveSeedSemanticProvider() as provider:
+            _prepare_live_seed_semantic_database(admin_url, provider.base_url)
+            app_url = _app_database_url(admin_url)
+            monkeypatch.setenv("DATABASE_URL", app_url)
+            monkeypatch.setenv("LLM_CREDENTIAL_ENCRYPTION_KEY", KEY_MATERIAL)
+            for key, value in storage_env.items():
+                monkeypatch.setenv(key, value)
+            client = await Client.connect(temporal_address, namespace=temporal_namespace)
+            with _start_live_go_api(app_url, temporal_address, temporal_namespace, task_queue, storage_env) as api:
+                async with _seed_worker(client, task_queue):
+                    run_id, source_file_id, first_persisted = await asyncio.to_thread(
+                        _drive_live_go_api_seed_semantic_run_strict,
+                        api,
+                        admin_url,
+                        source_bytes,
+                        source_sha256,
+                        cleanup_context,
+                    )
+
+                retry_response, retry_admission = await asyncio.to_thread(
+                    _request_live_go_api_seed_retry,
+                    api,
+                    admin_url,
+                    run_id,
+                    source_file_id,
+                    len(first_persisted["workflow_events"]),
+                )
+                retry_sequence = _single_retry_requested_sequence(retry_admission["workflow_events"])
+
+                async with _seed_worker(client, task_queue):
+                    retried_persisted = await asyncio.to_thread(
+                        _wait_for_seed_live_semantic_retry_rows,
+                        admin_url,
+                        run_id,
+                        source_file_id,
+                        retry_sequence,
+                    )
+                public_events = await asyncio.to_thread(
+                    _api_json,
+                    "GET",
+                    f"{api}/v1/seed-runs/{run_id}/events",
+                    {"X-Tenant-Id": TENANT_ID, "X-User-Id": USER_ID},
+                    None,
+                )
+
+        if retry_response.get("run_id") != run_id or retry_response.get("status") != "retry_requested":
+            raise AssertionError("retry endpoint did not preserve the same run_id and retry_requested status")
+        if retry_admission["source_files"] != [{"file_id": source_file_id, "parse_status": "parsing"}]:
+            raise AssertionError("retry admission did not reset the source to parsing")
+        if retry_admission["workflow_runs"] != [
+            {
+                "status": "queued",
+                "error_code": None,
+                "temporal_workflow_id": f"seed_run_{run_id}_retry",
+            }
+        ]:
+            raise AssertionError("retry admission did not reset the same workflow run")
+        if retried_persisted["source_files"] != [{"file_id": source_file_id, "parse_status": "parsed"}]:
+            raise AssertionError("retried worker did not reprocess the source to parsed")
+        if retried_persisted["workflow_runs"] != [{"status": "failed", "error_code": "LLM_MODULE_UNBOUND"}]:
+            raise AssertionError("retried workflow did not reach the expected terminal failed state")
+
+        post_retry_events = [
+            event for event in retried_persisted["workflow_events_with_sequence"] if event["sequence"] > retry_sequence
+        ]
+        post_retry_stages = [event["payload_jsonb"].get("stage") for event in post_retry_events]
+        if "parse_file" not in post_retry_stages or "segment_text" not in post_retry_stages:
+            raise AssertionError("real Temporal worker did not persist post-retry parse/segment events")
+        if not any(
+            event["event_type"] == "seed.stage.failed" and event["payload_jsonb"].get("stage") == "story_ontology"
+            for event in post_retry_events
+        ):
+            raise AssertionError("retried workflow did not fail closed at unbound story_ontology")
+        assert [request["module_key"] for request in provider.requests] == [
+            "sequential_reading",
+            "anchor_point_summary",
+            "sequential_reading",
+            "anchor_point_summary",
+        ]
+        _assert_seed_object_readback_strict(
+            object_store,
+            retried_persisted,
+            expected_artifact_bytes=source_bytes,
+            expected_segment_texts=["第一章 雨夜\n雨声压住脚步。", "第二章 破晓\n光落在窗沿。"],
+        )
+        public_body = json.dumps(
+            {
+                "retry_result": retry_response,
+                "retry_admission_events": retry_admission["workflow_events"],
+                "public_events": public_events,
+                "persisted_events": retried_persisted["workflow_events"],
+                "workflow_runs": retried_persisted["workflow_runs"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        _assert_no_seed_public_leak_markers(
+            public_body,
+            surface="seed retry public API/events",
+            forbidden=(
+                "object_key",
+                "source_object_key",
+                "artifact_object_key",
+                "segment_object_key",
+                "source_sha256",
+                "sha256",
+                "hash",
+                "checksum",
+                source_sha256,
+                "雨声压住脚步",
+                "光落在窗沿",
+                "prompt",
+                "provider_response",
+                "provider_raw_body",
+                "raw",
+                "raw_body",
+                "raw_content",
+                "raw_text",
+                "source_text",
+                "body_text",
+                "content",
+                "credential_ref",
+                "encrypted_api_key",
+                "api_key",
+                "sk-live-seed-semantic",
+                "PRIVATE_SEMANTIC",
+                "draft",
+                "manuscript",
+            ),
+        )
+    finally:
+        await asyncio.to_thread(
+            _cleanup_seed_live_objects_best_effort,
+            admin_url,
+            object_store,
+            cleanup_context,
+        )
 
 
 async def _run_seed_live_go_api_temporal_worker_completes_full_semantic_success_chain(
@@ -589,6 +760,104 @@ def _drive_live_go_api_seed_semantic_run(
         None,
     )
     return run_id, source_file_id, persisted, public_events
+
+
+def _drive_live_go_api_seed_semantic_run_strict(
+    api: str,
+    admin_url: str,
+    source_bytes: bytes,
+    source_sha256: str,
+    cleanup_context: dict[str, str] | None = None,
+) -> tuple[str, str, dict[str, list[dict[str, Any]]]]:
+    headers = {
+        "X-Tenant-Id": TENANT_ID,
+        "X-User-Id": USER_ID,
+        "Content-Type": "application/json",
+    }
+    upload = _api_json(
+        "POST",
+        f"{api}/v1/projects/{PROJECT_ID}/uploads",
+        headers,
+        {
+            "filename": "book.txt",
+            "mime_type": "text/plain; charset=utf-8",
+            "size_bytes": len(source_bytes),
+            "sha256": source_sha256,
+            "purpose": "seed",
+            "tenant_id": "00000000-0000-0000-0000-000000000000",
+        },
+    )
+    upload_id = upload["upload_id"]
+    source_file_id = upload["file_id"]
+    if cleanup_context is not None:
+        cleanup_context["source_file_id"] = source_file_id
+    _api_bytes(
+        "PUT",
+        f"{api}/v1/uploads/{upload_id}/object",
+        {"X-Tenant-Id": TENANT_ID, "X-User-Id": USER_ID},
+        source_bytes,
+    )
+    completed = _api_json(
+        "POST",
+        f"{api}/v1/uploads/{upload_id}/complete",
+        headers,
+        {},
+    )
+    if completed.get("parse_status") != "uploaded":
+        raise AssertionError("source upload did not complete to uploaded status")
+    run = _api_json(
+        "POST",
+        f"{api}/v1/projects/{PROJECT_ID}/seed-runs",
+        headers,
+        {
+            "tenant_id": "00000000-0000-0000-0000-000000000000",
+            "upload_id": upload_id,
+            "options": {
+                "language": "zh-CN",
+                "prompt": "must not enter the Temporal payload",
+                "credential_ref": "hidden",
+                "raw_text": "must not enter public workflow events",
+                "content": "must not enter public workflow events",
+                "provider_response": "must not enter public workflow events",
+                "draft": "must not enter public workflow events",
+                "manuscript": "must not enter public workflow events",
+            },
+        },
+    )
+    if run.get("status") != "queued":
+        raise AssertionError("seed run was not accepted as queued")
+    run_id = run["run_id"]
+    if cleanup_context is not None:
+        cleanup_context["run_id"] = run_id
+    persisted = _wait_for_seed_live_semantic_rows_strict(admin_url, run_id, source_file_id)
+    return run_id, source_file_id, persisted
+
+
+def _request_live_go_api_seed_retry(
+    api: str,
+    admin_url: str,
+    run_id: str,
+    source_file_id: str,
+    previous_event_count: int,
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    retry_response = _api_json(
+        "POST",
+        f"{api}/v1/seed-runs/{run_id}/retry",
+        {
+            "X-Tenant-Id": TENANT_ID,
+            "X-User-Id": USER_ID,
+            "X-Request-Id": "req-live-seed-same-run-retry",
+            "Content-Type": "application/json",
+        },
+        {},
+    )
+    retry_admission = _wait_for_seed_live_retry_admission_rows(
+        admin_url,
+        run_id,
+        source_file_id,
+        previous_event_count,
+    )
+    return retry_response, retry_admission
 
 
 def _drive_live_go_api_seed_full_semantic_run(
@@ -3530,6 +3799,117 @@ def _read_seed_full_semantic_live_rows_for(admin_url: str, run_id: str, source_f
     }
 
 
+def _read_seed_retry_control_rows_for(admin_url: str, run_id: str, source_file_id: str) -> dict[str, list[dict[str, Any]]]:
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT file_id::text, parse_status
+                   FROM source_files
+                   WHERE tenant_id = %s AND project_id = %s AND file_id = %s""",
+                (TENANT_ID, PROJECT_ID, source_file_id),
+            )
+            source_files = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT status, error_code, temporal_workflow_id
+                   FROM workflow_runs
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            workflow_runs = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT sequence, event_type, payload_jsonb
+                   FROM workflow_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY sequence""",
+                (TENANT_ID, PROJECT_ID, run_id),
+            )
+            workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+    return {
+        "source_files": source_files,
+        "workflow_runs": workflow_runs,
+        "workflow_events": workflow_events,
+    }
+
+
+def _read_seed_live_object_keys_for(admin_url: str, run_id: str | None, source_file_id: str | None) -> list[str]:
+    object_keys: list[str] = []
+    with psycopg.connect(admin_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            if source_file_id:
+                cursor.execute(
+                    """SELECT object_key
+                       FROM source_files
+                       WHERE tenant_id = %s AND project_id = %s AND file_id = %s""",
+                    (TENANT_ID, PROJECT_ID, source_file_id),
+                )
+                object_keys.extend(row["object_key"] for row in cursor.fetchall() if row.get("object_key"))
+            if run_id:
+                cursor.execute(
+                    """SELECT object_key
+                       FROM project_text_artifacts
+                       WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                    (TENANT_ID, PROJECT_ID, run_id),
+                )
+                object_keys.extend(row["object_key"] for row in cursor.fetchall() if row.get("object_key"))
+                cursor.execute(
+                    """SELECT object_key
+                       FROM text_segments
+                       WHERE tenant_id = %s AND project_id = %s AND run_id = %s""",
+                    (TENANT_ID, PROJECT_ID, run_id),
+                )
+                object_keys.extend(row["object_key"] for row in cursor.fetchall() if row.get("object_key"))
+    unique_keys: list[str] = []
+    seen: set[str] = set()
+    for key in object_keys:
+        if key not in seen:
+            seen.add(key)
+            unique_keys.append(key)
+    return unique_keys
+
+
+def _cleanup_seed_live_objects_best_effort(
+    admin_url: str,
+    object_store: S3CompatibleObjectStore,
+    cleanup_context: dict[str, str],
+) -> None:
+    run_id = cleanup_context.get("run_id")
+    source_file_id = cleanup_context.get("source_file_id")
+    if not run_id and not source_file_id:
+        return
+    try:
+        object_keys = _read_seed_live_object_keys_for(admin_url, run_id, source_file_id)
+    except Exception:
+        object_keys = []
+    object_keys.extend(_seed_live_known_retry_object_keys(run_id, source_file_id))
+    object_keys = _unique_text_values(object_keys)
+    for object_key in object_keys:
+        try:
+            request = object_store._signed_request("DELETE", object_key, b"", None)
+            object_store._http_request(request)
+        except Exception:
+            continue
+
+
+def _seed_live_known_retry_object_keys(run_id: str | None, source_file_id: str | None) -> list[str]:
+    object_keys: list[str] = []
+    if run_id and source_file_id:
+        object_keys.append(f"projects/{PROJECT_ID}/seed-runs/{run_id}/extracted/{source_file_id}.txt")
+    if run_id:
+        object_keys.extend(f"projects/{PROJECT_ID}/seed-runs/{run_id}/segments/{index:04d}.txt" for index in range(2))
+    return object_keys
+
+
+def _unique_text_values(values: list[Any]) -> list[str]:
+    unique_values: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        seen.add(value)
+        unique_values.append(value)
+    return unique_values
+
+
 def _read_seed_sequential_reading_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:
     with psycopg.connect(admin_url, row_factory=dict_row) as connection:
         with connection.cursor() as cursor:
@@ -3882,6 +4262,28 @@ def _finalize_live_forbidden_public_markers() -> tuple[str, ...]:
     )
 
 
+def _single_retry_requested_sequence(events: list[dict[str, Any]]) -> int:
+    retry_sequences = [
+        int(event["sequence"])
+        for event in events
+        if event["event_type"] == "workflow.retry_requested"
+    ]
+    if len(retry_sequences) != 1:
+        raise AssertionError("expected exactly one workflow.retry_requested event")
+    return retry_sequences[0]
+
+
+def _assert_no_seed_public_leak_markers(
+    text: str,
+    *,
+    surface: str,
+    forbidden: tuple[str, ...],
+) -> None:
+    for marker in forbidden:
+        if marker and marker in text:
+            raise AssertionError(f"{surface} leaked a forbidden marker")
+
+
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items()}
 
@@ -3942,6 +4344,112 @@ def _wait_for_seed_live_semantic_rows(admin_url: str, run_id: str, source_file_i
     raise AssertionError(f"timed out waiting for live seed semantic rows: {last!r}")
 
 
+def _wait_for_seed_live_semantic_rows_strict(
+    admin_url: str,
+    run_id: str,
+    source_file_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        rows = _read_seed_semantic_live_rows_for(admin_url, run_id, source_file_id)
+        if (
+            rows["source_files"] == [{"file_id": source_file_id, "parse_status": "parsed"}]
+            and len(rows["project_text_artifacts"]) == 1
+            and len(rows["text_segments"]) == 2
+            and len(rows["reading_segment_notes"]) == 2
+            and rows["runtime_facts"] == [
+                {
+                    "entities": 2,
+                    "relationships": 1,
+                    "segment_summaries": 2,
+                    "plot_threads": 1,
+                    "world_rules": 1,
+                }
+            ]
+            and len(rows["seed_analysis_snapshots"]) == 1
+            and rows["workflow_runs"] == [{"status": "failed", "error_code": "LLM_MODULE_UNBOUND"}]
+            and any(
+                event["event_type"] == "seed.stage.failed"
+                and event["payload_jsonb"].get("stage") == "story_ontology"
+                for event in rows["workflow_events"]
+            )
+        ):
+            return rows
+        time.sleep(0.5)
+    raise AssertionError("timed out waiting for live seed semantic fail-closed rows")
+
+
+def _wait_for_seed_live_retry_admission_rows(
+    admin_url: str,
+    run_id: str,
+    source_file_id: str,
+    previous_event_count: int,
+) -> dict[str, list[dict[str, Any]]]:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        rows = _read_seed_retry_control_rows_for(admin_url, run_id, source_file_id)
+        if (
+            rows["source_files"] == [{"file_id": source_file_id, "parse_status": "parsing"}]
+            and rows["workflow_runs"]
+            == [
+                {
+                    "status": "queued",
+                    "error_code": None,
+                    "temporal_workflow_id": f"seed_run_{run_id}_retry",
+                }
+            ]
+            and any(
+                event["event_type"] == "workflow.retry_requested"
+                and event["sequence"] > previous_event_count
+                for event in rows["workflow_events"]
+            )
+        ):
+            return rows
+        time.sleep(0.25)
+    raise AssertionError("timed out waiting for live seed retry admission rows")
+
+
+def _wait_for_seed_live_semantic_retry_rows(
+    admin_url: str,
+    run_id: str,
+    source_file_id: str,
+    retry_sequence: int,
+) -> dict[str, list[dict[str, Any]]]:
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        rows = _read_seed_semantic_live_rows_for(admin_url, run_id, source_file_id)
+        control_rows = _read_seed_retry_control_rows_for(admin_url, run_id, source_file_id)
+        post_retry_events = [
+            event for event in control_rows["workflow_events"] if event["sequence"] > retry_sequence
+        ]
+        if (
+            rows["source_files"] == [{"file_id": source_file_id, "parse_status": "parsed"}]
+            and len(rows["project_text_artifacts"]) == 1
+            and len(rows["text_segments"]) == 2
+            and len(rows["reading_segment_notes"]) == 2
+            and len(rows["seed_analysis_snapshots"]) == 1
+            and rows["workflow_runs"] == [{"status": "failed", "error_code": "LLM_MODULE_UNBOUND"}]
+            and any(
+                event["event_type"] == "seed.stage.completed"
+                and event["payload_jsonb"].get("stage") == "parse_file"
+                for event in post_retry_events
+            )
+            and any(
+                event["event_type"] == "seed.stage.completed"
+                and event["payload_jsonb"].get("stage") == "segment_text"
+                for event in post_retry_events
+            )
+            and any(
+                event["event_type"] == "seed.stage.failed"
+                and event["payload_jsonb"].get("stage") == "story_ontology"
+                for event in post_retry_events
+            )
+        ):
+            return {**rows, "workflow_events_with_sequence": control_rows["workflow_events"]}
+        time.sleep(0.5)
+    raise AssertionError("timed out waiting for live seed retry worker rows")
+
+
 def _wait_for_seed_live_full_semantic_rows(admin_url: str, run_id: str, source_file_id: str) -> dict[str, list[dict[str, Any]]]:
     deadline = time.monotonic() + 120
     last: dict[str, list[dict[str, Any]]] = {}
@@ -3986,6 +4494,31 @@ def _assert_seed_object_readback(
     segment_keys = [row["object_key"] for row in persisted["text_segment_object_refs"]]
     assert len(segment_keys) == len(expected_segment_texts)
     assert [object_store.read_bytes(key).decode("utf-8") for key in segment_keys] == expected_segment_texts
+
+
+def _assert_seed_object_readback_strict(
+    object_store: S3CompatibleObjectStore,
+    persisted: dict[str, list[dict[str, Any]]],
+    *,
+    expected_artifact_bytes: bytes,
+    expected_segment_texts: list[str],
+) -> None:
+    artifact_keys = [
+        row["object_key"]
+        for row in persisted["project_text_artifact_object_refs"]
+        if row["artifact_type"] == "extracted_text"
+    ]
+    if len(artifact_keys) != 1:
+        raise AssertionError("unexpected extracted text artifact object reference count")
+    if object_store.read_bytes(artifact_keys[0]) != expected_artifact_bytes:
+        raise AssertionError("extracted text artifact object did not round-trip")
+    segment_keys = [row["object_key"] for row in persisted["text_segment_object_refs"]]
+    if len(segment_keys) != len(expected_segment_texts):
+        raise AssertionError("unexpected segment object reference count")
+    expected_segment_bytes = [text.encode("utf-8") for text in expected_segment_texts]
+    for index, key in enumerate(segment_keys):
+        if object_store.read_bytes(key) != expected_segment_bytes[index]:
+            raise AssertionError("segment object did not round-trip")
 
 
 class _SeedWorker:

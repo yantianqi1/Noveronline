@@ -311,7 +311,7 @@ func main() {
 			}
 		}()
 	}
-	workflowRetrier, closeWorkflowRetrier, err := newWorkflowRetrier(temporalWorkflowClient, databaseURL)
+	workflowRetrier, closeWorkflowRetrier, err := newWorkflowRetrier(temporalWorkflowClient, databaseURL, os.Getenv("SEED_TASK_QUEUE"))
 	if err != nil {
 		log.Fatalf("configure workflow retrier: %v", err)
 	}
@@ -1284,7 +1284,7 @@ func newWorkflowCanceller(temporalClient workflows.TemporalWorkflowClient, datab
 	}), db.Close, nil
 }
 
-func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databaseURL string) (workflows.WorkflowRetrier, func() error, error) {
+func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databaseURL string, seedTaskQueue string) (workflows.WorkflowRetrier, func() error, error) {
 	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledWorkflowRetrier(), nil, nil
 	}
@@ -1297,8 +1297,9 @@ func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databas
 		Execer:  workflows.NewSQLDBWriterAdmissionExecer(db),
 	})
 	return workflows.NewTemporalWorkflowRetrier(workflows.TemporalWorkflowRetrierConfig{
-		Client: temporalClient,
-		Store:  store,
+		Client:    temporalClient,
+		Store:     store,
+		TaskQueue: seedTaskQueue,
 	}), db.Close, nil
 }
 
