@@ -26,6 +26,7 @@ from mirofish_agents.temporal.seed import (
     PostgresTextSegmentWriter,
     SEED_TASK_QUEUE,
     SeedPipelineWorkflow,
+    SeedSegmentRetryWorkflow,
     _global_aggregator_from_env,
     _object_store_from_env,
     _sequential_reader_from_env,
@@ -40,6 +41,7 @@ from mirofish_agents.temporal.seed import (
     segment_text_activity,
     sequential_reading_activity,
     run_seed_workflow_locally,
+    seed_segment_retry_activity,
     worker_spec,
 )
 from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution
@@ -2748,6 +2750,32 @@ class RecordingWorkflowRunStatusWriter:
                 "tenant_id": context.tenant_id,
                 "project_id": context.project_id,
                 "run_id": context.run_id,
+                "code": code,
+                "message": message,
+            }
+        )
+
+
+class RecordingSeedSegmentRetryStatusWriter:
+    def __init__(self) -> None:
+        self.statuses: list[dict[str, object]] = []
+
+    def mark_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        status: str,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        self.statuses.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+                "segment_ids": list(segment_ids),
+                "status": status,
                 "code": code,
                 "message": message,
             }
@@ -7989,6 +8017,7 @@ def test_seed_worker_spec_registers_temporal_workflow_and_activity() -> None:
 
     assert spec["task_queue"] == SEED_TASK_QUEUE
     assert "SeedPipelineWorkflow" in spec["workflows"]
+    assert "SeedSegmentRetryWorkflow" in spec["workflows"]
     assert "seed_pipeline_activity" in spec["activities"]
     assert "parse_file_activity" in spec["activities"]
     assert "segment_text_activity" in spec["activities"]
@@ -8001,12 +8030,138 @@ def test_seed_worker_spec_registers_temporal_workflow_and_activity() -> None:
     assert "archive_candidate_activity" in spec["activities"]
     assert "index_assets_activity" in spec["activities"]
     assert "finalize_seed_activity" in spec["activities"]
+    assert "seed_segment_retry_activity" in spec["activities"]
+
+
+def test_seed_segment_retry_activity_fails_closed_without_runner_and_marks_requests_failed() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_status_writer = RecordingSeedSegmentRetryStatusWriter()
+    workflow_status_writer = RecordingWorkflowRunStatusWriter()
+    payload = {
+        "context": _context().model_dump(),
+        "segment_ids": [
+            "77777777-7777-4777-8777-777777777777",
+            "88888888-8888-4888-8888-888888888888",
+        ],
+        "prompt": "private prompt",
+        "source_object_key": "objects/private.txt",
+        "api_key": "sk-hidden",
+        "credential_ref": "cred-hidden",
+        "draft": "secret draft",
+        "manuscript": "secret manuscript",
+    }
+
+    result = seed_segment_retry_activity(
+        payload,
+        retry_status_writer=retry_status_writer,
+        workflow_event_writer=workflow_writer,
+        workflow_status_writer=workflow_status_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 2,
+        "error": {
+            "code": "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED",
+            "message": "seed segment retry runner is not configured",
+        },
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+        "workflow_status_persisted": True,
+    }
+    assert retry_status_writer.statuses == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "segment_ids": [
+                "77777777-7777-4777-8777-777777777777",
+                "88888888-8888-4888-8888-888888888888",
+            ],
+            "status": "failed",
+            "code": "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED",
+            "message": "seed segment retry runner is not configured",
+        }
+    ]
+    assert workflow_writer.events == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "workflow_type": "seed_pipeline",
+            "event_type": "seed.segments.retry_failed",
+            "payload": {
+                "stage": "segment_retry",
+                "status": "failed",
+                "requested_count": 2,
+                "error_code": "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED",
+                "error_message": "seed segment retry runner is not configured",
+            },
+        }
+    ]
+    assert workflow_status_writer.failed == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "code": "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED",
+            "message": "seed segment retry runner is not configured",
+        }
+    ]
+    public_body = json.dumps([result, workflow_writer.events], ensure_ascii=False)
+    for forbidden in (
+        "77777777",
+        "88888888",
+        "private prompt",
+        "objects/private.txt",
+        "api_key",
+        "sk-hidden",
+        "credential_ref",
+        "cred-hidden",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in public_body
+
+
+def test_seed_segment_retry_activity_denies_before_side_effects() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_status_writer = RecordingSeedSegmentRetryStatusWriter()
+    workflow_status_writer = RecordingWorkflowRunStatusWriter()
+    context = _context().model_copy(update={"permissions": {}})
+
+    result = seed_segment_retry_activity(
+        {
+            "context": context.model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+        },
+        retry_status_writer=retry_status_writer,
+        workflow_event_writer=workflow_writer,
+        workflow_status_writer=workflow_status_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "error": {
+            "code": "FORBIDDEN",
+            "message": "seed_pipeline run permission is required",
+        },
+    }
+    assert retry_status_writer.statuses == []
+    assert workflow_writer.events == []
+    assert workflow_status_writer.failed == []
 
 
 def test_temporal_seed_worker_registers_parse_file_activity() -> None:
     components = worker_components_for_task_queue(SEED_TASK_QUEUE)
 
-    assert [workflow.__name__ for workflow in components["workflows"]] == ["SeedPipelineWorkflow"]
+    assert [workflow.__name__ for workflow in components["workflows"]] == [
+        "SeedPipelineWorkflow",
+        "SeedSegmentRetryWorkflow",
+    ]
     assert [activity.__name__ for activity in components["activities"]] == [
         "seed_pipeline_activity",
         "parse_file_activity",
@@ -8020,4 +8175,5 @@ def test_temporal_seed_worker_registers_parse_file_activity() -> None:
         "archive_candidate_activity",
         "index_assets_activity",
         "finalize_seed_activity",
+        "seed_segment_retry_activity",
     ]

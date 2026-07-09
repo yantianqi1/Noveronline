@@ -188,6 +188,19 @@ class WorkflowRunStatusWriter(Protocol):
         """Mark the admitted Seed workflow run failed with a stable public error."""
 
 
+class SeedSegmentRetryStatusWriter(Protocol):
+    def mark_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        status: str,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Persist per-segment retry request lifecycle status for the current run."""
+
+
 class _UnavailableWorkflowRunStatusWriter:
     def mark_running(
         self,
@@ -3840,6 +3853,43 @@ def _mark_seed_workflow_completed(
     return True
 
 
+def _mark_seed_segment_retries(
+    writer: SeedSegmentRetryStatusWriter | None,
+    *,
+    context: AgentContext,
+    segment_ids: list[str],
+    status: str,
+    code: str | None = None,
+    message: str | None = None,
+) -> bool:
+    if writer is None:
+        return False
+    writer.mark_seed_segment_retries(
+        context=context,
+        segment_ids=segment_ids,
+        status=status,
+        code=code,
+        message=message,
+    )
+    return True
+
+
+def _normalized_segment_retry_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    segment_ids: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        segment_ids.append(normalized)
+    return segment_ids
+
+
 def _required_artifact_type(value: str) -> str:
     normalized_value = _required_text_value(value, "artifact_type")
     allowed_types = {"extracted_text", "normalized_text", "segment_text"}
@@ -4235,6 +4285,30 @@ def _record_pending_stage_event(
             "status": "pending",
             "activity": "seed_pipeline_activity",
             "upload_id": upload_id,
+        },
+    )
+    return True
+
+
+def _record_failed_segment_retry_event(
+    *,
+    context: AgentContext,
+    requested_count: int,
+    error_code: str,
+    error_message: str,
+    workflow_event_writer: WorkflowEventWriter | None,
+) -> bool:
+    if workflow_event_writer is None:
+        return False
+    workflow_event_writer.record_workflow_event(
+        context=context,
+        event_type="seed.segments.retry_failed",
+        payload={
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": requested_count,
+            "error_code": error_code,
+            "error_message": error_message,
         },
     )
     return True
@@ -7078,6 +7152,138 @@ def seed_pipeline_activity(
     }
 
 
+@activity.defn
+def seed_segment_retry_activity(
+    payload: dict[str, Any],
+    retry_status_writer: SeedSegmentRetryStatusWriter | None = None,
+    workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
+) -> dict[str, Any]:
+    context = AgentContext.model_validate(payload.get("context", payload))
+    segment_ids = _normalized_segment_retry_ids(payload.get("segment_ids"))
+    error_code = "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED"
+    error_message = "seed segment retry runner is not configured"
+    if context.workflow_type != "seed_pipeline":
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": len(segment_ids),
+            "error": {
+                "code": "VALIDATION_FAILED",
+                "message": "seed segment retry requires seed_pipeline workflow context",
+            },
+        }
+    if not context.has_permission("seed_pipeline", "run"):
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": len(segment_ids),
+            "error": {
+                "code": "FORBIDDEN",
+                "message": "seed_pipeline run permission is required",
+            },
+        }
+    if not segment_ids:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": 0,
+            "error": {
+                "code": "VALIDATION_FAILED",
+                "message": "segment_ids are required",
+            },
+        }
+
+    retry_status_persisted = False
+    try:
+        retry_status_persisted = _mark_seed_segment_retries(
+            retry_status_writer,
+            context=context,
+            segment_ids=segment_ids,
+            status="failed",
+            code=error_code,
+            message=error_message,
+        )
+    except Exception:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": len(segment_ids),
+            "error": {
+                "code": "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED",
+                "message": "seed segment retry status write failed",
+            },
+            "retry_status_persisted": False,
+        }
+
+    try:
+        writer = _resolved_workflow_event_writer(workflow_event_writer)
+        stage_event_persisted = _record_failed_segment_retry_event(
+            context=context,
+            requested_count=len(segment_ids),
+            error_code=error_code,
+            error_message=error_message,
+            workflow_event_writer=writer,
+        )
+    except Exception:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": len(segment_ids),
+            "error": {
+                "code": "WORKFLOW_EVENT_WRITE_FAILED",
+                "message": "workflow event write failed",
+            },
+            "retry_status_persisted": retry_status_persisted,
+        }
+
+    try:
+        if workflow_status_writer is None:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=error_code,
+            message=error_message,
+        )
+    except Exception:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": len(segment_ids),
+            "error": {
+                "code": "WORKFLOW_STATUS_WRITE_FAILED",
+                "message": "seed workflow status write failed",
+            },
+            "retry_status_persisted": retry_status_persisted,
+            "stage_event_persisted": stage_event_persisted,
+        }
+
+    return {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": len(segment_ids),
+        "error": {
+            "code": error_code,
+            "message": error_message,
+        },
+        "retry_status_persisted": retry_status_persisted,
+        "stage_event_persisted": stage_event_persisted,
+        "workflow_status_persisted": workflow_status_persisted,
+    }
+
+
+@workflow.defn
+class SeedSegmentRetryWorkflow:
+    @workflow.run
+    async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await workflow.execute_activity(
+            seed_segment_retry_activity,
+            payload,
+            start_to_close_timeout=timedelta(minutes=10),
+        )
+
+
 @workflow.defn
 class SeedPipelineWorkflow:
     @workflow.run
@@ -8369,7 +8575,7 @@ def _segment_excerpt(segment_text: str) -> str:
 def worker_spec() -> dict[str, list[str] | str]:
     return {
         "task_queue": SEED_TASK_QUEUE,
-        "workflows": [SeedPipelineWorkflow.__name__],
+        "workflows": [SeedPipelineWorkflow.__name__, SeedSegmentRetryWorkflow.__name__],
         "activities": [
             seed_pipeline_activity.__name__,
             parse_file_activity.__name__,
@@ -8383,5 +8589,6 @@ def worker_spec() -> dict[str, list[str] | str]:
             archive_candidate_activity.__name__,
             index_assets_activity.__name__,
             finalize_seed_activity.__name__,
+            seed_segment_retry_activity.__name__,
         ],
     }

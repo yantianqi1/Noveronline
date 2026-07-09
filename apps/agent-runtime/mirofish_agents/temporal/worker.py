@@ -31,6 +31,7 @@ from mirofish_agents.temporal.hello import (
 from mirofish_agents.temporal.seed import (
     SEED_TASK_QUEUE,
     SeedPipelineWorkflow,
+    SeedSegmentRetryWorkflow,
     agent_profile_activity,
     archive_candidate_activity,
     entity_resolution_activity,
@@ -41,6 +42,7 @@ from mirofish_agents.temporal.seed import (
     parse_file_activity,
     persist_runtime_facts_activity,
     seed_pipeline_activity,
+    seed_segment_retry_activity,
     segment_text_activity,
     sequential_reading_activity,
 )
@@ -69,7 +71,7 @@ def worker_components_for_task_queue(task_queue: str) -> dict[str, list[object]]
         }
     if task_queue == SEED_TASK_QUEUE:
         return {
-            "workflows": [SeedPipelineWorkflow],
+            "workflows": [SeedPipelineWorkflow, SeedSegmentRetryWorkflow],
             "activities": [
                 seed_pipeline_activity,
                 parse_file_activity,
@@ -83,6 +85,7 @@ def worker_components_for_task_queue(task_queue: str) -> dict[str, list[object]]
                 archive_candidate_activity,
                 index_assets_activity,
                 finalize_seed_activity,
+                seed_segment_retry_activity,
             ],
         }
     return {
