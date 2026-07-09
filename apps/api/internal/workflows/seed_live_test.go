@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"mirofish-novel/apps/api/internal/sourcefiles"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 const liveSeedTenantID = "81111111-1111-1111-1111-111111111111"
@@ -99,7 +102,7 @@ func TestLiveSeedGoUploadCompleteAndAdmissionUseMinIOAndAppRole(t *testing.T) {
 		t.Fatalf("validate completed source: %v", err)
 	}
 	if validated.ObjectKey != objectInput.ObjectKey || validated.SHA256 != objectInput.SHA256 {
-		t.Fatalf("validated source metadata mismatch: %#v vs %#v", validated, objectInput)
+		t.Fatalf("validated source metadata mismatch")
 	}
 
 	admissionStore := NewSQLSeedAdmissionStore(SQLSeedAdmissionStoreConfig{
@@ -124,33 +127,136 @@ func TestLiveSeedGoUploadCompleteAndAdmissionUseMinIOAndAppRole(t *testing.T) {
 
 	persisted := readLiveSeedGoAdmissionRows(t, adminURL, record.UploadID)
 	if persisted.SourceStatus != "parsing" {
-		t.Fatalf("expected admission to advance source to parsing, got %#v", persisted)
+		t.Fatalf("expected admission to advance source to parsing")
 	}
 	if persisted.WorkflowStatus != "queued" || persisted.WorkflowType != SeedWorkflowType {
-		t.Fatalf("unexpected workflow admission row: %#v", persisted)
+		t.Fatalf("unexpected workflow admission row")
 	}
 	if persisted.EventType != "workflow.queued" {
-		t.Fatalf("expected queued workflow event, got %#v", persisted)
+		t.Fatalf("expected queued workflow event")
 	}
 	payloadJSON := mustJSON(t, persisted.EventPayload)
 	if !strings.Contains(payloadJSON, "source_file_id") || !strings.Contains(payloadJSON, record.FileID) {
-		t.Fatalf("expected queued event to include source file metadata, got %s", payloadJSON)
+		t.Fatalf("expected queued event to include source file metadata")
 	}
-	for _, forbidden := range []string{
-		objectInput.ObjectKey,
-		"object_key",
-		"source_object_key",
-		"第一章",
-		"雨声压住脚步",
-		"api_key",
-		"credential_ref",
-		"draft",
-		"manuscript",
-	} {
-		if strings.Contains(payloadJSON, forbidden) {
-			t.Fatalf("workflow admission payload leaked forbidden text %q: %s", forbidden, payloadJSON)
-		}
+	assertLiveSeedGoTextDoesNotContainMarkers(t, payloadJSON, "workflow admission payload", []liveSeedForbiddenMarker{
+		{Name: "object key", Value: objectInput.ObjectKey},
+		{Name: "object key field", Value: "object_key"},
+		{Name: "source object key field", Value: "source_object_key"},
+		{Name: "source title", Value: "第一章"},
+		{Name: "source body", Value: "雨声压住脚步"},
+		{Name: "api key marker", Value: "api_key"},
+		{Name: "credential ref marker", Value: "credential_ref"},
+		{Name: "draft marker", Value: "draft"},
+		{Name: "manuscript marker", Value: "manuscript"},
+	})
+}
+
+func TestLiveSeedGoWorkflowRetryPostgresMinIOUsesStoredSourceHandoffWithRecordingTemporal(t *testing.T) {
+	fixture := prepareLiveSeedGoRetryFixture(t)
+	defer fixture.AppDB.Close()
+	markLiveSeedGoRunFailedForRetry(t, fixture.AdminURL, fixture.Record.UploadID, fixture.Record.FileID)
+
+	temporalClient := &recordingRetryTemporalClient{}
+	retrier := NewTemporalWorkflowRetrier(TemporalWorkflowRetrierConfig{
+		Client: temporalClient,
+		Store: NewSQLWorkflowRetryStore(SQLWorkflowRetryStoreConfig{
+			Queryer: NewSQLDBWriterEventQueryer(fixture.AppDB),
+			Execer:  NewSQLDBWriterAdmissionExecer(fixture.AppDB),
+		}),
+	})
+	retried, err := retrier.RetryWorkflowRun(context.Background(), RetryWorkflowRunInput{
+		TenantID:    liveSeedTenantID,
+		RunID:       liveSeedRunID,
+		ActorUserID: liveSeedUserID,
+		RequestID:   "req-live-seed-retry",
+	})
+	if err != nil {
+		t.Fatalf("retry seed run failed with code %s", ErrorCode(err))
 	}
+	if retried.RunID != liveSeedRunID || retried.Status != "retry_requested" {
+		t.Fatalf("unexpected retry result: %#v", retried)
+	}
+	if temporalClient.workflowID != "seed_run_"+liveSeedRunID+"_retry" || temporalClient.workflowName != SeedWorkflowName {
+		t.Fatalf("unexpected retry Temporal start: id=%q workflow=%#v", temporalClient.workflowID, temporalClient.workflowName)
+	}
+	if temporalClient.options.TaskQueue != SeedTaskQueue {
+		t.Fatalf("retry Temporal start lost seed task queue: %#v", temporalClient.options)
+	}
+	payload, ok := temporalClient.args[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected retry Temporal payload map")
+	}
+	if payload["source_file_id"] != fixture.Record.FileID ||
+		payload["source_object_key"] != fixture.ObjectInput.ObjectKey ||
+		payload["source_sha256"] != fixture.ObjectInput.SHA256 ||
+		payload["source_size_bytes"] != fixture.ObjectInput.SizeBytes {
+		t.Fatalf("retry Temporal payload lost stored source handoff")
+	}
+
+	persisted := readLiveSeedGoRetryRows(t, fixture.AdminURL, fixture.Record.UploadID)
+	if persisted.SourceStatus != "parsing" || persisted.WorkflowStatus != "queued" {
+		t.Fatalf("retry did not reset run/source state")
+	}
+	if persisted.TemporalWorkflowID != "seed_run_"+liveSeedRunID+"_retry" {
+		t.Fatalf("retry did not persist retry temporal workflow id")
+	}
+	if persisted.EventType != "workflow.retry_requested" || persisted.EventSequence != 2 {
+		t.Fatalf("expected retry event sequence")
+	}
+	payloadJSON := mustJSON(t, persisted.EventPayload)
+	if !strings.Contains(payloadJSON, fixture.Record.UploadID) || !strings.Contains(payloadJSON, fixture.Record.FileID) || !strings.Contains(payloadJSON, "req-live-seed-retry") {
+		t.Fatalf("retry event lost public source correlation metadata")
+	}
+	assertLiveSeedGoTextDoesNotContainMarkers(t, payloadJSON, "retry event payload", liveSeedGoRetryForbiddenMarkers(fixture))
+}
+
+func TestLiveSeedGoWorkflowRetryPostgresMinIOStartFailureReleasesSourceWithRecordingTemporal(t *testing.T) {
+	fixture := prepareLiveSeedGoRetryFixture(t)
+	defer fixture.AppDB.Close()
+	markLiveSeedGoRunFailedForRetry(t, fixture.AdminURL, fixture.Record.UploadID, fixture.Record.FileID)
+
+	temporalClient := &recordingRetryTemporalClient{
+		err: errors.New("provider response raw content prompt api_key=secret encrypted credential credential_ref=ref object_key=private draft manuscript"),
+	}
+	retrier := NewTemporalWorkflowRetrier(TemporalWorkflowRetrierConfig{
+		Client: temporalClient,
+		Store: NewSQLWorkflowRetryStore(SQLWorkflowRetryStoreConfig{
+			Queryer: NewSQLDBWriterEventQueryer(fixture.AppDB),
+			Execer:  NewSQLDBWriterAdmissionExecer(fixture.AppDB),
+		}),
+	})
+	_, err := retrier.RetryWorkflowRun(context.Background(), RetryWorkflowRunInput{
+		TenantID:    liveSeedTenantID,
+		RunID:       liveSeedRunID,
+		ActorUserID: liveSeedUserID,
+		RequestID:   "req-live-seed-retry-failed",
+	})
+	if code := ErrorCode(err); code != "WORKFLOW_RETRY_FAILED" {
+		t.Fatalf("expected stable retry failure, got code %s", code)
+	}
+	if err != nil {
+		errText := err.Error()
+		assertLiveSeedGoTextDoesNotContainMarkers(t, errText, "retry error", liveSeedGoRetryForbiddenMarkers(fixture))
+	}
+
+	persisted := readLiveSeedGoRetryRows(t, fixture.AdminURL, fixture.Record.UploadID)
+	if persisted.SourceStatus != "uploaded" || persisted.WorkflowStatus != "failed" {
+		t.Fatalf("retry start failure did not release source and fail run")
+	}
+	if persisted.TemporalWorkflowID != "seed_run_"+liveSeedRunID+"_retry" {
+		t.Fatalf("retry failure should retain retry temporal workflow id for diagnostics")
+	}
+	if persisted.EventType != "workflow.failed" || persisted.EventSequence != 3 {
+		t.Fatalf("expected retry failure event sequence")
+	}
+	payloadJSON := mustJSON(t, persisted.EventPayload)
+	if !strings.Contains(payloadJSON, "WORKFLOW_RETRY_FAILED") ||
+		!strings.Contains(payloadJSON, seedWorkflowRetryStartFailedMessage) ||
+		!strings.Contains(payloadJSON, "req-live-seed-retry-failed") {
+		t.Fatalf("retry failure event lost stable public failure metadata")
+	}
+	assertLiveSeedGoTextDoesNotContainMarkers(t, payloadJSON, "retry failure event payload", liveSeedGoRetryForbiddenMarkers(fixture))
 }
 
 func liveSeedObjectStorageConfig(t *testing.T) sourcefiles.MinIOObjectWriterConfig {
@@ -218,6 +324,167 @@ type liveSeedGoAdmissionRows struct {
 	EventPayload   map[string]any
 }
 
+type liveSeedGoRetryRows struct {
+	SourceStatus       string
+	WorkflowStatus     string
+	TemporalWorkflowID string
+	EventType          string
+	EventSequence      int
+	EventPayload       map[string]any
+}
+
+type liveSeedGoRetryFixture struct {
+	AdminURL    string
+	AppDB       *sql.DB
+	Record      sourcefiles.Record
+	ObjectInput sourcefiles.ObjectWriteInput
+}
+
+type liveSeedForbiddenMarker struct {
+	Name  string
+	Value string
+}
+
+func prepareLiveSeedGoRetryFixture(t *testing.T) liveSeedGoRetryFixture {
+	t.Helper()
+	adminURL := os.Getenv("MIROFISH_SEED_LIVE_DATABASE_URL")
+	if strings.TrimSpace(adminURL) == "" {
+		t.Skip("set MIROFISH_SEED_LIVE_DATABASE_URL to run live Seed Go retry Postgres/MinIO harness")
+	}
+	storageConfig := liveSeedObjectStorageConfig(t)
+	prepareLiveSeedGoDatabase(t, adminURL)
+	appURL := liveSeedAppDatabaseURL(t, adminURL)
+	appDB, err := sql.Open("pgx", appURL)
+	if err != nil {
+		t.Fatalf("open app db: %v", err)
+	}
+	writer, err := sourcefiles.NewMinIOObjectWriter(storageConfig)
+	if err != nil {
+		appDB.Close()
+		t.Fatalf("new minio writer: %v", err)
+	}
+	verifier, err := sourcefiles.NewMinIOObjectVerifier(sourcefiles.MinIOObjectVerifierConfig(storageConfig))
+	if err != nil {
+		appDB.Close()
+		t.Fatalf("new minio verifier: %v", err)
+	}
+	sourceStore := sourcefiles.NewSQLStore(sourcefiles.SQLStoreConfig{
+		Queryer:        sourcefiles.NewSQLDBQueryer(appDB),
+		ObjectVerifier: verifier,
+	})
+	sourceBytes := []byte("第一章 重试\n风声穿过廊下。\n")
+	sourceHash := sha256.Sum256(sourceBytes)
+	record, err := sourceStore.CreateSourceFile(context.Background(), sourcefiles.CreateInput{
+		TenantID:    liveSeedTenantID,
+		ProjectID:   liveSeedProjectID,
+		ActorUserID: liveSeedUserID,
+		Filename:    "go-live-seed-retry.txt",
+		MimeType:    "text/plain",
+		SizeBytes:   int64(len(sourceBytes)),
+		SHA256:      hex.EncodeToString(sourceHash[:]),
+		Purpose:     "seed",
+	})
+	if err != nil {
+		appDB.Close()
+		t.Fatalf("create source file: %v", err)
+	}
+	objectInput, err := sourceStore.GetUploadObject(context.Background(), sourcefiles.GetUploadObjectInput{
+		TenantID: liveSeedTenantID,
+		UploadID: record.UploadID,
+	})
+	if err != nil {
+		appDB.Close()
+		t.Fatalf("get upload object metadata: %v", err)
+	}
+	if err := writer.WriteObject(context.Background(), objectInput, bytes.NewReader(sourceBytes)); err != nil {
+		appDB.Close()
+		t.Fatalf("write source object: %v", err)
+	}
+	if _, err := sourceStore.CompleteUpload(context.Background(), sourcefiles.CompleteInput{
+		TenantID: liveSeedTenantID,
+		UploadID: record.UploadID,
+	}); err != nil {
+		appDB.Close()
+		t.Fatalf("complete upload: code=%s err=%v", sourcefiles.ErrorCode(err), err)
+	}
+	admissionStore := NewSQLSeedAdmissionStore(SQLSeedAdmissionStoreConfig{
+		Execer: NewSQLDBWriterAdmissionExecer(appDB),
+	})
+	if err := admissionStore.AdmitSeedRun(context.Background(), SeedAdmissionInput{
+		TenantID:           liveSeedTenantID,
+		ProjectID:          liveSeedProjectID,
+		RunID:              liveSeedRunID,
+		TraceID:            "trace_" + liveSeedRunID,
+		WorkflowType:       SeedWorkflowType,
+		TemporalWorkflowID: "seed_run_" + liveSeedRunID,
+		ActorUserID:        liveSeedUserID,
+		RequestID:          "req-live-seed-go",
+		UploadID:           record.UploadID,
+		SourceFileID:       record.FileID,
+		Status:             "queued",
+	}); err != nil {
+		appDB.Close()
+		t.Fatalf("admit seed run: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupLiveSeedGoRetryFixture(adminURL, storageConfig, objectInput.ObjectKey)
+	})
+	return liveSeedGoRetryFixture{
+		AdminURL:    adminURL,
+		AppDB:       appDB,
+		Record:      record,
+		ObjectInput: objectInput,
+	}
+}
+
+func liveSeedGoRetryForbiddenMarkers(fixture liveSeedGoRetryFixture) []liveSeedForbiddenMarker {
+	return []liveSeedForbiddenMarker{
+		{Name: "object key", Value: fixture.ObjectInput.ObjectKey},
+		{Name: "source hash", Value: fixture.ObjectInput.SHA256},
+		{Name: "object key field", Value: "object_key"},
+		{Name: "source object key field", Value: "source_object_key"},
+		{Name: "source hash field", Value: "source_sha256"},
+		{Name: "source title", Value: "第一章"},
+		{Name: "source body", Value: "风声穿过廊下"},
+		{Name: "provider response marker", Value: "provider response"},
+		{Name: "raw marker", Value: "raw"},
+		{Name: "content marker", Value: "content"},
+		{Name: "prompt marker", Value: "prompt"},
+		{Name: "api key marker", Value: "api_key"},
+		{Name: "encrypted credential marker", Value: "encrypted credential"},
+		{Name: "credential ref marker", Value: "credential_ref"},
+		{Name: "draft marker", Value: "draft"},
+		{Name: "manuscript marker", Value: "manuscript"},
+	}
+}
+
+func assertLiveSeedGoTextDoesNotContainMarkers(t *testing.T, text string, surface string, markers []liveSeedForbiddenMarker) {
+	t.Helper()
+	for _, marker := range markers {
+		if strings.TrimSpace(marker.Value) == "" {
+			continue
+		}
+		if strings.Contains(text, marker.Value) {
+			t.Fatalf("%s leaked forbidden %s", surface, marker.Name)
+		}
+	}
+}
+
+func cleanupLiveSeedGoRetryFixture(adminURL string, storageConfig sourcefiles.MinIOObjectWriterConfig, objectKey string) {
+	if db, err := sql.Open("pgx", adminURL); err == nil {
+		_, _ = db.Exec("DELETE FROM tenants WHERE tenant_id = $1", liveSeedTenantID)
+		_ = db.Close()
+	}
+	client, err := minio.New(storageConfig.Endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(storageConfig.AccessKey, storageConfig.SecretKey, ""),
+		Secure: storageConfig.UseSSL,
+	})
+	if err != nil {
+		return
+	}
+	_ = client.RemoveObject(context.Background(), storageConfig.Bucket, objectKey, minio.RemoveObjectOptions{})
+}
+
 func readLiveSeedGoAdmissionRows(t *testing.T, adminURL string, uploadID string) liveSeedGoAdmissionRows {
 	t.Helper()
 	db, err := sql.Open("pgx", adminURL)
@@ -238,6 +505,58 @@ func readLiveSeedGoAdmissionRows(t *testing.T, adminURL string, uploadID string)
 	}
 	if err := json.Unmarshal(payloadBytes, &rows.EventPayload); err != nil {
 		t.Fatalf("decode workflow event payload: %v", err)
+	}
+	return rows
+}
+
+func markLiveSeedGoRunFailedForRetry(t *testing.T, adminURL string, uploadID string, sourceFileID string) {
+	t.Helper()
+	db, err := sql.Open("pgx", adminURL)
+	if err != nil {
+		t.Fatalf("open admin db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE workflow_runs
+SET status = 'failed',
+    message = 'failed before retry',
+    error_code = 'WORKFLOW_FAILED',
+    error_message = 'failed before retry',
+    updated_at = now()
+WHERE tenant_id = $1 AND project_id = $2 AND run_id = $3 AND workflow_type = $4`, liveSeedTenantID, liveSeedProjectID, liveSeedRunID, SeedWorkflowType); err != nil {
+		t.Fatalf("mark workflow failed for retry: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE source_files
+SET parse_status = 'uploaded',
+    updated_at = now()
+WHERE tenant_id = $1 AND project_id = $2 AND upload_id = $3 AND file_id = $4`, liveSeedTenantID, liveSeedProjectID, uploadID, sourceFileID); err != nil {
+		t.Fatalf("release source for retry: %v", err)
+	}
+}
+
+func readLiveSeedGoRetryRows(t *testing.T, adminURL string, uploadID string) liveSeedGoRetryRows {
+	t.Helper()
+	db, err := sql.Open("pgx", adminURL)
+	if err != nil {
+		t.Fatalf("open admin db: %v", err)
+	}
+	defer db.Close()
+	var rows liveSeedGoRetryRows
+	var payloadBytes []byte
+	if err := db.QueryRow(`SELECT parse_status FROM source_files WHERE tenant_id = $1 AND upload_id = $2`, liveSeedTenantID, uploadID).Scan(&rows.SourceStatus); err != nil {
+		t.Fatalf("read retry source status: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status, temporal_workflow_id FROM workflow_runs WHERE tenant_id = $1 AND project_id = $2 AND run_id = $3`, liveSeedTenantID, liveSeedProjectID, liveSeedRunID).Scan(&rows.WorkflowStatus, &rows.TemporalWorkflowID); err != nil {
+		t.Fatalf("read retry workflow run: %v", err)
+	}
+	if err := db.QueryRow(`SELECT event_type, sequence, payload_jsonb::text
+FROM workflow_events
+WHERE tenant_id = $1 AND run_id = $2
+ORDER BY sequence DESC
+LIMIT 1`, liveSeedTenantID, liveSeedRunID).Scan(&rows.EventType, &rows.EventSequence, &payloadBytes); err != nil {
+		t.Fatalf("read retry workflow event: %v", err)
+	}
+	if err := json.Unmarshal(payloadBytes, &rows.EventPayload); err != nil {
+		t.Fatalf("decode retry workflow event payload: %v", err)
 	}
 	return rows
 }

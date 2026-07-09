@@ -65,10 +65,10 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Phase 5：Seed live chain / product closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；P5 Seed Web API upload/start live harness 已新增为严格 opt-in，默认 skip，要求 session cookie、local API base URL、mutation 确认、throwaway project 确认，以及 `/v1/me` 返回的 active project id/name 包含 disposable marker；P5 Seed browser Overview upload/start live harness 已新增为严格 opt-in，默认 skip，要求 local Next app + local Go API + session cookie + disposable project preflight，并通过 Playwright 驱动真实 Overview form；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化；P5 Seed same-run workflow retry backend 现在会在 Temporal+Postgres 配置下对 terminal `seed_pipeline` run 执行 owner-authorized same-run retry admission、sanitized retry event、Temporal restart 和 start-failure source release |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；P5 Seed Web API upload/start live harness 已新增为严格 opt-in，默认 skip，要求 session cookie、local API base URL、mutation 确认、throwaway project 确认，以及 `/v1/me` 返回的 active project id/name 包含 disposable marker；P5 Seed browser Overview upload/start live harness 已新增为严格 opt-in，默认 skip，要求 local Next app + local Go API + session cookie + disposable project preflight，并通过 Playwright 驱动真实 Overview form；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化；P5 Seed same-run workflow retry backend 现在会在 Temporal+Postgres 配置下对 terminal `seed_pipeline` run 执行 owner-authorized same-run retry admission、sanitized retry event、Temporal restart 和 start-failure source release；P5 Seed retry Postgres/MinIO opt-in harness 已补，默认 skip，使用 recording Temporal client 验证 stored source handoff、retry event、start-failure compensation、source release 和 public payload redaction |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed workflow retry backend：把 generic/Seed retry 从 fail-closed contract 推进为真实 terminal `seed_pipeline` same-run retry backend；HTTP owner-aware RBAC 已在前置 slice 完成，本轮补 Temporal+Postgres retrier/store、状态机 guard、start-failure compensation 和敏感字段清洗 |
-| 推荐下一步 | 继续 Phase 5/4 产品闭环：优先推进 browser upload/complete live check、外部 provider/cluster Seed success-chain E2E、Seed retry live harness/segment-level retry、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+| 本轮开发 slice | P5 Seed workflow retry Postgres/MinIO harness：在已落地的 same-run retry backend 之上补严格 opt-in live DB/object-store coverage；Temporal 使用 recording client，因此不声明真实 Temporal cluster retry E2E |
+| 推荐下一步 | 继续 Phase 5/4 产品闭环：优先推进真实 Temporal-backed Seed retry live harness、browser upload/complete live check、外部 provider/cluster Seed success-chain E2E、segment-level retry、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
 
 ## Phase 5 P5 Seed Overview upload MIME contract hardening
 
@@ -114,6 +114,41 @@ Docs synced:
 Next:
 
 - Continue Phase 5/4 with Seed retry live harness or external provider/cluster/browser live E2E before raising product closure beyond the current `55%-60%` estimate.
+
+### 2026-07-09 当前会话：P5 Seed workflow retry Postgres/MinIO harness
+
+Context:
+
+- The previous retry backend slice implemented terminal same-run retry for `seed_pipeline`, but live coverage for the SQL/object-store handoff was still pending.
+- This harness is strict opt-in and default-skipped. It proves app-role Postgres/RLS plus MinIO source metadata recovery, while Temporal remains a recording client. It is not a real Temporal cluster/worker retry E2E.
+
+TDD / Review:
+
+- RED：`cd apps/api && go test ./internal/workflows -run TestLiveSeedGoWorkflowRetryUsesStoredSourceHandoff -count=1` first failed on missing live retry helper functions.
+- Implementation：`apps/api/internal/workflows/seed_live_test.go` now adds `TestLiveSeedGoWorkflowRetryPostgresMinIOUsesStoredSourceHandoffWithRecordingTemporal` and `TestLiveSeedGoWorkflowRetryPostgresMinIOStartFailureReleasesSourceWithRecordingTemporal`. The fixture creates a real source file row, writes and verifies the object through MinIO, admits a Seed run, marks it terminal, and exercises `SQLWorkflowRetryStore` under app-role context. Success path verifies stored source handoff in the internal Temporal payload, `SeedTaskQueue`, `workflow.retry_requested` sequence 2, queued/parsing state, and sanitized public retry event. Start-failure path injects a sensitive Temporal error through the recording client, verifies stable `WORKFLOW_RETRY_FAILED`, `workflow.failed` sequence 3, failed/uploaded compensation, retained retry workflow id, and sanitized public event/error.
+- Quality follow-up：public assertion failures no longer print forbidden runtime values, object keys, hashes, full payloads, or error text; they report stable forbidden marker categories only. The tests were renamed to make the recording Temporal boundary explicit, and fixture cleanup now best-effort deletes the fixed tenant and generated MinIO object after each live run.
+- Spec reviewer PASS. Quality/privacy reviewer initially found log-leak and overclaim blockers; Coordinator fixed both and quality/privacy re-review PASS.
+
+Verification:
+
+- `cd apps/api && go test ./internal/workflows -run 'TestLiveSeedGoWorkflowRetry|WorkflowRetrier|SQLWorkflowRetryStore' -count=1` passed.
+- `cd apps/api && go test ./internal/workflows -run 'LiveSeedGo|WorkflowRetrier|SQLWorkflowRetryStore' -count=1` passed.
+- `cd apps/api && go test ./internal/workflows ./internal/httpapi ./cmd/api -run 'Retry|WorkflowRetrier|SQLWorkflowRetryStore|WorkflowCanceller|GlobalRun|WorkflowRunControl|SeedRun' -count=1` passed.
+- `cd apps/api && go test ./... -count=1` passed.
+- `git diff --check` passed after doc sync.
+
+Docs synced:
+
+- `docs/refactor-saas/06-seed-pipeline.md`
+- `docs/refactor-saas/13-agent-runtime.md`
+- `docs/refactor-saas/15-api-contracts.md`
+- `docs/refactor-saas/18-legacy-coverage-matrix.md`
+- `tasks/refactor-saas-parallel-board.md`
+- `tasks/refactor-saas-live-progress.md`
+
+Next:
+
+- Continue with a true Temporal-backed Seed retry live harness or segment-level retry before claiming retry recovery closure. Browser/provider/cluster Seed E2E, OCR/scanned PDF, vector/hybrid search, Graph live E2E, and Writer live reference E2E remain pending.
 
 Context:
 
