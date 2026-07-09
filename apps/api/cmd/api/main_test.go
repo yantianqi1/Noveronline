@@ -566,6 +566,41 @@ func TestNewWorkflowRetrierUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T) 
 	}
 }
 
+func TestNewSeedSegmentRetrierUsesDisabledRetrierWithoutDatabaseURL(t *testing.T) {
+	retrier, closeRetrier, err := newSeedSegmentRetrier("")
+
+	if err != nil {
+		t.Fatalf("new seed segment retrier: %v", err)
+	}
+	if closeRetrier != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if _, ok := retrier.(*workflows.DisabledSeedSegmentRetrier); !ok {
+		t.Fatalf("expected disabled seed segment retrier, got %T", retrier)
+	}
+}
+
+func TestNewSeedSegmentRetrierUsesSQLRetrierWithDatabaseURL(t *testing.T) {
+	retrier, closeRetrier, err := newSeedSegmentRetrier("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeRetrier != nil {
+		defer func() {
+			if err := closeRetrier(); err != nil {
+				t.Fatalf("close seed segment retrier: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new seed segment retrier: %v", err)
+	}
+	if _, ok := retrier.(*workflows.SQLSeedSegmentRetrier); !ok {
+		t.Fatalf("expected SQL seed segment retrier, got %T", retrier)
+	}
+	if closeRetrier == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestNewWriterAdmissionStoreUsesNilStoreWithoutDatabaseURL(t *testing.T) {
 	store, closeStore, err := newWriterAdmissionStore("")
 

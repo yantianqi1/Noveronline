@@ -46,6 +46,7 @@ def test_core_saas_schema_declares_minimum_phase3_tables() -> None:
         "source_files",
         "project_text_artifacts",
         "text_segments",
+        "seed_segment_retry_requests",
         "reading_passes",
         "reading_segment_notes",
         "entities",
@@ -115,6 +116,7 @@ def test_tenant_business_tables_have_tenant_id_and_timestamps() -> None:
         "source_files",
         "project_text_artifacts",
         "text_segments",
+        "seed_segment_retry_requests",
         "reading_passes",
         "reading_segment_notes",
         "entities",
@@ -176,6 +178,7 @@ def test_tenant_business_tables_have_tenant_id_and_timestamps() -> None:
         "source_files",
         "project_text_artifacts",
         "text_segments",
+        "seed_segment_retry_requests",
         "reading_passes",
         "reading_segment_notes",
         "entities",
@@ -775,6 +778,29 @@ def test_seed_canon_schema_supports_segments_and_reading_notes() -> None:
     assert "source_files(file_id)" in segments_sql
     assert "idx_text_segments_tenant_project_run_order" in sql
     assert "idx_text_segments_source_file_order" in sql
+
+    segment_retry_sql = _table_block(sql, "seed_segment_retry_requests")
+    for column in (
+        "retry_request_id",
+        "project_id",
+        "run_id",
+        "segment_id",
+        "status",
+        "requested_by",
+        "request_id",
+        "attempts",
+        "last_error_code",
+        "last_error_message",
+        "requested_at",
+    ):
+        assert column in segment_retry_sql
+    assert "workflow_runs(run_id)" in segment_retry_sql
+    assert "text_segments(segment_id)" in segment_retry_sql
+    assert "UNIQUE (tenant_id, run_id, segment_id)" in segment_retry_sql
+    assert "idx_seed_segment_retry_requests_run_status" in sql
+    assert "idx_seed_segment_retry_requests_segment" in sql
+    assert "ALTER TABLE seed_segment_retry_requests ENABLE ROW LEVEL SECURITY" in sql
+    assert "CREATE POLICY tenant_isolation_seed_segment_retry_requests" in sql
 
     passes_sql = _table_block(sql, "reading_passes")
     for column in (

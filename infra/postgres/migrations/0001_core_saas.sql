@@ -248,6 +248,25 @@ CREATE TABLE IF NOT EXISTS text_segments (
   FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS seed_segment_retry_requests (
+  tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+  retry_request_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL,
+  run_id UUID NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+  segment_id UUID NOT NULL REFERENCES text_segments(segment_id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'running', 'completed', 'failed', 'cancelled')),
+  requested_by UUID REFERENCES users(user_id),
+  request_id TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  last_error_code TEXT,
+  last_error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, run_id, segment_id),
+  FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS reading_passes (
   tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
   pass_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1233,6 +1252,8 @@ CREATE INDEX IF NOT EXISTS idx_source_files_upload ON source_files (tenant_id, p
 CREATE INDEX IF NOT EXISTS idx_project_text_artifacts_tenant_project ON project_text_artifacts (tenant_id, project_id, artifact_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_text_segments_tenant_project_run_order ON text_segments (tenant_id, project_id, run_id, segment_order);
 CREATE INDEX IF NOT EXISTS idx_text_segments_source_file_order ON text_segments (tenant_id, source_file_id, segment_order);
+CREATE INDEX IF NOT EXISTS idx_seed_segment_retry_requests_run_status ON seed_segment_retry_requests (tenant_id, project_id, run_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_seed_segment_retry_requests_segment ON seed_segment_retry_requests (tenant_id, segment_id, status);
 
 DO $$
 BEGIN
@@ -1436,6 +1457,15 @@ ALTER TABLE text_segments FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_text_segments ON text_segments;
 CREATE POLICY tenant_isolation_text_segments
 ON text_segments
+FOR ALL
+USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+
+ALTER TABLE seed_segment_retry_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE seed_segment_retry_requests FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_seed_segment_retry_requests ON seed_segment_retry_requests;
+CREATE POLICY tenant_isolation_seed_segment_retry_requests
+ON seed_segment_retry_requests
 FOR ALL
 USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
 WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);

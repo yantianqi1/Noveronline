@@ -124,6 +124,155 @@ func (r *DisabledSeedSegmentRetrier) RetrySeedSegments(_ context.Context, _ Retr
 	}
 }
 
+type SQLSeedSegmentRetrierConfig struct {
+	Execer WriterAdmissionSQLExecer
+}
+
+type SQLSeedSegmentRetrier struct {
+	execer WriterAdmissionSQLExecer
+}
+
+func NewSQLSeedSegmentRetrier(config SQLSeedSegmentRetrierConfig) *SQLSeedSegmentRetrier {
+	return &SQLSeedSegmentRetrier{execer: config.Execer}
+}
+
+func (r *SQLSeedSegmentRetrier) RetrySeedSegments(ctx context.Context, input RetrySeedSegmentsInput) (SeedSegmentsRetry, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	runID := strings.TrimSpace(input.RunID)
+	segmentIDs := normalizeSeedSegmentRetryIDs(input.SegmentIDs)
+	if !validSeedSegmentRetryContext(tenantID, projectID, runID, strings.TrimSpace(input.ActorUserID), segmentIDs) {
+		return SeedSegmentsRetry{}, &AppError{Code: "VALIDATION_FAILED", Message: "seed segment retry context is invalid"}
+	}
+	if r.execer == nil {
+		return SeedSegmentsRetry{}, &AppError{Code: "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED", Message: "seed segment retry backend is not configured"}
+	}
+	segmentIDsJSON, err := json.Marshal(segmentIDs)
+	if err != nil {
+		return SeedSegmentsRetry{}, &AppError{Code: "VALIDATION_FAILED", Message: "seed segment retry payload must be JSON serializable"}
+	}
+	eventPayload, err := json.Marshal(SanitizeWorkflowEventPayload(map[string]any{
+		"status":          "retry_requested",
+		"workflow_type":   SeedWorkflowType,
+		"request_id":      strings.TrimSpace(input.RequestID),
+		"requested_count": len(segmentIDs),
+	}))
+	if err != nil {
+		return SeedSegmentsRetry{}, &AppError{Code: "VALIDATION_FAILED", Message: "seed segment retry event payload must be JSON serializable"}
+	}
+	query := `WITH requested_segments AS (
+  SELECT DISTINCT value::uuid AS segment_id
+  FROM jsonb_array_elements_text($4::jsonb) AS value
+),
+seed_run AS (
+  SELECT workflow_runs.run_id, workflow_runs.project_id, workflow_runs.workflow_type
+  FROM workflow_runs
+  WHERE workflow_runs.tenant_id = $1::uuid
+    AND workflow_runs.project_id = $2::uuid
+    AND workflow_runs.run_id = $3::uuid
+    AND workflow_runs.workflow_type = 'seed_pipeline'
+    AND workflow_runs.status IN ('failed', 'cancelled')
+),
+segment_scope AS (
+  SELECT text_segments.segment_id
+  FROM text_segments
+  JOIN requested_segments
+    ON requested_segments.segment_id = text_segments.segment_id
+  WHERE text_segments.tenant_id = $1::uuid
+    AND text_segments.project_id = $2::uuid
+    AND text_segments.run_id = $3::uuid
+    AND EXISTS (SELECT 1 FROM seed_run)
+),
+segment_retry_guard AS (
+  SELECT CASE
+    WHEN (SELECT COUNT(*) FROM requested_segments) > 0
+     AND (SELECT COUNT(*) FROM segment_scope) = (SELECT COUNT(*) FROM requested_segments)
+    THEN 1
+    ELSE 1 / 0
+  END AS ok
+),
+upserted AS (
+  INSERT INTO seed_segment_retry_requests (
+    tenant_id,
+    project_id,
+    run_id,
+    segment_id,
+    status,
+    requested_by,
+    request_id,
+    requested_at,
+    updated_at
+  )
+  SELECT
+    $1::uuid,
+    $2::uuid,
+    $3::uuid,
+    segment_scope.segment_id,
+    'requested',
+    NULLIF($5, '')::uuid,
+    NULLIF($6, ''),
+    now(),
+    now()
+  FROM segment_retry_guard
+  CROSS JOIN segment_scope
+  ON CONFLICT (tenant_id, run_id, segment_id)
+  DO UPDATE SET
+    status = 'requested',
+    requested_by = EXCLUDED.requested_by,
+    request_id = EXCLUDED.request_id,
+    requested_at = EXCLUDED.requested_at,
+    updated_at = now()
+  RETURNING segment_id
+),
+next_sequence AS (
+  SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+  FROM workflow_events
+  WHERE tenant_id = $1::uuid
+    AND run_id = $3::uuid
+)
+INSERT INTO workflow_events (
+  tenant_id,
+  run_id,
+  workflow_type,
+  project_id,
+  event_type,
+  sequence,
+  payload_jsonb
+)
+SELECT
+  $1::uuid,
+  seed_run.run_id,
+  seed_run.workflow_type,
+  seed_run.project_id,
+  'seed.segments.retry_requested',
+  next_sequence.sequence,
+  $7::jsonb
+FROM seed_run
+CROSS JOIN next_sequence
+WHERE (SELECT COUNT(*) FROM upserted) = (SELECT COUNT(*) FROM requested_segments)`
+	result, err := execAdmissionSQL(ctx, r.execer, tenantID, projectID, query,
+		tenantID,
+		projectID,
+		runID,
+		string(segmentIDsJSON),
+		strings.TrimSpace(input.ActorUserID),
+		strings.TrimSpace(input.RequestID),
+		string(eventPayload),
+	)
+	if err != nil || result == nil {
+		return SeedSegmentsRetry{}, seedSegmentRetryFailed()
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		return SeedSegmentsRetry{}, seedSegmentRetryFailed()
+	}
+	return SeedSegmentsRetry{
+		RunID:          runID,
+		Status:         "retry_requested",
+		RequestedCount: len(segmentIDs),
+	}, nil
+}
+
 type TemporalWorkflowRetrierConfig struct {
 	Client    TemporalWorkflowClient
 	Store     WorkflowRetryStore
@@ -605,6 +754,32 @@ func missingWorkflowRetryContext(values ...string) bool {
 	return false
 }
 
+func normalizeSeedSegmentRetryIDs(values []string) []string {
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func validSeedSegmentRetryContext(tenantID string, projectID string, runID string, actorUserID string, segmentIDs []string) bool {
+	if !isSeedUUID(tenantID) || !isSeedUUID(projectID) || !isSeedUUID(runID) || !isOptionalSeedUUID(actorUserID) || len(segmentIDs) == 0 {
+		return false
+	}
+	for _, segmentID := range segmentIDs {
+		if !isSeedUUID(segmentID) {
+			return false
+		}
+	}
+	return true
+}
+
 func workflowRetryQueryFailed() *AppError {
 	return &AppError{Code: "WORKFLOW_QUERY_FAILED", Message: "workflow retry query failed"}
 }
@@ -615,4 +790,8 @@ func workflowRetryAdmissionFailed() *AppError {
 
 func workflowRetryFailed() *AppError {
 	return &AppError{Code: "WORKFLOW_RETRY_FAILED", Message: seedWorkflowRetryStartFailedMessage}
+}
+
+func seedSegmentRetryFailed() *AppError {
+	return &AppError{Code: "SEED_SEGMENT_RETRY_FAILED", Message: "seed segment retry failed"}
 }

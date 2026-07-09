@@ -46,6 +46,96 @@ func TestDisabledSeedSegmentRetrierFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSQLSeedSegmentRetrierAdmitsExistingTerminalSegmentsWithSanitizedEvent(t *testing.T) {
+	execer := &recordingTenantWriterAdmissionExecer{}
+	retrier := NewSQLSeedSegmentRetrier(SQLSeedSegmentRetrierConfig{Execer: execer})
+
+	retried, err := retrier.RetrySeedSegments(context.Background(), RetrySeedSegmentsInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		ProjectID:   "22222222-2222-4222-8222-222222222222",
+		RunID:       "33333333-3333-4333-8333-333333333333",
+		SegmentIDs:  []string{"77777777-7777-4777-8777-777777777777", "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888"},
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+		RequestID:   "req-segments",
+	})
+
+	if err != nil {
+		t.Fatalf("retry seed segments: %v", err)
+	}
+	if retried.RunID != "33333333-3333-4333-8333-333333333333" || retried.Status != "retry_requested" || retried.RequestedCount != 2 {
+		t.Fatalf("unexpected retry result: %#v", retried)
+	}
+	if execer.plainCalled || execer.tenantID != "11111111-1111-4111-8111-111111111111" || execer.projectID != "22222222-2222-4222-8222-222222222222" {
+		t.Fatalf("segment retry admission did not use tenant/project context: %#v", execer)
+	}
+	for _, expected := range []string{
+		"WITH requested_segments AS",
+		"FROM text_segments",
+		"workflow_runs.workflow_type = 'seed_pipeline'",
+		"workflow_runs.status IN ('failed', 'cancelled')",
+		"INSERT INTO seed_segment_retry_requests",
+		"ON CONFLICT (tenant_id, run_id, segment_id)",
+		"'seed.segments.retry_requested'",
+		"segment_retry_guard AS",
+		"COUNT(*) FROM segment_scope",
+		"COUNT(*) FROM requested_segments",
+		"1 / 0",
+	} {
+		if !strings.Contains(execer.query, expected) {
+			t.Fatalf("segment retry admission query missing %q: %s", expected, execer.query)
+		}
+	}
+	joinedArgs := strings.Join(argsAsStrings(execer.args), "\n")
+	for _, expected := range []string{
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		"33333333-3333-4333-8333-333333333333",
+		"77777777-7777-4777-8777-777777777777",
+		"88888888-8888-4888-8888-888888888888",
+		"retry_requested",
+		"req-segments",
+	} {
+		if !strings.Contains(joinedArgs, expected) {
+			t.Fatalf("segment retry admission args lost %q: %s", expected, joinedArgs)
+		}
+	}
+	for _, forbidden := range []string{"object_key", "private/object.txt", "prompt", "provider", "raw body", "content", "api_key", "credential_ref", "draft", "manuscript"} {
+		if strings.Contains(joinedArgs, forbidden) {
+			t.Fatalf("segment retry admission args leaked %q: %s", forbidden, joinedArgs)
+		}
+	}
+	eventPayload := argsAsStrings([]any{execer.args[6]})[0]
+	if strings.Contains(eventPayload, "44444444-4444-4444-8444-444444444444") ||
+		strings.Contains(eventPayload, "segment_id") ||
+		strings.Contains(eventPayload, "77777777-7777-4777-8777-777777777777") {
+		t.Fatalf("segment retry public event payload leaked private/internal metadata: %s", eventPayload)
+	}
+}
+
+func TestSQLSeedSegmentRetrierRejectsInvalidIDsBeforeSQL(t *testing.T) {
+	execer := &recordingWriterAdmissionExecer{}
+	retrier := NewSQLSeedSegmentRetrier(SQLSeedSegmentRetrierConfig{Execer: execer})
+
+	_, err := retrier.RetrySeedSegments(context.Background(), RetrySeedSegmentsInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		ProjectID:   "22222222-2222-4222-8222-222222222222",
+		RunID:       "33333333-3333-4333-8333-333333333333",
+		SegmentIDs:  []string{"not-a-uuid", "77777777-7777-4777-8777-777777777777"},
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+		RequestID:   "req-segments",
+	})
+
+	if code := ErrorCode(err); code != "VALIDATION_FAILED" {
+		t.Fatalf("expected stable validation failure, got %s (%v)", code, err)
+	}
+	if execer.query != "" {
+		t.Fatalf("invalid segment retry IDs reached SQL: %s", execer.query)
+	}
+	if strings.Contains(err.Error(), "not-a-uuid") || strings.Contains(err.Error(), "77777777") {
+		t.Fatalf("validation error leaked segment ids: %v", err)
+	}
+}
+
 func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *testing.T) {
 	temporalClient := &recordingRetryTemporalClient{}
 	store := &recordingWorkflowRetryStore{

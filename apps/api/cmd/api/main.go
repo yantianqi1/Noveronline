@@ -322,6 +322,17 @@ func main() {
 			}
 		}()
 	}
+	seedSegmentRetrier, closeSeedSegmentRetrier, err := newSeedSegmentRetrier(databaseURL)
+	if err != nil {
+		log.Fatalf("configure seed segment retrier: %v", err)
+	}
+	if closeSeedSegmentRetrier != nil {
+		defer func() {
+			if err := closeSeedSegmentRetrier(); err != nil {
+				log.Printf("close seed segment retrier: %v", err)
+			}
+		}()
+	}
 
 	llmResolver, closeLLMResolver, err := newLLMResolver(databaseURL)
 	if err != nil {
@@ -687,6 +698,7 @@ func main() {
 		WorkflowEventReader:              workflowEventReader,
 		WorkflowCanceller:                workflowCanceller,
 		WorkflowRetrier:                  workflowRetrier,
+		SeedSegmentRetrier:               seedSegmentRetrier,
 		SeedStarter:                      seedStarter,
 		SeedRunReader:                    seedRunReader,
 		ProjectOverviewReader:            projectOverviewReader,
@@ -1300,6 +1312,19 @@ func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databas
 		Client:    temporalClient,
 		Store:     store,
 		TaskQueue: seedTaskQueue,
+	}), db.Close, nil
+}
+
+func newSeedSegmentRetrier(databaseURL string) (workflows.SeedSegmentRetrier, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return workflows.NewDisabledSeedSegmentRetrier(), nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewSQLSeedSegmentRetrier(workflows.SQLSeedSegmentRetrierConfig{
+		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
 	}), db.Close, nil
 }
 
