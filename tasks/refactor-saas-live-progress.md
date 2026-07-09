@@ -65,10 +65,46 @@
 | 项 | 内容 |
 |---|---|
 | 当前主线 | Phase 5：Seed live chain / product closure |
-| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；P5 Seed Web API upload/start live harness 已新增为严格 opt-in，默认 skip，要求 session cookie、local API base URL、mutation 确认、throwaway project 确认，以及 `/v1/me` 返回的 active project id/name 包含 disposable marker；P5 Seed browser Overview upload/start live harness 已新增为严格 opt-in，默认 skip，要求 local Next app + local Go API + session cookie + disposable project preflight，并通过 Playwright 驱动真实 Overview form；P5 Seed browser live privacy hardening 现在避免 cookie-backed server API calls 走 Next patched fetch / dynamic headers APIs，扫描 app HTML/RSC/text-component response 和 raw Go API JSON，并在本机 Next 4011 + Go API 3888 上执行通过；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化；P5 Seed same-run workflow retry backend 现在会在 Temporal+Postgres 配置下对 terminal `seed_pipeline` run 执行 owner-authorized same-run retry admission、sanitized retry event、Temporal restart 和 start-failure source release；P5 Seed retry Postgres/MinIO opt-in harness 已补，默认 skip，使用 recording Temporal client 验证 stored source handoff、retry event、start-failure compensation、source release 和 public payload redaction；P5 Seed retry true Temporal worker opt-in harness 已补，默认 skip，驱动真实 Go API retry endpoint 和配置 `SEED_TASK_QUEUE` 上的真实 worker，并在 run 后 best-effort 清理 live source/artifact/segment objects；P5 Seed scanned/no-text PDF 现在明确 fail closed 为 `OCR_BACKEND_UNCONFIGURED`，malformed/corrupt PDF 仍保持 `FILE_PARSE_DECODE_FAILED` |
+| 最近完成重点 | Wave 0 governance calibration、W1-S1 explicit draft adoption、W1-S2 writer reviewer admission/read metadata、W1-S3 manuscript metadata/export manifest、W1-S4 Writer UI manuscript metadata panels、W1-S5 Writer replay cursor / raw payload UI hardening、W1-S6 Pi compose live/local provider opt-in smoke harness、W1-S7 Writer browser verification evidence documentation、W2-S1 `/v1/me` auth reader seam 到 W2-S5zc actor-sensitive protected route inventory guard 均已通过对应验收记录；P5 Seed browser one-step upload/start action 已完成 Web 侧 file-first upload admission、object PUT、complete 和 Seed start handoff，且 Web API client 现在会把 server action 校验/推断出的 source MIME 继续用于 object PUT，避免浏览器 `application/octet-stream` 覆盖 admitted MIME；P5 Seed Web API upload/start live harness 已新增为严格 opt-in，默认 skip，要求 session cookie、local API base URL、mutation 确认、throwaway project 确认，以及 `/v1/me` 返回的 active project id/name 包含 disposable marker；P5 Seed browser Overview upload/start live harness 已新增为严格 opt-in，默认 skip，要求 local Next app + local Go API + session cookie + disposable project preflight，并通过 Playwright 驱动真实 Overview form；P5 Seed browser live privacy hardening 现在避免 cookie-backed server API calls 走 Next patched fetch / dynamic headers APIs，扫描 app HTML/RSC/text-component response 和 raw Go API JSON，并在本机 Next 4011 + Go API 3888 上执行通过；archive candidate、finalize readiness/status、global aggregation live Postgres/local-provider variants、Go API upload/complete -> Temporal worker -> Python semantic-chain fail-closed live E2E，以及 Go API upload/complete -> Temporal worker -> Python full semantic success-chain live E2E 已在本机执行通过；global aggregation provider-returned seed_analysis 现在先清洗再计算 public `summary_count` / 持久化；P5 Seed same-run workflow retry backend 现在会在 Temporal+Postgres 配置下对 terminal `seed_pipeline` run 执行 owner-authorized same-run retry admission、sanitized retry event、Temporal restart 和 start-failure source release；P5 Seed retry Postgres/MinIO opt-in harness 已补，默认 skip，使用 recording Temporal client 验证 stored source handoff、retry event、start-failure compensation、source release 和 public payload redaction；P5 Seed retry true Temporal worker opt-in harness 已补，默认 skip，驱动真实 Go API retry endpoint 和配置 `SEED_TASK_QUEUE` 上的真实 worker，并在 run 后 best-effort 清理 live source/artifact/segment objects；P5 Seed Overview 控制面现在按 selected run public status gate cancel/retry，retry 成功会清空 `after_event_id` 以显示新事件；P5 Seed scanned/no-text PDF 现在明确 fail closed 为 `OCR_BACKEND_UNCONFIGURED`，malformed/corrupt PDF 仍保持 `FILE_PARSE_DECODE_FAILED` |
 | 当前未完成重点 | Wave 1 真实 LLM-bound E2E 执行需 resolved provider env；真正内容导出 artifact service；Wave 2 complete production login/session lifecycle、refresh token/session renewal、route-wide auth middleware、production-grade cookie/session management UI beyond the metadata panel 和其他剩余 owner-aware/global non-asset mutation/read RBAC |
-| 本轮开发 slice | P5 Seed browser live privacy/session leakage hardening：cookie-backed Web server API calls 避免 Next patched `fetch` / public dynamic headers 泄露到 Flight/RSC，browser live harness 扫描 app HTML/RSC/text-component response 与 raw Go API JSON；不声明完整 Seed/browser/provider closure |
+| 本轮开发 slice | P5 Seed Overview retry/cancel control hardening：Cancel 仅对 selected ok 且非 terminal Seed run 启用；Retry 仅对 selected ok 且 `failed` / `cancelled` terminal run 启用；retry 成功清空 `after_event_id`，失败保留 cursor；不声明 browser/provider/Seed recovery closure |
 | 推荐下一步 | 继续 Phase 5/4 产品闭环：优先推进 browser upload/complete live check、外部 provider/cluster Seed success-chain E2E、segment-level retry/browser retry、LLM live provider/cluster E2E、React Flow/library hardening / Graph live DB/browser E2E 或 Writer live reference E2E。当前不声明完整 Seed pipeline、全部 provider E2E、Graph/Writer closure 或 100% |
+
+## Phase 5 P5 Seed Overview retry/cancel control hardening
+
+### 2026-07-09 当前会话：status-gated Overview controls
+
+Context:
+
+- Seed same-run retry backend and opt-in retry harnesses exist, but the Overview control panel enabled Cancel and Retry based only on whether any run was selected.
+- This is a narrow Web control-surface slice. It does not add browser retry E2E, per-segment retry, replacement-run retry, external provider/cluster certification, OCR, vector/hybrid search, or complete Seed recovery closure.
+
+TDD / Review:
+
+- Implementation subagent added focused coverage for Overview Seed control status gating and retry cursor behavior.
+- Spec reviewer PASS: cancel preserves the existing cursor, retry success clears `after_event_id`, retry failure preserves it, and only scoped Web files were touched.
+- Quality reviewer initially flagged the new test as too source-regex brittle. Coordinator follow-up moved the run-control rules into a small pure module and replaced the exact helper-shape assertions with table-driven behavior checks over `queued`, `running`, `completed`, `failed`, `cancelled`, trimmed uppercase status, null run, and non-ok run cases.
+
+Implementation:
+
+- `OverviewSeedShell` now derives `cancelSeedRunEnabled` from a selected ok non-terminal Seed run and `retrySeedRunEnabled` from a selected ok retryable terminal Seed run.
+- Retryable terminal statuses are `failed` and `cancelled`; `completed` is terminal but not retryable.
+- `retrySeedRunAction` clears `after_event_id` only after accepted retry so replay starts from the beginning of the retried event stream. Retry failure preserves the user's cursor. Cancel preserves the user's cursor.
+- Public UI/action code remains metadata-only and does not expose prompt, provider response, raw body/content, API keys, encrypted credentials, `credential_ref`, object keys, draft, or manuscript text.
+
+Verification:
+
+- Focused: `cd apps/web && npm run test -- --test-name-pattern='Overview Seed controls are status-gated'` passed, 64 passed / 2 skipped.
+- Broader Web: `cd apps/web && npm run test` passed, 64 passed / 2 skipped.
+- Typecheck: `cd apps/web && npm run typecheck` passed.
+- Build: `cd apps/web && rm -rf .next && npm run build` passed; known local Next SWC platform package warning remained non-fatal.
+- Broader Go API verification: `cd apps/api && go test ./... -count=1` passed.
+- `git diff --check` passed.
+- Spec reviewer re-check PASS. Quality/privacy reviewer re-check PASS after replacing brittle source-shape assertions with table-driven pure-rule coverage.
+
+Next:
+
+- Commit this UI slice. Then continue Phase 5 with browser upload/complete live check, external provider/cluster Seed success-chain E2E, segment-level retry/browser retry, OCR, vector/hybrid search, Graph live DB/browser E2E, and Writer live reference E2E.
 
 ## Phase 5 P5 Seed scanned-PDF/OCR fail-closed boundary
 

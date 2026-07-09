@@ -863,6 +863,43 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.doesNotMatch(shell, /mock/i);
 });
 
+test("Overview Seed controls are status-gated and retry resets successful event cursor", async () => {
+  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
+  const shell = await fileText("components/overview-seed-shell.tsx");
+  const controls = await import(`../components/overview-seed-run-controls.ts?seedControls=${Date.now()}`);
+  const cancelAction = sourceSlice(page, "async function cancelSeedRunAction", "async function retrySeedRunAction");
+  const retryAction = sourceSlice(page, "async function retrySeedRunAction", "return (");
+
+  const statusCases = [
+    { status: "queued", cancel: true, retry: false },
+    { status: "running", cancel: true, retry: false },
+    { status: "completed", cancel: false, retry: false },
+    { status: "failed", cancel: false, retry: true },
+    { status: "cancelled", cancel: false, retry: true },
+    { status: " FAILED ", cancel: false, retry: true },
+  ];
+  for (const statusCase of statusCases) {
+    const run = { ok: true, status: statusCase.status };
+    assert.equal(controls.canCancelSeedRun(run), statusCase.cancel, `cancel gate for ${statusCase.status}`);
+    assert.equal(controls.canRetrySeedRun(run), statusCase.retry, `retry gate for ${statusCase.status}`);
+  }
+  assert.equal(controls.canCancelSeedRun(null), false);
+  assert.equal(controls.canRetrySeedRun(null), false);
+  assert.equal(controls.canCancelSeedRun({ ok: false, status: "running" }), false);
+  assert.equal(controls.canRetrySeedRun({ ok: false, status: "failed" }), false);
+
+  assert.match(shell, /const\s+cancelSeedRunEnabled\s*=\s*canCancelSeedRun\(selectedSeedRun\)/);
+  assert.match(shell, /const\s+retrySeedRunEnabled\s*=\s*canRetrySeedRun\(selectedSeedRun\)/);
+  assert.match(shell, /disabled=\{!cancelSeedRunEnabled\}/);
+  assert.match(shell, /disabled=\{!retrySeedRunEnabled\}/);
+  assert.doesNotMatch(shell, /const\s+hasSelectedRun\s*=/);
+  assert.doesNotMatch(shell, /disabled=\{!hasSelectedRun\}/);
+
+  assert.match(cancelAction, /afterEventId:\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
+  assert.match(retryAction, /afterEventId:\s*result\.ok\s*\?\s*""\s*:\s*\(query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""\)/);
+  assert.doesNotMatch(`${shell}\n${retryAction}\n${cancelAction}`, /raw_body|content_text|draft_text|manuscript_text|provider_response|credential_ref|encrypted_api_key|api_key|object_key/i);
+});
+
 test("Next app shell declares tenant/project LLM Facility route", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/llm-facility/page.tsx");
 

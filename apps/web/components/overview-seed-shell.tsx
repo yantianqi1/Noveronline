@@ -10,6 +10,7 @@ import type {
   WorkflowRunEventsSummary,
   WorkflowRunSummary,
 } from "../lib/api";
+import { canCancelSeedRun, canRetrySeedRun } from "./overview-seed-run-controls";
 
 type ActionStatus = {
   status: string;
@@ -56,7 +57,8 @@ export function OverviewSeedShell({
   cancelSeedRunAction,
   retrySeedRunAction,
 }: OverviewSeedShellProps) {
-  const hasSelectedRun = Boolean(selectedRunId);
+  const cancelSeedRunEnabled = canCancelSeedRun(selectedSeedRun);
+  const retrySeedRunEnabled = canRetrySeedRun(selectedSeedRun);
 
   return (
     <div>
@@ -182,12 +184,12 @@ export function OverviewSeedShell({
               <form action={cancelSeedRunAction} className="inline-action-form">
                 <input type="hidden" name="runId" value={selectedRunId} />
                 <span>Cancel Seed run</span>
-                <button disabled={!hasSelectedRun} type="submit">Cancel Seed run</button>
+                <button disabled={!cancelSeedRunEnabled} type="submit">Cancel Seed run</button>
               </form>
               <form action={retrySeedRunAction} className="inline-action-form">
                 <input type="hidden" name="runId" value={selectedRunId} />
                 <span>Retry Seed run</span>
-                <button disabled={!hasSelectedRun} type="submit">Retry Seed run</button>
+                <button disabled={!retrySeedRunEnabled} type="submit">Retry Seed run</button>
               </form>
             </div>
             <p className="form-hint">

@@ -286,7 +286,7 @@ export default async function OverviewPage({
       seedCode: status.code,
       seedMessage: status.message,
       runId: status.runId || runId || query.runId || "",
-      afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      afterEventId: result.ok ? "" : (query.after_event_id ?? query.afterEventId ?? ""),
     }));
   }
 
