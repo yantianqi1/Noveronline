@@ -79,6 +79,90 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sessionCookie: config.sessionCookie,
     });
 
+    let retryControlRunId = runId;
+    const earlySelectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
+    const earlyControlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
+    const earlyCancelButton = earlyControlSeedPanel.getByRole("button", { name: /^Cancel Seed run$/ });
+    const earlyRetryButton = earlyControlSeedPanel.getByRole("button", { name: /^Retry Seed run$/ });
+    await earlySelectedRunPanel.getByText(runId).waitFor();
+    await earlyCancelButton.waitFor();
+    await earlyRetryButton.waitFor();
+    const earlyRunStatus = await assertSeedRunBrowserControlsReflectStatus(page, earlySelectedRunPanel, "fresh selected run");
+    if (earlyRunStatus === "queued" || earlyRunStatus === "running") {
+      const freshRunBeforeCancel = await api.getSeedRunSummary({
+        tenantId: config.tenantId,
+        sessionCookie: config.sessionCookie,
+        runId,
+      });
+      assertNoForbiddenPublicMarkers(freshRunBeforeCancel, {
+        sourceText,
+        sessionCookie: config.sessionCookie,
+      });
+      assert.equal(freshRunBeforeCancel.ok, true, publicFailure(freshRunBeforeCancel));
+      if (freshRunBeforeCancel.status === "queued" || freshRunBeforeCancel.status === "running") {
+        assert.equal(await earlyCancelButton.isEnabled(), true, "fresh browser Seed run must be cancellable for retry-control live coverage");
+        assert.equal(await earlyRetryButton.isDisabled(), true, "fresh browser Seed run must not expose retry before a retryable terminal status");
+        const beforeCancelUrl = page.url();
+        try {
+          await Promise.all([
+            page.waitForURL((url) => (
+              url.toString() !== beforeCancelUrl &&
+              url.searchParams.get("runId") === runId &&
+              Boolean(url.searchParams.get("seedStatus")) &&
+              Boolean(url.searchParams.get("seedCode"))
+            ), { timeout: 60000 }),
+            earlyCancelButton.click(),
+          ]);
+        } catch (error) {
+          const afterCancelRace = await api.getSeedRunSummary({
+            tenantId: config.tenantId,
+            sessionCookie: config.sessionCookie,
+            runId,
+          });
+          assertNoForbiddenPublicMarkers(afterCancelRace, {
+            sourceText,
+            sessionCookie: config.sessionCookie,
+          });
+          assert.equal(afterCancelRace.ok, true, publicFailure(afterCancelRace));
+          if (afterCancelRace.status === "queued" || afterCancelRace.status === "running") {
+            throw error;
+          }
+        }
+        await page.waitForLoadState("networkidle");
+        await flushResponseScans(appResponseScans);
+        assertNoForbiddenPublicMarkers(await page.textContent("body"), {
+          sourceText,
+          sessionCookie: config.sessionCookie,
+        });
+      }
+    }
+
+    const preparedRetryRun = await waitForSeedRunTerminalStatus(api, config, runId, {
+      sourceText,
+      timeoutMs: 60000,
+    });
+    if (preparedRetryRun.status === "completed" && config.consumeRetryRun) {
+      await assertConsumableRetryableSeedRun(api, config, config.retryRunId);
+      retryControlRunId = config.retryRunId;
+    } else if (preparedRetryRun.status === "completed") {
+      assert.fail("browser Seed retry live coverage requires MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN=1 and MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID when the uploaded run completes before cancellation");
+    } else if (preparedRetryRun.status === "failed" || preparedRetryRun.status === "cancelled") {
+      retryControlRunId = runId;
+    } else {
+      assert.fail("browser Seed retry live coverage could not prepare a retryable terminal run");
+    }
+
+    const preparedRetrySummary = await api.getSeedRunSummary({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+    });
+    assertNoForbiddenPublicMarkers(preparedRetrySummary, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(preparedRetrySummary.ok, true, publicFailure(preparedRetrySummary));
+
     const rawRun = await fetchBrowserLivePublicJsonWithRawScan(
       config,
       `/v1/seed-runs/${runId}`,
@@ -186,6 +270,133 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       sessionCookie: config.sessionCookie,
     });
+
+    const retryOverviewUrl = new URL(overviewUrl(config));
+    retryOverviewUrl.searchParams.set("runId", retryControlRunId);
+    await page.goto(retryOverviewUrl.toString(), { waitUntil: "networkidle" });
+    await flushResponseScans(appResponseScans);
+    const retrySelectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
+    const retrySeedEventsPanel = page.getByRole("heading", { name: "Seed events" }).locator("..");
+    await retrySelectedRunPanel.getByText(retryControlRunId).waitFor();
+    await assertSeedRunBrowserControlsReflectStatus(page, retrySelectedRunPanel, "retryable selected run");
+
+    const controlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
+    const cancelButton = controlSeedPanel.getByRole("button", { name: /^Cancel Seed run$/ });
+    const retryButton = controlSeedPanel.getByRole("button", { name: /^Retry Seed run$/ });
+    await cancelButton.waitFor();
+    await retryButton.waitFor();
+
+    const retryableRun = await api.getSeedRunSummary({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId: retryControlRunId,
+    });
+    assertNoForbiddenPublicMarkers(retryableRun, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(retryableRun.ok, true, publicFailure(retryableRun));
+    assert.equal(
+      retryableRun.status === "cancelled" || retryableRun.status === "failed",
+      true,
+      "browser Seed run did not reach a retryable terminal status for retry-control live coverage",
+    );
+    assert.equal(await cancelButton.isDisabled(), true, "retryable terminal browser Seed run must not expose cancel");
+    assert.equal(await retryButton.isEnabled(), true, "retryable terminal browser Seed run must expose retry");
+
+    const retryableEvents = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId: retryControlRunId,
+    });
+    assertNoForbiddenPublicMarkers(retryableEvents, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(retryableEvents.ok, true, publicFailure(retryableEvents));
+    const maxRetryableSequence = maxEventSequence(retryableEvents.items);
+    const retryCursorEvent = retryableEvents.items.find(
+      (event) => event.event_type === "workflow.queued" && event.sequence < maxRetryableSequence,
+    ) ?? retryableEvents.items.find((event) => event.sequence < maxRetryableSequence);
+    assert.ok(retryCursorEvent, "browser Seed retryable run must expose a cursor event with later events");
+    assert.ok(maxRetryableSequence > retryCursorEvent.sequence, "browser Seed retryable run did not preserve visible progress events after the cursor");
+    const retryReplayAfterCursor = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId: retryControlRunId,
+      afterEventId: retryCursorEvent.event_id,
+    });
+    assertNoForbiddenPublicMarkers(retryReplayAfterCursor, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(retryReplayAfterCursor.ok, true, publicFailure(retryReplayAfterCursor));
+    assert.equal(retryReplayAfterCursor.after_event_id, retryCursorEvent.event_id);
+    assert.ok(retryReplayAfterCursor.items.length > 0, "browser Seed retryable run did not expose post-cursor events");
+    assert.equal(
+      retryReplayAfterCursor.items.every((event) => event.event_id !== retryCursorEvent.event_id && event.sequence > retryCursorEvent.sequence),
+      true,
+      "browser Seed retryable replay returned the cursor event again",
+    );
+    const expectedPostCursorEvent = retryReplayAfterCursor.items[0];
+
+    const cursorUrl = new URL(overviewUrl(config));
+    cursorUrl.searchParams.set("runId", retryControlRunId);
+    cursorUrl.searchParams.set("after_event_id", retryCursorEvent.event_id);
+    await page.goto(cursorUrl.toString(), { waitUntil: "networkidle" });
+    await flushResponseScans(appResponseScans);
+    await page.getByText(`Event cursor: ${retryCursorEvent.event_id}`).first().waitFor();
+    const cursoredEventsText = await retrySeedEventsPanel.textContent();
+    assert.match(cursoredEventsText ?? "", new RegExp(escapeRegExp(expectedPostCursorEvent.event_type)));
+    assert.match(cursoredEventsText ?? "", new RegExp(`seq ${expectedPostCursorEvent.sequence}\\b`));
+    assert.doesNotMatch(cursoredEventsText ?? "", new RegExp(`seq ${retryCursorEvent.sequence}\\b`));
+    assertNoForbiddenPublicMarkers(await page.textContent("body"), {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(await retryButton.isEnabled(), true, "retryable browser Seed run lost retry enablement with an event cursor");
+
+    await Promise.all([
+      page.waitForURL((url) => (
+        url.searchParams.get("seedStatus") === "success" &&
+        url.searchParams.get("seedCode") === "retry_requested" &&
+        url.searchParams.get("runId") === retryControlRunId &&
+        !url.searchParams.has("after_event_id")
+      ), { timeout: 60000 }),
+      retryButton.click(),
+    ]);
+    await page.waitForLoadState("networkidle");
+    await flushResponseScans(appResponseScans);
+    assertNoForbiddenPublicMarkers(page.url(), {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assertNoForbiddenPublicMarkers(await page.textContent("body"), {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    await retrySeedEventsPanel.getByText("Event cursor: beginning").waitFor();
+    await retrySeedEventsPanel.getByText("workflow.queued").waitFor();
+    await retrySeedEventsPanel.getByText("workflow.retry_requested").waitFor();
+
+    const retriedEvents = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId: retryControlRunId,
+    });
+    assertNoForbiddenPublicMarkers(retriedEvents, {
+      sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(retriedEvents.ok, true, publicFailure(retriedEvents));
+    assert.ok(
+      retriedEvents.items.some((event) => event.event_type === "workflow.retry_requested"),
+      "browser Seed retry control did not expose the accepted retry event",
+    );
+    assert.ok(
+      retriedEvents.items.some((event) => event.sequence > maxRetryableSequence),
+      "browser Seed retry control did not make post-terminal events visible after clearing the cursor",
+    );
   } finally {
     if (appResponseScans) {
       appResponseScans.stop();
@@ -206,6 +417,8 @@ function browserLiveConfig() {
     tenantId: env("MIROFISH_WEB_BROWSER_LIVE_SEED_TENANT_ID"),
     projectId: env("MIROFISH_WEB_BROWSER_LIVE_SEED_PROJECT_ID"),
     sessionCookie: env("MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE"),
+    retryRunId: env("MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID"),
+    consumeRetryRun: env("MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN") === "1",
     allowMutation: env("MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION") === "1",
     throwawayProject: env("MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT") === "1",
     disposableProjectMarker: env("MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER"),
@@ -257,6 +470,9 @@ function assertBrowserLiveConfigComplete(config) {
   if (!config.throwawayProject) {
     missing.push("MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT=1");
   }
+  if (config.consumeRetryRun && !config.retryRunId) {
+    missing.push("MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID");
+  }
   assert.equal(
     missing.length,
     0,
@@ -278,6 +494,86 @@ function assertSafeLocalUrl(value, label) {
 function overviewUrl(config) {
   const url = new URL(`/${config.tenantId}/projects/${config.projectId}/overview`, config.appBaseUrl);
   return url.toString();
+}
+
+async function assertSeedRunBrowserControlsReflectStatus(page, selectedRunPanel, label) {
+  const controlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
+  const statusValue = selectedRunPanel.locator("dt", { hasText: /^Status$/ }).locator("xpath=following-sibling::dd[1]");
+  await statusValue.waitFor();
+  const status = ((await statusValue.textContent()) ?? "").trim().toLowerCase();
+  assert.notEqual(status, "", `${label} did not render a status`);
+  assert.equal(
+    await controlSeedPanel.getByRole("button", { name: /^Cancel Seed run$/ }).isEnabled(),
+    status === "queued" || status === "running",
+    `${label} cancel control did not match status`,
+  );
+  assert.equal(
+    await controlSeedPanel.getByRole("button", { name: /^Retry Seed run$/ }).isEnabled(),
+    status === "failed" || status === "cancelled",
+    `${label} retry control did not match status`,
+  );
+  return status;
+}
+
+async function assertConsumableRetryableSeedRun(api, config, runId) {
+  const rawRun = await fetchBrowserLivePublicJsonWithRawScan(config, `/v1/seed-runs/${runId}`);
+  assertNoForbiddenPublicMarkers(rawRun, { sessionCookie: config.sessionCookie });
+  assert.equal(rawRun.project_id, config.projectId);
+  assert.equal(rawRun.workflow_type, "seed_pipeline");
+  assert.equal(
+    rawRun.status === "failed" || rawRun.status === "cancelled",
+    true,
+    "browser Seed consumable retry run must be failed or cancelled",
+  );
+
+  const run = await api.getSeedRunSummary({
+    tenantId: config.tenantId,
+    sessionCookie: config.sessionCookie,
+    runId,
+  });
+  assertNoForbiddenPublicMarkers(run, { sessionCookie: config.sessionCookie });
+  assert.equal(run.ok, true, publicFailure(run));
+  assert.equal(run.project_id, config.projectId);
+  assert.equal(run.workflow_type, "seed_pipeline");
+  assert.equal(
+    run.status === "failed" || run.status === "cancelled",
+    true,
+    "browser Seed consumable retry summary must be failed or cancelled",
+  );
+}
+
+async function waitForSeedRunTerminalStatus(api, config, runId, options) {
+  const deadline = Date.now() + options.timeoutMs;
+  let latest;
+  while (Date.now() <= deadline) {
+    latest = await api.getSeedRunSummary({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+    });
+    assertNoForbiddenPublicMarkers(latest, {
+      sourceText: options.sourceText,
+      sessionCookie: config.sessionCookie,
+    });
+    assert.equal(latest.ok, true, publicFailure(latest));
+    if (latest.status === "completed" || latest.status === "failed" || latest.status === "cancelled") {
+      return latest;
+    }
+    await delay(500);
+  }
+  assert.fail(`browser Seed run did not reach a terminal status after cancel request: ${latest?.status ?? "unknown"}`);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function maxEventSequence(events) {
+  return events.reduce((maxSequence, event) => Math.max(maxSequence, event.sequence), 0);
 }
 
 async function fetchBrowserLivePublicJsonWithRawScan(config, path, options = {}) {
