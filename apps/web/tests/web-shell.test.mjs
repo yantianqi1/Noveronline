@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
+import {
+  addLiveSeedSessionCookie,
+  assertDisposableLiveSeedConfig,
+  assertLocalHttpUrl,
+  assertNoForbiddenPublicMarkers,
+  BROWSER_LIVE_SEED_PREFIX,
+  LIVE_SEED_PREFIX,
+  loadLiveSeedConfig,
+  overviewUrl,
+  publicFailure,
+  redactSensitiveText,
+} from "./live-seed-harness.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 
@@ -242,6 +254,305 @@ test("password login page issues browser session server-side without exposing to
   assert.match(page, /autoComplete="current-password"/);
   assert.match(page, /Sign in/);
   assert.doesNotMatch(page, /token_hash|credential_ref|encrypted_api_key|api_key|object_key|draft|manuscript|prompt|provider|raw_body|content_text/i);
+});
+
+test("live Seed harness loads strict opt-in configs for isolated prefixes", () => {
+  assert.deepEqual(loadLiveSeedConfig({ env: {}, prefix: LIVE_SEED_PREFIX }), {
+    enabled: false,
+    prefix: LIVE_SEED_PREFIX,
+  });
+  assert.deepEqual(loadLiveSeedConfig({ env: {}, prefix: BROWSER_LIVE_SEED_PREFIX, browser: true }), {
+    enabled: false,
+    prefix: BROWSER_LIVE_SEED_PREFIX,
+  });
+
+  const liveConfig = loadLiveSeedConfig({
+    env: {
+      MIROFISH_WEB_LIVE_SEED_API_BASE_URL: " http://127.0.0.1:3888 ",
+      MIROFISH_WEB_LIVE_SEED_TENANT_ID: "tenant-live",
+      MIROFISH_WEB_LIVE_SEED_PROJECT_ID: "project-live",
+      MIROFISH_WEB_LIVE_SEED_SESSION_COOKIE: "session-live",
+      MIROFISH_WEB_LIVE_SEED_ALLOW_MUTATION: "1",
+      MIROFISH_WEB_LIVE_SEED_THROWAWAY_PROJECT: "1",
+      MIROFISH_WEB_LIVE_SEED_DISPOSABLE_PROJECT_MARKER: "throwaway",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL: "http://127.0.0.1:4999",
+    },
+    prefix: LIVE_SEED_PREFIX,
+  });
+  assert.equal(liveConfig.enabled, true);
+  assert.equal(liveConfig.apiBaseUrl, "http://127.0.0.1:3888");
+  assert.equal(liveConfig.tenantId, "tenant-live");
+  assert.equal(liveConfig.projectId, "project-live");
+  assert.equal(liveConfig.sessionCookie, "session-live");
+  assert.equal(liveConfig.allowMutation, true);
+  assert.equal(liveConfig.throwawayProject, true);
+  assert.equal(liveConfig.disposableProjectMarker, "throwaway");
+  assert.equal("appBaseUrl" in liveConfig, false);
+  assertDisposableLiveSeedConfig(liveConfig);
+
+  const browserConfig = loadLiveSeedConfig({
+    env: {
+      MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL: "http://localhost:3999",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL: "http://localhost:3888",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_TENANT_ID: "tenant-browser",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_PROJECT_ID: "project-browser",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE: "session-browser",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION: "1",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT: "1",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER: "throwaway",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN: "1",
+      MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID: "run-retry",
+    },
+    prefix: BROWSER_LIVE_SEED_PREFIX,
+    browser: true,
+  });
+  assert.equal(browserConfig.enabled, true);
+  assert.equal(browserConfig.appBaseUrl, "http://localhost:3999");
+  assert.equal(browserConfig.apiBaseUrl, "http://localhost:3888");
+  assert.equal(browserConfig.consumeRetryRun, true);
+  assert.equal(browserConfig.retryRunId, "run-retry");
+  assertDisposableLiveSeedConfig(browserConfig);
+});
+
+test("live Seed harness fails loudly on partial config without echoing env values", () => {
+  assert.throws(
+    () => loadLiveSeedConfig({
+      env: {
+        MIROFISH_WEB_LIVE_SEED_API_BASE_URL: "http://127.0.0.1:3888",
+        MIROFISH_WEB_LIVE_SEED_SESSION_COOKIE: "secret-session-cookie",
+      },
+      prefix: LIVE_SEED_PREFIX,
+    }),
+    (error) => {
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_TENANT_ID/);
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_PROJECT_ID/);
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_ALLOW_MUTATION/);
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_THROWAWAY_PROJECT/);
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_DISPOSABLE_PROJECT_MARKER/);
+      assert.doesNotMatch(error.message, /secret-session-cookie|127\.0\.0\.1:3888/);
+      return true;
+    },
+  );
+
+  assert.throws(
+    () => loadLiveSeedConfig({
+      env: {
+        MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL: "http://127.0.0.1:3888",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_TENANT_ID: "tenant-browser",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_PROJECT_ID: "project-browser",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE: "browser-secret-session",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION: "1",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT: "1",
+        MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER: "throwaway",
+      },
+      prefix: BROWSER_LIVE_SEED_PREFIX,
+      browser: true,
+    }),
+    (error) => {
+      assert.match(error.message, /MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL/);
+      assert.doesNotMatch(error.message, /browser-secret-session|tenant-browser|project-browser/);
+      return true;
+    },
+  );
+});
+
+test("live Seed harness URL guard only accepts local http URLs", () => {
+  for (const value of [
+    "http://localhost:3888",
+    "http://127.0.0.1:3888/api",
+    "http://[::1]:3888",
+  ]) {
+    assert.equal(assertLocalHttpUrl(value, "test URL").protocol, "http:");
+  }
+
+  for (const value of [
+    "https://localhost:3888",
+    "http://example.com:3888",
+    "http://user:pass@localhost:3888",
+    "//localhost:3888",
+    "/v1/me",
+    "localhost:3888",
+  ]) {
+    assert.throws(
+      () => assertLocalHttpUrl(value, "test URL"),
+      (error) => {
+        assert.match(error.message, /test URL must be a local http URL/);
+        assert.doesNotMatch(error.message, /example\.com|user|pass|localhost:3888|\/v1\/me/);
+        return true;
+      },
+    );
+  }
+});
+
+test("live Seed harness privacy helpers redact tokens and keep assertion messages public", () => {
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature";
+  const sensitive = {
+    cookie: "mirofish_session=secret-cookie; theme=light",
+    auth: `Bearer ${jwt}`,
+    nested: { token: jwt },
+  };
+  const redacted = redactSensitiveText(sensitive, { sessionCookie: "secret-cookie" });
+  assert.doesNotMatch(redacted, /secret-cookie|Bearer eyJ|eyJhbGciOiJIUzI1NiJ9/);
+  assert.match(redacted, /\[redacted/);
+  assert.doesNotMatch(
+    redactSensitiveText("token v2:user-1:secret-token-material"),
+    /v2:user-1:secret-token-material/,
+  );
+  assert.doesNotMatch(
+    redactSensitiveText("access_token=secret-access refreshToken:secret-refresh csrf_token=secret-csrf"),
+    /secret-access|secret-refresh|secret-csrf/,
+  );
+  assert.doesNotMatch(
+    redactSensitiveText({
+      access_token: "secret-access",
+      accessToken: "secret-access-camel",
+      csrfToken: "secret-csrf",
+      sessionToken: "secret-session",
+      token: "secret-token",
+    }),
+    /secret-access|secret-access-camel|secret-csrf|secret-session|secret-token/,
+  );
+  assert.doesNotMatch(
+    publicFailure({ ok: false, code: "LIVE_FAILED", message: "source text: private chapter body" }),
+    /source text|private chapter body/i,
+  );
+
+  const sourceText = "uploaded \"chapter\"\nbody <private> should stay private";
+  for (const value of [
+    { prompt: "private prompt" },
+    { provider_response: "provider raw response" },
+    { source_text: sourceText },
+    { raw_content: "private raw content" },
+    { api_key: "sk-live-secret" },
+    { encryptedCredential: "encrypted-secret" },
+    { credential_ref: "credential-secret" },
+    { object_key: "object-secret" },
+    { access_token: "access-secret" },
+    { csrf_token: "csrf-secret" },
+    { refreshToken: "refresh-secret" },
+    { draft_note: "draft marker" },
+    { manuscript_title: "manuscript marker" },
+  ]) {
+    assert.throws(
+      () => assertNoForbiddenPublicMarkers(value, {
+        sourceText,
+        sessionCookie: "secret-cookie",
+      }),
+      (error) => {
+        assert.match(error.message, /live Seed public payload contained forbidden material/);
+        assert.doesNotMatch(
+          error.message,
+          /uploaded chapter|private prompt|provider raw response|raw content|api_key|encryptedCredential|credential_ref|object_key|draft|manuscript|access-secret|csrf-secret|refresh-secret|secret-cookie|sk-live-secret|encrypted-secret|credential-secret|object-secret/i,
+        );
+        return true;
+      },
+    );
+  }
+
+  assert.throws(
+    () => assertNoForbiddenPublicMarkers({ text: JSON.stringify(sourceText).slice(1, -1) }, { sourceText }),
+    /live Seed public payload contained forbidden material/,
+  );
+  assert.throws(
+    () => assertNoForbiddenPublicMarkers(
+      { text: "uploaded &quot;chapter&quot;\nbody &lt;private&gt; should stay private" },
+      { sourceText },
+    ),
+    /live Seed public payload contained forbidden material/,
+  );
+  assert.throws(
+    () => assertNoForbiddenPublicMarkers(
+      { text: "uploaded \"chapter\" body <private> should stay private" },
+      { sourceText },
+    ),
+    /live Seed public payload contained forbidden material/,
+  );
+  assert.throws(
+    () => assertNoForbiddenPublicMarkers(
+      { text: "uploaded &quot;chapter&quot; body &lt;private&gt; should stay private" },
+      { sourceText },
+    ),
+    /live Seed public payload contained forbidden material/,
+  );
+  for (const rawText of [
+    '{"draft_note":"private"}',
+    '{"manuscript_title":"private"}',
+    '{"token":"private"}',
+    '{"sessionCookie":"private"}',
+    '{"access_token":"private"}',
+  ]) {
+    assert.throws(
+      () => assertNoForbiddenPublicMarkers(rawText),
+      /live Seed public payload contained forbidden material/,
+    );
+  }
+
+  assertNoForbiddenPublicMarkers({
+    title: "Manuscript metadata",
+    note: "The run completed promptly.",
+    status: "draft status",
+    usage: { total_tokens: 42 },
+  });
+});
+
+test("live Seed harness public failures redact sensitive result material", () => {
+  const message = publicFailure({
+    ok: false,
+    code: "LIVE_FAILED",
+    message: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature mirofish_session=secret-cookie raw content",
+  }, { sessionCookie: "secret-cookie" });
+
+  assert.match(message, /LIVE_FAILED/);
+  assert.doesNotMatch(message, /secret-cookie|Bearer eyJ|eyJhbGciOiJIUzI1NiJ9|raw content/i);
+});
+
+test("live Seed harness overview URL encodes route segments", () => {
+  const url = new URL(overviewUrl({
+    appBaseUrl: "http://localhost:3999",
+    tenantId: "tenant/with space",
+    projectId: "project?with#chars",
+  }));
+  assert.equal(url.origin, "http://localhost:3999");
+  assert.equal(url.pathname, "/tenant%2Fwith%20space/projects/project%3Fwith%23chars/overview");
+  assert.equal(url.search, "");
+});
+
+test("live Seed harness adds browser session cookies without changing public error text", async () => {
+  const calls = [];
+  await addLiveSeedSessionCookie(
+    {
+      addCookies: async (cookies) => {
+        calls.push(cookies);
+      },
+    },
+    {
+      appBaseUrl: "http://127.0.0.1:3999",
+      sessionCookie: "secret-session-cookie",
+    },
+  );
+
+  assert.deepEqual(calls, [[{
+    name: "mirofish_session",
+    value: "secret-session-cookie",
+    url: "http://127.0.0.1:3999",
+    httpOnly: true,
+    sameSite: "Lax",
+  }]]);
+
+  await assert.rejects(
+    () => addLiveSeedSessionCookie(
+      { addCookies: async () => {} },
+      {
+        appBaseUrl: "https://127.0.0.1:3999",
+        sessionCookie: "secret-session-cookie",
+      },
+    ),
+    (error) => {
+      assert.match(error.message, /live Seed app base URL must be a local http URL/);
+      assert.doesNotMatch(error.message, /secret-session-cookie|https:\/\/127\.0\.0\.1/);
+      return true;
+    },
+  );
 });
 
 test("project shell exposes current-session logout without leaking the session token", async () => {
