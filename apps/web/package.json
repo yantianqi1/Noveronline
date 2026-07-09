@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "test": "node --test tests/*.test.mjs",
+    "test:live-seed": "node scripts/run-live-seed-harness.mjs --mode both",
+    "test:live-seed:api": "node scripts/run-live-seed-harness.mjs --mode api",
+    "test:live-seed:browser": "node scripts/run-live-seed-harness.mjs --mode browser",
     "typecheck": "tsc --noEmit",
     "build": "next build"
   },
