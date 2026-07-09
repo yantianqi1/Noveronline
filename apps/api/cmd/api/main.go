@@ -311,7 +311,17 @@ func main() {
 			}
 		}()
 	}
-	workflowRetrier := workflows.NewDisabledWorkflowRetrier()
+	workflowRetrier, closeWorkflowRetrier, err := newWorkflowRetrier(temporalWorkflowClient, databaseURL)
+	if err != nil {
+		log.Fatalf("configure workflow retrier: %v", err)
+	}
+	if closeWorkflowRetrier != nil {
+		defer func() {
+			if err := closeWorkflowRetrier(); err != nil {
+				log.Printf("close workflow retrier: %v", err)
+			}
+		}()
+	}
 
 	llmResolver, closeLLMResolver, err := newLLMResolver(databaseURL)
 	if err != nil {
@@ -1269,6 +1279,24 @@ func newWorkflowCanceller(temporalClient workflows.TemporalWorkflowClient, datab
 		Execer:  workflows.NewSQLDBWriterAdmissionExecer(db),
 	})
 	return workflows.NewTemporalWorkflowCanceller(workflows.TemporalWorkflowCancellerConfig{
+		Client: temporalClient,
+		Store:  store,
+	}), db.Close, nil
+}
+
+func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databaseURL string) (workflows.WorkflowRetrier, func() error, error) {
+	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
+		return workflows.NewDisabledWorkflowRetrier(), nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	store := workflows.NewSQLWorkflowRetryStore(workflows.SQLWorkflowRetryStoreConfig{
+		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
+		Execer:  workflows.NewSQLDBWriterAdmissionExecer(db),
+	})
+	return workflows.NewTemporalWorkflowRetrier(workflows.TemporalWorkflowRetrierConfig{
 		Client: temporalClient,
 		Store:  store,
 	}), db.Close, nil

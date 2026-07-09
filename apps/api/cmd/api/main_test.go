@@ -523,6 +523,44 @@ func TestNewWorkflowCancellerUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T
 	}
 }
 
+func TestNewWorkflowRetrierUsesDisabledRetrierWithoutBackends(t *testing.T) {
+	retrier, closeRetrier, err := newWorkflowRetrier(nil, "")
+
+	if err != nil {
+		t.Fatalf("new workflow retrier: %v", err)
+	}
+	if closeRetrier != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if _, ok := retrier.(*workflows.DisabledWorkflowRetrier); !ok {
+		t.Fatalf("expected disabled workflow retrier, got %T", retrier)
+	}
+}
+
+func TestNewWorkflowRetrierUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T) {
+	retrier, closeRetrier, err := newWorkflowRetrier(
+		&mainRecordingTemporalClient{},
+		"postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable",
+	)
+	if closeRetrier != nil {
+		defer func() {
+			if err := closeRetrier(); err != nil {
+				t.Fatalf("close workflow retrier: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new workflow retrier: %v", err)
+	}
+	if _, ok := retrier.(*workflows.TemporalWorkflowRetrier); !ok {
+		t.Fatalf("expected temporal workflow retrier, got %T", retrier)
+	}
+	if closeRetrier == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestNewWriterAdmissionStoreUsesNilStoreWithoutDatabaseURL(t *testing.T) {
 	store, closeStore, err := newWriterAdmissionStore("")
 

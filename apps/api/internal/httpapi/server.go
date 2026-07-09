@@ -6979,6 +6979,12 @@ func workflowPublicErrorMessage(code string) string {
 		return "workflow event cursor not found"
 	case "WORKFLOW_BACKEND_UNCONFIGURED":
 		return "workflow backend is not configured"
+	case "WORKFLOW_RETRY_BACKEND_UNCONFIGURED":
+		return "workflow retry backend is not configured"
+	case "WORKFLOW_RETRY_NOT_ALLOWED":
+		return "workflow run is not retryable"
+	case "WORKFLOW_RETRY_FAILED":
+		return "workflow retry failed"
 	default:
 		return "workflow request failed"
 	}
@@ -7117,6 +7123,8 @@ func statusForAppCode(code string) int {
 	case "SOURCE_FILE_OBJECT_NOT_FOUND":
 		return http.StatusConflict
 	case "SOURCE_FILE_OBJECT_PAYLOAD_MISMATCH":
+		return http.StatusConflict
+	case "WORKFLOW_RETRY_NOT_ALLOWED":
 		return http.StatusConflict
 	default:
 		return http.StatusServiceUnavailable
