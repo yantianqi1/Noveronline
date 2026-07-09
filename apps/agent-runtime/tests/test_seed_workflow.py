@@ -90,6 +90,42 @@ def _minimal_text_pdf(text: str) -> bytes:
     return bytes(output)
 
 
+def _minimal_blank_pdf_with_metadata(metadata: str) -> bytes:
+    escaped_metadata = metadata.replace("\\", "\\\\").replace("(", "\\(").replace(
+        ")",
+        "\\)",
+    )
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        f"<< /Producer ({escaped_metadata}) >>".encode("ascii"),
+    ]
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, body in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode("ascii"))
+        output.extend(body)
+        output.extend(b"\nendobj\n")
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Info 4 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode(
+            "ascii"
+        )
+    )
+    return bytes(output)
+
+
+def _minimal_blank_pdf_with_invalid_header(metadata: str) -> bytes:
+    valid_pdf = _minimal_blank_pdf_with_metadata(metadata)
+    return b"%PXD-1.4" + valid_pdf[len(b"%PDF-1.4") :]
+
+
 def test_seed_pipeline_activity_requires_explicit_permission() -> None:
     context = _context().model_copy(update={"permissions": {}})
 
@@ -4480,6 +4516,87 @@ def test_parse_file_activity_extracts_pdf_text_without_returning_raw_text() -> N
     assert "Chapter One Rain Night" not in str(workflow_writer.events)
 
 
+def test_parse_file_activity_fails_closed_for_valid_blank_pdf_without_configured_ocr() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    artifact_writer = RecordingTextArtifactWriter()
+    status_writer = RecordingSourceFileStatusWriter()
+    raw_pdf = _minimal_blank_pdf_with_metadata(
+        "prompt=hidden api_key=sk-hidden credential_ref=cred-hidden "
+        "object_key=projects/project-1/source-files/upload-1/private.pdf "
+        "draft=private manuscript=private"
+    )
+    object_store = InMemoryObjectStore({"uploads/source-1.pdf": raw_pdf})
+
+    result = parse_file_activity(
+        {
+            "context": _context().model_dump(),
+            "source_file_id": "file-1",
+            "source_object_key": "uploads/source-1.pdf",
+            "mime_type": "application/pdf",
+        },
+        source_object_store=object_store,
+        artifact_object_store=object_store,
+        text_artifact_writer=artifact_writer,
+        workflow_event_writer=workflow_writer,
+        source_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == {
+        "code": "OCR_BACKEND_UNCONFIGURED",
+        "message": "OCR backend is not configured for scanned PDF",
+    }
+    assert artifact_writer.artifacts == []
+    assert object_store.writes == []
+    assert status_writer.statuses == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "source_file_id": "file-1",
+            "parse_status": "failed",
+        }
+    ]
+    assert workflow_writer.events == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "workflow_type": "seed_pipeline",
+            "event_type": "seed.stage.failed",
+            "payload": {
+                "stage": "parse_file",
+                "status": "failed",
+                "activity": "parse_file_activity",
+                "source_file_id": "file-1",
+                "error_code": "OCR_BACKEND_UNCONFIGURED",
+                "error_message": "OCR backend is not configured for scanned PDF",
+            },
+        }
+    ]
+    public_body = json.dumps(
+        {"result": result, "events": workflow_writer.events},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    forbidden_public_markers = (
+        ("raw PDF payload", raw_pdf.decode("latin1")),
+        ("prompt marker", "prompt"),
+        ("API key field", "api_key"),
+        ("API key value", "sk-hidden"),
+        ("credential ref marker", "credential_ref"),
+        ("object key marker", "object_key"),
+        ("source object key", "uploads/source-1.pdf"),
+        ("private object path", "projects/project-1/source-files"),
+        ("draft marker", "draft"),
+        ("manuscript marker", "manuscript"),
+    )
+    leaked_marker_labels = [
+        label for label, marker in forbidden_public_markers if marker in public_body
+    ]
+    assert leaked_marker_labels == []
+
+
 def test_parse_file_activity_fails_closed_for_unextractable_pdf_without_leaking_bytes() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
     artifact_writer = RecordingTextArtifactWriter()
@@ -4511,8 +4628,65 @@ def test_parse_file_activity_fails_closed_for_unextractable_pdf_without_leaking_
     assert "api_key" not in str(result)
     assert "sk-hidden" not in str(result)
     assert "not a pdf" not in str(workflow_writer.events)
-    assert "api_key" not in str(workflow_writer.events)
-    assert "sk-hidden" not in str(workflow_writer.events)
+
+
+def test_parse_file_activity_keeps_malformed_pdf_header_as_decode_failure() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    artifact_writer = RecordingTextArtifactWriter()
+    status_writer = RecordingSourceFileStatusWriter()
+    raw_pdf = _minimal_blank_pdf_with_invalid_header(
+        "prompt=hidden api_key=sk-hidden credential_ref=cred-hidden"
+    )
+    object_store = InMemoryObjectStore({"uploads/source-1.pdf": raw_pdf})
+
+    result = parse_file_activity(
+        {
+            "context": _context().model_dump(),
+            "source_file_id": "file-1",
+            "source_object_key": "uploads/source-1.pdf",
+            "mime_type": "application/pdf",
+        },
+        source_object_store=object_store,
+        artifact_object_store=object_store,
+        text_artifact_writer=artifact_writer,
+        workflow_event_writer=workflow_writer,
+        source_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == {
+        "code": "FILE_PARSE_DECODE_FAILED",
+        "message": "source object text extraction failed",
+    }
+    assert artifact_writer.artifacts == []
+    assert object_store.writes == []
+    assert status_writer.statuses == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "source_file_id": "file-1",
+            "parse_status": "failed",
+        }
+    ]
+    assert workflow_writer.events[0]["payload"]["error_code"] == "FILE_PARSE_DECODE_FAILED"
+    public_body = json.dumps(
+        {"result": result, "events": workflow_writer.events},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    forbidden_public_markers = (
+        ("raw malformed PDF payload", raw_pdf.decode("latin1")),
+        ("prompt marker", "prompt"),
+        ("API key field", "api_key"),
+        ("API key value", "sk-hidden"),
+        ("credential ref marker", "credential_ref"),
+        ("source object key", "uploads/source-1.pdf"),
+    )
+    leaked_marker_labels = [
+        label for label, marker in forbidden_public_markers if marker in public_body
+    ]
+    assert leaked_marker_labels == []
     assert status_writer.statuses == [
         {
             "tenant_id": "tenant-1",

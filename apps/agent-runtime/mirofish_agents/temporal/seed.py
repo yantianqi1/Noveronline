@@ -43,6 +43,12 @@ SENSITIVE_WORKFLOW_EVENT_KEYS = {
     "segment_object_key",
     "source_object_key",
 }
+
+
+class PdfOcrBackendUnconfiguredError(Exception):
+    pass
+
+
 SENSITIVE_ARCHIVE_CANDIDATE_KEYS = {
     *SENSITIVE_WORKFLOW_EVENT_KEYS,
     "body_text",
@@ -4276,11 +4282,15 @@ def _source_object_integrity_matches(payload: dict[str, Any], source_bytes: byte
 
 
 def _extract_pdf_text(source_bytes: bytes) -> str:
+    if not source_bytes.startswith(b"%PDF-"):
+        raise ValueError("PDF header is invalid")
     reader = PdfReader(BytesIO(source_bytes), strict=False)
     page_texts = [(page.extract_text() or "").strip() for page in reader.pages]
     extracted_text = "\n\n".join(text for text in page_texts if text)
     if not extracted_text.strip():
-        raise ValueError("PDF text extraction produced no text")
+        raise PdfOcrBackendUnconfiguredError(
+            "OCR backend is not configured for scanned PDF"
+        )
     return extracted_text
 
 
@@ -5526,6 +5536,18 @@ def parse_file_activity(
         )
     try:
         extracted_text = _extract_source_text(source_bytes, mime_type)
+    except PdfOcrBackendUnconfiguredError:
+        return _parse_file_failed_result(
+            base=base,
+            context=context,
+            source_file_id=normalized_source_file_id,
+            code="OCR_BACKEND_UNCONFIGURED",
+            message="OCR backend is not configured for scanned PDF",
+            public_message="OCR backend is not configured for scanned PDF",
+            workflow_event_writer=workflow_event_writer,
+            source_status_writer=status_writer,
+            workflow_status_writer=workflow_status_writer,
+        )
     except (UnicodeDecodeError, ValueError, PyPdfError):
         return _parse_file_failed_result(
             base=base,
