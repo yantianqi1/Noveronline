@@ -12,6 +12,7 @@ const DEFAULTS = Object.freeze({
   userId: "00000000-0000-4000-8000-000000000501",
   tenantId: "00000000-0000-4000-8000-000000000502",
   projectId: "00000000-0000-4000-8000-000000000503",
+  llmChannelId: "77777777-7777-7777-7777-777777777777",
   email: "web-live-seed-fixture@example.test",
   displayName: "Web Live Seed Fixture",
   tenantSlug: "web-live-seed-fixture",
@@ -20,6 +21,15 @@ const DEFAULTS = Object.freeze({
   apiBaseUrl: "http://127.0.0.1:3888",
   appBaseUrl: "http://localhost:3999",
 });
+
+const SEED_LLM_MODULES = Object.freeze([
+  ["sequential_reading", "model-seed-sequential-live"],
+  ["anchor_point_summary", "model-seed-global-aggregation-live"],
+  ["story_ontology", "model-seed-ontology-live"],
+  ["entity_resolution", "model-seed-entity-resolution-live"],
+  ["character_agent_profile", "model-seed-profile-live"],
+  ["narrative_archives", "model-seed-archive-live"],
+]);
 
 export function loadFixtureConfig(options = {}) {
   const env = options.env ?? process.env;
@@ -43,6 +53,10 @@ export function loadFixtureConfig(options = {}) {
     createDevSession: readBoolean(env, flags, "CREATE_DEV_SESSION", "create-dev-session"),
     applySql: readBoolean(env, flags, "APPLY_SQL", "apply") || flags.has("apply"),
     printSql: readBoolean(env, flags, "PRINT_SQL", "print-sql") || flags.has("print-sql"),
+    prepareLlmBindings: readBoolean(env, flags, "PREPARE_LLM_BINDINGS", "prepare-llm-bindings"),
+    llmProviderBaseUrl: readText(env, flags, "LLM_PROVIDER_BASE_URL", "llm-provider-base-url"),
+    llmEncryptedApiKey: readText(env, flags, "LLM_ENCRYPTED_API_KEY", "llm-encrypted-api-key"),
+    llmChannelId: readText(env, flags, "LLM_CHANNEL_ID", "llm-channel-id") || DEFAULTS.llmChannelId,
   };
 
   config.projectTitle = projectTitle(config);
@@ -54,14 +68,15 @@ export function loadFixtureConfig(options = {}) {
 
 export async function prepareLiveSeedFixture(options = {}) {
   const config = loadFixtureConfig(options);
-  const sql = buildFixtureSql(config);
   const sections = [];
 
   assertSessionPlan(config);
+  assertLlmBindingPlan(config);
   if (config.applySql) {
     assertLocalPostgresUrl(config.databaseUrl, "MIROFISH_WEB_LIVE_SEED_FIXTURE_DATABASE_URL");
   }
 
+  const sql = buildFixtureSql(config);
   if (config.printSql || !config.applySql) {
     sections.push(sql.trimEnd());
   }
@@ -96,6 +111,9 @@ export function buildFixtureSql(config) {
     tenantSlug: sqlLiteral(config.tenantSlug),
     tenantName: sqlLiteral(config.tenantName),
     projectTitle: sqlLiteral(config.projectTitle),
+    llmChannelId: sqlLiteral(config.llmChannelId),
+    llmProviderBaseUrl: sqlLiteral(config.llmProviderBaseUrl),
+    llmEncryptedApiKey: sqlLiteral(config.llmEncryptedApiKey),
   };
 
   return `BEGIN;
@@ -140,7 +158,7 @@ ON CONFLICT (tenant_id, project_id, user_id) DO UPDATE
 SET role = EXCLUDED.role,
     status = 'active',
     updated_at = now();
-
+${config.prepareLlmBindings ? buildLlmBindingSql(values) : ""}
 COMMIT;
 `;
 }
@@ -320,6 +338,19 @@ function assertSessionPlan(config) {
   throw new Error("live Seed fixture is missing env names: MIROFISH_WEB_LIVE_SEED_FIXTURE_SESSION_COOKIE or MIROFISH_WEB_LIVE_SEED_FIXTURE_CREATE_DEV_SESSION");
 }
 
+function assertLlmBindingPlan(config) {
+  if (!config.prepareLlmBindings) {
+    return;
+  }
+  if (!config.applySql || config.printSql) {
+    throw new Error("MIROFISH_WEB_LIVE_SEED_FIXTURE_PREPARE_LLM_BINDINGS requires --apply without --print-sql");
+  }
+  assertLocalHttpUrl(config.llmProviderBaseUrl, "MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_PROVIDER_BASE_URL");
+  if (!isEncryptedCredentialEnvelope(config.llmEncryptedApiKey)) {
+    throw new Error("MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_ENCRYPTED_API_KEY must be an aes-256-gcm:v1 credential envelope");
+  }
+}
+
 function formatPsqlFailure(result) {
   const details = [];
   if (Number.isInteger(result?.status)) {
@@ -389,8 +420,104 @@ function readBoolean(env, flags, envSuffix, flagName) {
   return String(env[`${FIXTURE_PREFIX}${envSuffix}`] ?? "").trim() === "1";
 }
 
+function buildLlmBindingSql(values) {
+  const modelRows = SEED_LLM_MODULES.map(([, modelId]) =>
+    `  (${values.tenantId}::uuid, ${values.llmChannelId}::uuid, ${sqlLiteral(modelId)}, 'live-provider', true, false)`,
+  ).join(",\n");
+  const bindingRows = SEED_LLM_MODULES.map(([moduleKey, modelId]) =>
+    `  (${values.tenantId}::uuid, ${values.projectId}::uuid, ${sqlLiteral(moduleKey)}, ${values.llmChannelId}::uuid, ${sqlLiteral(modelId)}, '{"temperature":0}'::jsonb, ${values.userId}::uuid)`,
+  ).join(",\n");
+
+  return `
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM llm_channels
+    WHERE channel_id = ${values.llmChannelId}::uuid
+      AND tenant_id <> ${values.tenantId}::uuid
+  ) THEN
+    RAISE EXCEPTION 'LIVE_SEED_LLM_CHANNEL_TENANT_COLLISION'
+      USING ERRCODE = 'check_violation';
+  END IF;
+END $$;
+
+INSERT INTO llm_channels (
+  tenant_id, channel_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled
+)
+VALUES (
+  ${values.tenantId}::uuid,
+  ${values.llmChannelId}::uuid,
+  'Seed Semantic Live Provider',
+  'openai-compatible',
+  ${values.llmProviderBaseUrl},
+  ${values.llmEncryptedApiKey},
+  2,
+  true
+)
+ON CONFLICT (channel_id) DO UPDATE
+SET tenant_id = EXCLUDED.tenant_id,
+    name = EXCLUDED.name,
+    provider = EXCLUDED.provider,
+    base_url = EXCLUDED.base_url,
+    encrypted_api_key = EXCLUDED.encrypted_api_key,
+    max_concurrency = EXCLUDED.max_concurrency,
+    enabled = true,
+    updated_at = now();
+
+INSERT INTO llm_models (
+  tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+)
+VALUES
+${modelRows}
+ON CONFLICT (channel_id, model_id) DO UPDATE
+SET tenant_id = EXCLUDED.tenant_id,
+    owned_by = EXCLUDED.owned_by,
+    supports_json = true,
+    supports_tools = false,
+    updated_at = now();
+
+INSERT INTO llm_module_bindings (
+  tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
+)
+VALUES
+${bindingRows}
+ON CONFLICT (tenant_id, project_id, module_key) DO UPDATE
+SET channel_id = EXCLUDED.channel_id,
+    model_id = EXCLUDED.model_id,
+    settings_jsonb = EXCLUDED.settings_jsonb,
+    updated_by = EXCLUDED.updated_by,
+    updated_at = now();
+`;
+}
+
 function sqlLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function isEncryptedCredentialEnvelope(value) {
+  const parts = String(value ?? "").split(":");
+  if (parts.length !== 5 || parts[0] !== "aes-256-gcm" || parts[1] !== "v1") {
+    return false;
+  }
+  const [iv, tag, ciphertext] = parts.slice(2);
+  return base64ByteLength(iv) === 12 && base64ByteLength(tag) === 16 && base64ByteLength(ciphertext) > 0;
+}
+
+function base64ByteLength(value) {
+  if (typeof value !== "string" || value.trim() === "" || /\s/.test(value)) {
+    return -1;
+  }
+  let decoded;
+  try {
+    decoded = Buffer.from(value, "base64");
+  } catch {
+    return -1;
+  }
+  if (decoded.length === 0 || decoded.toString("base64") !== value) {
+    return -1;
+  }
+  return decoded.length;
 }
 
 function exportLine(name, value) {

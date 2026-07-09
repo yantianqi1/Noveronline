@@ -17,6 +17,7 @@ const baseEnv = {
   MIROFISH_WEB_LIVE_SEED_FIXTURE_APP_BASE_URL: "http://localhost:3999",
   MIROFISH_WEB_LIVE_SEED_FIXTURE_SESSION_COOKIE: "provided-session-cookie",
 };
+const encryptedFixtureKey = "aes-256-gcm:v1:ABEiM0RVZneImaq7:1fPg5GknWYe0jXyV7RRMuw==:70sgjI+43MNUJHTpNlJwKNMPxyhr8rJB";
 
 test("fixture SQL upserts disposable auth/project rows without pre-creating sessions", () => {
   const config = loadFixtureConfig({ env: baseEnv, argv: [] });
@@ -148,6 +149,111 @@ test("fixture apply failure includes sanitized psql diagnostics without database
       assert.match(error.message, /signal SIGTERM/);
       assert.match(error.message, /error ENOENT/);
       assert.doesNotMatch(error.message, /secret|mirofish|localhost|user/);
+      return true;
+    },
+  );
+});
+
+test("fixture can apply optional local Seed LLM module bindings without exporting credential material", async () => {
+  let appliedSql = "";
+  const result = await prepareLiveSeedFixture({
+    env: {
+      ...baseEnv,
+      MIROFISH_WEB_LIVE_SEED_FIXTURE_DATABASE_URL: "postgresql://user:secret@localhost:5432/mirofish",
+      MIROFISH_WEB_LIVE_SEED_FIXTURE_PREPARE_LLM_BINDINGS: "1",
+      MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_PROVIDER_BASE_URL: "http://127.0.0.1:48123",
+      MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_ENCRYPTED_API_KEY: encryptedFixtureKey,
+    },
+    argv: ["--apply"],
+    fetchImpl: async () => assert.fail("dev session fetch should not run when a session cookie is provided"),
+    runPsql: (_databaseUrl, sql) => {
+      appliedSql = sql;
+      return { ok: true };
+    },
+  });
+
+  for (const moduleKey of [
+    "sequential_reading",
+    "anchor_point_summary",
+    "story_ontology",
+    "entity_resolution",
+    "character_agent_profile",
+    "narrative_archives",
+  ]) {
+    assert.match(appliedSql, new RegExp(`'${moduleKey}'`));
+  }
+  assert.match(appliedSql, /INSERT INTO llm_channels /);
+  assert.match(appliedSql, /INSERT INTO llm_models /);
+  assert.match(appliedSql, /INSERT INTO llm_module_bindings /);
+  assert.match(appliedSql, /ON CONFLICT \(tenant_id, project_id, module_key\) DO UPDATE/);
+  assert.match(appliedSql, /LIVE_SEED_LLM_CHANNEL_TENANT_COLLISION/);
+  assert.match(appliedSql, /tenant_id <>/);
+  assert.match(appliedSql, /aes-256-gcm:v1:ABEiM0RVZneImaq7:1fPg5GknWYe0jXyV7RRMuw==:70sgjI\+43MNUJHTpNlJwKNMPxyhr8rJB/);
+  assert.doesNotMatch(result.output, /aes-256-gcm|ABEiM0RVZneImaq7|LLM_ENCRYPTED_API_KEY|sk-/);
+});
+
+test("fixture LLM binding preparation requires apply mode to avoid printing encrypted credentials", async () => {
+  await assert.rejects(
+    () => prepareLiveSeedFixture({
+      env: {
+        ...baseEnv,
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_PREPARE_LLM_BINDINGS: "1",
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_PROVIDER_BASE_URL: "http://127.0.0.1:48123",
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_ENCRYPTED_API_KEY: encryptedFixtureKey,
+      },
+      argv: ["--print-sql"],
+      fetchImpl: async () => assert.fail("dev session fetch should not run before LLM apply validation"),
+      runPsql: () => assert.fail("psql should not run without apply mode"),
+    }),
+    (error) => {
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_FIXTURE_PREPARE_LLM_BINDINGS requires --apply/);
+      assert.doesNotMatch(error.message, /aes-256-gcm|ciphertext|127\.0\.0\.1|48123/);
+      return true;
+    },
+  );
+});
+
+test("fixture LLM binding preparation rejects invalid credential envelopes without side effects", async () => {
+  for (const encryptedKey of ["", "sk-live-seed-raw", "aes-256-gcm:v1:iv:tag:ciphertext", "aes-256-gcm:v1:AAAA:BBBB:CCCC"]) {
+    await assert.rejects(
+      () => prepareLiveSeedFixture({
+        env: {
+          ...baseEnv,
+          MIROFISH_WEB_LIVE_SEED_FIXTURE_DATABASE_URL: "postgresql://user:secret@localhost:5432/mirofish",
+          MIROFISH_WEB_LIVE_SEED_FIXTURE_PREPARE_LLM_BINDINGS: "1",
+          MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_PROVIDER_BASE_URL: "http://127.0.0.1:48123",
+          MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_ENCRYPTED_API_KEY: encryptedKey,
+        },
+        argv: ["--apply"],
+        fetchImpl: async () => assert.fail("dev session fetch should not run before LLM credential validation"),
+        runPsql: () => assert.fail("psql should not run with invalid LLM credential configuration"),
+      }),
+      (error) => {
+        assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_ENCRYPTED_API_KEY/);
+        assert.doesNotMatch(error.message, /sk-live|secret|localhost|48123/);
+        return true;
+      },
+    );
+  }
+});
+
+test("fixture LLM binding preparation rejects non-local provider URL before psql", async () => {
+  await assert.rejects(
+    () => prepareLiveSeedFixture({
+      env: {
+        ...baseEnv,
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_DATABASE_URL: "postgresql://user:secret@localhost:5432/mirofish",
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_PREPARE_LLM_BINDINGS: "1",
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_PROVIDER_BASE_URL: "https://provider.example.test",
+        MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_ENCRYPTED_API_KEY: encryptedFixtureKey,
+      },
+      argv: ["--apply"],
+      fetchImpl: async () => assert.fail("dev session fetch should not run before LLM provider URL validation"),
+      runPsql: () => assert.fail("psql should not run with a non-local LLM provider URL"),
+    }),
+    (error) => {
+      assert.match(error.message, /MIROFISH_WEB_LIVE_SEED_FIXTURE_LLM_PROVIDER_BASE_URL must be a local http URL/);
+      assert.doesNotMatch(error.message, /provider\.example|ciphertext|secret/);
       return true;
     },
   );
