@@ -28,6 +28,25 @@ type WorkflowRetrier interface {
 	RetryWorkflowRun(context.Context, RetryWorkflowRunInput) (WorkflowRunRetry, error)
 }
 
+type RetrySeedSegmentsInput struct {
+	TenantID    string
+	ProjectID   string
+	RunID       string
+	SegmentIDs  []string
+	ActorUserID string
+	RequestID   string
+}
+
+type SeedSegmentsRetry struct {
+	RunID          string
+	Status         string
+	RequestedCount int
+}
+
+type SeedSegmentRetrier interface {
+	RetrySeedSegments(context.Context, RetrySeedSegmentsInput) (SeedSegmentsRetry, error)
+}
+
 type WorkflowRetryTargetInput struct {
 	TenantID string
 	RunID    string
@@ -89,6 +108,19 @@ func (r *DisabledWorkflowRetrier) RetryWorkflowRun(_ context.Context, _ RetryWor
 	return WorkflowRunRetry{}, &AppError{
 		Code:    "WORKFLOW_RETRY_BACKEND_UNCONFIGURED",
 		Message: "workflow retry backend is not configured",
+	}
+}
+
+type DisabledSeedSegmentRetrier struct{}
+
+func NewDisabledSeedSegmentRetrier() *DisabledSeedSegmentRetrier {
+	return &DisabledSeedSegmentRetrier{}
+}
+
+func (r *DisabledSeedSegmentRetrier) RetrySeedSegments(_ context.Context, _ RetrySeedSegmentsInput) (SeedSegmentsRetry, error) {
+	return SeedSegmentsRetry{}, &AppError{
+		Code:    "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED",
+		Message: "seed segment retry backend is not configured",
 	}
 }
 

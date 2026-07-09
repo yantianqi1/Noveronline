@@ -22,6 +22,30 @@ func TestDisabledWorkflowRetrierFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDisabledSeedSegmentRetrierFailsClosed(t *testing.T) {
+	retrier := NewDisabledSeedSegmentRetrier()
+
+	_, err := retrier.RetrySeedSegments(context.Background(), RetrySeedSegmentsInput{
+		TenantID:    "tenant-1",
+		ProjectID:   "project-1",
+		RunID:       "run-1",
+		SegmentIDs:  []string{"segment-1"},
+		ActorUserID: "user-1",
+		RequestID:   "req-1",
+	})
+
+	if code := ErrorCode(err); code != "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected seed segment retry backend to fail closed, got %s (%v)", code, err)
+	}
+	if strings.Contains(err.Error(), "segment-1") ||
+		strings.Contains(err.Error(), "user-1") ||
+		strings.Contains(err.Error(), "prompt") ||
+		strings.Contains(err.Error(), "api_key") ||
+		strings.Contains(err.Error(), "credential_ref") {
+		t.Fatalf("seed segment retry disabled error leaked input: %v", err)
+	}
+}
+
 func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *testing.T) {
 	temporalClient := &recordingRetryTemporalClient{}
 	store := &recordingWorkflowRetryStore{

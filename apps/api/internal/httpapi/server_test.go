@@ -582,6 +582,25 @@ func (r *recordingWorkflowRetrier) RetryWorkflowRun(ctx context.Context, input w
 	}, nil
 }
 
+type recordingSeedSegmentRetrier struct {
+	input  workflows.RetrySeedSegmentsInput
+	err    error
+	called bool
+}
+
+func (r *recordingSeedSegmentRetrier) RetrySeedSegments(ctx context.Context, input workflows.RetrySeedSegmentsInput) (workflows.SeedSegmentsRetry, error) {
+	r.input = input
+	r.called = true
+	if r.err != nil {
+		return workflows.SeedSegmentsRetry{}, r.err
+	}
+	return workflows.SeedSegmentsRetry{
+		RunID:          input.RunID,
+		Status:         "retry_requested",
+		RequestedCount: len(input.SegmentIDs),
+	}, nil
+}
+
 type recordingSeedStarter struct {
 	input workflows.StartSeedRunInput
 	err   error
@@ -2206,6 +2225,15 @@ func TestActorSensitiveRouteInventoryMatchesCanonicalRoutesAndRejectsMalformedSh
 			},
 		},
 		{
+			name:      "seed segment retry",
+			method:    http.MethodPost,
+			canonical: "/v1/seed-runs/seed-run-123/segments/retry",
+			malformed: []string{
+				"/v1/seed-runs//segments/retry",
+				"/v1/seed-runs/seed-run-123/segments/retry/extra",
+			},
+		},
+		{
 			name:      "draft adoption",
 			method:    http.MethodPost,
 			canonical: "/v1/drafts/draft-123/adoptions",
@@ -2277,6 +2305,16 @@ func TestProtectedRouteAllowlistGuardRejectsInvalidCanonicalCredentialsButKeepsM
 				"/v1/worldline-sessions/session-123/steps/extra",
 			},
 			body: `{"mode":"advance","options":{"prompt":"private"}}`,
+		},
+		{
+			name:      "seed segment retry",
+			method:    http.MethodPost,
+			canonical: "/v1/seed-runs/seed-run-123/segments/retry",
+			malformed: []string{
+				"/v1/seed-runs//segments/retry",
+				"/v1/seed-runs/seed-run-123/segments/retry/extra",
+			},
+			body: `{"segment_ids":["segment-1"],"prompt":"private"}`,
 		},
 		{
 			name:      "draft adoption",
@@ -17334,6 +17372,239 @@ func TestRetrySeedRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 	}
 	if body.Error.Code != "WORKFLOW_RETRY_BACKEND_UNCONFIGURED" {
 		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestRetrySeedSegmentsAuthorizesOwnerBeforeDecodeAndRetrier(t *testing.T) {
+	seedReader := &recordingSeedRunReader{
+		run: workflows.WorkflowRun{
+			RunID:        "seed-run-123",
+			WorkflowType: workflows.SeedWorkflowType,
+			ProjectID:    "owner-project",
+			Status:       "failed",
+		},
+	}
+	authorizer := &recordingAuthorizer{}
+	retrier := &recordingSeedSegmentRetrier{}
+	server := NewServer(Config{
+		Authorizer:         authorizer,
+		SeedRunReader:      seedReader,
+		SeedSegmentRetrier: retrier,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/segments/retry", strings.NewReader(`{"tenant_id":"body-tenant","project_id":"body-project","segment_ids":["segment-1","segment-2"],"prompt":"private","api_key":"sk-hidden"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "actor-123")
+	request.Header.Set("X-Request-Id", "req-segment-retry")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	if seedReader.getInput.TenantID != "tenant-123" || seedReader.getInput.RunID != "seed-run-123" {
+		t.Fatalf("seed owner lookup lost tenant/run scope: %#v", seedReader.getInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "owner-project" ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite ||
+		authorizer.inputs[0].UserID != "actor-123" ||
+		authorizer.inputs[0].RequestID != "req-segment-retry" {
+		t.Fatalf("unexpected segment retry authorization inputs: %#v", authorizer.inputs)
+	}
+	if !retrier.called ||
+		retrier.input.TenantID != "tenant-123" ||
+		retrier.input.ProjectID != "owner-project" ||
+		retrier.input.RunID != "seed-run-123" ||
+		retrier.input.ActorUserID != "actor-123" ||
+		retrier.input.RequestID != "req-segment-retry" {
+		t.Fatalf("segment retrier lost trusted context: %#v", retrier.input)
+	}
+	if strings.Join(retrier.input.SegmentIDs, ",") != "segment-1,segment-2" {
+		t.Fatalf("segment retrier lost segment ids: %#v", retrier.input.SegmentIDs)
+	}
+	for _, forbidden := range []string{"body-tenant", "body-project", "prompt", "private", "api_key", "sk-hidden", "actor-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("segment retry response leaked forbidden payload %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestRetrySeedSegmentsDeniesBeforeJSONDecodeOrRetrier(t *testing.T) {
+	seedReader := &recordingSeedRunReader{
+		run: workflows.WorkflowRun{
+			RunID:        "seed-run-123",
+			WorkflowType: workflows.SeedWorkflowType,
+			ProjectID:    "owner-project",
+			Status:       "failed",
+		},
+	}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{
+		Code:    auth.CodeAccessDenied,
+		Message: "denied prompt provider_response api_key credential_ref object_key draft manuscript",
+	}}
+	retrier := &recordingSeedSegmentRetrier{}
+	server := NewServer(Config{
+		Authorizer:         authorizer,
+		SeedRunReader:      seedReader,
+		SeedSegmentRetrier: retrier,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/segments/retry", strings.NewReader(`{"segment_ids":,"api_key":"sk-hidden","prompt":"private","draft":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "actor-123")
+	request.Header.Set("X-Request-Id", "req-segment-denied")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if seedReader.getInput.TenantID != "tenant-123" || seedReader.getInput.RunID != "seed-run-123" {
+		t.Fatalf("seed owner lookup did not run before denial: %#v", seedReader.getInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].ProjectID != "owner-project" ||
+		authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("unexpected authorization inputs: %#v", authorizer.inputs)
+	}
+	if retrier.called {
+		t.Fatalf("segment retrier ran after RBAC denial: %#v", retrier.input)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != auth.CodeAccessDenied || body.Error.Message != authPublicErrorMessage(auth.CodeAccessDenied) {
+		t.Fatalf("unexpected denial body: %#v", body)
+	}
+	for _, forbidden := range []string{"VALIDATION_FAILED", "prompt", "provider_response", "api_key", "credential_ref", "object_key", "draft", "manuscript", "sk-hidden", "private", "actor-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("segment retry denial leaked forbidden payload %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestRetrySeedSegmentsFailsClosedWhenBackendIsUnavailable(t *testing.T) {
+	seedReader := &recordingSeedRunReader{
+		run: workflows.WorkflowRun{
+			RunID:        "seed-run-123",
+			WorkflowType: workflows.SeedWorkflowType,
+			ProjectID:    "project-123",
+			Status:       "failed",
+		},
+	}
+	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, SeedRunReader: seedReader})
+	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/segments/retry", strings.NewReader(`{"segment_ids":["segment-1"],"content":"private source","credential_ref":"cred-hidden"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-segment-retry")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED" || body.Error.Message != "seed segment retry backend is not configured" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+	for _, forbidden := range []string{"private source", "credential_ref", "cred-hidden", "content", "user-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("segment retry unavailable response leaked forbidden payload %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestRetrySeedSegmentsRetrierErrorsArePubliclySanitized(t *testing.T) {
+	seedReader := &recordingSeedRunReader{
+		run: workflows.WorkflowRun{
+			RunID:        "seed-run-123",
+			WorkflowType: workflows.SeedWorkflowType,
+			ProjectID:    "project-123",
+			Status:       "failed",
+		},
+	}
+	retrier := &recordingSeedSegmentRetrier{err: &workflows.AppError{
+		Code:    "SEED_SEGMENT_RETRY_FAILED",
+		Message: "provider raw body content API key encrypted credential credential_ref object key draft manuscript prompt",
+	}}
+	server := NewServer(Config{
+		Authorizer:         &recordingAuthorizer{},
+		SeedRunReader:      seedReader,
+		SeedSegmentRetrier: retrier,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/segments/retry", strings.NewReader(`{"segment_ids":["segment-1"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "SEED_SEGMENT_RETRY_FAILED" || body.Error.Message != "seed segment retry failed" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+	for _, forbidden := range []string{"provider", "raw body", "content", "API key", "encrypted credential", "credential_ref", "object key", "draft", "manuscript", "prompt", "user-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("segment retry failure response leaked forbidden payload %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestRetrySeedSegmentsMalformedPathsRemain404WithoutSideEffects(t *testing.T) {
+	for _, path := range []string{
+		"/v1/seed-runs//segments/retry",
+		"/v1/seed-runs/seed-run-123//segments/retry",
+		"/v1/seed-runs/seed-run-123/segments/retry/extra",
+		"/v1/seed-runs/seed-run-123/segments",
+		"/api/v1/seed-runs/seed-run-123/segments/retry",
+	} {
+		t.Run(path, func(t *testing.T) {
+			seedReader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "seed-run-123", ProjectID: "project-123"}}
+			authorizer := &recordingAuthorizer{}
+			retrier := &recordingSeedSegmentRetrier{}
+			server := NewServer(Config{
+				Authorizer:         authorizer,
+				SeedRunReader:      seedReader,
+				SeedSegmentRetrier: retrier,
+			})
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"segment_ids":["segment-1"],"prompt":"private","api_key":"sk-hidden"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer v1:route-user:deadbeef")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "fallback-user")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected malformed segment retry path to remain 404, got %d: %s", response.Code, response.Body.String())
+			}
+			if seedReader.getInput.RunID != "" || authorizer.called || retrier.called {
+				t.Fatalf("malformed path reached side effects: reader=%#v authorizer=%#v retrier=%#v", seedReader.getInput, authorizer.inputs, retrier.input)
+			}
+			for _, forbidden := range []string{"route-user", "fallback-user", "deadbeef", "private", "api_key", "sk-hidden"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("malformed segment retry response leaked %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
 	}
 }
 

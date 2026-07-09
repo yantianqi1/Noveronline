@@ -46,6 +46,7 @@ type Config struct {
 	WorkflowEventReader              workflows.WorkflowEventReader
 	WorkflowCanceller                workflows.WorkflowCanceller
 	WorkflowRetrier                  workflows.WorkflowRetrier
+	SeedSegmentRetrier               workflows.SeedSegmentRetrier
 	SeedStarter                      workflows.SeedRunStarter
 	SeedRunReader                    workflows.SeedRunReader
 	ProjectOverviewReader            projectoverview.Reader
@@ -111,6 +112,7 @@ type Server struct {
 	workflowEventReader              workflows.WorkflowEventReader
 	workflowCanceller                workflows.WorkflowCanceller
 	workflowRetrier                  workflows.WorkflowRetrier
+	seedSegmentRetrier               workflows.SeedSegmentRetrier
 	seedStarter                      workflows.SeedRunStarter
 	seedRunReader                    workflows.SeedRunReader
 	projectOverviewReader            projectoverview.Reader
@@ -232,6 +234,10 @@ type startSeedRunRequest struct {
 	BodyTenantID string         `json:"tenant_id"`
 	UploadID     string         `json:"upload_id"`
 	Options      map[string]any `json:"options"`
+}
+
+type retrySeedSegmentsRequest struct {
+	SegmentIDs []string `json:"segment_ids"`
 }
 
 type startWorldlineSessionRequest struct {
@@ -654,6 +660,10 @@ func NewServer(config Config) *Server {
 	if workflowRetrier == nil {
 		workflowRetrier = workflows.NewDisabledWorkflowRetrier()
 	}
+	seedSegmentRetrier := config.SeedSegmentRetrier
+	if seedSegmentRetrier == nil {
+		seedSegmentRetrier = workflows.NewDisabledSeedSegmentRetrier()
+	}
 	seedStarter := config.SeedStarter
 	if seedStarter == nil {
 		seedStarter = workflows.NewDisabledSeedRunStarter()
@@ -855,6 +865,7 @@ func NewServer(config Config) *Server {
 		workflowEventReader:              workflowEventReader,
 		workflowCanceller:                workflowCanceller,
 		workflowRetrier:                  workflowRetrier,
+		seedSegmentRetrier:               seedSegmentRetrier,
 		seedStarter:                      seedStarter,
 		seedRunReader:                    seedRunReader,
 		projectOverviewReader:            projectOverviewReader,
@@ -1216,6 +1227,7 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "workflow run retry", method: http.MethodPost, match: isWorkflowRunRetryPath},
 	{name: "seed run cancel", method: http.MethodPost, match: isSeedRunCancelPath},
 	{name: "seed run retry", method: http.MethodPost, match: isSeedRunRetryPath},
+	{name: "seed segment retry", method: http.MethodPost, match: isSeedSegmentRetryPath},
 	{name: "worldline session step", method: http.MethodPost, match: isWorldlineSessionStepPath},
 	{name: "worldline session variables", method: http.MethodPost, match: isWorldlineSessionVariablesPath},
 	{name: "worldline session saved paths", method: http.MethodPost, match: isWorldlineSessionSavedPathsPath},
@@ -1616,6 +1628,10 @@ func isSeedRunRetryPath(path string) bool {
 	return seedRunRetryPathPart(path) != ""
 }
 
+func isSeedSegmentRetryPath(path string) bool {
+	return seedSegmentRetryPathPart(path) != ""
+}
+
 func isWriterRunDetailPath(path string) bool {
 	return writerRunPathPart(path) != ""
 }
@@ -1709,6 +1725,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCancelSeedRun(response, request)
 	case request.Method == http.MethodPost && isSeedRunRetryPath(request.URL.Path):
 		s.handleRetrySeedRun(response, request)
+	case request.Method == http.MethodPost && isSeedSegmentRetryPath(request.URL.Path):
+		s.handleRetrySeedSegments(response, request)
 	case request.Method == http.MethodGet && isSeedRunDetailPath(request.URL.Path):
 		s.handleGetSeedRun(response, request)
 	case request.Method == http.MethodPost && hasProjectSuffixPathShape(request.URL.Path, "uploads"):
@@ -2932,6 +2950,60 @@ func (s *Server) handleRetrySeedRun(response http.ResponseWriter, request *http.
 	writeJSON(response, http.StatusAccepted, map[string]string{
 		"run_id": retried.RunID,
 		"status": retried.Status,
+	})
+}
+
+func (s *Server) handleRetrySeedSegments(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	runID := seedSegmentRetryPathPart(request.URL.Path)
+	if runID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "seed segment retry route not found", nil)
+		return
+	}
+	run, err := s.seedRunReader.GetSeedRun(request.Context(), workflows.GetSeedRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	projectID := strings.TrimSpace(run.ProjectID)
+	if !s.authorizeGlobalRunOwnerCreativeWrite(response, request, tenantID, projectID) {
+		return
+	}
+	var payload retrySeedSegmentsRequest
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid seed segment retry payload", nil)
+		return
+	}
+	segmentIDs := normalizeNonEmptyStrings(payload.SegmentIDs)
+	if len(segmentIDs) == 0 {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "segment_ids are required", nil)
+		return
+	}
+	retried, err := s.seedSegmentRetrier.RetrySeedSegments(request.Context(), workflows.RetrySeedSegmentsInput{
+		TenantID:    tenantID,
+		ProjectID:   projectID,
+		RunID:       runID,
+		SegmentIDs:  segmentIDs,
+		ActorUserID: s.actorUserID(request),
+		RequestID:   requestID(request),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, map[string]any{
+		"run_id":          retried.RunID,
+		"status":          retried.Status,
+		"requested_count": retried.RequestedCount,
 	})
 }
 
@@ -6756,6 +6828,30 @@ func seedRunRetryPathPart(path string) string {
 	return strings.TrimSpace(runID)
 }
 
+func seedSegmentRetryPathPart(path string) string {
+	const prefix = "/v1/seed-runs/"
+	remainder, prefixOK := strings.CutPrefix(path, prefix)
+	if !prefixOK {
+		return ""
+	}
+	runID, suffix, ok := strings.Cut(remainder, "/")
+	if !ok || suffix != "segments/retry" || !isSinglePathSegment(runID) {
+		return ""
+	}
+	return strings.TrimSpace(runID)
+}
+
+func normalizeNonEmptyStrings(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			normalized = append(normalized, value)
+		}
+	}
+	return normalized
+}
+
 func writerRunCancelPathPart(path string) string {
 	const prefix = "/v1/writer-runs/"
 	remainder, prefixOK := strings.CutPrefix(path, prefix)
@@ -6985,6 +7081,10 @@ func workflowPublicErrorMessage(code string) string {
 		return "workflow run is not retryable"
 	case "WORKFLOW_RETRY_FAILED":
 		return "workflow retry failed"
+	case "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED":
+		return "seed segment retry backend is not configured"
+	case "SEED_SEGMENT_RETRY_FAILED":
+		return "seed segment retry failed"
 	default:
 		return "workflow request failed"
 	}
