@@ -18,8 +18,10 @@ import (
 
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
+	"mirofish-novel/apps/api/internal/authrecovery"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/llm"
+	"mirofish-novel/apps/api/internal/platformratelimit"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
 	"mirofish-novel/apps/api/internal/sourcefiles"
@@ -28,6 +30,11 @@ import (
 	"mirofish-novel/apps/api/internal/workflows"
 	"mirofish-novel/apps/api/internal/worldline"
 )
+
+func newDevelopmentServer(config Config) *Server {
+	config.AllowDevelopmentAuth = true
+	return NewServer(config)
+}
 
 func signedSessionTokenForTest(t *testing.T, secret string, userID string) string {
 	t.Helper()
@@ -62,7 +69,7 @@ func sessionCSRFTokenForTest(t *testing.T, server *Server, sessionToken string) 
 }
 
 func TestSignSessionTokenUsesNonceBearingFormatForRotation(t *testing.T) {
-	server := NewServer(Config{SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 
 	first, ok := server.signSessionToken("user-session")
 	if !ok {
@@ -96,7 +103,7 @@ func TestSignSessionTokenUsesNonceBearingFormatForRotation(t *testing.T) {
 }
 
 func TestJWTSessionTokenUsesStableClaimsAndVerifiesWithHash(t *testing.T) {
-	server := NewServer(Config{SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 	now := time.Now().UTC()
 
 	token, ok := server.signJWTSessionToken(" jwt-user ", " session-123 ", now)
@@ -151,6 +158,18 @@ type recordingPasswordAuthenticator struct {
 	called bool
 }
 
+type recordingPasswordChanger struct {
+	input  auth.ChangePasswordInput
+	err    error
+	called bool
+}
+
+func (c *recordingPasswordChanger) ChangePassword(ctx context.Context, input auth.ChangePasswordInput) error {
+	c.input = input
+	c.called = true
+	return c.err
+}
+
 func (a *recordingPasswordAuthenticator) AuthenticatePassword(ctx context.Context, input auth.PasswordLoginInput) (auth.CurrentUser, error) {
 	a.input = input
 	a.called = true
@@ -185,6 +204,32 @@ type recordingAuthSessionStore struct {
 	rotateCalled       bool
 	calls              []string
 }
+
+type recordingPlatformRateLimiter struct {
+	input    platformratelimit.Input
+	decision platformratelimit.Decision
+	err      error
+	called   bool
+}
+
+func (l *recordingPlatformRateLimiter) Allow(_ context.Context, input platformratelimit.Input) (platformratelimit.Decision, error) {
+	l.input = input
+	l.called = true
+	return l.decision, l.err
+}
+
+type recordingTrustedClientProofVerifier struct {
+	result string
+	err    error
+}
+
+func (v recordingTrustedClientProofVerifier) Verify(string) (string, error) {
+	return v.result, v.err
+}
+
+type readinessCheckerFunc func(context.Context) ReadinessReport
+
+func (check readinessCheckerFunc) Check(ctx context.Context) ReadinessReport { return check(ctx) }
 
 func (s *recordingAuthSessionStore) CreateSession(ctx context.Context, input auth.CreateSessionInput) error {
 	s.createInput = input
@@ -504,6 +549,32 @@ type recordingDraftReviewStore struct {
 	called     bool
 }
 
+type recordingDraftReviewOwnerLookup struct {
+	input     workflows.DraftReviewOwnerLookupInput
+	projectID string
+	err       error
+	called    bool
+}
+
+func (l *recordingDraftReviewOwnerLookup) LookupDraftReviewProject(_ context.Context, input workflows.DraftReviewOwnerLookupInput) (string, error) {
+	l.input = input
+	l.called = true
+	return l.projectID, l.err
+}
+
+type recordingDraftReviewIssueStore struct {
+	input  workflows.UpdateDraftReviewIssueInput
+	result workflows.DraftReviewIssueMutation
+	err    error
+	called bool
+}
+
+func (s *recordingDraftReviewIssueStore) UpdateIssueStatus(_ context.Context, input workflows.UpdateDraftReviewIssueInput) (workflows.DraftReviewIssueMutation, error) {
+	s.input = input
+	s.called = true
+	return s.result, s.err
+}
+
 func (s *recordingDraftReviewStore) StartDraftReview(ctx context.Context, input workflows.StartDraftReviewInput) (workflows.DraftReviewAdmission, error) {
 	s.startInput = input
 	s.called = true
@@ -528,6 +599,22 @@ type recordingManuscriptReader struct {
 	manifest    workflows.ManuscriptExportManifest
 	getErr      error
 	exportErr   error
+}
+
+type recordingManuscriptArtifactExporter struct {
+	input  workflows.ExportManuscriptArtifactInput
+	result workflows.ManuscriptArtifact
+	err    error
+	called bool
+}
+
+func (e *recordingManuscriptArtifactExporter) ExportManuscriptArtifact(
+	_ context.Context,
+	input workflows.ExportManuscriptArtifactInput,
+) (workflows.ManuscriptArtifact, error) {
+	e.input = input
+	e.called = true
+	return e.result, e.err
 }
 
 func (r *recordingManuscriptReader) GetManuscript(ctx context.Context, input workflows.GetManuscriptInput) (workflows.Manuscript, error) {
@@ -815,6 +902,23 @@ func (s *recordingWorldlineStepStarter) StartStep(ctx context.Context, input wor
 	return s.run, nil
 }
 
+type recordingWorldlineAutoEvolutionStarter struct {
+	input worldline.StartAutoEvolutionInput
+	run   worldline.AutoEvolutionRun
+	err   error
+}
+
+func (s *recordingWorldlineAutoEvolutionStarter) StartAutoEvolution(
+	ctx context.Context,
+	input worldline.StartAutoEvolutionInput,
+) (worldline.AutoEvolutionRun, error) {
+	s.input = input
+	if s.err != nil {
+		return worldline.AutoEvolutionRun{}, s.err
+	}
+	return s.run, nil
+}
+
 type recordingWorldlineSessionReader struct {
 	listInput worldline.ListSessionsInput
 	getInput  worldline.GetSessionInput
@@ -929,14 +1033,18 @@ func (s *recordingWorldlineVariableStore) InjectVariable(ctx context.Context, in
 type recordingWorldlinePreparationStore struct {
 	createInput     worldline.CreatePreparationInput
 	getInput        worldline.GetPreparationInput
+	listInput       worldline.ListPreparationsInput
 	agentsInput     worldline.ListPreparedAgentsInput
 	preparation     worldline.PreparationRecord
+	preparations    []worldline.PreparationRecord
 	agents          []worldline.PreparedAgentRecord
 	createErr       error
 	getErr          error
+	listErr         error
 	agentsErr       error
 	createWasCalled bool
 	getWasCalled    bool
+	listWasCalled   bool
 	agentsWasCalled bool
 }
 
@@ -949,6 +1057,10 @@ func (s *recordingWorldlinePreparationStore) CreatePreparation(ctx context.Conte
 	return s.preparation, nil
 }
 
+func (s *recordingWorldlinePreparationStore) StartPreparation(ctx context.Context, input worldline.CreatePreparationInput) (worldline.PreparationRecord, error) {
+	return s.CreatePreparation(ctx, input)
+}
+
 func (s *recordingWorldlinePreparationStore) GetPreparation(ctx context.Context, input worldline.GetPreparationInput) (worldline.PreparationRecord, error) {
 	s.getInput = input
 	s.getWasCalled = true
@@ -956,6 +1068,15 @@ func (s *recordingWorldlinePreparationStore) GetPreparation(ctx context.Context,
 		return worldline.PreparationRecord{}, s.getErr
 	}
 	return s.preparation, nil
+}
+
+func (s *recordingWorldlinePreparationStore) ListPreparations(ctx context.Context, input worldline.ListPreparationsInput) ([]worldline.PreparationRecord, error) {
+	s.listInput = input
+	s.listWasCalled = true
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.preparations, nil
 }
 
 func (s *recordingWorldlinePreparationStore) ListPreparedAgents(ctx context.Context, input worldline.ListPreparedAgentsInput) ([]worldline.PreparedAgentRecord, error) {
@@ -974,16 +1095,61 @@ type recordingCharacterConsoleStore struct {
 	updateInput characterconsole.UpdateInteractionStatusInput
 	appendInput characterconsole.AppendTurnInput
 	turnsInput  characterconsole.ListTurnsInput
+	eventsInput characterconsole.ListEventsInput
 
 	interaction  characterconsole.InteractionRecord
 	interactions []characterconsole.InteractionRecord
 	turn         characterconsole.TurnRecord
 	turns        []characterconsole.TurnRecord
+	events       []characterconsole.EventRecord
 	err          error
 	getErr       error
 	updateErr    error
 	appendErr    error
 	turnsErr     error
+	eventsErr    error
+}
+
+type recordingCharacterDialogueStarter struct {
+	input  workflows.StartCharacterDialogueInput
+	run    workflows.CharacterDialogueRun
+	err    error
+	called bool
+}
+
+type recordingCharacterProposalStore struct {
+	listInput   characterconsole.ListProposalsInput
+	adoptInput  characterconsole.AdoptProposalInput
+	proposals   []characterconsole.ProposalRecord
+	adoption    characterconsole.ProposalAdoption
+	listErr     error
+	adoptErr    error
+	listCalled  bool
+	adoptCalled bool
+}
+
+func (s *recordingCharacterProposalStore) ListProposals(_ context.Context, input characterconsole.ListProposalsInput) ([]characterconsole.ProposalRecord, error) {
+	s.listInput = input
+	s.listCalled = true
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.proposals, nil
+}
+
+func (s *recordingCharacterProposalStore) AdoptProposal(_ context.Context, input characterconsole.AdoptProposalInput) (characterconsole.ProposalAdoption, error) {
+	s.adoptInput = input
+	s.adoptCalled = true
+	if s.adoptErr != nil {
+		return characterconsole.ProposalAdoption{}, s.adoptErr
+	}
+	return s.adoption, nil
+}
+
+func (s *recordingCharacterDialogueStarter) StartCharacterDialogue(_ context.Context, input workflows.StartCharacterDialogueInput) (workflows.CharacterDialogueRun, error) {
+	s.input = input
+	s.called = true
+	return s.run, s.err
 }
 
 func (s *recordingCharacterConsoleStore) CreateInteraction(ctx context.Context, input characterconsole.CreateInteractionInput) (characterconsole.InteractionRecord, error) {
@@ -1011,6 +1177,14 @@ func (s *recordingCharacterConsoleStore) GetInteraction(ctx context.Context, inp
 		return characterconsole.InteractionRecord{}, s.err
 	}
 	return s.interaction, nil
+}
+
+func (s *recordingCharacterConsoleStore) ListEvents(_ context.Context, input characterconsole.ListEventsInput) ([]characterconsole.EventRecord, error) {
+	s.eventsInput = input
+	if s.eventsErr != nil {
+		return nil, s.eventsErr
+	}
+	return s.events, nil
 }
 
 func (s *recordingCharacterConsoleStore) UpdateInteractionStatus(ctx context.Context, input characterconsole.UpdateInteractionStatusInput) (characterconsole.InteractionRecord, error) {
@@ -1554,7 +1728,7 @@ func (s *recordingAssetReindexStarter) StartAssetReindex(ctx context.Context, in
 }
 
 func TestHealthzReturnsServiceStatus(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 
@@ -1569,6 +1743,109 @@ func TestHealthzReturnsServiceStatus(t *testing.T) {
 	}
 	if body["status"] != "ok" || body["service"] != "mirofish-api" {
 		t.Fatalf("unexpected health body: %#v", body)
+	}
+}
+
+func TestReadyzReportsCurrentDependencyStateWithoutPrivateDetails(t *testing.T) {
+	checkedAt := time.Date(2026, time.July, 10, 17, 30, 0, 0, time.UTC)
+	server := newDevelopmentServer(Config{ReadinessChecker: readinessCheckerFunc(func(context.Context) ReadinessReport {
+		return ReadinessReport{CheckedAt: checkedAt, Dependencies: []ReadinessDependency{
+			{Name: "temporal", Status: "ready"},
+			{Name: "postgres", Status: "ready"},
+			{Name: "redis", Status: "disabled"},
+			{Name: "object_storage", Status: "ready"},
+		}}
+	})})
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unexpected readiness response: status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	var body struct {
+		Status       string                `json:"status"`
+		Dependencies []ReadinessDependency `json:"dependencies"`
+		Timestamp    string                `json:"timestamp"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ready" || body.Timestamp != checkedAt.Format(time.RFC3339Nano) || len(body.Dependencies) != 4 {
+		t.Fatalf("unexpected readiness body: %#v", body)
+	}
+	if body.Dependencies[0].Name != "object_storage" || body.Dependencies[3].Name != "temporal" {
+		t.Fatalf("readiness dependencies are not stable-sorted: %#v", body.Dependencies)
+	}
+}
+
+func TestReadyzFailsClosedForEveryDependencyAndRecoversWithoutCaching(t *testing.T) {
+	for _, dependency := range []string{"postgres", "redis", "temporal", "object_storage"} {
+		t.Run(dependency, func(t *testing.T) {
+			calls := 0
+			server := newDevelopmentServer(Config{ReadinessChecker: readinessCheckerFunc(func(context.Context) ReadinessReport {
+				calls++
+				status := "unavailable"
+				if calls > 1 {
+					status = "ready"
+				}
+				return ReadinessReport{Dependencies: []ReadinessDependency{{
+					Name: dependency, Status: status, ErrorCode: strings.ToUpper(dependency) + "_UNAVAILABLE",
+				}}}
+			})})
+
+			first := httptest.NewRecorder()
+			server.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if first.Code != http.StatusServiceUnavailable || !strings.Contains(first.Body.String(), strings.ToUpper(dependency)+"_UNAVAILABLE") {
+				t.Fatalf("dependency failure did not fail closed: status=%d body=%s", first.Code, first.Body.String())
+			}
+			second := httptest.NewRecorder()
+			server.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if second.Code != http.StatusOK || calls != 2 {
+				t.Fatalf("transient readiness did not recover: status=%d calls=%d body=%s", second.Code, calls, second.Body.String())
+			}
+		})
+	}
+}
+
+func TestReadyzSanitizesTokensAndRejectsMalformedRoutes(t *testing.T) {
+	server := newDevelopmentServer(Config{ReadinessChecker: readinessCheckerFunc(func(context.Context) ReadinessReport {
+		return ReadinessReport{Dependencies: []ReadinessDependency{{
+			Name: "postgres private.internal:5432", Status: "failed with password=secret",
+			ErrorCode: "driver: dial private.internal with password=secret",
+		}}}
+	})})
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected fail-closed readiness, got %d", response.Code)
+	}
+	for _, private := range []string{"private.internal", "password", "secret", "driver", "dial"} {
+		if strings.Contains(strings.ToLower(response.Body.String()), private) {
+			t.Fatalf("readiness leaked %q: %s", private, response.Body.String())
+		}
+	}
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/readyz", nil),
+		httptest.NewRequest(http.MethodGet, "/readyz/extra", nil),
+	} {
+		malformed := httptest.NewRecorder()
+		server.ServeHTTP(malformed, request)
+		if malformed.Code != http.StatusNotFound {
+			t.Fatalf("malformed readiness route returned %d: %s", malformed.Code, malformed.Body.String())
+		}
+	}
+}
+
+func TestReadyzRejectsEmptyCheckerReport(t *testing.T) {
+	server := newDevelopmentServer(Config{ReadinessChecker: readinessCheckerFunc(func(context.Context) ReadinessReport {
+		return ReadinessReport{}
+	})})
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"error_code":"READINESS_EMPTY"`) {
+		t.Fatalf("empty readiness report did not fail closed: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -1598,7 +1875,7 @@ func TestHealthzIgnoresMalformedPresentedAuthCredentials(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{SessionAuthSecret: "test-secret"})
+			server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 			request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 			tt.setup(request)
 			response := httptest.NewRecorder()
@@ -1650,7 +1927,7 @@ func (w *recordingSourceFileObjectWriter) WriteObject(ctx context.Context, input
 }
 
 func TestUnknownRouteReturnsStableErrorEnvelope(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodGet, "/missing", nil)
 	request.Header.Set("X-Request-Id", "req_test")
 	response := httptest.NewRecorder()
@@ -1698,7 +1975,7 @@ func TestUnknownRoutePreservesNotFoundWithMalformedPresentedAuthCredentials(t *t
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{SessionAuthSecret: "test-secret"})
+			server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 			request := httptest.NewRequest(http.MethodGet, "/missing", nil)
 			request.Header.Set("X-Request-Id", "req_missing")
 			tt.setup(request)
@@ -1819,7 +2096,7 @@ func TestActorSensitiveMalformedNestedProjectRoutesPreserveNotFoundWithInvalidBe
 			traceAccess := &allowTraceAccessChecker{}
 			traceAuditor := &recordingTraceExportAuditor{}
 			assetReader := &recordingAssetReader{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:         authorizer,
 				StoryGraphReader:   storyReader,
 				LLMResolver:        resolver,
@@ -1923,7 +2200,7 @@ func TestActorSensitiveCanonicalNestedProjectRoutesRejectInvalidBearerBeforeFall
 			traceReader := &recordingTraceReader{}
 			traceAccess := &allowTraceAccessChecker{}
 			traceAuditor := &recordingTraceExportAuditor{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:         authorizer,
 				StoryGraphReader:   storyReader,
 				LLMResolver:        resolver,
@@ -2176,7 +2453,7 @@ func TestMalformedProtectedInventoryRoutesStay404WithoutActorOrSideEffects(t *te
 			authorizer := &recordingAuthorizer{}
 			config, assertNoSideEffects := tt.config(authorizer)
 			config.SessionAuthSecret = "test-secret"
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -2416,7 +2693,7 @@ func newProtectedRouteAllowlistGuardServer() (*Server, protectedRouteAllowlistGu
 		archiveReviewStore:   &recordingArchiveMemoryReviewStore{},
 		storyGraphAdoptions:  &recordingStoryGraphCandidateAdoptionStore{},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		SessionAuthSecret:                "test-secret",
 		AuthSessionStore:                 sideEffects.sessionStore,
 		Authorizer:                       sideEffects.authorizer,
@@ -2464,7 +2741,7 @@ func assertNoProtectedRouteAllowlistGuardSideEffects(t *testing.T, sideEffects p
 
 func TestGetCurrentUserRequiresTrustedUserContextBeforeReader(t *testing.T) {
 	reader := &recordingAuthReader{}
-	server := NewServer(Config{AuthReader: reader})
+	server := newDevelopmentServer(Config{AuthReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header.Set("X-Request-Id", "req_me_missing_user")
 	request.Header.Set("X-Tenant-Id", "tenant-header-must-not-matter")
@@ -2490,7 +2767,7 @@ func TestGetCurrentUserRequiresTrustedUserContextBeforeReader(t *testing.T) {
 }
 
 func TestGetCurrentUserFailsClosedWhenAuthReaderIsDisabled(t *testing.T) {
-	server := NewServer(Config{})
+	server := newDevelopmentServer(Config{})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req_me_disabled")
@@ -2536,7 +2813,7 @@ func TestGetCurrentUserUsesInjectedReaderAndReturnsOnlyPublicSummary(t *testing.
 			}},
 		},
 	}
-	server := NewServer(Config{AuthReader: reader})
+	server := newDevelopmentServer(Config{AuthReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header.Set("X-User-Id", " user-123 ")
 	request.Header.Set("X-Request-Id", "req_me_success")
@@ -2614,7 +2891,7 @@ func TestGetCurrentUserAcceptsJWTBearerThroughSessionStoreBeforeReader(t *testin
 		},
 	}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		AuthReader:        reader,
 		AuthSessionStore:  sessionStore,
 		SessionAuthSecret: "test-secret",
@@ -2656,7 +2933,7 @@ func TestGetCurrentUserAcceptsJWTBearerThroughSessionStoreBeforeReader(t *testin
 func TestGetCurrentUserRejectsMalformedJWTBearerBeforeFallbackReaderOrSessionStore(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		AuthReader:        reader,
 		AuthSessionStore:  sessionStore,
 		SessionAuthSecret: "test-secret",
@@ -2705,7 +2982,7 @@ func TestCreateDevSessionIssuesSignedHttpOnlyCookieWithoutTokenLeak(t *testing.T
 			}},
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":" user-session "}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-Id", "req_dev_session")
@@ -2766,7 +3043,7 @@ func TestCreateDevSessionPersistsSessionBeforeIssuingCookie(t *testing.T) {
 		},
 	}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-Id", "req_session_persist")
@@ -2801,7 +3078,7 @@ func TestCreateDevSessionIssuesDistinctNonceCookiesForSameUser(t *testing.T) {
 			User: auth.UserSummary{UserID: "user-session"},
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: &recordingAuthSessionStore{}, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: &recordingAuthSessionStore{}, SessionAuthSecret: "test-secret"})
 	issuedCookies := make([]string, 0, 2)
 	persistedHashes := make([]string, 0, 2)
 
@@ -2850,7 +3127,7 @@ func TestCreateDevSessionFailsClosedWhenSessionPersistenceFailsBeforeCookie(t *t
 			Message: "session insert leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -2905,7 +3182,7 @@ func TestPasswordLoginIssuesPersistedSignedHttpOnlyCookieWithoutSecretLeak(t *te
 		},
 	}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		PasswordAuthenticator: authenticator,
 		AuthSessionStore:      sessionStore,
 		SessionAuthSecret:     "test-secret",
@@ -3004,7 +3281,7 @@ func TestPasswordLoginFailsClosedWithoutAuthenticatorStoreOrSecretBeforeSideEffe
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(tt.config)
+			server := newDevelopmentServer(tt.config)
 			request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":"author@example.test","password":"correct password"}`))
 			response := httptest.NewRecorder()
 
@@ -3031,7 +3308,7 @@ func TestPasswordLoginFailsClosedWithoutAuthenticatorStoreOrSecretBeforeSideEffe
 func TestPasswordLoginMalformedPathsStay404WithoutAuthenticatorOrSessionStore(t *testing.T) {
 	authenticator := &recordingPasswordAuthenticator{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		PasswordAuthenticator: authenticator,
 		AuthSessionStore:      sessionStore,
 		SessionAuthSecret:     "test-secret",
@@ -3054,8 +3331,233 @@ func TestPasswordLoginMalformedPathsStay404WithoutAuthenticatorOrSessionStore(t 
 	}
 }
 
+func TestChangePasswordWithCookieValidatesSessionChangesPasswordAndClearsCookie(t *testing.T) {
+	changer := &recordingPasswordChanger{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := newDevelopmentServer(Config{
+		PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret",
+	})
+	token := signedSessionTokenForTest(t, "test-secret", "user-password")
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{
+		"current_password":"current password value",
+		"new_password":"new secure password value"
+	}`))
+	request.Header.Set("X-Request-Id", "req_password_change")
+	request.Header.Set("X-User-Id", "development-fallback")
+	request.Header.Set(csrfHeaderName, sessionCSRFTokenForTest(t, server, token))
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if !sessionStore.validateCalled || sessionStore.validateInput.UserID != "user-password" ||
+		sessionStore.validateInput.TokenHash != hashSessionToken(token) ||
+		sessionStore.validateInput.RequestID != "req_password_change" {
+		t.Fatalf("password change did not validate the presented session: %#v", sessionStore.validateInput)
+	}
+	if !changer.called || changer.input.UserID != "user-password" ||
+		changer.input.CurrentPassword != "current password value" ||
+		changer.input.NewPassword != "new secure password value" ||
+		changer.input.RequestID != "req_password_change" || changer.input.Now.IsZero() {
+		t.Fatalf("password changer received unexpected input: %#v", changer.input)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != sessionCookieName || cookies[0].Value != "" ||
+		cookies[0].MaxAge >= 0 || !cookies[0].HttpOnly || cookies[0].Path != "/" {
+		t.Fatalf("successful cookie password change did not clear the session cookie: %#v", cookies)
+	}
+	for _, forbidden := range []string{token, "current password value", "new secure password value", "development-fallback"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("password change response leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestChangePasswordWithBearerDoesNotUseFallbackOrMutateCookie(t *testing.T) {
+	changer := &recordingPasswordChanger{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := newDevelopmentServer(Config{
+		PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret",
+	})
+	token := signedSessionTokenForTest(t, "test-secret", "bearer-password-user")
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{
+		"current_password":"current password value",
+		"new_password":"new secure password value"
+	}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-User-Id", "development-fallback")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if !sessionStore.validateCalled || sessionStore.validateInput.UserID != "bearer-password-user" || !changer.called || changer.input.UserID != "bearer-password-user" {
+		t.Fatalf("bearer credential was not used end to end: store=%#v changer=%#v", sessionStore.validateInput, changer.input)
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("bearer password change mutated cookies: %#v", response.Result().Cookies())
+	}
+}
+
+func TestChangePasswordFailsClosedBeforeDecodeWhenDependencyIsMissing(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		config Config
+	}{
+		{name: "password_changer", config: Config{AuthSessionStore: &recordingAuthSessionStore{}, SessionAuthSecret: "test-secret"}},
+		{name: "session_store", config: Config{PasswordChanger: &recordingPasswordChanger{}, SessionAuthSecret: "test-secret"}},
+		{name: "session_secret", config: Config{PasswordChanger: &recordingPasswordChanger{}, AuthSessionStore: &recordingAuthSessionStore{}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newDevelopmentServer(tt.config)
+			request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{"current_password":"secret body"`))
+			request.Header.Set("X-User-Id", "development-fallback")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", response.Code, response.Body.String())
+			}
+			if changer, ok := tt.config.PasswordChanger.(*recordingPasswordChanger); ok && changer.called {
+				t.Fatalf("missing dependency reached password changer: %#v", changer.input)
+			}
+			if store, ok := tt.config.AuthSessionStore.(*recordingAuthSessionStore); ok && store.validateCalled {
+				t.Fatalf("missing dependency reached session validation: %#v", store.validateInput)
+			}
+			if strings.Contains(response.Body.String(), "secret body") || strings.Contains(response.Body.String(), "development-fallback") {
+				t.Fatalf("dependency failure leaked request data: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestChangePasswordCookieRequiresCSRFAheadOfSessionValidationAndDecode(t *testing.T) {
+	changer := &recordingPasswordChanger{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := newDevelopmentServer(Config{
+		PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{"current_password":"secret body"`))
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-password")})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if sessionStore.validateCalled || changer.called {
+		t.Fatalf("missing CSRF reached session store or changer: store=%#v changer=%#v", sessionStore, changer)
+	}
+	if len(response.Result().Cookies()) != 0 || strings.Contains(response.Body.String(), "secret body") {
+		t.Fatalf("missing CSRF caused side effect or leaked body: cookies=%#v body=%s", response.Result().Cookies(), response.Body.String())
+	}
+}
+
+func TestChangePasswordRejectsInvalidSessionBodyAndCurrentPasswordWithoutLeakage(t *testing.T) {
+	t.Run("invalid_session", func(t *testing.T) {
+		changer := &recordingPasswordChanger{}
+		sessionStore := &recordingAuthSessionStore{validateErr: &auth.AppError{
+			Code: auth.CodeUnauthenticated, Message: "expired token prompt=private api_key=sk-hidden",
+		}}
+		server := newDevelopmentServer(Config{PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		token := signedSessionTokenForTest(t, "test-secret", "expired-user")
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{"current_password":"current secret","new_password":"new secure password"}`))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized || changer.called || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("invalid session was not rejected before change: status=%d changer=%#v cookies=%#v", response.Code, changer, response.Result().Cookies())
+		}
+		for _, forbidden := range []string{"expired-user", token, "current secret", "new secure password", "prompt", "api_key", "sk-hidden"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("invalid-session response leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("strict_body", func(t *testing.T) {
+		changer := &recordingPasswordChanger{}
+		sessionStore := &recordingAuthSessionStore{}
+		server := newDevelopmentServer(Config{PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		token := signedSessionTokenForTest(t, "test-secret", "user-password")
+		for _, body := range []string{
+			`{"current_password":"current secret","new_password":"new secure password","unexpected":true}`,
+			`{"current_password":"current secret","new_password":"new secure password"}{}`,
+		} {
+			request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest || changer.called || len(response.Result().Cookies()) != 0 {
+				t.Fatalf("strict body was not rejected: status=%d body=%s changer=%#v", response.Code, response.Body.String(), changer)
+			}
+		}
+	})
+
+	t.Run("invalid_current_password", func(t *testing.T) {
+		changer := &recordingPasswordChanger{err: &auth.AppError{
+			Code: auth.CodeUnauthenticated, Message: "current password is invalid prompt=private api_key=sk-hidden",
+		}}
+		sessionStore := &recordingAuthSessionStore{}
+		server := newDevelopmentServer(Config{PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		token := signedSessionTokenForTest(t, "test-secret", "user-password")
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{"current_password":"wrong current secret","new_password":"new secure password"}`))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized || !sessionStore.validateCalled || !changer.called || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("invalid current password response was not fail-closed: status=%d store=%#v changer=%#v", response.Code, sessionStore, changer)
+		}
+		for _, forbidden := range []string{"user-password", token, "wrong current secret", "new secure password", "prompt", "api_key", "sk-hidden"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("invalid-current-password response leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+}
+
+func TestChangePasswordRequiresExactPathAndPresentedSignedCredential(t *testing.T) {
+	changer := &recordingPasswordChanger{}
+	sessionStore := &recordingAuthSessionStore{}
+	server := newDevelopmentServer(Config{PasswordChanger: changer, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/password/change", strings.NewReader(`{"current_password":"current password","new_password":"new secure password"}`))
+	request.Header.Set("X-User-Id", "development-fallback")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || sessionStore.validateCalled || changer.called {
+		t.Fatalf("development fallback reached password change: status=%d store=%#v changer=%#v", response.Code, sessionStore, changer)
+	}
+
+	for _, path := range []string{"/v1/auth/password//change", "/v1/auth/password/change/extra"} {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"current_password":"current password","new_password":"new secure password"}`))
+		request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "user-password"))
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected malformed path %s to stay 404, got %d: %s", path, response.Code, response.Body.String())
+		}
+	}
+	if sessionStore.validateCalled || changer.called {
+		t.Fatalf("malformed password routes caused side effects: store=%#v changer=%#v", sessionStore, changer)
+	}
+}
+
 func TestSessionCSRFTokenRequiresSessionCookieAndDoesNotLeakTokenMaterial(t *testing.T) {
-	server := NewServer(Config{SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 	sessionToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request := httptest.NewRequest(http.MethodGet, "/v1/auth/csrf-token", nil)
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionToken})
@@ -3096,7 +3598,7 @@ func TestUnsafeActorSensitiveCookieRoutesRequireCSRFBeforeAuthorizerAndStores(t 
 	t.Run("project_asset_create", func(t *testing.T) {
 		authorizer := &recordingAuthorizer{}
 		store := &recordingAssetMutationStore{}
-		server := NewServer(Config{
+		server := newDevelopmentServer(Config{
 			Authorizer:         authorizer,
 			AssetMutationStore: store,
 			SessionAuthSecret:  "test-secret",
@@ -3131,7 +3633,7 @@ func TestUnsafeActorSensitiveCookieRoutesRequireCSRFBeforeAuthorizerAndStores(t 
 	t.Run("tenant_session_revoke", func(t *testing.T) {
 		authorizer := &recordingAuthorizer{}
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{
+		server := newDevelopmentServer(Config{
 			Authorizer:        authorizer,
 			AuthSessionStore:  sessionStore,
 			SessionAuthSecret: "test-secret",
@@ -3156,6 +3658,149 @@ func TestUnsafeActorSensitiveCookieRoutesRequireCSRFBeforeAuthorizerAndStores(t 
 	})
 }
 
+func TestMountedMutationRoutesRequireCookieCSRFAheadOfDomainHandlers(t *testing.T) {
+	token := signedSessionTokenForTest(t, "test-secret", "user-123")
+	tests := []struct {
+		name    string
+		path    string
+		install func(*Config, http.Handler)
+	}{
+		{
+			name: "writer workspace",
+			path: "/v1/projects/project-123/chapters",
+			install: func(config *Config, handler http.Handler) {
+				config.WriterWorkspaceHandler = handler
+			},
+		},
+		{
+			name: "writer planning book generation",
+			path: "/v1/projects/project-123/book-plans/plan-123/generations",
+			install: func(config *Config, handler http.Handler) {
+				config.WriterWorkspaceHandler = handler
+			},
+		},
+		{
+			name: "manuscript workspace",
+			path: "/v1/projects/project-123/manuscript-workspace/commands",
+			install: func(config *Config, handler http.Handler) {
+				config.ManuscriptWorkspaceHandler = handler
+			},
+		},
+		{
+			name: "writer planning dedup extraction",
+			path: "/v1/projects/project-123/manuscript-workspace/dedup-extractions",
+			install: func(config *Config, handler http.Handler) {
+				config.ManuscriptWorkspaceHandler = handler
+			},
+		},
+		{
+			name: "asset catalog",
+			path: "/v1/projects/project-123/asset-catalog/assets",
+			install: func(config *Config, handler http.Handler) {
+				config.AssetCatalogHandler = handler
+			},
+		},
+		{
+			name: "collaboration",
+			path: "/v1/tenants/tenant-123/invitations",
+			install: func(config *Config, handler http.Handler) {
+				config.CollaborationHandler = handler
+			},
+		},
+		{
+			name: "llm admin",
+			path: "/v1/llm-admin/policies",
+			install: func(config *Config, handler http.Handler) {
+				config.LLMAdminHandler = handler
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			config := Config{SessionAuthSecret: "test-secret"}
+			test.install(&config, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called = true
+			}))
+			server := newDevelopmentServer(config)
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(`{"private":"payload"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden || called {
+				t.Fatalf("missing CSRF reached mounted handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+			}
+			for _, forbidden := range []string{"user-123", token, "private", "payload", "api_key", "credential_ref", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("missing CSRF response leaked %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestMountedMutationRoutesRejectInvalidBearerAheadOfDomainHandlers(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		install func(*Config, http.Handler)
+	}{
+		{name: "writer workspace", path: "/v1/projects/project-123/chapters", install: func(config *Config, handler http.Handler) {
+			config.WriterWorkspaceHandler = handler
+		}},
+		{name: "writer planning book generation", path: "/v1/projects/project-123/book-plans/plan-123/generations", install: func(config *Config, handler http.Handler) {
+			config.WriterWorkspaceHandler = handler
+		}},
+		{name: "manuscript workspace", path: "/v1/projects/project-123/manuscript-workspace/commands", install: func(config *Config, handler http.Handler) {
+			config.ManuscriptWorkspaceHandler = handler
+		}},
+		{name: "writer planning dedup extraction", path: "/v1/projects/project-123/manuscript-workspace/dedup-extractions", install: func(config *Config, handler http.Handler) {
+			config.ManuscriptWorkspaceHandler = handler
+		}},
+		{name: "asset catalog", path: "/v1/projects/project-123/asset-catalog/assets", install: func(config *Config, handler http.Handler) {
+			config.AssetCatalogHandler = handler
+		}},
+		{name: "collaboration", path: "/v1/tenants/tenant-123/invitations", install: func(config *Config, handler http.Handler) {
+			config.CollaborationHandler = handler
+		}},
+		{name: "llm admin", path: "/v1/llm-admin/policies", install: func(config *Config, handler http.Handler) {
+			config.LLMAdminHandler = handler
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			config := Config{SessionAuthSecret: "test-secret"}
+			test.install(&config, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called = true
+			}))
+			server := newDevelopmentServer(config)
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(`{"private":"payload"}`))
+			request.Header.Set("Authorization", "Bearer invalid")
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized || called {
+				t.Fatalf("invalid bearer reached mounted handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+			}
+			for _, forbidden := range []string{"invalid", "private", "payload", "api_key", "credential_ref", "draft", "manuscript"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("invalid bearer response leaked %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestListCurrentUserSessionsRequiresPresentedCredentialAndReturnsMetadataOnly(t *testing.T) {
 	reader := &recordingAuthReader{}
 	expiresAt := time.Now().UTC().Add(time.Hour)
@@ -3169,7 +3814,7 @@ func TestListCurrentUserSessionsRequiresPresentedCredentialAndReturnsMetadataOnl
 			Current:    true,
 		}},
 	}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
 	request.Header.Set("X-Request-Id", "req_session_list")
@@ -3226,7 +3871,7 @@ func TestListCurrentUserSessionsRequiresPresentedCredentialAndReturnsMetadataOnl
 func TestListCurrentUserSessionsFailsClosedWithoutCredentialStoreOrExactPath(t *testing.T) {
 	t.Run("missing_credential_does_not_use_development_fallback", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
 		request.Header.Set("X-User-Id", "fallback-user")
 		response := httptest.NewRecorder()
@@ -3245,7 +3890,7 @@ func TestListCurrentUserSessionsFailsClosedWithoutCredentialStoreOrExactPath(t *
 	})
 
 	t.Run("missing_store_fails_closed_without_cookie_mutation", func(t *testing.T) {
-		server := NewServer(Config{SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 		token := signedSessionTokenForTest(t, "test-secret", "user-session")
 		request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
 		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
@@ -3268,7 +3913,7 @@ func TestListCurrentUserSessionsFailsClosedWithoutCredentialStoreOrExactPath(t *
 
 	t.Run("malformed_authorization_fails_before_store", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		request := httptest.NewRequest(http.MethodGet, "/v1/auth/sessions", nil)
 		request.Header.Add("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "user-session"))
 		request.Header.Add("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "other-user"))
@@ -3286,7 +3931,7 @@ func TestListCurrentUserSessionsFailsClosedWithoutCredentialStoreOrExactPath(t *
 
 	t.Run("malformed_paths_stay_404_without_store_side_effects", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		for _, path := range []string{"/v1/auth//sessions", "/v1/auth/sessions/extra"} {
 			t.Run(path, func(t *testing.T) {
 				request := httptest.NewRequest(http.MethodGet, path, nil)
@@ -3309,7 +3954,7 @@ func TestListCurrentUserSessionsFailsClosedWithoutCredentialStoreOrExactPath(t *
 func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
 	request.Header.Set("X-Request-Id", "req_session_revoke")
@@ -3347,7 +3992,7 @@ func TestRevokeCurrentSessionRevokesPersistedSessionBeforeClearingCookie(t *test
 
 func TestRevokeCurrentSessionRequiresCSRFForCookieCredentialBeforeStore(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
 	response := httptest.NewRecorder()
@@ -3374,7 +4019,7 @@ func TestRevokeCurrentSessionRequiresCSRFForCookieCredentialBeforeStore(t *testi
 func TestRevokeCurrentSessionRequiresPresentedSignedCredentialWithoutFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
 	request.Header.Set("X-CSRF-Token", "csrf-token-for-missing-cookie")
 	request.Header.Set("X-User-Id", "fallback-user")
@@ -3407,7 +4052,7 @@ func TestRevokeCurrentSessionFailsClosedWhenStoreFailsBeforeClearingCookie(t *te
 			Message: "revoke leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
@@ -3443,7 +4088,7 @@ func TestRevokeCurrentSessionFailsClosedWhenStoreFailsBeforeClearingCookie(t *te
 func TestRevokeAllCurrentUserSessionsRequiresCSRFAndStoreBeforeClearingCookie(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
 	request.Header.Set("X-Request-Id", "req_session_revoke_all")
@@ -3486,7 +4131,7 @@ func TestRevokeAllCurrentUserSessionsRequiresCSRFAndStoreBeforeClearingCookie(t 
 func TestRevokeAllCurrentUserSessionsFailsClosedBeforeStoreOrCookieSideEffects(t *testing.T) {
 	t.Run("missing_csrf", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
 		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
 		response := httptest.NewRecorder()
@@ -3505,7 +4150,7 @@ func TestRevokeAllCurrentUserSessionsFailsClosedBeforeStoreOrCookieSideEffects(t
 	})
 
 	t.Run("missing_store", func(t *testing.T) {
-		server := NewServer(Config{SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 		token := signedSessionTokenForTest(t, "test-secret", "user-session")
 		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
 		request.Header.Set("X-CSRF-Token", server.sessionCSRFToken(hashSessionToken(token)))
@@ -3529,7 +4174,7 @@ func TestRevokeAllCurrentUserSessionsFailsClosedBeforeStoreOrCookieSideEffects(t
 				Message: "all revoke leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 			},
 		}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		token := signedSessionTokenForTest(t, "test-secret", "user-session")
 		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/sessions", nil)
 		request.Header.Set("X-CSRF-Token", server.sessionCSRFToken(hashSessionToken(token)))
@@ -3558,7 +4203,7 @@ func TestRevokeAllCurrentUserSessionsFailsClosedBeforeStoreOrCookieSideEffects(t
 
 func TestMalformedRevokeAllSessionsPathsStay404WithoutSideEffects(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	for _, path := range []string{
 		"/v1/auth//sessions",
 		"/v1/auth/sessions/extra",
@@ -3586,7 +4231,7 @@ func TestMalformedRevokeAllSessionsPathsStay404WithoutSideEffects(t *testing.T) 
 func TestRotateCurrentSessionReplacesPersistedCookieBeforeIssuingNewCookie(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	oldToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	csrfToken := sessionCSRFTokenForTest(t, server, oldToken)
 	sessionStore.validateCalled = false
@@ -3644,7 +4289,7 @@ func TestRotateCurrentSessionReplacesPersistedCookieBeforeIssuingNewCookie(t *te
 
 func TestRotateCurrentSessionRequiresCSRFBeforeStore(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
 	response := httptest.NewRecorder()
@@ -3665,7 +4310,7 @@ func TestRotateCurrentSessionRequiresCSRFBeforeStore(t *testing.T) {
 func TestRotateCurrentSessionRequiresCookieAndSessionStoreWithoutFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
 	request.Header.Set("X-User-Id", "fallback-user")
 	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "bearer-user"))
@@ -3683,7 +4328,7 @@ func TestRotateCurrentSessionRequiresCookieAndSessionStoreWithoutFallback(t *tes
 		t.Fatalf("rotation issued cookie without a browser session cookie: %#v", response.Result().Cookies())
 	}
 
-	noStoreServer := NewServer(Config{SessionAuthSecret: "test-secret"})
+	noStoreServer := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 	noStoreToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	noStoreRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
 	noStoreRequest.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, noStoreServer, noStoreToken))
@@ -3708,7 +4353,7 @@ func TestRotateCurrentSessionFailsClosedWhenStoreFailsBeforeReplacingCookie(t *t
 			Message: "rotate leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/rotation", nil)
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
@@ -3743,7 +4388,7 @@ func TestRotateCurrentSessionFailsClosedWhenStoreFailsBeforeReplacingCookie(t *t
 
 func TestMalformedRotateCurrentSessionPathsStay404WithoutSideEffects(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	for _, path := range []string{
 		"/v1/auth//session/rotation",
 		"/v1/auth/session/rotation/extra",
@@ -3771,7 +4416,7 @@ func TestMalformedRotateCurrentSessionPathsStay404WithoutSideEffects(t *testing.
 func TestRotateCurrentSessionToJWTReplacesPersistedCookieBeforeIssuingJWTCookie(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	oldToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	csrfToken := sessionCSRFTokenForTest(t, server, oldToken)
 	sessionStore.validateCalled = false
@@ -3831,7 +4476,7 @@ func TestRotateCurrentSessionToJWTReplacesPersistedCookieBeforeIssuingJWTCookie(
 
 func TestRotateCurrentSessionToJWTRequiresCSRFBeforeStore(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
 	response := httptest.NewRecorder()
@@ -3852,7 +4497,7 @@ func TestRotateCurrentSessionToJWTRequiresCSRFBeforeStore(t *testing.T) {
 func TestRotateCurrentSessionToJWTRequiresCookieAndSessionStoreWithoutFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
 	request.Header.Set("X-User-Id", "fallback-user")
 	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "bearer-user"))
@@ -3870,7 +4515,7 @@ func TestRotateCurrentSessionToJWTRequiresCookieAndSessionStoreWithoutFallback(t
 		t.Fatalf("jwt rotation issued cookie without a browser session cookie: %#v", response.Result().Cookies())
 	}
 
-	noStoreServer := NewServer(Config{SessionAuthSecret: "test-secret"})
+	noStoreServer := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 	noStoreToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	noStoreRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
 	noStoreRequest.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, noStoreServer, noStoreToken))
@@ -3894,7 +4539,7 @@ func TestRotateCurrentSessionToJWTFailsClosedWhenStoreFailsBeforeReplacingCookie
 			Message: "jwt rotate leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-rotation", nil)
 	token := signedSessionTokenForTest(t, "test-secret", "user-session")
 	request.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, server, token))
@@ -3929,7 +4574,7 @@ func TestRotateCurrentSessionToJWTFailsClosedWhenStoreFailsBeforeReplacingCookie
 
 func TestMalformedRotateCurrentSessionToJWTPathsStay404WithoutSideEffects(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	for _, path := range []string{
 		"/v1/auth//session/jwt-rotation",
 		"/v1/auth/session/jwt-rotation/extra",
@@ -3957,7 +4602,7 @@ func TestMalformedRotateCurrentSessionToJWTPathsStay404WithoutSideEffects(t *tes
 func TestCurrentSessionAccessTokenCreatesPersistedBearerJWTAfterCookieCSRF(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	oldToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	csrfToken := sessionCSRFTokenForTest(t, server, oldToken)
 	sessionStore.validateCalled = false
@@ -4025,7 +4670,7 @@ func TestCurrentSessionAccessTokenCreatesPersistedBearerJWTAfterCookieCSRF(t *te
 
 func TestCurrentSessionAccessTokenRequiresCSRFBeforeValidateOrCreate(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/access-token", nil)
 	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "user-session")})
 	response := httptest.NewRecorder()
@@ -4046,7 +4691,7 @@ func TestCurrentSessionAccessTokenRequiresCSRFBeforeValidateOrCreate(t *testing.
 func TestCurrentSessionAccessTokenRequiresCookieStoreAndSecretWithoutFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/access-token", nil)
 	request.Header.Set("X-User-Id", "fallback-user")
 	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "bearer-user"))
@@ -4064,7 +4709,7 @@ func TestCurrentSessionAccessTokenRequiresCookieStoreAndSecretWithoutFallback(t 
 		t.Fatalf("missing cookie returned token or cookie: body=%s cookies=%#v", response.Body.String(), response.Result().Cookies())
 	}
 
-	noStoreServer := NewServer(Config{SessionAuthSecret: "test-secret"})
+	noStoreServer := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 	noStoreToken := signedSessionTokenForTest(t, "test-secret", "user-session")
 	noStoreRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/access-token", nil)
 	noStoreRequest.Header.Set("X-CSRF-Token", sessionCSRFTokenForTest(t, noStoreServer, noStoreToken))
@@ -4081,7 +4726,7 @@ func TestCurrentSessionAccessTokenRequiresCookieStoreAndSecretWithoutFallback(t 
 	}
 
 	noSecretStore := &recordingAuthSessionStore{}
-	noSecretServer := NewServer(Config{AuthSessionStore: noSecretStore})
+	noSecretServer := newDevelopmentServer(Config{AuthSessionStore: noSecretStore})
 	noSecretRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/session/access-token", nil)
 	noSecretRequest.Header.Set("X-CSRF-Token", "deadbeef")
 	noSecretRequest.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "v1:user-session:deadbeef"})
@@ -4131,7 +4776,7 @@ func TestCurrentSessionAccessTokenSanitizesStoreValidationAndCreateFailures(t *t
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{AuthSessionStore: tt.store, SessionAuthSecret: "test-secret"})
+			server := newDevelopmentServer(Config{AuthSessionStore: tt.store, SessionAuthSecret: "test-secret"})
 			token := signedSessionTokenForTest(t, "test-secret", "user-session")
 			request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/access-token", nil)
 			request.Header.Set("X-CSRF-Token", server.sessionCSRFToken(hashSessionToken(token)))
@@ -4163,7 +4808,7 @@ func TestCurrentSessionAccessTokenSanitizesStoreValidationAndCreateFailures(t *t
 func TestMalformedCurrentSessionAccessTokenPathsStay404WithoutSideEffects(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	for _, path := range []string{
 		"/v1/auth//session/access-token",
 		"/v1/auth/session/access-token/extra",
@@ -4193,7 +4838,7 @@ func TestMalformedCurrentSessionAccessTokenPathsStay404WithoutSideEffects(t *tes
 func TestJWTBearerRefreshAtomicallyRotatesPersistedJWT(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	oldToken, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC().Add(-1*time.Minute))
 	if !ok {
 		t.Fatal("expected old jwt to sign")
@@ -4263,7 +4908,7 @@ func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFall
 	t.Run("rejects_cookie_and_development_without_bearer", func(t *testing.T) {
 		reader := &recordingAuthReader{}
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
 		request.Header.Set("X-User-Id", "fallback-user")
 		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-user")})
@@ -4284,7 +4929,7 @@ func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFall
 
 	t.Run("rejects_duplicate_authorization_headers_before_store", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		first, ok := server.signJWTSessionToken("user-session", "sid-one", time.Now().UTC())
 		if !ok {
 			t.Fatal("expected first jwt to sign")
@@ -4310,7 +4955,7 @@ func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFall
 
 	t.Run("rejects_legacy_bearer_before_store", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
 		request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "legacy-user"))
 		response := httptest.NewRecorder()
@@ -4327,7 +4972,7 @@ func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFall
 
 	t.Run("rejects_legacy_v2_bearer_before_store", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 		legacyV2, ok := server.signSessionToken("legacy-user")
 		if !ok {
 			t.Fatal("expected legacy v2 token to sign")
@@ -4347,7 +4992,7 @@ func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFall
 	})
 
 	t.Run("missing_store_fails_before_rotate", func(t *testing.T) {
-		server := NewServer(Config{SessionAuthSecret: "test-secret"})
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
 		token, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC())
 		if !ok {
 			t.Fatal("expected jwt to sign")
@@ -4368,7 +5013,7 @@ func TestJWTBearerRefreshRequiresSingleCompactBearerJWTStoreAndSecretWithoutFall
 
 	t.Run("missing_secret_fails_before_store", func(t *testing.T) {
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{AuthSessionStore: sessionStore})
+		server := newDevelopmentServer(Config{AuthSessionStore: sessionStore})
 		request := httptest.NewRequest(http.MethodPost, "/v1/auth/session/jwt-refresh", nil)
 		request.Header.Set("Authorization", "Bearer header.claims.signature")
 		response := httptest.NewRecorder()
@@ -4391,7 +5036,7 @@ func TestJWTBearerRefreshSanitizesRotateFailure(t *testing.T) {
 			Message: "rotate leaked jwt claim api_key=sk-hidden credential_ref=secret prompt=hidden draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	token, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC())
 	if !ok {
 		t.Fatal("expected jwt to sign")
@@ -4423,7 +5068,7 @@ func TestJWTBearerRefreshSanitizesRotateFailure(t *testing.T) {
 func TestMalformedJWTBearerRefreshPathsStay404WithoutSideEffects(t *testing.T) {
 	reader := &recordingAuthReader{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	token, ok := server.signJWTSessionToken("user-session", "old-session-id", time.Now().UTC())
 	if !ok {
 		t.Fatal("expected jwt to sign")
@@ -4456,7 +5101,7 @@ func TestMalformedJWTBearerRefreshPathsStay404WithoutSideEffects(t *testing.T) {
 
 func TestMalformedRevokeCurrentSessionPathsStay404WithoutSideEffects(t *testing.T) {
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	for _, path := range []string{
 		"/v1/auth//session",
 		"/v1/auth/session/extra",
@@ -4484,7 +5129,7 @@ func TestMalformedRevokeCurrentSessionPathsStay404WithoutSideEffects(t *testing.
 func TestAdminTenantSessionRevocationRequiresTenantAdminBeforeStore(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        authorizer,
 		AuthSessionStore:  sessionStore,
 		SessionAuthSecret: "test-secret",
@@ -4521,7 +5166,7 @@ func TestAdminTenantSessionRevocationFailsClosedBeforeStoreAndSanitizesErrors(t 
 			Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		}}
 		sessionStore := &recordingAuthSessionStore{}
-		server := NewServer(Config{
+		server := newDevelopmentServer(Config{
 			Authorizer:        authorizer,
 			AuthSessionStore:  sessionStore,
 			SessionAuthSecret: "test-secret",
@@ -4547,7 +5192,7 @@ func TestAdminTenantSessionRevocationFailsClosedBeforeStoreAndSanitizesErrors(t 
 
 	t.Run("missing_store_after_authorization", func(t *testing.T) {
 		authorizer := &recordingAuthorizer{}
-		server := NewServer(Config{
+		server := newDevelopmentServer(Config{
 			Authorizer:        authorizer,
 			SessionAuthSecret: "test-secret",
 		})
@@ -4572,7 +5217,7 @@ func TestAdminTenantSessionRevocationFailsClosedBeforeStoreAndSanitizesErrors(t 
 				Message: "tenant sessions leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 			},
 		}
-		server := NewServer(Config{
+		server := newDevelopmentServer(Config{
 			Authorizer:        authorizer,
 			AuthSessionStore:  sessionStore,
 			SessionAuthSecret: "test-secret",
@@ -4600,7 +5245,7 @@ func TestAdminTenantSessionRevocationFailsClosedBeforeStoreAndSanitizesErrors(t 
 func TestMalformedTenantSessionRevocationPathsStay404WithoutActorOrStoreSideEffects(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        authorizer,
 		AuthSessionStore:  sessionStore,
 		SessionAuthSecret: "test-secret",
@@ -4629,7 +5274,7 @@ func TestMalformedTenantSessionRevocationPathsStay404WithoutActorOrStoreSideEffe
 
 func TestCreateDevSessionFailsClosedWithoutSessionSecretBeforeReader(t *testing.T) {
 	reader := &recordingAuthReader{}
-	server := NewServer(Config{AuthReader: reader})
+	server := newDevelopmentServer(Config{AuthReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"user-session"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-Id", "req_dev_session_no_secret")
@@ -4664,7 +5309,7 @@ func TestCreateDevSessionVerifiesUserAndSanitizesReaderErrors(t *testing.T) {
 			Message: "user missing prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/dev-sessions", strings.NewReader(`{"user_id":"missing-user"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-Id", "req_dev_session_missing_user")
@@ -4703,7 +5348,7 @@ func TestCreateDevSessionMalformedPathsStayNotFoundWithoutReader(t *testing.T) {
 	} {
 		t.Run(path, func(t *testing.T) {
 			reader := &recordingAuthReader{}
-			server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+			server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"user_id":"user-session"}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer v1:bad-user:deadbeef")
@@ -4741,7 +5386,7 @@ func TestAuthSubjectGetAssetRejectsInvalidBearerBeforeFallbackAuthorizerAndReade
 			Payload:   map[string]any{"secret": "asset payload"},
 		},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        authorizer,
 		AssetReader:       reader,
 		SessionAuthSecret: "test-secret",
@@ -4780,7 +5425,7 @@ func TestAuthSubjectReservedAssetGetPathsPreserveNotFoundWithInvalidBearer(t *te
 		t.Run(path, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{}
 			reader := &recordingAssetReader{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:        authorizer,
 				AssetReader:       reader,
 				SessionAuthSecret: "test-secret",
@@ -4818,7 +5463,7 @@ func TestAuthSubjectCurrentUserUsesSignedSessionCookieWithoutHeader(t *testing.T
 			User: auth.UserSummary{UserID: "user-cookie"},
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.AddCookie(&http.Cookie{
 		Name:  "mirofish_session",
@@ -4845,7 +5490,7 @@ func TestAuthSubjectRejectsRevokedPersistedSessionBeforeReaderAndFallback(t *tes
 			Message: "revoked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, AuthSessionStore: sessionStore, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header.Set("X-User-Id", "fallback-user")
 	request.AddCookie(&http.Cookie{
@@ -4881,7 +5526,7 @@ func TestAuthSubjectCurrentUserBearerOverridesHeaderAndCookie(t *testing.T) {
 			User: auth.UserSummary{UserID: "user-bearer"},
 		},
 	}
-	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header.Set("Authorization", "Bearer "+signedSessionTokenForTest(t, "test-secret", "user-bearer"))
 	request.Header.Set("X-User-Id", "header-user")
@@ -4903,7 +5548,7 @@ func TestAuthSubjectCurrentUserBearerOverridesHeaderAndCookie(t *testing.T) {
 
 func TestAuthSubjectRejectsDuplicateAuthorizationHeadersBeforeReader(t *testing.T) {
 	reader := &recordingAuthReader{}
-	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header["Authorization"] = []string{
 		"Bearer " + signedSessionTokenForTest(t, "test-secret", "user-valid"),
@@ -4924,7 +5569,7 @@ func TestAuthSubjectRejectsDuplicateAuthorizationHeadersBeforeReader(t *testing.
 
 func TestAuthSubjectRejectsOddAuthorizationHeadersInsteadOfFallback(t *testing.T) {
 	reader := &recordingAuthReader{}
-	server := NewServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: "test-secret"})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header["Authorization"] = []string{
 		"  ",
@@ -4969,7 +5614,7 @@ func TestAuthSubjectRejectsMalformedCredentialsBeforeReaderWithoutLeakingPayload
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := &recordingAuthReader{}
-			server := NewServer(Config{AuthReader: reader, SessionAuthSecret: tt.secret})
+			server := newDevelopmentServer(Config{AuthReader: reader, SessionAuthSecret: tt.secret})
 			request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 			request.Header.Set("X-User-Id", "fallback-user")
 			if tt.setHeader {
@@ -5007,7 +5652,7 @@ func TestAuthSubjectRejectsMalformedCredentialsBeforeReaderWithoutLeakingPayload
 func TestAuthSubjectStartSeedRunRejectsInvalidBearerBeforeFallbackAndSideEffects(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		SeedStarter:       starter,
 		SourceFileStore:   sourceStore,
 		SessionAuthSecret: "test-secret",
@@ -5048,7 +5693,7 @@ func TestGetCurrentUserSanitizesReaderErrorsAtHTTPBoundary(t *testing.T) {
 			Message: "prompt body api_key encrypted_credential credential_ref object_key draft manuscript must not leak",
 		},
 	}
-	server := NewServer(Config{AuthReader: reader})
+	server := newDevelopmentServer(Config{AuthReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
 	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req_me_error")
@@ -5095,7 +5740,7 @@ func TestRBACDefaultAuthorizerDeniesProjectOverviewBeforeReader(t *testing.T) {
 	overviewReader := &recordingProjectOverviewReader{
 		overview: projectoverview.Overview{ProjectID: "project-123", Status: "active"},
 	}
-	server := NewServer(Config{AuthReader: authReader, ProjectOverviewReader: overviewReader})
+	server := newDevelopmentServer(Config{AuthReader: authReader, ProjectOverviewReader: overviewReader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/overview", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -5133,7 +5778,7 @@ func TestRBACAuthorizerDeniesWriterRunBeforeLLMResolverAndStarter(t *testing.T) 
 	}
 	resolver := &recordingLLMResolver{result: writerComposerResolution()}
 	starter := &recordingStarter{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: starter, LLMResolver: resolver})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: starter, LLMResolver: resolver})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5178,7 +5823,7 @@ func TestRBACAuthorizerDeniesWriterRunBeforeLLMResolverAndStarter(t *testing.T) 
 func TestRBACRequiresUserContextBeforeWriterRunSideEffects(t *testing.T) {
 	resolver := &recordingLLMResolver{result: writerComposerResolution()}
 	starter := &recordingStarter{}
-	server := NewServer(Config{WriterStarter: starter, LLMResolver: resolver})
+	server := newDevelopmentServer(Config{WriterStarter: starter, LLMResolver: resolver})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5219,7 +5864,7 @@ func TestRBACDefaultAuthorizerDeniesWriterRunWithoutMatchingProjectBeforeSideEff
 	}
 	resolver := &recordingLLMResolver{result: writerComposerResolution()}
 	starter := &recordingStarter{}
-	server := NewServer(Config{AuthReader: authReader, WriterStarter: starter, LLMResolver: resolver})
+	server := newDevelopmentServer(Config{AuthReader: authReader, WriterStarter: starter, LLMResolver: resolver})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -5251,7 +5896,7 @@ func TestRBACDefaultAuthorizerDeniesWriterRunWithoutMatchingProjectBeforeSideEff
 
 func TestStartWriterRunCarriesTenantProjectAndRunContext(t *testing.T) {
 	starter := &recordingStarter{}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	requestBody := bytes.NewBufferString(`{"mode":"draft","instruction":"写下一场谈判","options":{"asset_ids":["asset-1"]}}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", requestBody)
 	request.Header.Set("Content-Type", "application/json")
@@ -5303,7 +5948,7 @@ func TestStartWriterRunCarriesTenantProjectAndRunContext(t *testing.T) {
 func TestAuthSubjectWriterRunUsesSignedCookieForRBACAndStarter(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	starter := &recordingStarter{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        authorizer,
 		WriterStarter:     starter,
 		LLMResolver:       boundWriterComposerResolver(),
@@ -5335,7 +5980,7 @@ func TestAuthSubjectWriterRunUsesSignedCookieForRBACAndStarter(t *testing.T) {
 
 func TestStartWriterRunSanitizesUntrustedOptionsBeforeStarter(t *testing.T) {
 	starter := &recordingStarter{}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	requestBody := bytes.NewBufferString(`{
 		"mode":"draft",
 		"instruction":"写下一场谈判",
@@ -5402,7 +6047,7 @@ func TestStartWriterRunSanitizesUntrustedOptionsBeforeStarter(t *testing.T) {
 
 func TestStartWriterRunValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.T) {
 	starter := &recordingStarter{}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", strings.NewReader(`{
 		"mode":"draft",
 		"instruction":"写下一场谈判",
@@ -5458,9 +6103,13 @@ func TestStartDraftReviewResolvesReviewerBindingAndAdmitsMetadataOnlyWorkflow(t 
 			Settings:      map[string]any{"temperature": 0.2},
 		},
 	}
-	server := NewServer(Config{
-		DraftReviewStore: store,
-		LLMResolver:      resolver,
+	ownerLookup := &recordingDraftReviewOwnerLookup{projectID: "project-123"}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{
+		DraftReviewStore:       store,
+		DraftReviewOwnerLookup: ownerLookup,
+		Authorizer:             authorizer,
+		LLMResolver:            resolver,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{
 		"tenant_id":"evil-tenant",
@@ -5490,6 +6139,12 @@ func TestStartDraftReviewResolvesReviewerBindingAndAdmitsMetadataOnlyWorkflow(t 
 		resolver.input.ProjectID != "project-123" ||
 		resolver.input.ModuleKey != "writer_reviewer" {
 		t.Fatalf("reviewer binding was not resolved with tenant/project scope: %#v", resolver.input)
+	}
+	if !ownerLookup.called || ownerLookup.input.TenantID != "tenant-123" || ownerLookup.input.DraftID != "draft-123" || ownerLookup.input.ActorUserID != "user-123" {
+		t.Fatalf("draft owner lookup lost trusted context: %#v", ownerLookup.input)
+	}
+	if authorizer.input.ProjectID != "project-123" || authorizer.input.Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("draft review was not authorized against the owner project: %#v", authorizer.input)
 	}
 	if store.startInput.TenantID != "tenant-123" ||
 		store.startInput.DraftID != "draft-123" ||
@@ -5526,12 +6181,15 @@ func TestStartDraftReviewResolvesReviewerBindingAndAdmitsMetadataOnlyWorkflow(t 
 
 func TestStartDraftReviewRequiresReviewerBindingBeforeAdmission(t *testing.T) {
 	store := &recordingDraftReviewStore{}
-	server := NewServer(Config{
-		DraftReviewStore: store,
-		LLMResolver:      llm.NewStaticResolver(nil),
+	server := newDevelopmentServer(Config{
+		DraftReviewStore:       store,
+		DraftReviewOwnerLookup: &recordingDraftReviewOwnerLookup{projectID: "project-123"},
+		Authorizer:             &recordingAuthorizer{},
+		LLMResolver:            llm.NewStaticResolver(nil),
 	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{"project_id":"project-123","note":"review"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5547,27 +6205,31 @@ func TestStartDraftReviewRequiresReviewerBindingBeforeAdmission(t *testing.T) {
 	}
 }
 
-func TestStartDraftReviewRequiresProjectScopeBeforeReviewerBindingResolution(t *testing.T) {
+func TestStartDraftReviewRejectsBodyProjectMismatchBeforeReviewerBindingResolution(t *testing.T) {
 	store := &recordingDraftReviewStore{}
 	resolver := &recordingLLMResolver{}
-	server := NewServer(Config{
-		DraftReviewStore: store,
-		LLMResolver:      resolver,
+	ownerLookup := &recordingDraftReviewOwnerLookup{projectID: "owner-project"}
+	server := newDevelopmentServer(Config{
+		DraftReviewStore:       store,
+		DraftReviewOwnerLookup: ownerLookup,
+		Authorizer:             &recordingAuthorizer{},
+		LLMResolver:            resolver,
 	})
-	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{"note":"review"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{"project_id":"body-project","note":"review"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
 
 	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected missing project scope to fail validation, got %d: %s", response.Code, response.Body.String())
+		t.Fatalf("expected mismatched project scope to fail validation, got %d: %s", response.Code, response.Body.String())
 	}
 	if resolver.called {
 		t.Fatalf("reviewer binding should not resolve before project scope is known: %#v", resolver.input)
 	}
 	if store.called {
-		t.Fatalf("review admission must not start without project scope: %#v", store.startInput)
+		t.Fatalf("review admission must not trust a mismatched body project: %#v", store.startInput)
 	}
 	body := response.Body.String()
 	if !strings.Contains(body, `"code":"VALIDATION_FAILED"`) {
@@ -5602,9 +6264,12 @@ func TestListDraftReviewsReturnsSanitizedMetadataOnly(t *testing.T) {
 			}},
 		},
 	}
-	server := NewServer(Config{DraftReviewStore: store})
+	ownerLookup := &recordingDraftReviewOwnerLookup{projectID: "project-123"}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{DraftReviewStore: store, DraftReviewOwnerLookup: ownerLookup, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodGet, "/v1/drafts/draft-123/reviews", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5614,6 +6279,9 @@ func TestListDraftReviewsReturnsSanitizedMetadataOnly(t *testing.T) {
 	}
 	if store.listInput.TenantID != "tenant-123" || store.listInput.DraftID != "draft-123" {
 		t.Fatalf("review list lost tenant/draft scope: %#v", store.listInput)
+	}
+	if ownerLookup.input.DraftID != "draft-123" || authorizer.input.ProjectID != "project-123" || authorizer.input.Permission != auth.PermissionProjectRead {
+		t.Fatalf("review list did not authorize the owner project: lookup=%#v auth=%#v", ownerLookup.input, authorizer.input)
 	}
 	body := response.Body.String()
 	for _, expected := range []string{`"draft_id":"draft-123"`, `"review_id":"review-123"`, `"issue_id":"issue-1"`, `"summary":"public summary"`, `"suggestion":"public suggestion"`} {
@@ -5650,9 +6318,14 @@ func TestListDraftReviewsSanitizesStoreReturnedIssueTextAtHTTPBoundary(t *testin
 			}},
 		},
 	}
-	server := NewServer(Config{DraftReviewStore: store})
+	server := newDevelopmentServer(Config{
+		DraftReviewStore:       store,
+		DraftReviewOwnerLookup: &recordingDraftReviewOwnerLookup{projectID: "project-123"},
+		Authorizer:             &recordingAuthorizer{},
+	})
 	request := httptest.NewRequest(http.MethodGet, "/v1/drafts/draft-123/reviews", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -5673,10 +6346,76 @@ func TestListDraftReviewsSanitizesStoreReturnedIssueTextAtHTTPBoundary(t *testin
 	}
 }
 
+func TestUpdateDraftReviewIssueUsesOwnerProjectAndOptimisticVersion(t *testing.T) {
+	ownerLookup := &recordingDraftReviewOwnerLookup{projectID: "project-123"}
+	authorizer := &recordingAuthorizer{}
+	store := &recordingDraftReviewIssueStore{result: workflows.DraftReviewIssueMutation{
+		IssueID: "issue-123", ReviewID: "review-123", ProjectID: "project-123",
+		Status: "accepted", Version: "2026-07-10 23:30:00+00",
+	}}
+	server := newDevelopmentServer(Config{
+		DraftReviewOwnerLookup: ownerLookup,
+		DraftReviewIssueStore:  store,
+		Authorizer:             authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPatch, "/v1/draft-review-issues/issue-123", strings.NewReader(`{"status":"accepted","version":"2026-07-10 23:20:00+00"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-issue-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if ownerLookup.input.IssueID != "issue-123" || ownerLookup.input.ActorUserID != "user-123" {
+		t.Fatalf("issue owner lookup lost trusted context: %#v", ownerLookup.input)
+	}
+	if authorizer.input.ProjectID != "project-123" || authorizer.input.Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("issue mutation was not creative-write authorized: %#v", authorizer.input)
+	}
+	if store.input.TenantID != "tenant-123" || store.input.ProjectID != "project-123" || store.input.IssueID != "issue-123" || store.input.ActorUserID != "user-123" || store.input.RequestID != "req-issue-123" || store.input.Status != "accepted" || store.input.Version != "2026-07-10 23:20:00+00" {
+		t.Fatalf("issue mutation lost trusted scope or optimistic version: %#v", store.input)
+	}
+}
+
+func TestDraftReviewAuthorizationHappensBeforeBodyDecodeOrSideEffects(t *testing.T) {
+	ownerLookup := &recordingDraftReviewOwnerLookup{projectID: "project-123"}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied private prompt api_key=secret"}}
+	resolver := &recordingLLMResolver{}
+	store := &recordingDraftReviewStore{}
+	server := newDevelopmentServer(Config{
+		DraftReviewStore:       store,
+		DraftReviewOwnerLookup: ownerLookup,
+		Authorizer:             authorizer,
+		LLMResolver:            resolver,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/reviews", strings.NewReader(`{"prompt":"private malformed body"`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected authorization failure before decode, got %d: %s", response.Code, response.Body.String())
+	}
+	if resolver.called || store.called {
+		t.Fatalf("authorization failure reached review side effects: resolver=%#v store=%#v", resolver.input, store.startInput)
+	}
+	for _, forbidden := range []string{"private malformed body", "api_key", "secret", "prompt"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("authorization error leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
 func TestCreateUploadCarriesTenantProjectActorAndReturnsSanitizedSourceFile(t *testing.T) {
 	store := &recordingSourceFileStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
 	requestBody := bytes.NewBufferString(`{"tenant_id":"evil-tenant","filename":"novel.md","mime_type":"text/markdown","size_bytes":2048,"sha256":"abc123","purpose":"seed"}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", requestBody)
 	request.Header.Set("Content-Type", "application/json")
@@ -5718,7 +6457,7 @@ func TestCreateUploadRequiresCreativeWriteBeforeDecodeAndStore(t *testing.T) {
 		Code:    auth.CodeAccessDenied,
 		Message: "denied prompt api_key credential_ref draft manuscript",
 	}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
 		"filename":"novel.md",
 		"mime_type":"text/markdown",
@@ -5749,7 +6488,7 @@ func TestCreateUploadRequiresCreativeWriteBeforeDecodeAndStore(t *testing.T) {
 
 func TestCreateUploadValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
 		"filename":"novel.md",
 		"mime_type":"text/markdown",
@@ -5783,7 +6522,7 @@ func TestCreateUploadValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.
 
 func TestCreateUploadRejectsUnsupportedSourceMimeBeforeStore(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", strings.NewReader(`{
 		"filename":"notes.json",
 		"mime_type":"application/json",
@@ -5842,7 +6581,7 @@ func TestCreateUploadRequiresCredentialAndCookieCSRFBeforeDecodeOrStore(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			store := &recordingSourceFileStore{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:     &recordingStarter{},
 				SourceFileStore:   store,
 				Authorizer:        authorizer,
@@ -5890,7 +6629,7 @@ func TestCreateUploadAuthorizesPathProjectBeforeDecodeOrStore(t *testing.T) {
 	authorizer := &recordingAuthorizer{
 		err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret actor=user-123"},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:   &recordingStarter{},
 		SourceFileStore: store,
 		Authorizer:      authorizer,
@@ -5929,7 +6668,7 @@ func TestUploadSourceObjectUsesTenantUploadScopeAndDoesNotExposeObjectMetadata(t
 	store := &recordingSourceFileStore{}
 	writer := &recordingSourceFileObjectWriter{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
@@ -5980,7 +6719,7 @@ func TestUploadSourceObjectAuthorizesOwnerProjectBeforeObjectSideEffects(t *test
 	authorizer := &recordingAuthorizer{
 		err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret object_key=private actor=user-123"},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
@@ -6066,7 +6805,7 @@ func TestUploadObjectAndCompleteAuthorizeOwnerProjectBeforeSideEffects(t *testin
 				Code:    auth.CodeAccessDenied,
 				Message: "denied prompt api_key credential_ref draft manuscript",
 			}}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:          &recordingStarter{},
 				SourceFileStore:        store,
 				SourceFileObjectWriter: writer,
@@ -6153,7 +6892,7 @@ func TestUploadObjectAndCompleteRequireCredentialAndCookieCSRFBeforeStoreOrWrite
 			store := &recordingSourceFileStore{}
 			writer := &recordingSourceFileObjectWriter{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:          &recordingStarter{},
 				SourceFileStore:        store,
 				SourceFileObjectWriter: writer,
@@ -6194,7 +6933,7 @@ func TestUploadObjectAndCompleteRequireCredentialAndCookieCSRFBeforeStoreOrWrite
 
 func TestUploadSourceObjectFailsClosedWithoutObjectWriter(t *testing.T) {
 	store := &recordingSourceFileStore{}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodPut, "/v1/uploads/upload-123/object", strings.NewReader("hello"))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6222,7 +6961,7 @@ func TestUploadSourceObjectSanitizesWriterErrorsAtHTTPBoundary(t *testing.T) {
 	writer := &recordingSourceFileObjectWriter{
 		err: sourcefiles.NewAppError("SOURCE_FILE_STORAGE_WRITE_FAILED", "put failed prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/project-123/source-files/upload-123/book.txt"),
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
@@ -6256,7 +6995,7 @@ func TestUploadSourceObjectRejectsNonWritableUploadStatusAtHTTPBoundary(t *testi
 		err: sourcefiles.NewAppError("SOURCE_FILE_UPLOAD_NOT_WRITABLE", "cannot write object after completion prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/project-123/source-files/upload-123/book.txt"),
 	}
 	writer := &recordingSourceFileObjectWriter{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:          &recordingStarter{},
 		SourceFileStore:        store,
 		SourceFileObjectWriter: writer,
@@ -6294,7 +7033,7 @@ func TestUploadSourceObjectRejectsNonWritableUploadStatusAtHTTPBoundary(t *testi
 func TestCompleteUploadUsesTenantUploadScopeAndReturnsSanitizedSourceFile(t *testing.T) {
 	store := &recordingSourceFileStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/uploads/upload-123/complete", bytes.NewBufferString(`{"tenant_id":"evil-tenant","object_key":"must-not-be-used"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -6333,7 +7072,7 @@ func TestCompleteUploadAuthorizesOwnerProjectBeforeCompleteSideEffects(t *testin
 	authorizer := &recordingAuthorizer{
 		err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden credential_ref=secret object_key=private actor=user-123"},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:   &recordingStarter{},
 		SourceFileStore: store,
 		Authorizer:      authorizer,
@@ -6371,7 +7110,7 @@ func TestCompleteUploadAuthorizesOwnerProjectBeforeCompleteSideEffects(t *testin
 }
 
 func TestCompleteUploadFailsClosedWithoutSourceFileBackend(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/uploads/upload-123/complete", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6415,7 +7154,7 @@ func TestUploadIDRoutesRejectInvalidActorCredentialBeforeFallbackOrSideEffects(t
 			if test.writer {
 				config.SourceFileObjectWriter = writer
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 			request.Header.Set("Authorization", "Token broken")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -6466,7 +7205,7 @@ func TestUploadIDRoutesRequireCookieCSRFBeforeActorFallbackOrSideEffects(t *test
 			if test.writer {
 				config.SourceFileObjectWriter = writer
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: signedSessionTokenForTest(t, "test-secret", "cookie-actor")})
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -6495,7 +7234,7 @@ func TestMalformedUploadIDPathsStay404WithoutActorOrSideEffects(t *testing.T) {
 	writer := &recordingSourceFileObjectWriter{}
 	authorizer := &recordingAuthorizer{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		SessionAuthSecret:      "test-secret",
 		AuthSessionStore:       sessionStore,
 		WriterStarter:          &recordingStarter{},
@@ -6544,7 +7283,7 @@ func TestMalformedUploadIDPathsStay404WithoutActorOrSideEffects(t *testing.T) {
 
 func TestCompleteUploadReturnsConflictWhenObjectIsMissing(t *testing.T) {
 	store := &recordingSourceFileStore{err: sourcefiles.NewAppError("SOURCE_FILE_OBJECT_NOT_FOUND", "source file object was not found in object storage")}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/uploads/upload-123/complete", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6565,7 +7304,7 @@ func TestCompleteUploadReturnsConflictWhenObjectIsMissing(t *testing.T) {
 
 func TestCompleteUploadReturnsConflictForNonCompletableUploadStatus(t *testing.T) {
 	store := &recordingSourceFileStore{err: sourcefiles.NewAppError("SOURCE_FILE_UPLOAD_NOT_COMPLETABLE", "cannot complete parsed prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/project-123/source-files/upload-123/book.txt")}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/uploads/upload-123/complete", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-Request-Id", "req-upload-complete-status")
@@ -6636,7 +7375,7 @@ func TestSourceFileRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T) 
 			if test.method == http.MethodGet && strings.HasSuffix(test.path, "/source-files") {
 				config = projectReadAllowedConfig(config)
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -6668,7 +7407,7 @@ func TestSourceFileRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T) 
 }
 
 func TestCreateUploadFailsClosedWithoutSourceFileBackend(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/uploads", bytes.NewBufferString(`{"filename":"novel.md","mime_type":"text/markdown","size_bytes":2048,"sha256":"abc123","purpose":"seed"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -6704,7 +7443,7 @@ func TestListSourceFilesUsesTenantProjectScopeAndSanitizedRows(t *testing.T) {
 			CreatedAt:   "2026-07-04T10:00:00Z",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, SourceFileStore: store}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/source-files", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6750,7 +7489,7 @@ func TestListAssetsUsesTenantProjectScopeAndSanitizedRows(t *testing.T) {
 			UpdatedAt:  "2026-07-04T00:00:00Z",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/assets", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6789,7 +7528,7 @@ func TestListWorldlineSavedPathsUsesTenantProjectScopeAndSanitizedRows(t *testin
 			UpdatedAt:         "2026-07-05T00:01:00Z",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlineSavedPathReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlineSavedPathReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/worldline/saved-paths", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -6832,7 +7571,7 @@ func TestCreateWorldlineSavedPathCarriesTenantSessionActorContextAndSanitizesPay
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineSavedPathStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineSavedPathStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/saved-paths", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"title":"雨夜谈判路线",
@@ -6886,7 +7625,7 @@ func TestCreateWorldlineSavedPathFailsClosedWithoutConfiguredStore(t *testing.T)
 	reader := &recordingWorldlineSessionReader{
 		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/saved-paths", strings.NewReader(`{
 		"title":"雨夜谈判路线",
 		"selected_event_ids":["event-1"]
@@ -6999,7 +7738,7 @@ func TestWorldlineValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 					event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-123"},
 				}
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -7095,7 +7834,7 @@ func TestCreativeWriteRBACDeniesProjectMutationsBeforeDecodeAndSideEffects(t *te
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			config, assertNoSideEffect := tt.buildConfig(authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{
 				"goal":"private draft",
 				"api_key":"sk-hidden",
@@ -7208,7 +7947,7 @@ func TestWorldlineSessionOwnerCreativeWriteDeniesBeforeDecodeAndSideEffects(t *t
 			}
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			config, assertNoSideEffect := tt.buildConfig(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{
 				"mode":,
 				"api_key":"sk-hidden",
@@ -7304,7 +8043,7 @@ func TestWorldlineSessionOwnerLookupErrorDoesNotAuthorizeOrMutateAndSanitizesMes
 			reader := &recordingWorldlineSessionReader{err: lookupErr}
 			authorizer := &recordingAuthorizer{}
 			config, assertNoSideEffect := tt.buildConfig(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -7390,7 +8129,7 @@ func TestWorldlineSessionOwnerBlankProjectFailsClosedBeforeAuthDecodeAndSideEffe
 			}
 			authorizer := &recordingAuthorizer{}
 			config, assertNoSideEffect := tt.buildConfig(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{
 				"mode":,
 				"api_key":"sk-hidden",
@@ -7466,7 +8205,7 @@ func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionStarter: starter})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldline-sessions", strings.NewReader(`{
 		"goal":"test a council betrayal",
 		"anchor_path_id":"path-1",
@@ -7507,7 +8246,7 @@ func TestStartWorldlineSessionCarriesTenantProjectActorContext(t *testing.T) {
 
 func TestAuthSubjectStartWorldlineSessionRejectsInvalidCookieBeforeFallbackAndStarter(t *testing.T) {
 	starter := &recordingWorldlineSessionStarter{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WorldlineSessionStarter: starter,
 		SessionAuthSecret:       "test-secret",
 	})
@@ -7541,7 +8280,7 @@ func TestAuthSubjectStartWorldlineSessionRejectsInvalidCookieBeforeFallbackAndSt
 }
 
 func TestStartWorldlineSessionFailsClosedWithoutStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldline-sessions", strings.NewReader(`{"goal":"test a path"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -7574,7 +8313,7 @@ func TestStartWorldlineStepCarriesTenantSessionActorContextAndSanitizesOptions(t
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineStepStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineStepStarter: starter})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/steps", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"mode":"director",
@@ -7595,6 +8334,7 @@ func TestStartWorldlineStepCarriesTenantSessionActorContextAndSanitizesOptions(t
 	}
 	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
 	if starter.input.TenantID != "tenant-123" ||
+		starter.input.ProjectID != "project-owner" ||
 		starter.input.SessionID != "session-1" ||
 		starter.input.ActorUserID != "user-456" ||
 		starter.input.RequestID != "req-789" ||
@@ -7626,7 +8366,7 @@ func TestStartWorldlineStepFailsClosedWithoutStarter(t *testing.T) {
 	reader := &recordingWorldlineSessionReader{
 		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/steps", strings.NewReader(`{"mode":"director"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -7638,6 +8378,131 @@ func TestStartWorldlineStepFailsClosedWithoutStarter(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "WORLDLINE_STEP_BACKEND_UNCONFIGURED") {
 		t.Fatalf("expected fail-closed worldline step error, got %s", response.Body.String())
+	}
+}
+
+func TestStartWorldlineStepReturnsConflictForActiveSessionStep(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+	}
+	starter := &recordingWorldlineStepStarter{err: &worldline.AppError{
+		Code: "WORLDLINE_STEP_ACTIVE", Message: "worldline session already has an active step",
+	}}
+	server := newDevelopmentServer(Config{
+		WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{},
+		WorldlineSessionReader: reader, WorldlineStepStarter: starter,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/steps", strings.NewReader(`{"mode":"director"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"WORLDLINE_STEP_ACTIVE"`) ||
+		!strings.Contains(response.Body.String(), `"message":"worldline session already has an active step"`) {
+		t.Fatalf("unexpected active-step response: %s", response.Body.String())
+	}
+}
+
+func TestStartWorldlineAutoEvolutionUsesSessionOwnerScopeAndSanitizesOptions(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
+	starter := &recordingWorldlineAutoEvolutionStarter{
+		run: worldline.AutoEvolutionRun{
+			RunID: "run-auto-1", ProjectID: "project-owner", SessionID: "session-1",
+			WorkflowType: worldline.WorldlineAutoEvolutionWorkflowType, Status: "queued", MaxSteps: 4,
+		},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{
+		WriterStarter: &recordingStarter{}, Authorizer: authorizer,
+		WorldlineSessionReader: reader, WorldlineAutoEvolutionStarter: starter,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/auto-evolutions", strings.NewReader(`{
+		"tenant_id":"tenant-from-body",
+		"max_steps":4,
+		"options":{"mode":"director","prompt":"private","credential_ref":"secret","nested":{"draft":"private","pace":"steady"}}
+	}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-auto-1")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.SessionID != "session-1" {
+		t.Fatalf("session reader lost auto-evolution owner scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-auto-1")
+	if starter.input.TenantID != "tenant-123" || starter.input.ProjectID != "project-owner" ||
+		starter.input.SessionID != "session-1" || starter.input.ActorUserID != "user-456" ||
+		starter.input.RequestID != "req-auto-1" || starter.input.MaxSteps != 4 {
+		t.Fatalf("auto-evolution starter lost trusted scope: %#v", starter.input)
+	}
+	if _, exists := starter.input.Options["prompt"]; exists {
+		t.Fatalf("auto-evolution options retained prompt: %#v", starter.input.Options)
+	}
+	nested, _ := starter.input.Options["nested"].(map[string]any)
+	if _, exists := nested["draft"]; exists || nested["pace"] != "steady" {
+		t.Fatalf("auto-evolution nested options were not sanitized: %#v", starter.input.Options)
+	}
+	body := response.Body.String()
+	for _, required := range []string{`"run_id":"run-auto-1"`, `"workflow_type":"worldline_auto_evolution"`, `"max_steps":4`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("auto-evolution response missing %s: %s", required, body)
+		}
+	}
+	for _, forbidden := range []string{"tenant-from-body", "prompt", "credential_ref", "draft", "user-456"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("auto-evolution response leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestStartWorldlineAutoEvolutionFailsClosedAndMapsActiveConflict(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
+	for _, tt := range []struct {
+		name       string
+		starter    worldline.AutoEvolutionStarter
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "unconfigured", wantStatus: http.StatusServiceUnavailable, wantCode: "WORLDLINE_AUTO_EVOLUTION_BACKEND_UNCONFIGURED"},
+		{
+			name: "active",
+			starter: &recordingWorldlineAutoEvolutionStarter{err: &worldline.AppError{
+				Code: "WORLDLINE_AUTO_EVOLUTION_ACTIVE", Message: "worldline session already has an active auto-evolution",
+			}},
+			wantStatus: http.StatusConflict,
+			wantCode:   "WORLDLINE_AUTO_EVOLUTION_ACTIVE",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newDevelopmentServer(Config{
+				WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{},
+				WorldlineSessionReader: reader, WorldlineAutoEvolutionStarter: tt.starter,
+			})
+			request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/auto-evolutions", strings.NewReader(`{"max_steps":2}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-456")
+			request.Header.Set("X-Request-Id", "req-auto-error")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus || !strings.Contains(response.Body.String(), `"code":"`+tt.wantCode+`"`) {
+				t.Fatalf("unexpected auto-evolution error response: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -7658,10 +8523,15 @@ func TestCreateWorldlinePreparationCarriesContextAndSanitizesOptions(t *testing.
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+	server := newDevelopmentServer(Config{
+		WriterStarter: &recordingStarter{}, Authorizer: authorizer,
+		WorldlinePreparationStarter: store, WorldlinePreparationStore: store,
+	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldlines/preparations", strings.NewReader(`{
 		"goal":"Prepare council agents",
 		"anchor_path_id":"path-1",
+		"agent_refs":[{"source_kind":"entity","source_id":"00000000-0000-4000-8000-000000000011"}],
+		"source_refs":[{"source_kind":"asset","source_id":"00000000-0000-4000-8000-000000000012"}],
 		"options":{"agent_count":3,"prompt":"must be stripped","credential_ref":"must be stripped"}
 	}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -7683,6 +8553,10 @@ func TestCreateWorldlinePreparationCarriesContextAndSanitizesOptions(t *testing.
 		store.createInput.AnchorPathID != "path-1" {
 		t.Fatalf("preparation store lost context: %#v", store.createInput)
 	}
+	if len(store.createInput.AgentRefs) != 1 || store.createInput.AgentRefs[0].SourceKind != "entity" ||
+		len(store.createInput.SourceRefs) != 1 || store.createInput.SourceRefs[0].SourceKind != "asset" {
+		t.Fatalf("preparation store lost selected refs: %#v", store.createInput)
+	}
 	if _, exists := store.createInput.Options["prompt"]; exists {
 		t.Fatalf("preparation options retained forbidden prompt field: %#v", store.createInput.Options)
 	}
@@ -7700,7 +8574,7 @@ func TestCreateWorldlinePreparationCarriesContextAndSanitizesOptions(t *testing.
 }
 
 func TestCreateWorldlinePreparationFailsClosedWithoutStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/worldlines/preparations", strings.NewReader(`{"goal":"prepare agents"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -7747,7 +8621,7 @@ func TestGetWorldlinePreparationAndPreparedAgentsUseTenantPrepareScope(t *testin
 			UpdatedAt:     "2026-07-05T00:01:00Z",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlinePreparationStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlinePreparationStore: store}))
 
 	detailRequest := httptest.NewRequest(http.MethodGet, "/v1/worldline-preparations/prepare-1", nil)
 	detailRequest.Header.Set("X-Tenant-Id", "tenant-123")
@@ -7823,7 +8697,7 @@ func TestWorldlinePreparationReadsAuthorizeOwnerProjectBeforeResponseOrAgents(t 
 		t.Run(tt.name, func(t *testing.T) {
 			store := worldlinePreparationReadStoreForTest()
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-456")
@@ -7867,7 +8741,7 @@ func TestWorldlinePreparationReadsRejectInvalidCredentialBeforeStoreOrAuthorizer
 		t.Run(path, func(t *testing.T) {
 			store := worldlinePreparationReadStoreForTest()
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:             &recordingStarter{},
 				Authorizer:                authorizer,
 				WorldlinePreparationStore: store,
@@ -7939,7 +8813,7 @@ func TestWorldlinePreparationReadsDenyAndBlankOwnerBeforeResponseOrAgents(t *tes
 			store := worldlinePreparationReadStoreForTest()
 			store.preparation.ProjectID = tt.projectID
 			authorizer := &recordingAuthorizer{err: tt.authErr}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-456")
@@ -8012,7 +8886,7 @@ func TestWorldlinePreparationReadLookupAndAgentErrorsAreSanitized(t *testing.T) 
 			store.getErr = tt.getErr
 			store.agentsErr = tt.agentsErr
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlinePreparationStore: store})
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-456")
@@ -8043,7 +8917,7 @@ func TestMalformedWorldlinePreparationReadPathsStay404WithoutActorOrStore(t *tes
 	store := worldlinePreparationReadStoreForTest()
 	authorizer := &recordingAuthorizer{}
 	sessionStore := &recordingAuthSessionStore{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:             &recordingStarter{},
 		Authorizer:                authorizer,
 		WorldlinePreparationStore: store,
@@ -8173,7 +9047,7 @@ func TestListWorldlineSessionsUsesTenantProjectScopeAndSanitizedRows(t *testing.
 			UpdatedAt:    "2026-07-05T00:01:00Z",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, WorldlineSessionReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/worldline-sessions", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -8213,7 +9087,7 @@ func TestGetWorldlineSessionUsesTenantSessionScopeAndSanitizedRows(t *testing.T)
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -8298,7 +9172,7 @@ func TestWorldlineSessionReadProjectReadDenialStopsBeforeResponseAndFinalReaders
 			}
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			config, assertNoFinalReader := tt.buildConfig(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-123")
@@ -8379,7 +9253,7 @@ func TestWorldlineSessionReadOwnerLookupErrorDoesNotAuthorizeOrReadFinalDataAndS
 			reader := &recordingWorldlineSessionReader{err: lookupErr}
 			authorizer := &recordingAuthorizer{}
 			config, assertNoFinalReader := tt.buildConfig(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "actor-user")
@@ -8462,7 +9336,7 @@ func TestWorldlineSessionReadBlankOwnerProjectFailsClosedBeforeAuthAndFinalReade
 			}
 			authorizer := &recordingAuthorizer{}
 			config, assertNoFinalReader := tt.buildConfig(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-123")
@@ -8545,7 +9419,7 @@ func TestWorldlineSessionReadInvalidBearerStopsBeforeReadersAndFallbackSubjectLe
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			config, assertNoReader := tt.buildConfig()
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "fallback-user")
@@ -8588,7 +9462,7 @@ func TestWorldlineSessionMalformedReadPathsPreserveNotFoundShape(t *testing.T) {
 			timelineReader := &recordingWorldlineTimelineReader{events: []worldline.TimelineEventRecord{{EventID: "event-1"}}}
 			eventReader := &recordingWorldlineEventReader{events: []worldline.EventRecord{{EventID: "event-1"}}}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:           &recordingStarter{},
 				Authorizer:              authorizer,
 				WorldlineSessionReader:  sessionReader,
@@ -8652,7 +9526,7 @@ func TestWorldlineSessionReadFinalReaderErrorsAreSanitizedAfterAuthorization(t *
 				session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
 			}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(tt.buildConfig(reader, authorizer))
+			server := newDevelopmentServer(tt.buildConfig(reader, authorizer))
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "actor-user")
@@ -8700,7 +9574,7 @@ func TestListWorldlineTimelineUsesTenantSessionScopeAndSanitizedRows(t *testing.
 		}},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: sessionReader, WorldlineTimelineReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: sessionReader, WorldlineTimelineReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1/timeline", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -8734,7 +9608,7 @@ func TestListWorldlineTimelineFailsClosedWithoutConfiguredReader(t *testing.T) {
 	sessionReader := &recordingWorldlineSessionReader{
 		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: sessionReader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: sessionReader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1/timeline", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -8775,7 +9649,7 @@ func TestListWorldlineEventsUsesTenantSessionScopeAndSanitizedRows(t *testing.T)
 		}},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: sessionReader, WorldlineEventReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: sessionReader, WorldlineEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1/events?status=candidate", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -8812,7 +9686,7 @@ func TestListWorldlineEventsFailsClosedWithoutConfiguredReader(t *testing.T) {
 	sessionReader := &recordingWorldlineSessionReader{
 		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: sessionReader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: sessionReader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -8857,7 +9731,7 @@ func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"project_id":"malicious-project",
@@ -8904,7 +9778,7 @@ func TestAdoptWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t
 
 func TestAdoptWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
 	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"canon"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -8924,7 +9798,7 @@ func TestAdoptWorldlineEventDeniedBeforeDecodeAndStore(t *testing.T) {
 	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
 	store := &recordingWorldlineEventAdoptionStore{}
 	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "actor user-456 denied for hidden-title prompt=secret api_key=sk-hidden"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"private-note","prompt":"secret","api_key":"sk-hidden"`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -8977,7 +9851,7 @@ func TestAdoptWorldlineEventOwnerLookupFailuresDoNotAuthorizeOrStore(t *testing.
 			reader := &recordingWorldlineEventReader{event: tt.event, getErr: tt.err}
 			store := &recordingWorldlineEventAdoptionStore{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
 			request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"private-note","prompt":"secret"}`))
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-456")
@@ -9010,7 +9884,7 @@ func TestAdoptWorldlineEventStoreErrorIsSanitizedAfterAuthorization(t *testing.T
 	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
 	store := &recordingWorldlineEventAdoptionStore{err: &worldline.AppError{Code: "WORLDLINE_EVENT_ADOPTION_WRITE_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden draft=private"}}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/adoptions", strings.NewReader(`{"note":"public note"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -9062,7 +9936,7 @@ func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
 	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"project_id":"malicious-project",
@@ -9113,7 +9987,7 @@ func TestUpdateWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(
 
 func TestUpdateWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
 	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
 	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"edit"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -9133,7 +10007,7 @@ func TestUpdateWorldlineEventDeniedBeforeDecodeAndStore(t *testing.T) {
 	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
 	store := &recordingWorldlineEventMutationStore{}
 	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "actor user-456 denied for hidden-title prompt=secret api_key=sk-hidden"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
 	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"hidden-title","prompt":"secret","api_key":"sk-hidden"`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -9186,7 +10060,7 @@ func TestUpdateWorldlineEventOwnerLookupFailuresDoNotAuthorizeOrStore(t *testing
 			reader := &recordingWorldlineEventReader{event: tt.event, getErr: tt.err}
 			store := &recordingWorldlineEventMutationStore{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
 			request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"hidden-title","prompt":"secret"}`))
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-456")
@@ -9219,7 +10093,7 @@ func TestUpdateWorldlineEventStoreErrorIsSanitizedAfterAuthorization(t *testing.
 	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
 	store := &recordingWorldlineEventMutationStore{err: &worldline.AppError{Code: "WORLDLINE_EVENT_MUTATION_WRITE_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden manuscript=private"}}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventMutationStore: store})
 	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-events/event-1", strings.NewReader(`{"title":"public title"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-456")
@@ -9259,7 +10133,7 @@ func TestMalformedWorldlineEventMutationPathsRemainNotFoundWithInvalidBearer(t *
 			adoptions := &recordingWorldlineEventAdoptionStore{}
 			mutations := &recordingWorldlineEventMutationStore{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				SessionAuthSecret:           "secret",
 				WriterStarter:               &recordingStarter{},
 				Authorizer:                  authorizer,
@@ -9307,7 +10181,7 @@ func TestInjectWorldlineVariableCarriesTenantSessionActorContextAndSanitizesPayl
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineVariableStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineVariableStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/variables", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"name":"主角亲族提前失踪",
@@ -9363,7 +10237,7 @@ func TestInjectWorldlineVariableFailsClosedWithoutConfiguredStore(t *testing.T) 
 	reader := &recordingWorldlineSessionReader{
 		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-sessions/session-1/variables", strings.NewReader(`{"name":"变量"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -9379,7 +10253,7 @@ func TestInjectWorldlineVariableFailsClosedWithoutConfiguredStore(t *testing.T) 
 }
 
 func TestListWorldlineSessionsFailsClosedWithoutConfiguredReader(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/worldline-sessions", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -9395,7 +10269,7 @@ func TestListWorldlineSessionsFailsClosedWithoutConfiguredReader(t *testing.T) {
 }
 
 func TestListWorldlineSavedPathsFailsClosedWithoutConfiguredReader(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/worldline/saved-paths", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -9431,7 +10305,7 @@ func TestCreateCharacterInteractionCarriesTenantProjectActorContextAndSanitizesP
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, CharacterConsoleStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, CharacterConsoleStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/character-interactions", strings.NewReader(`{
 		"tenant_id":"body-tenant",
 		"project_id":"body-project",
@@ -9519,7 +10393,7 @@ func TestCharacterInteractionMutationRBACDeniedBeforeDecodeAndSideEffects(t *tes
 			authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied prompt=hidden api_key=sk-hidden actor=user-123"}}
 			resolver := &recordingLLMResolver{}
 			starter := &recordingStarter{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:            authorizer,
 				WriterStarter:         starter,
 				LLMResolver:           resolver,
@@ -9584,7 +10458,7 @@ func TestCharacterInteractionMutationOwnerLookupFailureFailsClosedBeforeAuthoriz
 			authorizer := &recordingAuthorizer{}
 			resolver := &recordingLLMResolver{}
 			starter := &recordingStarter{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:            authorizer,
 				WriterStarter:         starter,
 				LLMResolver:           resolver,
@@ -9654,7 +10528,7 @@ func TestCharacterInteractionMutationBlankOwnerProjectFailsClosedBeforeAuthoriza
 			authorizer := &recordingAuthorizer{}
 			resolver := &recordingLLMResolver{}
 			starter := &recordingStarter{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:            authorizer,
 				WriterStarter:         starter,
 				LLMResolver:           resolver,
@@ -9708,7 +10582,7 @@ func TestCharacterInteractionMutationSuccessAuthorizesCreativeWriteOnOwnerProjec
 			},
 		}
 		authorizer := &recordingAuthorizer{}
-		server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, CharacterConsoleStore: store})
+		server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, CharacterConsoleStore: store})
 		request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{
 			"tenant_id":"body-tenant",
 			"actor_type":"user",
@@ -9743,7 +10617,7 @@ func TestCharacterInteractionMutationSuccessAuthorizesCreativeWriteOnOwnerProjec
 			},
 		}
 		authorizer := &recordingAuthorizer{}
-		server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, CharacterConsoleStore: store})
+		server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, CharacterConsoleStore: store})
 		request := httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{
 			"tenant_id":"body-tenant",
 			"status":"saved"
@@ -9789,7 +10663,7 @@ func TestCharacterInteractionMutationSuccessAuthorizesCreativeWriteOnOwnerProjec
 			}},
 		}
 		authorizer := &recordingAuthorizer{}
-		server := NewServer(Config{
+		server := newDevelopmentServer(Config{
 			Authorizer:            authorizer,
 			WriterStarter:         starter,
 			LLMResolver:           resolver,
@@ -9844,7 +10718,7 @@ func TestCharacterInteractionMutationMalformedPathsRemain404WithoutActorResoluti
 			authorizer := &recordingAuthorizer{}
 			resolver := &recordingLLMResolver{}
 			starter := &recordingStarter{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				SessionAuthSecret:     "test-secret",
 				Authorizer:            authorizer,
 				WriterStarter:         starter,
@@ -9887,7 +10761,7 @@ func TestUpdateCharacterInteractionStatusUsesTenantScopeAndSanitizesResponse(t *
 			UpdatedAt: "2026-07-06T00:03:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodPatch, "/v1/character-interactions/interaction-1", strings.NewReader(`{
 		"tenant_id":"body-tenant",
 		"status":"saved"
@@ -9952,7 +10826,7 @@ func TestListAndGetCharacterInteractionsUseTenantScopeAndIncludeTurnsInDetail(t 
 			CreatedAt:     "2026-07-06T00:01:00Z",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 
 	listRequest := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/character-interactions?status=active", nil)
 	listRequest.Header.Set("X-Tenant-Id", "tenant-123")
@@ -10065,7 +10939,7 @@ func TestCharacterInteractionResponsesSanitizeInjectedStorePayloadsAtHTTPBoundar
 			CreatedAt:       "2026-07-06T00:02:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 
 	for _, scenario := range []struct {
 		request  *http.Request
@@ -10113,7 +10987,7 @@ func TestCharacterInteractionRoutesSanitizeUnexpectedStoreErrorsAtHTTPBoundary(t
 	store := &recordingCharacterConsoleStore{
 		err: errors.New("driver exploded prompt=hidden api_key=sk-hidden credential_ref=secret body=private manuscript=private"),
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 
 	for _, request := range []*http.Request{
 		httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/character-interactions", strings.NewReader(`{
@@ -10139,7 +11013,7 @@ func TestCharacterInteractionRoutesSanitizeUnexpectedStoreErrorsAtHTTPBoundary(t
 		}
 		body := response.Body.String()
 		expectedMessage := "character interaction query failed"
-		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/turns") {
+		if strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") {
 			expectedMessage = "character interaction lookup failed"
 		}
 		if !strings.Contains(body, "CHARACTER_INTERACTION_QUERY_FAILED") || !strings.Contains(body, expectedMessage) {
@@ -10212,7 +11086,7 @@ func TestCharacterInteractionMutationStoreErrorsAfterAuthorizationAreSanitized(t
 			authorizer := &recordingAuthorizer{}
 			resolver := &recordingLLMResolver{}
 			starter := &recordingStarter{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:            authorizer,
 				WriterStarter:         starter,
 				LLMResolver:           resolver,
@@ -10274,7 +11148,7 @@ func TestCharacterInteractionRoutesStabilizeCodedStoreErrorMessagesAtHTTPBoundar
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			store := &recordingCharacterConsoleStore{getErr: testCase.err}
-			server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+			server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 			request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/interaction-1", nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-Request-Id", "req-character-coded-error")
@@ -10322,7 +11196,7 @@ func TestCharacterInteractionValidationErrorsDoNotEchoSensitiveUnknownFields(t *
 					ProjectID:     "project-123",
 				},
 			}
-			server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+			server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 			testCase.request.Header.Set("X-Tenant-Id", "tenant-123")
 			testCase.request.Header.Set("X-User-Id", "user-123")
 			testCase.request.Header.Set("X-Request-Id", "req-character-validation")
@@ -10383,7 +11257,7 @@ func TestCharacterInteractionMutationValidationErrorsRunAfterOwnerCreativeWriteP
 			authorizer := &recordingAuthorizer{}
 			resolver := &recordingLLMResolver{}
 			starter := &recordingStarter{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:            authorizer,
 				WriterStarter:         starter,
 				LLMResolver:           resolver,
@@ -10438,7 +11312,7 @@ func TestAppendCharacterInteractionTurnDoesNotGenerateAgentReply(t *testing.T) {
 			CreatedAt:     "2026-07-06T00:01:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{
 		"tenant_id":"body-tenant",
 		"actor_type":"user",
@@ -10494,7 +11368,7 @@ func TestAppendCharacterInteractionTurnVerifiesParentInteractionScope(t *testing
 			Summary:       "公开回合",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/turns", strings.NewReader(`{
 		"actor_type":"user",
 		"turn_kind":"dialogue",
@@ -10529,7 +11403,7 @@ func TestAppendCharacterInteractionTurnReturnsNotFoundForMissingInteraction(t *t
 			Summary:       "must not be written",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/missing-interaction/turns", strings.NewReader(`{
 		"actor_type":"user",
 		"turn_kind":"dialogue",
@@ -10572,7 +11446,7 @@ func TestListCharacterInteractionTurnsVerifiesParentInteractionScope(t *testing.
 			Summary:       "公开回合",
 		}},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/interaction-1/turns", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 
@@ -10595,7 +11469,7 @@ func TestListCharacterInteractionTurnsReturnsNotFoundForMissingInteraction(t *te
 		getErr: &characterconsole.AppError{Code: "NOT_FOUND", Message: "character interaction was not found"},
 		turns:  []characterconsole.TurnRecord{},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/missing-interaction/turns", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 
@@ -10617,7 +11491,7 @@ func TestListCharacterInteractionTurnsReturnsNotFoundForMissingInteraction(t *te
 }
 
 func TestCharacterInteractionRoutesFailClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/character-interactions", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 
@@ -10632,23 +11506,267 @@ func TestCharacterInteractionRoutesFailClosedWithoutConfiguredStore(t *testing.T
 	}
 }
 
-func TestCharacterInteractionEventsRemainExplicitlyPending(t *testing.T) {
-	store := &recordingCharacterConsoleStore{}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
-	request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/interaction-1/events", nil)
+func TestCharacterInteractionEventsReturnPersistedPublicRuntimeEvents(t *testing.T) {
+	store := &recordingCharacterConsoleStore{
+		interaction: characterconsole.InteractionRecord{ProjectID: "project-123"},
+		events: []characterconsole.EventRecord{{
+			EventID: "event-1", InteractionID: "interaction-1", Sequence: 2,
+			EventType: "character.turn.completed", Payload: map[string]any{"status": "completed"},
+		}},
+	}
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/interaction-1/events?after_event_id=event-0", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected pending/fail-closed status, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected persisted events, got %d: %s", response.Code, response.Body.String())
 	}
 	if store.getInput.TenantID != "tenant-123" || store.getInput.InteractionID != "interaction-1" {
-		t.Fatalf("runtime pending route did not verify tenant-scoped interaction first: %#v", store.getInput)
+		t.Fatalf("event route did not verify tenant-scoped interaction first: %#v", store.getInput)
 	}
-	if !strings.Contains(response.Body.String(), "CHARACTER_CONSOLE_RUNTIME_PENDING") {
-		t.Fatalf("expected explicit pending runtime, got %s", response.Body.String())
+	if store.eventsInput.TenantID != "tenant-123" || store.eventsInput.InteractionID != "interaction-1" || store.eventsInput.AfterEventID != "event-0" {
+		t.Fatalf("event route lost scoped cursor input: %#v", store.eventsInput)
+	}
+	for _, expected := range []string{`"interaction_id":"interaction-1"`, `"after_event_id":"event-0"`, `"event_type":"character.turn.completed"`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("event response missing %s: %s", expected, response.Body.String())
+		}
+	}
+}
+
+func TestStartCharacterDialogueAuthorizesOwnerAndCarriesScopedTurnContext(t *testing.T) {
+	store := &recordingCharacterConsoleStore{interaction: characterconsole.InteractionRecord{
+		InteractionID: "interaction-1",
+		ProjectID:     "project-123",
+		Status:        "active",
+	}}
+	authorizer := &recordingAuthorizer{}
+	starter := &recordingCharacterDialogueStarter{run: workflows.CharacterDialogueRun{
+		RunID: "run-1", TraceID: "trace-1", ProjectID: "project-123", InteractionID: "interaction-1",
+		WorkflowType: workflows.CharacterDialogueWorkflowType, Status: "queued",
+	}}
+	server := newDevelopmentServer(Config{
+		WriterStarter:            &recordingStarter{},
+		CharacterConsoleStore:    store,
+		CharacterDialogueStarter: starter,
+		Authorizer:               authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/dialogue", strings.NewReader(`{"user_turn_id":"turn-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "request-dialogue-1")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", response.Code, response.Body.String())
+	}
+	if !starter.called || starter.input.TenantID != "tenant-123" || starter.input.ProjectID != "project-123" ||
+		starter.input.InteractionID != "interaction-1" || starter.input.UserTurnID != "turn-1" ||
+		starter.input.ActorUserID != "user-123" || starter.input.RequestID != "request-dialogue-1" {
+		t.Fatalf("dialogue starter lost scoped context: %#v", starter.input)
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-123" || authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("unexpected dialogue authorization: %#v", authorizer.inputs)
+	}
+	for _, expected := range []string{`"run_id":"run-1"`, `"interaction_id":"interaction-1"`, `"workflow_type":"character_dialogue"`, `"status":"queued"`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("dialogue response missing %s: %s", expected, response.Body.String())
+		}
+	}
+}
+
+func TestListCharacterProposalsAuthorizesOwnerAndReturnsOnlyPublicMetadata(t *testing.T) {
+	console := &recordingCharacterConsoleStore{interaction: characterconsole.InteractionRecord{
+		InteractionID: "interaction-1", ProjectID: "project-123", Status: "active",
+	}}
+	proposals := &recordingCharacterProposalStore{proposals: []characterconsole.ProposalRecord{{
+		AssetID: "asset-1", ProjectID: "project-123", InteractionID: "interaction-1",
+		ProposalType: "memory", AssetType: "character_memory_proposal", Lifecycle: "candidate",
+		Title: "Memory proposal", Summary: "Public proposal summary", TargetID: "memory-1",
+	}}}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{
+		WriterStarter: &recordingStarter{}, CharacterConsoleStore: console,
+		CharacterProposalStore: proposals, Authorizer: authorizer,
+	})
+	request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/interaction-1/proposals", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if !proposals.listCalled || proposals.listInput.TenantID != "tenant-123" || proposals.listInput.ProjectID != "project-123" || proposals.listInput.InteractionID != "interaction-1" || proposals.listInput.ActorUserID != "user-123" {
+		t.Fatalf("proposal list lost scoped input: %#v", proposals.listInput)
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+		t.Fatalf("unexpected proposal list authorization: %#v", authorizer.inputs)
+	}
+	for _, expected := range []string{`"interaction_id":"interaction-1"`, `"asset_id":"asset-1"`, `"proposal_type":"memory"`, `"lifecycle":"candidate"`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("proposal response missing %s: %s", expected, response.Body.String())
+		}
+	}
+	assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, response.Body.String())
+}
+
+func TestAdoptCharacterProposalAuthorizesBeforeDecodeAndStore(t *testing.T) {
+	console := &recordingCharacterConsoleStore{interaction: characterconsole.InteractionRecord{
+		InteractionID: "interaction-1", ProjectID: "project-private", Status: "active",
+	}}
+	proposals := &recordingCharacterProposalStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "private policy"}}
+	server := newDevelopmentServer(Config{
+		WriterStarter: &recordingStarter{}, CharacterConsoleStore: console,
+		CharacterProposalStore: proposals, Authorizer: authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/proposals/asset-1/adoptions", strings.NewReader(`{"prompt":"secret","api_key":"hidden"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if proposals.adoptCalled {
+		t.Fatalf("denied proposal adoption reached store: %#v", proposals.adoptInput)
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("unexpected proposal adoption authorization: %#v", authorizer.inputs)
+	}
+	for _, forbidden := range []string{"project-private", "private policy", "prompt", "secret", "api_key", "hidden"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("denied proposal adoption leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestAdoptCharacterProposalCarriesExactScopeAndReturnsTargetMetadata(t *testing.T) {
+	console := &recordingCharacterConsoleStore{interaction: characterconsole.InteractionRecord{
+		InteractionID: "interaction-1", ProjectID: "project-123", Status: "active",
+	}}
+	proposals := &recordingCharacterProposalStore{adoption: characterconsole.ProposalAdoption{
+		AssetID: "asset-1", ProjectID: "project-123", InteractionID: "interaction-1",
+		ProposalType: "relation", TargetID: "relationship-1", Status: "adopted",
+	}}
+	server := newDevelopmentServer(Config{
+		WriterStarter: &recordingStarter{}, CharacterConsoleStore: console,
+		CharacterProposalStore: proposals, Authorizer: &recordingAuthorizer{},
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/proposals/asset-1/adoptions", strings.NewReader(`{"note":"Keep this relationship"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "request-adopt-1")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if !proposals.adoptCalled || proposals.adoptInput.TenantID != "tenant-123" || proposals.adoptInput.ProjectID != "project-123" || proposals.adoptInput.InteractionID != "interaction-1" || proposals.adoptInput.AssetID != "asset-1" || proposals.adoptInput.ActorUserID != "user-123" || proposals.adoptInput.RequestID != "request-adopt-1" || proposals.adoptInput.Note != "Keep this relationship" {
+		t.Fatalf("proposal adoption lost scoped input: %#v", proposals.adoptInput)
+	}
+	for _, expected := range []string{`"asset_id":"asset-1"`, `"proposal_type":"relation"`, `"target_id":"relationship-1"`, `"status":"adopted"`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("proposal adoption response missing %s: %s", expected, response.Body.String())
+		}
+	}
+	assertHTTPBodyHasNoSensitiveCharacterConsoleFields(t, response.Body.String())
+}
+
+func TestCharacterProposalAdoptionPathRejectsMalformedShapes(t *testing.T) {
+	for _, path := range []string{
+		"/v1/character-interactions//proposals/asset-1/adoptions",
+		"/v1/character-interactions/interaction-1/proposals//adoptions",
+		"/v1/character-interactions/interaction-1/proposals/asset-1/adoptions/extra",
+		"/v1/character-interactions/interaction-1/extra/proposals/asset-1/adoptions",
+	} {
+		if isCharacterProposalAdoptionPath(path) {
+			t.Fatalf("malformed character proposal path matched: %s", path)
+		}
+	}
+	if !isCharacterProposalAdoptionPath("/v1/character-interactions/interaction-1/proposals/asset-1/adoptions") {
+		t.Fatalf("canonical character proposal adoption path did not match")
+	}
+}
+
+func TestStartCharacterDialogueDeniesBeforeDecodeAndStarter(t *testing.T) {
+	store := &recordingCharacterConsoleStore{interaction: characterconsole.InteractionRecord{
+		InteractionID: "interaction-1",
+		ProjectID:     "project-private",
+	}}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "private policy detail"}}
+	starter := &recordingCharacterDialogueStarter{}
+	server := newDevelopmentServer(Config{
+		WriterStarter:            &recordingStarter{},
+		CharacterConsoleStore:    store,
+		CharacterDialogueStarter: starter,
+		Authorizer:               authorizer,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/dialogue", strings.NewReader(`{"prompt":"secret","api_key":"hidden"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if starter.called {
+		t.Fatalf("denied dialogue reached starter: %#v", starter.input)
+	}
+	for _, forbidden := range []string{"project-private", "private policy detail", "prompt", "secret", "api_key", "hidden"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("denied dialogue leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestCharacterInteractionReadRoutesAuthorizeOwnerProjectBeforeTurnRead(t *testing.T) {
+	for _, path := range []string{
+		"/v1/character-interactions/interaction-1",
+		"/v1/character-interactions/interaction-1/turns",
+		"/v1/character-interactions/interaction-1/events",
+	} {
+		t.Run(path, func(t *testing.T) {
+			store := &recordingCharacterConsoleStore{interaction: characterconsole.InteractionRecord{
+				InteractionID: "interaction-1",
+				ProjectID:     "project-private",
+			}}
+			authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "private read policy"}}
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store, Authorizer: authorizer})
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if store.turnsInput.InteractionID != "" {
+				t.Fatalf("denied read reached turns store: %#v", store.turnsInput)
+			}
+			if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-private" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+				t.Fatalf("unexpected read authorization: %#v", authorizer.inputs)
+			}
+		})
 	}
 }
 
@@ -10704,7 +11822,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 			},
 		},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           boundWriterComposerResolver(),
@@ -10712,6 +11830,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/character-interactions/interaction-1/chapter-drafts", strings.NewReader(`{
 		"target_chapter_id":"chapter-9",
+		"target_scene_id":"scene-12",
 		"pov_mode":"first_person",
 		"style_asset_ids":["style-1","style-2"],
 		"author_instruction":"保持紧张感"
@@ -10743,6 +11862,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 	if !strings.Contains(starter.input.Instruction, "公开互动标题") ||
 		!strings.Contains(starter.input.Instruction, "第一回合公开摘要") ||
 		!strings.Contains(starter.input.Instruction, "第二回合公开摘要") ||
+		!strings.Contains(starter.input.Instruction, "Target scene id: scene-12") ||
 		!strings.Contains(starter.input.Instruction, "保持紧张感") {
 		t.Fatalf("writer instruction did not include public interaction context: %q", starter.input.Instruction)
 	}
@@ -10755,6 +11875,7 @@ func TestConvertCharacterInteractionToChapterDraftStartsWriterRunFromPublicMetad
 		starter.input.Options["character_interaction_id"] != "interaction-1" ||
 		starter.input.Options["worldline_session_id"] != "session-1" ||
 		starter.input.Options["target_chapter_id"] != "chapter-9" ||
+		starter.input.Options["target_scene_id"] != "scene-12" ||
 		starter.input.Options["pov_mode"] != "first_person" ||
 		starter.input.Options["module_key"] != "writer_composer" {
 		t.Fatalf("writer options lost public conversion metadata: %#v", starter.input.Options)
@@ -10792,7 +11913,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresWriterBindingBeforeAdm
 			Summary:       "公开回合",
 		}},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           llm.NewStaticResolver(nil),
@@ -10828,7 +11949,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresPublicTurns(t *testing
 		},
 		turns: []characterconsole.TurnRecord{},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           boundWriterComposerResolver(),
@@ -10880,7 +12001,7 @@ func TestConvertCharacterInteractionToChapterDraftRequiresPublicTurnSummaryMater
 			Summary:       "   ",
 		}},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:            &recordingAuthorizer{},
 		WriterStarter:         starter,
 		LLMResolver:           boundWriterComposerResolver(),
@@ -10911,7 +12032,7 @@ func TestCharacterInteractionPendingRoutesReturnNotFoundForMissingInteraction(t 
 	store := &recordingCharacterConsoleStore{
 		err: &characterconsole.AppError{Code: "NOT_FOUND", Message: "character interaction was not found"},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, CharacterConsoleStore: store}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/character-interactions/missing-interaction/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 
@@ -10927,8 +12048,8 @@ func TestCharacterInteractionPendingRoutesReturnNotFoundForMissingInteraction(t 
 	if !strings.Contains(response.Body.String(), "NOT_FOUND") {
 		t.Fatalf("expected NOT_FOUND response, got %s", response.Body.String())
 	}
-	if strings.Contains(response.Body.String(), "CHARACTER_CONSOLE_RUNTIME_PENDING") {
-		t.Fatalf("missing interaction must not be reported as runtime pending: %s", response.Body.String())
+	if store.eventsInput.InteractionID != "" {
+		t.Fatalf("missing interaction must stop before event query: %#v", store.eventsInput)
 	}
 }
 
@@ -10982,7 +12103,7 @@ func TestGetAssetUsesTenantAssetScopeAndSanitizedRow(t *testing.T) {
 			UpdatedAt:  "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -11035,7 +12156,7 @@ func TestGetAssetDeniesProjectReadWithoutLeakingAssetMetadata(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -11107,7 +12228,7 @@ func TestGetAssetReaderErrorsDoNotCallAuthorizer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{}
 			reader := &recordingAssetReader{err: tt.err}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
 			request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-123")
@@ -11151,7 +12272,7 @@ func TestGetAssetBlankProjectIDFailsClosedWithoutAssetMetadata(t *testing.T) {
 			Payload: map[string]any{"body": "must not leak body", "prompt": "must not leak prompt"},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodGet, "/v1/assets/asset-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -11190,7 +12311,7 @@ func TestListAssetFacetsUsesTenantProjectScopeAndSanitizedCounts(t *testing.T) {
 			Tags:       []assets.FacetBucket{{Value: "主角", Count: 2}},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/assets/facets", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -11239,10 +12360,13 @@ func TestSearchAssetsUsesTenantProjectQueryScopeAndSanitizedRows(t *testing.T) {
 			UpdatedAt: "2026-07-04T00:00:00Z",
 		}},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader})
-	request := httptest.NewRequest(http.MethodPost, "/v1/assets/search", strings.NewReader(`{"project_id":"project-123","query":"灵气"}`))
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/assets/search", strings.NewReader(`{"project_id":"project-123","query":"灵气","mode":"hybrid"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-asset-search")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -11250,8 +12374,16 @@ func TestSearchAssetsUsesTenantProjectQueryScopeAndSanitizedRows(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
-	if reader.searchInput.TenantID != "tenant-123" || reader.searchInput.ProjectID != "project-123" || reader.searchInput.Query != "灵气" {
+	if reader.searchInput.TenantID != "tenant-123" || reader.searchInput.ProjectID != "project-123" || reader.searchInput.Query != "灵气" || reader.searchInput.Mode != "hybrid" {
 		t.Fatalf("reader lost search scope: %#v", reader.searchInput)
+	}
+	if len(authorizer.inputs) != 1 ||
+		authorizer.inputs[0].UserID != "user-123" ||
+		authorizer.inputs[0].TenantID != "tenant-123" ||
+		authorizer.inputs[0].ProjectID != "project-123" ||
+		authorizer.inputs[0].Permission != auth.PermissionProjectRead ||
+		authorizer.inputs[0].RequestID != "req-asset-search" {
+		t.Fatalf("unexpected project_read authorizer inputs: %#v", authorizer.inputs)
 	}
 	body := response.Body.String()
 	if !strings.Contains(body, `"search_document_id":"doc-1"`) || !strings.Contains(body, `"title":"灵气规则"`) {
@@ -11267,6 +12399,109 @@ func TestSearchAssetsUsesTenantProjectQueryScopeAndSanitizedRows(t *testing.T) {
 	for _, forbidden := range []string{"raw_payload_jsonb", "api_key", "encrypted_api_key", "credential_ref"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("asset search leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestSearchAssetsForwardsTypedFiltersAfterProjectAuthorization(t *testing.T) {
+	pinned := false
+	wantFilters := assets.SearchFilters{
+		AssetTypes: []string{"character", "world_rule"},
+		Categories: []string{"cast", "world"},
+		Lifecycles: []string{"canon", "material"},
+		Sources:    []string{"manual", "seed_pipeline"},
+		Tags:       []string{"protagonist", "rule"},
+		Pinned:     &pinned,
+	}
+	reader := &recordingAssetReader{}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/assets/search", strings.NewReader(`{
+		"project_id":"project-123",
+		"query":"moon rule",
+		"mode":"hybrid",
+		"filters":{
+			"asset_types":["character","world_rule"],
+			"categories":["cast","world"],
+			"lifecycles":["canon","material"],
+			"sources":["manual","seed_pipeline"],
+			"tags":["protagonist","rule"],
+			"pinned":false
+		}
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-asset-filter-search")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if !reflect.DeepEqual(reader.searchInput.Filters, wantFilters) {
+		t.Fatalf("reader lost typed search filters: got %#v, want %#v", reader.searchInput.Filters, wantFilters)
+	}
+	if reader.searchInput.TenantID != "tenant-123" || reader.searchInput.ProjectID != "project-123" {
+		t.Fatalf("reader lost authorized tenant/project scope: %#v", reader.searchInput)
+	}
+	assertSingleProjectReadAuthorizationForProject(t, authorizer, "user-123", "project-123", "req-asset-filter-search")
+	for _, forbidden := range []string{"asset_types", "categories", "lifecycles", "sources", "protagonist", "api_key", "credential_ref"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("asset search response exposed request/private field %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestSearchAssetsRejectsUnauthenticatedRequestBeforeAuthorizationAndReader(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	reader := &recordingAssetReader{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/assets/search", strings.NewReader(`{"project_id":"project-123","query":"private query"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusUnauthorized, response.Code, response.Body.String())
+	}
+	if authorizer.called || reader.searchInput.TenantID != "" {
+		t.Fatalf("unauthenticated search reached authorization or reader: authorizer=%#v reader=%#v", authorizer.inputs, reader.searchInput)
+	}
+	for _, forbidden := range []string{"project-123", "private query", "tenant-123"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("unauthenticated response leaked request value %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestSearchAssetsDeniesProjectReadBeforeReader(t *testing.T) {
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "policy-internal project-123 private query"}}
+	reader := &recordingAssetReader{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost, "/v1/assets/search", strings.NewReader(`{"project_id":"project-123","query":"private query"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-123" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+		t.Fatalf("unexpected authorizer inputs: %#v", authorizer.inputs)
+	}
+	if reader.searchInput.TenantID != "" {
+		t.Fatalf("denied search reached reader: %#v", reader.searchInput)
+	}
+	for _, forbidden := range []string{"project-123", "private query", "policy-internal"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("denied response leaked private value %q: %s", forbidden, response.Body.String())
 		}
 	}
 }
@@ -11288,7 +12523,7 @@ func TestListArchiveMemoriesUsesTenantProjectAssetScopeAndSanitizedRows(t *testi
 			UpdatedAt:  "2026-07-05T00:00:00Z",
 		}},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memories?project_id=project-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -11326,7 +12561,7 @@ func TestListArchiveMemoryEventsUsesTenantProjectAssetScopeAndSanitizedRows(t *t
 			CreatedAt: "2026-07-05T00:00:00Z",
 		}},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memory-events?project_id=project-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -11351,7 +12586,7 @@ func TestListArchiveMemoryEventsUsesTenantProjectAssetScopeAndSanitizedRows(t *t
 }
 
 func TestListArchiveMemoriesWithoutReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memories?project_id=project-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -11398,7 +12633,7 @@ func TestArchiveMemoryReviewRequiresBodyProjectBeforeOwnerLookup(t *testing.T) {
 			reader := &recordingArchiveMemoryReader{}
 			store := &recordingArchiveMemoryReviewStore{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 			request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11443,7 +12678,7 @@ func TestAdoptArchiveMemoryUsesOwnerProjectForRBACAndStoreIgnoringBodyProject(t 
 	}
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11503,7 +12738,7 @@ func TestRejectArchiveMemoryUsesOwnerProjectForRBACAndStoreIgnoringBodyProject(t
 	}
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/rejections", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11548,7 +12783,7 @@ func TestArchiveMemoryReviewDeniedAssetManageAfterOwnerLookupDoesNotCallStoreOrL
 	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: "project-owner", Summary: "memory-1-summary"}}
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied for user-123 malicious-project memory-secret private prompt raw provider secret-key credential_ref draft manuscript"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-secret/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11586,7 +12821,7 @@ func TestArchiveMemoryReviewOwnerLookupFailureDoesNotAuthorizeStoreOrLeak(t *tes
 	}
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-secret/rejections", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11618,7 +12853,7 @@ func TestArchiveMemoryReviewBlankOwnerProjectFailsClosedBeforeAuthorizeStore(t *
 	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: ""}}
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11649,7 +12884,7 @@ func TestArchiveMemoryReviewStoreFailureReturnsPublicMessageAfterOwnerAuthorizat
 		err: &assets.AppError{Code: "ARCHIVE_MEMORY_REVIEW_FAILED", Message: "failed memory-secret malicious-project user-123 private prompt raw provider secret-key credential_ref object_key draft manuscript"},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-secret/adoptions", strings.NewReader(`{"project_id":"malicious-project"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11682,7 +12917,7 @@ func TestAuthSubjectArchiveMemoryReviewRejectsInvalidBearerBeforeReaderAuthorize
 	reader := &recordingArchiveMemoryReader{}
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		ArchiveMemoryReader:      reader,
 		ArchiveMemoryReviewStore: store,
 		SessionAuthSecret:        "test-secret",
@@ -11720,7 +12955,7 @@ func TestAuthSubjectArchiveMemoryReviewRejectsInvalidBearerBeforeReaderAuthorize
 func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredStore(t *testing.T) {
 	reader := &recordingArchiveMemoryReader{memory: assets.ArchiveMemoryRecord{MemoryID: "memory-1", AssetID: "asset-1", ProjectID: "project-owner"}}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"project-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11752,7 +12987,7 @@ func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredStore(t *testing.T) {
 func TestAdoptArchiveMemoryFailsClosedWithoutConfiguredReaderBeforeReviewStore(t *testing.T) {
 	store := &recordingArchiveMemoryReviewStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReviewStore: store, Authorizer: authorizer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/archive-memories/memory-1/adoptions", strings.NewReader(`{"project_id":"project-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11873,7 +13108,7 @@ func TestPhase5ValidationErrorsDoNotEchoDecoderDetails(t *testing.T) {
 			if tt.needsAssetOwner {
 				config.AssetReader = &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{
 				"api_key":"sk-hidden",
 				"prompt":"private",
@@ -11921,7 +13156,7 @@ func TestAdoptAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 	authorizer := &recordingAuthorizer{}
 	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 	store := &recordingAssetAdoptionStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/assets/asset-1/adoptions", strings.NewReader(`{"target_lifecycle":"canon"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -11957,7 +13192,7 @@ func TestAdoptAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 
 func TestAdoptAssetFailsClosedWithoutConfiguredStore(t *testing.T) {
 	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/assets/asset-1/adoptions", strings.NewReader(`{"target_lifecycle":"canon"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -12052,7 +13287,7 @@ func TestAssetManageRBACSingleAssetMutationsUseReaderProjectBeforeDecodeAndSideE
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			mutations := &recordingAssetMutationStore{}
 			adoptions := &recordingAssetAdoptionStore{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:      &recordingStarter{},
 				AssetReader:        reader,
 				Authorizer:         authorizer,
@@ -12197,7 +13432,7 @@ func TestAssetManageRBACSingleAssetMutationsReaderErrorsDoNotAuthorizeOrMutate(t
 				authorizer := &recordingAuthorizer{}
 				mutations := &recordingAssetMutationStore{}
 				adoptions := &recordingAssetAdoptionStore{}
-				server := NewServer(Config{
+				server := newDevelopmentServer(Config{
 					WriterStarter:      &recordingStarter{},
 					AssetReader:        reader,
 					Authorizer:         authorizer,
@@ -12276,7 +13511,7 @@ func TestReservedAssetMutationPathsPreserveNotFoundWithInvalidBearerAndNoSideEff
 			authorizer := &recordingAuthorizer{}
 			mutations := &recordingAssetMutationStore{}
 			adoptions := &recordingAssetAdoptionStore{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				SessionAuthSecret:  "test-secret",
 				AssetReader:        reader,
 				Authorizer:         authorizer,
@@ -12379,7 +13614,7 @@ func TestAssetManageRBACSingleAssetMutationsBlankProjectFailsClosedBeforeAuthori
 			authorizer := &recordingAuthorizer{}
 			mutations := &recordingAssetMutationStore{}
 			adoptions := &recordingAssetAdoptionStore{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WriterStarter:      &recordingStarter{},
 				AssetReader:        reader,
 				Authorizer:         authorizer,
@@ -12445,7 +13680,7 @@ func TestDisabledAssetReaderPreflightsSingleAssetMutationsBeforeDisabledStores(t
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+			server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -12536,7 +13771,7 @@ func TestAssetManageRBACProjectAssetMutationsDenyBeforeDecodeAndSideEffects(t *t
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			config, assertNoSideEffect := tt.build(authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(
 				http.MethodPost,
 				tt.path,
@@ -12585,7 +13820,7 @@ func TestAssetManageRBACProjectAssetMutationsDenyBeforeDecodeAndSideEffects(t *t
 func TestCreateAssetUsesTenantProjectActorRequestAndReturnsSanitizedAsset(t *testing.T) {
 	store := &recordingAssetMutationStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetMutationStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetMutationStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/assets",
@@ -12627,7 +13862,7 @@ func TestPatchAssetUsesTenantActorRequestAndReturnsSanitizedAsset(t *testing.T) 
 	authorizer := &recordingAuthorizer{}
 	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 	store := &recordingAssetMutationStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetMutationStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetMutationStore: store})
 	request := httptest.NewRequest(
 		http.MethodPatch,
 		"/v1/assets/asset-1",
@@ -12672,7 +13907,7 @@ func TestDeleteAssetUsesTenantActorRequestAndReturnsSanitizedResult(t *testing.T
 	authorizer := &recordingAuthorizer{}
 	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
 	store := &recordingAssetMutationStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetMutationStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: authorizer, AssetMutationStore: store})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/assets/asset-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -12705,7 +13940,7 @@ func TestDeleteAssetUsesTenantActorRequestAndReturnsSanitizedResult(t *testing.T
 
 func TestAssetMutationsFailClosedWithoutConfiguredStore(t *testing.T) {
 	reader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: reader, Authorizer: &recordingAuthorizer{}})
 	cases := []struct {
 		method string
 		path   string
@@ -12735,7 +13970,7 @@ func TestAssetMutationsFailClosedWithoutConfiguredStore(t *testing.T) {
 func TestBulkAssetActionUsesTenantProjectActorRequestAndReturnsSanitizedResult(t *testing.T) {
 	store := &recordingAssetBulkActionStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/assets/bulk-actions",
@@ -12782,7 +14017,7 @@ func TestBulkAssetActionUsesTenantProjectActorRequestAndReturnsSanitizedResult(t
 func TestAssetManageRBACBulkAssetActionDenyAfterValidationBeforeStore(t *testing.T) {
 	store := &recordingAssetBulkActionStore{}
 	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied for user-123 asset-1 prompt provider_response raw_body api-key encrypted credential_ref object-key draft manuscript"}}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/assets/bulk-actions",
@@ -12827,7 +14062,7 @@ func TestBulkAssetActionStoreFailureReturnsPublicMessage(t *testing.T) {
 		err: &assets.AppError{Code: "ASSET_BULK_ACTION_FAILED", Message: "failed asset-1 asset-2 body-tenant user-123 prompt provider_response raw_body content api_key encrypted_credential credential_ref object_key draft manuscript private prompt raw provider secret-key cred-1 obj-1 draft text manuscript text"},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetBulkActionStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/assets/bulk-actions",
@@ -12870,7 +14105,7 @@ func TestBulkAssetActionStoreFailureReturnsPublicMessage(t *testing.T) {
 func TestAuthSubjectBulkAssetActionRejectsInvalidBearerBeforeFallbackAndStore(t *testing.T) {
 	store := &recordingAssetBulkActionStore{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		AssetBulkActionStore: store,
 		SessionAuthSecret:    "test-secret",
 		Authorizer:           authorizer,
@@ -12913,7 +14148,7 @@ func TestAuthSubjectBulkAssetActionRejectsInvalidBearerBeforeFallbackAndStore(t 
 
 func TestBulkAssetActionFailsClosedWithoutConfiguredStore(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/assets/bulk-actions",
@@ -12948,7 +14183,7 @@ func TestBulkAssetActionFailsClosedWithoutConfiguredStore(t *testing.T) {
 func TestStartAssetIngestionCarriesTenantProjectActorRequestAndMaterialContext(t *testing.T) {
 	starter := &recordingAssetIngestionStarter{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetIngestionStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetIngestionStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/asset-ingestions",
@@ -12993,7 +14228,7 @@ func TestStartAssetIngestionCarriesTenantProjectActorRequestAndMaterialContext(t
 }
 
 func TestStartAssetIngestionFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/asset-ingestions", strings.NewReader(`{"material_text":"素材","hint_type":"note"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -13029,7 +14264,7 @@ func TestGetAssetIngestionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testing
 			UpdatedAt:    "2026-07-04T00:01:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, AssetIngestionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetIngestionReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/asset-ingestions/ingestion-run-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -13056,7 +14291,7 @@ func TestGetAssetIngestionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testing
 func TestStartStyleExtractionCarriesTenantProjectActorRequestAndSourceContext(t *testing.T) {
 	starter := &recordingStyleExtractionStarter{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, StyleExtractionStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, StyleExtractionStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/style-extractions",
@@ -13101,7 +14336,7 @@ func TestStartStyleExtractionCarriesTenantProjectActorRequestAndSourceContext(t 
 }
 
 func TestStartStyleExtractionFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/style-extractions", strings.NewReader(`{"material_text":"风格样本"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -13137,7 +14372,7 @@ func TestGetStyleExtractionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testin
 			UpdatedAt:    "2026-07-05T00:01:00Z",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StyleExtractionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StyleExtractionReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/style-extractions/style-run-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -13164,7 +14399,7 @@ func TestGetStyleExtractionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testin
 func TestStartAssetReindexCarriesTenantProjectActorRequestAndOptionsContext(t *testing.T) {
 	starter := &recordingAssetReindexStarter{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetReindexStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, AssetReindexStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/assets/reindex",
@@ -13212,7 +14447,7 @@ func TestStartAssetReindexCarriesTenantProjectActorRequestAndOptionsContext(t *t
 }
 
 func TestStartAssetReindexFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/assets/reindex", strings.NewReader(`{"scope":"project","mode":"keyword"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -13235,7 +14470,7 @@ func TestStartAssetReindexFailsClosedWithoutConfiguredStarter(t *testing.T) {
 
 func TestStartStoryGraphBuildCarriesTenantProjectActorRequestAndOptionsContext(t *testing.T) {
 	starter := &recordingStoryGraphBuildStarter{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StoryGraphBuildStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StoryGraphBuildStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/story-graph/builds",
@@ -13282,7 +14517,7 @@ func TestStartStoryGraphBuildCarriesTenantProjectActorRequestAndOptionsContext(t
 }
 
 func TestStartStoryGraphBuildFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/builds", strings.NewReader(`{"mode":"full"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -13304,7 +14539,7 @@ func TestStartStoryGraphBuildFailsClosedWithoutConfiguredStarter(t *testing.T) {
 
 func TestStartStoryGraphBondGenerationCarriesTenantProjectActorRequestSelectionAndOptionsContext(t *testing.T) {
 	starter := &recordingStoryGraphBondGenerationStarter{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, StoryGraphBondGenerationStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StoryGraphBondGenerationStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/story-graph/bond-generations",
@@ -13354,7 +14589,7 @@ func TestStartStoryGraphBondGenerationCarriesTenantProjectActorRequestSelectionA
 }
 
 func TestStartStoryGraphBondGenerationFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/bond-generations", strings.NewReader(`{"node_ids":["node-1","node-2"],"options":{"generate_bonds":true}}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -13389,7 +14624,7 @@ func TestGetStoryGraphCurrentUsesTenantProjectScopeAndPublicSnapshotMetadata(t *
 			UpdatedAt:         "2026-07-05T10:01:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/current", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -13416,7 +14651,7 @@ func TestGetStoryGraphCurrentUsesTenantProjectScopeAndPublicSnapshotMetadata(t *
 }
 
 func TestGetStoryGraphCurrentFailsClosedWithoutConfiguredReader(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/current", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -13447,7 +14682,7 @@ func TestAdoptStoryGraphCandidateUsesPathScopeCreativeWriteAndPublicResponse(t *
 			Status:     "adopted",
 		},
 	}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{
 		"tenant_id":"evil-tenant",
 		"project_id":"evil-project",
@@ -13489,7 +14724,7 @@ func TestAdoptStoryGraphCandidateUsesPathScopeCreativeWriteAndPublicResponse(t *
 func TestAdoptStoryGraphCandidateDenialStopsBeforeDecodeAndStore(t *testing.T) {
 	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied leaked prompt=secret api_key=sk-hidden draft=private"}}
 	store := &recordingStoryGraphCandidateAdoptionStore{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{this is not json and should not be decoded before auth}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -13521,7 +14756,7 @@ func TestAdoptStoryGraphCandidateStoreErrorUsesStablePublicMessage(t *testing.T)
 			Message: "driver leaked prompt=hidden api_key=sk-hidden credential_ref=secret object_key=private draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{"target_kind":"plot_thread"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -13551,7 +14786,7 @@ func TestAdoptStoryGraphCandidateStoreErrorUsesStablePublicMessage(t *testing.T)
 func TestAdoptStoryGraphCandidateRejectsInvalidBodyBeforeStoreSideEffects(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	store := &recordingStoryGraphCandidateAdoptionStore{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphCandidateAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/candidates/asset-candidate-1/adoptions", strings.NewReader(`{"target_kind":"relationship","api_key": "sk-hidden"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -13614,8 +14849,8 @@ func TestGetStoryGraphViewUsesTenantProjectScopeAndSanitizesPayload(t *testing.T
 			}},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
-	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/views/world?limit=50&types=character,organization&include_edges=true", nil)
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/views/world?limit=50&offset=300&types=character,organization&include_edges=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
 
@@ -13627,7 +14862,7 @@ func TestGetStoryGraphViewUsesTenantProjectScopeAndSanitizesPayload(t *testing.T
 	if reader.viewInput.TenantID != "tenant-123" || reader.viewInput.ProjectID != "project-123" || reader.viewInput.ViewID != "world" {
 		t.Fatalf("reader lost view context: %#v", reader.viewInput)
 	}
-	if reader.viewInput.Limit != 50 || !reader.viewInput.IncludeEdges || strings.Join(reader.viewInput.Types, ",") != "character,organization" {
+	if reader.viewInput.Limit != 50 || reader.viewInput.Offset != 300 || !reader.viewInput.IncludeEdges || strings.Join(reader.viewInput.Types, ",") != "character,organization" {
 		t.Fatalf("reader lost query options: %#v", reader.viewInput)
 	}
 	body := response.Body.String()
@@ -13670,7 +14905,7 @@ func TestGetStoryGraphNodeAndEdgeUseTenantProjectScope(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
 
 	nodeRequest := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1", nil)
 	nodeRequest.Header.Set("X-Tenant-Id", "tenant-123")
@@ -13724,7 +14959,7 @@ func TestGetStoryGraphEvidenceMetadataRemainsPublicReadSide(t *testing.T) {
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
 
 	requests := []struct {
 		path     string
@@ -13778,7 +15013,7 @@ func TestGetStoryGraphEvidenceProjectReadDenialStopsBeforeAccessCheckerAndReader
 			Message: "denied leaked prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private",
 		},
 	}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1/evidence?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -13809,7 +15044,7 @@ func TestGetStoryGraphEvidenceMalformedPathsStay404WithoutAuthOrReader(t *testin
 	reader := &recordingStoryGraphReader{}
 	access := &allowStoryGraphEvidenceAccessChecker{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access, SessionAuthSecret: "test-secret"})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access, SessionAuthSecret: "test-secret"})
 	for _, path := range []string{
 		"/v1/projects/project-123/story-graph/nodes//evidence",
 		"/v1/projects/project-123/story-graph/nodes/node-1/evidence/extra",
@@ -13867,7 +15102,7 @@ func TestGetStoryGraphLayoutAndClustersRequireProjectRead(t *testing.T) {
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, StoryGraphReader: reader})
 
 	requests := []struct {
 		path      string
@@ -13875,7 +15110,7 @@ func TestGetStoryGraphLayoutAndClustersRequireProjectRead(t *testing.T) {
 		projectID string
 	}{
 		{path: "/v1/projects/project-123/story-graph/layouts/world", expected: `"engine":"dagre"`, projectID: "project-123"},
-		{path: "/v1/projects/project-123/story-graph/clusters?limit=10", expected: `"cluster_key":"main"`, projectID: "project-123"},
+		{path: "/v1/projects/project-123/story-graph/clusters?limit=10&offset=20", expected: `"cluster_key":"main"`, projectID: "project-123"},
 	}
 	for _, item := range requests {
 		request := httptest.NewRequest(http.MethodGet, item.path, nil)
@@ -13911,14 +15146,46 @@ func TestGetStoryGraphLayoutAndClustersRequireProjectRead(t *testing.T) {
 	if reader.layoutInput.TenantID != "tenant-123" || reader.layoutInput.ProjectID != "project-123" || reader.layoutInput.ViewID != "world" {
 		t.Fatalf("reader lost layout context: %#v", reader.layoutInput)
 	}
-	if reader.clustersInput.TenantID != "tenant-123" || reader.clustersInput.ProjectID != "project-123" || reader.clustersInput.Limit != 10 {
+	if reader.clustersInput.TenantID != "tenant-123" || reader.clustersInput.ProjectID != "project-123" || reader.clustersInput.Limit != 10 || reader.clustersInput.Offset != 20 {
 		t.Fatalf("reader lost cluster context: %#v", reader.clustersInput)
+	}
+}
+
+func TestStoryGraphPaginationRejectsInvalidOffsetBeforeReader(t *testing.T) {
+	for _, item := range []struct {
+		name string
+		path string
+	}{
+		{name: "view negative", path: "/v1/projects/project-123/story-graph/views/world?offset=-1"},
+		{name: "view non integer", path: "/v1/projects/project-123/story-graph/views/world?offset=next"},
+		{name: "clusters negative", path: "/v1/projects/project-123/story-graph/clusters?offset=-1"},
+		{name: "clusters non integer", path: "/v1/projects/project-123/story-graph/clusters?offset=next"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			reader := &recordingStoryGraphReader{}
+			server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
+			request := httptest.NewRequest(http.MethodGet, item.path, nil)
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, response.Code, response.Body.String())
+			}
+			if reader.viewInput.ProjectID != "" || reader.clustersInput.ProjectID != "" {
+				t.Fatalf("invalid offset reached reader: view=%#v clusters=%#v", reader.viewInput, reader.clustersInput)
+			}
+			if !strings.Contains(response.Body.String(), `"code":"VALIDATION_FAILED"`) {
+				t.Fatalf("unexpected validation response: %s", response.Body.String())
+			}
+		})
 	}
 }
 
 func TestGetStoryGraphEvidenceFullSnippetRequiresPermission(t *testing.T) {
 	reader := &recordingStoryGraphReader{}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1/evidence?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -13965,7 +15232,7 @@ func TestGetStoryGraphEvidenceFullSnippetWhenAuthorized(t *testing.T) {
 		},
 	}
 	access := &allowStoryGraphEvidenceAccessChecker{}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, StoryGraphReader: reader, StoryGraphEvidenceAccess: access}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/nodes/node-1/evidence?include_full=true&limit=25", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -14002,7 +15269,7 @@ func TestStartSeedRunCarriesTenantProjectUploadActorAndRequestContext(t *testing
 			ParseStatus: "uploaded",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	requestBody := bytes.NewBufferString(`{
 		"tenant_id":"evil-tenant",
 		"upload_id":"upload-123",
@@ -14092,7 +15359,7 @@ func TestStartSeedRunSanitizesSensitiveRequestIDBeforeStarter(t *testing.T) {
 			ParseStatus: "uploaded",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -14116,7 +15383,7 @@ func TestStartSeedRunSanitizesSensitiveRequestIDBeforeStarter(t *testing.T) {
 }
 
 func TestErrorEnvelopeSanitizesSensitiveRequestIDHeader(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: &recordingSeedStarter{}, SourceFileStore: &recordingSourceFileStore{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: &recordingSeedStarter{}, SourceFileStore: &recordingSourceFileStore{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{
 		"upload_id":"upload-123",
 		"api_key":"sk-hidden"
@@ -14148,7 +15415,7 @@ func TestErrorEnvelopeSanitizesSensitiveRequestIDHeader(t *testing.T) {
 func TestStartSeedRunValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{
 		"upload_id":"upload-123",
 		"api_key":"sk-hidden"
@@ -14184,7 +15451,7 @@ func TestStartSeedRunSanitizesSourceFileValidationErrorAtHTTPBoundary(t *testing
 	sourceStore := &recordingSourceFileStore{
 		validateErr: sourcefiles.NewAppError("SOURCE_FILE_QUERY_FAILED", "driver exploded prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/project-123/source-files/upload-123/book.txt"),
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -14219,7 +15486,7 @@ func TestStartSeedRunSanitizesSourceFileValidationErrorAtHTTPBoundary(t *testing
 
 func TestStartSeedRunFailsClosedWithoutSourceFileBackendBeforeWorkflowStart(t *testing.T) {
 	starter := &recordingSeedStarter{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -14253,7 +15520,7 @@ func TestStartSeedRunFailsClosedWithoutSourceFileBackendBeforeWorkflowStart(t *t
 func TestStartSeedRunFailsWhenUploadDoesNotBelongToTenantProject(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{validateErr: sourcefiles.NewAppError("NOT_FOUND", "source file upload not found")}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-missing"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -14279,7 +15546,7 @@ func TestStartSeedRunFailsWhenUploadDoesNotBelongToTenantProject(t *testing.T) {
 func TestStartSeedRunFailsWhenUploadIsNotCompleted(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{validateErr: sourcefiles.NewAppError("SOURCE_FILE_NOT_UPLOADED", "source file upload must be completed before seed run")}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-pending"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -14316,7 +15583,7 @@ func TestStartSeedRunFailsClosedWithoutConfiguredStarter(t *testing.T) {
 			ParseStatus: "uploaded",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -14343,7 +15610,7 @@ func TestStartSeedRunFailsClosedWithoutConfiguredStarter(t *testing.T) {
 
 func TestGetWriterRunReturnsQueuedRunStatusFromAPI(t *testing.T) {
 	starter := workflows.NewLocalWriterStarter()
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: boundWriterComposerResolver()})
 	startRequest := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/writer-runs",
@@ -14373,7 +15640,7 @@ func TestGetWriterRunReturnsQueuedRunStatusFromAPI(t *testing.T) {
 	if err := json.NewDecoder(getResponse.Body).Decode(&body); err != nil {
 		t.Fatalf("decode get response: %v", err)
 	}
-	if body["run_id"] != started["run_id"] || body["trace_id"] != started["trace_id"] || body["project_id"] != "project-123" || body["status"] != "queued" {
+	if body["run_id"] != started["run_id"] || body["trace_id"] != started["trace_id"] || body["project_id"] != "project-123" || body["mode"] != "draft" || body["instruction"] != "写下一场谈判" || body["status"] != "queued" {
 		t.Fatalf("unexpected get body: %#v", body)
 	}
 }
@@ -14526,7 +15793,7 @@ func TestAuthSubjectGlobalRunReadsRejectInvalidBearerBeforeFallbackAndReaders(t 
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			config, assertReadersUnused := tt.config()
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "fallback-user")
@@ -14621,7 +15888,7 @@ func TestGlobalRunReadErrorsUseStablePublicMessages(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(tt.config())
+			server := newDevelopmentServer(tt.config())
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "user-123")
@@ -14733,7 +16000,7 @@ func TestMalformedGlobalRunReadPathsStay404WithoutAuthOrReaders(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			config, assertNoSideEffects := tt.config()
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "fallback-user")
@@ -14886,7 +16153,7 @@ func TestGlobalRunReadsAuthorizeReturnedProjectBeforeResponseOrEvents(t *testing
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			config, assertPreflight := tt.config(authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "actor-123")
@@ -15016,7 +16283,7 @@ func TestGlobalRunReadsRejectBlankOwnerProjectBeforeResponseOrEvents(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{}
 			config, assertPreflight := tt.config(authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "actor-123")
@@ -15228,7 +16495,7 @@ func TestGlobalRunControlsAuthorizeOwnerCreativeWriteBeforeSideEffects(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{}
 			config, assertSideEffect := tt.config(authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"project_id":"body-project","prompt":"private","api_key":"sk-hidden"}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -15270,6 +16537,7 @@ func TestGlobalWorkflowRunControlsUseCreativeWriteForCreativeWorkflows(t *testin
 		worldlineSessionWorkflowType,
 		worldlineStepWorkflowType,
 		worldlinePreparationWorkflowType,
+		worldlineAutoEvolutionWorkflowType,
 	} {
 		for _, tt := range []struct {
 			name string
@@ -15293,7 +16561,7 @@ func TestGlobalWorkflowRunControlsUseCreativeWriteForCreativeWorkflows(t *testin
 				}}
 				canceller := &recordingWorkflowCanceller{}
 				retrier := &recordingWorkflowRetrier{}
-				server := NewServer(Config{
+				server := newDevelopmentServer(Config{
 					WorkflowReader:    reader,
 					WorkflowCanceller: canceller,
 					WorkflowRetrier:   retrier,
@@ -15370,6 +16638,12 @@ func TestGlobalWorkflowRunControlsReachSideEffectsAfterMappedAuthorization(t *te
 			expectedPermission: auth.PermissionCreativeWrite,
 			expectCancel:       true,
 		},
+		{
+			name:               "worldline auto-evolution retry",
+			workflowType:       worldlineAutoEvolutionWorkflowType,
+			path:               "/v1/workflow-runs/run-mapped/retry",
+			expectedPermission: auth.PermissionCreativeWrite,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := &recordingWorkflowReader{
@@ -15383,7 +16657,7 @@ func TestGlobalWorkflowRunControlsReachSideEffectsAfterMappedAuthorization(t *te
 			authorizer := &recordingAuthorizer{}
 			canceller := &recordingWorkflowCanceller{}
 			retrier := &recordingWorkflowRetrier{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WorkflowReader:    reader,
 				WorkflowCanceller: canceller,
 				WorkflowRetrier:   retrier,
@@ -15496,7 +16770,7 @@ func TestGlobalWorkflowRunControlsUseAssetManageForAssetWorkflows(t *testing.T) 
 				Message: "creative writer denied prompt api_key credential_ref draft manuscript",
 			}}
 			config, assertNoSideEffect := tt.config(reader, authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"prompt":"private","api_key":"sk-hidden"}`))
 			request.Header.Set("X-Tenant-Id", "tenant-123")
 			request.Header.Set("X-User-Id", "actor-123")
@@ -15538,7 +16812,7 @@ func TestGlobalWorkflowRunControlsFailClosedForUnknownWorkflowType(t *testing.T)
 			authorizer := &recordingAuthorizer{}
 			canceller := &recordingWorkflowCanceller{}
 			retrier := &recordingWorkflowRetrier{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				WorkflowReader:    reader,
 				WorkflowCanceller: canceller,
 				WorkflowRetrier:   retrier,
@@ -15665,7 +16939,7 @@ func TestGlobalRunControlsDenyOwnerCreativeWriteBeforeSideEffectsAndSanitize(t *
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{err: deniedErr}
 			config, assertNoSideEffect := tt.config(authorizer)
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"mode":,"project_id":"body-project","draft":"private manuscript"}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -15813,7 +17087,7 @@ func TestGlobalRunControlsOwnerLookupErrorsAndBlankProjectFailClosedBeforeAuthOr
 			t.Run(tt.name+" "+name, func(t *testing.T) {
 				authorizer := &recordingAuthorizer{}
 				config, assertNoSideEffect := tt.config(useLookupErr, authorizer)
-				server := NewServer(config)
+				server := newDevelopmentServer(config)
 				request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"mode":,"api_key":"sk-hidden","prompt":"private"}`))
 				request.Header.Set("Content-Type", "application/json")
 				request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -15919,7 +17193,7 @@ func TestGlobalRunControlSideEffectErrorsAreSanitized(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(tt.config(authorizer))
+			server := newDevelopmentServer(tt.config(authorizer))
 			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"prompt":"private","api_key":"sk-hidden"}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -15957,7 +17231,7 @@ func TestMalformedGlobalRunControlPathsStay404WithoutActorOrSideEffects(t *testi
 	workflowRetrier := &recordingWorkflowRetrier{}
 	writerCanceller := &recordingWriterCanceller{}
 	writerStarter := &recordingStarter{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		SessionAuthSecret: "test-secret",
 		AuthSessionStore:  sessionStore,
 		Authorizer:        authorizer,
@@ -16120,7 +17394,7 @@ func TestGetWriterRunUsesConfiguredReader(t *testing.T) {
 			Status:    "completed",
 		},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:    &recordingAuthorizer{},
 		WriterStarter: &recordingStarter{},
 		WriterReader:  reader,
@@ -16162,7 +17436,7 @@ func TestGetWorkflowRunUsesConfiguredReaderAndReturnsPublicMetadata(t *testing.T
 			UpdatedAt:    "2026-07-04T01:02:00Z",
 		},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:     &recordingAuthorizer{},
 		WriterStarter:  &recordingStarter{},
 		WorkflowReader: reader,
@@ -16216,7 +17490,7 @@ func TestListSeedRunsUsesConfiguredReaderAndReturnsOnlyPublicMetadata(t *testing
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/seed-runs", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16255,7 +17529,7 @@ func TestGetProjectReadinessUsesTenantProjectScopeAndReturnsPublicSnapshot(t *te
 			UpdatedAt:              "2026-07-07T01:05:00Z",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, ProjectReadinessReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, ProjectReadinessReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/readiness", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16291,7 +17565,7 @@ func TestGetProjectReadinessSanitizesReaderErrorsAtHTTPBoundary(t *testing.T) {
 			Message: "driver exploded prompt=hidden api_key=sk-hidden credential_ref=cred-hidden readiness report body",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, ProjectReadinessReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, ProjectReadinessReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/readiness", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16355,7 +17629,7 @@ func TestGetProjectOverviewUsesTenantProjectScopeAndReturnsPublicRollup(t *testi
 			UpdatedAt:                     "2026-07-07T01:05:00Z",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/overview", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16415,7 +17689,7 @@ func TestGetProjectOverviewSanitizesReaderErrorsAtHTTPBoundary(t *testing.T) {
 			Message: "driver exploded prompt=hidden api_key=sk-hidden credential_ref=cred-hidden readiness report body draft manuscript",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, ProjectOverviewReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/overview", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16444,7 +17718,7 @@ func TestGetSeedRunRejectsNonSeedWorkflowRun(t *testing.T) {
 	reader := &recordingSeedRunReader{
 		getErr: &workflows.AppError{Code: "NOT_FOUND", Message: "seed run not found"},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/seed-runs/writer-run-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16491,7 +17765,7 @@ func TestGetSeedRunEventsUsesWorkflowEventReaderAndRedactsSensitivePayload(t *te
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedRunReader: seedReader, WorkflowEventReader: eventReader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedRunReader: seedReader, WorkflowEventReader: eventReader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/seed-runs/seed-run-1/events?after_event_id=evt-seed-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -16547,7 +17821,7 @@ func TestGetWriterRunEventsReturnsEventsAfterQueryCursor(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: runReader, WriterEventReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: runReader, WriterEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/writer-runs/run-123/events?after_event_id=evt-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -16615,7 +17889,7 @@ func TestGetWorkflowRunEventsReturnsEventsAfterQueryCursorAndSanitizesPayload(t 
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: runReader, WorkflowEventReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: runReader, WorkflowEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/workflow-runs/run-123/events?after_event_id=evt-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -16680,7 +17954,7 @@ func TestGetWorkflowRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: runReader, WorkflowEventReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: runReader, WorkflowEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/workflow-runs/run-123/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -16726,7 +18000,7 @@ func TestGetWriterRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: runReader, WriterEventReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: runReader, WriterEventReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/writer-runs/run-123/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -16754,7 +18028,7 @@ func TestGetWriterRunEventsSSEUsesLastEventIDForResume(t *testing.T) {
 func TestCancelWriterRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 	reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-123", Status: "running"}}
 	canceller := &recordingWriterCanceller{}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: reader, WriterCanceller: canceller})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: reader, WriterCanceller: canceller})
 	request := httptest.NewRequest(http.MethodPost, "/v1/writer-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -16810,7 +18084,7 @@ func TestGetManuscriptReturnsMetadataOnlyWithinTenantProject(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16857,7 +18131,7 @@ func TestGetManuscriptSanitizesInjectedValuesAtHTTPBoundary(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16892,7 +18166,7 @@ func TestGetManuscriptSanitizesInjectedValuesAtHTTPBoundary(t *testing.T) {
 
 func TestGetManuscriptRequiresTenantContext(t *testing.T) {
 	reader := &recordingManuscriptReader{}
-	server := NewServer(Config{ManuscriptReader: reader})
+	server := newDevelopmentServer(Config{ManuscriptReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
 	response := httptest.NewRecorder()
 
@@ -16907,7 +18181,7 @@ func TestGetManuscriptRequiresTenantContext(t *testing.T) {
 }
 
 func TestGetManuscriptFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16933,7 +18207,7 @@ func TestGetManuscriptSanitizesStoreErrorMessagesAtHTTPBoundary(t *testing.T) {
 			Message: "driver leaked content_text=private prompt=hidden api_key=sk-hidden credential_ref=cred draft=private manuscript=private",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16968,7 +18242,7 @@ func TestGetManuscriptExportReturnsManifestMetadataOnly(t *testing.T) {
 			}},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{ManuscriptReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export?format=metadata_manifest", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -16995,8 +18269,80 @@ func TestGetManuscriptExportReturnsManifestMetadataOnly(t *testing.T) {
 	assertHTTPBodyOmitsManuscriptPrivateFields(t, body)
 }
 
+func TestGetManuscriptExportTXTDownloadsRealArtifactAfterProjectReadAuthorization(t *testing.T) {
+	exporter := &recordingManuscriptArtifactExporter{result: workflows.ManuscriptArtifact{
+		ProjectID: "project-123", Format: "txt", FileName: "project-123-manuscript.txt",
+		ContentType: "text/plain; charset=utf-8", Content: []byte("adopted manuscript\n"),
+		SizeBytes: 19, SHA256: "public-sha256", BlockCount: 1,
+	}}
+	reader := &recordingManuscriptReader{}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{
+		ManuscriptReader: reader, ManuscriptArtifactExporter: exporter, Authorizer: authorizer,
+	})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export?format=txt", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	request.Header.Set("X-Request-Id", "req-artifact")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "adopted manuscript\n" {
+		t.Fatalf("unexpected artifact response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Disposition") != `attachment; filename="project-123-manuscript.txt"` ||
+		response.Header().Get("Cache-Control") != "private, no-store" ||
+		response.Header().Get("X-Content-SHA256") != "public-sha256" {
+		t.Fatalf("artifact response missing privacy/integrity headers: %#v", response.Header())
+	}
+	if !exporter.called || exporter.input.TenantID != "tenant-123" || exporter.input.ProjectID != "project-123" || exporter.input.Format != "txt" {
+		t.Fatalf("artifact exporter received unexpected input: %#v", exporter.input)
+	}
+	if reader.exportInput.ProjectID != "" {
+		t.Fatalf("TXT download reached metadata manifest reader: %#v", reader.exportInput)
+	}
+	assertSingleProjectReadAuthorizationForProject(t, authorizer, "user-123", "project-123", "req-artifact")
+}
+
+func TestGetManuscriptExportTXTEmptyOrUnconfiguredFailsClosed(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		exporter := &recordingManuscriptArtifactExporter{err: &workflows.AppError{
+			Code: "MANUSCRIPT_EMPTY", Message: "private manuscript content",
+		}}
+		server := newDevelopmentServer(Config{ManuscriptArtifactExporter: exporter, Authorizer: &recordingAuthorizer{}})
+		request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export?format=txt", nil)
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"MANUSCRIPT_EMPTY"`) {
+			t.Fatalf("unexpected empty artifact response: status=%d body=%s", response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "private manuscript content") {
+			t.Fatalf("artifact error leaked content: %s", response.Body.String())
+		}
+	})
+
+	t.Run("unconfigured", func(t *testing.T) {
+		server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}})
+		request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export?format=txt", nil)
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED"`) {
+			t.Fatalf("unexpected unconfigured artifact response: status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+}
+
 func TestGetManuscriptExportFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/manuscript/export", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -17026,7 +18372,7 @@ func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t
 			BlockOrder: 12,
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"chapter_id":"chapter-override",
@@ -17092,7 +18438,7 @@ func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t
 
 func TestAdoptDraftRejectsSceneOverrideUntilManuscriptBlocksSupportScenes(t *testing.T) {
 	store := &recordingDraftAdoptionStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"scene_id":"scene-123"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -17117,7 +18463,7 @@ func TestAdoptDraftSanitizesStoreErrorMessagesAtHTTPBoundary(t *testing.T) {
 			Message: "driver leaked prompt=hidden api_key=sk-hidden credential_ref=cred draft=private manuscript=private content_text=secret",
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"block_order":1}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -17140,7 +18486,7 @@ func TestAdoptDraftSanitizesStoreErrorMessagesAtHTTPBoundary(t *testing.T) {
 
 func TestAdoptDraftRequiresTenantContext(t *testing.T) {
 	store := &recordingDraftAdoptionStore{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{}`))
 	response := httptest.NewRecorder()
 
@@ -17155,7 +18501,7 @@ func TestAdoptDraftRequiresTenantContext(t *testing.T) {
 }
 
 func TestAdoptDraftFailsClosedWithoutConfiguredStore(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"block_order":1}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-Request-Id", "reqadopt")
@@ -17178,7 +18524,7 @@ func TestAdoptDraftFailsClosedWithoutConfiguredStore(t *testing.T) {
 func TestCancelWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "running"}}
 	canceller := &recordingWorkflowCanceller{}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader, WorkflowCanceller: canceller})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader, WorkflowCanceller: canceller})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17218,7 +18564,7 @@ func TestCancelSeedRunVerifiesSeedRunAndCarriesActorContext(t *testing.T) {
 		},
 	}
 	canceller := &recordingWorkflowCanceller{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        &recordingAuthorizer{},
 		WriterStarter:     &recordingStarter{},
 		SeedRunReader:     seedReader,
@@ -17258,7 +18604,7 @@ func TestCancelSeedRunRejectsNonSeedRunBeforeCallingBackend(t *testing.T) {
 		getErr: &workflows.AppError{Code: "NOT_FOUND", Message: "seed run not found"},
 	}
 	canceller := &recordingWorkflowCanceller{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:     &recordingStarter{},
 		SeedRunReader:     seedReader,
 		WorkflowCanceller: canceller,
@@ -17279,7 +18625,7 @@ func TestCancelSeedRunRejectsNonSeedRunBeforeCallingBackend(t *testing.T) {
 
 func TestCancelWorkflowRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "running"}}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17310,7 +18656,7 @@ func TestRetrySeedRunVerifiesSeedRunAndCarriesActorContext(t *testing.T) {
 		},
 	}
 	retrier := &recordingWorkflowRetrier{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:      &recordingAuthorizer{},
 		WriterStarter:   &recordingStarter{},
 		SeedRunReader:   seedReader,
@@ -17354,7 +18700,7 @@ func TestRetrySeedRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 			Status:       "failed",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedRunReader: seedReader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedRunReader: seedReader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/retry", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17386,7 +18732,7 @@ func TestRetrySeedSegmentsAuthorizesOwnerBeforeDecodeAndRetrier(t *testing.T) {
 	}
 	authorizer := &recordingAuthorizer{}
 	retrier := &recordingSeedSegmentRetrier{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:         authorizer,
 		SeedRunReader:      seedReader,
 		SeedSegmentRetrier: retrier,
@@ -17446,7 +18792,7 @@ func TestRetrySeedSegmentsDeniesBeforeJSONDecodeOrRetrier(t *testing.T) {
 		Message: "denied prompt provider_response api_key credential_ref object_key draft manuscript",
 	}}
 	retrier := &recordingSeedSegmentRetrier{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:         authorizer,
 		SeedRunReader:      seedReader,
 		SeedSegmentRetrier: retrier,
@@ -17497,7 +18843,7 @@ func TestRetrySeedSegmentsFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 			Status:       "failed",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, SeedRunReader: seedReader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, SeedRunReader: seedReader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/seed-runs/seed-run-123/segments/retry", strings.NewReader(`{"segment_ids":["segment-1"],"content":"private source","credential_ref":"cred-hidden"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -17537,7 +18883,7 @@ func TestRetrySeedSegmentsRetrierErrorsArePubliclySanitized(t *testing.T) {
 		Code:    "SEED_SEGMENT_RETRY_FAILED",
 		Message: "provider raw body content API key encrypted credential credential_ref object key draft manuscript prompt",
 	}}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:         &recordingAuthorizer{},
 		SeedRunReader:      seedReader,
 		SeedSegmentRetrier: retrier,
@@ -17579,7 +18925,7 @@ func TestRetrySeedSegmentsMalformedPathsRemain404WithoutSideEffects(t *testing.T
 			seedReader := &recordingSeedRunReader{run: workflows.WorkflowRun{RunID: "seed-run-123", ProjectID: "project-123"}}
 			authorizer := &recordingAuthorizer{}
 			retrier := &recordingSeedSegmentRetrier{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:         authorizer,
 				SeedRunReader:      seedReader,
 				SeedSegmentRetrier: retrier,
@@ -17611,7 +18957,7 @@ func TestRetrySeedSegmentsMalformedPathsRemain404WithoutSideEffects(t *testing.T
 func TestRetryWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "failed"}}
 	retrier := &recordingWorkflowRetrier{}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader, WorkflowRetrier: retrier})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader, WorkflowRetrier: retrier})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/retry", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17643,7 +18989,7 @@ func TestRetryWorkflowRunCarriesTenantRunActorAndRequestContext(t *testing.T) {
 
 func TestRetryWorkflowRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 	reader := &recordingWorkflowReader{run: workflows.WorkflowRun{RunID: "run-123", WorkflowType: workflows.WriterWorkflowType, ProjectID: "project-123", Status: "failed"}}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WorkflowReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/workflow-runs/run-123/retry", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17666,7 +19012,7 @@ func TestRetryWorkflowRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 
 func TestCancelWriterRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 	reader := &recordingWriterReader{run: workflows.WriterRun{RunID: "run-123", ProjectID: "project-123", Status: "running"}}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, WriterReader: reader})
 	request := httptest.NewRequest(http.MethodPost, "/v1/writer-runs/run-123/cancel", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17688,7 +19034,7 @@ func TestCancelWriterRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 }
 
 func TestStartAgentRuntimeHelloWithoutConfiguredStarterFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-runtime/hello-runs", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -17709,7 +19055,7 @@ func TestStartAgentRuntimeHelloWithoutConfiguredStarterFailsExplicitly(t *testin
 
 func TestStartAgentRuntimeHelloCarriesContext(t *testing.T) {
 	starter := &recordingHelloStarter{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:     &recordingStarter{},
 		AgentHelloStarter: starter,
 	})
@@ -17740,7 +19086,7 @@ func TestStartAgentRuntimeHelloCarriesContext(t *testing.T) {
 }
 
 func TestStartWriterRunRejectsMissingTenantContext(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, LLMResolver: boundWriterComposerResolver()})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, LLMResolver: boundWriterComposerResolver()})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -17760,7 +19106,7 @@ func TestStartWriterRunRejectsMissingTenantContext(t *testing.T) {
 }
 
 func TestStartWriterRunRejectsMissingLLMModuleBinding(t *testing.T) {
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMResolver: llm.NewStaticResolver(nil)})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMResolver: llm.NewStaticResolver(nil)})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -17783,7 +19129,7 @@ func TestStartWriterRunRejectsMissingLLMModuleBinding(t *testing.T) {
 
 func TestResolveLLMModuleBindingReturnsSanitizedResolution(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, LLMResolver: boundWriterComposerResolver()})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, LLMResolver: boundWriterComposerResolver()})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/module-bindings/writer_composer/resolution", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17830,7 +19176,7 @@ func TestProjectReadRBACLLMResolutionDenyStopsBeforeResolver(t *testing.T) {
 			Message: "resolution denied prompt=hidden api_key=sk-hidden credential_ref=cred-hidden",
 		},
 	}
-	server := NewServer(Config{Authorizer: authorizer, LLMResolver: resolver})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, LLMResolver: resolver})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/module-bindings/writer_composer/resolution", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -17869,7 +19215,7 @@ func TestAuthSubjectProjectReadLLMResolutionRejectsInvalidBearerBeforeFallbackAu
 		result: llm.ModuleResolution{ModuleKey: "writer_composer", ChannelID: "channel-1", ModelID: "model-1"},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        authorizer,
 		LLMResolver:       resolver,
 		SessionAuthSecret: "test-secret",
@@ -17919,7 +19265,7 @@ func TestListLLMModulesCarriesTenantProjectContextAndReturnsSanitizedRegistry(t 
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMModuleRegistry: registry}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMModuleRegistry: registry}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/modules", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -17976,7 +19322,7 @@ func TestGetLLMSettingsReturnsSanitizedTenantSnapshot(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMSettingsReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMSettingsReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/llm/settings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18003,7 +19349,7 @@ func TestGetLLMSettingsReturnsSanitizedTenantSnapshot(t *testing.T) {
 }
 
 func TestGetLLMSettingsWithoutReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/llm/settings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18036,7 +19382,7 @@ func TestListLLMModuleBindingsReturnsSanitizedProjectScopedRows(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/module-bindings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18096,7 +19442,7 @@ func TestRBACDefaultAuthorizerRequiresTenantAdminBeforeLLMModuleBindingMutationS
 				},
 			}
 			store := &recordingLLMBindingStore{}
-			server := NewServer(Config{AuthReader: authReader, LLMBindingStore: store})
+			server := newDevelopmentServer(Config{AuthReader: authReader, LLMBindingStore: store})
 			request := httptest.NewRequest(tt.method, "/v1/projects/project-123/llm/module-bindings/writer_composer", tt.body)
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -18141,7 +19487,7 @@ func TestUpsertLLMModuleBindingCarriesActorAndReturnsSanitizedBinding(t *testing
 			UpdatedAt:     "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
 	request := httptest.NewRequest(
 		http.MethodPut,
 		"/v1/projects/project-123/llm/module-bindings/writer_composer",
@@ -18191,7 +19537,7 @@ func TestDeleteLLMModuleBindingCarriesTenantProjectContext(t *testing.T) {
 			UpdatedAt:     "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMBindingStore: store})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/projects/project-123/llm/module-bindings/writer_composer", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18214,7 +19560,7 @@ func TestDeleteLLMModuleBindingCarriesTenantProjectContext(t *testing.T) {
 }
 
 func TestListLLMModuleBindingsWithoutStoreFailsExplicitly(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/module-bindings", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18251,7 +19597,7 @@ func TestListLLMChannelsReturnsSanitizedTenantProjectScopedRows(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMCatalogReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMCatalogReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/channels", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18291,7 +19637,7 @@ func TestListLLMModelsCarriesChannelContextAndReturnsSanitizedRows(t *testing.T)
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMCatalogReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMCatalogReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/channels/channel-1/models", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18318,22 +19664,23 @@ func TestListLLMModelsCarriesChannelContextAndReturnsSanitizedRows(t *testing.T)
 func TestCreateLLMChannelEncryptsCredentialAndReturnsSanitizedChannel(t *testing.T) {
 	store := &recordingLLMChannelStore{
 		created: llm.ChannelRecord{
-			ChannelID:      "channel-1",
-			Name:           "Draft Channel",
-			Provider:       "openai-compatible",
-			BaseURL:        "https://llm.example.test/v1",
-			MaxConcurrency: 4,
-			Enabled:        true,
-			Scope:          "tenant",
-			CreatedAt:      "2026-07-04T00:00:00Z",
-			UpdatedAt:      "2026-07-04T00:00:00Z",
+			ChannelID:             "channel-1",
+			Name:                  "Draft Channel",
+			Provider:              "openai-compatible",
+			BaseURL:               "https://llm.example.test/v1",
+			MaxConcurrency:        4,
+			ExternalProviderOptIn: true,
+			Enabled:               true,
+			Scope:                 "tenant",
+			CreatedAt:             "2026-07-04T00:00:00Z",
+			UpdatedAt:             "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/llm/channels",
-		bytes.NewBufferString(`{"name":"Draft Channel","provider":"openai-compatible","base_url":"https://llm.example.test/v1","api_key":"sk-secret","max_concurrency":4,"enabled":true}`),
+		bytes.NewBufferString(`{"name":"Draft Channel","provider":"openai-compatible","base_url":"https://llm.example.test/v1","api_key":"sk-secret","max_concurrency":4,"external_provider_opt_in":true,"enabled":true}`),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -18344,7 +19691,7 @@ func TestCreateLLMChannelEncryptsCredentialAndReturnsSanitizedChannel(t *testing
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, response.Code, response.Body.String())
 	}
-	if store.createInput.TenantID != "tenant-123" || store.createInput.Name != "Draft Channel" || store.createInput.APIKey != "sk-secret" {
+	if store.createInput.TenantID != "tenant-123" || store.createInput.Name != "Draft Channel" || store.createInput.APIKey != "sk-secret" || !store.createInput.ExternalProviderOptIn {
 		t.Fatalf("store lost create payload: %#v", store.createInput)
 	}
 	rawBody := response.Body.String()
@@ -18353,7 +19700,7 @@ func TestCreateLLMChannelEncryptsCredentialAndReturnsSanitizedChannel(t *testing
 			t.Fatalf("create channel leaked %s: %s", forbidden, rawBody)
 		}
 	}
-	if !strings.Contains(rawBody, `"channel_id":"channel-1"`) || !strings.Contains(rawBody, `"scope":"tenant"`) {
+	if !strings.Contains(rawBody, `"channel_id":"channel-1"`) || !strings.Contains(rawBody, `"scope":"tenant"`) || !strings.Contains(rawBody, `"external_provider_opt_in":true`) {
 		t.Fatalf("unexpected create body: %s", rawBody)
 	}
 }
@@ -18361,22 +19708,23 @@ func TestCreateLLMChannelEncryptsCredentialAndReturnsSanitizedChannel(t *testing
 func TestPatchLLMChannelCarriesTenantContextAndReturnsSanitizedChannel(t *testing.T) {
 	store := &recordingLLMChannelStore{
 		updated: llm.ChannelRecord{
-			ChannelID:      "channel-1",
-			Name:           "Renamed Channel",
-			Provider:       "openai-compatible",
-			BaseURL:        "https://llm.example.test/v1",
-			MaxConcurrency: 2,
-			Enabled:        false,
-			Scope:          "tenant",
-			CreatedAt:      "2026-07-04T00:00:00Z",
-			UpdatedAt:      "2026-07-04T00:00:00Z",
+			ChannelID:             "channel-1",
+			Name:                  "Renamed Channel",
+			Provider:              "openai-compatible",
+			BaseURL:               "https://llm.example.test/v1",
+			MaxConcurrency:        2,
+			ExternalProviderOptIn: true,
+			Enabled:               false,
+			Scope:                 "tenant",
+			CreatedAt:             "2026-07-04T00:00:00Z",
+			UpdatedAt:             "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
 	request := httptest.NewRequest(
 		http.MethodPatch,
 		"/v1/llm/channels/channel-1",
-		bytes.NewBufferString(`{"name":"Renamed Channel","base_url":"https://llm.example.test/v1","max_concurrency":2,"enabled":false}`),
+		bytes.NewBufferString(`{"name":"Renamed Channel","base_url":"https://llm.example.test/v1","max_concurrency":2,"external_provider_opt_in":true,"enabled":false}`),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -18392,6 +19740,9 @@ func TestPatchLLMChannelCarriesTenantContextAndReturnsSanitizedChannel(t *testin
 	}
 	if store.updateInput.Enabled {
 		t.Fatalf("store lost disabled flag: %#v", store.updateInput)
+	}
+	if !store.updateInput.ExternalProviderOptIn {
+		t.Fatalf("store lost external provider opt-in: %#v", store.updateInput)
 	}
 	rawBody := response.Body.String()
 	if strings.Contains(rawBody, "api_key") || strings.Contains(rawBody, "encrypted_api_key") || strings.Contains(rawBody, "credential_ref") {
@@ -18413,7 +19764,7 @@ func TestDeleteLLMChannelDisablesTenantChannel(t *testing.T) {
 			UpdatedAt:      "2026-07-04T00:00:00Z",
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMChannelStore: store})
 	request := httptest.NewRequest(http.MethodDelete, "/v1/llm/channels/channel-1", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18428,6 +19779,54 @@ func TestDeleteLLMChannelDisablesTenantChannel(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"enabled":false`) {
 		t.Fatalf("expected disabled channel response: %s", response.Body.String())
+	}
+}
+
+func TestPatchLLMChannelModelUpdatesMetadata(t *testing.T) {
+	store := &recordingLLMModelStore{
+		updated: llm.ModelRecord{
+			ModelID:       "gpt-5.5",
+			OwnedBy:       "provider",
+			ContextWindow: 128000,
+			SupportsTools: true,
+			SupportsJSON:  true,
+			InputCost:     0.001,
+			OutputCost:    0.002,
+			CreatedAt:     "2026-07-04T00:00:00Z",
+			UpdatedAt:     "2026-07-04T00:00:00Z",
+		},
+	}
+	server := newDevelopmentServer(Config{
+		Authorizer:    &recordingAuthorizer{},
+		WriterStarter: &recordingStarter{},
+		LLMModelStore: store,
+	})
+	request := httptest.NewRequest(
+		http.MethodPatch,
+		"/v1/llm/channels/channel-1/models/gpt-5.5",
+		bytes.NewBufferString(`{"context_window":128000,"supports_tools":true,"supports_json":true,"input_cost":0.001,"output_cost":0.002}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if store.updateInput.TenantID != "tenant-123" || store.updateInput.ChannelID != "channel-1" || store.updateInput.ModelID != "gpt-5.5" {
+		t.Fatalf("store lost model update context: %#v", store.updateInput)
+	}
+	if store.updateInput.ContextWindow == nil || *store.updateInput.ContextWindow != 128000 {
+		t.Fatalf("store lost context_window: %#v", store.updateInput)
+	}
+	if !store.updateInput.SupportsJSON || store.updateInput.InputCost == nil || *store.updateInput.InputCost != 0.001 {
+		t.Fatalf("store lost model metadata: %#v", store.updateInput)
+	}
+	rawBody := response.Body.String()
+	if !strings.Contains(rawBody, `"model_id":"gpt-5.5"`) || !strings.Contains(rawBody, `"context_window":128000`) {
+		t.Fatalf("unexpected model update body: %s", rawBody)
 	}
 }
 
@@ -18457,7 +19856,7 @@ func TestSyncLLMChannelModelsCarriesTenantContextAndReturnsSanitizedModels(t *te
 			},
 		},
 	}
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMModelSyncer: syncer})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, LLMModelSyncer: syncer})
 	request := httptest.NewRequest(http.MethodPost, "/v1/llm/channels/channel-1/sync-models", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18520,7 +19919,7 @@ func TestTenantLLMSettingsAndChannelManagementRBACDeniedBeforeDecodeAndSideEffec
 			channelStore := &recordingLLMChannelStore{}
 			modelSyncer := &recordingLLMModelSyncer{}
 			authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "denied actor=user-123 prompt=hidden api_key=sk-hidden credential_ref=secret draft=private manuscript=private"}}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				Authorizer:        authorizer,
 				LLMSettingsReader: settingsReader,
 				LLMChannelStore:   channelStore,
@@ -18579,7 +19978,7 @@ func TestTenantLLMChannelManagementMalformedPathsRemain404WithoutActorResolution
 			channelStore := &recordingLLMChannelStore{}
 			modelSyncer := &recordingLLMModelSyncer{}
 			authorizer := &recordingAuthorizer{}
-			server := NewServer(Config{
+			server := newDevelopmentServer(Config{
 				SessionAuthSecret: "test-secret",
 				Authorizer:        authorizer,
 				LLMChannelStore:   channelStore,
@@ -18607,7 +20006,7 @@ func TestTenantLLMChannelManagementMalformedPathsRemain404WithoutActorResolution
 }
 
 func TestCreateLLMChannelWithoutStoreFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/llm/channels",
@@ -18632,7 +20031,7 @@ func TestCreateLLMChannelWithoutStoreFailsExplicitly(t *testing.T) {
 }
 
 func TestListLLMChannelsWithoutCatalogReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/channels", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18670,7 +20069,7 @@ func TestListLLMActivityReturnsSanitizedTenantProjectScopedRows(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/activity?run_id=run_123&module_key=writer_composer", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18731,7 +20130,7 @@ func TestListLLMActivitySanitizesReaderErrorPayloadAtHTTPBoundary(t *testing.T) 
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/activity?run_id=550e8400-e29b-41d4-a716-446655440000&module_key=worldline_director", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18769,7 +20168,7 @@ func TestListLLMActivitySanitizesTelemetryQueryErrorAtHTTPBoundary(t *testing.T)
 			Message: "driver failed api_key=sk-leaked prompt=private credential_ref=secret-ref",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/activity?run_id=550e8400-e29b-41d4-a716-446655440000&module_key=worldline_director", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18806,7 +20205,7 @@ func TestListLLMUsageReturnsTenantProjectScopedSummary(t *testing.T) {
 			},
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/usage?run_id=run_123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18837,7 +20236,7 @@ func TestListLLMUsageSanitizesTelemetryQueryErrorAtHTTPBoundary(t *testing.T) {
 			Message: "usage driver failed api_key=sk-leaked prompt=private credential_ref=secret-ref",
 		},
 	}
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, LLMTelemetryReader: reader}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/usage?run_id=550e8400-e29b-41d4-a716-446655440000&module_key=worldline_director", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18863,7 +20262,7 @@ func TestListLLMUsageSanitizesTelemetryQueryErrorAtHTTPBoundary(t *testing.T) {
 }
 
 func TestListLLMActivityWithoutTelemetryReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
+	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/llm/activity", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18896,7 +20295,7 @@ func TestListAgentTraceEventsReturnsRedactedTenantProjectScopedRows(t *testing.T
 			},
 		},
 	}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18923,7 +20322,7 @@ func TestRBACDefaultAuthorizerDeniesRedactedTraceListBeforeReader(t *testing.T) 
 		},
 	}
 	reader := &recordingTraceReader{}
-	server := NewServer(Config{AuthReader: authReader, TraceReader: reader})
+	server := newDevelopmentServer(Config{AuthReader: authReader, TraceReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -18954,7 +20353,7 @@ func TestRBACDefaultAuthorizerDeniesRedactedTraceListBeforeReader(t *testing.T) 
 
 func TestListAgentTraceEventsFullPayloadRequiresPermission(t *testing.T) {
 	reader := &recordingTraceReader{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -18990,7 +20389,7 @@ func TestRBACFullTraceListDeniesWriterBeforeTraceAccessCheckerAndReader(t *testi
 	}
 	reader := &recordingTraceReader{}
 	access := &allowTraceAccessChecker{}
-	server := NewServer(Config{AuthReader: authReader, TraceReader: reader, TraceAccessChecker: access})
+	server := newDevelopmentServer(Config{AuthReader: authReader, TraceReader: reader, TraceAccessChecker: access})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -19038,7 +20437,7 @@ func TestListAgentTraceEventsFullPayloadWhenAuthorized(t *testing.T) {
 	}
 	access := &allowTraceAccessChecker{order: &order}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, TraceReader: reader, TraceAccessChecker: access})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, TraceReader: reader, TraceAccessChecker: access})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events?include_full=true", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -19066,7 +20465,7 @@ func TestListAgentTraceEventsFullPayloadWhenAuthorized(t *testing.T) {
 }
 
 func TestListAgentTraceEventsWithoutReaderFailsExplicitly(t *testing.T) {
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/agent-traces/trace-1/events", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	response := httptest.NewRecorder()
@@ -19088,7 +20487,7 @@ func TestListAgentTraceEventsWithoutReaderFailsExplicitly(t *testing.T) {
 func TestExportAgentTraceRequiresFullTracePermission(t *testing.T) {
 	reader := &recordingTraceReader{}
 	auditor := &recordingTraceExportAuditor{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader, TraceExportAuditor: auditor})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader, TraceExportAuditor: auditor})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -19114,7 +20513,7 @@ func TestProjectReadRBACListAssetsDefaultAuthorizerDeniesBeforeReader(t *testing
 	reader := &recordingAssetReader{
 		assets: []assets.Record{{AssetID: "asset-1", ProjectID: "project-123", Title: "should not be read"}},
 	}
-	server := NewServer(Config{AuthReader: authReader, AssetReader: reader})
+	server := newDevelopmentServer(Config{AuthReader: authReader, AssetReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/assets", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -19150,7 +20549,7 @@ func TestProjectReadRBACStoryGraphCurrentDenyAuthorizerStopsBeforeReader(t *test
 			Message: "no graph for you prompt=hidden api_key=sk-hidden credential_ref=cred-hidden",
 		},
 	}
-	server := NewServer(Config{Authorizer: authorizer, StoryGraphReader: reader})
+	server := newDevelopmentServer(Config{Authorizer: authorizer, StoryGraphReader: reader})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/story-graph/current", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
 	request.Header.Set("X-User-Id", "user-123")
@@ -19194,7 +20593,7 @@ func TestAuthSubjectProjectReadLLMActivityRejectsInvalidBearerBeforeFallbackAuth
 		activities: []llm.ActivityRecord{{ActivityID: "activity-1", ProjectID: "project-123", Status: "completed"}},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:         authorizer,
 		LLMTelemetryReader: reader,
 		SessionAuthSecret:  "test-secret",
@@ -19238,7 +20637,7 @@ func TestAuthSubjectProjectReadManuscriptExportUsesSignedCookieForAuthorizerAndR
 		},
 	}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:        authorizer,
 		ManuscriptReader:  reader,
 		SessionAuthSecret: "test-secret",
@@ -19279,7 +20678,7 @@ func TestRBACTraceExportProjectReadDenialHappensBeforeDecodeAuditAndReader(t *te
 	}
 	reader := &recordingTraceReader{}
 	auditor := &recordingTraceExportAuditor{}
-	server := NewServer(Config{AuthReader: authReader, TraceReader: reader, TraceExportAuditor: auditor})
+	server := newDevelopmentServer(Config{AuthReader: authReader, TraceReader: reader, TraceExportAuditor: auditor})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/agent-traces/trace-1/export",
@@ -19330,7 +20729,7 @@ func TestRBACTraceExportFullTraceDenialHappensBeforeValidationCheckerAuditAndRea
 			&auth.AppError{Code: auth.CodeAccessDenied, Message: "current user access is denied"},
 		},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:      &recordingStarter{},
 		Authorizer:         authorizer,
 		TraceReader:        reader,
@@ -19392,7 +20791,7 @@ func TestRBACTraceExportDuplicateIncludeFullTrueRequiresFullTracePermissionBefor
 			&auth.AppError{Code: auth.CodeAccessDenied, Message: "current user access is denied"},
 		},
 	}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:      &recordingStarter{},
 		Authorizer:         authorizer,
 		TraceReader:        reader,
@@ -19447,7 +20846,7 @@ func TestExportAgentTraceAuditsAndReturnsEvents(t *testing.T) {
 	access := &allowTraceAccessChecker{}
 	auditor := &recordingTraceExportAuditor{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		WriterStarter:      &recordingStarter{},
 		Authorizer:         authorizer,
 		TraceReader:        reader,
@@ -19498,7 +20897,7 @@ func TestAuthSubjectTraceExportUsesSignedCookieForFullAccessAndAudit(t *testing.
 	access := &allowTraceAccessChecker{}
 	auditor := &recordingTraceExportAuditor{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:         authorizer,
 		TraceReader:        reader,
 		TraceAccessChecker: access,
@@ -19539,7 +20938,7 @@ func TestAuthSubjectTraceExportRejectsInvalidBearerBeforeFallbackAndSideEffects(
 	access := &allowTraceAccessChecker{}
 	auditor := &recordingTraceExportAuditor{}
 	authorizer := &recordingAuthorizer{}
-	server := NewServer(Config{
+	server := newDevelopmentServer(Config{
 		Authorizer:         authorizer,
 		TraceReader:        reader,
 		TraceAccessChecker: access,
@@ -19578,7 +20977,7 @@ func TestAuthSubjectTraceExportRejectsInvalidBearerBeforeFallbackAndSideEffects(
 func TestExportAgentTraceWithoutAuditorFailsExplicitly(t *testing.T) {
 	reader := &recordingTraceReader{}
 	access := &allowTraceAccessChecker{}
-	server := NewServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader, TraceAccessChecker: access})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, TraceReader: reader, TraceAccessChecker: access})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-traces/trace-1/export", bytes.NewBufferString(`{"include_full":false}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -19652,7 +21051,7 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 			if tt.allowAuth {
 				config.Authorizer = &recordingAuthorizer{}
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -19684,6 +21083,303 @@ func TestLLMFacilityAndTraceValidationErrorsDoNotEchoDecoderDetails(t *testing.T
 				if strings.Contains(body, forbidden) {
 					t.Fatalf("LLM/trace validation response leaked forbidden detail %q: %s", forbidden, body)
 				}
+			}
+		})
+	}
+}
+
+func TestPlatformRateLimitStopsLoginAndSessionMutationsBeforeSideEffects(t *testing.T) {
+	t.Run("login proof is required before decode", func(t *testing.T) {
+		limiter := &recordingPlatformRateLimiter{decision: platformratelimit.Decision{Allowed: true}}
+		authenticator := &recordingPasswordAuthenticator{}
+		server := newDevelopmentServer(Config{
+			SessionAuthSecret: "test-secret", PasswordAuthenticator: authenticator,
+			AuthSessionStore: &recordingAuthSessionStore{}, RateLimiter: limiter,
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"password":"private-password"`))
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable || limiter.called || authenticator.called ||
+			!strings.Contains(response.Body.String(), `"code":"TRUSTED_CLIENT_PROOF_BACKEND_UNCONFIGURED"`) {
+			t.Fatalf("missing proof verifier did not fail before decode: status=%d limiter=%v auth=%v body=%s", response.Code, limiter.called, authenticator.called, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "private-password") {
+			t.Fatalf("proof configuration failure leaked login body: %s", response.Body.String())
+		}
+	})
+
+	t.Run("invalid login proof is rejected before decode", func(t *testing.T) {
+		limiter := &recordingPlatformRateLimiter{decision: platformratelimit.Decision{Allowed: true}}
+		authenticator := &recordingPasswordAuthenticator{}
+		server := newDevelopmentServer(Config{
+			SessionAuthSecret: "test-secret", PasswordAuthenticator: authenticator,
+			AuthSessionStore: &recordingAuthSessionStore{}, RateLimiter: limiter,
+			TrustedClientProofVerifier: recordingTrustedClientProofVerifier{err: errors.New("private proof detail")},
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"password":"private-password"`))
+		request.Header.Set(authrecovery.RecoveryClientProofHeader, "forged-proof")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden || limiter.called || authenticator.called ||
+			!strings.Contains(response.Body.String(), `"code":"TRUSTED_CLIENT_PROOF_INVALID"`) {
+			t.Fatalf("invalid proof did not fail before decode: status=%d limiter=%v auth=%v body=%s", response.Code, limiter.called, authenticator.called, response.Body.String())
+		}
+		for _, forbidden := range []string{"private-password", "forged-proof", "private proof detail"} {
+			if strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("invalid proof response leaked %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("login denied", func(t *testing.T) {
+		limiter := &recordingPlatformRateLimiter{decision: platformratelimit.Decision{Allowed: false, RetryAfter: 1500 * time.Millisecond}}
+		authenticator := &recordingPasswordAuthenticator{}
+		clientHash := strings.Repeat("a", 64)
+		server := newDevelopmentServer(Config{
+			SessionAuthSecret: "test-secret", PasswordAuthenticator: authenticator,
+			AuthSessionStore: &recordingAuthSessionStore{}, RateLimiter: limiter,
+			TrustedClientProofVerifier: recordingTrustedClientProofVerifier{result: clientHash},
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":" User@Example.Test ","password":"private-password"}`))
+		request.Header.Set(authrecovery.RecoveryClientProofHeader, "signed-client-proof")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "2" || authenticator.called {
+			t.Fatalf("rate-limited login reached authenticator: status=%d retry=%q called=%v body=%s", response.Code, response.Header().Get("Retry-After"), authenticator.called, response.Body.String())
+		}
+		if !limiter.called || limiter.input.Class != platformratelimit.ClassAuthLogin || !reflect.DeepEqual(limiter.input.KeyParts, []string{clientHash, "user@example.test"}) {
+			t.Fatalf("unexpected login rate-limit input: %#v", limiter.input)
+		}
+		for _, forbidden := range []string{"private-password", "user@example.test", clientHash, "signed-client-proof"} {
+			if strings.Contains(strings.ToLower(response.Body.String()), forbidden) {
+				t.Fatalf("rate-limit response leaked key material %q: %s", forbidden, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("session revoke denied", func(t *testing.T) {
+		limiter := &recordingPlatformRateLimiter{decision: platformratelimit.Decision{Allowed: false, RetryAfter: time.Second}}
+		store := &recordingAuthSessionStore{}
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret", AuthSessionStore: store, RateLimiter: limiter})
+		token := server.signSessionTokenForUserForTest(t, "user-123")
+		tokenHash := hashSessionToken(token)
+		request := httptest.NewRequest(http.MethodDelete, "/v1/auth/session", nil)
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		request.Header.Set(csrfHeaderName, server.sessionCSRFToken(tokenHash))
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusTooManyRequests || store.revokeCalled {
+			t.Fatalf("rate-limited session revoke reached mutation: status=%d revoke=%v body=%s", response.Code, store.revokeCalled, response.Body.String())
+		}
+		if limiter.input.Class != platformratelimit.ClassAuthSessionMutation || len(limiter.input.KeyParts) != 3 || limiter.input.KeyParts[0] != "user-123" || limiter.input.KeyParts[1] != tokenHash || limiter.input.KeyParts[2] != "revoke_current" {
+			t.Fatalf("unexpected session rate-limit input: %#v", limiter.input)
+		}
+	})
+
+	t.Run("backend failure", func(t *testing.T) {
+		limiter := &recordingPlatformRateLimiter{err: errors.New("redis private endpoint")}
+		authenticator := &recordingPasswordAuthenticator{}
+		server := newDevelopmentServer(Config{
+			SessionAuthSecret: "test-secret", PasswordAuthenticator: authenticator,
+			AuthSessionStore: &recordingAuthSessionStore{}, RateLimiter: limiter,
+			TrustedClientProofVerifier: recordingTrustedClientProofVerifier{result: strings.Repeat("b", 64)},
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":"user@example.test","password":"private-password"}`))
+		request.Header.Set(authrecovery.RecoveryClientProofHeader, "signed-client-proof")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable || authenticator.called || !strings.Contains(response.Body.String(), `"code":"RATE_LIMIT_BACKEND_UNAVAILABLE"`) {
+			t.Fatalf("unexpected limiter backend failure: status=%d called=%v body=%s", response.Code, authenticator.called, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "redis private endpoint") {
+			t.Fatalf("limiter error leaked backend detail: %s", response.Body.String())
+		}
+	})
+}
+
+func (s *Server) signSessionTokenForUserForTest(t *testing.T, userID string) string {
+	t.Helper()
+	token, ok := s.signSessionToken(userID)
+	if !ok {
+		t.Fatal("sign session token")
+	}
+	return token
+}
+
+func TestAssetCatalogRouteFailsClosedAndCarriesResolvedActorContext(t *testing.T) {
+	path := "/v1/projects/project-123/asset-catalog/assets/asset-123"
+
+	t.Run("unconfigured", func(t *testing.T) {
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ASSET_CATALOG_BACKEND_UNCONFIGURED"`) {
+			t.Fatalf("unexpected unconfigured asset catalog response: status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("configured", func(t *testing.T) {
+		called := false
+		handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			called = true
+			userID, ok := ActorUserIDFromContext(request.Context())
+			if !ok || userID != "user-123" {
+				t.Fatalf("asset catalog handler lost resolved actor context: user=%q ok=%v", userID, ok)
+			}
+			response.WriteHeader(http.StatusNoContent)
+		})
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret", AssetCatalogHandler: handler})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNoContent || !called {
+			t.Fatalf("configured asset catalog handler was not reached: status=%d called=%v", response.Code, called)
+		}
+	})
+
+	t.Run("invalid bearer", func(t *testing.T) {
+		called := false
+		server := newDevelopmentServer(Config{
+			SessionAuthSecret: "test-secret",
+			AssetCatalogHandler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called = true
+			}),
+		})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer invalid")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized || called {
+			t.Fatalf("invalid bearer reached asset catalog handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+		}
+	})
+}
+
+func TestManuscriptExportDownloadRouteUsesMountedAuthenticatedHandler(t *testing.T) {
+	path := "/v1/projects/project-123/manuscript/exports/export-123/download"
+
+	t.Run("unconfigured", func(t *testing.T) {
+		server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED"`) {
+			t.Fatalf("unexpected unconfigured manuscript export response: status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("configured", func(t *testing.T) {
+		called := false
+		server := newDevelopmentServer(Config{
+			SessionAuthSecret: "test-secret",
+			ManuscriptExportHandler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				called = true
+				userID, ok := ActorUserIDFromContext(request.Context())
+				if !ok || userID != "user-123" {
+					t.Fatalf("manuscript export handler lost actor context: user=%q ok=%v", userID, ok)
+				}
+				response.WriteHeader(http.StatusNoContent)
+			}),
+		})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNoContent || !called {
+			t.Fatalf("configured manuscript export handler was not reached: status=%d called=%v", response.Code, called)
+		}
+	})
+}
+
+func TestManuscriptWorkspaceMountedMatcherCoversPublicCommandMethods(t *testing.T) {
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPut, path: "/v1/projects/project-123/manuscript-workspace/blocks/block-123/tags"},
+		{method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/blocks/block-123/move"},
+		{method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/commands"},
+		{method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/exports"},
+		{method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/dedup-patterns/pattern-123/accept"},
+		{method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/dedup-extractions"},
+	} {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			called := false
+			server := newDevelopmentServer(Config{ManuscriptWorkspaceHandler: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				called = true
+				response.WriteHeader(http.StatusNoContent)
+			})})
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if response.Code != http.StatusNoContent || !called {
+				t.Fatalf("workspace route missed mounted handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestWriterPlanningMountedRoutesUseExactShapes(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		writer    bool
+		wantMatch bool
+	}{
+		{name: "book generation", method: http.MethodPost, path: "/v1/projects/project-123/book-plans/plan-123/generations", writer: true, wantMatch: true},
+		{name: "book generation wrong method", method: http.MethodGet, path: "/v1/projects/project-123/book-plans/plan-123/generations", writer: true},
+		{name: "book generation extra segment", method: http.MethodPost, path: "/v1/projects/project-123/book-plans/plan-123/generations/extra", writer: true},
+		{name: "dedup extraction", method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/dedup-extractions", wantMatch: true},
+		{name: "dedup extraction wrong method", method: http.MethodGet, path: "/v1/projects/project-123/manuscript-workspace/dedup-extractions"},
+		{name: "dedup extraction extra segment", method: http.MethodPost, path: "/v1/projects/project-123/manuscript-workspace/dedup-extractions/extra"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				called = true
+				if actor, ok := ActorUserIDFromContext(request.Context()); !ok || actor != "user-123" {
+					t.Fatalf("mounted planning route lost actor context: actor=%q ok=%v", actor, ok)
+				}
+				response.WriteHeader(http.StatusNoContent)
+			})
+			config := Config{}
+			if test.writer {
+				config.WriterWorkspaceHandler = handler
+			} else {
+				config.ManuscriptWorkspaceHandler = handler
+			}
+			server := newDevelopmentServer(config)
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if test.wantMatch {
+				if response.Code != http.StatusNoContent || !called {
+					t.Fatalf("exact planning route missed mounted handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+				}
+				return
+			}
+			if response.Code != http.StatusNotFound || called {
+				t.Fatalf("malformed planning route reached handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
 			}
 		})
 	}
@@ -19839,7 +21535,7 @@ func TestLLMFacilityRoutesSanitizeStoreErrorMessagesAtHTTPBoundary(t *testing.T)
 			if strings.HasPrefix(tt.path, "/v1/llm/") {
 				config.Authorizer = &recordingAuthorizer{}
 			}
-			server := NewServer(config)
+			server := newDevelopmentServer(config)
 			body := tt.body
 			if body == "" {
 				body = `{}`
@@ -19892,10 +21588,13 @@ func (s *recordingHelloStarter) StartHelloAgent(ctx context.Context, input workf
 type recordingLLMTelemetryReader struct {
 	activityInput llm.ActivityQueryInput
 	usageInput    llm.UsageQueryInput
+	billingInput  llm.BillingUsageQuery
 	activities    []llm.ActivityRecord
 	usage         []llm.UsageRecord
+	billing       []llm.BillingUsageRecord
 	activityErr   error
 	usageErr      error
+	billingErr    error
 }
 
 type recordingLLMSettingsReader struct {
@@ -19929,6 +21628,12 @@ type recordingLLMChannelStore struct {
 	created     llm.ChannelRecord
 	updated     llm.ChannelRecord
 	deleted     llm.ChannelRecord
+	err         error
+}
+
+type recordingLLMModelStore struct {
+	updateInput llm.UpdateModelInput
+	updated     llm.ModelRecord
 	err         error
 }
 
@@ -20032,6 +21737,14 @@ func (s *recordingLLMChannelStore) DeleteChannel(ctx context.Context, input llm.
 	return s.deleted, nil
 }
 
+func (s *recordingLLMModelStore) UpdateModel(ctx context.Context, input llm.UpdateModelInput) (llm.ModelRecord, error) {
+	s.updateInput = input
+	if s.err != nil {
+		return llm.ModelRecord{}, s.err
+	}
+	return s.updated, nil
+}
+
 func (r *recordingLLMModuleRegistry) ListModules(ctx context.Context, input llm.ModuleRegistryInput) ([]llm.ModuleRecord, error) {
 	r.input = input
 	return r.modules, r.err
@@ -20061,6 +21774,14 @@ func (r *recordingLLMTelemetryReader) ListUsage(ctx context.Context, input llm.U
 		return nil, r.usageErr
 	}
 	return r.usage, nil
+}
+
+func (r *recordingLLMTelemetryReader) BillingUsage(ctx context.Context, input llm.BillingUsageQuery) ([]llm.BillingUsageRecord, error) {
+	r.billingInput = input
+	if r.billingErr != nil {
+		return nil, r.billingErr
+	}
+	return r.billing, nil
 }
 
 type recordingTraceReader struct {

@@ -1,4 +1,4 @@
-import { GuideShell } from "../../../../../../components/guide-shell";
+import { redirect } from "next/navigation";
 
 export default async function GuidePage({
   params,
@@ -7,5 +7,5 @@ export default async function GuidePage({
 }) {
   const { tenantSlug, projectId } = await params;
 
-  return <GuideShell projectId={projectId} tenantSlug={tenantSlug} />;
+  redirect(`/${tenantSlug}/projects/${projectId}/overview`);
 }

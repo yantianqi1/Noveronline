@@ -37,6 +37,45 @@ describe("validateWriterWorkflowPayload", () => {
     expect(payload.options.module_key).toBe("writer_composer");
   });
 
+  it("maps Character Console target chapter and scene options into the runtime draft target", () => {
+    const payload = validateWriterWorkflowPayload({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      trace_id: "trace_1",
+      requested_by: "usr_1",
+      mode: "draft",
+      instruction: "Rewrite the saved interaction as a chapter scene.",
+      options: {
+        module_key: "writer_composer",
+        source: "character_console",
+        character_interaction_id: "interaction-1",
+        target_chapter_id: "chapter-1",
+        target_scene_id: "scene-1"
+      }
+    });
+
+    expect(payload.chapter_id).toBe("chapter-1");
+    expect(payload.scene_id).toBe("scene-1");
+  });
+
+  it("maps explicit asset, graph, and worldline references from admission options", () => {
+    const payload = validateWriterWorkflowPayload({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1", trace_id: "trace_1",
+      requested_by: "usr_1", mode: "draft", instruction: "Use selected references.",
+      options: {
+        module_key: "writer_composer",
+        selected_asset_ids: ["asset-1"],
+        graph_node_ids: ["node-1"],
+        worldline_path_ids: ["path-1"]
+      }
+    });
+
+    expect(payload.selected_asset_ids).toEqual(["asset-1"]);
+    expect(payload.graph_node_ids).toEqual(["node-1"]);
+    expect(payload.worldline_path_ids).toEqual(["path-1"]);
+  });
+
   it("fails explicitly when runtime context is incomplete", () => {
     expect(() =>
       validateWriterWorkflowPayload({

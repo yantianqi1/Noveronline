@@ -27,6 +27,7 @@ func TestSQLModelSyncerSyncsOpenAICompatibleModelsWithDecryptedCredential(t *tes
 					encryptedKey,
 					4,
 					true,
+					true,
 					"2026-07-04T00:00:00Z",
 					"2026-07-04T00:00:00Z",
 				}},
@@ -39,6 +40,7 @@ func TestSQLModelSyncerSyncsOpenAICompatibleModelsWithDecryptedCredential(t *tes
 						"openai-compatible",
 						"https://llm.example.test/v1",
 						4,
+						true,
 						true,
 						"2026-07-04T01:00:00Z",
 						"ok:2",
@@ -61,6 +63,7 @@ func TestSQLModelSyncerSyncsOpenAICompatibleModelsWithDecryptedCredential(t *tes
 						"openai-compatible",
 						"https://llm.example.test/v1",
 						4,
+						true,
 						true,
 						"2026-07-04T01:00:00Z",
 						"ok:2",
@@ -101,7 +104,7 @@ func TestSQLModelSyncerSyncsOpenAICompatibleModelsWithDecryptedCredential(t *tes
 	if err != nil {
 		t.Fatalf("sync models: %v", err)
 	}
-	if provider.input.APIKey != "sk-live" || provider.input.BaseURL != "https://llm.example.test/v1" || provider.input.Provider != "openai-compatible" {
+	if provider.input.APIKey != "sk-live" || provider.input.BaseURL != "https://llm.example.test/v1" || provider.input.Provider != "openai-compatible" || !provider.input.ExternalProviderOptIn {
 		t.Fatalf("provider did not receive explicit channel credential/context: %#v", provider.input)
 	}
 	if result.Channel.ChannelID != "channel-1" || result.Channel.LastSyncStatus != "ok:2" {
@@ -144,6 +147,7 @@ func TestSQLModelSyncerRecordsExplicitFailureStatusWhenProviderFails(t *testing.
 					encryptedKey,
 					4,
 					true,
+					true,
 					"2026-07-04T00:00:00Z",
 					"2026-07-04T00:00:00Z",
 				}},
@@ -155,6 +159,7 @@ func TestSQLModelSyncerRecordsExplicitFailureStatusWhenProviderFails(t *testing.
 					"openai-compatible",
 					"https://llm.example.test/v1",
 					4,
+					true,
 					true,
 					"2026-07-04T01:00:00Z",
 					"failed:LLM_PROVIDER_ERROR",

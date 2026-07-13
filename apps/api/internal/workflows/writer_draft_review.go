@@ -203,6 +203,8 @@ func (s *SQLDraftReviewStore) ListDraftReviews(ctx context.Context, input ListDr
   issues.summary,
   issues.suggestion,
   issues.status,
+  issues.created_at::text,
+  issues.updated_at::text,
   reviews.created_at::text,
   reviews.updated_at::text
 FROM draft_reviews reviews
@@ -234,6 +236,8 @@ ORDER BY reviews.created_at DESC, issues.created_at ASC`
 		var summary sql.NullString
 		var suggestion sql.NullString
 		var issueStatus sql.NullString
+		var issueCreatedAt sql.NullString
+		var issueUpdatedAt sql.NullString
 		var createdAt string
 		var updatedAt string
 		if err := rows.Scan(
@@ -248,6 +252,8 @@ ORDER BY reviews.created_at DESC, issues.created_at ASC`
 			&summary,
 			&suggestion,
 			&issueStatus,
+			&issueCreatedAt,
+			&issueUpdatedAt,
 			&createdAt,
 			&updatedAt,
 		); err != nil {
@@ -279,6 +285,8 @@ ORDER BY reviews.created_at DESC, issues.created_at ASC`
 				Summary:    publicDraftReviewText(summary.String),
 				Suggestion: publicDraftReviewText(suggestion.String),
 				Status:     issueStatus.String,
+				CreatedAt:  issueCreatedAt.String,
+				UpdatedAt:  issueUpdatedAt.String,
 			})
 		}
 	}

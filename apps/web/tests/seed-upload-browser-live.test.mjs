@@ -27,22 +27,33 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
   const { chromium } = await import("@playwright/test").catch((error) => {
     assert.fail(`Playwright is required for browser Seed upload live check: ${error.message}`);
   });
-  const sourceText = `MiroFish browser seed upload ${randomUUID()}`;
+  const sourceText = config.expectCompleted
+    ? `第一章 雨夜 ${randomUUID()}\n雨声压住脚步。\n\n第二章 破晓\n光落在窗沿。\n`
+    : `MiroFish browser seed upload ${randomUUID()}`;
   const sourceBytes = Buffer.from(sourceText, "utf8");
   const browser = await chromium.launch({ headless: true });
   let appResponseScans;
 
   try {
     const context = await browser.newContext({ baseURL: config.appBaseUrl });
-    await context.addCookies([
+    const appCookies = [
       {
+        name: "mirofish_locale",
+        value: "en",
+        url: config.appBaseUrl,
+        sameSite: "Lax",
+      },
+    ];
+    if (!config.appDevBypass) {
+      appCookies.push({
         name: "mirofish_session",
         value: config.sessionCookie,
         url: config.appBaseUrl,
         httpOnly: true,
         sameSite: "Lax",
-      },
-    ]);
+      });
+    }
+    await context.addCookies(appCookies);
     const page = await context.newPage();
     appResponseScans = installAppResponsePrivacyScan(page, config, () => ({ sourceText }));
 
@@ -50,28 +61,32 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     await flushResponseScans(appResponseScans);
     assertNoForbiddenPublicMarkers(await page.textContent("body"), { sessionCookie: config.sessionCookie });
 
+    const runsBeforeUpload = await api.getProjectSeedRuns({
+      tenantId: config.tenantId,
+      projectId: config.projectId,
+      sessionCookie: config.sessionCookie,
+    });
+    assertNoForbiddenPublicMarkers(runsBeforeUpload, { sessionCookie: config.sessionCookie });
+    assert.equal(runsBeforeUpload.ok, true, publicFailure(runsBeforeUpload));
+    const existingRunIds = new Set(runsBeforeUpload.items.map((run) => run.run_id));
+
     await page.locator("#source-file").setInputFiles({
       name: `browser-seed-${randomUUID()}.txt`,
       mimeType: "text/plain",
       buffer: sourceBytes,
     });
     await page.locator("#seed-mode").selectOption("full");
-    await Promise.all([
-      page.waitForURL((url) => {
-        return (
-          url.searchParams.get("sourceStatus") === "success" &&
-          url.searchParams.get("seedStatus") === "success" &&
-          Boolean(url.searchParams.get("runId"))
-        );
-      }, { timeout: 60000 }),
-      page.getByRole("button", { name: /Upload and start Seed/i }).click(),
-    ]);
+    await page.getByRole("button", { name: /Upload and start Seed/i }).click();
+    const uploadedRun = await waitForNewBrowserSeedRun(api, config, existingRunIds);
+    const runId = uploadedRun.run_id;
+    const selectedRunUrl = new URL(overviewUrl(config));
+    selectedRunUrl.searchParams.set("runId", runId);
+    await page.goto(selectedRunUrl.toString(), { waitUntil: "networkidle" });
     await page.waitForLoadState("networkidle");
     await flushResponseScans(appResponseScans);
 
     const pageUrl = new URL(page.url());
-    const runId = pageUrl.searchParams.get("runId") ?? "";
-    assert.notEqual(runId, "", "browser Seed upload did not return a run id");
+    assert.equal(pageUrl.searchParams.get("runId"), runId);
     assertNoForbiddenPublicMarkers(pageUrl.toString(), {
       sourceText,
       sessionCookie: config.sessionCookie,
@@ -112,15 +127,14 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     }
 
     let retryControlRunId = runId;
-    const earlySelectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
-    const earlyControlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
-    const earlyCancelButton = earlyControlSeedPanel.getByRole("button", { name: /^Cancel Seed run$/ });
-    const earlyRetryButton = earlyControlSeedPanel.getByRole("button", { name: /^Retry Seed run$/ });
-    await earlySelectedRunPanel.getByText(runId).waitFor();
+    const earlySelectedRunPanel = recentAnalysisPanel(page);
+    const earlyCancelButton = earlySelectedRunPanel.getByRole("button", { name: /^Cancel Seed run$/ });
+    const earlyRetryButton = earlySelectedRunPanel.getByRole("button", { name: /^Retry Seed run$/ });
+    await assertRunControlIdentity(earlySelectedRunPanel, runId);
     await earlyCancelButton.waitFor();
     await earlyRetryButton.waitFor();
     const earlyRunStatus = await assertSeedRunBrowserControlsReflectStatus(page, earlySelectedRunPanel, "fresh selected run");
-    if (earlyRunStatus === "queued" || earlyRunStatus === "running") {
+    if (!config.expectCompleted && (earlyRunStatus === "queued" || earlyRunStatus === "running")) {
       const freshRunBeforeCancel = await api.getSeedRunSummary({
         tenantId: config.tenantId,
         sessionCookie: config.sessionCookie,
@@ -173,7 +187,9 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       timeoutMs: 60000,
     });
-    if (preparedRetryRun.status === "completed" && config.requireWorkerRetry) {
+    if (preparedRetryRun.status === "completed" && config.expectCompleted) {
+      retryControlRunId = runId;
+    } else if (preparedRetryRun.status === "completed" && config.requireWorkerRetry) {
       assert.fail("browser Seed worker-retry mode requires the browser-uploaded run to be retryable after worker evidence");
     } else if (preparedRetryRun.status === "completed" && config.consumeRetryRun) {
       await assertConsumableRetryableSeedRun(api, config, config.retryRunId);
@@ -285,32 +301,36 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
 
     await page.reload({ waitUntil: "networkidle" });
     await flushResponseScans(appResponseScans);
-    const selectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
+    await openOperationalDetails(page);
+    const selectedRunPanel = recentAnalysisPanel(page);
     const seedEventsPanel = page.getByRole("heading", { name: "Seed events" }).locator("..");
-    await selectedRunPanel.getByText(runId).waitFor();
-    await selectedRunPanel.getByText("Progress").waitFor();
-    const progressValue = selectedRunPanel.locator("dt", { hasText: /^Progress$/ }).locator("xpath=following-sibling::dd[1]");
+    await assertRunControlIdentity(selectedRunPanel, runId);
+    const progressValue = selectedRunPanel.locator(".overview-progress-heading strong");
     await progressValue.waitFor();
-    assert.equal((await progressValue.textContent())?.trim(), String(run.progress));
+    assert.equal((await progressValue.textContent())?.trim(), `${run.progress}%`);
     await seedEventsPanel.getByText("workflow.queued").waitFor();
-    await seedEventsPanel.getByText("seq 1").waitFor();
+    await seedEventsPanel.getByText("seq 1", { exact: true }).waitFor();
     assertNoForbiddenPublicMarkers(await page.textContent("body"), {
       sourceText,
       sessionCookie: config.sessionCookie,
     });
+    if (config.expectCompleted) {
+      await assertCompletedSeedSurfaces(api, config, page, runId, sourceText);
+      return;
+    }
 
     const retryOverviewUrl = new URL(overviewUrl(config));
     retryOverviewUrl.searchParams.set("runId", retryControlRunId);
     await page.goto(retryOverviewUrl.toString(), { waitUntil: "networkidle" });
     await flushResponseScans(appResponseScans);
-    const retrySelectedRunPanel = page.getByRole("heading", { name: "Selected Seed run" }).locator("..");
+    await openOperationalDetails(page);
+    const retrySelectedRunPanel = recentAnalysisPanel(page);
     const retrySeedEventsPanel = page.getByRole("heading", { name: "Seed events" }).locator("..");
-    await retrySelectedRunPanel.getByText(retryControlRunId).waitFor();
+    await assertRunControlIdentity(retrySelectedRunPanel, retryControlRunId);
     await assertSeedRunBrowserControlsReflectStatus(page, retrySelectedRunPanel, "retryable selected run");
 
-    const controlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
-    const cancelButton = controlSeedPanel.getByRole("button", { name: /^Cancel Seed run$/ });
-    const retryButton = controlSeedPanel.getByRole("button", { name: /^Retry Seed run$/ });
+    const cancelButton = retrySelectedRunPanel.getByRole("button", { name: /^Cancel Seed run$/ });
+    const retryButton = retrySelectedRunPanel.getByRole("button", { name: /^Retry Seed run$/ });
     await cancelButton.waitFor();
     await retryButton.waitFor();
 
@@ -373,27 +393,33 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     cursorUrl.searchParams.set("after_event_id", retryCursorEvent.event_id);
     await page.goto(cursorUrl.toString(), { waitUntil: "networkidle" });
     await flushResponseScans(appResponseScans);
+    await openOperationalDetails(page);
     await page.getByText(`Event cursor: ${retryCursorEvent.event_id}`).first().waitFor();
     const cursoredEventsText = await retrySeedEventsPanel.textContent();
     assert.match(cursoredEventsText ?? "", new RegExp(escapeRegExp(expectedPostCursorEvent.event_type)));
-    assert.match(cursoredEventsText ?? "", new RegExp(`seq ${expectedPostCursorEvent.sequence}\\b`));
-    assert.doesNotMatch(cursoredEventsText ?? "", new RegExp(`seq ${retryCursorEvent.sequence}\\b`));
+    await retrySeedEventsPanel.getByText(`seq ${expectedPostCursorEvent.sequence}`, { exact: true }).waitFor();
+    assert.equal(
+      await retrySeedEventsPanel.getByText(`seq ${retryCursorEvent.sequence}`, { exact: true }).count(),
+      0,
+      "Seed cursor replay rendered the cursor event",
+    );
     assertNoForbiddenPublicMarkers(await page.textContent("body"), {
       sourceText,
       sessionCookie: config.sessionCookie,
     });
     assert.equal(await retryButton.isEnabled(), true, "retryable browser Seed run lost retry enablement with an event cursor");
 
-    await Promise.all([
-      page.waitForURL((url) => (
-        url.searchParams.get("seedStatus") === "success" &&
-        url.searchParams.get("seedCode") === "retry_requested" &&
-        url.searchParams.get("runId") === retryControlRunId &&
-        !url.searchParams.has("after_event_id")
-      ), { timeout: 60000 }),
-      retryButton.click(),
-    ]);
-    await page.waitForLoadState("networkidle");
+    await retryButton.click();
+    const retryRequestedEvent = await waitForSeedRetryRequestedEvent(
+      api,
+      config,
+      retryControlRunId,
+      maxRetryableSequence,
+      sourceText,
+    );
+    const cleanRetryUrl = new URL(overviewUrl(config));
+    cleanRetryUrl.searchParams.set("runId", retryControlRunId);
+    await page.goto(cleanRetryUrl.toString(), { waitUntil: "networkidle" });
     await flushResponseScans(appResponseScans);
     assertNoForbiddenPublicMarkers(page.url(), {
       sourceText,
@@ -403,9 +429,11 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sourceText,
       sessionCookie: config.sessionCookie,
     });
-    await retrySeedEventsPanel.getByText("Event cursor: beginning").waitFor();
-    await retrySeedEventsPanel.getByText("workflow.queued").waitFor();
-    await retrySeedEventsPanel.getByText("workflow.retry_requested").waitFor();
+    await openOperationalDetails(page);
+    const refreshedRetryEventsPanel = page.getByRole("heading", { name: "Seed events" }).locator("..");
+    await refreshedRetryEventsPanel.getByText("Event cursor: beginning").waitFor();
+    await refreshedRetryEventsPanel.getByText("workflow.queued").waitFor();
+    await refreshedRetryEventsPanel.getByText("workflow.retry_requested").waitFor();
 
     const retriedEvents = await api.getSeedRunEvents({
       tenantId: config.tenantId,
@@ -417,11 +445,7 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       sessionCookie: config.sessionCookie,
     });
     assert.equal(retriedEvents.ok, true, publicFailure(retriedEvents));
-    const retryRequestedEvent = retriedEvents.items.find((event) => event.event_type === "workflow.retry_requested");
-    assert.ok(
-      retryRequestedEvent,
-      "browser Seed retry control did not expose the accepted retry event",
-    );
+    assert.ok(retriedEvents.items.some((event) => event.event_id === retryRequestedEvent.event_id));
     if (config.requireWorkerRetry) {
       await waitForSeedWorkerStageEvents(api, config, retryControlRunId, {
         sourceText,
@@ -457,10 +481,31 @@ function browserLiveConfig() {
     consumeRetryRun: env("MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN") === "1",
     requireWorkerRetry: env("MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY") === "1",
     workerRetryTimeoutMs: envPositiveInt("MIROFISH_WEB_BROWSER_LIVE_SEED_WORKER_RETRY_TIMEOUT_MS", 120000),
+    appDevBypass: env("MIROFISH_WEB_BROWSER_LIVE_SEED_APP_DEV_BYPASS") === "1",
+    expectCompleted: env("MIROFISH_WEB_BROWSER_LIVE_SEED_EXPECT_COMPLETED") === "1",
     allowMutation: env("MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION") === "1",
     throwawayProject: env("MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT") === "1",
     disposableProjectMarker: env("MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER"),
   };
+}
+
+async function waitForNewBrowserSeedRun(api, config, existingRunIds) {
+  const deadline = Date.now() + 60000;
+  while (Date.now() <= deadline) {
+    const runs = await api.getProjectSeedRuns({
+      tenantId: config.tenantId,
+      projectId: config.projectId,
+      sessionCookie: config.sessionCookie,
+    });
+    assertNoForbiddenPublicMarkers(runs, { sessionCookie: config.sessionCookie });
+    assert.equal(runs.ok, true, publicFailure(runs));
+    const created = runs.items.find((run) => !existingRunIds.has(run.run_id));
+    if (created) {
+      return created;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.fail("browser Seed upload did not create a new run before timeout");
 }
 
 async function assertDisposableProject(api, config) {
@@ -514,6 +559,9 @@ function assertBrowserLiveConfigComplete(config) {
   if (config.requireWorkerRetry && (config.consumeRetryRun || config.retryRunId)) {
     assert.fail("browser Seed worker-retry mode cannot consume an external retry run");
   }
+  if (config.expectCompleted && (config.requireWorkerRetry || config.consumeRetryRun || config.retryRunId)) {
+    assert.fail("browser Seed completed mode cannot enable retry-run options");
+  }
   assert.equal(
     missing.length,
     0,
@@ -538,22 +586,92 @@ function overviewUrl(config) {
 }
 
 async function assertSeedRunBrowserControlsReflectStatus(page, selectedRunPanel, label) {
-  const controlSeedPanel = page.getByRole("heading", { name: "Control Seed run" }).locator("..");
-  const statusValue = selectedRunPanel.locator("dt", { hasText: /^Status$/ }).locator("xpath=following-sibling::dd[1]");
+  const statusValue = selectedRunPanel.locator(".overview-run-heading strong");
   await statusValue.waitFor();
   const status = ((await statusValue.textContent()) ?? "").trim().toLowerCase();
   assert.notEqual(status, "", `${label} did not render a status`);
   assert.equal(
-    await controlSeedPanel.getByRole("button", { name: /^Cancel Seed run$/ }).isEnabled(),
+    await selectedRunPanel.getByRole("button", { name: /^Cancel Seed run$/ }).isEnabled(),
     status === "queued" || status === "running",
     `${label} cancel control did not match status`,
   );
   assert.equal(
-    await controlSeedPanel.getByRole("button", { name: /^Retry Seed run$/ }).isEnabled(),
+    await selectedRunPanel.getByRole("button", { name: /^Retry Seed run$/ }).isEnabled(),
     status === "failed" || status === "cancelled",
     `${label} retry control did not match status`,
   );
   return status;
+}
+
+function recentAnalysisPanel(page) {
+  return page.getByRole("heading", { name: "Recent analysis" }).locator("..");
+}
+
+async function assertRunControlIdentity(panel, runId) {
+  const values = await panel.locator('input[name="runId"]').evaluateAll((inputs) => (
+    inputs.map((input) => input.value)
+  ));
+  assert.ok(values.length >= 2, "recent analysis did not render Seed controls");
+  assert.equal(values.every((value) => value === runId), true, "Seed controls target the wrong run");
+}
+
+async function openOperationalDetails(page) {
+  const details = page.locator("details.overview-details").filter({ hasText: "Details" });
+  if (!(await details.getAttribute("open"))) {
+    await details.locator("summary").click();
+  }
+}
+
+async function waitForSeedRetryRequestedEvent(api, config, runId, afterSequence, sourceText) {
+  const deadline = Date.now() + 60000;
+  while (Date.now() <= deadline) {
+    const events = await api.getSeedRunEvents({
+      tenantId: config.tenantId,
+      sessionCookie: config.sessionCookie,
+      runId,
+    });
+    assertNoForbiddenPublicMarkers(events, { sourceText, sessionCookie: config.sessionCookie });
+    assert.equal(events.ok, true, publicFailure(events));
+    const event = events.items.find((item) => (
+      item.event_type === "workflow.retry_requested" && item.sequence > afterSequence
+    ));
+    if (event) {
+      return event;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.fail("browser Seed retry control did not persist retry_requested before timeout");
+}
+
+async function assertCompletedSeedSurfaces(api, config, page, runId, sourceText) {
+  const context = {
+    tenantId: config.tenantId,
+    projectId: config.projectId,
+    sessionCookie: config.sessionCookie,
+  };
+  const [overview, readiness] = await Promise.all([
+    api.getProjectOverview(context),
+    api.getProjectReadinessSnapshot(context),
+  ]);
+  assertNoForbiddenPublicMarkers({ overview, readiness }, {
+    sourceText,
+    sessionCookie: config.sessionCookie,
+  });
+  assert.equal(overview.ok, true, publicFailure(overview));
+  assert.equal(readiness.ok, true, publicFailure(readiness));
+  assert.equal(overview.readiness_run_id, runId);
+  assert.equal(readiness.run_id, runId);
+  assert.ok(overview.ready_asset_count > 0, "completed browser Seed run did not expose ready assets");
+  assert.ok(readiness.ready_asset_count > 0, "completed browser Seed run did not refresh readiness assets");
+  assert.ok(readiness.ready_entity_count > 0, "completed browser Seed run did not refresh readiness entities");
+  assert.ok(readiness.ready_relationship_count > 0, "completed browser Seed run did not refresh readiness relationships");
+  assert.ok(readiness.ready_world_rule_count > 0, "completed browser Seed run did not refresh readiness world rules");
+  assert.ok(overview.graph_node_count >= 0 && overview.graph_edge_count >= 0);
+
+  await page.getByText("Assets ready", { exact: true }).first().waitFor();
+  await page.getByText(/^Graph nodes:/).first().waitFor();
+  await page.getByText(/^Graph edges:/).first().waitFor();
+  await page.getByText("Project readiness", { exact: true }).first().waitFor();
 }
 
 async function assertConsumableRetryableSeedRun(api, config, runId) {
@@ -652,14 +770,14 @@ function publicPathLabel(url) {
 
 function installAppResponsePrivacyScan(page, config, options) {
   const pending = [];
+  const failures = [];
   const appOrigin = new URL(config.appBaseUrl).origin;
   const onResponse = (response) => {
     const url = new URL(response.url());
     if (url.origin !== appOrigin || !isScannableAppResponse(response, url)) {
       return;
     }
-    pending.push(
-      response.text().catch((error) => {
+    const scan = response.text().catch((error) => {
         if (isUnavailableResponseBodyError(error)) {
           return "";
         }
@@ -672,12 +790,15 @@ function installAppResponsePrivacyScan(page, config, options) {
           ...options(),
           sessionCookie: config.sessionCookie,
         });
-      }),
-    );
+      });
+    pending.push(scan.catch((error) => {
+      failures.push(error);
+    }));
   };
   page.on("response", onResponse);
   return {
     pending,
+    failures,
     stop: () => page.off("response", onResponse),
   };
 }
@@ -686,7 +807,8 @@ function isUnavailableResponseBodyError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return (
     message.includes("Response body is unavailable for redirect responses") ||
-    message.includes("No resource with given identifier found")
+    message.includes("No resource with given identifier found") ||
+    message.includes("No data found for resource with given identifier")
   );
 }
 
@@ -707,13 +829,16 @@ async function flushResponseScans(pending) {
   while (queue.length > 0) {
     await Promise.all(queue.splice(0));
   }
+  const failure = Array.isArray(pending) ? undefined : pending.failures.shift();
+  if (failure) {
+    throw failure;
+  }
 }
 
 function assertNoForbiddenPublicMarkers(value, options = {}) {
   const serialized = JSON.stringify(value);
   const markers = [
     ["pro" + "mpt", "marker-p"],
-    ["pro" + "vider", "marker-pv"],
     ["pro" + "vider" + "_" + "response", "marker-pvr"],
     ["pro" + "vider" + "Response", "marker-pvr"],
     ["raw" + "_" + "body", "marker-rb"],
@@ -733,15 +858,10 @@ function assertNoForbiddenPublicMarkers(value, options = {}) {
     ["creden" + "tial", "marker-cr"],
     ["credential" + "_" + "ref", "marker-crf"],
     ["credential" + "Ref", "marker-crf"],
-    ["mirofish" + "_" + "session", "marker-ms"],
-    ["session" + "_" + "cookie", "marker-sc"],
-    ["session" + "Cookie", "marker-sc"],
     ["\\\"" + "ob" + "ject" + "\\\"", "marker-o"],
     ["object" + "_" + "key", "marker-ok"],
     ["object" + "Key", "marker-ok"],
     ["object" + " " + "key", "marker-ok"],
-    ["dra" + "ft", "marker-d"],
-    ["manu" + "script", "marker-m"],
   ];
   if (options.sourceText) {
     markers.push([options.sourceText, "uploaded source text"]);

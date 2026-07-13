@@ -6,17 +6,23 @@ FORBIDDEN_MARKERS = (
     "LLM_BASE_URL",
     "LLM_MODEL_NAME",
 )
-TEXT_SUFFIXES = {".py", ".js", ".vue", ".md", ".txt", ".json", ".example"}
+TEXT_SUFFIXES = {".py", ".js", ".mjs", ".ts", ".tsx", ".md", ".txt", ".json", ".example"}
 
 
 def test_runtime_surfaces_do_not_reference_legacy_llm_env_vars():
     repo_root = Path(__file__).resolve().parents[2]
     targets = [
         repo_root / "backend" / "app",
-        repo_root / "frontend" / "src",
+        repo_root / "apps" / "web" / "app",
+        repo_root / "apps" / "web" / "components",
+        repo_root / "apps" / "web" / "lib",
         repo_root / "README.md",
+        repo_root / "AGENTS.md",
+        repo_root / "CLAUDE.md",
+        repo_root / "CONTRIBUTING.md",
         repo_root / ".env.example",
-        repo_root / "docs" / "CODEX_HANDOFF_GUIDE.md",
+        repo_root / "docs" / "refactor-saas" / "DEVELOPMENT_PLAN.md",
+        repo_root / "docs" / "refactor-saas" / "24-current-development-progress.md",
     ]
 
     violations = []

@@ -1,4 +1,9 @@
+import { ChevronRight, GitBranch } from "lucide-react";
+
+import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import type {
+  AssetListSummary,
+  StoryGraphViewSummary,
   WorldlineEventsSummary,
   WorldlinePreparationSummary,
   WorldlinePreparedAgentsSummary,
@@ -6,18 +11,32 @@ import type {
   WorldlineSessionsSummary,
   WorldlineTimelineSummary,
 } from "../lib/api";
+import { tx, type Locale } from "../lib/locale";
+import { SubmitButton } from "./submit-button";
+import { WorkspaceHeader } from "./workspace-header";
+import { WorkspaceModeSwitcher } from "./workspace-mode-switcher";
 
 type WorldlineShellProps = {
+  locale: Locale;
   tenantSlug: string;
   projectId: string;
   savedPaths: WorldlineSavedPathsSummary;
   sessions: WorldlineSessionsSummary;
   timeline: WorldlineTimelineSummary;
   events: WorldlineEventsSummary;
+  pathEvents: WorldlineEventsSummary;
   preparation: WorldlinePreparationSummary;
   preparedAgents: WorldlinePreparedAgentsSummary;
+  assets: AssetListSummary;
+  graphView: StoryGraphViewSummary;
+  selectedSessionId: string;
+  selectedAgentRefs: string[];
+  selectedSourceRefs: string[];
+  selectWorldlineSessionAction: (formData: FormData) => Promise<void>;
+  refreshWorldlinePreparationAction: (formData: FormData) => Promise<void>;
   startWorldlineSessionAction: (formData: FormData) => Promise<void>;
   startWorldlineStepAction: (formData: FormData) => Promise<void>;
+  startWorldlineAutoEvolutionAction: (formData: FormData) => Promise<void>;
   createWorldlinePreparationAction: (formData: FormData) => Promise<void>;
   injectWorldlineVariableAction: (formData: FormData) => Promise<void>;
   createWorldlineSavedPathAction: (formData: FormData) => Promise<void>;
@@ -30,6 +49,12 @@ type WorldlineShellProps = {
     runId: string;
   };
   worldlineStepStatus: {
+    status: string;
+    code: string;
+    message: string;
+    runId: string;
+  };
+  worldlineAutoStatus: {
     status: string;
     code: string;
     message: string;
@@ -68,16 +93,26 @@ type WorldlineShellProps = {
 };
 
 export function WorldlineShell({
-  tenantSlug,
+  locale,
   projectId,
+  tenantSlug,
   savedPaths,
   sessions,
   timeline,
   events,
+  pathEvents,
   preparation,
   preparedAgents,
+  assets,
+  graphView,
+  selectedSessionId,
+  selectedAgentRefs,
+  selectedSourceRefs,
+  selectWorldlineSessionAction,
+  refreshWorldlinePreparationAction,
   startWorldlineSessionAction,
   startWorldlineStepAction,
+  startWorldlineAutoEvolutionAction,
   createWorldlinePreparationAction,
   injectWorldlineVariableAction,
   createWorldlineSavedPathAction,
@@ -85,245 +120,244 @@ export function WorldlineShell({
   updateWorldlineEventAction,
   worldlineSessionStatus,
   worldlineStepStatus,
+  worldlineAutoStatus,
   worldlinePreparationStatus,
   worldlineVariableStatus,
   worldlineSavedPathStatus,
   worldlineEventAdoptionStatus,
   worldlineEventMutationStatus,
 }: WorldlineShellProps) {
-  const latestSessionId = sessions.ok && sessions.items.length > 0 ? sessions.items[0].session_id : "";
+  const activeSessions = sessions.ok
+    ? sessions.items.filter((session) => session.lifecycle === "active")
+    : [];
+  const activeSessionId = activeSessions.some((session) => session.session_id === selectedSessionId)
+    ? selectedSessionId
+    : activeSessions[0]?.session_id ?? "";
 
   return (
-    <div>
-      <header>
-        <p className="eyebrow">Worldline</p>
-        <h1>Worldline</h1>
-        <p>
-          Tenant <strong>{tenantSlug}</strong> / Project <strong>{projectId}</strong>
-        </p>
-        <div className="status-row">
-          <span className="status-pill">
-            Saved paths: {savedPaths.ok ? savedPaths.items.length : savedPaths.code}
-          </span>
-          <span className="status-pill">
-            Sessions: {sessions.ok ? sessions.items.length : sessions.code}
-          </span>
-          <span className="status-pill">
-            Timeline: {timeline.ok ? timeline.items.length : timeline.code}
-          </span>
-          <span className="status-pill">
-            Events: {events.ok ? events.items.length : events.code}
-          </span>
-          <span className="status-pill">
-            Preparation: {preparation.ok ? preparation.status : preparation.code}
-          </span>
-          <span className="status-pill">Current world</span>
-        </div>
-      </header>
+    <div className="worldline-root">
+      <WorkspaceHeader
+        className="worldline-header"
+        eyebrow={<Bi zh="世界线" en="Worldline" />}
+        icon={<GitBranch size={22} strokeWidth={1.8} />}
+        meta={(
+          <>
+            <span className="status-pill"><Bi zh="当前世界" en="Current world" />: {activeSessionId ? <Bi zh="进行中" en="active" /> : <Bi zh="尚未开始" en="not started" />}</span>
+            <span className="status-pill">
+              <Bi zh="时间线" en="Timeline" />: {timeline.ok ? timeline.items.length : tx(locale, "暂不可用", "unavailable")}
+            </span>
+            <span className="status-pill">
+              <Bi zh="候选事件" en="Candidates" />: {events.ok ? events.items.length : tx(locale, "暂不可用", "unavailable")}
+            </span>
+          </>
+        )}
+        title={<Bi zh="世界线" en="Worldline" />}
+      />
 
-      <div className="workbench-grid" style={{ marginTop: 20 }}>
+      <div className="workbench-grid worldline-workbench">
         <main>
-          <section className="panel" aria-labelledby="start-session-heading">
-            <p className="eyebrow">Session</p>
-            <h2 id="start-session-heading">Start session</h2>
+          <WorkspaceModeSwitcher
+            aria-label={tx(locale, "世界线工作模式", "Worldline workspace mode")}
+            defaultMode={activeSessionId ? "simulate" : "start"}
+            modes={[
+              { id: "start", label: <Bi zh="开始" en="Start" /> },
+              { id: "simulate", label: <Bi zh="推演" en="Simulate" /> },
+              { id: "records", label: <Bi zh="记录" en="Records" /> },
+            ]}
+            panels={{
+              start: (
+          <section className="panel" aria-labelledby="start-session-heading" data-worldline-mode="start">
+            <p className="eyebrow"><Bi zh="推演" en="Session" /></p>
+            <h2 id="start-session-heading"><Bi zh="开始推演" en="Start session" /></h2>
             <StatusLine worldlineSessionStatus={worldlineSessionStatus} />
             <form action={startWorldlineSessionAction} className="binding-form">
-              <label htmlFor="worldline-session-goal">Goal</label>
+              <label htmlFor="worldline-session-goal"><Bi zh="目标" en="Goal" /></label>
               <textarea
                 id="worldline-session-goal"
                 name="goal"
-                placeholder="Explore one concrete current-world consequence"
+                placeholder={tx(locale, "描述本次推演要探索的情节结果", "Describe the story consequence to explore")}
                 required
                 rows={4}
               />
 
-              <label htmlFor="worldline-anchor-path">Anchor path</label>
+              <label htmlFor="worldline-anchor-path"><Bi zh="参考路径" en="Anchor path" /></label>
               {savedPaths.ok && savedPaths.items.length > 0 ? (
                 <select id="worldline-anchor-path" name="anchorPathId" defaultValue="">
-                  <option value="">No anchor path</option>
-                  {savedPaths.items.map((path) => (
+                  <option value="">{tx(locale, "不使用参考路径", "No anchor path")}</option>
+                  {savedPaths.items.map((path, index) => (
                     <option key={path.path_id} value={path.path_id}>
-                      {path.title || path.path_id}
+                      {path.title || tx(locale, `未命名路径 ${index + 1}`, `Untitled path ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="worldline-anchor-path"
                   name="anchorPathId"
-                  placeholder="Optional saved path id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无参考路径", "No saved path available")}</option></select>
               )}
-              <p className="form-hint">
-                WORLDLINE_SESSION_BACKEND_UNCONFIGURED appears until a real session backend is wired.
-              </p>
-              <button type="submit">Start session</button>
+              <SubmitButton idleLabel={<Bi zh="开始推演" en="Start session" />} pendingLabel={<Bi zh="启动中…" en="Starting…" />} />
             </form>
           </section>
-
+              ),
+              records: (
+                <>
           <section
             aria-labelledby="saved-paths-heading"
             className={`panel ${savedPaths.ok ? "" : "error-box"}`}
+            data-worldline-mode="records"
           >
-            <p className="eyebrow">References</p>
-            <h2 id="saved-paths-heading">Saved paths</h2>
+            <p className="eyebrow"><Bi zh="参考" en="References" /></p>
+            <h2 id="saved-paths-heading"><Bi zh="已保存路径" en="Saved paths" /></h2>
             <SavedPathList savedPaths={savedPaths} />
           </section>
 
           <section
             aria-labelledby="session-history-heading"
             className={`panel ${sessions.ok ? "" : "error-box"}`}
+            data-worldline-mode="records"
           >
-            <p className="eyebrow">Sessions</p>
-            <h2 id="session-history-heading">Session history</h2>
+            <p className="eyebrow"><Bi zh="历史" en="Sessions" /></p>
+            <h2 id="session-history-heading"><Bi zh="推演记录" en="Session history" /></h2>
             <SessionList sessions={sessions} />
-          </section>
-
-          <section className="panel" aria-labelledby="step-session-heading">
-            <p className="eyebrow">Runtime Admission</p>
-            <h2 id="step-session-heading">Step session</h2>
-            <StepStatusLine worldlineStepStatus={worldlineStepStatus} />
-            <form action={startWorldlineStepAction} className="binding-form">
-              <label htmlFor="worldline-step-session">Session</label>
-              {sessions.ok && sessions.items.length > 0 ? (
-                <select
-                  id="worldline-step-session"
-                  name="sessionId"
-                  defaultValue={latestSessionId}
-                >
-                  {sessions.items.map((session) => (
-                    <option key={session.session_id} value={session.session_id}>
-                      {session.goal_summary || session.session_id}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  id="worldline-step-session"
-                  name="sessionId"
-                  placeholder="Admitted session id"
-                />
-              )}
-
-              <label htmlFor="worldline-step-mode">Mode</label>
-              <select id="worldline-step-mode" name="stepMode" defaultValue="director">
-                <option value="director">Director</option>
-                <option value="agent_turn">Agent turn</option>
-                <option value="evaluation">Evaluation</option>
+            <form action={selectWorldlineSessionAction} className="binding-form">
+              <label htmlFor="worldline-current-session"><Bi zh="当前世界" en="Current world" /></label>
+              <select id="worldline-current-session" name="selectedSessionId" defaultValue={activeSessionId} disabled={activeSessions.length === 0}>
+                {activeSessions.length === 0 ? <option value="">{tx(locale, "没有 active 推演", "No active session")}</option> : null}
+                {activeSessions.map((session, index) => (
+                  <option key={session.session_id} value={session.session_id}>{session.goal_summary || tx(locale, `未命名推演 ${index + 1}`, `Untitled session ${index + 1}`)}</option>
+                ))}
               </select>
-
-              <p className="form-hint">
-                WORLDLINE_STEP_BACKEND_UNCONFIGURED appears until step admission is backed by
-                Postgres or a runtime starter.
-              </p>
-              <button type="submit">Step session</button>
+              <SubmitButton disabled={activeSessions.length === 0} idleLabel={<Bi zh="载入当前世界" en="Load current world" />} pendingLabel={<Bi zh="载入中…" en="Loading…" />} />
             </form>
           </section>
-
-          <section className="panel" aria-labelledby="variable-injection-heading">
-            <p className="eyebrow">Variable</p>
-            <h2 id="variable-injection-heading">Variable injection</h2>
-            <VariableStatusLine worldlineVariableStatus={worldlineVariableStatus} />
-            <form action={injectWorldlineVariableAction} className="binding-form">
-              <label htmlFor="worldline-variable-session">Session</label>
-              {sessions.ok && sessions.items.length > 0 ? (
-                <select
-                  id="worldline-variable-session"
-                  name="sessionId"
-                  defaultValue={latestSessionId}
-                >
-                  {sessions.items.map((session) => (
-                    <option key={session.session_id} value={session.session_id}>
-                      {session.goal_summary || session.session_id}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  id="worldline-variable-session"
-                  name="sessionId"
-                  placeholder="Admitted session id"
-                />
-              )}
-
-              <label htmlFor="worldline-variable-name">Name</label>
-              <input
-                id="worldline-variable-name"
-                name="variableName"
-                placeholder="主角亲族提前失踪"
-                required
-              />
-
-              <label htmlFor="worldline-variable-description">Description</label>
-              <textarea
-                id="worldline-variable-description"
-                name="variableDescription"
-                placeholder="Public metadata summary for this current-world variable"
-                rows={3}
-              />
-
-              <label htmlFor="worldline-variable-impact-axis">Impact axis</label>
-              <input
-                id="worldline-variable-impact-axis"
-                name="impactAxis"
-                placeholder="kinship_pressure"
-              />
-
-              <label className="checkbox-row" htmlFor="worldline-variable-locked">
-                <input id="worldline-variable-locked" name="locked" type="checkbox" />
-                Lock variable
-              </label>
-
-              <p className="form-hint">
-                WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED appears until variable metadata writes are
-                backed by Postgres.
-              </p>
-              <button type="submit">Inject variable</button>
-            </form>
+                </>
+              ),
+              simulate: (
+                <>
+          <section
+            className={`panel worldline-timeline-primary ${timeline.ok ? "" : "error-box"}`}
+            aria-labelledby="worldline-timeline-heading"
+            data-worldline-mode="simulate"
+          >
+            <p className="eyebrow"><Bi zh="当前世界" en="Current world" /></p>
+            <h2 id="worldline-timeline-heading"><Bi zh="时间线" en="Timeline" /></h2>
+            <TimelineList timeline={timeline} />
           </section>
+
+          <section className="panel worldline-simulate-toolbar" aria-labelledby="step-session-heading" data-worldline-mode="simulate">
+            <p className="eyebrow"><Bi zh="推进" en="Progress" /></p>
+            <h2 id="step-session-heading"><Bi zh="推演操作" en="Simulation controls" /></h2>
+            <StepStatusLine worldlineStepStatus={worldlineStepStatus} />
+            <form action={startWorldlineStepAction} className="binding-form worldline-toolbar-form">
+              <input type="hidden" name="sessionId" value={activeSessionId} />
+              <label htmlFor="worldline-step-mode"><Bi zh="模式" en="Mode" /></label>
+              <select id="worldline-step-mode" name="stepMode" defaultValue="director" disabled={!activeSessionId}>
+                <option value="director">{tx(locale, "导演", "Director")}</option>
+                <option value="agent_turn">{tx(locale, "角色回合", "Agent turn")}</option>
+                <option value="evaluation">{tx(locale, "评估", "Evaluation")}</option>
+              </select>
+              <SubmitButton disabled={!activeSessionId} idleLabel={<Bi zh="推进一步" en="Step once" />} pendingLabel={<Bi zh="推进中…" en="Stepping…" />} />
+            </form>
+            <details className="worldline-module-group">
+              <summary>
+                <span><Bi zh="多步与变量" en="Auto steps and variables" /></span>
+                <small><Bi zh="次要控制" en="Secondary controls" /></small>
+              </summary>
+              <div className="worldline-module-content">
+                <AutoStatusLine worldlineAutoStatus={worldlineAutoStatus} />
+                <form action={startWorldlineAutoEvolutionAction} className="binding-form">
+                  <input type="hidden" name="sessionId" value={activeSessionId} />
+                  <label htmlFor="worldline-auto-max-steps"><Bi zh="最大步数" en="Maximum steps" /></label>
+                  <input id="worldline-auto-max-steps" name="maxSteps" type="number" min={1} max={50} defaultValue={3} inputMode="numeric" disabled={!activeSessionId} />
+                  <SubmitButton tone="secondary" disabled={!activeSessionId} idleLabel={<Bi zh="多步推演" en="Auto evolve" />} pendingLabel={<Bi zh="启动中…" en="Starting…" />} />
+                </form>
+                <VariableStatusLine worldlineVariableStatus={worldlineVariableStatus} />
+                <form action={injectWorldlineVariableAction} className="binding-form">
+                  <input type="hidden" name="sessionId" value={activeSessionId} />
+                  <label htmlFor="worldline-variable-name"><Bi zh="名称" en="Name" /></label>
+                  <input id="worldline-variable-name" name="variableName" placeholder={tx(locale, "变量名称", "Variable name")} required disabled={!activeSessionId} />
+                  <label htmlFor="worldline-variable-description"><Bi zh="描述" en="Description" /></label>
+                  <textarea id="worldline-variable-description" name="variableDescription" placeholder={tx(locale, "描述变量及其情节作用", "Describe the variable and its story effect")} rows={2} disabled={!activeSessionId} />
+                  <label htmlFor="worldline-variable-impact-axis"><Bi zh="影响方向" en="Story impact" /></label>
+                  <input id="worldline-variable-impact-axis" name="impactAxis" placeholder={tx(locale, "例如：亲族关系压力", "For example: family relationship pressure")} disabled={!activeSessionId} />
+                  <label className="checkbox-row" htmlFor="worldline-variable-locked">
+                    <input id="worldline-variable-locked" name="locked" type="checkbox" disabled={!activeSessionId} />
+                    <Bi zh="锁定变量" en="Lock variable" />
+                  </label>
+                  <SubmitButton tone="secondary" disabled={!activeSessionId} idleLabel={<Bi zh="注入变量" en="Inject variable" />} pendingLabel={<Bi zh="注入中…" en="Injecting…" />} />
+                </form>
+              </div>
+            </details>
+          </section>
+
+          <section
+            className={`panel ${events.ok ? "" : "error-box"}`}
+            aria-labelledby="worldline-events-heading"
+            data-worldline-mode="simulate"
+          >
+            <p className="eyebrow"><Bi zh="候选" en="Candidates" /></p>
+            <h2 id="worldline-events-heading"><Bi zh="候选事件" en="Candidate events" /></h2>
+            <EventList events={events} />
+          </section>
+                </>
+              ),
+            }}
+          />
         </main>
 
         <aside>
+          <details className="worldline-module-group worldline-module-group-dark" open={!activeSessionId}>
+            <summary>
+              <span><Bi zh="角色准备" en="Preparation" /></span>
+              <small>{preparedAgents.ok ? preparedAgents.items.length : 0} <Bi zh="名角色" en="agents" /></small>
+            </summary>
+            <div className="worldline-module-content">
           <section className="panel" aria-labelledby="prepare-agents-heading">
-            <p className="eyebrow">Preparation</p>
-            <h2 id="prepare-agents-heading">Prepare agents</h2>
+            <p className="eyebrow"><Bi zh="角色准备" en="Preparation" /></p>
+            <h2 id="prepare-agents-heading"><Bi zh="准备角色" en="Prepare agents" /></h2>
             <PreparationStatusLine worldlinePreparationStatus={worldlinePreparationStatus} />
             <form action={createWorldlinePreparationAction} className="binding-form">
-              <label htmlFor="worldline-preparation-goal">Goal</label>
+              <label htmlFor="worldline-preparation-goal"><Bi zh="目标" en="Goal" /></label>
               <textarea
                 id="worldline-preparation-goal"
                 name="preparationGoal"
-                placeholder="Prepare current-world agents for one focused interaction"
+                placeholder={tx(locale, "描述角色需要参与的互动", "Describe the interaction to prepare")}
                 required
                 rows={4}
               />
 
-              <label htmlFor="worldline-preparation-anchor-path">Anchor path</label>
+              <label htmlFor="worldline-preparation-anchor-path"><Bi zh="参考路径" en="Anchor path" /></label>
               {savedPaths.ok && savedPaths.items.length > 0 ? (
                 <select
                   id="worldline-preparation-anchor-path"
                   name="preparationAnchorPathId"
                   defaultValue=""
                 >
-                  <option value="">No anchor path</option>
-                  {savedPaths.items.map((path) => (
+                  <option value="">{tx(locale, "不使用参考路径", "No anchor path")}</option>
+                  {savedPaths.items.map((path, index) => (
                     <option key={path.path_id} value={path.path_id}>
-                      {path.title || path.path_id}
+                      {path.title || tx(locale, `未命名路径 ${index + 1}`, `Untitled path ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="worldline-preparation-anchor-path"
                   name="preparationAnchorPathId"
-                  placeholder="Optional saved path id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无参考路径", "No saved path available")}</option></select>
               )}
-              <p className="form-hint">
-                WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED appears until preparation admission is
-                backed by Postgres.
-              </p>
-              <button type="submit">Prepare agents</button>
+              <TypedReferenceChoices
+                assets={assets}
+                events={events}
+                graphView={graphView}
+                savedPaths={savedPaths}
+                selectedAgentRefs={selectedAgentRefs}
+                selectedSourceRefs={selectedSourceRefs}
+              />
+              <button type="submit"><Bi zh="准备角色" en="Prepare agents" /></button>
             </form>
           </section>
 
@@ -331,149 +365,143 @@ export function WorldlineShell({
             className={`panel ${preparation.ok && preparedAgents.ok ? "" : "error-box"}`}
             aria-labelledby="prepared-agents-heading"
           >
-            <p className="eyebrow">Agent Metadata</p>
-            <h2 id="prepared-agents-heading">Prepared agents</h2>
+            <p className="eyebrow"><Bi zh="角色" en="Agents" /></p>
+            <h2 id="prepared-agents-heading"><Bi zh="已准备角色" en="Prepared agents" /></h2>
             <PreparationDetail preparation={preparation} preparedAgents={preparedAgents} />
+            {preparation.ok && (preparation.status === "completed" || preparation.status === "ready") ? (
+              <a
+                className="overview-next-link"
+                href={characterConsoleHref(tenantSlug, projectId, preparation.prepare_id, activeSessionId)}
+              >
+                <Bi zh="进入角色控制" en="Enter Character Console" />
+                <ChevronRight aria-hidden="true" size={18} />
+              </a>
+            ) : null}
+            {preparation.ok ? (
+              <form action={refreshWorldlinePreparationAction} className="binding-form">
+                <input type="hidden" name="prepareId" value={preparation.prepare_id} />
+                <input type="hidden" name="selectedAgentRefs" value={selectedAgentRefs.join(",")} />
+                <input type="hidden" name="selectedSourceRefs" value={selectedSourceRefs.join(",")} />
+                <button type="submit"><Bi zh="刷新准备状态与角色" en="Refresh preparation and roster" /></button>
+              </form>
+            ) : null}
           </section>
+            </div>
+          </details>
 
-          <section className="panel error-box" aria-labelledby="worldline-runtime-heading">
-            <p className="eyebrow">Runtime</p>
-            <h2 id="worldline-runtime-heading">Worldline runtime</h2>
-            <p className="form-hint">
-              WORLDLINE_RUNTIME_PENDING: session preparation, timeline stepping, and event adoption
-              are not wired in this SaaS slice.
-            </p>
-          </section>
-
-          <section
-            className={`panel ${timeline.ok ? "" : "error-box"}`}
-            aria-labelledby="worldline-timeline-heading"
-          >
-            <p className="eyebrow">Timeline</p>
-            <h2 id="worldline-timeline-heading">Timeline</h2>
-            <TimelineList timeline={timeline} />
-          </section>
-
-          <section
-            className={`panel ${events.ok ? "" : "error-box"}`}
-            aria-labelledby="worldline-events-heading"
-          >
-            <p className="eyebrow">Candidates</p>
-            <h2 id="worldline-events-heading">Candidate events</h2>
-            <EventList events={events} />
-          </section>
-
+          <details className="worldline-module-group worldline-module-group-dark">
+            <summary>
+              <span><Bi zh="事件与路径" en="Events and paths" /></span>
+              <small><Bi zh="编辑、采纳与保存" en="Edit, adopt and save" /></small>
+            </summary>
+            <div className="worldline-module-content">
           <section className="panel" aria-labelledby="edit-event-heading">
-            <p className="eyebrow">Candidate Metadata</p>
-            <h2 id="edit-event-heading">Edit event</h2>
+            <p className="eyebrow"><Bi zh="候选事件" en="Candidate event" /></p>
+            <h2 id="edit-event-heading"><Bi zh="编辑事件" en="Edit event" /></h2>
             <EventMutationStatusLine worldlineEventMutationStatus={worldlineEventMutationStatus} />
             <form action={updateWorldlineEventAction} className="binding-form">
-              <label htmlFor="worldline-edit-event">Candidate event</label>
+              <label htmlFor="worldline-edit-event"><Bi zh="候选事件" en="Candidate event" /></label>
               {events.ok && events.items.length > 0 ? (
                 <select id="worldline-edit-event" name="eventId" defaultValue="">
-                  <option value="">Select candidate event</option>
-                  {events.items.map((event) => (
+                  <option value="">{tx(locale, "选择候选事件", "Select candidate event")}</option>
+                  {events.items.map((event, index) => (
                     <option key={event.event_id} value={event.event_id}>
-                      {event.title || event.event_id}
+                      {event.title || tx(locale, `未命名事件 ${index + 1}`, `Untitled event ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input id="worldline-edit-event" name="eventId" placeholder="Candidate event id" />
+                <select id="worldline-edit-event" name="eventId" disabled><option value="">{tx(locale, "暂无候选事件", "No candidate event")}</option></select>
               )}
 
-              <label htmlFor="worldline-event-title">Title</label>
+              <label htmlFor="worldline-event-title"><Bi zh="标题" en="Title" /></label>
               <input
                 id="worldline-event-title"
                 name="eventTitle"
-                placeholder="Public event title"
+                placeholder={tx(locale, "事件标题", "Event title")}
               />
 
-              <label htmlFor="worldline-event-summary">Summary</label>
+              <label htmlFor="worldline-event-summary"><Bi zh="摘要" en="Summary" /></label>
               <textarea
                 id="worldline-event-summary"
                 name="eventSummary"
-                placeholder="Public metadata summary"
+                placeholder={tx(locale, "事件摘要", "Event summary")}
                 rows={3}
               />
 
-              <label htmlFor="worldline-event-kind">Kind</label>
-              <input
+              <label htmlFor="worldline-event-kind"><Bi zh="类型" en="Kind" /></label>
+              <select
                 id="worldline-event-kind"
                 name="eventKind"
-                placeholder="director_revision"
-              />
+                defaultValue="director_revision"
+              >
+                <option value="director_revision">{tx(locale, "导演修订", "Director revision")}</option>
+                <option value="plot_turn">{tx(locale, "剧情转折", "Plot turn")}</option>
+                <option value="character_choice">{tx(locale, "角色选择", "Character choice")}</option>
+              </select>
 
-              <p className="form-hint">
-                WORLDLINE_EVENT_MUTATION_BACKEND_UNCONFIGURED appears until event metadata edits
-                are backed by Postgres.
-              </p>
-              <button type="submit">Update event</button>
+              <button type="submit"><Bi zh="更新事件" en="Update event" /></button>
             </form>
           </section>
 
           <section className="panel" aria-labelledby="adopt-event-heading">
-            <p className="eyebrow">Canon Boundary</p>
-            <h2 id="adopt-event-heading">Adopt event</h2>
+            <p className="eyebrow"><Bi zh="正史" en="Canon" /></p>
+            <h2 id="adopt-event-heading"><Bi zh="采纳事件" en="Adopt event" /></h2>
             <EventAdoptionStatusLine worldlineEventAdoptionStatus={worldlineEventAdoptionStatus} />
             <form action={adoptWorldlineEventAction} className="binding-form">
-              <label htmlFor="worldline-adopt-event">Candidate event</label>
+              <label htmlFor="worldline-adopt-event"><Bi zh="候选事件" en="Candidate event" /></label>
               {events.ok && events.items.length > 0 ? (
                 <select id="worldline-adopt-event" name="eventId" defaultValue="">
-                  <option value="">Select candidate event</option>
-                  {events.items.map((event) => (
+                  <option value="">{tx(locale, "选择候选事件", "Select candidate event")}</option>
+                  {events.items.map((event, index) => (
                     <option key={event.event_id} value={event.event_id}>
-                      {event.title || event.event_id}
+                      {event.title || tx(locale, `未命名事件 ${index + 1}`, `Untitled event ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input id="worldline-adopt-event" name="eventId" placeholder="Candidate event id" />
+                <select id="worldline-adopt-event" name="eventId" disabled><option value="">{tx(locale, "暂无候选事件", "No candidate event")}</option></select>
               )}
 
-              <label htmlFor="worldline-adoption-note">Note</label>
+              <label htmlFor="worldline-adoption-note"><Bi zh="备注" en="Note" /></label>
               <textarea
                 id="worldline-adoption-note"
                 name="adoptionNote"
-                placeholder="Public adoption note"
+                placeholder={tx(locale, "采纳备注", "Adoption note")}
                 rows={3}
               />
 
-              <p className="form-hint">
-                WORLDLINE_EVENT_ADOPTION_BACKEND_UNCONFIGURED appears until event adoption writes
-                are backed by Postgres.
-              </p>
-              <button type="submit">Adopt event</button>
+              <button type="submit"><Bi zh="采纳事件" en="Adopt event" /></button>
             </form>
           </section>
 
           <section className="panel" aria-labelledby="save-path-heading">
-            <p className="eyebrow">Reference Path</p>
-            <h2 id="save-path-heading">Save path</h2>
+            <p className="eyebrow"><Bi zh="参考" en="Reference" /></p>
+            <h2 id="save-path-heading"><Bi zh="保存路径" en="Save path" /></h2>
             <SavedPathStatusLine worldlineSavedPathStatus={worldlineSavedPathStatus} />
             <form action={createWorldlineSavedPathAction} className="binding-form">
-              <label htmlFor="worldline-save-path-session">Session</label>
+              <label htmlFor="worldline-save-path-session"><Bi zh="推演" en="Session" /></label>
               {sessions.ok && sessions.items.length > 0 ? (
                 <select
                   id="worldline-save-path-session"
                   name="sessionId"
-                  defaultValue={latestSessionId}
+                  defaultValue={activeSessionId}
                 >
-                  {sessions.items.map((session) => (
+                  {sessions.items.map((session, index) => (
                     <option key={session.session_id} value={session.session_id}>
-                      {session.goal_summary || session.session_id}
+                      {session.goal_summary || tx(locale, `未命名推演 ${index + 1}`, `Untitled session ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="worldline-save-path-session"
                   name="sessionId"
-                  placeholder="Admitted session id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无可用推演", "No session available")}</option></select>
               )}
 
-              <label htmlFor="worldline-saved-path-title">Title</label>
+              <label htmlFor="worldline-saved-path-title"><Bi zh="标题" en="Title" /></label>
               <input
                 id="worldline-saved-path-title"
                 name="savedPathTitle"
@@ -481,64 +509,44 @@ export function WorldlineShell({
                 required
               />
 
-              <label htmlFor="worldline-saved-path-summary">Summary</label>
+              <label htmlFor="worldline-saved-path-summary"><Bi zh="摘要" en="Summary" /></label>
               <textarea
                 id="worldline-saved-path-summary"
                 name="savedPathSummary"
-                placeholder="Public path summary"
+                placeholder={tx(locale, "路径摘要", "Path summary")}
                 rows={3}
               />
 
               <fieldset className="checkbox-group">
-                <legend>Candidate events</legend>
-                {events.ok && events.items.length > 0 ? (
-                  events.items.map((event) => (
+                <legend><Bi zh="推演事件" en="Session events" /></legend>
+                {pathEvents.ok && pathEvents.items.length > 0 ? (
+                  pathEvents.items.map((event, index) => (
                     <label className="checkbox-row" key={event.event_id}>
                       <input name="selectedEventIds" type="checkbox" value={event.event_id} />
-                      <span>{event.title || event.event_id}</span>
+                      <span>{event.title || tx(locale, `未命名事件 ${index + 1}`, `Untitled event ${index + 1}`)}</span>
                     </label>
                   ))
                 ) : (
                   <p className="form-hint">
-                    {events.ok
-                      ? "No candidate events have been written for this session."
-                      : `${events.code}: ${events.message}`}
+                    {pathEvents.ok
+                      ? <Bi zh="当前推演暂无事件。" en="No events are available for this session." />
+                      : <FailureText />}
                   </p>
                 )}
               </fieldset>
 
-              <label htmlFor="worldline-manual-event-ids">Event IDs</label>
-              <textarea
-                id="worldline-manual-event-ids"
-                name="manualEventIds"
-                placeholder="Optional event ids, one per line"
-                rows={3}
-              />
-
-              <label htmlFor="worldline-writer-instruction">Writer instruction</label>
+              <label htmlFor="worldline-writer-instruction"><Bi zh="写作要求" en="Writer instruction" /></label>
               <textarea
                 id="worldline-writer-instruction"
                 name="writerInstruction"
-                placeholder="How Writer should use this saved path as a reference"
+                placeholder={tx(locale, "说明写作台如何使用这条路径", "How Writer should use this path")}
                 rows={3}
               />
-
-              <p className="form-hint">
-                WORLDLINE_SAVED_PATH_BACKEND_UNCONFIGURED appears until saved-path writes are
-                backed by Postgres.
-              </p>
-              <button type="submit">Save path</button>
+              <button type="submit"><Bi zh="保存路径" en="Save path" /></button>
             </form>
           </section>
-
-          <section className="panel" aria-labelledby="worldline-boundary-heading">
-            <p className="eyebrow">Canon Boundary</p>
-            <h2 id="worldline-boundary-heading">Current world</h2>
-            <p className="form-hint">
-              Saved paths remain Writer references; candidate events enter canon only through the
-              explicit adoption action above.
-            </p>
-          </section>
+            </div>
+          </details>
         </aside>
       </div>
     </div>
@@ -553,14 +561,7 @@ function StatusLine({
   if (!worldlineSessionStatus.status) {
     return null;
   }
-  const statusClass = worldlineSessionStatus.status === "success" ? "success-box" : "error-box";
-  return (
-    <p className={`form-status ${statusClass}`} data-status={worldlineSessionStatus.status}>
-      {worldlineSessionStatus.code || "WORLDLINE_SESSION_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlineSessionStatus.message}
-      {worldlineSessionStatus.runId ? ` Run ${worldlineSessionStatus.runId}` : ""}
-    </p>
-  );
+  return <ActionFeedback code={worldlineSessionStatus.code} status={worldlineSessionStatus.status} successEn="Session started." successZh="推演已开始。" />;
 }
 
 function StepStatusLine({
@@ -571,14 +572,16 @@ function StepStatusLine({
   if (!worldlineStepStatus.status) {
     return null;
   }
-  const statusClass = worldlineStepStatus.status === "success" ? "success-box" : "error-box";
-  return (
-    <p className={`form-status ${statusClass}`} data-status={worldlineStepStatus.status}>
-      {worldlineStepStatus.code || "WORLDLINE_STEP_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlineStepStatus.message}
-      {worldlineStepStatus.runId ? ` Run ${worldlineStepStatus.runId}` : ""}
-    </p>
-  );
+  return <ActionFeedback code={worldlineStepStatus.code} status={worldlineStepStatus.status} successEn="Session step queued." successZh="推演推进已提交。" />;
+}
+
+function AutoStatusLine({
+  worldlineAutoStatus,
+}: {
+  worldlineAutoStatus: WorldlineShellProps["worldlineAutoStatus"];
+}) {
+  if (!worldlineAutoStatus.status) return null;
+  return <ActionFeedback code={worldlineAutoStatus.code} status={worldlineAutoStatus.status} successEn="Auto evolution queued for the active current world." successZh="当前世界多步推演已提交。" />;
 }
 
 function PreparationStatusLine({
@@ -589,15 +592,7 @@ function PreparationStatusLine({
   if (!worldlinePreparationStatus.status) {
     return null;
   }
-  const statusClass =
-    worldlinePreparationStatus.status === "success" ? "success-box" : "error-box";
-  return (
-    <p className={`form-status ${statusClass}`} data-status={worldlinePreparationStatus.status}>
-      {worldlinePreparationStatus.code || "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlinePreparationStatus.message}
-      {worldlinePreparationStatus.prepareId ? ` Preparation ${worldlinePreparationStatus.prepareId}` : ""}
-    </p>
-  );
+  return <ActionFeedback code={worldlinePreparationStatus.code} status={worldlinePreparationStatus.status} successEn="Agents prepared." successZh="角色准备完成。" />;
 }
 
 function VariableStatusLine({
@@ -608,14 +603,7 @@ function VariableStatusLine({
   if (!worldlineVariableStatus.status) {
     return null;
   }
-  const statusClass = worldlineVariableStatus.status === "success" ? "success-box" : "error-box";
-  return (
-    <p className={`form-status ${statusClass}`} data-status={worldlineVariableStatus.status}>
-      {worldlineVariableStatus.code || "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlineVariableStatus.message}
-      {worldlineVariableStatus.variableId ? ` Variable ${worldlineVariableStatus.variableId}` : ""}
-    </p>
-  );
+  return <ActionFeedback code={worldlineVariableStatus.code} status={worldlineVariableStatus.status} successEn="Variable injected." successZh="变量已注入。" />;
 }
 
 function SavedPathStatusLine({
@@ -626,14 +614,7 @@ function SavedPathStatusLine({
   if (!worldlineSavedPathStatus.status) {
     return null;
   }
-  const statusClass = worldlineSavedPathStatus.status === "success" ? "success-box" : "error-box";
-  return (
-    <p className={`form-status ${statusClass}`} data-status={worldlineSavedPathStatus.status}>
-      {worldlineSavedPathStatus.code || "WORLDLINE_SAVED_PATH_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlineSavedPathStatus.message}
-      {worldlineSavedPathStatus.pathId ? ` Path ${worldlineSavedPathStatus.pathId}` : ""}
-    </p>
-  );
+  return <ActionFeedback code={worldlineSavedPathStatus.code} status={worldlineSavedPathStatus.status} successEn="Path saved." successZh="路径已保存。" />;
 }
 
 function EventAdoptionStatusLine({
@@ -644,15 +625,7 @@ function EventAdoptionStatusLine({
   if (!worldlineEventAdoptionStatus.status) {
     return null;
   }
-  const statusClass =
-    worldlineEventAdoptionStatus.status === "success" ? "success-box" : "error-box";
-  return (
-    <p className={`form-status ${statusClass}`} data-status={worldlineEventAdoptionStatus.status}>
-      {worldlineEventAdoptionStatus.code || "WORLDLINE_EVENT_ADOPTION_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlineEventAdoptionStatus.message}
-      {worldlineEventAdoptionStatus.eventId ? ` Event ${worldlineEventAdoptionStatus.eventId}` : ""}
-    </p>
-  );
+  return <ActionFeedback code={worldlineEventAdoptionStatus.code} status={worldlineEventAdoptionStatus.status} successEn="Event adopted." successZh="事件已采纳。" />;
 }
 
 function EventMutationStatusLine({
@@ -663,13 +636,28 @@ function EventMutationStatusLine({
   if (!worldlineEventMutationStatus.status) {
     return null;
   }
-  const statusClass =
-    worldlineEventMutationStatus.status === "success" ? "success-box" : "error-box";
+  return <ActionFeedback code={worldlineEventMutationStatus.code} status={worldlineEventMutationStatus.status} successEn="Event updated." successZh="事件已更新。" />;
+}
+
+function ActionFeedback({
+  code: _code,
+  status,
+  successEn,
+  successZh,
+}: {
+  code: string;
+  status: string;
+  successEn: string;
+  successZh: string;
+}) {
+  const success = status === "success";
   return (
-    <p className={`form-status ${statusClass}`} data-status={worldlineEventMutationStatus.status}>
-      {worldlineEventMutationStatus.code || "WORLDLINE_EVENT_MUTATION_BACKEND_UNCONFIGURED"}:{" "}
-      {worldlineEventMutationStatus.message}
-      {worldlineEventMutationStatus.eventId ? ` Event ${worldlineEventMutationStatus.eventId}` : ""}
+    <p className={`form-status ${success ? "success-box" : "error-box"}`} data-status={status}>
+      {success ? (
+        <Bi zh={successZh} en={successEn} />
+      ) : (
+        <Bi zh="操作未完成，请检查输入或稍后重试。" en="The action could not be completed. Check the input or try again." />
+      )}
     </p>
   );
 }
@@ -684,7 +672,7 @@ function PreparationDetail({
   if (!preparation.ok) {
     return (
       <p className="form-hint">
-        {preparation.code || "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED"}: {preparation.message}
+        <FailureText />
       </p>
     );
   }
@@ -693,15 +681,10 @@ function PreparationDetail({
     <div className="binding-stack">
       <article className="reference-card">
         <div className="status-row">
-          <span className="status-pill">{preparation.status}</span>
-          <span className="status-pill">{preparation.lifecycle}</span>
+          <span className="status-pill"><StatusValue value={preparation.status} /></span>
+          <span className="status-pill"><StatusValue value={preparation.lifecycle} /></span>
         </div>
-        <h3>{preparation.goal_summary || preparation.prepare_id}</h3>
-        <p className="trace-meta">Preparation {preparation.prepare_id}</p>
-        <p className="trace-meta">Run {preparation.run_id}</p>
-        {preparation.anchor_path_id ? (
-          <p className="trace-meta">Anchor {preparation.anchor_path_id}</p>
-        ) : null}
+        <h3>{preparation.goal_summary || <Bi zh="未命名角色准备" en="Untitled preparation" />}</h3>
       </article>
       <PreparedAgentList preparedAgents={preparedAgents} />
     </div>
@@ -716,15 +699,14 @@ function PreparedAgentList({
   if (!preparedAgents.ok) {
     return (
       <p className="form-hint">
-        {preparedAgents.code || "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED"}:{" "}
-        {preparedAgents.message}
+        <FailureText />
       </p>
     );
   }
   if (preparedAgents.items.length === 0) {
     return (
       <p className="form-hint">
-        No prepared agents have been written for this preparation yet.
+        <Bi zh="当前准备中暂无角色。" en="No agents are available for this preparation." />
       </p>
     );
   }
@@ -733,18 +715,93 @@ function PreparedAgentList({
       {preparedAgents.items.map((agent) => (
         <article className="reference-card" key={agent.agent_id}>
           <div className="status-row">
-            <span className="status-pill">{agent.status}</span>
-            <span className="status-pill">{agent.role || "agent"}</span>
+            <span className="status-pill"><StatusValue value={agent.status} /></span>
+            <span className="status-pill">{agent.role || <Bi zh="角色" en="Agent" />}</span>
           </div>
           <h3>{agent.display_name || agent.agent_id}</h3>
-          <p className="form-hint">{agent.summary || "No public summary."}</p>
-          <p className="trace-meta">Agent {agent.agent_id}</p>
-          {agent.source_asset_id ? (
-            <p className="trace-meta">Source asset {agent.source_asset_id}</p>
-          ) : null}
+          <p className="form-hint">{agent.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
         </article>
       ))}
     </div>
+  );
+}
+
+function TypedReferenceChoices({
+  assets,
+  events,
+  graphView,
+  savedPaths,
+  selectedAgentRefs,
+  selectedSourceRefs,
+}: {
+  assets: AssetListSummary;
+  events: WorldlineEventsSummary;
+  graphView: StoryGraphViewSummary;
+  savedPaths: WorldlineSavedPathsSummary;
+  selectedAgentRefs: string[];
+  selectedSourceRefs: string[];
+}) {
+  const selectableAssets = assets.ok
+    ? assets.items.filter((asset) => asset.enabled && asset.lifecycle !== "archived").slice(0, 60)
+    : [];
+  const selectableEntities = graphView.ok
+    ? graphView.nodes.filter((node) => node.lifecycle !== "archived").slice(0, 60)
+    : [];
+  return (
+    <>
+      <details className="worldline-reference-disclosure">
+        <summary><Bi zh="选择角色与上下文" en="Choose agents and context" /></summary>
+        <div className="worldline-reference-content">
+      <fieldset className="checkbox-group">
+        <legend><Bi zh="参与角色引用" en="Agent refs" /></legend>
+        {selectableAssets.map((asset) => (
+          <label className="checkbox-row" key={`agent-asset-${asset.asset_id}`}>
+            <input name="agentRefs" type="checkbox" value={`asset:${asset.asset_id}`} defaultChecked={selectedAgentRefs.includes(`asset:${asset.asset_id}`)} />
+            <span><strong>Asset</strong> {asset.title || asset.asset_id}</span>
+          </label>
+        ))}
+        {selectableEntities.map((entity) => (
+          <label className="checkbox-row" key={`agent-entity-${entity.node_id}`}>
+            <input name="agentRefs" type="checkbox" value={`entity:${entity.node_id}`} defaultChecked={selectedAgentRefs.includes(`entity:${entity.node_id}`)} />
+            <span><strong><Bi zh="故事角色" en="Story entity" /></strong> {entity.title || <Bi zh="未命名节点" en="Untitled node" />}</span>
+          </label>
+        ))}
+        {selectableAssets.length + selectableEntities.length === 0 ? (
+          <p className="form-hint"><Bi zh="没有可用的真实 Asset 或 Entity；准备请求不会生成占位角色。" en="No real Asset or Entity is available; preparation will not create placeholder agents." /></p>
+        ) : null}
+      </fieldset>
+      <fieldset className="checkbox-group">
+        <legend><Bi zh="上下文来源引用" en="Source refs" /></legend>
+        {selectableAssets.map((asset) => (
+          <label className="checkbox-row" key={`source-asset-${asset.asset_id}`}>
+            <input name="sourceRefs" type="checkbox" value={`asset:${asset.asset_id}`} defaultChecked={selectedSourceRefs.includes(`asset:${asset.asset_id}`)} />
+            <span><strong>Asset</strong> {asset.title || asset.asset_id}</span>
+          </label>
+        ))}
+        {selectableEntities.map((entity) => (
+          <label className="checkbox-row" key={`source-entity-${entity.node_id}`}>
+            <input name="sourceRefs" type="checkbox" value={`entity:${entity.node_id}`} defaultChecked={selectedSourceRefs.includes(`entity:${entity.node_id}`)} />
+            <span><strong><Bi zh="故事节点" en="Story entity" /></strong> {entity.title || <Bi zh="未命名节点" en="Untitled node" />}</span>
+          </label>
+        ))}
+        {savedPaths.ok ? savedPaths.items.map((path) => (
+          <label className="checkbox-row" key={`source-path-${path.path_id}`}>
+            <input name="sourceRefs" type="checkbox" value={`saved_path:${path.path_id}`} defaultChecked={selectedSourceRefs.includes(`saved_path:${path.path_id}`)} />
+            <span><strong><Bi zh="已保存路径" en="Saved path" /></strong> {path.title || <Bi zh="未命名路径" en="Untitled path" />}</span>
+          </label>
+        )) : null}
+        {events.ok ? events.items.map((event) => (
+          <label className="checkbox-row" key={`source-event-${event.event_id}`}>
+            <input name="sourceRefs" type="checkbox" value={`worldline_event:${event.event_id}`} defaultChecked={selectedSourceRefs.includes(`worldline_event:${event.event_id}`)} />
+            <span><strong><Bi zh="世界线事件" en="Worldline event" /></strong> {event.title || <Bi zh="未命名事件" en="Untitled event" />}</span>
+          </label>
+        )) : null}
+      </fieldset>
+      {!assets.ok ? <p className="form-hint"><FailureText /></p> : null}
+      {!graphView.ok ? <p className="form-hint"><FailureText /></p> : null}
+        </div>
+      </details>
+    </>
   );
 }
 
@@ -752,12 +809,12 @@ function SessionList({ sessions }: { sessions: WorldlineSessionsSummary }) {
   if (!sessions.ok) {
     return (
       <p className="form-hint">
-        {sessions.code || "WORLDLINE_SESSION_BACKEND_UNCONFIGURED"}: {sessions.message}
+        <FailureText />
       </p>
     );
   }
   if (sessions.items.length === 0) {
-    return <p className="form-hint">No worldline sessions have been admitted for this project.</p>;
+    return <p className="form-hint"><Bi zh="该项目暂无推演记录。" en="No worldline sessions are available for this project." /></p>;
   }
 
   return (
@@ -765,13 +822,10 @@ function SessionList({ sessions }: { sessions: WorldlineSessionsSummary }) {
       {sessions.items.map((session) => (
         <article className="reference-card" key={session.session_id}>
           <div className="status-row">
-            <span className="status-pill">{session.status}</span>
-            <span className="status-pill">{session.lifecycle}</span>
+            <span className="status-pill"><StatusValue value={session.status} /></span>
+            <span className="status-pill"><StatusValue value={session.lifecycle} /></span>
           </div>
-          <h3>{session.goal_summary || session.session_id}</h3>
-          <p className="trace-meta">Session {session.session_id}</p>
-          <p className="trace-meta">Run {session.run_id}</p>
-          {session.anchor_path_id ? <p className="trace-meta">Anchor {session.anchor_path_id}</p> : null}
+          <h3>{session.goal_summary || <Bi zh="未命名推演" en="Untitled session" />}</h3>
         </article>
       ))}
     </div>
@@ -782,12 +836,12 @@ function TimelineList({ timeline }: { timeline: WorldlineTimelineSummary }) {
   if (!timeline.ok) {
     return (
       <p className="form-hint">
-        {timeline.code || "WORLDLINE_TIMELINE_BACKEND_UNCONFIGURED"}: {timeline.message}
+        <FailureText />
       </p>
     );
   }
   if (timeline.items.length === 0) {
-    return <p className="form-hint">No public timeline events have been written for this session.</p>;
+    return <p className="form-hint"><Bi zh="当前推演暂无时间线事件。" en="No timeline events are available for this session." /></p>;
   }
 
   return (
@@ -796,13 +850,11 @@ function TimelineList({ timeline }: { timeline: WorldlineTimelineSummary }) {
         <article className="reference-card" key={event.event_id}>
           <div className="status-row">
             <span className="status-pill">#{event.sequence}</span>
-            <span className="status-pill">{event.status || event.event_type}</span>
+            <span className="status-pill"><StatusValue value={event.status || event.event_type} /></span>
             {event.kind ? <span className="status-pill">{event.kind}</span> : null}
           </div>
           <h3>{event.title || event.event_type}</h3>
-          <p className="form-hint">{event.summary || "No public summary."}</p>
-          <p className="trace-meta">Event {event.event_id}</p>
-          <p className="trace-meta">Run {event.run_id}</p>
+          <p className="form-hint">{event.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
         </article>
       ))}
     </div>
@@ -813,12 +865,12 @@ function EventList({ events }: { events: WorldlineEventsSummary }) {
   if (!events.ok) {
     return (
       <p className="form-hint">
-        {events.code || "WORLDLINE_EVENT_BACKEND_UNCONFIGURED"}: {events.message}
+        <FailureText />
       </p>
     );
   }
   if (events.items.length === 0) {
-    return <p className="form-hint">No candidate events have been written for this session.</p>;
+    return <p className="form-hint"><Bi zh="当前推演暂无候选事件。" en="No candidate events are available for this session." /></p>;
   }
 
   return (
@@ -826,34 +878,43 @@ function EventList({ events }: { events: WorldlineEventsSummary }) {
       {events.items.map((event) => (
         <article className="reference-card" key={event.event_id}>
           <div className="status-row">
-            <span className="status-pill">Step {event.step}</span>
-            <span className="status-pill">{event.status}</span>
-            <span className="status-pill">{event.lifecycle}</span>
+            <span className="status-pill"><Bi zh="步骤" en="Step" /> {event.step}</span>
+            <span className="status-pill"><StatusValue value={event.status} /></span>
+            <span className="status-pill"><StatusValue value={event.lifecycle} /></span>
             {event.kind ? <span className="status-pill">{event.kind}</span> : null}
           </div>
-          <h3>{event.title || event.event_id}</h3>
-          <p className="form-hint">{event.summary || "No public summary."}</p>
-          <p className="trace-meta">Event {event.event_id}</p>
-          {event.confidence ? <p className="trace-meta">Confidence {event.confidence}</p> : null}
-          {event.involved_agent_ids.length > 0 ? (
-            <p className="trace-meta">Agents {event.involved_agent_ids.join(", ")}</p>
-          ) : null}
+          <h3>{event.title || <Bi zh="未命名事件" en="Untitled event" />}</h3>
+          <p className="form-hint">{event.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
         </article>
       ))}
     </div>
   );
 }
 
+function characterConsoleHref(
+  tenantSlug: string,
+  projectId: string,
+  prepareId: string,
+  anchorSessionId: string,
+) {
+  const query = new URLSearchParams();
+  query.set("prepare_id", prepareId);
+  if (anchorSessionId) {
+    query.set("anchor_session_id", anchorSessionId);
+  }
+  return `/${encodeURIComponent(tenantSlug)}/projects/${encodeURIComponent(projectId)}/character-console?${query.toString()}`;
+}
+
 function SavedPathList({ savedPaths }: { savedPaths: WorldlineSavedPathsSummary }) {
   if (!savedPaths.ok) {
     return (
       <p className="form-hint">
-        {savedPaths.code || "WORLDLINE_BACKEND_UNCONFIGURED"}: {savedPaths.message}
+        <FailureText />
       </p>
     );
   }
   if (savedPaths.items.length === 0) {
-    return <p className="form-hint">No saved paths are available for this project.</p>;
+    return <p className="form-hint"><Bi zh="该项目暂无已保存路径。" en="No saved paths are available for this project." /></p>;
   }
 
   return (
@@ -861,13 +922,11 @@ function SavedPathList({ savedPaths }: { savedPaths: WorldlineSavedPathsSummary 
       {savedPaths.items.map((path) => (
         <article className="reference-card" key={path.path_id}>
           <div className="status-row">
-            <span className="status-pill">{path.lifecycle}</span>
-            <span className="status-pill">{path.selected_event_ids.length} events</span>
+            <span className="status-pill"><StatusValue value={path.lifecycle} /></span>
+            <span className="status-pill">{path.selected_event_ids.length} <Bi zh="个事件" en="events" /></span>
           </div>
-          <h3>{path.title || path.path_id}</h3>
-          <p className="form-hint">{path.summary || "No public summary."}</p>
-          <p className="trace-meta">Path {path.path_id}</p>
-          <p className="trace-meta">Session {path.session_id}</p>
+          <h3>{path.title || <Bi zh="未命名路径" en="Untitled path" />}</h3>
+          <p className="form-hint">{path.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
           {path.writer_instruction ? (
             <p className="form-hint">{path.writer_instruction}</p>
           ) : null}

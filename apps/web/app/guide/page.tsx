@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 
+import { devEntryRedirectPath } from "../../lib/dev-access";
+
 export default function LegacyGuidePage() {
-  redirect("/demo/projects/demo-project/guide");
+  redirect(devEntryRedirectPath());
 }

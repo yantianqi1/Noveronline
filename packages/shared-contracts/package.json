@@ -1,0 +1,31 @@
+{
+  "name": "@mirofish/shared-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Language-neutral runtime contracts for the MiroFish SaaS control plane and workers.",
+  "files": [
+    "schemas",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./schemas/writer-workflow-input": "./schemas/writer-workflow-input.schema.json",
+    "./schemas/writer-tool-request": "./schemas/writer-tool-request.schema.json",
+    "./schemas/writer-runtime-event": "./schemas/writer-runtime-event.schema.json",
+    "./schemas/writer-public-event": "./schemas/writer-public-event.schema.json"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs && tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,6 +1,6 @@
 # 00. Product Vision and Scope
 
-更新时间：`2026-06-27`
+更新时间：`2026-07-13`
 
 ## 一句话定位
 
@@ -34,6 +34,17 @@
 ```
 
 重构不是换掉主链，而是把主链产品化、多人化、可部署化。
+
+### 零起点写作与反向知识主链（规划契约）
+
+新项目不应被强制先上传旧稿再开始写作。目标产品提供两条对等入口：
+
+- `从一个想法开始` 让空项目直接进入 Writer，建立故事前提、book plan、章节/场景，再由用户手写或启动 Writer draft。该入口不要求 Seed，也不自动生成 canon 或 manuscript。
+- `上传已有文本` 继续走 Upload -> Seed -> Assets / Graph -> Writer 主链，不为新入口削弱长文分析能力。
+
+写作链同时需要反向回馈知识链：只从已持久化的 manuscript 检查点或显式采用的 draft 增量提取角色、关系、世界规则、地点、物件和剧情线索。所有提取结果先作为 `candidate + disabled` 保存，未经人工审阅不得进入 canon、manuscript 或 Writer 检索上下文。
+
+完整产品、API、生命周期、UI 和分期设计见 [28. Zero-start Writer and Manuscript Asset Distillation](./28-zero-start-writer-and-manuscript-asset-distillation.md)。该方案当前是待实现目标，不代表现有产品已通过验收。
 
 ## 用户角色
 

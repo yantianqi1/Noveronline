@@ -1,6 +1,6 @@
 # 04. Design System and UI
 
-更新时间：`2026-06-27`
+更新时间：`2026-07-12`
 
 ## UI 目标
 
@@ -94,14 +94,50 @@ Main Surface
 
 ### 风格
 
-推荐“专业创作操作台”：
+采用 **现代书卷式创作工作台**。Google、Microsoft、Apple 和 Amazon / Cloudscape 只提供信息层级、导航、筛选、渐进披露和响应式结构参考，不复制它们的配色、字体、材质或品牌外观。
 
-- 背景浅色为主，暗色主题可选。
-- 中性灰 / 墨蓝作为结构色。
+- 保留小说产品的视觉识别：暖纸、深墨、印章红、克制旧金、宋体标题和低对比纸纹。
+- 纸面承载阅读、表单和正文；墨面只承载主画布、当前选中对象或沉浸式 Agent / Inspector，不在同页平铺多个深色视觉中心。
+- 首屏直接进入创作任务。Overview 可保留较强叙事画面，Assets、Graph、Worldline、Character、Writer 等工作台使用紧凑页头。
+- 视觉高级感来自比例、留白、字阶、细线分隔和稳定交互，不来自大面积玻璃、营销式 hero、装饰性渐变或卡片堆叠。
+- 每页只突出一个主对象和一个主要动作。红色不作为普通按钮的默认填充色泛滥使用。
+
+整体气质应像一套当代编辑部与作家长期使用的数字案头：有文学辨识度，同时保持专业工具的效率和可扫描性。
+
+### 纸墨材质层级
+
+```text
+App background
+  暖纸色 #f3eee4 / #e9e3d8 + 极低对比度纸纤维纹理
+
+Navigation paper
+  稳定浅纸面 + 深墨文字 + 细线分隔
+  当前项使用左侧印章红标记，不使用大面积填色
+
+Primary panel
+  近实色暖纸面；4-8px radius；优先使用分隔线而不是投影
+
+Ink surface
+  #171a1b 一类深墨面；旧金用于少量结构线和状态点
+  用于图谱画布、选中对象 Inspector 或沉浸创作区域
+
+Controls
+  4-6px radius；桌面 40px、触控 44px 高；focus ring 使用印章红
+```
+
+任何正文、错误信息和表格文字都不得依赖纹理或透明背景维持对比度。纸纹只作为低对比装饰层，不得降低可读性。
+
+### 颜色策略
+
+基础方向：
+
+- 暖纸色为主，深墨色用于结构和局部沉浸面。
+- 印章红 `#8f211b` 用于唯一主操作、选中态和焦点环。
+- 旧金 `#a9854f` / `#b18a4e` 只用于分隔、候选和少量层级强调。
 - 绿色用于完成和正典。
 - 琥珀用于候选和待审。
 - 红色用于错误和危险。
-- 紫色/蓝色只作少量语义强调，不做全站主色泛滥。
+- 紫色仅在确有语义区分时使用，不作为背景装饰。
 
 ### 色彩 token
 
@@ -128,7 +164,8 @@ Main Surface
 
 推荐：
 
-- UI：Geist Sans 或 Inter。
+- UI 控件：`Noto Sans SC` / `Microsoft YaHei UI` / 系统无衬线 fallback。
+- 标题与创作内容：`Songti SC` / `SimSun` / `Noto Serif SC` / Georgia fallback。
 - 数字/任务编号/trace：Geist Mono 或 JetBrains Mono。
 - 正文阅读：可配置中文阅读字体，如 `Noto Serif SC` / 系统宋体 fallback。
 
@@ -147,18 +184,28 @@ Main Surface
 - 工具按钮使用 icon button + tooltip。
 - 主要操作必须有文字。
 
+### 动效
+
+- 交互时长使用 160ms、220ms、280ms 三档，常规状态变化优先 220ms。
+- 使用统一的自然减速曲线；动效服务展开、选中、保存和层级变化。
+- panel 悬停最多上浮 1px；按钮按下最多位移 1px，不使用弹跳或大比例缩放。
+- 动画只改变 `transform`、`opacity`、颜色和阴影，避免触发布局抖动。
+- 所有非必要动画必须在 `prefers-reduced-motion: reduce` 下关闭。
+- 进度和状态变化应保留文本，不依赖渐变或颜色单独表达语义。
+
+### Web 适配边界
+
+- 桌面端使用固定宽度导航 rail + 顶部 context bar + 自适应主工作区。
+- 触控目标最小 44px；数据密集表格可横向滚动，但页面本身不得横向溢出。
+- 小于 860px 时导航折叠为顶部抽屉，主工作区和双栏 panel 变为单列。
+- 长表单和受权限控制的诊断输出保持在所属 Drawer 内滚动，不建立嵌套页面滚动区。
+- 页面 header 保持无卡片、紧凑且可扫描；panel 标题不得使用 hero 尺寸。
+
 ## 通用组件
 
 ### Project Context Bar
 
-显示：
-
-- 当前项目名。
-- seed 状态。
-- graph 状态。
-- asset count。
-- active workflow。
-- 最近 writer run。
+默认只显示当前项目、当前主链阶段、唯一活动任务摘要、全局搜索和用户菜单。Seed、Graph、资产数量和最近 Writer run 等完整状态进入“项目状态” Popover，不平铺成一排状态 pill。
 
 ### Workflow Progress Surface
 
@@ -174,9 +221,9 @@ Main Surface
 
 旧 seed timeline、graph build console、worldline auto task panel、writer progress panel 都应收敛到同一组件族。
 
-### Agent Trace Drawer
+### Technical Details Drawer
 
-统一展示：
+只对有权限的支持或管理员角色按需加载：
 
 - prompt snapshot。
 - tool calls。
@@ -187,7 +234,7 @@ Main Surface
 - JSON parse/repair。
 - error stack。
 
-敏感内容默认折叠，查看大段原文需要权限和审计。
+普通作者 UI 不渲染 UUID、原始 JSON、系统 Prompt、Provider 请求响应、内部错误码、数据库/队列/Worker 信息。敏感内容不能只靠 CSS 隐藏；作者 API 投影本身不得返回。查看大段原文需要权限、主动操作和审计。
 
 ### Inspector Panel
 
@@ -211,7 +258,7 @@ Tabs
   Evidence
   Relations
   Memory
-  Trace
+  Technical details（仅授权角色）
 ```
 
 ### Command Palette
@@ -266,8 +313,8 @@ Tabs
 
 布局：
 
-- 顶部搜索 + 新建/入库。
-- 左侧 facets：来源、类型、生命周期、项目、标签、角色/组织/规则/线索。
+- 顶部单行 Filter Bar：搜索、已启用条件、筛选入口、排序、视图。
+- 来源、类型、生命周期、项目、标签、角色/组织/规则/线索在统一 Popover / Sheet 内分组编辑；应用后显示为可移除 chips。
 - 中央结果：列表/卡片/看板。
 - 右侧详情：内容、结构化字段、关联、使用历史、记忆。
 
@@ -298,10 +345,11 @@ Tabs
 
 布局：
 
-- 左侧：章节/场景目录。
-- 中央：正文编辑器。
-- 右侧：上下文、Agent trace、审校、资产引用。
-- 顶部：写作模式、模型状态、保存状态、运行按钮。
+- 左侧主区：连续 Agent thread，依次呈现作者指令、检索活动、工具结果、候选正文和人工决策。
+- 主区底部：常驻 composer；写作模式使用 segmented control，上下文引用作为附件渐进披露。
+- 右侧：稿件 artifact，通过 `稿件 / 章节 / 审校 / 工作室` 互斥标签切换正文、结构、审校、规划与命令。
+- 顶部：Writer Agent 状态和技术详情入口；run/trace id、事件游标和回放只进入授权 Drawer。
+- 移动端：Agent thread 在前，artifact 在后；不恢复纵向平铺全部表单的旧长页。
 
 ## 交互原则
 
@@ -313,6 +361,8 @@ Tabs
 - trace 和高级设置默认折叠。
 - 切换页面要保留过滤、滚动和当前选择。
 - 工作台三栏布局必须支持折叠。
+- 当前任务必需信息不得放进折叠区；高级设置、历史、解释和诊断才使用渐进披露。
+- 每项既有用户能力最多通过两层 Disclosure / Drawer / Tabs 可到达，不因简化界面而删除。
 
 ## 图标规范
 
@@ -351,3 +401,6 @@ Tabs
 - 图谱 1000 节点时不卡死，默认聚合/分页/局部展开。
 - 写作台正文区域不会被 fixed header/footer 遮挡。
 - LLM 未绑定时，每个模块给出明确配置入口。
+- 默认筛选栏保持单行，已应用筛选同步 URL，刷新和返回后状态不丢失。
+- 作者可见文本和 SSR HTML 不含 README、开发文档路径、UUID、原始 JSON、内部错误码、系统 Prompt 或 Provider Body。
+- 每个页面可见区域最多一个 primary action；其余命令降为次要按钮、Overflow Menu 或上下文动作。

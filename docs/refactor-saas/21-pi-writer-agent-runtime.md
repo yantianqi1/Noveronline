@@ -1,6 +1,6 @@
 # 21. Pi Writer Agent Runtime
 
-更新时间：`2026-07-03`
+更新时间：`2026-07-13`
 
 ## 模块定位
 
@@ -88,7 +88,7 @@ apps/web
 如果 SaaS 基座尚未完成，可以先使用当前前端/后端作为桥：
 
 ```text
-frontend/src/pages/writer
+apps/web/app/(app)/[tenantSlug]/projects/[projectId]/writer
   -> backend FastAPI compatibility endpoint
   -> Node Pi Writer Runtime process
   -> current unified DB / services
@@ -270,6 +270,17 @@ Pi 接入方式：
 - `beforeToolCall` 必须检查权限和 tool allowlist。
 - `save_draft_revision` 必须幂等，重复调用不能产生脏数据。
 
+### Writer 查询生命周期门（规划中）
+
+本契约来自 [28. Zero-start Writer and Manuscript Asset Distillation](./28-zero-start-writer-and-manuscript-asset-distillation.md)，是 Pi 工具读侧的待实现加固，不表示当前所有 query tool 已通过该 gate 验收。
+
+- `query_assets` 在 `beforeToolCall` 授权后仍必须由 server-side reader 强制 tenant/project、`enabled = true` 和 lifecycle allowlist；不信任模型传入的 lifecycle 过滤器。
+- `query_assets` allowlist 为 `seed | canon | material`。`candidate | draft | simulation | manuscript | archived` 在该工具中全部拒绝；simulation 和 manuscript 分别通过经过验证的 worldline reference 与 `query_manuscript_context` 专用工具读取。
+- `query_character_profile` 和 `query_world_rules` 保持 typed canon reader，不从未采用 candidate assets 建立隐式 fallback；它们仍必须强制 tenant/project 和各自 canon/evidence 真相源。
+- manuscript 反哺产生的资产在审阅前是 `candidate + disabled`；即使模型知道 candidate id，query gate 也必须拒绝。只有人工采用为 `canon` 或 `material` 并启用后才可被后续 Writer run 消费。
+- 生命周期拒绝必须写 sanitized tool event/trace 元数据，不回显 candidate body、正文、prompt 或凭证。
+- Pi Runtime 只保存 draft revision，不调用资产采用、canon 更新或 manuscript asset distillation 写入；这些动作由独立的用户/API/workflow 边界执行。
+
 ## Event 映射
 
 Pi event 必须映射成产品事件和 trace 事件。
@@ -406,6 +417,7 @@ UI 细节遵循：
 
 - `04-design-system-and-ui.md` 的写作台布局。
 - `11-writer-workbench.md` 的 Draft Mode / Continue Mode / Right Rail。
+- `28-zero-start-writer-and-manuscript-asset-distillation.md` 的双入口、候选资产 rail 和移动端 bottom Sheet 契约。
 - 不在页面中放“这是 AI 功能说明”的大段说明文本。
 
 ## 测试与验收

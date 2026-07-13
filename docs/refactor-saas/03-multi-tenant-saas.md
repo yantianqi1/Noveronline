@@ -1,6 +1,6 @@
 # 03. Multi-Tenant SaaS
 
-更新时间：`2026-06-27`
+更新时间：`2026-07-12`
 
 ## 目标
 
@@ -13,6 +13,15 @@
 - 后台任务不会串租户。
 - LLM Key、小说原文、上传文件、trace 和稿件都按租户隔离。
 - 支持未来套餐、计费、额度、用量和风控。
+
+## 用户可见模型
+
+- 产品界面统一称“工作区”；`tenant` / `tenant_id` 仅作为数据库和 API 的内部兼容命名。
+- 每个账号自助注册时，原子创建且只创建一个 `personal` 工作区、一个首项目和对应 owner 关系，并直接签发首次会话。
+- 一个账号不是只能属于一个工作区：它始终保留自己的个人工作区，以后还可以通过邀请加入多个团队工作区。
+- 个人账号只有一个工作区时隐藏工作区切换器；加入第二个工作区后才显示切换入口。
+- 工作区仍是项目、成员、LLM 渠道与绑定、配额、用量和计费的隔离边界。平台管理员不通过加入所有用户工作区来管理网站。
+- 项目邀请只授予受邀项目访问；工作区邀请才授予该工作区范围的角色。
 
 ## 核心实体
 
@@ -30,7 +39,7 @@
 - `created_at`
 - `last_login_at`
 
-### Tenant
+### Workspace（内部 Tenant）
 
 代表个人 workspace 或组织 workspace。
 
@@ -54,6 +63,7 @@
 - `user_id`
 - `role`: `owner | admin | editor | writer | viewer | billing`
 - `status`: `active | invited | suspended`
+- `access_scope`: `tenant | project_bridge`
 - `joined_at`
 
 ### Project
@@ -84,15 +94,17 @@
 - `user_id`
 - `role`: `project_owner | editor | writer | analyst | viewer`
 
-如果没有 project member 行，默认继承 tenant membership。
+`access_scope=tenant` 的工作区成员可以按工作区角色继承项目权限；`access_scope=project_bridge` 只用于承接项目邀请，必须存在目标项目的 active project member 行，不能继承同工作区其他项目。
+
+`0016_workspace_membership_scope_backfill` 会把升级前由项目邀请创建、且没有工作区邀请证据的旧 viewer 成员保守收敛为 `project_bridge`。回填只接受成员创建/加入时间与项目邀请接受时间一致的明确证据；原本已存在的工作区成员保持 `tenant` scope，迁移决策写入私有审计表以支持核验与定向回滚。
 
 ## 权限模型
 
-### 租户角色
+### 工作区角色
 
 | 角色 | 权限 |
 |---|---|
-| owner | 管理租户、成员、计费、LLM 配置、所有项目 |
+| owner | 管理工作区、成员、计费、LLM 配置、所有项目 |
 | admin | 管理成员和项目，不管理账单所有权 |
 | editor | 创建/编辑项目、资产、图谱、worldline、稿件 |
 | writer | 使用写作台、worldline、角色控制，提交草稿 |
@@ -249,7 +261,7 @@ Temporal workflow 获取锁，完成或失败后释放。过期锁由维护任�
 
 “每个人前端界面不同”应通过真实上下文实现：
 
-- 当前租户不同：项目列表、LLM 配置、配额不同。
+- 当前工作区不同：项目列表、LLM 配置、配额不同。
 - 当前角色不同：按钮、危险操作、配置入口不同。
 - 当前项目不同：模块状态、最近任务、图谱、资产、worldline 不同。
 - 用户偏好不同：侧栏折叠、工作台布局、默认视图、最近打开章节不同。

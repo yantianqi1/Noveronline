@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"go.temporal.io/sdk/client"
 )
 
 func TestSQLSavedPathReaderListsTenantProjectScopedSanitizedRows(t *testing.T) {
@@ -64,6 +66,9 @@ func TestSQLSavedPathReaderListsTenantProjectScopedSanitizedRows(t *testing.T) {
 	}
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "project-123", 25}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+	if queryer.tenantID != "tenant-123" || queryer.tenantCalls != 1 {
+		t.Fatalf("saved path reader skipped tenant context: %#v", queryer)
 	}
 }
 
@@ -143,7 +148,7 @@ func TestSQLSavedPathStoreCreatesSavedPathFromTenantSessionEventsAndWritesSaniti
 		t.Fatalf("unexpected selected events: %#v", path.SelectedEventIDs)
 	}
 	query := strings.ToLower(queryer.query)
-	for _, required := range []string{"insert into worldline_saved_paths", "join worldline_sessions", "join worldline_events", "insert into workflow_events", "worldline.saved_path.created"} {
+	for _, required := range []string{"insert into worldline_saved_paths", "worldline_sessions", "join worldline_events", "insert into workflow_events", "worldline.saved_path.created"} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("expected %s query, got %s", required, queryer.query)
 		}
@@ -161,6 +166,10 @@ func TestSQLSavedPathStoreCreatesSavedPathFromTenantSessionEventsAndWritesSaniti
 				}
 			}
 		}
+	}
+	if queryer.tenantID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		queryer.actorUserID != "cccccccc-cccc-cccc-cccc-cccccccccccc" || queryer.actorCalls != 1 {
+		t.Fatalf("saved path write skipped tenant actor context: %#v", queryer)
 	}
 }
 
@@ -198,7 +207,7 @@ func TestSQLSessionStoreStartsSessionWithWorkflowAdmissionAndSanitizedMetadata(t
 		t.Fatalf("unexpected run summary: %#v", run)
 	}
 	joinedQueries := strings.ToLower(strings.Join(execer.queries, "\n"))
-	for _, required := range []string{"insert into workflow_runs", "insert into workflow_events", "insert into worldline_sessions"} {
+	for _, required := range []string{"app_set_tenant_context", "insert into workflow_runs", "insert into workflow_events", "insert into worldline_sessions"} {
 		if !strings.Contains(joinedQueries, required) {
 			t.Fatalf("expected %s query, got %s", required, joinedQueries)
 		}
@@ -232,8 +241,10 @@ func TestDisabledStepStarterFailsClosed(t *testing.T) {
 
 func TestSQLStepStarterAdmitsTenantSessionScopedStepAndWritesSanitizedQueuedEvent(t *testing.T) {
 	execer := &recordingWorldlineExecer{}
+	temporalClient := &recordingWorldlineTemporalClient{}
 	starter := NewSQLStepStarter(SQLStepStarterConfig{
 		Execer: execer,
+		Client: temporalClient,
 		NewID: fixedWorldlineIDs(
 			"11111111-1111-1111-1111-111111111111",
 			"22222222-2222-2222-2222-222222222222",
@@ -242,6 +253,7 @@ func TestSQLStepStarterAdmitsTenantSessionScopedStepAndWritesSanitizedQueuedEven
 
 	run, err := starter.StartStep(context.Background(), StartStepInput{
 		TenantID:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		ProjectID:   "dddddddd-dddd-dddd-dddd-dddddddddddd",
 		SessionID:   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
 		ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
 		RequestID:   "req-step-123",
@@ -258,16 +270,37 @@ func TestSQLStepStarterAdmitsTenantSessionScopedStepAndWritesSanitizedQueuedEven
 		t.Fatalf("start step: %v", err)
 	}
 	if run.RunID != "11111111-1111-1111-1111-111111111111" ||
-		run.ProjectID != "" ||
+		run.ProjectID != "dddddddd-dddd-dddd-dddd-dddddddddddd" ||
 		run.WorkflowType != "worldline_step" ||
 		run.Status != "queued" {
 		t.Fatalf("unexpected step run: %#v", run)
+	}
+	if temporalClient.options.ID != "worldline_step_11111111-1111-1111-1111-111111111111" ||
+		temporalClient.options.TaskQueue != "worldline-interactive" ||
+		temporalClient.workflow != "WorldlineStepWorkflow" {
+		t.Fatalf("unexpected Temporal handoff: %#v workflow=%#v", temporalClient.options, temporalClient.workflow)
+	}
+	payload, ok := temporalClient.args[0].(map[string]any)
+	if !ok || payload["session_id"] != "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" {
+		t.Fatalf("unexpected Temporal payload: %#v", temporalClient.args)
+	}
+	contextPayload := payload["context"].(map[string]any)
+	if contextPayload["project_id"] != "dddddddd-dddd-dddd-dddd-dddddddddddd" ||
+		contextPayload["module_key"] != "worldline_director" {
+		t.Fatalf("Temporal payload lost project/module context: %#v", contextPayload)
+	}
+	if _, exists := payload["options"].(map[string]any)["prompt"]; exists {
+		t.Fatalf("Temporal payload retained private option: %#v", payload)
 	}
 	joinedQueries := strings.ToLower(strings.Join(execer.queries, "\n"))
 	for _, required := range []string{"from worldline_sessions", "insert into workflow_runs", "insert into workflow_events", "worldline_step", "workflow.queued"} {
 		if !strings.Contains(joinedQueries, required) {
 			t.Fatalf("expected %s in step admission query, got %s", required, joinedQueries)
 		}
+	}
+	if !strings.Contains(joinedQueries, "temporal_workflow_id") ||
+		!strings.Contains(strings.Join(stringArgs(execer.args), " "), "worldline_step_11111111-1111-1111-1111-111111111111") {
+		t.Fatalf("step admission did not persist Temporal workflow identity: queries=%s args=%#v", joinedQueries, execer.args)
 	}
 	for _, forbidden := range []string{"prompt", "response", "body_text", "content_text", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
 		if strings.Contains(joinedQueries, forbidden) {
@@ -280,6 +313,128 @@ func TestSQLStepStarterAdmitsTenantSessionScopedStepAndWritesSanitizedQueuedEven
 				t.Fatalf("step admission args leaked sanitized option value: %#v", execer.args)
 			}
 		}
+	}
+}
+
+func TestSQLStepStarterCompensatesTemporalStartFailureInTenantActorContext(t *testing.T) {
+	execer := &recordingTenantActorWorldlineExecer{}
+	temporalClient := &recordingWorldlineTemporalClient{err: errors.New("private provider api_key=sk-hidden prompt=hidden")}
+	starter := NewSQLStepStarter(SQLStepStarterConfig{
+		Execer: execer,
+		Client: temporalClient,
+		NewID: fixedWorldlineIDs(
+			"11111111-1111-1111-1111-111111111111",
+			"22222222-2222-2222-2222-222222222222",
+		),
+	})
+
+	_, err := starter.StartStep(context.Background(), StartStepInput{
+		TenantID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ProjectID: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		SessionID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		RequestID: "req-step-failure", Mode: "director",
+	})
+
+	if ErrorCode(err) != "WORKFLOW_FAILED" || err.Error() != "failed to start worldline step workflow" {
+		t.Fatalf("unexpected sanitized start failure: code=%s err=%v", ErrorCode(err), err)
+	}
+	if len(execer.queries) != 2 || len(execer.tenantIDs) != 2 || len(execer.actorUserIDs) != 2 {
+		t.Fatalf("expected admission and compensation tenant transactions: %#v", execer)
+	}
+	for index := range execer.tenantIDs {
+		if execer.tenantIDs[index] != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+			execer.actorUserIDs[index] != "cccccccc-cccc-cccc-cccc-cccccccccccc" {
+			t.Fatalf("tenant actor context drifted: tenants=%#v actors=%#v", execer.tenantIDs, execer.actorUserIDs)
+		}
+	}
+	compensationQuery := strings.ToLower(execer.queries[1])
+	for _, required := range []string{"update workflow_runs", "status = 'failed'", "workflow.start_failed", "status = 'queued'"} {
+		if !strings.Contains(compensationQuery, required) {
+			t.Fatalf("compensation query missing %q: %s", required, compensationQuery)
+		}
+	}
+	for _, forbidden := range []string{"sk-hidden", "prompt=hidden", "private provider"} {
+		if strings.Contains(err.Error(), forbidden) || strings.Contains(strings.Join(stringArgs(execer.args), " "), forbidden) {
+			t.Fatalf("start failure leaked private Temporal error %q", forbidden)
+		}
+	}
+}
+
+func TestSQLStepStarterCompensationSurvivesCancelledRequestContext(t *testing.T) {
+	execer := &recordingTenantActorWorldlineExecer{}
+	temporalClient := &recordingWorldlineTemporalClient{err: context.Canceled}
+	starter := NewSQLStepStarter(SQLStepStarterConfig{
+		Execer: execer, Client: temporalClient,
+		NewID: fixedWorldlineIDs("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+	})
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+
+	_, _ = starter.StartStep(requestContext, StartStepInput{
+		TenantID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ProjectID: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		SessionID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+	})
+
+	if len(execer.contextErrors) != 2 {
+		t.Fatalf("expected admission and compensation contexts, got %#v", execer.contextErrors)
+	}
+	if !errors.Is(execer.contextErrors[0], context.Canceled) {
+		t.Fatalf("admission should observe cancelled request context, got %v", execer.contextErrors[0])
+	}
+	if execer.contextErrors[1] != nil {
+		t.Fatalf("compensation must detach from request cancellation, got %v", execer.contextErrors[1])
+	}
+}
+
+func TestSQLStepStarterReturnsIdempotentRunWithoutStartingTemporalAgain(t *testing.T) {
+	existing := StepRun{
+		RunID: "99999999-9999-4999-8999-999999999999", ProjectID: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		SessionID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", WorkflowType: "worldline_step", Status: "running",
+	}
+	admission := &recordingWorldlineStepAdmissionExecer{run: existing, idempotent: true}
+	temporalClient := &recordingWorldlineTemporalClient{}
+	starter := NewSQLStepStarter(SQLStepStarterConfig{
+		Execer: admission, Client: temporalClient,
+		NewID: fixedWorldlineIDs("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+	})
+	input := StartStepInput{
+		TenantID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ProjectID: existing.ProjectID,
+		SessionID: existing.SessionID, ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		RequestID: "req-idempotent", Mode: "director",
+	}
+
+	run, err := starter.StartStep(context.Background(), input)
+
+	if err != nil || !reflect.DeepEqual(run, existing) {
+		t.Fatalf("expected existing idempotent run, got run=%#v err=%v", run, err)
+	}
+	if !reflect.DeepEqual(admission.input, input) || admission.proposed.RunID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("unexpected admission call: %#v", admission)
+	}
+	if len(temporalClient.args) != 0 {
+		t.Fatalf("idempotent retry started Temporal again: %#v", temporalClient.args)
+	}
+}
+
+func TestSQLStepStarterRejectsActiveStepWithoutStartingTemporal(t *testing.T) {
+	admission := &recordingWorldlineStepAdmissionExecer{err: &AppError{
+		Code: "WORLDLINE_STEP_ACTIVE", Message: "worldline session already has an active step",
+	}}
+	temporalClient := &recordingWorldlineTemporalClient{}
+	starter := NewSQLStepStarter(SQLStepStarterConfig{
+		Execer: admission, Client: temporalClient,
+		NewID: fixedWorldlineIDs("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+	})
+
+	_, err := starter.StartStep(context.Background(), StartStepInput{
+		TenantID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ProjectID: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		SessionID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", RequestID: "req-overlap",
+	})
+
+	if ErrorCode(err) != "WORLDLINE_STEP_ACTIVE" || err.Error() != "worldline session already has an active step" {
+		t.Fatalf("unexpected active-step error: code=%s err=%v", ErrorCode(err), err)
+	}
+	if len(temporalClient.args) != 0 {
+		t.Fatalf("active overlap started Temporal: %#v", temporalClient.args)
 	}
 }
 
@@ -405,6 +560,9 @@ func TestSQLTimelineReaderListsSessionWorkflowEventsAsPublicMetadata(t *testing.
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "session-1", 25}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
 	}
+	if queryer.tenantID != "tenant-123" || queryer.tenantCalls != 1 {
+		t.Fatalf("timeline reader skipped tenant context: %#v", queryer)
+	}
 }
 
 func TestDisabledEventReaderFailsClosed(t *testing.T) {
@@ -495,6 +653,9 @@ func TestSQLEventReaderListsTenantSessionScopedPublicCandidateMetadata(t *testin
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "session-1", "candidate", 25}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
 	}
+	if queryer.tenantID != "tenant-123" || queryer.tenantCalls != 1 {
+		t.Fatalf("event list reader skipped tenant context: %#v", queryer)
+	}
 }
 
 func TestSQLEventReaderGetsTenantScopedPublicEventMetadata(t *testing.T) {
@@ -547,6 +708,9 @@ func TestSQLEventReaderGetsTenantScopedPublicEventMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "event-1"}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+	if queryer.tenantID != "tenant-123" || queryer.tenantCalls != 1 {
+		t.Fatalf("event detail reader skipped tenant context: %#v", queryer)
 	}
 }
 
@@ -649,6 +813,10 @@ func TestSQLEventMutationStoreUpdatesTenantScopedCandidateAndWritesSanitizedEven
 			}
 		}
 	}
+	if queryer.tenantID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		queryer.actorUserID != "cccccccc-cccc-cccc-cccc-cccccccccccc" || queryer.actorCalls != 1 {
+		t.Fatalf("event mutation skipped tenant actor context: %#v", queryer)
+	}
 }
 
 func TestSQLEventAdoptionStoreAdoptsTenantScopedCandidateAndWritesSanitizedEvents(t *testing.T) {
@@ -724,6 +892,10 @@ func TestSQLEventAdoptionStoreAdoptsTenantScopedCandidateAndWritesSanitizedEvent
 			}
 		}
 	}
+	if queryer.tenantID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		queryer.actorUserID != "cccccccc-cccc-cccc-cccc-cccccccccccc" || queryer.actorCalls != 1 {
+		t.Fatalf("event adoption skipped tenant actor context: %#v", queryer)
+	}
 }
 
 func TestDisabledVariableStoreFailsClosed(t *testing.T) {
@@ -774,7 +946,7 @@ func TestSQLVariableStoreInjectsVariableMetadataAndQueuedEvent(t *testing.T) {
 		t.Fatalf("unexpected variable metadata: %#v", variable)
 	}
 	joinedQueries := strings.ToLower(strings.Join(execer.queries, "\n"))
-	for _, required := range []string{"insert into worldline_variables", "join worldline_sessions", "insert into workflow_events", "worldline.variable.injected"} {
+	for _, required := range []string{"insert into worldline_variables", "worldline_sessions", "insert into workflow_events", "worldline.variable.injected"} {
 		if !strings.Contains(joinedQueries, required) {
 			t.Fatalf("expected %s query, got %s", required, joinedQueries)
 		}
@@ -798,7 +970,9 @@ func TestSQLVariableStoreInjectsVariableMetadataAndQueuedEvent(t *testing.T) {
 }
 
 func TestSQLPreparationStoreCreatesPreparationAdmissionAndSanitizedQueuedEvent(t *testing.T) {
-	execer := &recordingWorldlineExecer{results: []sql.Result{driver.RowsAffected(1)}}
+	execer := &recordingTenantActorWorldlineExecer{
+		recordingWorldlineExecer: recordingWorldlineExecer{results: []sql.Result{driver.RowsAffected(1)}},
+	}
 	store := NewSQLPreparationStore(SQLPreparationStoreConfig{
 		Execer: execer,
 		NewID: fixedWorldlineIDs(
@@ -835,6 +1009,10 @@ func TestSQLPreparationStoreCreatesPreparationAdmissionAndSanitizedQueuedEvent(t
 		preparation.Lifecycle != "preparing" {
 		t.Fatalf("unexpected preparation summary: %#v", preparation)
 	}
+	if len(execer.tenantIDs) != 1 || execer.tenantIDs[0] != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		len(execer.actorUserIDs) != 1 || execer.actorUserIDs[0] != "cccccccc-cccc-cccc-cccc-cccccccccccc" {
+		t.Fatalf("preparation admission bypassed tenant/actor context: tenant=%#v actor=%#v", execer.tenantIDs, execer.actorUserIDs)
+	}
 
 	joinedQueries := strings.ToLower(strings.Join(execer.queries, "\n"))
 	for _, required := range []string{"insert into workflow_runs", "insert into worldline_preparations", "insert into workflow_events"} {
@@ -853,6 +1031,42 @@ func TestSQLPreparationStoreCreatesPreparationAdmissionAndSanitizedQueuedEvent(t
 				t.Fatalf("preparation admission args leaked sanitized option value: %#v", execer.args)
 			}
 		}
+	}
+}
+
+func TestSQLPreparationStoreListsPreparationsByProject(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"prepare-1",
+			"run-1",
+			"project-123",
+			"worldline_preparation",
+			"queued",
+			"preparing",
+			"Prepare council agents",
+			"path-1",
+			"user-1",
+			"2026-07-05T00:00:00Z",
+			"2026-07-05T00:01:00Z",
+		}}},
+	}
+	store := NewSQLPreparationStore(SQLPreparationStoreConfig{Queryer: queryer, Limit: 20})
+
+	preparations, err := store.ListPreparations(context.Background(), ListPreparationsInput{
+		TenantID:  "tenant-123",
+		ProjectID: "project-123",
+	})
+	if err != nil {
+		t.Fatalf("list preparations: %v", err)
+	}
+	if len(preparations) != 1 || preparations[0].PrepareID != "prepare-1" {
+		t.Fatalf("unexpected preparations: %#v", preparations)
+	}
+	if !strings.Contains(queryer.query, "FROM worldline_preparations") ||
+		!strings.Contains(queryer.query, "project_id::text = $2") ||
+		!strings.Contains(queryer.query, "ORDER BY updated_at DESC") ||
+		!strings.Contains(queryer.query, "LIMIT 20") {
+		t.Fatalf("expected project-scoped preparation list query, got %s", queryer.query)
 	}
 }
 
@@ -936,10 +1150,14 @@ func TestSQLPreparationStoreReadsPreparationAndPreparedAgentsAsPublicMetadata(t 
 }
 
 type recordingWorldlineQueryer struct {
-	query string
-	args  []any
-	rows  *fakeWorldlineRows
-	err   error
+	query       string
+	args        []any
+	rows        *fakeWorldlineRows
+	err         error
+	tenantID    string
+	tenantCalls int
+	actorUserID string
+	actorCalls  int
 }
 
 func (q *recordingWorldlineQueryer) QueryContext(_ context.Context, query string, args ...any) (SQLRows, error) {
@@ -954,11 +1172,90 @@ func (q *recordingWorldlineQueryer) QueryContext(_ context.Context, query string
 	return q.rows, nil
 }
 
+func (q *recordingWorldlineQueryer) QueryTenantContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	q.tenantID = tenantID
+	q.tenantCalls++
+	return q.QueryContext(ctx, query, args...)
+}
+
+func (q *recordingWorldlineQueryer) QueryTenantActorContext(ctx context.Context, tenantID string, actorUserID string, query string, args ...any) (SQLRows, error) {
+	q.tenantID = tenantID
+	q.actorUserID = actorUserID
+	q.actorCalls++
+	return q.QueryContext(ctx, query, args...)
+}
+
 type recordingWorldlineExecer struct {
 	queries []string
 	args    [][]any
 	results []sql.Result
 	err     error
+}
+
+type recordingWorldlineTemporalClient struct {
+	options  client.StartWorkflowOptions
+	workflow any
+	args     []any
+	err      error
+}
+
+type recordingTenantActorWorldlineExecer struct {
+	recordingWorldlineExecer
+	tenantIDs     []string
+	actorUserIDs  []string
+	contextErrors []error
+}
+
+type recordingWorldlineStepAdmissionExecer struct {
+	recordingWorldlineExecer
+	input      StartStepInput
+	proposed   StepRun
+	run        StepRun
+	idempotent bool
+	err        error
+}
+
+func (e *recordingWorldlineStepAdmissionExecer) AdmitWorldlineStep(
+	_ context.Context,
+	input StartStepInput,
+	proposed StepRun,
+	_ string,
+	_ string,
+	_ string,
+	_ string,
+) (StepRun, bool, error) {
+	e.input = input
+	e.proposed = proposed
+	if e.err != nil {
+		return StepRun{}, false, e.err
+	}
+	return e.run, e.idempotent, nil
+}
+
+func (e *recordingTenantActorWorldlineExecer) ExecTenantActorContext(ctx context.Context, tenantID string, actorUserID string, query string, args ...any) (sql.Result, error) {
+	e.tenantIDs = append(e.tenantIDs, tenantID)
+	e.actorUserIDs = append(e.actorUserIDs, actorUserID)
+	e.contextErrors = append(e.contextErrors, ctx.Err())
+	return e.recordingWorldlineExecer.ExecContext(ctx, query, args...)
+}
+
+func stringArgs(calls [][]any) []string {
+	values := []string{}
+	for _, call := range calls {
+		for _, arg := range call {
+			if value, ok := arg.(string); ok {
+				values = append(values, value)
+			}
+		}
+	}
+	return values
+}
+
+func (c *recordingWorldlineTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, workflow any, args ...any) (client.WorkflowRun, error) {
+	c.options = options
+	c.workflow = workflow
+	c.args = args
+	return nil, c.err
 }
 
 func (e *recordingWorldlineExecer) ExecContext(_ context.Context, query string, args ...any) (sql.Result, error) {

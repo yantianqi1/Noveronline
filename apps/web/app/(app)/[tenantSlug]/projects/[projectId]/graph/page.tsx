@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-import { StoryGraphShell, storyGraphBondStatus, storyGraphBuildStatus } from "../../../../../../components/story-graph-shell";
+import { StoryGraphShell } from "../../../../../../components/story-graph-shell";
+import { storyGraphBondStatus, storyGraphBuildStatus } from "../../../../../../components/story-graph-status";
 import {
   adoptStoryGraphCandidate,
   getProjectAssets,
@@ -16,7 +17,9 @@ import {
   type StoryGraphCandidateAdoptionSummary,
   type StoryGraphEvidenceSummary,
 } from "../../../../../../lib/api";
-import { webApiContext } from "../../../../../../lib/server-auth";
+import { tx } from "../../../../../../lib/locale";
+import { currentRequestLocale } from "../../../../../../lib/request-locale";
+import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -41,34 +44,37 @@ export default async function StoryGraphPage({
   }>;
 }) {
   const { tenantSlug, projectId } = await params;
+  const locale = await currentRequestLocale();
   const query = searchParams ? await searchParams : {};
-  const apiContext = await webApiContext({ tenantId: tenantSlug, projectId });
-  const current = await getStoryGraphCurrent(apiContext);
-  const view = await getStoryGraphView({
-    ...apiContext,
-    viewId: "world",
-    limit: 300,
-    includeEdges: true,
-  });
-  const evidence = await firstEvidenceSummary(apiContext, view);
-  const layout = await getStoryGraphLayout({
-    ...apiContext,
-    viewId: "world",
-  });
-  const clusters = await getStoryGraphClusters({
-    ...apiContext,
-    limit: 50,
-  });
-  const graphCandidates = graphCandidatesFromAssets(await getProjectAssets(apiContext));
+  const apiContext = webReadApiContext({ tenantId: tenantSlug, projectId });
   const selectedRunId = query.bondRunId || query.runId || "";
-  const workflowRun = selectedRunId ? await getWorkflowRunSummary({
-    ...(await webApiContext({ tenantId: tenantSlug })),
-    runId: selectedRunId,
-  }) : null;
-  const workflowEvents = selectedRunId ? await getWorkflowRunEvents({
-    ...(await webApiContext({ tenantId: tenantSlug })),
-    runId: selectedRunId,
-  }) : null;
+  const workflowContext = selectedRunId ? webReadApiContext({ tenantId: tenantSlug }) : null;
+  const [current, view, layout, clusters, projectAssets, workflowRun, workflowEvents] = await Promise.all([
+    getStoryGraphCurrent(apiContext),
+    getStoryGraphView({
+      ...apiContext,
+      viewId: "world",
+      limit: 300,
+      includeEdges: true,
+    }),
+    getStoryGraphLayout({
+      ...apiContext,
+      viewId: "world",
+    }),
+    getStoryGraphClusters({
+      ...apiContext,
+      limit: 50,
+    }),
+    getProjectAssets(apiContext),
+    selectedRunId && workflowContext
+      ? getWorkflowRunSummary({ ...workflowContext, runId: selectedRunId })
+      : Promise.resolve(null),
+    selectedRunId && workflowContext
+      ? getWorkflowRunEvents({ ...workflowContext, runId: selectedRunId })
+      : Promise.resolve(null),
+  ]);
+  const evidence = await firstEvidenceSummary(apiContext, view, locale);
+  const graphCandidates = graphCandidatesFromAssets(projectAssets);
 
   async function buildAction(formData: FormData) {
     "use server";
@@ -81,7 +87,7 @@ export default async function StoryGraphPage({
         source: stringFromFormData(formData, "source") || "seed_canon",
       },
     });
-    const status = storyGraphBuildStatus(result);
+    const status = storyGraphBuildStatus(result, locale);
     redirect(storyGraphRoute({
       tenantSlug,
       projectId,
@@ -109,7 +115,7 @@ export default async function StoryGraphPage({
         mode: stringFromFormData(formData, "mode") || "bonds_and_threads",
       },
     });
-    const status = storyGraphBondStatus(result);
+    const status = storyGraphBondStatus(result, locale);
     redirect(storyGraphRoute({
       tenantSlug,
       projectId,
@@ -142,7 +148,7 @@ export default async function StoryGraphPage({
         bondRunId: query.bondRunId ?? "",
         storyGraphAdoptionStatus: "error",
         storyGraphAdoptionCode: "STORY_GRAPH_CANDIDATE_ADOPTION_VALIDATION_FAILED",
-        storyGraphAdoptionMessage: "invalid story graph candidate adoption target",
+        storyGraphAdoptionMessage: tx(locale, "请选择采用类型", "Choose an adoption type"),
         storyGraphAdoptionTargetId: "",
       }));
     }
@@ -152,7 +158,7 @@ export default async function StoryGraphPage({
       assetId: stringFromFormData(formData, "assetId"),
       targetKind,
     });
-    const status = storyGraphAdoptionStatus(result);
+    const status = storyGraphAdoptionStatus(result, locale);
     redirect(storyGraphRoute({
       tenantSlug,
       projectId,
@@ -173,6 +179,7 @@ export default async function StoryGraphPage({
 
   return (
     <StoryGraphShell
+      locale={locale}
       tenantSlug={tenantSlug}
       projectId={projectId}
       current={current}
@@ -245,8 +252,8 @@ function stringFromFormData(formData: FormData, key: string) {
 }
 
 function stringListFromFormData(formData: FormData, key: string) {
-  return stringFromFormData(formData, key)
-    .split(/[\n,]/)
+  return formData.getAll(key)
+    .flatMap((value) => typeof value === "string" ? value.split(/[\n,]/) : [])
     .map((value) => value.trim())
     .filter(Boolean);
 }
@@ -259,7 +266,7 @@ function targetKindFromFormData(formData: FormData): "relationship" | "plot_thre
   return null;
 }
 
-function storyGraphAdoptionStatus(result: StoryGraphCandidateAdoptionSummary) {
+function storyGraphAdoptionStatus(result: StoryGraphCandidateAdoptionSummary, locale: "zh-CN" | "en") {
   if (!result.ok) {
     return {
       status: "error",
@@ -268,10 +275,13 @@ function storyGraphAdoptionStatus(result: StoryGraphCandidateAdoptionSummary) {
       targetId: "",
     };
   }
+  const targetLabel = result.target_kind === "relationship"
+    ? tx(locale, "关系", "a relationship")
+    : tx(locale, "剧情线索", "a plot thread");
   return {
     status: "success",
     code: "STORY_GRAPH_CANDIDATE_ADOPTED",
-    message: `${result.asset_id} adopted as ${result.target_kind}`,
+    message: tx(locale, `候选项已采用为${targetLabel}`, `Candidate adopted as ${targetLabel}`),
     targetId: result.target_id,
   };
 }
@@ -301,6 +311,7 @@ function setQueryIfPresent(query: URLSearchParams, key: string, value: string) {
 async function firstEvidenceSummary(
   apiContext: { tenantId: string; actorUserId?: string; sessionCookie?: string; projectId: string },
   view: Awaited<ReturnType<typeof getStoryGraphView>>,
+  locale: "zh-CN" | "en",
 ): Promise<StoryGraphEvidenceSummary> {
   if (!view.ok) {
     return {
@@ -315,7 +326,7 @@ async function firstEvidenceSummary(
     return {
       ok: false,
       code: "STORY_GRAPH_SELECTION_UNAVAILABLE",
-      message: "story graph evidence requires a node or edge selection",
+      message: tx(locale, "请选择故事图谱节点或关系后查看证据", "Select a story graph node or edge to view evidence"),
       request_id: "web-shell",
     };
   }

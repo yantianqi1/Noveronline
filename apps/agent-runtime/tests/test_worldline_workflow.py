@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
     AesGcmCredentialDecryptor,
@@ -13,16 +15,21 @@ from mirofish_agents.seed.sequential_reader import (
 )
 from mirofish_agents.temporal.worker import worker_components_for_task_queue
 from mirofish_agents.temporal.worldline import (
+    LLMFacilityWorldlinePrepareRunner,
     LLMFacilityWorldlineStepRunner,
     PostgresLLMTelemetryWriter,
     PostgresWorkflowEventWriter,
     PostgresWorkflowRunStatusWriter,
     PostgresWorldlineSourceLoader,
     PostgresWorldlineCandidateEventWriter,
+    WORLDLINE_PREPARE_MODULE_KEY,
+    WORLDLINE_PREPARE_WORKFLOW_TYPE,
     WORLDLINE_STEP_MODULE_KEY,
     WORLDLINE_TASK_QUEUE,
+    run_worldline_prepare_workflow_locally,
     run_worldline_step_workflow_locally,
     worker_spec,
+    worldline_prepare_activity,
     worldline_step_activity,
 )
 
@@ -86,6 +93,7 @@ class RecordingWorkflowRunStatusWriter:
         self,
         *,
         context: AgentContext,
+        session_id: str,
         code: str,
         message: str,
     ) -> None:
@@ -565,7 +573,7 @@ class FailingWorkflowStatusUpdateConnection(RecordingConnection):
 
 class MissingWorkflowStatusParentCursor(RecordingCursor):
     def fetchone(self) -> dict[str, int]:
-        return {"workflow_updated": 0}
+        return {"workflow_updated": 0, "session_updated": 0}
 
 
 class MissingWorkflowStatusParentConnection(RecordingConnection):
@@ -585,14 +593,70 @@ class MissingWorkflowEventParentConnection(RecordingConnection):
         self.cursor_obj = MissingWorkflowEventParentCursor()
 
 
-class FailingCandidateInsertCursor(RecordingCursor):
+class CandidateWriterCursor(RecordingCursor):
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_sql = ""
+
+    def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+        self._last_sql = sql
+        super().execute(sql, params)
+
+    def fetchone(self) -> dict[str, Any] | None:
+        sql = self._last_sql
+        if "SELECT status" in sql and "FROM worldline_sessions" in sql:
+            return {"status": "running"}
+        if "COUNT(*)::int AS event_count" in sql:
+            return {"event_count": 0, "min_step": 0, "max_step": 0}
+        if "FROM workflow_runs AS workflow_run" in sql:
+            return {"active": 1}
+        if "AS next_step" in sql:
+            return {"next_step": 1}
+        if "INSERT INTO worldline_events" in sql:
+            return {"event_id": "event-1"}
+        return super().fetchone()
+
+
+class CandidateWriterConnection(RecordingConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_obj = CandidateWriterCursor()
+
+
+class ExistingCandidateWriterCursor(CandidateWriterCursor):
+    def fetchone(self) -> dict[str, Any] | None:
+        if "COUNT(*)::int AS event_count" in self._last_sql:
+            return {"event_count": 2, "min_step": 3, "max_step": 3}
+        return super().fetchone()
+
+
+class ExistingCandidateWriterConnection(CandidateWriterConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_obj = ExistingCandidateWriterCursor()
+
+
+class InactiveCandidateWriterCursor(CandidateWriterCursor):
+    def fetchone(self) -> dict[str, Any] | None:
+        if "FROM workflow_runs AS workflow_run" in self._last_sql:
+            return None
+        return super().fetchone()
+
+
+class InactiveCandidateWriterConnection(CandidateWriterConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_obj = InactiveCandidateWriterCursor()
+
+
+class FailingCandidateInsertCursor(CandidateWriterCursor):
     def execute(self, sql: str, params: tuple[Any, ...]) -> None:
         super().execute(sql, params)
         if "INSERT INTO worldline_events" in sql:
             raise RuntimeError("candidate insert failed prompt=hidden api_key=sk-nope credential_ref=secret-ref")
 
 
-class FailingCandidateInsertConnection(RecordingConnection):
+class FailingCandidateInsertConnection(CandidateWriterConnection):
     def __init__(self) -> None:
         super().__init__()
         self.cursor_obj = FailingCandidateInsertCursor()
@@ -708,12 +772,20 @@ class WorldlineStepChainCursor:
                     "87utEhTfLrnKAiv0vtWdTg==:qe3dwCoCLzMECbZ5"
                 )
             }
+        if "SELECT status" in sql and "FROM worldline_sessions" in sql:
+            return {"status": "running"}
+        if "COUNT(*)::int AS event_count" in sql:
+            return {"event_count": 0, "min_step": 0, "max_step": 0}
+        if "FROM workflow_runs AS workflow_run" in sql:
+            return {"active": 1}
+        if "AS next_step" in sql:
+            return {"next_step": 1}
         if "INSERT INTO worldline_events" in sql:
             return {"event_id": "event-candidate-1"}
         if "INSERT INTO workflow_events" in sql:
             return {"event_id": "event-workflow-1"}
         if "UPDATE workflow_runs" in sql:
-            return {"workflow_updated": 1}
+            return {"workflow_updated": 1, "session_updated": 1}
         return None
 
 
@@ -868,7 +940,11 @@ def test_llm_facility_worldline_step_runner_persists_candidate_events_without_pu
         context=_context(),
         session_id="session-1",
         mode="director",
-        options={"goal": "推进一次单世界推演", "prompt": "不应公开的用户指令"},
+        options={
+            "goal": "推进一次单世界推演",
+            "prompt": "不应公开的用户指令",
+            "source_step_index": 0,
+        },
     )
 
     assert result == {
@@ -1879,7 +1955,7 @@ def test_llm_facility_worldline_step_runner_redacts_provider_exception_message()
 
 
 def test_postgres_worldline_candidate_event_writer_inserts_only_public_metadata() -> None:
-    connection = RecordingConnection()
+    connection = CandidateWriterConnection()
     writer = PostgresWorldlineCandidateEventWriter(connect=lambda: connection)
 
     result = writer.write_candidate_events(
@@ -1903,11 +1979,12 @@ def test_postgres_worldline_candidate_event_writer_inserts_only_public_metadata(
         ],
     )
 
-    assert result == {"status": "completed", "candidate_event_count": 1}
+    assert result == {"status": "completed", "candidate_event_count": 1, "step": 1}
     assert connection.commits == 1
     assert connection.closed is True
-    assert len(connection.cursor_obj.executions) == 1
-    sql, params = connection.cursor_obj.executions[0]
+    candidate_writes = [item for item in connection.cursor_obj.executions if "INSERT INTO worldline_events" in item[0]]
+    assert len(candidate_writes) == 1
+    sql, params = candidate_writes[0]
     assert "worldline_events" in sql
     encoded = json.dumps(params, ensure_ascii=False, default=str)
     assert "雨夜谈判破裂" in encoded
@@ -1917,7 +1994,7 @@ def test_postgres_worldline_candidate_event_writer_inserts_only_public_metadata(
 
 
 def test_postgres_worldline_candidate_event_writer_scopes_insert_to_admitted_session() -> None:
-    connection = RecordingConnection()
+    connection = CandidateWriterConnection()
     writer = PostgresWorldlineCandidateEventWriter(connect=lambda: connection)
 
     writer.write_candidate_events(
@@ -1935,11 +2012,50 @@ def test_postgres_worldline_candidate_event_writer_scopes_insert_to_admitted_ses
         ],
     )
 
-    sql = connection.cursor_obj.executions[0][0].lower()
+    sql = "\n".join(item[0] for item in connection.cursor_obj.executions).lower()
     assert "worldline_sessions" in sql
     assert "worldline_sessions.tenant_id" in sql
     assert "worldline_sessions.project_id" in sql
     assert "worldline_sessions.session_id" in sql
+
+
+def test_postgres_worldline_candidate_event_writer_reuses_existing_run_step_without_duplicate_insert() -> None:
+    connection = ExistingCandidateWriterConnection()
+    writer = PostgresWorldlineCandidateEventWriter(connect=lambda: connection)
+
+    result = writer.write_candidate_events(
+        context=_context(),
+        session_id="session-1",
+        source_run_id=WORLDLINE_STEP_RUN_UUID,
+        model_id="model-worldline",
+        mode="director",
+        events=[{"title": "Duplicate retry", "summary": "Must not insert again.", "kind": "director"}],
+    )
+
+    assert result == {"status": "completed", "candidate_event_count": 2, "step": 3}
+    assert connection.commits == 1
+    assert not any("INSERT INTO worldline_events" in sql for sql, _ in connection.cursor_obj.executions)
+
+
+def test_postgres_worldline_candidate_event_writer_rejects_stale_or_foreign_session_run() -> None:
+    connection = InactiveCandidateWriterConnection()
+    writer = PostgresWorldlineCandidateEventWriter(connect=lambda: connection)
+
+    with pytest.raises(LLMFacilityError) as captured:
+        writer.write_candidate_events(
+            context=_context(),
+            session_id="session-1",
+            source_run_id=WORLDLINE_STEP_RUN_UUID,
+            model_id="model-worldline",
+            mode="director",
+            events=[{"title": "Stale", "summary": "Must not persist.", "kind": "director"}],
+        )
+
+    assert captured.value.code == "WORLDLINE_STEP_NOT_ACTIVE"
+    assert captured.value.message == "worldline step is not active for this session"
+    assert connection.commits == 0
+    assert connection.rollbacks == 1
+    assert not any("INSERT INTO worldline_events" in sql for sql, _ in connection.cursor_obj.executions)
 
 
 def test_postgres_worldline_candidate_event_writer_rolls_back_when_session_scope_missing() -> None:
@@ -2282,6 +2398,7 @@ def test_postgres_workflow_status_writer_rolls_back_and_sanitizes_error_when_upd
     try:
         writer.mark_failed(
             context=_context(),
+            session_id="session-1",
             code="LLM_PROVIDER_ERROR",
             message="worldline provider call failed",
         )
@@ -2312,6 +2429,7 @@ def test_postgres_workflow_status_writer_rolls_back_when_admission_parent_missin
                 "status": "completed",
                 "session_id": "session-1",
                 "mode": "director",
+                "step": 1,
                 "candidate_event_count": 1,
                 "prompt": "private prompt",
                 "api_key": "sk-input",
@@ -2330,6 +2448,11 @@ def test_postgres_workflow_status_writer_rolls_back_when_admission_parent_missin
     encoded = json.dumps(connection.cursor_obj.executions, ensure_ascii=False, default=str)
     assert "completed" in encoded
     assert "session-1" in encoded
+    sql = connection.cursor_obj.executions[0][0]
+    assert "status IN ('queued', 'running')" in sql
+    assert "queued_event.payload_jsonb->>'session_id'" in sql
+    assert "source_run_id = %s" in sql
+    assert "step = %s" in sql
     for forbidden in ["private prompt", "sk-input", "secret-ref", "api_key", "credential_ref"]:
         assert forbidden not in encoded
 
@@ -2558,7 +2681,7 @@ def test_worldline_step_activity_runs_db_backed_success_chain_under_same_run_id(
         "stage": "worldline_step",
         "session_id": "session-1",
         "mode": "director",
-        "step": 4,
+        "step": 1,
         "candidate_event_count": 1,
         "model_id": "model-worldline",
         "workflow_status_persisted": True,
@@ -2585,7 +2708,7 @@ def test_worldline_step_activity_runs_db_backed_success_chain_under_same_run_id(
         else "other"
         for item in database.executions
     ]
-    assert operations == [
+    assert [operation for operation in operations if operation != "other"] == [
         "binding",
         "credential",
         "provider",
@@ -2709,11 +2832,405 @@ def test_worldline_worker_spec_registers_temporal_workflow_and_activity() -> Non
 
     assert spec["task_queue"] == WORLDLINE_TASK_QUEUE
     assert "WorldlineStepWorkflow" in spec["workflows"]
+    assert "WorldlinePrepareWorkflow" in spec["workflows"]
     assert "worldline_step_activity" in spec["activities"]
+    assert "worldline_prepare_activity" in spec["activities"]
 
 
-def test_temporal_worldline_worker_registers_step_activity() -> None:
+def test_temporal_worldline_worker_registers_step_prepare_and_auto_evolution_activities() -> None:
     components = worker_components_for_task_queue(WORLDLINE_TASK_QUEUE)
 
-    assert [workflow.__name__ for workflow in components["workflows"]] == ["WorldlineStepWorkflow"]
-    assert [activity.__name__ for activity in components["activities"]] == ["worldline_step_activity"]
+    assert [workflow.__name__ for workflow in components["workflows"]] == [
+        "WorldlineStepWorkflow",
+        "WorldlinePrepareWorkflow",
+        "WorldlineAutoEvolutionWorkflow",
+    ]
+    assert [activity.__name__ for activity in components["activities"]] == [
+        "worldline_step_activity",
+        "worldline_prepare_activity",
+        "worldline_auto_evolution_step_activity",
+        "worldline_auto_evolution_finalize_activity",
+    ]
+
+
+WORLDLINE_PREPARE_ID = "47d8f976-4f29-4d57-a939-240f07b731d0"
+WORLDLINE_PREPARE_ASSET_ID = "2ec44036-4d71-4e7c-a442-4319e43f805f"
+WORLDLINE_PREPARE_ENTITY_ID = "a047cab3-a16c-464a-8584-9bc531e83740"
+
+
+def _prepare_context(*, permitted: bool = True) -> AgentContext:
+    permissions = {WORLDLINE_PREPARE_MODULE_KEY: ["run"]} if permitted else {}
+    return AgentContext(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        run_id=WORLDLINE_STEP_RUN_UUID,
+        workflow_type=WORLDLINE_PREPARE_WORKFLOW_TYPE,
+        actor_user_id="user-1",
+        module_key=WORLDLINE_PREPARE_MODULE_KEY,
+        trace_id="trace-worldline-prepare-1",
+        permissions=permissions,
+    )
+
+
+def _prepare_payload(*, permitted: bool = True) -> dict[str, Any]:
+    return {
+        "context": _prepare_context(permitted=permitted).model_dump(),
+        "prepare_id": WORLDLINE_PREPARE_ID,
+        "options": {
+            "agent_refs": [{"source_kind": "asset", "source_id": "payload-must-not-be-trusted"}],
+            "prompt": "hidden payload prompt",
+            "credential_ref": "hidden-ref",
+        },
+    }
+
+
+def _prepare_resolution() -> ModuleBindingResolution:
+    return ModuleBindingResolution(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        module_key=WORLDLINE_PREPARE_MODULE_KEY,
+        channel_id="channel-prepare",
+        model_id="model-prepare",
+        provider="openai-compatible",
+        base_url="https://llm.example/v1",
+        credential_ref="channel-prepare",
+        supports_json=True,
+        settings={"temperature": 0.3},
+    )
+
+
+class RecordingWorldlinePrepareScopeStore:
+    def __init__(self, *, scope: dict[str, Any] | None = None, error: LLMFacilityError | None = None) -> None:
+        self.scope = scope or {
+            "already_completed": False,
+            "goal_summary": "Test how the alliance responds.",
+            "selected_agents": [
+                {
+                    "selection_ref": f"asset:{WORLDLINE_PREPARE_ASSET_ID}",
+                    "source_kind": "asset",
+                    "source_id": WORLDLINE_PREPARE_ASSET_ID,
+                    "source_asset_id": WORLDLINE_PREPARE_ASSET_ID,
+                    "display_name": "Lin Yue",
+                    "role": "character",
+                    "summary": "Public character summary.",
+                    "source_text": "private source text",
+                    "private_profile": "private source profile",
+                }
+            ],
+            "selected_sources": [
+                {
+                    "selection_ref": f"asset:{WORLDLINE_PREPARE_ASSET_ID}",
+                    "source_kind": "asset",
+                    "source_id": WORLDLINE_PREPARE_ASSET_ID,
+                    "title": "Lin Yue",
+                    "summary": "Public character summary.",
+                    "content_text": "private asset content",
+                }
+            ],
+        }
+        self.error = error
+        self.loads: list[dict[str, Any]] = []
+        self.materializations: list[dict[str, Any]] = []
+
+    def load_scope(self, *, context: AgentContext, prepare_id: str) -> dict[str, Any]:
+        self.loads.append({"context": context, "prepare_id": prepare_id})
+        if self.error is not None:
+            raise self.error
+        return self.scope
+
+    def materialize_agents(
+        self,
+        *,
+        context: AgentContext,
+        prepare_id: str,
+        model_id: str,
+        agents: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.materializations.append(
+            {
+                "context": context,
+                "prepare_id": prepare_id,
+                "model_id": model_id,
+                "agents": agents,
+            }
+        )
+        return {"prepared_agent_count": len(agents), "reused": False}
+
+
+class RecordingWorldlinePrepareLifecycleWriter:
+    def __init__(self) -> None:
+        self.completed: list[dict[str, Any]] = []
+        self.failed: list[dict[str, Any]] = []
+
+    def mark_completed(
+        self,
+        *,
+        context: AgentContext,
+        prepare_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        self.completed.append({"context": context, "prepare_id": prepare_id, "result": result})
+
+    def mark_failed(
+        self,
+        *,
+        context: AgentContext,
+        prepare_id: str,
+        code: str,
+        message: str,
+    ) -> None:
+        self.failed.append(
+            {
+                "context": context,
+                "prepare_id": prepare_id,
+                "code": code,
+                "message": message,
+            }
+        )
+
+
+class SuccessfulWorldlinePrepareRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def run_prepare(self, *, context: AgentContext, prepare_id: str) -> dict[str, Any]:
+        self.calls.append({"context": context, "prepare_id": prepare_id})
+        return {
+            "status": "completed",
+            "prepare_id": prepare_id,
+            "prepared_agent_count": 1,
+            "model_id": "model-prepare",
+            "private_profile": "must not be public",
+            "runtime_seed_state": "must not be public",
+            "manuscript": "must not exist",
+        }
+
+
+def test_llm_facility_worldline_prepare_runner_uses_db_scope_and_materializes_public_dossier_only() -> None:
+    resolver = RecordingBindingResolver(_prepare_resolution())
+    credentials = RecordingCredentialProvider("sk-prepare")
+    chat_client = RecordingJSONChatClient(
+        {
+            "prepared_agents": [
+                {
+                    "source_ref": f"asset:{WORLDLINE_PREPARE_ASSET_ID}",
+                    "display_name": "Lin Yue",
+                    "role": "protagonist",
+                    "public_profile": {"summary": "Keeps the alliance intact while hiding her doubts."},
+                    "private_profile": "private motive must not enter the public prepared-agent row",
+                    "runtime_seed_state": {"secret": "private runtime state"},
+                    "prompt": "hidden provider prompt",
+                    "draft": "forbidden draft",
+                }
+            ]
+        }
+    )
+    scope_store = RecordingWorldlinePrepareScopeStore()
+    runner = LLMFacilityWorldlinePrepareRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        scope_store=scope_store,
+    )
+
+    result = runner.run_prepare(context=_prepare_context(), prepare_id=WORLDLINE_PREPARE_ID)
+
+    assert result == {
+        "status": "completed",
+        "prepare_id": WORLDLINE_PREPARE_ID,
+        "module_key": WORLDLINE_PREPARE_MODULE_KEY,
+        "model_id": "model-prepare",
+        "prepared_agent_count": 1,
+        "reused": False,
+    }
+    assert resolver.calls == [WORLDLINE_PREPARE_MODULE_KEY]
+    assert credentials.calls == ["channel-prepare"]
+    assert scope_store.loads == [{"context": _prepare_context(), "prepare_id": WORLDLINE_PREPARE_ID}]
+    assert scope_store.materializations[0]["agents"] == [
+        {
+            "selection_ref": f"asset:{WORLDLINE_PREPARE_ASSET_ID}",
+            "source_kind": "asset",
+            "source_id": WORLDLINE_PREPARE_ASSET_ID,
+            "source_asset_id": WORLDLINE_PREPARE_ASSET_ID,
+            "display_name": "Lin Yue",
+            "role": "protagonist",
+            "summary": "Keeps the alliance intact while hiding her doubts.",
+        }
+    ]
+    user_message = json.loads(chat_client.calls[0]["messages"][1]["content"])
+    assert user_message["selected_agents"][0]["source_id"] == WORLDLINE_PREPARE_ASSET_ID
+    encoded = json.dumps([result, scope_store.materializations, user_message], ensure_ascii=False, default=str)
+    for forbidden in [
+        "private source text",
+        "private source profile",
+        "private asset content",
+        "private motive",
+        "private runtime state",
+        "hidden provider prompt",
+        "forbidden draft",
+        "sk-prepare",
+    ]:
+        assert forbidden not in encoded
+
+
+def test_llm_facility_worldline_prepare_runner_reuses_ready_materialization_without_provider_call() -> None:
+    scope_store = RecordingWorldlinePrepareScopeStore(
+        scope={
+            "already_completed": True,
+            "existing_agent_count": 2,
+            "goal_summary": "Already prepared",
+            "selected_agents": [],
+            "selected_sources": [],
+        }
+    )
+    resolver = RecordingBindingResolver(_prepare_resolution())
+    credentials = RecordingCredentialProvider("sk-prepare")
+    chat_client = RecordingJSONChatClient({"prepared_agents": []})
+    runner = LLMFacilityWorldlinePrepareRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        scope_store=scope_store,
+    )
+
+    result = runner.run_prepare(context=_prepare_context(), prepare_id=WORLDLINE_PREPARE_ID)
+
+    assert result == {
+        "status": "completed",
+        "prepare_id": WORLDLINE_PREPARE_ID,
+        "prepared_agent_count": 2,
+        "reused": True,
+    }
+    assert resolver.calls == []
+    assert credentials.calls == []
+    assert chat_client.calls == []
+    assert scope_store.materializations == []
+
+
+def test_llm_facility_worldline_prepare_runner_fails_missing_db_source_before_binding() -> None:
+    scope_store = RecordingWorldlinePrepareScopeStore(
+        error=LLMFacilityError(
+            "WORLDLINE_PREPARATION_SOURCE_NOT_FOUND",
+            "one or more worldline preparation sources were not found in this tenant/project",
+        )
+    )
+    resolver = RecordingBindingResolver(_prepare_resolution())
+    runner = LLMFacilityWorldlinePrepareRunner(
+        binding_resolver=resolver,
+        credential_provider=RecordingCredentialProvider("sk-prepare"),
+        chat_client=RecordingJSONChatClient({"prepared_agents": []}),
+        scope_store=scope_store,
+    )
+
+    result = runner.run_prepare(context=_prepare_context(), prepare_id=WORLDLINE_PREPARE_ID)
+
+    assert result == {
+        "status": "failed",
+        "error": {
+            "code": "WORLDLINE_PREPARATION_SOURCE_NOT_FOUND",
+            "message": "one or more worldline preparation sources were not found in this tenant/project",
+        },
+    }
+    assert resolver.calls == []
+    assert scope_store.materializations == []
+
+
+def test_llm_facility_worldline_prepare_runner_requires_exact_selected_agent_roster() -> None:
+    scope_store = RecordingWorldlinePrepareScopeStore()
+    scope_store.scope["selected_agents"].append(
+        {
+            "selection_ref": f"entity:{WORLDLINE_PREPARE_ENTITY_ID}",
+            "source_kind": "entity",
+            "source_id": WORLDLINE_PREPARE_ENTITY_ID,
+            "source_asset_id": None,
+            "display_name": "North Gate Guild",
+            "role": "organization",
+            "summary": "Controls access to the northern district.",
+        }
+    )
+    runner = LLMFacilityWorldlinePrepareRunner(
+        binding_resolver=RecordingBindingResolver(_prepare_resolution()),
+        credential_provider=RecordingCredentialProvider("sk-prepare"),
+        chat_client=RecordingJSONChatClient(
+            {
+                "prepared_agents": [
+                    {
+                        "source_ref": f"asset:{WORLDLINE_PREPARE_ASSET_ID}",
+                        "public_profile": {"summary": "Only one of two selected agents."},
+                    }
+                ]
+            }
+        ),
+        scope_store=scope_store,
+    )
+
+    result = runner.run_prepare(context=_prepare_context(), prepare_id=WORLDLINE_PREPARE_ID)
+
+    assert result["status"] == "failed"
+    assert result["error"] == {
+        "code": "SCHEMA_VALIDATION_FAILED",
+        "message": "prepared_agents must cover every selected agent exactly once",
+    }
+    assert scope_store.materializations == []
+
+
+def test_worldline_prepare_activity_persists_only_public_completion_metadata() -> None:
+    runner = SuccessfulWorldlinePrepareRunner()
+    lifecycle = RecordingWorldlinePrepareLifecycleWriter()
+
+    result = worldline_prepare_activity(
+        _prepare_payload(),
+        prepare_runner=runner,
+        lifecycle_writer=lifecycle,
+    )
+
+    assert result == {
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "run_id": WORLDLINE_STEP_RUN_UUID,
+        "workflow_type": WORLDLINE_PREPARE_WORKFLOW_TYPE,
+        "actor_user_id": "user-1",
+        "module_key": WORLDLINE_PREPARE_MODULE_KEY,
+        "trace_id": "trace-worldline-prepare-1",
+        "status": "completed",
+        "stage": "worldline_prepare",
+        "prepare_id": WORLDLINE_PREPARE_ID,
+        "prepared_agent_count": 1,
+        "model_id": "model-prepare",
+        "workflow_state_persisted": True,
+    }
+    assert runner.calls == [{"context": _prepare_context(), "prepare_id": WORLDLINE_PREPARE_ID}]
+    assert lifecycle.completed[0]["result"] == {
+        "prepare_id": WORLDLINE_PREPARE_ID,
+        "prepared_agent_count": 1,
+        "model_id": "model-prepare",
+    }
+    encoded = json.dumps([result, lifecycle.completed], ensure_ascii=False, default=str)
+    for forbidden in ["payload-must-not-be-trusted", "hidden payload prompt", "hidden-ref", "private_profile", "runtime_seed_state", "manuscript"]:
+        assert forbidden not in encoded
+
+
+def test_worldline_prepare_activity_fails_closed_without_permission_or_runner() -> None:
+    denied_lifecycle = RecordingWorldlinePrepareLifecycleWriter()
+    denied = worldline_prepare_activity(
+        _prepare_payload(permitted=False),
+        prepare_runner=SuccessfulWorldlinePrepareRunner(),
+        lifecycle_writer=denied_lifecycle,
+    )
+    unconfigured_lifecycle = RecordingWorldlinePrepareLifecycleWriter()
+    unconfigured = run_worldline_prepare_workflow_locally(
+        _prepare_payload(),
+        lifecycle_writer=unconfigured_lifecycle,
+    )
+
+    assert denied["status"] == "failed"
+    assert denied["error"] == {
+        "code": "FORBIDDEN",
+        "message": "worldline_agent_prepare run permission is required",
+    }
+    assert denied_lifecycle.completed == []
+    assert denied_lifecycle.failed[0]["code"] == "FORBIDDEN"
+    assert denied_lifecycle.failed[0]["prepare_id"] == WORLDLINE_PREPARE_ID
+    assert unconfigured["status"] == "failed"
+    assert unconfigured["error"]["code"] == "WORLDLINE_PREPARE_RUNNER_UNCONFIGURED"
+    assert unconfigured_lifecycle.failed[0]["prepare_id"] == WORLDLINE_PREPARE_ID

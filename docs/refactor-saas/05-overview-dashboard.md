@@ -1,6 +1,6 @@
 # 05. Overview Dashboard
 
-更新时间：`2026-06-27`
+更新时间：`2026-07-13`
 
 ## 模块定位
 
@@ -32,10 +32,19 @@
 作者登录后创建项目，进入总览。页面应显示：
 
 - 项目名称和空状态。
-- 上传小说/设定/大纲的入口。
+- `从一个想法开始` 和 `上传已有文本` 两条入口。
 - 支持 TXT / MD / PDF。
 - LLM 设施未配置时的清晰提示。
 - Seed Pipeline 预计会生成哪些数据。
+
+### Planned: 空项目双入口
+
+完整契约见 [28. Zero-start Writer and Manuscript Asset Distillation](./28-zero-start-writer-and-manuscript-asset-distillation.md)。该旅程尚未实现，不得据此把现有 Overview 空状态标记为完成。
+
+- 主入口 `从一个想法开始` 使用紧凑 bootstrap 表单创建最小 book plan、第一章、第一场景和人工正文起始 block，然后深链 Writer；不调用 LLM，不要求 source file 或 Seed。
+- 次入口 `上传已有文本` 继续使用现有 Upload -> Seed 流程。
+- 空项目不展示会误导作者的全量健康统计面板；先呈现一个主动作和一个次动作。直接打开空 Writer 时复用同一 bootstrap，不要求返回 Overview。
+- 移动端保持正文/下一动作优先，表单控件和按钮触控区域不小于 44px，异步错误使用可恢复的就地反馈。
 
 ### 作者上传小说
 

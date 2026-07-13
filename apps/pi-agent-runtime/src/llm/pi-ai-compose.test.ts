@@ -58,11 +58,23 @@ describe("createPiAIComposeDraft", () => {
         calls.push(`model:${provider}:${modelId}`);
         return model;
       },
-      async complete(inputModel: Model<string>, context: Context, options?: { apiKey?: string; temperature?: number; maxTokens?: number; sessionId?: string }) {
+      async complete(inputModel: Model<string>, context: Context, options?: {
+        apiKey?: string;
+        temperature?: number;
+        maxTokens?: number;
+        sessionId?: string;
+        headers?: Record<string, string | null>;
+      }) {
         const firstMessage = context.messages[0];
         calls.push(`complete:${options?.apiKey}:${options?.temperature}:${options?.maxTokens}:${options?.sessionId}:${firstMessage?.role}`);
         expect(inputModel).toBe(model);
         expect(firstMessage?.content).toBe("写下一场雨夜谈判");
+        expect(options?.headers).toEqual({
+          "X-MiroFish-Tenant-Id": "ten_1",
+          "X-MiroFish-Project-Id": "proj_1",
+          "X-MiroFish-Run-Id": "run_1",
+          "X-MiroFish-Module-Key": "writer_composer"
+        });
         return assistant;
       }
     } as unknown as MutableModels;

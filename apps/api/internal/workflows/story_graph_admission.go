@@ -83,8 +83,11 @@ SELECT
   1,
   $9::jsonb
 FROM workflow_insert`
-	_, err = s.execer.ExecContext(
+	_, err = execAdmissionSQL(
 		ctx,
+		s.execer,
+		strings.TrimSpace(input.TenantID),
+		strings.TrimSpace(input.ProjectID),
 		query,
 		strings.TrimSpace(input.TenantID),
 		strings.TrimSpace(input.ProjectID),

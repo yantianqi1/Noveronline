@@ -60,11 +60,18 @@ func (r *SQLSettingsReader) GetSettings(ctx context.Context, input SettingsInput
 			Message: "LLM settings backend is not configured",
 		}
 	}
-	channels, err := r.listSettingsChannels(ctx, input)
+	tenantQueryer, ok := r.queryer.(SQLTenantQueryer)
+	if !ok {
+		return SettingsSnapshot{}, &AppError{
+			Code:    "LLM_SETTINGS_BACKEND_UNCONFIGURED",
+			Message: "LLM settings backend does not support tenant-scoped queries",
+		}
+	}
+	channels, err := r.listSettingsChannels(ctx, tenantQueryer, input)
 	if err != nil {
 		return SettingsSnapshot{}, err
 	}
-	bindings, err := r.listTenantBindings(ctx, input)
+	bindings, err := r.listTenantBindings(ctx, tenantQueryer, input)
 	if err != nil {
 		return SettingsSnapshot{}, err
 	}
@@ -75,7 +82,7 @@ func (r *SQLSettingsReader) GetSettings(ctx context.Context, input SettingsInput
 	}, nil
 }
 
-func (r *SQLSettingsReader) listSettingsChannels(ctx context.Context, input SettingsInput) ([]ChannelRecord, error) {
+func (r *SQLSettingsReader) listSettingsChannels(ctx context.Context, queryer SQLTenantQueryer, input SettingsInput) ([]ChannelRecord, error) {
 	query := `SELECT
   channel_id::text,
   name,
@@ -92,7 +99,8 @@ FROM llm_channels
 WHERE (tenant_id::text = $1 OR tenant_id IS NULL)
 ORDER BY scope DESC, name ASC, channel_id::text ASC
 LIMIT $2`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), r.limit)
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := queryer.QueryTenantContext(ctx, tenantID, query, tenantID, r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "LLM_SETTINGS_QUERY_FAILED", Message: err.Error()}
 	}
@@ -123,7 +131,7 @@ LIMIT $2`
 	return records, nil
 }
 
-func (r *SQLSettingsReader) listTenantBindings(ctx context.Context, input SettingsInput) ([]ModuleBindingRecord, error) {
+func (r *SQLSettingsReader) listTenantBindings(ctx context.Context, queryer SQLTenantQueryer, input SettingsInput) ([]ModuleBindingRecord, error) {
 	query := `SELECT
   b.module_key,
   c.channel_id::text,
@@ -146,7 +154,8 @@ WHERE b.tenant_id::text = $1
   AND b.project_id IS NULL
 ORDER BY b.module_key ASC
 LIMIT $2`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), r.limit)
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := queryer.QueryTenantContext(ctx, tenantID, query, tenantID, r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "LLM_SETTINGS_QUERY_FAILED", Message: err.Error()}
 	}
@@ -197,6 +206,13 @@ func isSensitiveSettingsKey(key string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(key))
 	if normalized == "" {
 		return true
+	}
+	// Operational generation budgets are public binding metadata, not credentials.
+	// Without this allowlist, keys like max_tokens would match the broad "token" filter.
+	switch normalized {
+	case "max_tokens", "max_concurrency", "temperature", "top_p", "top_k",
+		"presence_penalty", "frequency_penalty", "embedding_dimensions":
+		return false
 	}
 	return strings.Contains(normalized, "api_key") ||
 		strings.Contains(normalized, "credential") ||

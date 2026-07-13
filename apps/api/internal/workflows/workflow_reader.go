@@ -81,8 +81,10 @@ FROM workflow_runs
 WHERE tenant_id::text = $1
   AND run_id::text = $2
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(
+	rows, err := queryWorkflowRunRows(
 		ctx,
+		r.queryer,
+		strings.TrimSpace(input.TenantID),
 		query,
 		strings.TrimSpace(input.TenantID),
 		strings.TrimSpace(input.RunID),
@@ -140,6 +142,19 @@ LIMIT 1`
 		CreatedAt:    createdAt,
 		UpdatedAt:    updatedAt,
 	}, nil
+}
+
+func queryWorkflowRunRows(
+	ctx context.Context,
+	queryer WriterEventSQLQueryer,
+	tenantID string,
+	query string,
+	args ...any,
+) (WriterEventSQLRows, error) {
+	if tenantQueryer, ok := queryer.(WriterEventSQLTenantQueryer); ok {
+		return tenantQueryer.QueryTenantContext(ctx, tenantID, query, args...)
+	}
+	return queryer.QueryContext(ctx, query, args...)
 }
 
 func workflowRunQueryFailed() *AppError {

@@ -2,13 +2,36 @@
 
 This file guides Claude Code when working in this repository.
 
+## SaaS Refactor Source Of Truth
+
+The active development goal is the SaaS refactor. Read sources in this order:
+
+1. `docs/refactor-saas/DEVELOPMENT_PLAN.md` for scope, phase order, and final completion criteria.
+2. `docs/refactor-saas/24-current-development-progress.md` for the only current progress, critical path, and verification freshness snapshot.
+3. `tasks/refactor-saas-parallel-board.md` for active tasks, dependencies, and next gates.
+4. The current worktree, schema, and tests as the final factual authority.
+
+Do not infer current work from historical handoffs, append-only logs, model-specific plans, or fixed window prompts. Do not restart from Phase 0.
+
+Active SaaS code lives in `apps/api`, `apps/web`, `apps/agent-runtime`, `apps/pi-agent-runtime`, and `infra`. `backend` is retained only for legacy import and compatibility reference. The root `frontend` application is retired and deleted; do not recreate, run, copy, or use it as a visual reference.
+
 ## Project Overview
 
 MiroFish-Novel is a multi-agent novel analysis and writing platform. It turns uploaded novels, outlines, character cards, and free-form materials into structured story knowledge, then uses that knowledge for graph exploration, archive management, single-world simulation, and Writer Agent-assisted prose generation.
 
 This repository was originally inspired by `MiroFish`, but this codebase is novel-domain specific. Do not bring back social-media, public-opinion, Twitter, Reddit, or sentiment-analysis abstractions unless explicitly requested.
 
-## Commands
+## SaaS Refactor Commands
+
+```bash
+cd apps/api && go test ./...
+cd apps/web && npm test && npm run typecheck && npm run build
+cd apps/agent-runtime && env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider tests -q
+cd apps/pi-agent-runtime && npm test && npm run typecheck && npm run build
+docker compose -f infra/docker-compose.yml up -d
+```
+
+## Legacy Backend Commands
 
 ### Backend
 
@@ -28,19 +51,6 @@ APP_PORT=3888 .venv/bin/python run.py
 ```
 
 FastAPI docs are available at `http://localhost:3888/docs`.
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-npm run lint
-npm run build
-npm run test
-```
-
-The Vite dev server listens on `http://localhost:3999` and proxies `/api` to `http://127.0.0.1:3888`.
 
 ### Tests
 
@@ -63,7 +73,17 @@ uv run alembic downgrade -1
 
 Startup runs `alembic upgrade head` through the FastAPI lifespan. Never edit applied revisions; add a new revision.
 
-## Architecture
+## SaaS Refactor Architecture
+
+- `apps/api` — Go control plane, HTTP/RBAC, workflow admission, and read sides.
+- `apps/web` — Next.js SaaS application and workbenches.
+- `apps/agent-runtime` — Python Seed, Graph, Asset, and Worldline workers.
+- `apps/pi-agent-runtime` — Pi Writer Agent Runtime.
+- `infra` — Postgres baseline, Temporal, Redis, MinIO, and Compose.
+
+`apps/web` is the only frontend and Web build context. Writer is **manuscript-primary**: the dominant canvas is the manuscript workspace (`manuscript` / `structure` / `review` / `studio` artifact tabs), and the Writer Agent is a **persistent collaborator** in a right-side dock (continuous thread + persistent composer + selection-driven invocation) rather than occupying half the screen. Current structure: `writer-agent-layout[data-layout="manuscript-primary"]` wraps `writer-artifact-canvas` (dominant primary) and `writer-agent-dock` (persistent secondary). The retired blue Vite UI, blue Writer long-page screenshots, `writer-studio-grid`, collapsed composer, and dark `writer-agent-rail` are not valid implementation or visual baselines. References to root `frontend/` in `docs/plans/` or `docs/superpowers/` are historical records only.
+
+## Legacy Application Architecture
 
 ### Backend
 
@@ -92,22 +112,7 @@ Startup runs `alembic upgrade head` through the FastAPI lifespan. Never edit app
 - **Writer Agent**: retrieval planning, tool loop, prose writing, manuscript compilation, reviewer pass, dedup extraction, world-data update, and book-plan workflows.
 - **LLM facility**: `llm_channels`, `llm_models`, `llm_module_bindings`, activity tracking, and module-level routing.
 
-### Frontend
-
-`frontend/src/` is a React 19 + TypeScript + Vite app:
-
-- `pages/overview/` — project creation, seed upload, pipeline status, trace viewing.
-- `pages/asset-library/` — unified assets, search, facets, details.
-- `pages/story-graph/` — D3 story graph, build console, inspector, graph bond generation.
-- `pages/worldline/` — worldline workbench, director panels, roster, timeline, variable controls.
-- `pages/writer/` — Writer Workbench, book plan, chapters, scenes, manuscript, reviewer, continuation context.
-- `pages/llm-facility/` — channel, model, and module-binding management.
-- `components/` — shared business components and `ui/` primitives.
-- `api/` — domain API clients and SSE helper.
-- `stores/` — Zustand stores.
-- `frontend/src/router.tsx` — React Router 7 route table. Legacy `/archive-library` redirects to `/assets`.
-
-## Persistence Model
+## Legacy Persistence Model
 
 - Default DB: `backend/data/mirofish.db` via `DATABASE_URL`.
 - Schema owner: Alembic revisions under `backend/alembic/versions/`.
@@ -137,7 +142,9 @@ Startup runs `alembic upgrade head` through the FastAPI lifespan. Never edit app
 
 - `README.md` — public project overview, setup, commands, and contribution entry points.
 - `AGENTS.md` — AI agent handoff, product facts, and stricter development constraints.
-- `docs/CODEX_HANDOFF_GUIDE.md` — detailed Codex handoff notes.
+- `docs/refactor-saas/DEVELOPMENT_PLAN.md` — SaaS scope and completion definition.
+- `docs/refactor-saas/24-current-development-progress.md` — sole current SaaS progress source.
+- `tasks/refactor-saas-parallel-board.md` — active task/dependency board only.
 - `docs/database/database-source-of-truth-matrix.md` — DB vs legacy source-of-truth matrix.
 - `docs/fastapi-route-manifest.md` — route inventory.
 - `docs/agent-data-schema-reference.md` — Agent data schemas and prompt references.

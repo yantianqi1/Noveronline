@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"testing"
 
+	"mirofish-novel/apps/api/internal/testschema"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -72,6 +74,28 @@ func TestLiveSQLTelemetryReaderReadsWorldlineStepTelemetryWithTenantContext(t *t
 	if !reflect.DeepEqual(usage, expectedUsage) {
 		t.Fatalf("unexpected usage rows: %#v", usage)
 	}
+
+	aggregatedUsage, err := reader.AggregateUsage(context.Background(), UsageAggregateQueryInput{
+		TenantID: liveTenantID, ProjectID: liveProjectID, RunID: liveRunID, ModuleKey: "worldline_director",
+	})
+	if err != nil {
+		t.Fatalf("aggregate usage: %v", err)
+	}
+	if len(aggregatedUsage) != 1 || aggregatedUsage[0].Quantity != 34 ||
+		aggregatedUsage[0].ProviderCalls != 1 || aggregatedUsage[0].CallIdentityStatus != "complete" {
+		t.Fatalf("duplicate provider-call usage was not reconciled: %#v", aggregatedUsage)
+	}
+	aggregatedActivity, err := reader.AggregateActivity(context.Background(), UsageAggregateQueryInput{
+		TenantID: liveTenantID, ProjectID: liveProjectID, RunID: liveRunID, ModuleKey: "worldline_director",
+	})
+	if err != nil {
+		t.Fatalf("aggregate activity: %v", err)
+	}
+	reconciled := ReconcileTelemetry(aggregatedActivity, aggregatedUsage)
+	if len(reconciled) != 1 || reconciled[0].Status != "matched" || reconciled[0].ActivityCalls != 1 ||
+		reconciled[0].ActivityTokens != 34 || reconciled[0].UsageTokens != 34 {
+		t.Fatalf("activity and usage telemetry did not reconcile: %#v", reconciled)
+	}
 }
 
 func prepareLiveTelemetryDatabase(t *testing.T, adminURL string) {
@@ -81,14 +105,7 @@ func prepareLiveTelemetryDatabase(t *testing.T, adminURL string) {
 		t.Fatalf("open admin db: %v", err)
 	}
 	defer db.Close()
-	migrationPath := filepath.Join("..", "..", "..", "..", "infra", "postgres", "migrations", "0001_core_saas.sql")
-	migrationSQL, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(migrationSQL)); err != nil {
-		t.Fatalf("apply migration: %v", err)
-	}
+	prepareLiveTelemetrySchema(t, db)
 	if _, err := db.Exec("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mirofish_live_app') THEN CREATE ROLE mirofish_live_app LOGIN PASSWORD 'mirofish_live_password' IN ROLE mirofish_app; ELSE ALTER ROLE mirofish_live_app WITH LOGIN PASSWORD 'mirofish_live_password'; END IF; END $$; GRANT mirofish_app TO mirofish_live_app;"); err != nil {
 		t.Fatalf("ensure app role: %v", err)
 	}
@@ -117,12 +134,27 @@ VALUES ($1, $2, $3, 'worldline_director', $4, 'model-worldline-live', 'completed
 		t.Fatalf("seed activity: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO usage_events (tenant_id, project_id, run_id, module_key, usage_type, quantity, unit, metadata_jsonb)
-VALUES ($1, $2, $3, 'worldline_director', 'llm_tokens', 34, 'tokens', '{"provider":"openai-compatible"}'::jsonb)`, liveTenantID, liveProjectID, liveRunID); err != nil {
+VALUES ($1, $2, $3, 'worldline_director', 'llm_tokens', 34, 'tokens', '{"provider":"openai-compatible","provider_call_id":"local-worldline-call-1"}'::jsonb)`, liveTenantID, liveProjectID, liveRunID); err != nil {
 		t.Fatalf("seed usage: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO usage_events (tenant_id, project_id, run_id, module_key, usage_type, quantity, unit, metadata_jsonb)
+VALUES ($1, $2, $3, 'worldline_director', 'llm_tokens', 34, 'tokens', '{"provider":"openai-compatible","provider_call_id":"local-worldline-call-1","retry":"duplicate-write"}'::jsonb)`, liveTenantID, liveProjectID, liveRunID); err != nil {
+		t.Fatalf("seed duplicate provider call usage: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO usage_events (tenant_id, project_id, run_id, module_key, usage_type, quantity, unit, metadata_jsonb)
 VALUES ($1, $2, $3, 'worldline_director', 'storage_bytes', 999, 'bytes', '{}'::jsonb)`, liveTenantID, liveProjectID, liveRunID); err != nil {
 		t.Fatalf("seed non-llm usage: %v", err)
+	}
+}
+
+func prepareLiveTelemetrySchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	migrationPath := filepath.Join("..", "..", "..", "..", "infra", "postgres", "migrations", "0001_core_saas.sql")
+	if err := testschema.EnsureLiveSchema(
+		context.Background(), db, migrationPath,
+		"tenants", "projects", "workflow_runs", "llm_activity", "usage_events",
+	); err != nil {
+		t.Fatalf("prepare live telemetry schema: %v", err)
 	}
 }
 

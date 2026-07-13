@@ -2,7 +2,7 @@ name: ${COMPOSE_PROJECT_NAME:-mirofish-saas}
 
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mirofish}
       POSTGRES_USER: ${POSTGRES_USER:-mirofish}
@@ -39,14 +39,15 @@ services:
   temporal:
     image: temporalio/auto-setup:1.25
     depends_on:
-      postgres:
-        condition: service_healthy
+      temporal-db-init:
+        condition: service_completed_successfully
     environment:
       DB: postgres12
       DB_PORT: 5432
       POSTGRES_SEEDS: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mirofish}
       POSTGRES_PWD: ${POSTGRES_PASSWORD:-mirofish_dev_password}
+      SKIP_DB_CREATE: "true"
     ports:
       - "${TEMPORAL_PORT:-7233}:7233"
     healthcheck:
@@ -60,6 +61,22 @@ services:
       retries: 30
     restart: unless-stopped
 
+  temporal-db-init:
+    image: pgvector/pgvector:pg16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-mirofish}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mirofish_dev_password}
+      TEMPORAL_DB: ${TEMPORAL_DB:-temporal}
+      TEMPORAL_VISIBILITY_DB: ${TEMPORAL_VISIBILITY_DB:-temporal_visibility}
+    volumes:
+      - ./scripts/init-temporal-databases.sh:/usr/local/bin/init-temporal-databases:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/init-temporal-databases"]
+    restart: "no"
+
   temporal-ui:
     image: temporalio/ui:2.32.0
     depends_on:
@@ -67,7 +84,7 @@ services:
         condition: service_healthy
     environment:
       TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:3999
+      TEMPORAL_CORS_ORIGINS: ${TEMPORAL_CORS_ORIGINS:-http://localhost:3999}
     ports:
       - "${TEMPORAL_UI_PORT:-8233}:8080"
     restart: unless-stopped
@@ -111,6 +128,102 @@ services:
       ]
     restart: "no"
 
+  schema-init:
+    image: pgvector/pgvector:pg16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-mirofish}
+      POSTGRES_USER: ${POSTGRES_USER:-mirofish}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mirofish_dev_password}
+      APP_DATABASE_USER: ${APP_DATABASE_USER:-mirofish_runtime}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}
+    volumes:
+      - ./postgres/migrations:/migrations:ro
+      - ./scripts/bootstrap-compose-database.sh:/usr/local/bin/bootstrap-compose-database:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/bootstrap-compose-database"]
+    restart: "no"
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: ../../infra/docker/api.Dockerfile
+    depends_on:
+      schema-init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MIROFISH_API_ADDR: :8080
+      MIROFISH_DEPLOYMENT_ENV: local
+      MIROFISH_ENABLE_DEVELOPMENT_AUTH: ${MIROFISH_ENABLE_DEVELOPMENT_AUTH:-0}
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      MIROFISH_AUTH_SESSION_SECRET: ${MIROFISH_AUTH_SESSION_SECRET:-mirofish_local_compose_session_secret_change_me}
+      MIROFISH_RECOVERY_CLIENT_PROOF_SECRET: ${MIROFISH_RECOVERY_CLIENT_PROOF_SECRET:-0123456789abcdef0123456789abcdef}
+      AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY: ${AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY:-YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=}
+      MIROFISH_AUTH_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
+      MIROFISH_RATE_LIMIT_KEY_SECRET: ${MIROFISH_RATE_LIMIT_KEY_SECRET:-fedcba9876543210fedcba9876543210}
+      MIROFISH_RATE_LIMIT_POLICIES_JSON: >-
+        {"auth_login":{"limit":20,"window_seconds":60},"auth_signup":{"limit":8,"window_seconds":300},"auth_session_mutation":{"limit":60,"window_seconds":60},"collaboration_invite_create":{"limit":20,"window_seconds":60},"collaboration_invite_accept":{"limit":30,"window_seconds":60},"llm_admin_mutation":{"limit":60,"window_seconds":60},"llm_provider_health":{"limit":10,"window_seconds":60}}
+      TEMPORAL_ADDRESS: temporal:7233
+      WRITER_TASK_QUEUE: writer-streaming
+      HELLO_AGENT_TASK_QUEUE: maintenance
+      SEED_TASK_QUEUE: seed-heavy
+      ASSET_TASK_QUEUE: asset-light
+      GRAPH_TASK_QUEUE: graph-heavy
+      WORLDLINE_TASK_QUEUE: worldline-interactive
+      CHARACTER_TASK_QUEUE: character-interactive
+      WRITER_REVIEW_TASK_QUEUE: writer-reviewer
+      WRITER_PLANNING_TASK_QUEUE: writer-planning
+      LEGACY_IMPORT_TASK_QUEUE: ${LEGACY_IMPORT_TASK_QUEUE:-legacy-import}
+      MIROFISH_READINESS_TIMEOUT: ${MIROFISH_READINESS_TIMEOUT:-5s}
+      MIROFISH_OBJECT_STORAGE_ENDPOINT: minio:9000
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}
+      MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-mirofish}
+      MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}
+      MIROFISH_OBJECT_STORAGE_USE_SSL: "false"
+      MANUSCRIPT_ARTIFACT_ROOT: /var/lib/mirofish/manuscript-artifacts
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    volumes:
+      - manuscript_artifacts:/var/lib/mirofish/manuscript-artifacts
+    ports:
+      - "127.0.0.1:${API_PORT:-3888}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/readyz | grep -q '\"status\":\"ready\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: ../../infra/docker/web.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      MIROFISH_API_BASE_URL: http://api:8080
+      MIROFISH_WEB_DEV_BYPASS_LOGIN: "0"
+      MIROFISH_RECOVERY_CLIENT_PROOF_SECRET: ${MIROFISH_RECOVERY_CLIENT_PROOF_SECRET:-0123456789abcdef0123456789abcdef}
+      MIROFISH_TRUSTED_CLIENT_IP_HEADER: ${MIROFISH_TRUSTED_CLIENT_IP_HEADER:-x-forwarded-for}
+    ports:
+      - "${WEB_PORT:-3999}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/login"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
   agent-runtime:
     build:
       context: ../apps/agent-runtime
@@ -120,6 +233,13 @@ services:
         condition: service_healthy
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      AGENT_RUNTIME_TASK_QUEUE: maintenance
+    healthcheck: &python-worker-health
+      test: ["CMD-SHELL", "grep -aq 'mirofish_agents.temporal.worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   agent-runtime-seed:
@@ -131,15 +251,24 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      schema-init:
+        condition: service_completed_successfully
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       AGENT_RUNTIME_TASK_QUEUE: seed-heavy
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
       MIROFISH_OBJECT_STORAGE_ENDPOINT: minio:9000
       MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}
       MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-mirofish}
       MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}
       MIROFISH_OBJECT_STORAGE_USE_SSL: "false"
+      MIROFISH_OCR_BACKEND: ${MIROFISH_OCR_BACKEND:-tesseract}
+      MIROFISH_OCR_LANGUAGES: ${MIROFISH_OCR_LANGUAGES:-eng+chi_sim}
+      MIROFISH_OCR_RENDER_SCALE: ${MIROFISH_OCR_RENDER_SCALE:-2}
+      MIROFISH_OCR_PAGE_SEGMENTATION_MODE: ${MIROFISH_OCR_PAGE_SEGMENTATION_MODE:-3}
+      MIROFISH_OCR_PAGE_TIMEOUT_SECONDS: ${MIROFISH_OCR_PAGE_TIMEOUT_SECONDS:-}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck: *python-worker-health
     restart: unless-stopped
 
   agent-runtime-graph:
@@ -149,10 +278,136 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       AGENT_RUNTIME_TASK_QUEUE: graph-heavy
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck: *python-worker-health
+    restart: unless-stopped
+
+  agent-runtime-asset:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_RUNTIME_TASK_QUEUE: asset-light
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck: *python-worker-health
+    restart: unless-stopped
+
+  agent-runtime-worldline:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_RUNTIME_TASK_QUEUE: worldline-interactive
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck: *python-worker-health
+    restart: unless-stopped
+
+  agent-runtime-character:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_RUNTIME_TASK_QUEUE: character-interactive
+      CHARACTER_TASK_QUEUE: character-interactive
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck: *python-worker-health
+    restart: unless-stopped
+
+  agent-runtime-reviewer:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.writer_review_worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      WRITER_REVIEW_TASK_QUEUE: writer-reviewer
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'mirofish_agents.temporal.writer_review_worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  agent-runtime-writer-planning:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.writer_planning_worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      WRITER_PLANNING_TASK_QUEUE: writer-planning
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'mirofish_agents.temporal.writer_planning_worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  legacy-import-worker:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.legacy_import_worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      LEGACY_IMPORT_TASK_QUEUE: ${LEGACY_IMPORT_TASK_QUEUE:-legacy-import}
+      LEGACY_IMPORT_DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LEGACY_IMPORT_SOURCE_ROOT: /legacy-import-source
+    volumes:
+      - ./legacy-import-source:/legacy-import-source:ro
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'mirofish_agents.temporal.legacy_import_worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   pi-agent-runtime:
@@ -164,14 +419,67 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       WRITER_TASK_QUEUE: writer-streaming
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'npm run worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  worker-readiness:
+    image: temporalio/auto-setup:1.25
+    depends_on:
+      temporal:
+        condition: service_healthy
+      agent-runtime:
+        condition: service_healthy
+      agent-runtime-seed:
+        condition: service_healthy
+      agent-runtime-asset:
+        condition: service_healthy
+      agent-runtime-graph:
+        condition: service_healthy
+      agent-runtime-worldline:
+        condition: service_healthy
+      agent-runtime-character:
+        condition: service_healthy
+      agent-runtime-reviewer:
+        condition: service_healthy
+      agent-runtime-writer-planning:
+        condition: service_healthy
+      legacy-import-worker:
+        condition: service_healthy
+      pi-agent-runtime:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    entrypoint: ["tail", "-f", "/dev/null"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_READINESS_MAX_CONCURRENCY: ${TEMPORAL_READINESS_MAX_CONCURRENCY:-4}
+    volumes:
+      - ./scripts/check-temporal-workers.sh:/usr/local/bin/check-temporal-workers:ro
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/usr/local/bin/check-temporal-workers"]
+      interval: 10s
+      timeout: 20s
+      retries: 30
+      start_period: 10s
     restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
   minio_data:
+  manuscript_artifacts:

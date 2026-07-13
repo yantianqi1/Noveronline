@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 )
 
@@ -122,6 +121,10 @@ type SQLQueryer interface {
 	QueryContext(context.Context, string, ...any) (SQLRows, error)
 }
 
+type SQLTenantQueryer interface {
+	QueryTenantContext(context.Context, string, string, ...any) (SQLRows, error)
+}
+
 type SQLReaderConfig struct {
 	Queryer SQLQueryer
 	Limit   int
@@ -164,6 +167,39 @@ func (q sqlDBQueryer) QueryContext(ctx context.Context, query string, args ...an
 	return q.db.QueryContext(ctx, query, args...)
 }
 
+func (q sqlDBQueryer) QueryTenantContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, NULL::uuid, false)", strings.TrimSpace(tenantID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &tenantScopedRows{rows: rows, tx: tx}, nil
+}
+
+type tenantScopedRows struct {
+	rows SQLRows
+	tx   *sql.Tx
+}
+
+func (r *tenantScopedRows) Next() bool             { return r.rows.Next() }
+func (r *tenantScopedRows) Scan(dest ...any) error { return r.rows.Scan(dest...) }
+func (r *tenantScopedRows) Err() error             { return r.rows.Err() }
+func (r *tenantScopedRows) Close() error {
+	if err := r.rows.Close(); err != nil {
+		_ = r.tx.Rollback()
+		return err
+	}
+	return r.tx.Commit()
+}
+
 func (r *SQLReader) ListEvents(ctx context.Context, input EventQueryInput) ([]EventRecord, error) {
 	if err := validateTraceInput(input); err != nil {
 		return nil, err
@@ -194,8 +230,10 @@ WHERE e.tenant_id::text = $1
   AND e.trace_id = $3
 ORDER BY e.event_order ASC
 LIMIT $5`
-	rows, err := r.queryer.QueryContext(
+	rows, err := queryTraceRows(
 		ctx,
+		r.queryer,
+		input.TenantID,
 		query,
 		strings.TrimSpace(input.TenantID),
 		strings.TrimSpace(input.ProjectID),
@@ -204,9 +242,8 @@ LIMIT $5`
 		r.limit,
 	)
 	if err != nil {
-		return nil, &AppError{Code: "AGENT_TRACE_QUERY_FAILED", Message: err.Error()}
+		return nil, traceQueryError()
 	}
-	defer rows.Close()
 
 	records := []EventRecord{}
 	for rows.Next() {
@@ -221,13 +258,21 @@ LIMIT $5`
 			&record.RedactionLevel,
 			&record.CreatedAt,
 		); err != nil {
-			return nil, &AppError{Code: "AGENT_TRACE_QUERY_FAILED", Message: err.Error()}
+			_ = rows.Close()
+			return nil, traceQueryError()
 		}
 		record.Payload = decodePayload(payloadJSON)
+		if !input.IncludeFull {
+			record.Payload = sanitizeTraceMap(record.Payload)
+		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "AGENT_TRACE_QUERY_FAILED", Message: err.Error()}
+		_ = rows.Close()
+		return nil, traceQueryError()
+	}
+	if err := rows.Close(); err != nil {
+		return nil, traceQueryError()
 	}
 	return records, nil
 }
@@ -249,7 +294,7 @@ func (a *SQLExportAuditor) RecordExport(ctx context.Context, input ExportAuditIn
 		"event_count":  input.EventCount,
 	})
 	if err != nil {
-		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: err.Error()}
+		return traceAuditError()
 	}
 	query := `INSERT INTO audit_logs (
   tenant_id, actor_user_id, action, resource_type, resource_id,
@@ -278,24 +323,24 @@ func (a *SQLExportAuditor) RecordExport(ctx context.Context, input ExportAuditIn
 		string(metadata),
 	)
 	if err != nil {
-		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: err.Error()}
+		return traceAuditError()
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return &AppError{Code: "TRACE_AUDIT_FAILED", Message: err.Error()}
+			return traceAuditError()
 		}
 		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: "audit insert did not return audit_id"}
 	}
 	var auditID string
 	if err := rows.Scan(&auditID); err != nil {
-		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: err.Error()}
+		return traceAuditError()
 	}
 	if strings.TrimSpace(auditID) == "" {
 		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: "audit insert returned empty audit_id"}
 	}
 	if err := rows.Err(); err != nil {
-		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: err.Error()}
+		return traceAuditError()
 	}
 	return nil
 }
@@ -327,7 +372,57 @@ func decodePayload(raw string) map[string]any {
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return map[string]any{"message": fmt.Sprintf("invalid trace payload: %s", raw)}
+		return map[string]any{"message": "invalid trace payload"}
 	}
 	return decoded
+}
+
+func queryTraceRows(ctx context.Context, queryer SQLQueryer, tenantID string, query string, args ...any) (SQLRows, error) {
+	if tenantQueryer, ok := queryer.(SQLTenantQueryer); ok {
+		return tenantQueryer.QueryTenantContext(ctx, strings.TrimSpace(tenantID), query, args...)
+	}
+	return queryer.QueryContext(ctx, query, args...)
+}
+
+func traceQueryError() error {
+	return &AppError{Code: "AGENT_TRACE_QUERY_FAILED", Message: "agent trace query failed"}
+}
+
+func traceAuditError() error {
+	return &AppError{Code: "TRACE_AUDIT_FAILED", Message: "trace export audit failed"}
+}
+
+func sanitizeTraceMap(input map[string]any) map[string]any {
+	output := map[string]any{}
+	for key, value := range input {
+		if isSensitiveTraceKey(key) {
+			continue
+		}
+		output[key] = sanitizeTraceValue(value)
+	}
+	return output
+}
+
+func sanitizeTraceValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return sanitizeTraceMap(typed)
+	case []any:
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, sanitizeTraceValue(item))
+		}
+		return items
+	default:
+		return value
+	}
+}
+
+func isSensitiveTraceKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "api_key", "apikey", "authorization", "body", "body_text", "content", "content_text", "credential_ref", "draft", "encrypted_api_key", "manuscript", "prompt", "raw_body", "raw_content", "raw_text", "response", "source_material", "source_text", "text":
+		return true
+	default:
+		return false
+	}
 }

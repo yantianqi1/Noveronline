@@ -66,6 +66,18 @@ type PasswordAuthenticator interface {
 	AuthenticatePassword(context.Context, PasswordLoginInput) (CurrentUser, error)
 }
 
+type ChangePasswordInput struct {
+	UserID          string
+	CurrentPassword string
+	NewPassword     string
+	Now             time.Time
+	RequestID       string
+}
+
+type PasswordChanger interface {
+	ChangePassword(context.Context, ChangePasswordInput) error
+}
+
 type CreateSessionInput struct {
 	UserID    string
 	TokenHash string
@@ -246,6 +258,16 @@ type SQLPasswordAuthenticatorConfig struct {
 	Reader  Reader
 }
 
+type SQLPasswordChangerConfig struct {
+	Queryer    SQLQueryer
+	Execer     SQLExecer
+	BcryptCost int
+}
+
+type SQLAuthorizerConfig struct {
+	Queryer SQLQueryer
+}
+
 type SQLReader struct {
 	queryer SQLQueryer
 }
@@ -255,15 +277,29 @@ type SQLPasswordAuthenticator struct {
 	reader  Reader
 }
 
+type SQLPasswordChanger struct {
+	queryer    SQLQueryer
+	execer     SQLExecer
+	bcryptCost int
+}
+
+type SQLAuthorizer struct {
+	queryer SQLQueryer
+}
+
 type SQLSessionStoreConfig struct {
-	Queryer SQLQueryer
-	Execer  SQLExecer
+	Queryer       SQLQueryer
+	Execer        SQLExecer
+	TouchInterval time.Duration
 }
 
 type SQLSessionStore struct {
-	queryer SQLQueryer
-	execer  SQLExecer
+	queryer       SQLQueryer
+	execer        SQLExecer
+	touchInterval time.Duration
 }
+
+const defaultSessionTouchInterval = 5 * time.Minute
 
 func NewSQLReader(config SQLReaderConfig) *SQLReader {
 	return &SQLReader{queryer: config.Queryer}
@@ -277,8 +313,28 @@ func NewSQLPasswordAuthenticator(config SQLPasswordAuthenticatorConfig) *SQLPass
 	return &SQLPasswordAuthenticator{queryer: config.Queryer, reader: reader}
 }
 
+func NewSQLPasswordChanger(config SQLPasswordChangerConfig) *SQLPasswordChanger {
+	cost := config.BcryptCost
+	if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
+		cost = bcrypt.DefaultCost
+	}
+	return &SQLPasswordChanger{queryer: config.Queryer, execer: config.Execer, bcryptCost: cost}
+}
+
+func NewSQLAuthorizer(config SQLAuthorizerConfig) *SQLAuthorizer {
+	return &SQLAuthorizer{queryer: config.Queryer}
+}
+
 func NewSQLSessionStore(config SQLSessionStoreConfig) *SQLSessionStore {
-	return &SQLSessionStore{queryer: config.Queryer, execer: config.Execer}
+	touchInterval := config.TouchInterval
+	if touchInterval <= 0 {
+		touchInterval = defaultSessionTouchInterval
+	}
+	return &SQLSessionStore{
+		queryer:       config.Queryer,
+		execer:        config.Execer,
+		touchInterval: touchInterval,
+	}
 }
 
 type AppError struct {
@@ -304,6 +360,16 @@ func NewDisabledReader() DisabledReader {
 	return DisabledReader{}
 }
 
+type DisabledPasswordChanger struct{}
+
+func NewDisabledPasswordChanger() DisabledPasswordChanger {
+	return DisabledPasswordChanger{}
+}
+
+func (DisabledPasswordChanger) ChangePassword(context.Context, ChangePasswordInput) error {
+	return &AppError{Code: CodeBackendUnconfigured, Message: "password change backend is not configured"}
+}
+
 func (DisabledReader) GetCurrentUser(context.Context, GetCurrentUserInput) (CurrentUser, error) {
 	return CurrentUser{}, &AppError{
 		Code:    CodeBackendUnconfigured,
@@ -325,6 +391,22 @@ func ValidatePasswordLoginInput(input PasswordLoginInput) error {
 	return nil
 }
 
+func ValidateChangePasswordInput(input ChangePasswordInput) error {
+	if strings.TrimSpace(input.UserID) == "" {
+		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
+	}
+	if input.CurrentPassword == "" || input.NewPassword == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "current_password and new_password are required"}
+	}
+	if input.CurrentPassword == input.NewPassword {
+		return &AppError{Code: CodeValidationFailed, Message: "new password must differ from current password"}
+	}
+	if len([]byte(input.NewPassword)) < 12 || len([]byte(input.NewPassword)) > 72 {
+		return &AppError{Code: CodeValidationFailed, Message: "new password must be between 12 and 72 bytes"}
+	}
+	return nil
+}
+
 type ReaderBackedAuthorizer struct {
 	reader Reader
 }
@@ -337,17 +419,11 @@ func NewReaderBackedAuthorizer(reader Reader) *ReaderBackedAuthorizer {
 }
 
 func (a *ReaderBackedAuthorizer) Authorize(ctx context.Context, input AuthorizeInput) error {
-	if err := ValidateGetCurrentUserInput(GetCurrentUserInput{UserID: input.UserID, RequestID: input.RequestID}); err != nil {
+	if err := validateAuthorizeInput(input); err != nil {
 		return err
 	}
 	tenantID := strings.TrimSpace(input.TenantID)
 	projectID := strings.TrimSpace(input.ProjectID)
-	if tenantID == "" || input.Permission == "" {
-		return &AppError{Code: CodeValidationFailed, Message: "tenant_id and permission are required"}
-	}
-	if !tenantScopedPermission(input.Permission) && projectID == "" {
-		return &AppError{Code: CodeValidationFailed, Message: "project_id is required"}
-	}
 	if a.reader == nil {
 		return &AppError{Code: CodeBackendUnconfigured, Message: "auth reader is not configured"}
 	}
@@ -364,28 +440,131 @@ func (a *ReaderBackedAuthorizer) Authorize(ctx context.Context, input AuthorizeI
 	return accessDenied()
 }
 
+func (a *SQLAuthorizer) Authorize(ctx context.Context, input AuthorizeInput) error {
+	if err := validateAuthorizeInput(input); err != nil {
+		return err
+	}
+	if a.queryer == nil {
+		return authLookupFailed()
+	}
+
+	userID := strings.TrimSpace(input.UserID)
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	role, err := a.readResolvedRole(ctx, userID, tenantID, projectID, input.Permission)
+	if err != nil {
+		return err
+	}
+	if _, ok := allowedRolesForPermission(input.Permission)[normalizedRole(role)]; ok {
+		return nil
+	}
+	return accessDenied()
+}
+
+func validateAuthorizeInput(input AuthorizeInput) error {
+	if err := ValidateGetCurrentUserInput(GetCurrentUserInput{UserID: input.UserID, RequestID: input.RequestID}); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.TenantID) == "" || input.Permission == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "tenant_id and permission are required"}
+	}
+	if !tenantScopedPermission(input.Permission) && strings.TrimSpace(input.ProjectID) == "" {
+		return &AppError{Code: CodeValidationFailed, Message: "project_id is required"}
+	}
+	return nil
+}
+
+func (a *SQLAuthorizer) readResolvedRole(
+	ctx context.Context,
+	userID string,
+	tenantID string,
+	projectID string,
+	permission Permission,
+) (string, error) {
+	query := `SELECT tm.role
+FROM tenant_memberships tm
+JOIN tenants t ON t.tenant_id = tm.tenant_id AND t.status = 'active'
+WHERE tm.user_id = $1
+  AND tm.tenant_id = $2
+  AND tm.status = 'active'
+  AND tm.access_scope = 'tenant'
+LIMIT 1`
+	args := []any{userID, tenantID}
+	if !tenantScopedPermission(permission) {
+		query = `SELECT COALESCE(NULLIF(BTRIM(pm.role), ''), tm.role) AS resolved_role
+FROM tenant_memberships tm
+JOIN tenants t ON t.tenant_id = tm.tenant_id AND t.status = 'active'
+JOIN projects p ON p.tenant_id = tm.tenant_id AND p.status = 'active'
+LEFT JOIN project_members pm
+  ON pm.tenant_id = p.tenant_id
+ AND pm.project_id = p.project_id
+ AND pm.user_id = tm.user_id
+ AND pm.status = 'active'
+WHERE tm.user_id = $1
+  AND tm.tenant_id = $2
+  AND p.project_id = $3
+  AND tm.status = 'active'
+  AND (tm.access_scope = 'tenant' OR pm.user_id IS NOT NULL)
+LIMIT 1`
+		args = append(args, projectID)
+	}
+
+	rows, err := a.queryAuthContext(ctx, userID, query, args...)
+	if err != nil {
+		return "", authLookupFailed()
+	}
+	role := ""
+	if rows.Next() {
+		if err := rows.Scan(&role); err != nil {
+			_ = rows.Close()
+			return "", authLookupFailed()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return "", authLookupFailed()
+	}
+	return strings.TrimSpace(role), nil
+}
+
+func (a *SQLAuthorizer) queryAuthContext(ctx context.Context, userID string, query string, args ...any) (SQLRows, error) {
+	if authQueryer, ok := a.queryer.(SQLAuthQueryer); ok {
+		return authQueryer.QueryAuthContext(ctx, userID, query, args...)
+	}
+	return a.queryer.QueryContext(ctx, query, args...)
+}
+
 func tenantScopedPermission(permission Permission) bool {
 	return permission == PermissionLLMModuleBindingManage || permission == PermissionTenantSessionManage
 }
 
 func (a *ReaderBackedAuthorizer) allowed(currentUser CurrentUser, tenantID string, projectID string, permission Permission) bool {
+	allowedRoles := allowedRolesForPermission(permission)
+	if tenantScopedPermission(permission) {
+		return hasTenantRole(currentUser.ActiveTenants, tenantID, allowedRoles)
+	}
+	return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, allowedRoles)
+}
+
+func allowedRolesForPermission(permission Permission) map[string]struct{} {
 	switch permission {
 	case PermissionProjectRead:
-		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, projectReadProjectRoles())
+		return projectReadProjectRoles()
 	case PermissionTraceFullAccess:
-		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, traceFullAccessProjectRoles())
+		return traceFullAccessProjectRoles()
 	case PermissionWriterRun:
-		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, writerRunProjectRoles())
+		return writerRunProjectRoles()
 	case PermissionCreativeWrite:
-		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, creativeWriteProjectRoles())
+		return creativeWriteProjectRoles()
 	case PermissionAssetManage:
-		return hasProjectRole(currentUser.ActiveProjects, tenantID, projectID, assetManageProjectRoles())
-	case PermissionLLMModuleBindingManage:
-		return hasTenantRole(currentUser.ActiveTenants, tenantID, llmModuleBindingManageTenantRoles())
-	case PermissionTenantSessionManage:
-		return hasTenantRole(currentUser.ActiveTenants, tenantID, llmModuleBindingManageTenantRoles())
+		return assetManageProjectRoles()
+	case PermissionLLMModuleBindingManage, PermissionTenantSessionManage:
+		return llmModuleBindingManageTenantRoles()
 	default:
-		return false
+		return map[string]struct{}{}
 	}
 }
 
@@ -437,6 +616,99 @@ func (a *SQLPasswordAuthenticator) AuthenticatePassword(ctx context.Context, inp
 		UserID:    userID,
 		RequestID: input.RequestID,
 	})
+}
+
+func (c *SQLPasswordChanger) ChangePassword(ctx context.Context, input ChangePasswordInput) error {
+	if err := ValidateChangePasswordInput(input); err != nil {
+		return err
+	}
+	if c.queryer == nil || c.execer == nil {
+		return authLookupFailed()
+	}
+	userID := strings.TrimSpace(input.UserID)
+	oldHash, err := c.readPasswordCredential(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(oldHash), []byte(input.CurrentPassword)) != nil {
+		return &AppError{Code: CodeUnauthenticated, Message: "current password is invalid"}
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), c.bcryptCost)
+	if err != nil {
+		return authLookupFailed()
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := c.execer.ExecContext(ctx, `WITH changed_credential AS (
+  UPDATE user_password_credentials
+  SET password_hash = $2,
+      status = 'active',
+      password_updated_at = $4,
+      updated_at = now()
+  WHERE user_id = $1
+    AND password_hash = $3
+    AND status IN ('active', 'reset_required')
+  RETURNING user_id
+), revoked_sessions AS (
+  UPDATE user_sessions
+  SET status = 'revoked',
+      revoked_at = $4,
+      updated_at = now()
+  WHERE user_id IN (SELECT user_id FROM changed_credential)
+    AND status = 'active'
+    AND revoked_at IS NULL
+  RETURNING user_session_id
+)
+SELECT user_id::text FROM changed_credential`, userID, string(newHash), oldHash, now)
+	if err != nil || result == nil {
+		return authLookupFailed()
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return authLookupFailed()
+	}
+	return nil
+}
+
+func (c *SQLPasswordChanger) readPasswordCredential(ctx context.Context, userID string) (string, error) {
+	rows, err := c.queryer.QueryContext(ctx, `SELECT credential.password_hash
+FROM user_password_credentials AS credential
+JOIN users AS app_user ON app_user.user_id = credential.user_id
+WHERE credential.user_id = $1
+  AND credential.status IN ('active', 'reset_required')
+  AND app_user.status = 'active'
+LIMIT 1`, userID)
+	if err != nil {
+		return "", authLookupFailed()
+	}
+	if !rows.Next() {
+		if rows.Err() != nil {
+			_ = rows.Close()
+			return "", authLookupFailed()
+		}
+		if err := rows.Close(); err != nil {
+			return "", authLookupFailed()
+		}
+		return "", &AppError{Code: CodeUnauthenticated, Message: "current password is invalid"}
+	}
+	var passwordHash string
+	if err := rows.Scan(&passwordHash); err != nil {
+		_ = rows.Close()
+		return "", authLookupFailed()
+	}
+	if rows.Err() != nil {
+		_ = rows.Close()
+		return "", authLookupFailed()
+	}
+	if err := rows.Close(); err != nil {
+		return "", authLookupFailed()
+	}
+	if strings.TrimSpace(passwordHash) == "" {
+		return "", &AppError{Code: CodeUnauthenticated, Message: "current password is invalid"}
+	}
+	return strings.TrimSpace(passwordHash), nil
 }
 
 func (a *SQLPasswordAuthenticator) readActivePasswordCredential(ctx context.Context, email string) (string, string, error) {
@@ -514,7 +786,7 @@ func (s *SQLSessionStore) ValidateSession(ctx context.Context, input ValidateSes
 	if userID == "" || tokenHash == "" {
 		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
 	}
-	if s.queryer == nil || s.execer == nil {
+	if s.queryer == nil {
 		return authLookupFailed()
 	}
 	now := input.Now
@@ -522,15 +794,27 @@ func (s *SQLSessionStore) ValidateSession(ctx context.Context, input ValidateSes
 		now = time.Now().UTC()
 	}
 	rows, err := s.queryer.QueryContext(ctx, `
-SELECT user_session_id::text
-FROM user_sessions
-WHERE user_id = $1
-  AND token_hash = $2
-  AND expires_at > $3
-  AND revoked_at IS NULL
-  AND status = 'active'
-LIMIT 1
-`, userID, tokenHash, now)
+WITH valid_session AS MATERIALIZED (
+  SELECT user_session_id
+  FROM user_sessions
+  WHERE user_id = $1
+    AND token_hash = $2
+    AND expires_at > $3
+    AND revoked_at IS NULL
+    AND status = 'active'
+  LIMIT 1
+), touched_session AS (
+  UPDATE user_sessions AS session
+  SET last_seen_at = $3,
+      updated_at = now()
+  FROM valid_session
+  WHERE session.user_session_id = valid_session.user_session_id
+    AND COALESCE(last_seen_at, created_at) <= $4
+  RETURNING session.user_session_id
+)
+SELECT valid_session.user_session_id::text
+FROM valid_session
+`, userID, tokenHash, now, now.Add(-s.touchInterval))
 	if err != nil {
 		return authLookupFailed()
 	}
@@ -551,16 +835,6 @@ LIMIT 1
 	}
 	if strings.TrimSpace(sessionID) == "" {
 		return &AppError{Code: CodeUnauthenticated, Message: "user context is required"}
-	}
-	_, err = s.execer.ExecContext(ctx, `
-UPDATE user_sessions
-SET last_seen_at = $3,
-    updated_at = now()
-WHERE user_id = $1
-  AND token_hash = $2
-`, userID, tokenHash, now)
-	if err != nil {
-		return authLookupFailed()
 	}
 	return nil
 }
@@ -876,7 +1150,9 @@ LEFT JOIN project_members pm
  AND pm.project_id = p.project_id
  AND pm.user_id = tm.user_id
  AND pm.status = 'active'
-WHERE tm.user_id = $1 AND tm.status = 'active'
+WHERE tm.user_id = $1
+  AND tm.status = 'active'
+  AND (tm.access_scope = 'tenant' OR pm.user_id IS NOT NULL)
 ORDER BY p.title, p.project_id
 `, userID)
 	if err != nil {

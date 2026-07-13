@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import threading
 import uuid
 import json
 from datetime import datetime
@@ -80,6 +81,9 @@ class TaskManager:
     _instance = None
     _init_lock = asyncio.Lock()
     _instance_ready = False
+    _bridge_guard = threading.Lock()
+    _bridge_loop: Optional[asyncio.AbstractEventLoop] = None
+    _bridge_thread: Optional[threading.Thread] = None
 
     def __new__(cls):
         """单例模式 — 同步部分只创建对象壳。"""
@@ -126,8 +130,44 @@ class TaskManager:
         if loop is not None and loop.is_running():
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             return future.result()
-        # No cached loop — last resort
-        return asyncio.run(coro)
+        bridge_loop = self._get_sync_bridge_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, bridge_loop)
+        return future.result()
+
+    @classmethod
+    def _get_sync_bridge_loop(cls) -> asyncio.AbstractEventLoop:
+        """Return the one process-wide loop used by truly sync callers."""
+        with cls._bridge_guard:
+            if cls._bridge_loop is not None and cls._bridge_loop.is_running():
+                return cls._bridge_loop
+
+            ready = threading.Event()
+            startup_error: list[BaseException] = []
+
+            def run_loop() -> None:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    cls._bridge_loop = loop
+                    loop.call_soon(ready.set)
+                    loop.run_forever()
+                except BaseException as exc:  # noqa: BLE001
+                    startup_error.append(exc)
+                    ready.set()
+
+            cls._bridge_thread = threading.Thread(
+                target=run_loop,
+                name="task-manager-sync-bridge",
+                daemon=True,
+            )
+            cls._bridge_thread.start()
+            if not ready.wait(timeout=5):
+                raise RuntimeError("TaskManager sync bridge loop failed to start")
+            if startup_error:
+                raise RuntimeError("TaskManager sync bridge loop failed") from startup_error[0]
+            if cls._bridge_loop is None or not cls._bridge_loop.is_running():
+                raise RuntimeError("TaskManager sync bridge loop is unavailable")
+            return cls._bridge_loop
 
     def _serialize(self, task: Task) -> Dict[str, Any]:
         return {

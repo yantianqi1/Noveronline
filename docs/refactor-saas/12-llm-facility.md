@@ -1,6 +1,6 @@
 # 12. LLM Facility
 
-更新时间：`2026-06-27`
+更新时间：`2026-07-13`
 
 ## 模块定位
 
@@ -117,6 +117,15 @@ project binding
 - `writer_composer`
 - `writer_dedup_extractor`
 - `writer_reviewer`
+
+### Planned: Writer Asset Distiller
+
+`writer_asset_distiller` 是 [28. Zero-start Writer and Manuscript Asset Distillation](./28-zero-start-writer-and-manuscript-asset-distillation.md) 规划的新模块，当前未进入已实现注册表，不能据此宣称 binding、worker 或 live provider 已闭合。
+
+- module group 归入 Writer/Assets 后处理，要求 JSON capability，不使用旧环境变量 fallback。
+- 输入正文只由 worker 通过 app-role/RLS 私下读取；Temporal input/history、公开 Activity、usage、event 和错误不保存正文、evidence、prompt 或 provider body。
+- module unbound、capability 不足、quota denied 或 provider failure 只令蒸馏 workflow 失败，不回滚已保存 manuscript，也不写 partial candidate。
+- 手动蒸馏由用户动作构成处理授权；`after_adoption | chapter_complete` 自动模式还要求项目 owner/admin 显式确认正文会发送到当前绑定 provider。Channel 自身的 external HTTPS opt-in 和 encrypted credential 约束继续生效。
 
 ## 数据模型
 

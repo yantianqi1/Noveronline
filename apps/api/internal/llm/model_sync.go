@@ -23,9 +23,10 @@ type ModelSyncResult struct {
 }
 
 type ProviderListModelsInput struct {
-	Provider string
-	BaseURL  string
-	APIKey   string
+	Provider              string
+	BaseURL               string
+	APIKey                string
+	ExternalProviderOptIn bool
 }
 
 type ProviderModel struct {
@@ -120,9 +121,10 @@ func (s *SQLModelSyncer) SyncModels(ctx context.Context, input ModelSyncInput) (
 		return ModelSyncResult{}, err
 	}
 	models, err := s.provider.ListModels(ctx, ProviderListModelsInput{
-		Provider: channel.channel.Provider,
-		BaseURL:  channel.channel.BaseURL,
-		APIKey:   apiKey,
+		Provider:              channel.channel.Provider,
+		BaseURL:               channel.channel.BaseURL,
+		APIKey:                apiKey,
+		ExternalProviderOptIn: channel.channel.ExternalProviderOptIn,
 	})
 	if err != nil {
 		status := "failed:" + modelSyncErrorCode(err)
@@ -142,6 +144,7 @@ func (s *SQLModelSyncer) loadTenantChannelCredential(ctx context.Context, input 
   base_url,
   encrypted_api_key,
   max_concurrency,
+  external_provider_opt_in,
   enabled,
   created_at::text,
   updated_at::text
@@ -150,7 +153,7 @@ WHERE tenant_id::text = $1
   AND channel_id::text = $2
   AND enabled = TRUE
 LIMIT 1`
-	rows, err := s.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID))
+	rows, err := s.queryTenantRows(ctx, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID))
 	if err != nil {
 		return syncChannelCredential{}, &AppError{Code: "LLM_MODEL_SYNC_QUERY_FAILED", Message: err.Error()}
 	}
@@ -169,6 +172,7 @@ LIMIT 1`
 		&record.channel.BaseURL,
 		&record.encryptedKey,
 		&record.channel.MaxConcurrency,
+		&record.channel.ExternalProviderOptIn,
 		&record.channel.Enabled,
 		&record.channel.CreatedAt,
 		&record.channel.UpdatedAt,
@@ -198,8 +202,8 @@ func (s *SQLModelSyncer) upsertModels(ctx context.Context, input ModelSyncInput,
   SELECT $1::uuid, c.channel_id, incoming.model_id, NULLIF(incoming.owned_by, ''), now()
   FROM llm_channels c
   JOIN incoming ON incoming.model_id IS NOT NULL AND incoming.model_id <> ''
-  WHERE c.tenant_id::text = $1
-    AND c.channel_id::text = $2
+  WHERE c.tenant_id = $1::uuid
+    AND c.channel_id = $2::uuid
   ON CONFLICT (channel_id, model_id) DO UPDATE SET
     owned_by = EXCLUDED.owned_by,
     updated_at = now()
@@ -218,17 +222,18 @@ func (s *SQLModelSyncer) upsertModels(ctx context.Context, input ModelSyncInput,
   SET last_sync_at = now(),
       last_sync_status = $4,
       updated_at = now()
-  WHERE tenant_id::text = $1
-    AND channel_id::text = $2
+  WHERE tenant_id = $1::uuid
+    AND channel_id = $2::uuid
   RETURNING
     channel_id::text,
     name,
     provider,
     base_url,
     max_concurrency,
+    external_provider_opt_in,
     enabled,
-    COALESCE(last_sync_at::text, ''),
-    COALESCE(last_sync_status, ''),
+    COALESCE(last_sync_at::text, '') AS last_sync_at,
+    COALESCE(last_sync_status, '') AS last_sync_status,
     'tenant' AS scope,
     created_at::text,
     updated_at::text
@@ -239,6 +244,7 @@ SELECT
   marked.provider,
   marked.base_url,
   marked.max_concurrency,
+  marked.external_provider_opt_in,
   marked.enabled,
   marked.last_sync_at,
   marked.last_sync_status,
@@ -257,12 +263,19 @@ SELECT
 FROM marked
 LEFT JOIN upserted ON TRUE
 ORDER BY upserted.model_id ASC`
-	rows, err := s.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID), string(modelsJSON), status)
+	rows, err := s.queryTenantWriteRows(ctx, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID), string(modelsJSON), status)
 	if err != nil {
 		return ModelSyncResult{}, &AppError{Code: "LLM_MODEL_SYNC_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	return scanModelSyncRows(rows)
+	result, scanErr := scanModelSyncRows(rows)
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return ModelSyncResult{}, scanErr
+	}
+	if closeErr != nil {
+		return ModelSyncResult{}, &AppError{Code: "LLM_MODEL_SYNC_FAILED", Message: closeErr.Error()}
+	}
+	return result, nil
 }
 
 func (s *SQLModelSyncer) recordFailure(ctx context.Context, input ModelSyncInput, status string) (ChannelRecord, error) {
@@ -270,26 +283,48 @@ func (s *SQLModelSyncer) recordFailure(ctx context.Context, input ModelSyncInput
 SET last_sync_at = now(),
     last_sync_status = $3,
     updated_at = now()
-WHERE tenant_id::text = $1
-  AND channel_id::text = $2
+WHERE tenant_id = $1::uuid
+  AND channel_id = $2::uuid
 RETURNING
   channel_id::text,
   name,
   provider,
   base_url,
   max_concurrency,
+  external_provider_opt_in,
   enabled,
   COALESCE(last_sync_at::text, ''),
   COALESCE(last_sync_status, ''),
   'tenant' AS scope,
   created_at::text,
   updated_at::text`
-	rows, err := s.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID), status)
+	rows, err := s.queryTenantWriteRows(ctx, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID), status)
 	if err != nil {
 		return ChannelRecord{}, &AppError{Code: "LLM_MODEL_SYNC_STATUS_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	return scanSingleChannel(rows, "LLM_MODEL_SYNC_STATUS_FAILED", "channel sync status was not updated")
+	result, scanErr := scanSingleChannel(rows, "LLM_MODEL_SYNC_STATUS_FAILED", "channel sync status was not updated")
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return ChannelRecord{}, scanErr
+	}
+	if closeErr != nil {
+		return ChannelRecord{}, &AppError{Code: "LLM_MODEL_SYNC_STATUS_FAILED", Message: closeErr.Error()}
+	}
+	return result, nil
+}
+
+func (s *SQLModelSyncer) queryTenantRows(ctx context.Context, tenantID, query string, args ...any) (SQLRows, error) {
+	if queryer, ok := s.queryer.(SQLTenantQueryer); ok {
+		return queryer.QueryTenantContext(ctx, tenantID, query, args...)
+	}
+	return s.queryer.QueryContext(ctx, query, args...)
+}
+
+func (s *SQLModelSyncer) queryTenantWriteRows(ctx context.Context, tenantID, query string, args ...any) (SQLRows, error) {
+	if queryer, ok := s.queryer.(SQLTenantWriteQueryer); ok {
+		return queryer.QueryTenantWriteContext(ctx, tenantID, query, args...)
+	}
+	return s.queryer.QueryContext(ctx, query, args...)
 }
 
 func scanModelSyncRows(rows SQLRows) (ModelSyncResult, error) {
@@ -303,6 +338,7 @@ func scanModelSyncRows(rows SQLRows) (ModelSyncResult, error) {
 			&channel.Provider,
 			&channel.BaseURL,
 			&channel.MaxConcurrency,
+			&channel.ExternalProviderOptIn,
 			&channel.Enabled,
 			&channel.LastSyncAt,
 			&channel.LastSyncStatus,
@@ -425,19 +461,23 @@ func (p *OpenAICompatibleModelProvider) ListModels(ctx context.Context, input Pr
 	if baseURL == "" || strings.TrimSpace(input.APIKey) == "" {
 		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "base_url and api_key are required"}
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	endpoint, err := validateProviderEndpoint(baseURL, "/models", input.ExternalProviderOptIn)
 	if err != nil {
-		return nil, &AppError{Code: "LLM_PROVIDER_ERROR", Message: err.Error()}
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, &AppError{Code: "LLM_PROVIDER_REQUEST_INVALID", Message: "LLM provider request is invalid"}
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(input.APIKey))
 	request.Header.Set("Accept", "application/json")
 	response, err := p.client.Do(request)
 	if err != nil {
-		return nil, &AppError{Code: "LLM_PROVIDER_ERROR", Message: err.Error()}
+		return nil, stableProviderContextError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, &AppError{Code: "LLM_PROVIDER_ERROR", Message: fmt.Sprintf("model catalog request failed with status %d", response.StatusCode)}
+		return nil, providerStatusError(response.StatusCode)
 	}
 	var payload struct {
 		Data []struct {

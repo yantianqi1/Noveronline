@@ -99,6 +99,8 @@ export function loadLiveSeedConfig(options = {}) {
       `${prefix}WORKER_RETRY_TIMEOUT_MS`,
       DEFAULT_WORKER_RETRY_TIMEOUT_MS,
     );
+    config.appDevBypass = envText(env, `${prefix}APP_DEV_BYPASS`) === "1";
+    config.expectCompleted = envText(env, `${prefix}EXPECT_COMPLETED`) === "1";
   }
 
   assertDisposableLiveSeedConfig(config);
@@ -143,6 +145,9 @@ export function assertDisposableLiveSeedConfig(config) {
     assertLocalHttpUrl(config.appBaseUrl, "live Seed app base URL");
     if (config.requireWorkerRetry && (config.consumeRetryRun || config.retryRunId)) {
       throw new Error("worker retry mode must retry the browser-uploaded run");
+    }
+    if (config.expectCompleted && (config.requireWorkerRetry || config.consumeRetryRun || config.retryRunId)) {
+      throw new Error("completed mode cannot enable retry-run options");
     }
   }
   assertLocalHttpUrl(config.apiBaseUrl, "live Seed API base URL");
@@ -258,6 +263,7 @@ export async function fetchLiveSeedPublicJsonWithRawScan(config, path, options =
 
 export function installAppResponsePrivacyScan(page, config, options = {}) {
   const pending = [];
+  const failures = [];
   const appOrigin = new URL(config.appBaseUrl).origin;
   const optionValues = typeof options === "function" ? options : () => options;
   const onResponse = (response) => {
@@ -265,8 +271,7 @@ export function installAppResponsePrivacyScan(page, config, options = {}) {
     if (url.origin !== appOrigin || !isScannableAppResponse(response, url)) {
       return;
     }
-    pending.push(
-      response.text().catch((error) => {
+    const scan = response.text().catch((error) => {
         if (isUnavailableResponseBodyError(error)) {
           return "";
         }
@@ -279,12 +284,15 @@ export function installAppResponsePrivacyScan(page, config, options = {}) {
           ...optionValues(),
           sessionCookie: config.sessionCookie,
         });
-      }),
-    );
+      });
+    pending.push(scan.catch((error) => {
+      failures.push(error);
+    }));
   };
   page.on("response", onResponse);
   return {
     pending,
+    failures,
     stop: () => page.off("response", onResponse),
   };
 }
@@ -293,6 +301,10 @@ export async function flushResponseScans(pending) {
   const queue = Array.isArray(pending) ? pending : pending.pending;
   while (queue.length > 0) {
     await Promise.all(queue.splice(0));
+  }
+  const failure = Array.isArray(pending) ? undefined : pending.failures.shift();
+  if (failure) {
+    throw failure;
   }
 }
 
@@ -540,7 +552,8 @@ function isUnavailableResponseBodyError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return (
     message.includes("Response body is unavailable for redirect responses") ||
-    message.includes("No resource with given identifier found")
+    message.includes("No resource with given identifier found") ||
+    message.includes("No data found for resource with given identifier")
   );
 }
 

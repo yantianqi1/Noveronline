@@ -1,61 +1,289 @@
-import { Agent, type AgentOptions } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
+import {
+  createModels,
+  createProvider,
+  type AssistantMessage,
+  type Model
+} from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { Object as ObjectSchema } from "typebox";
 
-import type { RuntimeContext, WriterRunInput } from "../contracts/writer-run.js";
-import { mapPiEvent, type WriterWorkflowEvent } from "../contracts/writer-events.js";
+import type {
+  ComposeDraftRequest,
+  ComposeDraftResult,
+  OrchestrateWritingBriefRequest,
+  OrchestrateWritingBriefResult,
+  WriterToolName
+} from "../activities/pi-writer-activities.js";
+import { assertToolAllowed, ToolPermissionDenied } from "../tools/permissions.js";
 
-export interface LlmFacilityResolution {
-  provider: string;
-  model: unknown;
-  apiKey: string;
-}
+const noArguments = ObjectSchema({}, { additionalProperties: false });
 
-export interface WriterAgentDeps {
-  resolveLlm: (input: WriterRunInput) => Promise<LlmFacilityResolution>;
-  emitEvent: (event: WriterWorkflowEvent) => Promise<void>;
-  beforeTool: (toolName: string, args: unknown, context: RuntimeContext) => Promise<void>;
-  afterTool: (toolName: string, result: unknown, context: RuntimeContext) => Promise<void>;
-}
-
-export async function createPiWriterAgent(
-  input: WriterRunInput,
-  context: RuntimeContext,
-  deps: WriterAgentDeps
-): Promise<Agent> {
-  const llm = await deps.resolveLlm(input);
-  const options: AgentOptions = {
-    initialState: {
-      model: llm.model as any,
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: input.instruction }]
-        }
-      ] as any
+export function createPiWriterExecution() {
+  return {
+    orchestrateWritingBrief: async (request: OrchestrateWritingBriefRequest) => {
+      const runtime = createRuntime(request);
+      const tools = request.tool_names.map((name) => writerTool(name, request));
+      let permissionError: ToolPermissionDenied | undefined;
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: orchestratorSystemPrompt(),
+          model: runtime.model,
+          thinkingLevel: request.thinking_level ?? "off",
+          tools
+        },
+        streamFn: runtime.streamFn,
+        getApiKey: (provider) => provider === runtime.providerId ? request.apiKey : undefined,
+        toolExecution: request.tool_execution ?? "parallel",
+        beforeToolCall: async ({ toolCall }) => {
+          try {
+            assertToolAllowed(toolCall.name, {
+              tenant_id: request.tenant_id,
+              project_id: request.project_id,
+              run_id: request.run_id
+            }, request.runtime_context);
+            return undefined;
+          } catch (error) {
+            if (!(error instanceof ToolPermissionDenied)) throw error;
+            permissionError = error;
+            return { block: true, reason: error.message };
+          }
+        },
+        sessionId: request.run_id
+      });
+      agent.subscribe(async (event) => request.onAgentEvent?.(event));
+      await promptWithAbort(agent, orchestratorPrompt(request), request.abort_signal);
+      if (permissionError) throw permissionError;
+      const message = finalAssistantMessage(agent.state.messages);
+      const content = assistantText(message);
+      if (!content.trim()) throw new Error("Pi writer orchestrator returned an empty writing brief");
+      return { writing_brief: content, usage: aggregateUsage(agent.state.messages) } satisfies OrchestrateWritingBriefResult;
     },
-    getApiKey(provider: string) {
-      if (provider !== llm.provider) return undefined;
-      return llm.apiKey;
-    },
-    beforeToolCall: async (toolContext) => {
-      const raw = toolContext as unknown as { toolCall?: { toolName?: string }; args?: unknown };
-      await deps.beforeTool(raw.toolCall?.toolName ?? "", raw.args, context);
-      return undefined;
-    },
-    afterToolCall: async (toolContext) => {
-      const raw = toolContext as unknown as {
-        toolCall?: { toolName?: string };
-        result?: unknown;
-      };
-      await deps.afterTool(raw.toolCall?.toolName ?? "", raw.result, context);
-      return undefined;
-    },
-    sessionId: context.run_id,
-    toolExecution: input.options.tool_execution ?? "parallel"
+    composeDraft: async (request: ComposeDraftRequest) => {
+      const runtime = createRuntime(request);
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: composerSystemPrompt(request),
+          model: runtime.model,
+          thinkingLevel: request.thinking_level ?? "off"
+        },
+        streamFn: runtime.streamFn,
+        getApiKey: (provider) => provider === runtime.providerId ? request.apiKey : undefined,
+        sessionId: request.run_id
+      });
+      agent.subscribe(async (event) => {
+        const delta = textDelta(event);
+        if (delta) await request.onToken?.(delta);
+      });
+      await promptWithAbort(agent, composerPrompt(request), request.abort_signal);
+      const message = finalAssistantMessage(agent.state.messages);
+      const content = assistantText(message);
+      if (!content.trim()) throw new Error("Pi writer composer returned an empty draft");
+      return { content, usage: messageUsage(message) } satisfies ComposeDraftResult;
+    }
   };
-  const agent = new Agent(options);
-  agent.subscribe(async (event) => {
-    const mapped = mapPiEvent(event, context);
-    if (mapped) await deps.emitEvent(mapped);
+}
+
+function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments> {
+  return {
+    name,
+    label: name,
+    description: toolDescription(name),
+    parameters: noArguments,
+    executionMode: name === "save_draft_revision" ? "sequential" : "parallel",
+    execute: async (toolCallId, _params, signal) => {
+      if (signal?.aborted) throw new Error("writer tool execution aborted");
+      const details = await request.executeTool(name, toolCallId);
+      return {
+        content: [{ type: "text", text: JSON.stringify(details) }],
+        details
+      };
+    }
+  };
+}
+
+function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefRequest) {
+  const parentProviderCallID = request.provider_call_id?.trim();
+  if (!parentProviderCallID) {
+    throw new Error("LLM_PROVIDER_CALL_ID_INVALID: Pi writer provider call identity is required");
+  }
+  const providerId = `mirofish-${request.channel_id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const model = openAICompatibleModel(request, providerId);
+  const provider = createProvider({
+    id: providerId,
+    name: `MiroFish ${request.provider}`,
+    baseUrl: request.base_url,
+    auth: { apiKey: { name: "MiroFish LLM Facility request key", resolve: async () => ({ auth: {} }) } },
+    models: [model],
+    api: openAICompletionsApi()
   });
-  return agent;
+  const models = createModels();
+  models.setProvider(provider);
+  const resolved = models.getModel(providerId, request.model_id);
+  if (!resolved) throw new Error("Pi writer resolved model is unavailable");
+  let turnIndex = 0;
+  const streamFn = (model: Parameters<typeof models.streamSimple>[0], context: Parameters<typeof models.streamSimple>[1], options?: Parameters<typeof models.streamSimple>[2]) => {
+    const turnCallID = `${parentProviderCallID}:turn:${turnIndex++}`;
+    return models.streamSimple({
+      ...model,
+      headers: { ...model.headers, "Idempotency-Key": turnCallID, "X-MiroFish-Provider-Call-Parent": parentProviderCallID }
+    }, context, options);
+  };
+  return { providerId, model: resolved, models, streamFn };
+}
+
+function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWritingBriefRequest, providerId: string): Model<"openai-completions"> {
+  return {
+    id: request.model_id,
+    name: request.model_id,
+    api: "openai-completions",
+    provider: providerId,
+    baseUrl: request.base_url,
+    reasoning: Boolean(request.settings.reasoning),
+    input: ["text"],
+    cost: {
+      input: numericSetting(request.settings, "input_cost") ?? 0,
+      output: numericSetting(request.settings, "output_cost") ?? 0,
+      cacheRead: 0,
+      cacheWrite: 0
+    },
+    contextWindow: numericSetting(request.settings, "context_window") ?? 128000,
+    maxTokens: numericSetting(request.settings, "max_tokens") ?? 4000,
+    headers: providerRequestHeaders(request)
+  };
+}
+
+function providerRequestHeaders(request: ComposeDraftRequest | OrchestrateWritingBriefRequest): Record<string, string> {
+  const providerCallID = request.provider_call_id?.trim();
+  if (!providerCallID) {
+    throw new Error("LLM_PROVIDER_CALL_ID_INVALID: Pi writer provider call identity is required");
+  }
+  return {
+    "Idempotency-Key": providerCallID,
+    "X-MiroFish-Tenant-Id": request.tenant_id,
+    "X-MiroFish-Project-Id": request.project_id,
+    "X-MiroFish-Run-Id": request.run_id,
+    "X-MiroFish-Module-Key": request.module_key
+  };
+}
+
+function orchestratorSystemPrompt(): string {
+  return "You are the MiroFish writer orchestrator. Call the available read tools before producing a concise writing brief. Never write or adopt manuscript content. Do not call save_draft_revision; the runtime persists the composer result explicitly.";
+}
+
+function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
+  return JSON.stringify({
+    task: "Build a writing brief from authoritative project tools.",
+    mode: request.mode,
+    instruction: request.instruction,
+    chapter_id: request.chapter_id,
+    scene_id: request.scene_id,
+    selected_asset_ids: request.selected_asset_ids,
+    graph_node_ids: request.graph_node_ids,
+    worldline_path_ids: request.worldline_path_ids,
+    target_words: request.target_words
+  });
+}
+
+function composerSystemPrompt(request: ComposeDraftRequest): string {
+  const configured = typeof request.settings.system_prompt === "string" ? request.settings.system_prompt.trim() : "";
+  if (request.mode === "revise") {
+    return configured || "You revise selected novel prose. Return only the revised selection text. Do not wrap in quotes or commentary. Do not claim manuscript adoption.";
+  }
+  return configured || "Write original novel prose from the supplied writing brief. Return prose only. Do not claim manuscript adoption or review completion.";
+}
+
+function composerPrompt(request: ComposeDraftRequest): string {
+  if (request.mode === "revise" && request.revise) {
+    return JSON.stringify({
+      task: "revise_selection",
+      instruction: request.instruction,
+      selection_text: request.revise.selection_text,
+      block_id: request.revise.block_id,
+      action: request.revise.action,
+      writing_brief: request.writing_brief
+    });
+  }
+  return JSON.stringify({
+    instruction: request.instruction,
+    writing_brief: request.writing_brief,
+    target_words: request.target_words
+  });
+}
+
+function finalAssistantMessage(messages: unknown[]): AssistantMessage {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as AssistantMessage;
+    if (message?.role === "assistant") {
+      if (message.stopReason === "error" || message.stopReason === "aborted") {
+        throw new Error("Pi writer provider call failed");
+      }
+      return message;
+    }
+  }
+  throw new Error("Pi writer provider returned no assistant message");
+}
+
+function assistantText(message: AssistantMessage): string {
+  return message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+}
+
+function messageUsage(message: AssistantMessage): ComposeDraftResult["usage"] {
+  return {
+    prompt_tokens: message.usage.input,
+    completion_tokens: message.usage.output,
+    cost_estimate: message.usage.cost.total
+  };
+}
+
+function aggregateUsage(messages: unknown[]): ComposeDraftResult["usage"] {
+  const assistantMessages = messages.filter((message): message is AssistantMessage =>
+    Boolean(message && typeof message === "object" && (message as AssistantMessage).role === "assistant")
+  );
+  return assistantMessages.reduce((total, message) => ({
+    prompt_tokens: total.prompt_tokens + message.usage.input,
+    completion_tokens: total.completion_tokens + message.usage.output,
+    cost_estimate: (total.cost_estimate ?? 0) + message.usage.cost.total
+  }), { prompt_tokens: 0, completion_tokens: 0, cost_estimate: 0 });
+}
+
+async function promptWithAbort(agent: Agent, prompt: string, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await agent.prompt(prompt);
+    return;
+  }
+  if (signal.aborted) throw new Error("WORKFLOW_CANCELLED: Pi writer activity was cancelled");
+  const abort = () => { void agent.abort(); };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    await agent.prompt(prompt);
+    if (signal.aborted) throw new Error("WORKFLOW_CANCELLED: Pi writer activity was cancelled");
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+function textDelta(event: AgentEvent): string {
+  if (event.type !== "message_update" || event.assistantMessageEvent.type !== "text_delta") return "";
+  return event.assistantMessageEvent.delta;
+}
+
+function numericSetting(settings: Record<string, unknown>, key: string): number | undefined {
+  const value = settings[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function toolDescription(name: WriterToolName): string {
+  const descriptions: Record<WriterToolName, string> = {
+    query_project_context: "Read project title, genre, language, and status.",
+    query_chapter_scene: "Read the requested chapter and scene identifiers plus existing draft metadata.",
+    query_assets: "Read selected or relevant enabled project assets and their private writing context.",
+    query_world_rules: "Read extracted project world rules as private writing context.",
+    query_character_profile: "Read project character identities, aliases, and current state as private writing context.",
+    query_graph_neighbors: "Read explicitly selected story graph nodes and their direct relationships.",
+    query_worldline_paths: "Read explicitly selected saved worldline paths as non-canon references.",
+    query_manuscript_context: "Read recently adopted manuscript blocks for continuation context.",
+    save_draft_revision: "Reserved runtime persistence tool. The orchestrator must not call it."
+  };
+  return descriptions[name];
 }

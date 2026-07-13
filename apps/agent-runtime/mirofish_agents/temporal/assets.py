@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import uuid
 from datetime import timedelta
 from typing import Any, Callable, Protocol
+from urllib.request import Request, urlopen
 
 from temporalio import activity, workflow
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.llm_quota import PostgresQuotaStore, ProviderQuotaGate, QuotaAwareJSONChatClient
 from mirofish_agents.seed.sequential_reader import (
     CredentialProvider,
     JSONChatClient,
     LLMFacilityError,
     ModuleBindingResolution,
     ModuleBindingResolver,
-    OpenAICompatibleJSONClient,
     PostgresCredentialProvider,
     PostgresModuleBindingResolver,
+    set_postgres_tenant_context,
 )
 
 ASSET_TASK_QUEUE = "asset-light"
@@ -57,6 +61,19 @@ class WorkflowEventWriter(Protocol):
         run_id: str,
         event_type: str,
         payload: dict[str, Any],
+    ) -> None:
+        ...
+
+
+class WorkflowStatusWriter(Protocol):
+    def write_status(
+        self,
+        *,
+        context: AgentContext,
+        status: str,
+        result: dict[str, Any] | None,
+        error_code: str | None,
+        error_message: str | None,
     ) -> None:
         ...
 
@@ -119,6 +136,90 @@ class AssetReindexer(Protocol):
         ...
 
 
+class EmbeddingClient(Protocol):
+    def embed_texts(
+        self,
+        *,
+        context: AgentContext,
+        resolution: ModuleBindingResolution,
+        api_key: str,
+        texts: list[str],
+        provider_call_id: str | None = None,
+    ) -> list[list[float]]:
+        ...
+
+
+class EmbeddingVectors(list[list[float]]):
+    def __init__(self, values: list[list[float]], *, llm_usage: dict[str, int] | None) -> None:
+        super().__init__(values)
+        self.llm_usage = llm_usage
+
+
+class OpenAICompatibleEmbeddingClient:
+    def __init__(self, *, http_request: Callable[[Request], bytes] | None = None) -> None:
+        self._http_request = http_request or _urlopen_bytes
+
+    def embed_texts(
+        self,
+        *,
+        context: AgentContext,
+        resolution: ModuleBindingResolution,
+        api_key: str,
+        texts: list[str],
+        provider_call_id: str | None = None,
+    ) -> EmbeddingVectors:
+        if not texts:
+            return EmbeddingVectors([], llm_usage=None)
+        body: dict[str, Any] = {"model": resolution.model_id, "input": texts}
+        dimensions = resolution.settings.get("embedding_dimensions")
+        if isinstance(dimensions, int) and not isinstance(dimensions, bool) and dimensions > 0:
+            body["dimensions"] = dimensions
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-MiroFish-Tenant-Id": context.tenant_id,
+            "X-MiroFish-Project-Id": context.project_id or "",
+            "X-MiroFish-Run-Id": context.run_id,
+            "X-MiroFish-Module-Key": resolution.module_key,
+        }
+        if isinstance(provider_call_id, str) and provider_call_id.strip():
+            headers["Idempotency-Key"] = provider_call_id.strip()
+        request = Request(
+            _embeddings_url(resolution.base_url),
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            response_body = self._http_request(request)
+        except Exception as exc:
+            raise LLMFacilityError("LLM_PROVIDER_ERROR", "embedding provider request failed") from exc
+        try:
+            response = json.loads(response_body.decode("utf-8"))
+            data = response["data"]
+        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LLMFacilityError("LLM_PROVIDER_ERROR", "embedding response was not valid") from exc
+        if not isinstance(data, list) or len(data) != len(texts):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding response count did not match input count")
+        ordered: list[list[float] | None] = [None] * len(texts)
+        for fallback_index, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding response item must be an object")
+            index = item.get("index", fallback_index)
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(texts):
+                raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding response index was invalid")
+            if ordered[index] is not None:
+                raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding response index was duplicated")
+            ordered[index] = _embedding_vector(item.get("embedding"))
+        embeddings = [embedding for embedding in ordered if embedding is not None]
+        if len(embeddings) != len(texts):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding response was incomplete")
+        dimensions_seen = {len(embedding) for embedding in embeddings}
+        if len(dimensions_seen) != 1:
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding dimensions were inconsistent")
+        return EmbeddingVectors(embeddings, llm_usage=_embedding_usage(response.get("usage")))
+
+
 class LLMFacilityAssetIngestionRunner:
     def __init__(
         self,
@@ -127,11 +228,13 @@ class LLMFacilityAssetIngestionRunner:
         credential_provider: CredentialProvider,
         chat_client: JSONChatClient,
         candidate_writer: AssetCandidateWriter,
+        quota_gate: ProviderQuotaGate | None = None,
     ) -> None:
         self._binding_resolver = binding_resolver
         self._credential_provider = credential_provider
         self._chat_client = chat_client
         self._candidate_writer = candidate_writer
+        self._quota_gate = quota_gate
 
     def ingest(
         self,
@@ -157,19 +260,37 @@ class LLMFacilityAssetIngestionRunner:
             )
             if not isinstance(api_key, str) or not api_key.strip():
                 raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
-            response_json = self._chat_client.complete_json(
+            messages = _asset_ingestion_messages(
                 context=context,
-                resolution=resolution,
-                api_key=api_key.strip(),
-                messages=_asset_ingestion_messages(
-                    context=context,
-                    material_text=material_text,
-                    hint_type=hint_type,
-                    scope=scope,
-                    options=options,
-                ),
+                material_text=material_text,
+                hint_type=hint_type,
+                scope=scope,
+                options=options,
             )
-            candidates = _candidate_list(response_json.get("candidates"))
+            if self._quota_gate is None:
+                response_json = self._chat_client.complete_json(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key.strip(),
+                    messages=messages,
+                )
+                candidates = _candidate_list(response_json.get("candidates"))
+            else:
+                candidates = self._quota_gate.execute_json(
+                    context=context,
+                    resolution=resolution,
+                    stage="candidate_generation",
+                    call_index=0,
+                    input_texts=[message["content"] for message in messages],
+                    provider=lambda provider_call_id: self._chat_client.complete_json(
+                        context=context,
+                        resolution=resolution,
+                        api_key=api_key.strip(),
+                        messages=messages,
+                        provider_call_id=provider_call_id,
+                    ),
+                    validate=lambda response: _candidate_list(response.get("candidates")),
+                )
             candidate_batch_id = f"asset-ingestion:{context.run_id}"
             persisted = self._candidate_writer.write_candidates(
                 context=context,
@@ -202,12 +323,14 @@ class LLMFacilityStyleExtractionRunner:
         chat_client: JSONChatClient,
         candidate_writer: AssetCandidateWriter,
         source_material_loader: StyleSourceMaterialLoader | None = None,
+        quota_gate: ProviderQuotaGate | None = None,
     ) -> None:
         self._binding_resolver = binding_resolver
         self._credential_provider = credential_provider
         self._chat_client = chat_client
         self._candidate_writer = candidate_writer
         self._source_material_loader = source_material_loader
+        self._quota_gate = quota_gate
 
     def extract_style(
         self,
@@ -238,19 +361,37 @@ class LLMFacilityStyleExtractionRunner:
             )
             if not isinstance(api_key, str) or not api_key.strip():
                 raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
-            response_json = self._chat_client.complete_json(
+            messages = _style_extraction_messages(
                 context=context,
-                resolution=resolution,
-                api_key=api_key.strip(),
-                messages=_style_extraction_messages(
-                    context=context,
-                    material_text=resolved_material_text,
-                    source_asset_id=source_asset_id,
-                    scope=scope,
-                    options=options,
-                ),
+                material_text=resolved_material_text,
+                source_asset_id=source_asset_id,
+                scope=scope,
+                options=options,
             )
-            candidates = [_style_profile_candidate(response_json.get("style_profile"))]
+            if self._quota_gate is None:
+                response_json = self._chat_client.complete_json(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key.strip(),
+                    messages=messages,
+                )
+                candidates = [_style_profile_candidate(response_json.get("style_profile"))]
+            else:
+                candidates = self._quota_gate.execute_json(
+                    context=context,
+                    resolution=resolution,
+                    stage="style_extraction",
+                    call_index=0,
+                    input_texts=[message["content"] for message in messages],
+                    provider=lambda provider_call_id: self._chat_client.complete_json(
+                        context=context,
+                        resolution=resolution,
+                        api_key=api_key.strip(),
+                        messages=messages,
+                        provider_call_id=provider_call_id,
+                    ),
+                    validate=lambda response: [_style_profile_candidate(response.get("style_profile"))],
+                )
             candidate_batch_id = f"style-extraction:{context.run_id}"
             persisted = self._candidate_writer.write_candidates(
                 context=context,
@@ -444,8 +585,20 @@ class PostgresStyleSourceMaterialLoader:
 
 
 class PostgresAssetReindexer:
-    def __init__(self, *, connect: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        *,
+        connect: Callable[[], Any],
+        binding_resolver: ModuleBindingResolver | None = None,
+        credential_provider: CredentialProvider | None = None,
+        embedding_client: EmbeddingClient | None = None,
+        quota_gate: ProviderQuotaGate | None = None,
+    ) -> None:
         self._connect = connect
+        self._binding_resolver = binding_resolver
+        self._credential_provider = credential_provider
+        self._embedding_client = embedding_client
+        self._quota_gate = quota_gate
 
     @classmethod
     def from_database_url(cls, database_url: str) -> "PostgresAssetReindexer":
@@ -454,7 +607,16 @@ class PostgresAssetReindexer:
         except ImportError as exc:  # pragma: no cover - depends on runtime packaging
             raise RuntimeError("psycopg is required for DATABASE_URL asset reindexing") from exc
 
-        return cls(connect=lambda: psycopg.connect(database_url))
+        return cls(
+            connect=lambda: psycopg.connect(database_url),
+            binding_resolver=PostgresModuleBindingResolver.from_database_url(database_url),
+            credential_provider=PostgresCredentialProvider.from_database_url(
+                database_url=database_url,
+                key_material=os.environ.get("LLM_CREDENTIAL_ENCRYPTION_KEY"),
+            ),
+            embedding_client=OpenAICompatibleEmbeddingClient(),
+            quota_gate=ProviderQuotaGate(PostgresQuotaStore.from_database_url(database_url)),
+        )
 
     def reindex(
         self,
@@ -468,11 +630,45 @@ class PostgresAssetReindexer:
             raise LLMFacilityError("VALIDATION_FAILED", "project_id is required to reindex project assets")
         normalized_scope = _asset_reindex_scope(scope)
         normalized_mode = _asset_reindex_mode(mode)
-        if normalized_mode != "keyword":
-            raise LLMFacilityError("VALIDATION_FAILED", "only keyword asset reindexing is currently supported")
         include_disabled = bool(options.get("include_disabled", False))
+        if include_disabled:
+            raise LLMFacilityError("VALIDATION_FAILED", "disabled assets cannot be included in search indexes")
+        embedding_model: str | None = None
+        embedding_assets: list[dict[str, str]] = []
+        embeddings: list[list[float]] = []
+        if normalized_mode in {"vector", "hybrid"}:
+            resolution, api_key = self._resolve_embedding_provider(context)
+            embedding_model = resolution.model_id
+            embedding_assets = self._load_embedding_assets(context)
+            embedding_texts = [asset["embedding_text"] for asset in embedding_assets]
+            if embedding_texts and self._quota_gate is not None:
+                embeddings = self._quota_gate.execute_embedding(
+                    context=context,
+                    resolution=resolution,
+                    stage="reindex_embedding",
+                    call_index=0,
+                    input_texts=embedding_texts,
+                    provider=lambda provider_call_id: _embedding_provider_payload(
+                        self._embedding_client,
+                        context=context,
+                        resolution=resolution,
+                        api_key=api_key,
+                        texts=embedding_texts,
+                        provider_call_id=provider_call_id,
+                    ),
+                    validate=lambda response: _quota_embedding_vectors(response, expected_count=len(embedding_texts)),
+                )
+            else:
+                embeddings = self._embedding_client.embed_texts(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    texts=embedding_texts,
+                ) if embedding_texts else []
+        reindex_batch_id = f"asset-reindex:{context.run_id}"
         connection = self._connect()
         try:
+            set_postgres_tenant_context(connection, context=context)
             with connection.cursor() as cursor:
                 cursor.execute(
                     """WITH request_context AS (
@@ -516,7 +712,7 @@ class PostgresAssetReindexer:
                            entity_type,
                            title,
                            body,
-                           tags,
+                           tags_jsonb,
                            payload_jsonb
                          )
                          SELECT
@@ -526,25 +722,30 @@ class PostgresAssetReindexer:
                            eligible.project_id,
                            eligible.asset_type,
                            eligible.title,
-                           COALESCE(eligible.summary, ''),
+                           btrim(COALESCE(eligible.summary, '') || E'\n' || COALESCE(eligible.content_text, '')),
                            CASE
                              WHEN jsonb_typeof(eligible.tags_jsonb) = 'array' THEN eligible.tags_jsonb
                              ELSE '[]'::jsonb
                            END,
-                           jsonb_strip_nulls(jsonb_build_object(
-                             'asset_type', eligible.asset_type,
-                             'asset_id', eligible.asset_id,
-                             'summary', eligible.summary,
-                             'reindex_run_id', (SELECT run_id FROM request_context)
-                           ))
+                           (
+                             CASE
+                               WHEN jsonb_typeof(eligible.payload_jsonb) = 'object' THEN eligible.payload_jsonb
+                               ELSE '{}'::jsonb
+                             END
+                           ) || jsonb_strip_nulls(jsonb_build_object(
+                                  'asset_type', eligible.asset_type,
+                                  'asset_id', eligible.asset_id,
+                                  'summary', eligible.summary,
+                                  'reindex_run_id', (SELECT run_id FROM request_context)
+                                ))
                          FROM eligible_assets eligible
-                         ON CONFLICT (tenant_id, source, source_ref)
+                         ON CONFLICT (tenant_id, project_id, source, source_ref)
                          DO UPDATE SET
                            project_id = EXCLUDED.project_id,
                            entity_type = EXCLUDED.entity_type,
                            title = EXCLUDED.title,
                            body = EXCLUDED.body,
-                           tags = EXCLUDED.tags,
+                           tags_jsonb = EXCLUDED.tags_jsonb,
                            payload_jsonb = EXCLUDED.payload_jsonb,
                            updated_at = now()
                          RETURNING search_document_id
@@ -561,26 +762,224 @@ class PostgresAssetReindexer:
                     ),
                 )
                 row = cursor.fetchone()
+                asset_count = _non_negative_int(_row_value(row, "asset_count", 0), "asset_count")
+                if normalized_mode in {"vector", "hybrid"}:
+                    if asset_count != len(embedding_assets):
+                        raise LLMFacilityError("ASSET_REINDEX_SOURCE_CHANGED", "asset source changed during reindex")
+                    self._replace_embeddings(
+                        cursor=cursor,
+                        context=context,
+                        embedding_model=embedding_model or "",
+                        reindex_batch_id=reindex_batch_id,
+                        assets=embedding_assets,
+                        embeddings=embeddings,
+                    )
             connection.commit()
         except LLMFacilityError:
+            _rollback_quietly(connection)
             raise
         except Exception as exc:
+            _rollback_quietly(connection)
             raise LLMFacilityError("ASSET_REINDEX_FAILED", "asset reindex failed") from exc
         finally:
             connection.close()
-        return {
+        result: dict[str, Any] = {
             "status": "completed",
             "module_key": ASSET_REINDEX_MODULE_KEY,
-            "reindex_batch_id": f"asset-reindex:{context.run_id}",
+            "reindex_batch_id": reindex_batch_id,
             "asset_count": _non_negative_int(_row_value(row, "asset_count", 0), "asset_count"),
             "search_document_count": _non_negative_int(
                 _row_value(row, "search_document_count", 1),
                 "search_document_count",
             ),
-            "embedding_count": _non_negative_int(_row_value(row, "embedding_count", 2), "embedding_count"),
+            "embedding_count": len(embeddings),
             "scope": normalized_scope,
             "mode": normalized_mode,
         }
+        if embedding_model is not None:
+            result["embedding_model"] = embedding_model
+        return result
+
+    def _resolve_embedding_provider(
+        self,
+        context: AgentContext,
+    ) -> tuple[ModuleBindingResolution, str]:
+        if self._binding_resolver is None or self._credential_provider is None or self._embedding_client is None:
+            raise LLMFacilityError(
+                "ASSET_EMBEDDING_PROVIDER_UNCONFIGURED",
+                "asset embedding provider is not configured",
+            )
+        resolution = self._binding_resolver.resolve_module_binding(
+            context=context,
+            module_key=ASSET_REINDEX_MODULE_KEY,
+        )
+        _validate_asset_reindex_resolution(resolution)
+        api_key = self._credential_provider.resolve_api_key(
+            context=context,
+            credential_ref=resolution.credential_ref,
+        )
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
+        return resolution, api_key.strip()
+
+    def _load_embedding_assets(self, context: AgentContext) -> list[dict[str, str]]:
+        connection = self._connect()
+        try:
+            set_postgres_tenant_context(connection, context=context)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT
+                         asset_id::text,
+                         title,
+                         COALESCE(summary, ''),
+                         COALESCE(content_text, ''),
+                         updated_at::text
+                       FROM assets
+                       WHERE tenant_id::text = %s
+                         AND project_id::text = %s
+                         AND scope = 'project'
+                         AND enabled = true
+                       ORDER BY asset_id::text ASC""",
+                    (context.tenant_id, context.project_id),
+                )
+                rows = cursor.fetchall()
+            connection.commit()
+        except LLMFacilityError:
+            _rollback_quietly(connection)
+            raise
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise LLMFacilityError("ASSET_REINDEX_FAILED", "asset reindex failed") from exc
+        finally:
+            connection.close()
+        return [
+            {
+                "asset_id": str(_row_value(row, "asset_id", 0)),
+                "embedding_text": _asset_embedding_text(row),
+                "source_updated_at": str(_row_value(row, "updated_at", 4)),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _replace_embeddings(
+        *,
+        cursor: Any,
+        context: AgentContext,
+        embedding_model: str,
+        reindex_batch_id: str,
+        assets: list[dict[str, str]],
+        embeddings: list[list[float]],
+    ) -> None:
+        if len(assets) != len(embeddings):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding count did not match assets")
+        cursor.execute(
+            """DELETE FROM asset_embeddings
+               WHERE tenant_id::text = %s
+                 AND project_id::text = %s
+                 AND embedding_model = %s""",
+            (context.tenant_id, context.project_id, embedding_model),
+        )
+        for asset, embedding in zip(assets, embeddings, strict=True):
+            cursor.execute(
+                """INSERT INTO asset_embeddings (
+                     tenant_id, asset_id, project_id, embedding_model, dimensions,
+                     embedding, content_sha256, reindex_batch_id, source_updated_at
+                   )
+                   SELECT
+                     asset.tenant_id,
+                     asset.asset_id,
+                     asset.project_id,
+                     %s,
+                     %s,
+                     %s::vector,
+                     %s,
+                     %s,
+                     asset.updated_at
+                   FROM assets asset
+                   WHERE asset.tenant_id::text = %s
+                     AND asset.project_id::text = %s
+                     AND asset.asset_id::text = %s
+                     AND asset.updated_at::text = %s
+                     AND asset.enabled = true
+                   RETURNING embedding_id""",
+                (
+                    embedding_model,
+                    len(embedding),
+                    _vector_literal(embedding),
+                    hashlib.sha256(asset["embedding_text"].encode("utf-8")).hexdigest(),
+                    reindex_batch_id,
+                    context.tenant_id,
+                    context.project_id,
+                    asset["asset_id"],
+                    asset["source_updated_at"],
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise LLMFacilityError("ASSET_REINDEX_SOURCE_CHANGED", "asset source changed during reindex")
+
+
+class PostgresAssetReindexStatusWriter:
+    def __init__(self, *, connect: Callable[[], Any]) -> None:
+        self._connect = connect
+
+    @classmethod
+    def from_database_url(cls, database_url: str) -> "PostgresAssetReindexStatusWriter":
+        try:
+            import psycopg
+        except ImportError as exc:  # pragma: no cover - depends on runtime packaging
+            raise RuntimeError("psycopg is required for DATABASE_URL asset reindex status writes") from exc
+        return cls(connect=lambda: psycopg.connect(database_url))
+
+    def write_status(
+        self,
+        *,
+        context: AgentContext,
+        status: str,
+        result: dict[str, Any] | None,
+        error_code: str | None,
+        error_message: str | None,
+    ) -> None:
+        if status not in {"running", "completed", "failed"}:
+            raise LLMFacilityError("VALIDATION_FAILED", "asset reindex workflow status is invalid")
+        connection = self._connect()
+        try:
+            set_postgres_tenant_context(connection, context=context)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE workflow_runs
+                       SET status = %s,
+                           progress = CASE WHEN %s = 'completed' THEN 100 ELSE progress END,
+                           result_jsonb = %s::jsonb,
+                           error_code = %s,
+                           error_message = %s,
+                           updated_at = now()
+                       WHERE tenant_id::text = %s
+                         AND project_id::text = %s
+                         AND run_id::text = %s
+                         AND workflow_type = 'asset_reindex'""",
+                    (
+                        status,
+                        status,
+                        json.dumps(_sanitize_asset_value(result), ensure_ascii=False) if result is not None else None,
+                        error_code,
+                        error_message,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise LLMFacilityError("WORKFLOW_RUN_NOT_FOUND", "asset reindex workflow run was not found")
+            connection.commit()
+        except LLMFacilityError:
+            _rollback_quietly(connection)
+            raise
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise LLMFacilityError("WORKFLOW_STATUS_WRITE_FAILED", "asset reindex workflow status write failed") from exc
+        finally:
+            connection.close()
 
 
 def _base_payload(context: AgentContext) -> dict[str, str | None]:
@@ -618,8 +1017,9 @@ def _asset_ingestion_runner_from_env() -> AssetIngestionRunner | None:
             database_url=database_url,
             key_material=os.environ.get("LLM_CREDENTIAL_ENCRYPTION_KEY"),
         ),
-        chat_client=OpenAICompatibleJSONClient(),
+        chat_client=QuotaAwareJSONChatClient(),
         candidate_writer=PostgresAssetCandidateWriter.from_database_url(database_url),
+        quota_gate=ProviderQuotaGate(PostgresQuotaStore.from_database_url(database_url)),
     )
 
 
@@ -641,13 +1041,20 @@ def _record_asset_ingestion_event(
     writer = workflow_event_writer if workflow_event_writer is not None else _workflow_event_writer_from_env()
     if writer is None:
         return False
-    writer.write_event(
-        tenant_id=context.tenant_id,
-        project_id=context.project_id,
-        run_id=context.run_id,
-        event_type=event_type,
-        payload=payload,
-    )
+    write_event = getattr(writer, "write_event", None)
+    if callable(write_event):
+        write_event(
+            tenant_id=context.tenant_id,
+            project_id=context.project_id,
+            run_id=context.run_id,
+            event_type=event_type,
+            payload=payload,
+        )
+        return True
+    record_workflow_event = getattr(writer, "record_workflow_event", None)
+    if not callable(record_workflow_event):
+        raise LLMFacilityError("WORKFLOW_EVENT_WRITE_FAILED", "asset workflow event writer is invalid")
+    record_workflow_event(context=context, event_type=event_type, payload=payload)
     return True
 
 
@@ -785,12 +1192,13 @@ def _style_extraction_runner_from_env() -> StyleExtractionRunner | None:
             database_url=database_url,
             key_material=os.environ.get("LLM_CREDENTIAL_ENCRYPTION_KEY"),
         ),
-        chat_client=OpenAICompatibleJSONClient(),
+        chat_client=QuotaAwareJSONChatClient(),
         candidate_writer=PostgresAssetCandidateWriter.from_database_url(
             database_url,
             source_kind="style_extraction",
         ),
         source_material_loader=PostgresStyleSourceMaterialLoader.from_database_url(database_url),
+        quota_gate=ProviderQuotaGate(PostgresQuotaStore.from_database_url(database_url)),
     )
 
 
@@ -801,6 +1209,13 @@ def _asset_reindexer_from_env() -> AssetReindexer | None:
     return PostgresAssetReindexer.from_database_url(database_url)
 
 
+def _asset_reindex_status_writer_from_env() -> WorkflowStatusWriter | None:
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        return None
+    return PostgresAssetReindexStatusWriter.from_database_url(database_url)
+
+
 def _completed_asset_reindex_event(
     *,
     context: AgentContext,
@@ -808,25 +1223,29 @@ def _completed_asset_reindex_event(
     asset_count: int,
     search_document_count: int,
     embedding_count: int,
+    embedding_model: str | None,
     scope: str,
     mode: str,
     workflow_event_writer: WorkflowEventWriter | None,
 ) -> bool:
+    event_payload: dict[str, Any] = {
+        "stage": "asset_reindex",
+        "activity": "asset_reindex_activity",
+        "status": "completed",
+        "module_key": ASSET_REINDEX_MODULE_KEY,
+        "reindex_batch_id": reindex_batch_id,
+        "asset_count": asset_count,
+        "search_document_count": search_document_count,
+        "embedding_count": embedding_count,
+        "scope": scope,
+        "mode": mode,
+    }
+    if embedding_model is not None:
+        event_payload["embedding_model"] = embedding_model
     return _record_asset_ingestion_event(
         context=context,
         event_type="asset.stage.completed",
-        payload={
-            "stage": "asset_reindex",
-            "activity": "asset_reindex_activity",
-            "status": "completed",
-            "module_key": ASSET_REINDEX_MODULE_KEY,
-            "reindex_batch_id": reindex_batch_id,
-            "asset_count": asset_count,
-            "search_document_count": search_document_count,
-            "embedding_count": embedding_count,
-            "scope": scope,
-            "mode": mode,
-        },
+        payload=event_payload,
         workflow_event_writer=workflow_event_writer,
     )
 
@@ -839,6 +1258,7 @@ def _failed_asset_reindex_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowStatusWriter | None = None,
 ) -> dict[str, Any]:
     event_persisted = _record_asset_ingestion_event(
         context=context,
@@ -853,6 +1273,19 @@ def _failed_asset_reindex_result(
         },
         workflow_event_writer=workflow_event_writer,
     )
+    status_persisted = False
+    if workflow_status_writer is not None:
+        try:
+            workflow_status_writer.write_status(
+                context=context,
+                status="failed",
+                result=None,
+                error_code=code,
+                error_message=public_message,
+            )
+            status_persisted = True
+        except Exception:
+            status_persisted = False
     return _error_result(
         base=base,
         code=code,
@@ -861,6 +1294,7 @@ def _failed_asset_reindex_result(
             "stage": "asset_reindex",
             "module_key": ASSET_REINDEX_MODULE_KEY,
             "stage_event_persisted": event_persisted,
+            "workflow_status_persisted": status_persisted,
         },
     )
 
@@ -931,6 +1365,14 @@ def _public_asset_ingestion_error_message(code: str) -> str:
 def _public_asset_reindex_error_message(code: str) -> str:
     if code == "ASSET_REINDEXER_UNCONFIGURED":
         return "asset reindexer is unconfigured"
+    if code == "ASSET_EMBEDDING_PROVIDER_UNCONFIGURED":
+        return "asset embedding provider is unconfigured"
+    if code == "LLM_MODULE_UNBOUND":
+        return "asset_reindex module is unbound"
+    if code in {"LLM_CREDENTIAL_UNAVAILABLE", "LLM_CREDENTIAL_KEY_UNCONFIGURED"}:
+        return "asset embedding credential is unavailable"
+    if code == "ASSET_REINDEX_SOURCE_CHANGED":
+        return "asset source changed during reindex"
     if code == "SCHEMA_VALIDATION_FAILED":
         return "asset reindex output schema validation failed"
     if code == "VALIDATION_FAILED":
@@ -1168,9 +1610,128 @@ def _asset_reindex_mode(value: str) -> str:
     normalized = value.strip() if isinstance(value, str) else "keyword"
     if not normalized:
         normalized = "keyword"
-    if normalized not in {"keyword"}:
-        raise LLMFacilityError("VALIDATION_FAILED", "only keyword asset reindexing is currently supported")
+    if normalized not in {"keyword", "vector", "hybrid"}:
+        raise LLMFacilityError("VALIDATION_FAILED", "asset reindex mode must be keyword, vector, or hybrid")
     return normalized
+
+
+def _validate_asset_reindex_resolution(resolution: ModuleBindingResolution) -> None:
+    if resolution.module_key != ASSET_REINDEX_MODULE_KEY:
+        raise LLMFacilityError("LLM_MODULE_UNBOUND", "resolved module key does not match asset_reindex")
+    for field_name in ("channel_id", "model_id", "provider", "base_url", "credential_ref"):
+        value = getattr(resolution, field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
+
+
+def _asset_embedding_text(row: Any) -> str:
+    parts = [
+        _row_value(row, "title", 1),
+        _row_value(row, "summary", 2),
+        _row_value(row, "content_text", 3),
+    ]
+    return "\n".join(str(part).strip() for part in parts if isinstance(part, str) and part.strip())
+
+
+def _embedding_vector(value: Any) -> list[float]:
+    if not isinstance(value, list) or not value:
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding must be a non-empty array")
+    vector: list[float] = []
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding components must be numbers")
+        normalized = float(component)
+        if not math.isfinite(normalized):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding components must be finite")
+        vector.append(normalized)
+    return vector
+
+
+def _embedding_usage(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    prompt_tokens = _embedding_non_negative_int(
+        value.get("prompt_tokens") if "prompt_tokens" in value else value.get("input_tokens")
+    )
+    total_tokens = _embedding_non_negative_int(value.get("total_tokens"))
+    if prompt_tokens is None:
+        prompt_tokens = total_tokens
+    if prompt_tokens is None:
+        return None
+    if total_tokens is None:
+        total_tokens = prompt_tokens
+    if total_tokens < prompt_tokens:
+        return None
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": total_tokens - prompt_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _embedding_non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and value >= 0 and value.is_integer():
+        return int(value)
+    return None
+
+
+def _embedding_provider_payload(
+    client: EmbeddingClient,
+    *,
+    context: AgentContext,
+    resolution: ModuleBindingResolution,
+    api_key: str,
+    texts: list[str],
+    provider_call_id: str,
+) -> dict[str, Any]:
+    vectors = client.embed_texts(
+        context=context,
+        resolution=resolution,
+        api_key=api_key,
+        texts=texts,
+        provider_call_id=provider_call_id,
+    )
+    return {
+        "vectors": [list(vector) for vector in vectors],
+        "__llm_usage": getattr(vectors, "llm_usage", None),
+    }
+
+
+def _quota_embedding_vectors(response: dict[str, Any], *, expected_count: int) -> list[list[float]]:
+    raw_vectors = response.get("vectors")
+    if not isinstance(raw_vectors, list) or len(raw_vectors) != expected_count:
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding response count did not match input count")
+    vectors = [_embedding_vector(value) for value in raw_vectors]
+    if len({len(vector) for vector in vectors}) > 1:
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "embedding dimensions were inconsistent")
+    return vectors
+
+
+def _vector_literal(vector: list[float]) -> str:
+    return "[" + ",".join(format(component, ".17g") for component in vector) + "]"
+
+
+def _embeddings_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    if normalized.endswith("/embeddings"):
+        return normalized
+    return f"{normalized}/embeddings"
+
+
+def _urlopen_bytes(request: Request) -> bytes:
+    with urlopen(request) as response:  # noqa: S310 - URL comes from an authorized LLM Facility channel
+        return response.read()
+
+
+def _rollback_quietly(connection: Any) -> None:
+    try:
+        connection.rollback()
+    except Exception:
+        pass
 
 
 def _candidate_required_text(value: Any, field_name: str) -> str:
@@ -1461,9 +2022,15 @@ def asset_reindex_activity(
     payload: dict[str, Any],
     asset_reindexer: AssetReindexer | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context)
+    status_writer = (
+        workflow_status_writer
+        if workflow_status_writer is not None
+        else _asset_reindex_status_writer_from_env()
+    )
     if not context.has_permission(ASSET_REINDEX_MODULE_KEY, "run"):
         return _error_result(
             base=base,
@@ -1479,6 +2046,7 @@ def asset_reindex_activity(
             message=f"module_key must be {ASSET_REINDEX_MODULE_KEY}",
             public_message="asset reindex module key is invalid",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
     try:
         scope = _asset_reindex_scope(_optional_text(payload.get("scope")) or "project")
@@ -1491,6 +2059,7 @@ def asset_reindex_activity(
             message=str(exc),
             public_message="asset reindex request is invalid",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
     reindexer = asset_reindexer if asset_reindexer is not None else _asset_reindexer_from_env()
@@ -1502,6 +2071,7 @@ def asset_reindex_activity(
             message="asset reindexer requires DATABASE_URL backed storage",
             public_message="asset reindexer is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
     try:
         reindex_result = reindexer.reindex(
@@ -1518,6 +2088,7 @@ def asset_reindex_activity(
             message=exc.message,
             public_message=_public_asset_reindex_error_message(exc.code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
     except Exception:
         return _failed_asset_reindex_result(
@@ -1527,6 +2098,7 @@ def asset_reindex_activity(
             message="asset reindexer failed",
             public_message="asset reindex failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
     if reindex_result.get("status") != "completed":
         error = reindex_result.get("error") if isinstance(reindex_result.get("error"), dict) else {}
@@ -1538,6 +2110,7 @@ def asset_reindex_activity(
             message=_public_asset_reindex_error_message(code),
             public_message=_public_asset_reindex_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
     try:
         module_key = _optional_text(reindex_result.get("module_key")) or ASSET_REINDEX_MODULE_KEY
@@ -1550,6 +2123,7 @@ def asset_reindex_activity(
             "search_document_count",
         )
         embedding_count = _non_negative_int(reindex_result.get("embedding_count", 0), "embedding_count")
+        embedding_model = _optional_text(reindex_result.get("embedding_model"))
     except Exception as exc:
         return _failed_asset_reindex_result(
             base=base,
@@ -1558,18 +2132,61 @@ def asset_reindex_activity(
             message=str(exc),
             public_message="asset reindex output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=status_writer,
         )
+    status_result: dict[str, Any] = {
+        "stage": "asset_reindex",
+        "module_key": ASSET_REINDEX_MODULE_KEY,
+        "reindex_batch_id": reindex_batch_id,
+        "asset_count": asset_count,
+        "search_document_count": search_document_count,
+        "embedding_count": embedding_count,
+        "scope": scope,
+        "mode": mode,
+    }
+    if embedding_model is not None:
+        status_result["embedding_model"] = embedding_model
+    status_persisted = False
+    if status_writer is not None:
+        try:
+            status_writer.write_status(
+                context=context,
+                status="completed",
+                result=status_result,
+                error_code=None,
+                error_message=None,
+            )
+            status_persisted = True
+        except LLMFacilityError as exc:
+            return _failed_asset_reindex_result(
+                base=base,
+                context=context,
+                code=exc.code,
+                message=exc.message,
+                public_message="asset reindex workflow status write failed",
+                workflow_event_writer=workflow_event_writer,
+            )
+        except Exception:
+            return _failed_asset_reindex_result(
+                base=base,
+                context=context,
+                code="WORKFLOW_STATUS_WRITE_FAILED",
+                message="asset reindex workflow status write failed",
+                public_message="asset reindex workflow status write failed",
+                workflow_event_writer=workflow_event_writer,
+            )
     event_persisted = _completed_asset_reindex_event(
         context=context,
         reindex_batch_id=reindex_batch_id,
         asset_count=asset_count,
         search_document_count=search_document_count,
         embedding_count=embedding_count,
+        embedding_model=embedding_model,
         scope=scope,
         mode=mode,
         workflow_event_writer=workflow_event_writer,
     )
-    return {
+    result = {
         **base,
         "status": "completed",
         "stage": "asset_reindex",
@@ -1581,7 +2198,11 @@ def asset_reindex_activity(
         "scope": scope,
         "mode": mode,
         "stage_event_persisted": event_persisted,
+        "workflow_status_persisted": status_persisted,
     }
+    if embedding_model is not None:
+        result["embedding_model"] = embedding_model
+    return result
 
 
 @workflow.defn

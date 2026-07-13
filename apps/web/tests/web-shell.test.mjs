@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import {
@@ -22,6 +22,24 @@ async function fileText(relativePath) {
   return readFile(path.join(root, relativePath), "utf8");
 }
 
+async function sourceFiles(relativeDirectory) {
+  const directory = path.join(root, relativeDirectory);
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nestedFiles = await Promise.all(
+    entries.map(async (entry) => {
+      const relativePath = path.join(relativeDirectory, entry.name);
+      if (entry.isDirectory()) {
+        return sourceFiles(relativePath);
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".tsx")) {
+        return [];
+      }
+      return [{ relativePath, source: await fileText(relativePath) }];
+    }),
+  );
+  return nestedFiles.flat();
+}
+
 function sourceSlice(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start);
@@ -42,7 +60,7 @@ test("writer API client exposes metadata-only manuscript endpoints with tenant h
   const client = await fileText("lib/api.ts");
   const manuscriptClient = [
     sourceSlice(client, "export type ManuscriptBlockMetadata", "export type WorkflowRunSummary"),
-    sourceSlice(client, "export async function getProjectManuscript", "export async function getWorkflowRunSummary"),
+    sourceSlice(client, "export async function getProjectManuscript", "export async function downloadProjectManuscriptArtifact"),
     sourceSlice(client, "async function decodeProjectManuscriptResponse", "async function decodeWorkflowRunResponse"),
     sourceSlice(client, "function decodeManuscriptBlockMetadata", "function decodeWorkflowRunEvent"),
   ].join("\n");
@@ -80,6 +98,8 @@ test("writer page loads manuscript summaries alongside picker data", async () =>
   assert.match(page, /getProjectManuscript/);
   assert.match(page, /getProjectManuscriptExportManifest/);
   assert.match(page, /const\s*\[\s*assets,\s*graphView,\s*worldlineSavedPaths,\s*manuscript,\s*manuscriptExportManifest\s*\]\s*=\s*await\s+Promise\.all/);
+  assert.match(page, /planningRun,\s*proposals,\s*distillationSettings\s*\]\s*=\s*await\s+Promise\.all/);
+  assert.match(page, /<Suspense\s+fallback=\{<WriterProductWorkspaceLoading\s*\/>\}>/);
   assert.match(page, /getProjectManuscript\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
   assert.match(page, /getProjectManuscriptExportManifest\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
   assert.match(page, /manuscript=\{manuscript\}/);
@@ -94,12 +114,12 @@ test("Writer shell renders metadata-only manuscript and export panels", async ()
   assert.match(shell, /manuscript\.ok/);
   assert.match(shell, /manuscriptExportManifest\.ok/);
   assert.match(shell, /Manuscript metadata/);
-  assert.match(shell, /Export manifest/);
+  assert.match(shell, /Export manuscript/);
   assert.match(shell, /MANUSCRIPT_BACKEND_UNCONFIGURED/);
   assert.match(shell, /MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED/);
   assert.match(shell, /block\.block_id/);
-  assert.match(shell, /block\.chapter_id/);
-  assert.match(shell, /block\.source_draft_id/);
+  assert.match(shell, /data-chapter-id=\{block\.chapter_id/);
+  assert.match(shell, /data-source-draft-id=\{block\.source_draft_id/);
   assert.match(shell, /block\.word_count/);
   assert.match(shell, /manifestBlock\.block_id/);
   assert.match(shell, /manifestBlock\.word_count/);
@@ -117,15 +137,85 @@ test("Writer shell renders metadata-only manuscript and export panels", async ()
 test("project navigation includes writer and LLM Facility routes with active path state", async () => {
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const nav = await fileText("components/project-nav.tsx");
+  const transition = await fileText("components/workspace-route-transition.tsx");
+  const css = await fileText("app/globals.css");
 
   assert.match(layout, /ProjectNav/);
   assert.match(nav, /usePathname/);
+  assert.match(nav, /useRouter/);
+  assert.match(nav, /useTransition/);
+  assert.match(nav, /router\.prefetch\(href\)/);
   assert.match(nav, /\/overview/);
   assert.match(nav, /\/writer/);
   assert.match(nav, /\/llm-facility/);
   assert.match(nav, /Overview/);
   assert.match(nav, /LLM Facility/);
   assert.match(nav, /aria-current/);
+  assert.doesNotMatch(nav, /navigationBasePath/);
+  assert.match(nav, /const activeTenants = currentUser\.ok \? currentUser\.active_tenants : \[\]/);
+  assert.match(nav, /const href = workspacePathForProject\(activeTenants, currentProject, item\.path\)/);
+  assert.match(nav, /function matchesNavigationHref\(pathname: string, href: string, sectionPath: string\)/);
+  assert.match(nav, /matchesNavigationHref\(\s*pathname,\s*workspacePathForProject\(activeTenants, currentProject, item\.path\),\s*item\.path,\s*\)/s);
+  assert.match(nav, /pathname\.startsWith\(`\$\{href\}\/`\)/);
+  assert.match(nav, /const activeHref = optimisticHref \?\? pathname/);
+  assert.match(nav, /const active = matchesNavigationHref\(activeHref, href, item\.path\)/);
+  assert.match(nav, /data-active=\{active \? "true" : undefined\}/);
+  assert.match(nav, /onNavigate=\{navigateWorkspace\}/);
+  assert.match(nav, /onNavigate=\{\(event\) => onNavigate\(event, href\)\}/);
+  assert.match(nav, /onFocus=\{prefetchRoute\}/);
+  assert.match(nav, /onFocus=\{\(\) => onFocus\(href\)\}/);
+  assert.match(nav, /onMouseEnter=\{\(\) => onFocus\(href\)\}/);
+  assert.doesNotMatch(nav, /prefetch=\{false\}/);
+  assert.match(nav, /event\.preventDefault\(\)/);
+  assert.match(nav, /startNavigationTransition\(\(\) => router\.push\(href\)\)/);
+  assert.doesNotMatch(nav, /pendingHref|LoaderCircle|nav-link-spinner|aria-busy/);
+  assert.match(layout, /WorkspaceRouteTransition/);
+  assert.match(layout, /<WorkspaceRouteTransition>\s*\{children\}\s*<\/WorkspaceRouteTransition>/s);
+  assert.match(nav, /signalWorkspaceNavigationStart\(\)/);
+  assert.match(transition, /usePathname/);
+  assert.match(transition, /WORKSPACE_NAVIGATION_START_EVENT/);
+  assert.match(transition, /WORKSPACE_NAVIGATION_COMPLETE_EVENT/);
+  assert.match(transition, /window\.addEventListener\(WORKSPACE_NAVIGATION_START_EVENT/);
+  assert.match(transition, /window\.addEventListener\(WORKSPACE_NAVIGATION_COMPLETE_EVENT/);
+  assert.match(transition, /window\.setTimeout/);
+  assert.match(transition, /data-pending=\{pending \? "true" : "false"\}/);
+  assert.match(transition, /className="workspace-route-content" key=\{pathname\}/);
+  assert.match(css, /\.workspace-route-content\s*\{[^}]*animation:\s*workspace-route-enter var\(--motion-fast\) var\(--ease-natural\)/s);
+  assert.match(css, /@keyframes workspace-route-enter\s*\{[\s\S]*opacity:[\s\S]*transform:\s*translateY\(4px\)/);
+  assert.match(css, /\.workspace-route-progress\[data-visible="true"\]/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.workspace-route-content[\s\S]*animation:\s*none/s);
+  await assert.rejects(
+    fileText("app/(app)/[tenantSlug]/projects/[projectId]/loading.tsx"),
+    { code: "ENOENT" },
+  );
+});
+
+test("project chrome is content-sized and keeps route identifiers out of display copy", async () => {
+  const css = await fileText("app/globals.css");
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+  const shells = await Promise.all([
+    "components/asset-library-shell.tsx",
+    "components/story-graph-shell.tsx",
+    "components/llm-facility-shell.tsx",
+    "components/writer-workbench-shell.tsx",
+  ].map((path) => fileText(path)));
+
+  assert.match(css, /\.app-sidebar\s*\{[^}]*height:\s*fit-content/s);
+  assert.match(css, /\.app-sidebar\s*\{[^}]*max-height:\s*100dvh/s);
+  assert.match(css, /\.sidebar-stack\s*\{[^}]*min-height:\s*0/s);
+  assert.match(layout, /const\s+currentProject\s*=\s*currentUser\.ok/);
+  assert.match(layout, /currentProject\?\.name/);
+  assert.doesNotMatch(layout, /<span>\{tenantSlug\}<\/span>/);
+  assert.doesNotMatch(layout, /<strong>\{projectId\}<\/strong>/);
+  assert.doesNotMatch(nav, /currentProject\?\.name \|\| projectId/);
+  assert.doesNotMatch(nav, /currentTenant\?\.name \|\| tenantSlug/);
+  for (const shell of shells) {
+    assert.doesNotMatch(shell, /<Bi zh="租户" en="Tenant" \/>\s*<strong>\{tenantSlug\}<\/strong>/);
+    assert.doesNotMatch(shell, /<Bi zh="项目" en="Project" \/>\s*<strong>\{projectId\}<\/strong>/);
+  }
+  assert.doesNotMatch(shells[1], /<Bi zh="节点 ID" en="Node ID" \/>/);
+  assert.doesNotMatch(shells[1], /node\.title \|\| node\.node_id/);
 });
 
 test("Current user API client can fetch public membership summary with browser session cookie", async () => {
@@ -142,7 +232,8 @@ test("Current user API client can fetch public membership summary with browser s
   assert.match(client, /import http from "node:http"/);
   assert.match(client, /import https from "node:https"/);
   assert.match(apiFetchHelper, /url\.protocol === "https:" \? https : http/);
-  assert.match(apiFetchHelper, /new Response\(Buffer\.concat\(chunks\)/);
+  assert.match(apiFetchHelper, /new Response\(responseStatusHasNoBody\(status\) \? null : Buffer\.concat\(chunks\)/);
+  assert.match(apiFetchHelper, /status === 204 \|\| status === 205 \|\| status === 304/);
   assert.doesNotMatch(client, /await fetch\(/);
   assert.match(currentUserTypes, /CurrentUserRecord/);
   assert.match(currentUserTypes, /TenantMembershipSummary/);
@@ -192,10 +283,13 @@ test("Current user API client can fetch public membership summary with browser s
 test("tenant picker project layout loads current user and passes memberships into ProjectNav", async () => {
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const requestSession = await fileText("lib/request-session.ts");
+  const devAccess = await fileText("lib/dev-access.ts");
+  const workspaceRoute = await fileText("lib/workspace-route.ts");
+  const middleware = await fileText("middleware.ts");
 
   assert.match(layout, /getCurrentUser/);
   assert.match(layout, /currentRequestSessionCookie/);
-  assert.match(layout, /const\s+sessionCookie\s*=\s*currentRequestSessionCookie\(\{\s*required:\s*true\s*\}\)/);
+  assert.match(layout, /required:\s*!isDevLoginBypassEnabled\(\)/);
   assert.doesNotMatch(layout, /from\s*"next\/headers"|cookies\(\)|headers\(\)|cookieStore\.get\("mirofish_session"\)/);
   assert.match(requestSession, /workUnitAsyncStorage/);
   assert.match(requestSession, /CURRENT_REQUEST_SESSION_CONTEXT_UNAVAILABLE/);
@@ -203,9 +297,45 @@ test("tenant picker project layout loads current user and passes memberships int
   assert.match(requestSession, /CURRENT_REQUEST_SESSION_STORE_UNAVAILABLE/);
   assert.match(requestSession, /store\.headers\.get\("cookie"\)/);
   assert.doesNotMatch(requestSession, /from\s*"next\/headers"|cookies\(\)|headers\(\)/);
-  assert.match(layout, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
+  assert.match(devAccess, /export function isDevLoginBypassEnabled/);
+  assert.match(
+    devAccess,
+    /if \(flag === "1"[^}]+return true;\s*}\s*return false;/s,
+    "development login bypass must require explicit opt-in",
+  );
+  assert.doesNotMatch(
+    devAccess,
+    /Enabled outside production by default/,
+    "normal local entry must use the real login page",
+  );
+  assert.match(devAccess, /export function devActorUserId/);
+  assert.match(workspaceRoute, /workspacePathForProject/);
+  assert.match(workspaceRoute, /projectPublicKey/);
+  assert.match(workspaceRoute, /resolveProjectPublicKey/);
+  assert.match(workspaceRoute, /workspaceKeyFromIds/);
+  assert.match(workspaceRoute, /workspaceIdsFromKey/);
+  assert.match(workspaceRoute, /publicWorkspaceSection/);
+  assert.match(middleware, /NextResponse\.rewrite/);
+  assert.match(middleware, /NextResponse\.redirect/);
+  assert.match(middleware, /workspaceIdFromPublicSegment/);
+  assert.match(middleware, /workspaceIdsFromKey/);
+  assert.match(middleware, /resolveProjectPublicKey/);
+  assert.match(middleware, /projectPublicKey/);
+  assert.match(middleware, /canonicalLLMFacilitySearch/);
+  assert.match(middleware, /llmModulePathSegment/);
+  assert.match(middleware, /sessionCookieFromHeader/);
+  assert.match(middleware, /decodeURIComponent\(value\)/);
+  assert.match(middleware, /route\.kind === "project"/);
+  assert.match(middleware, /route\.kind === "workspace-key"/);
+  assert.match(middleware, /matcher:\s*\["\/p\/:path\*",\s*"\/w\/:path\*"/);
+  assert.match(middleware, /canonical\.pathname = `\/p\/\$\{publicKey\}/);
+  assert.match(middleware, /INTERNAL_WORKSPACE_REWRITE_HEADER/);
+  assert.match(middleware, /request\.headers\.get\(INTERNAL_WORKSPACE_REWRITE_HEADER\) === "1"/);
+  assert.match(middleware, /request:\s*\{\s*headers:\s*internalHeaders\s*\}/);
+  assert.match(layout, /devActorUserId\(\)/);
   assert.match(layout, /sessionCookie\s*\|\|\s*actorUserId/);
-  assert.match(layout, /await\s+getCurrentUser\(\{\s*actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId,\s*sessionCookie,\s*\}\)/s);
+  assert.doesNotMatch(layout, /getCurrentUserSessions|currentUserSessions/);
+  assert.match(layout, /getCurrentUser\(\{\s*actorUserId:\s*sessionCookie\s*\?\s*undefined\s*:\s*actorUserId,\s*sessionCookie,\s*\}\)/s);
   assert.match(layout, /CURRENT_USER_CONTEXT_UNCONFIGURED/);
   assert.doesNotMatch(layout, /\?\?\s*"web-shell"/);
   assert.match(layout, /currentUser=\{currentUser\}/);
@@ -213,17 +343,57 @@ test("tenant picker project layout loads current user and passes memberships int
   assert.match(layout, /projectId=\{projectId\}/);
 });
 
+test("marketing landing is the product homepage and CTAs enter login", async () => {
+  const home = await fileText("app/page.tsx");
+  const shell = await fileText("components/landing-shell.tsx");
+  const bodyHtml = await fileText("lib/landing-body-html.ts");
+  const publicMain = await fileText("public/landing/main.js");
+  const publicBody = await fileText("public/landing/body.html");
+  const authCss = await fileText("app/auth-marketing.css");
+  const dockerfile = await fileText("../../infra/docker/web.Dockerfile");
+
+  assert.match(home, /LandingShell/);
+  assert.doesNotMatch(home, /devEntryRedirectPath/);
+  assert.match(shell, /LANDING_BODY_HTML/);
+  assert.match(shell, /landing-active/);
+  assert.match(shell, /\/landing\/styles\.css/);
+  assert.match(shell, /\/landing\/main\.js/);
+  assert.match(bodyHtml, /LANDING_BODY_HTML/);
+  assert.match(bodyHtml, /href=\\"\/login\\"/);
+  assert.match(publicBody, /href="\/login"/);
+  assert.match(publicBody, /\/landing\/assets\//);
+  assert.match(publicMain, /\/landing\/assets\//);
+  assert.match(publicMain, /__MIROFISH_LANDING_BOOTED__/);
+  assert.match(
+    publicMain,
+    /previousBootScreen === bootScreen && bootScreen\?\.isConnected/,
+    "landing boot guard must be scoped to the connected DOM instance so remounts can initialize",
+  );
+  assert.doesNotMatch(
+    publicMain,
+    /if \(window\.__MIROFISH_LANDING_BOOTED__\) return/,
+    "a session-wide boot guard leaves the remounted landing page stuck on its preload screen",
+  );
+  assert.doesNotMatch(publicMain, /href="#workbench"/);
+  assert.match(authCss, /auth-shell/);
+  assert.match(authCss, /#9b2c2c/);
+  assert.match(dockerfile, /COPY --from=build \/app\/public \.\/public/);
+});
+
 test("password login page issues browser session server-side without exposing token material", async () => {
   const client = await fileText("lib/api.ts");
   const page = await fileText("app/login/page.tsx");
+  const form = await fileText("components/login-form.tsx");
+  const home = await fileText("app/page.tsx");
   const loginClient = sourceSlice(client, "export async function loginWithPassword", "export async function revokeCurrentSession");
   const loginAction = sourceSlice(page, "async function loginAction", "return (");
 
   assert.match(client, /export type PasswordLoginSummary/);
-  assert.match(client, /export async function loginWithPassword\(input:\s*\{\s*email:\s*string;\s*password:\s*string;?\s*\}\)/);
+  assert.match(client, /export async function loginWithPassword\(input:\s*\{\s*email:\s*string;\s*password:\s*string;\s*clientProof\?:\s*string;?\s*\}\)/);
   assert.match(loginClient, /\/v1\/auth\/login/);
   assert.match(loginClient, /method:\s*"POST"/);
   assert.match(loginClient, /"Content-Type":\s*"application\/json"/);
+  assert.match(loginClient, /"X-Mirofish-Recovery-Client":\s*input\.clientProof\.trim\(\)/);
   assert.match(loginClient, /body:\s*JSON\.stringify\(\{\s*email:\s*input\.email,\s*password:\s*input\.password,\s*\}\)/s);
   assert.match(loginClient, /parseSessionCookieSetCookie\(response\.headers\.get\("set-cookie"\)\)/);
   assert.match(loginClient, /decodeCurrentUserResponse\(response\)/);
@@ -231,29 +401,41 @@ test("password login page issues browser session server-side without exposing to
   assert.match(loginClient, /networkFailure\(error,\s*"PASSWORD_LOGIN_FAILED"\)/);
   assert.doesNotMatch(loginClient, /X-User-Id|X-Tenant-Id|headers\.Cookie|Cookie:\s*|contextHeaders|actorUserId|csrfToken/);
 
-  assert.match(page, /import\s*\{\s*cookies\s*\}\s*from\s*"next\/headers"/);
+  assert.match(page, /import\s*\{\s*cookies,\s*headers\s*\}\s*from\s*"next\/headers"/);
+  assert.match(page, /import\s*\{\s*createRecoveryClientProof\s*\}\s*from\s*"\.\.\/\.\.\/lib\/auth-recovery-server"/);
   assert.match(page, /import\s*\{\s*redirect\s*\}\s*from\s*"next\/navigation"/);
+  assert.match(page, /isDevLoginBypassEnabled\(\)/);
+  assert.match(page, /devWorkspacePath\("overview"\)/);
+  assert.match(home, /LandingShell/);
+  assert.match(home, /长篇小说多智能体创作平台|Long-form fiction/);
   assert.match(page, /loginWithPassword/);
   assert.match(loginAction, /"use server"/);
   assert.match(loginAction, /const\s+email\s*=\s*stringFromFormData\(formData,\s*"email"\)/);
   assert.match(loginAction, /const\s+password\s*=\s*rawStringFromFormData\(formData,\s*"password"\)/);
-  assert.match(loginAction, /await\s+loginWithPassword\(\{\s*email,\s*password\s*\}\)/s);
+  assert.match(loginAction, /const\s+clientProof\s*=\s*createRecoveryClientProof\(await\s+headers\(\)\)/);
+  assert.match(loginAction, /await\s+loginWithPassword\(\{\s*email,\s*password,\s*clientProof\s*\}\)/s);
   assert.match(loginAction, /const\s+cookieStore\s*=\s*await\s+cookies\(\)/);
   assert.match(loginAction, /cookieStore\.set\("mirofish_session",\s*result\.session_cookie\.value,/);
   assert.match(loginAction, /httpOnly:\s*result\.session_cookie\.http_only/);
   assert.match(loginAction, /sameSite:\s*result\.session_cookie\.same_site/);
   assert.match(loginAction, /const\s+project\s*=\s*result\.active_projects\[0\]/);
-  assert.match(loginAction, /redirect\(`\/\$\{project\.tenant_id\}\/projects\/\$\{project\.project_id\}\/overview`\)/);
+  assert.match(loginAction, /cookieStore\.set\("mirofish_session"[\s\S]*const\s+project\s*=\s*result\.active_projects\[0\][\s\S]*if\s*\(!project\)\s*\{\s*redirect\("\/invitations\/accept"\)/);
+  assert.match(loginAction, /redirect\(workspacePathForProject\(result\.active_tenants,\s*project,\s*"overview"\)\)/);
   assert.doesNotMatch(loginAction, /console\.|MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|X-Tenant-Id|getCurrentUser|session_cookie\.value\}/);
 
-  assert.match(page, /<form\s+action=\{loginAction\}/);
-  assert.match(page, /htmlFor="login-email"/);
-  assert.match(page, /type="email"/);
-  assert.match(page, /htmlFor="login-password"/);
-  assert.match(page, /type="password"/);
-  assert.match(page, /autoComplete="email"/);
-  assert.match(page, /autoComplete="current-password"/);
-  assert.match(page, /Sign in/);
+  assert.match(page, /<LoginForm action=\{loginAction\} \/>/);
+  assert.match(page, /欢迎回来/);
+  assert.match(form, /<form action=\{action\}/);
+  assert.match(form, /htmlFor="login-email"/);
+  assert.match(form, /type="email"/);
+  assert.match(form, /htmlFor="login-password"/);
+  assert.match(form, /type=\{passwordVisible \? "text" : "password"\}/);
+  assert.match(form, /autoComplete="email"/);
+  assert.match(form, /autoComplete="current-password"/);
+  assert.match(form, /useFormStatus/);
+  assert.match(form, /正在登录/);
+  assert.match(form, /进入创作工作台/);
+  assert.doesNotMatch(page, /<LanguageSwitcher \/>/);
   assert.doesNotMatch(page, /token_hash|credential_ref|encrypted_api_key|api_key|object_key|draft|manuscript|prompt|provider|raw_body|content_text/i);
 });
 
@@ -341,6 +523,39 @@ test("live Seed harness rejects worker-retry mode with external retry-run fallba
       assert.doesNotMatch(error.message, /run-retry-secret|session-browser|tenant-browser|project-browser/);
       return true;
     },
+  );
+});
+
+test("live Seed harness keeps completed browser mode separate from retry modes", () => {
+  const baseEnv = {
+    MIROFISH_WEB_BROWSER_LIVE_SEED_APP_BASE_URL: "http://localhost:3999",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_API_BASE_URL: "http://localhost:3888",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_TENANT_ID: "tenant-browser",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_PROJECT_ID: "project-browser",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_SESSION_COOKIE: "session-browser",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_ALLOW_MUTATION: "1",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_THROWAWAY_PROJECT: "1",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_DISPOSABLE_PROJECT_MARKER: "throwaway",
+    MIROFISH_WEB_BROWSER_LIVE_SEED_EXPECT_COMPLETED: "1",
+  };
+  const completed = loadLiveSeedConfig({
+    env: baseEnv,
+    prefix: BROWSER_LIVE_SEED_PREFIX,
+    browser: true,
+  });
+  assert.equal(completed.expectCompleted, true);
+  assert.equal(completed.requireWorkerRetry, false);
+
+  assert.throws(
+    () => loadLiveSeedConfig({
+      env: {
+        ...baseEnv,
+        MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY: "1",
+      },
+      prefix: BROWSER_LIVE_SEED_PREFIX,
+      browser: true,
+    }),
+    /completed mode cannot enable retry-run options/,
   );
 });
 
@@ -665,7 +880,7 @@ test("project shell exposes current-session logout without leaking the session t
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const actions = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/session-actions.ts");
   const nav = await fileText("components/project-nav.tsx");
-  const logoutClient = sourceSlice(client, "export async function revokeCurrentSession", "export async function startWriterRun");
+  const logoutClient = sourceSlice(client, "export async function revokeCurrentSession", "export async function changePassword");
   const logoutAction = sourceSlice(actions, "export async function logoutAction", "export async function rotateSessionAction");
 
   assert.match(client, /export async function getSessionCSRFToken\(input:\s*\{\s*sessionCookie\?:\s*string;?\s*\}\)/);
@@ -692,13 +907,14 @@ test("project shell exposes current-session logout without leaking the session t
   assert.match(actions, /actionCookieStore\.get\("mirofish_session"\)\?\.value\?\.trim\(\)/);
   assert.match(logoutAction, /"use server"/);
   assert.match(logoutAction, /readActionSessionCookie\(\)/);
-  assert.match(logoutAction, /if\s*\(!actionSessionCookie\)\s*\{\s*return;\s*\}/s);
+  assert.match(logoutAction, /if\s*\(!actionSessionCookie\)\s*\{\s*redirect\("\/login"\);\s*\}/s);
   assert.match(actions, /async function requireActionCSRFToken/);
   assert.match(actions, /throw new Error\("SESSION_CSRF_TOKEN_UNAVAILABLE"\)/);
   assert.match(logoutAction, /const\s+csrfResult\s*=\s*await\s+requireActionCSRFToken\(actionSessionCookie\)/s);
   assert.match(logoutAction, /await\s+revokeCurrentSession\(\{\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
   assert.match(logoutAction, /throw new Error\("SESSION_REVOKE_FAILED"\)/);
   assert.match(logoutAction, /actionCookieStore\.delete\("mirofish_session"\)/);
+  assert.match(logoutAction, /actionCookieStore\.delete\("mirofish_session"\);\s*redirect\("\/login"\)/s);
   assert.doesNotMatch(logoutAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|sessionCookie\s*\}/);
   assert.match(layout, /logoutAction=\{logoutAction\}/);
 
@@ -751,6 +967,7 @@ test("project shell exposes session management metadata without leaking token ma
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const actions = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/session-actions.ts");
   const nav = await fileText("components/project-nav.tsx");
+  const sessionsRoute = await fileText("app/api/auth/sessions/route.ts");
   const listClient = sourceSlice(client, "export async function getCurrentUserSessions", "export async function revokeAllCurrentUserSessions");
   const revokeAllClient = sourceSlice(client, "export async function revokeAllCurrentUserSessions", "export async function startWriterRun");
   const revokeAllAction = sourceSlice(actions, "export async function revokeAllSessionsAction", "export async function revokeTenantSessionsAction");
@@ -774,21 +991,22 @@ test("project shell exposes session management metadata without leaking token ma
   assert.match(revokeAllClient, /networkFailure\(error,\s*"SESSION_REVOKE_ALL_FAILED"\)/);
   assert.doesNotMatch(revokeAllClient, /X-User-Id|actorUserId|body|JSON\.stringify/);
 
-  assert.match(layout, /getCurrentUserSessions/);
+  assert.doesNotMatch(layout, /getCurrentUserSessions|currentUserSessions/);
   assert.match(actions, /revokeAllCurrentUserSessions/);
-  assert.match(layout, /const\s+currentUserSessions\s*=\s*sessionCookie\s*\?\s*await\s+getCurrentUserSessions\(\{\s*sessionCookie\s*\}\)\s*:\s*undefined/s);
   assert.match(revokeAllAction, /"use server"/);
   assert.match(revokeAllAction, /readActionSessionCookie\(\)/);
   assert.match(revokeAllAction, /const\s+csrfResult\s*=\s*await\s+requireActionCSRFToken\(actionSessionCookie\)/s);
   assert.match(revokeAllAction, /await\s+revokeAllCurrentUserSessions\(\{\s*sessionCookie:\s*actionSessionCookie,\s*csrfToken:\s*csrfResult\.csrf_token\s*\}\)/s);
   assert.match(revokeAllAction, /throw new Error\("SESSION_REVOKE_FAILED"\)/);
-  assert.match(layout, /currentUserSessions=\{currentUserSessions\}/);
   assert.match(layout, /revokeAllSessionsAction=\{revokeAllSessionsAction\}/);
   assert.doesNotMatch(revokeAllAction, /MIROFISH_WEB_DEV_ACTOR_USER_ID|X-User-Id|console\.|JSON\.stringify|sessionCookie\s*\}/);
 
-  assert.match(nav, /currentUserSessions\?:\s*CurrentUserSessionsSummary/);
+  assert.match(nav, /useState<CurrentUserSessionsSummary/);
+  assert.match(nav, /onToggle=\{loadSessionsWhenOpened\}/);
+  assert.match(nav, /fetch\("\/api\/auth\/sessions"/);
+  assert.match(nav, /if \(!event\.currentTarget\.open/);
   assert.match(nav, /revokeAllSessionsAction:\s*\(\)\s*=>\s*Promise<void>/);
-  assert.match(nav, /aria-label="Sessions"/);
+  assert.match(nav, /aria-label="会话 \/ Sessions"/);
   assert.match(nav, /Active sessions/);
   assert.match(nav, /currentUserSessions\.sessions\.map/);
   assert.match(nav, /session\.current/);
@@ -797,6 +1015,9 @@ test("project shell exposes session management metadata without leaking token ma
   assert.match(nav, /<form\s+action=\{revokeAllSessionsAction\}/);
   assert.match(nav, /Sign out everywhere/);
   assert.doesNotMatch(nav, /mirofish_session|sessionCookie|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
+  assert.match(sessionsRoute, /export async function GET/);
+  assert.match(sessionsRoute, /getCurrentUserSessions\(\{\s*sessionCookie\s*\}\)/);
+  assert.match(sessionsRoute, /cache-control",\s*"private, no-store"/i);
 });
 
 test("project shell exposes tenant-wide session revocation for tenant admins without leaking token material", async () => {
@@ -828,7 +1049,7 @@ test("project shell exposes tenant-wide session revocation for tenant admins wit
   assert.match(nav, /const\s+currentTenant\s*=\s*currentUser\.ok\s*\?\s*currentUser\.active_tenants\.find\(\(tenant\)\s*=>\s*tenant\.tenant_id\s*===\s*tenantSlug\)\s*:\s*undefined/s);
   assert.match(nav, /const\s+canManageTenantSessions\s*=\s*currentTenant\s*\?\s*\["owner",\s*"admin"\]\.includes\(currentTenant\.role\)\s*:\s*false/s);
   assert.match(nav, /<form\s+action=\{revokeTenantSessionsAction\}/);
-  assert.match(nav, /Revoke tenant sessions/);
+  assert.match(nav, /Revoke workspace sessions/);
   assert.doesNotMatch(nav, /mirofish_session|sessionCookie|csrf|token_hash|api_key|credential_ref|draft|manuscript|prompt|provider/i);
 });
 
@@ -838,19 +1059,20 @@ test("project shell triggers automatic session refresh without exposing the sess
   const route = await fileText("app/api/auth/session/refresh/route.ts");
 
   assert.match(layout, /SessionAutoRefresh/);
-  assert.match(layout, /const\s+currentSessionExpiresAt\s*=\s*currentUserSessions\?\.ok\s*\?\s*currentUserSessions\.sessions\.find\(\(session\)\s*=>\s*session\.current\)\?\.expires_at\s*:\s*undefined/s);
-  assert.match(layout, /<SessionAutoRefresh\s+currentSessionExpiresAt=\{currentSessionExpiresAt\}\s+enabled=\{Boolean\(sessionCookie\)\}\s*\/>/);
+  assert.match(layout, /<SessionAutoRefresh\s+enabled=\{Boolean\(sessionCookie\)\}\s*\/>/);
   assert.doesNotMatch(layout, /<SessionAutoRefresh[^>]*sessionCookie=\{/i);
 
   assert.match(trigger, /"use client"/);
-  assert.match(trigger, /export function SessionAutoRefresh\(input:\s*\{\s*currentSessionExpiresAt\?:\s*string;\s*enabled:\s*boolean;?\s*\}\)/);
+  assert.match(trigger, /export function SessionAutoRefresh\(input:\s*\{\s*enabled:\s*boolean;?\s*\}\)/);
   assert.match(trigger, /useEffect/);
   assert.match(trigger, /sessionStorage/);
   assert.match(trigger, /SESSION_REFRESH_COOLDOWN_MS/);
   assert.match(trigger, /SESSION_REFRESH_THRESHOLD_MS/);
-  assert.match(trigger, /Date\.parse\(input\.currentSessionExpiresAt\s*\?\?\s*""\)/);
+  assert.match(trigger, /fetch\("\/api\/auth\/sessions"/);
+  assert.match(trigger, /session\.current/);
+  assert.match(trigger, /Date\.parse\(currentSession\?\.expires_at\s*\?\?\s*""\)/);
   assert.match(trigger, /expiresAt\s*-\s*now\s*>\s*SESSION_REFRESH_THRESHOLD_MS/);
-  assert.match(trigger, /\[input\.currentSessionExpiresAt,\s*input\.enabled\]/);
+  assert.match(trigger, /\[input\.enabled\]/);
   assert.match(trigger, /fetch\("\/api\/auth\/session\/refresh"/);
   assert.match(trigger, /method:\s*"POST"/);
   assert.match(trigger, /credentials:\s*"same-origin"/);
@@ -884,9 +1106,9 @@ test("project pages resolve API context from browser session cookie instead of h
 
   assert.match(helper, /export\s+async\s+function\s+webApiContext/);
   assert.match(helper, /currentRequestSessionCookie/);
-  assert.match(helper, /const\s+sessionCookie\s*=\s*currentRequestSessionCookie\(\{\s*required:\s*true\s*\}\)/);
+  assert.match(helper, /required:\s*!isDevLoginBypassEnabled\(\)/);
   assert.doesNotMatch(helper, /from\s*"next\/headers"|cookies\(\)|headers\(\)|cookieStore\.get\("mirofish_session"\)/);
-  assert.match(helper, /process\.env\.MIROFISH_WEB_DEV_ACTOR_USER_ID\?\.trim\(\)/);
+  assert.match(helper, /devActorUserId\(\)/);
   assert.match(helper, /getSessionCSRFToken/);
   assert.match(helper, /const\s+csrfResult\s*=\s*sessionCookie\s*\?\s*await\s+getSessionCSRFToken\(\{\s*sessionCookie\s*\}\)\s*:\s*undefined/s);
   assert.match(helper, /throw new Error\("WEB_CSRF_TOKEN_UNAVAILABLE"\)/);
@@ -905,7 +1127,7 @@ test("project pages resolve API context from browser session cookie instead of h
   assert.doesNotMatch(pageSources, /actorUserId:\s*'web-shell'/);
 });
 
-test("ProjectNav renders tenant picker and project picker links from public memberships", async () => {
+test("ProjectNav renders workspace and project picker links from public memberships", async () => {
   const nav = await fileText("components/project-nav.tsx");
 
   assert.match(nav, /CurrentUserSummary/);
@@ -914,21 +1136,20 @@ test("ProjectNav renders tenant picker and project picker links from public memb
   assert.match(nav, /active_projects/);
   assert.match(nav, /currentProject/);
   assert.match(nav, /Project access unavailable/);
-  assert.match(nav, /ACTIVE_PROJECT_MEMBERSHIP_MISSING/);
+  assert.match(nav, /const hasMultipleWorkspaces = activeTenants\.length > 1/);
   assert.match(nav, /currentSectionPath/);
-  assert.match(nav, /hrefForProject\(project\.tenant_id,\s*project\.project_id,\s*currentSectionPath\)/);
-  assert.match(nav, /hrefForProject\(tenant\.tenant_id,\s*project\.project_id,\s*currentSectionPath\)/);
+  assert.match(nav, /workspacePathForProject\(activeTenants,\s*project,\s*currentSectionPath\)/);
+  assert.match(nav, /workspacePathForProject\(\[tenant\],\s*project,\s*currentSectionPath\)/);
   assert.match(nav, /tenant\.tenant_id/);
   assert.match(nav, /tenant\.name/);
   assert.match(nav, /project\.project_id/);
   assert.match(nav, /project\.name/);
-  assert.match(nav, /\/projects\/\$\{projectId\}\$\{sectionPath\}/);
+  assert.doesNotMatch(nav, /function hrefForProject/);
   assert.match(nav, /currentProject\s*\?\s*\(/s);
-  assert.match(nav, /currentUser\.code/);
-  assert.match(nav, /currentUser\.message/);
+  assert.match(nav, /<FailureText \/>/);
   assert.match(nav, /Membership unavailable/);
   assert.match(nav, /User/);
-  assert.match(nav, /Tenants/);
+  assert.match(nav, /Workspaces/);
   assert.match(nav, /Projects/);
   assert.doesNotMatch(nav, /tenant\.name\s*\|\|\s*tenant\.tenant_id/);
   assert.doesNotMatch(nav, /project\.name\s*\|\|\s*project\.project_id/);
@@ -1055,6 +1276,7 @@ test("Overview page exposes one-step upload and Seed start server action", async
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
   const action = sourceSlice(page, "async function uploadAndStartSeedAction", "async function cancelSeedRunAction");
   const nextConfig = await fileText("next.config.ts");
+  const webDockerfile = await fileText("../../infra/docker/web.Dockerfile");
 
   assert.match(action, /"use server"/);
   assert.match(action, /fileFromFormData\(formData,\s*"file"\)/);
@@ -1081,7 +1303,11 @@ test("Overview page exposes one-step upload and Seed start server action", async
   assert.match(action, /return\s+redirect\(overviewRoute/);
   assert.doesNotMatch(action, /mock|fake|MIROFISH_.*LLM|OPENAI_API_KEY|api_key|credential_ref|encrypted_api_key/i);
   assert.match(nextConfig, /serverActions:\s*\{/);
-  assert.match(nextConfig, /bodySizeLimit:\s*"64mb"/);
+  assert.match(nextConfig, /bodySizeLimit:\s*SOURCE_UPLOAD_BODY_LIMIT|bodySizeLimit:\s*"64mb"/);
+  assert.match(nextConfig, /SOURCE_UPLOAD_BODY_LIMIT\s*=\s*"64mb"/);
+  assert.match(nextConfig, /middlewareClientMaxBodySize:\s*SOURCE_UPLOAD_BODY_LIMIT|middlewareClientMaxBodySize:\s*"64mb"/);
+  assert.match(nextConfig, /distDir:\s*process\.env\.NODE_ENV\s*===\s*"development"\s*\?\s*"\.next-dev"\s*:\s*"\.next"/);
+  assert.match(webDockerfile, /COPY --from=build \/app\/next\.config\.ts \.\/next\.config\.ts/);
 });
 
 test("Overview Seed upload live harness is opt-in and privacy bounded", async () => {
@@ -1131,6 +1357,7 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_RETRY_RUN_ID/);
   assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_CONSUME_RETRY_RUN/);
   assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_REQUIRE_WORKER_RETRY/);
+  assert.match(browserLiveTest, /MIROFISH_WEB_BROWSER_LIVE_SEED_APP_DEV_BYPASS/);
   assert.match(browserLiveTest, /waitForSeedWorkerStageEvents/);
   assert.match(browserLiveTest, /browser Seed worker-retry mode cannot consume an external retry run/);
   assert.match(browserLiveTest, /test\.skip/);
@@ -1165,9 +1392,10 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /fetchBrowserLivePublicJsonWithRawScan\(\s*config,\s*`\/v1\/seed-runs\/\$\{runId\}\/events\?after_event_id=\$\{encodeURIComponent\(queuedEvent\.event_id\)\}`/);
   assert.match(browserLiveTest, /workflow\.queued/);
   assert.match(browserLiveTest, /workflow\.retry_requested/);
-  assert.match(browserLiveTest, /Selected Seed run/);
+  assert.match(browserLiveTest, /Recent analysis/);
   assert.match(browserLiveTest, /Seed events/);
-  assert.match(browserLiveTest, /Control Seed run/);
+  assert.match(browserLiveTest, /assertRunControlIdentity/);
+  assert.match(browserLiveTest, /openOperationalDetails/);
   assert.match(browserLiveTest, /Cancel Seed run/);
   assert.match(browserLiveTest, /Retry Seed run/);
   assert.match(browserLiveTest, /seq 1/);
@@ -1176,7 +1404,7 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /assertConsumableRetryableSeedRun/);
   assert.match(browserLiveTest, /preparedRetryRun\.status === "completed" && config\.consumeRetryRun/);
   assert.match(browserLiveTest, /afterEventId:\s*retryCursorEvent\.event_id/);
-  assert.match(browserLiveTest, /assert\.doesNotMatch\(cursoredEventsText/);
+  assert.match(browserLiveTest, /Seed cursor replay rendered the cursor event/);
   assert.match(browserLiveTest, /retry_requested/);
   assert.match(browserLiveTest, /after_event_id/);
   assert.match(browserLiveTest, /maxRetryableSequence/);
@@ -1188,7 +1416,7 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"sessioncookie"/);
   assert.match(browserLiveTest, /forbiddenKeys[\s\S]*"privatecontent"/);
   assert.match(browserLiveTest, /sessionCookie:\s*config\.sessionCookie/);
-  assert.match(browserLiveTest, /"session"\s*\+\s*"Cookie"/);
+  assert.match(browserLiveTest, /markers\.push\(\[options\.sessionCookie,\s*"session cookie value"\]\)/);
   assert.match(browserLiveTest, /"private"\s*\+\s*"Content"/);
   assert.match(browserLiveTest, /redactAssertionMessage/);
   assert.match(browserLiveTest, /"api"\s*\+\s*"\s+"\s*\+\s*"key"/);
@@ -1217,18 +1445,8 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /Worldline events/);
   assert.match(shell, /Character interactions/);
   assert.match(shell, /Writer runs/);
-  assert.match(shell, /LLM calls/);
-  assert.match(shell, /LLM tokens/);
-  assert.match(shell, /LLM enabled channels/);
-  assert.match(shell, /LLM bound modules/);
-  assert.match(shell, /LLM missing core modules/);
-  assert.match(shell, /LLM sync ok channels/);
-  assert.match(shell, /LLM sync failed channels/);
-  assert.match(shell, /LLM sync pending channels/);
-  assert.match(shell, /LLM latest sync/);
-  assert.match(shell, /Latest failed workflow/);
-  assert.match(shell, /Failure code/);
-  assert.match(shell, /Failure updated/);
+  assert.match(shell, /Latest interruption/);
+  assert.match(shell, /Interruption updated/);
   assert.match(shell, /asset_count/);
   assert.match(shell, /graph_node_count/);
   assert.match(shell, /graph_edge_count/);
@@ -1236,22 +1454,13 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /worldline_event_count/);
   assert.match(shell, /character_interaction_count/);
   assert.match(shell, /writer_run_count/);
-  assert.match(shell, /llm_activity_count/);
-  assert.match(shell, /llm_token_count/);
-  assert.match(shell, /llm_enabled_channel_count/);
-  assert.match(shell, /llm_bound_module_count/);
-  assert.match(shell, /llm_missing_core_module_count/);
-  assert.match(shell, /llm_sync_ok_channel_count/);
-  assert.match(shell, /llm_sync_failed_channel_count/);
-  assert.match(shell, /llm_sync_pending_channel_count/);
-  assert.match(shell, /llm_latest_sync_at/);
   assert.match(shell, /latest_failed_workflow_run_id/);
   assert.match(shell, /latest_failed_workflow_type/);
   assert.match(shell, /latest_failed_workflow_error_code/);
   assert.match(shell, /latest_failed_workflow_updated_at/);
   assert.match(shell, /readiness_snapshot_id/);
   assert.match(shell, /readiness_run_id/);
-  assert.match(shell, /PROJECT_OVERVIEW_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /projectOverview\.code/);
   assert.match(shell, /Project readiness/);
   assert.match(shell, /projectReadiness\.ok/);
   assert.match(shell, /ready_asset_count/);
@@ -1260,9 +1469,12 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /ready_world_rule_count/);
   assert.match(shell, /Upload and start Seed/);
   assert.match(shell, /uploadAndStartSeedAction/);
-  assert.match(shell, /type="file"/);
-  assert.match(shell, /name="file"/);
-  assert.match(shell, /name="mode"/);
+  assert.match(shell, /OverviewSeedUploadForm/);
+  const uploadForm = await fileText("components/overview-seed-upload-form.tsx");
+  assert.match(uploadForm, /type="file"/);
+  assert.match(uploadForm, /name="file"/);
+  assert.match(uploadForm, /name="mode"/);
+  assert.match(uploadForm, /SOURCE_UPLOAD_MAX_BYTES\s*=\s*64\s*\*\s*1024\s*\*\s*1024/);
   assert.match(shell, /Complete upload/);
   assert.match(shell, /Start Seed/);
   assert.match(shell, /completeUploadAction/);
@@ -1271,27 +1483,24 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /file\.parse_status !== "pending"/);
   assert.match(shell, /file\.parse_status !== "uploaded"/);
   assert.doesNotMatch(shell, /Admit source file|Upload object|Complete this upload|uploadSourceObjectAction|<label htmlFor=".*upload-id"|placeholder=".*upload/i);
-  assert.match(shell, /Seed pipeline/);
   assert.match(shell, /Seed runs/);
-  assert.match(shell, /Inspect Seed run/);
   assert.match(shell, /Inspect/);
   assert.match(shell, /name="runId"/);
-  assert.match(shell, /name="after_event_id"/);
-  assert.match(shell, /Event cursor/);
   assert.match(shell, /Seed events/);
   assert.match(shell, /cancelSeedRunAction/);
   assert.match(shell, /retrySeedRunAction/);
   assert.match(shell, /Cancel Seed run/);
   assert.match(shell, /Retry Seed run/);
-  assert.match(shell, /PROJECT_READINESS_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /projectReadiness\.code/);
   assert.match(shell, /sourceFiles\.ok/);
   assert.match(shell, /seedRuns\.ok/);
   assert.match(shell, /selectedSeedRun\.ok/);
   assert.match(shell, /seedEvents\.ok/);
-  assert.match(shell, /SOURCE_FILE_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /sourceFiles\.code/);
+  assert.match(shell, /<FailureText \/>/);
   assert.doesNotMatch(shell, /object key/i);
   assert.doesNotMatch(shell, /presigned/i);
-  assert.doesNotMatch(shell, /raw text|prompt|credential|draft|manuscript/i);
+  assert.doesNotMatch(shell, /raw text|prompt|credential|draft_text|manuscript_text/i);
   assert.doesNotMatch(shell, /readiness report body/i);
   assert.doesNotMatch(shell, /mock/i);
 });
@@ -1345,8 +1554,10 @@ test("Next app shell declares tenant/project LLM Facility route", async () => {
   assert.match(page, /getLLMSettings/);
   assert.match(page, /deleteLLMModuleBinding/);
   assert.match(page, /optionalPositiveNumberFromFormData\(formData,\s*"moduleMaxConcurrency"\)/);
-  assert.match(page, /max_concurrency:\s*moduleMaxConcurrency/);
+  assert.match(page, /settings\.max_concurrency\s*=\s*maxConcurrency/);
   assert.match(page, /bindModuleAction/);
+  assert.match(page, /batchBindModuleAction/);
+  assert.match(page, /loadChannelModels/);
   assert.match(page, /clearBindingAction/);
   assert.match(page, /createChannelAction/);
   assert.match(page, /updateChannelAction/);
@@ -1359,6 +1570,13 @@ test("Next app shell declares tenant/project LLM Facility route", async () => {
   assert.match(page, /resolveLLMModuleBinding/);
   assert.match(page, /getLLMActivity/);
   assert.match(page, /getLLMUsage/);
+  assert.match(page, /query\.module\?\.trim\(\) \|\| query\.moduleKey\?\.trim\(\)/);
+  assert.match(page, /query\.channel\?\.trim\(\) \|\| query\.channelId\?\.trim\(\)/);
+  assert.match(page, /query\.run\?\.trim\(\) \|\| query\.runId\?\.trim\(\)/);
+  assert.match(page, /hasDefaultChannelQuery/);
+  assert.match(page, /canonicalSearch\.delete\("channel"\)/);
+  assert.match(page, /workspacePathForProject/);
+  assert.doesNotMatch(page, /redirect\(`\/\$\{tenantSlug\}\/projects\/\$\{projectId\}\/llm-facility/);
   assert.match(page, /LLMFacilityShell/);
 });
 
@@ -1394,16 +1612,19 @@ test("Next app shell declares tenant/project Asset Library route", async () => {
   assert.match(page, /AssetLibraryShell/);
 });
 
-test("legacy Asset Library entry routes redirect to the SaaS asset workspace", async () => {
+test("legacy Asset Library entry routes redirect through shared entry path", async () => {
   const archiveRoute = await fileText("app/archive-library/page.tsx");
   const assetRoute = await fileText("app/asset-library/page.tsx");
+  const devAccess = await fileText("lib/dev-access.ts");
 
   for (const route of [archiveRoute, assetRoute]) {
     assert.match(route, /redirect/);
-    assert.match(route, /\/demo\/projects\/demo-project\/assets/);
+    assert.match(route, /devEntryRedirectPath\(\)/);
     assert.doesNotMatch(route, /mock/i);
     assert.doesNotMatch(route, /api_key|encrypted_api_key|credential_ref/i);
   }
+  assert.match(devAccess, /export function devEntryRedirectPath/);
+  assert.match(devAccess, /isDevLoginBypassEnabled\(\)\s*\?\s*devWorkspacePath\("overview"\)\s*:\s*"\/login"/);
 });
 
 test("Next app shell declares tenant/project Worldline route with saved-path read side", async () => {
@@ -1449,8 +1670,8 @@ test("Next app shell declares tenant/project Worldline route with saved-path rea
   assert.match(shell, /preparation/);
   assert.match(shell, /preparedAgents/);
   assert.match(shell, /Start session/);
-  assert.match(shell, /Step session/);
-  assert.match(shell, /Variable injection/);
+  assert.match(shell, /Step once|Step session|推进一步/);
+  assert.match(shell, /Inject variable|Variable injection|注入变量/);
   assert.match(shell, /Save path/);
   assert.match(shell, /Prepare agents/);
   assert.match(shell, /Prepared agents/);
@@ -1459,11 +1680,9 @@ test("Next app shell declares tenant/project Worldline route with saved-path rea
   assert.match(shell, /Candidate events/);
   assert.match(shell, /Edit event/);
   assert.match(shell, /Adopt event/);
-  assert.match(shell, /WORLDLINE_TIMELINE_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_EVENT_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_EVENT_ADOPTION_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_EVENT_MUTATION_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_STEP_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /worldline-timeline-primary|worldline-simulate-toolbar/);
+  assert.match(shell, /timeline\.ok/);
+  assert.match(shell, /events\.ok/);
   assert.match(shell, /startWorldlineSessionAction/);
   assert.match(shell, /startWorldlineStepAction/);
   assert.match(shell, /createWorldlinePreparationAction/);
@@ -1488,11 +1707,11 @@ test("Next app shell declares tenant/project Worldline route with saved-path rea
   assert.match(shell, /worldlineEventAdoptionStatus/);
   assert.match(shell, /worldlineEventMutationStatus/);
   assert.match(shell, /worldlineStepStatus/);
-  assert.match(shell, /WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_SESSION_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_SAVED_PATH_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /!preparation\.ok/);
+  assert.match(shell, /!preparedAgents\.ok/);
+  assert.match(shell, /sessions\.ok/);
+  assert.match(shell, /savedPaths\.ok/);
+  assert.match(shell, /<FailureText \/>/);
   assert.match(shell, /path\.path_id/);
   assert.match(client, /CreateWorldlineSavedPathInput/);
   assert.match(client, /createWorldlineSavedPath/);
@@ -1509,7 +1728,7 @@ test("Next app shell declares tenant/project Worldline route with saved-path rea
   assert.doesNotMatch(shell, /api_key|encrypted_api_key|credential_ref/i);
   assert.doesNotMatch(client, /credential_ref:\s*string/);
   assert.match(legacyRoute, /redirect/);
-  assert.match(legacyRoute, /\/demo\/projects\/demo-project\/worldline/);
+  assert.match(legacyRoute, /devEntryRedirectPath\(\)/);
   assert.doesNotMatch(legacyRoute, /mock/i);
   assert.match(nav, /\/worldline/);
   assert.match(nav, /Worldline/);
@@ -1555,7 +1774,7 @@ test("worldline API client exposes metadata-only variable injection", async () =
   assert.doesNotMatch(client, /encrypted_api_key:\s*string/);
 });
 
-test("Next app shell declares tenant/project Character Console route with explicit pending runtime", async () => {
+test("Next app shell declares tenant/project Character Console route", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/character-console/page.tsx");
   const shell = await fileText("components/character-console-shell.tsx");
   const legacyRoute = await fileText("app/character-console/page.tsx");
@@ -1565,15 +1784,15 @@ test("Next app shell declares tenant/project Character Console route with explic
   assert.match(page, /CharacterConsoleShell/);
   assert.match(page, /listCharacterInteractions/);
   assert.match(page, /interactions=/);
-  assert.match(shell, /CHARACTER_CONSOLE_RUNTIME_PENDING/);
-  assert.match(shell, /WORLDLINE_SESSION_REQUIRED/);
+  assert.match(shell, /worldlineSessions\.ok/);
+  assert.match(shell, /<FailureText \/>/);
   assert.match(shell, /CharacterInteractionsSummary/);
   assert.match(shell, /interactions\.ok/);
   assert.match(shell, /Convert to chapter draft/);
   assert.doesNotMatch(shell, /mock/i);
   assert.doesNotMatch(shell, /api_key|encrypted_api_key|credential_ref/i);
   assert.match(legacyRoute, /redirect/);
-  assert.match(legacyRoute, /\/demo\/projects\/demo-project\/character-console/);
+  assert.match(legacyRoute, /devEntryRedirectPath\(\)/);
   assert.doesNotMatch(legacyRoute, /mock/i);
   assert.match(nav, /\/character-console/);
   assert.match(nav, /Character Console/);
@@ -1592,6 +1811,8 @@ test("Character Console route exposes create interaction metadata form and actio
   assert.match(page, /getCharacterInteraction/);
   assert.match(page, /listCharacterInteractionTurns/);
   assert.match(page, /getCharacterInteractionEvents/);
+  assert.match(page, /getCharacterProposals/);
+  assert.match(page, /adoptCharacterProposal/);
   assert.match(page, /convertCharacterInteractionToChapterDraft/);
   assert.match(page, /getWorldlineEvents/);
   assert.match(page, /getWorldlinePreparedAgents/);
@@ -1607,6 +1828,7 @@ test("Character Console route exposes create interaction metadata form and actio
   assert.match(page, /inspectCharacterInteractionTurnsAction/);
   assert.match(page, /inspectCharacterInteractionEventsAction/);
   assert.match(page, /convertCharacterInteractionToChapterDraftAction/);
+  assert.match(page, /adoptCharacterProposalAction/);
   assert.match(page, /searchParams/);
   assert.match(page, /anchor_session_id/);
   assert.match(page, /characterConsoleStatusRoute/);
@@ -1634,6 +1856,12 @@ test("Character Console route exposes create interaction metadata form and actio
   assert.match(shell, /inspectCharacterInteractionTurnsAction/);
   assert.match(shell, /inspectCharacterInteractionEventsAction/);
   assert.match(shell, /convertCharacterInteractionToChapterDraftAction/);
+  assert.match(shell, /adoptCharacterProposalAction/);
+  assert.match(shell, /CharacterProposalReview/);
+  assert.match(shell, /proposal\.proposal_type/);
+  assert.match(shell, /proposal\.lifecycle === "candidate"/);
+  assert.match(shell, /name="proposalInteractionId"/);
+  assert.match(shell, /name="proposalAssetId"/);
   assert.match(shell, /inspectWorldlineEventAnchorsAction/);
   assert.match(shell, /anchorSessionId/);
   assert.match(shell, /interactionStatus/);
@@ -1665,11 +1893,11 @@ test("Character Console route exposes create interaction metadata form and actio
   assert.match(shell, /WorldlineSessionsSummary/);
   assert.match(shell, /worldlineSessions\.ok/);
   assert.match(shell, /worldlineSessions\.items/);
-  assert.match(shell, /WORLDLINE_PREPARED_AGENTS_QUERY_FAILED/);
-  assert.match(shell, /WORLDLINE_EVENT_QUERY_FAILED/);
-  assert.match(shell, /WORLDLINE_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /WORLDLINE_SESSION_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /STORY_GRAPH_BACKEND_UNCONFIGURED/);
+  assert.match(shell, /!preparedAgents\.ok/);
+  assert.match(shell, /!worldlineEvents\.ok/);
+  assert.match(shell, /!worldlineSessions\.ok/);
+  assert.match(shell, /!graphView\.ok/);
+  assert.match(shell, /<FailureText \/>/);
   assert.match(shell, /turnStatus/);
   assert.match(shell, /name="anchorSessionId"/);
   assert.match(shell, /name="prepareId"/);
@@ -1685,21 +1913,23 @@ test("Character Console route exposes create interaction metadata form and actio
   assert.match(shell, /name="actorId"/);
   assert.match(shell, /name="turnKind"/);
   assert.match(shell, /name="turnSummary"/);
-  assert.match(shell, /name="actionJson"/);
-  assert.match(shell, /name="worldStateDeltaJson"/);
-  assert.match(shell, /name="traceId"/);
+  assert.doesNotMatch(shell, /name="actionJson"|name="worldStateDeltaJson"/);
+  assert.doesNotMatch(shell, /name="traceId"/);
   assert.match(shell, /name="selectedInteractionId"/);
   assert.match(shell, /name="turnsInteractionId"/);
-  assert.match(shell, /name="runtimeInteractionId"/);
+  assert.doesNotMatch(shell, /name="runtimeInteractionId"/);
+  assert.match(shell, /name="statusInteractionId"/);
+  assert.match(shell, /name="interactionNextStatus"/);
   assert.match(shell, /name="convertInteractionId"/);
   assert.match(shell, /name="targetChapterId"/);
+  assert.match(shell, /name="targetSceneId"/);
   assert.match(shell, /name="povMode"/);
   assert.match(shell, /Create interaction/);
-  assert.match(shell, /Inspect interaction/);
-  assert.match(shell, /Load public turns/);
-  assert.match(shell, /Check runtime events/);
-  assert.match(shell, /Request chapter draft conversion/);
-  assert.match(shell, /Writer run queued/);
+  assert.match(shell, /View interaction/);
+  assert.match(shell, /Load turns/);
+  assert.doesNotMatch(shell, /Check runtime events/);
+  assert.match(shell, /Request chapter draft/);
+  assert.match(shell, /Chapter draft request submitted/);
   assert.match(shell, /Load worldline events/);
   assert.match(shell, /Load prepared agents/);
   assert.match(shell, /Graph nodes/);
@@ -1713,30 +1943,32 @@ test("Character Console route exposes create interaction metadata form and actio
   assert.match(shell, /preparedAgents\.items\.find/);
   assert.match(shell, /dossierAgent\.role/);
   assert.match(shell, /dossierAgent\.status/);
-  assert.match(shell, /dossierAgent\.source_asset_id/);
+  assert.match(shell, /dossierAgent\.display_name/);
+  assert.match(shell, /dossierAgent\.agent_id/);
+  assert.doesNotMatch(shell, /dossierAgent\.source_asset_id/);
   assert.match(shell, /dossierAgent\.summary/);
   assert.match(shell, /agentHistoryTurns/);
   assert.match(shell, /selectedInteraction\.turns\.filter/);
   assert.match(shell, /turn\.actor_id === selectedPovAgentId/);
   assert.match(shell, /turn\.actor_type === "user"/);
-  assert.match(shell, /Public turn history/);
+  assert.match(shell, /Character turn history/);
   assert.match(shell, /agentHistoryTurns\.slice\(0,\s*6\)/);
   assert.match(shell, /historyTurn\.turn_order/);
   assert.match(shell, /historyTurn\.summary/);
   assert.match(shell, /Saved paths/);
   assert.match(shell, /Record turn/);
   assert.match(shell, /Recorded turns/);
-  assert.match(shell, /Public turn replay/);
+  assert.match(shell, /Turn replay/);
   assert.match(shell, /SelectedPublicTurnReplay/);
   assert.match(shell, /selectedTurns\.ok/);
   assert.match(shell, /selectedTurns\.items/);
   assert.match(shell, /turn\.turn_order/);
   assert.match(shell, /turn\.actor_type/);
   assert.match(shell, /turn\.turn_kind/);
-  assert.match(shell, /turn\.action/);
-  assert.match(shell, /turn\.world_state_delta/);
-  assert.match(shell, /Save interaction/);
-  assert.match(shell, /Archive interaction/);
+  assert.doesNotMatch(shell, /turn\.action/);
+  assert.doesNotMatch(shell, /turn\.world_state_delta/);
+  assert.match(shell, /name="interactionNextStatus" value="saved"/);
+  assert.match(shell, /name="interactionNextStatus" value="archived"/);
   assert.doesNotMatch(shell, /input_text|output_text|body_text|content_text/i);
   assert.doesNotMatch(shell, /api_key|encrypted_api_key|credential_ref/i);
 });
@@ -1760,6 +1992,8 @@ test("character console API client exposes metadata-only interaction endpoints",
   assert.match(client, /CharacterInteractionTurnsSummary/);
   assert.match(client, /CharacterInteractionEventsSummary/);
   assert.match(client, /CharacterInteractionChapterDraftSummary/);
+  assert.match(client, /CharacterProposalsSummary/);
+  assert.match(client, /CharacterProposalAdoptionSummary/);
   assert.match(client, /createCharacterInteraction/);
   assert.match(client, /updateCharacterInteractionStatus/);
   assert.match(client, /listCharacterInteractions/);
@@ -1768,6 +2002,8 @@ test("character console API client exposes metadata-only interaction endpoints",
   assert.match(client, /listCharacterInteractionTurns/);
   assert.match(client, /getCharacterInteractionEvents/);
   assert.match(client, /convertCharacterInteractionToChapterDraft/);
+  assert.match(client, /getCharacterProposals/);
+  assert.match(client, /adoptCharacterProposal/);
   assert.match(client, /method:\s*"POST"/);
   assert.match(client, /worldline_session_id:\s*input\.worldlineSessionId/);
   assert.match(client, /anchor_type:\s*input\.anchorType/);
@@ -1781,7 +2017,10 @@ test("character console API client exposes metadata-only interaction endpoints",
   assert.match(client, /\/v1\/character-interactions\/\$\{input\.interactionId\}\/turns`/);
   assert.match(client, /\/v1\/character-interactions\/\$\{input\.interactionId\}\/events`/);
   assert.match(client, /\/v1\/character-interactions\/\$\{input\.interactionId\}\/chapter-drafts`/);
+  assert.match(client, /\/v1\/character-interactions\/\$\{input\.interactionId\}\/proposals`/);
+  assert.match(client, /\/v1\/character-interactions\/\$\{input\.interactionId\}\/proposals\/\$\{input\.assetId\}\/adoptions`/);
   assert.match(client, /target_chapter_id:\s*input\.targetChapterId/);
+  assert.match(client, /target_scene_id:\s*input\.targetSceneId/);
   assert.match(client, /pov_mode:\s*input\.povMode/);
   assert.match(client, /run_id:\s*requiredString\(payload,\s*"run_id"\)/);
   assert.match(client, /trace_id:\s*requiredString\(payload,\s*"trace_id"\)/);
@@ -1797,28 +2036,18 @@ test("character console API client exposes metadata-only interaction endpoints",
   assert.doesNotMatch(characterClient, /encrypted_api_key:\s*string/);
 });
 
-test("Next app shell declares tenant/project Guide route with explicit onboarding states", async () => {
+test("retired Guide routes redirect into supported user workflows", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/guide/page.tsx");
-  const shell = await fileText("components/guide-shell.tsx");
   const legacyRoute = await fileText("app/guide/page.tsx");
   const nav = await fileText("components/project-nav.tsx");
 
   assert.match(page, /params:\s*Promise<\{\s*tenantSlug:\s*string;\s*projectId:\s*string;?\s*\}>/);
-  assert.match(page, /GuideShell/);
-  assert.match(shell, /Guide/);
-  assert.match(shell, /Onboarding status/);
-  assert.match(shell, /SAAS_GUIDE_RUNTIME_PENDING/);
-  assert.match(shell, /Writer-first/);
-  assert.match(shell, /Phase 4/);
-  assert.match(shell, /Phase 5/);
-  assert.match(shell, /Phase 6/);
-  assert.doesNotMatch(shell, /mock/i);
-  assert.doesNotMatch(shell, /api_key|encrypted_api_key|credential_ref/i);
+  assert.match(page, /redirect\(`\/\$\{tenantSlug\}\/projects\/\$\{projectId\}\/overview`\)/);
+  assert.doesNotMatch(page, /GuideShell|runtime|Phase\s+\d/i);
   assert.match(legacyRoute, /redirect/);
-  assert.match(legacyRoute, /\/demo\/projects\/demo-project\/guide/);
+  assert.match(legacyRoute, /devEntryRedirectPath\(\)/);
   assert.doesNotMatch(legacyRoute, /mock/i);
-  assert.match(nav, /\/guide/);
-  assert.match(nav, /Guide/);
+  assert.doesNotMatch(nav, /\/guide|CircleHelp/);
 });
 
 test("Next app shell declares tenant/project Story Graph route", async () => {
@@ -1958,7 +2187,7 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.match(shell, /Workflow events/);
   assert.match(shell, /Compose Mode/);
   assert.match(shell, /Generate bonds/);
-  assert.match(shell, /Candidate adoption/);
+  assert.match(shell, /Curate Mode/);
   assert.match(shell, /Graph candidates/);
   assert.match(shell, /Adopt relationship/);
   assert.match(shell, /Adopt plot thread/);
@@ -1967,6 +2196,9 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.match(shell, /bondAction/);
   assert.match(shell, /bondStatus/);
   assert.match(shell, /storyGraphBondStatus/);
+  assert.match(shell, /workspaceMode === "build"/);
+  assert.match(shell, /workspaceMode === "curate"/);
+  assert.match(shell, /workspaceMode === "compose"/);
   assert.match(shell, /workflowRun\.ok/);
   assert.match(shell, /workflowEvents\.ok/);
   assert.match(shell, /event\.event_type/);
@@ -1988,41 +2220,43 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.doesNotMatch(shell, /mock/i);
 });
 
-test("Story Graph shell renders a metadata-only canvas from public viewport records", async () => {
+test("Story Graph shell renders an interactive canvas without exposing internal identifiers", async () => {
   const shell = await fileText("components/story-graph-shell.tsx");
   const styles = await fileText("app/globals.css");
   const canvasSlice = sourceSlice(shell, "function GraphCanvas", "function GraphViewport");
-  const edgeHeaderStyle = sourceSlice(styles, ".story-graph-node-card span,", ".story-graph-node-card dl");
 
-  assert.match(shell, /<GraphCanvas\s+view=\{view\}/);
+  assert.match(shell, /<GraphCanvas[\s\S]*clusters=\{clusters\}[\s\S]*current=\{current\}[\s\S]*layout=\{layout\}[\s\S]*locale=\{locale\}[\s\S]*view=\{view\}/);
   assert.match(canvasSlice, /StoryGraphViewSummary/);
   assert.match(canvasSlice, /view\.ok/);
   assert.match(canvasSlice, /view\.nodes\.length\s*===\s*0/);
   assert.match(canvasSlice, /No graph nodes available/);
-  assert.match(canvasSlice, /view\.nodes\.map/);
-  assert.match(canvasSlice, /view\.edges\.map/);
+  assert.match(canvasSlice, /InteractiveGraphCanvas/);
+  assert.match(canvasSlice, /graphLayoutModel/);
+  assert.match(canvasSlice, /useMemo/);
+  assert.match(canvasSlice, /useState/);
+  assert.match(canvasSlice, /<svg/);
+  assert.match(canvasSlice, /data-graph-canvas="true"/);
+  assert.match(canvasSlice, /visibleEdges\.map/);
+  assert.match(canvasSlice, /filteredNodes\.map/);
   assert.match(canvasSlice, /node\.node_id/);
   assert.match(canvasSlice, /node\.node_type/);
   assert.match(canvasSlice, /node\.title/);
-  assert.match(canvasSlice, /node\.lifecycle/);
-  assert.match(canvasSlice, /node\.importance/);
-  assert.match(canvasSlice, /node\.evidence_count/);
+  assert.match(canvasSlice, /selectedNode\.lifecycle/);
+  assert.match(canvasSlice, /selectedNode\.importance/);
+  assert.match(canvasSlice, /selectedNode\.evidence_count/);
   assert.match(canvasSlice, /edge\.edge_id/);
   assert.match(canvasSlice, /edge\.edge_type/);
   assert.match(canvasSlice, /edge\.label/);
   assert.match(canvasSlice, /edge\.source_node_id/);
   assert.match(canvasSlice, /edge\.target_node_id/);
   assert.match(canvasSlice, /edge\.weight/);
-  assert.doesNotMatch(canvasSlice, /current\.node_count|current\.edge_count|graph-canvas-skeleton/);
+  assert.match(canvasSlice, /aria-label=\{tx\(locale, "缩小图谱", "Zoom out"\)\}/);
+  assert.match(canvasSlice, /aria-label=\{tx\(locale, "放大图谱", "Zoom in"\)\}/);
+  assert.doesNotMatch(canvasSlice, /<dd>\{selectedNode\.node_id\}<\/dd>/);
+  assert.doesNotMatch(canvasSlice, /node\.title \|\| node\.node_id/);
   assert.doesNotMatch(canvasSlice, /prompt|provider|response|raw_body|content_text|api_key|encrypted_api_key|credential_ref|object_key|draft|manuscript|candidate payload|evidence snippet/i);
   assert.match(styles, /\.story-graph-canvas/);
   assert.match(styles, /min-height:\s*360px/);
-  assert.match(styles, /grid-template-columns:\s*minmax\(0,\s*2fr\)\s*minmax\(220px,\s*1fr\)/);
-  assert.match(styles, /\.story-graph-node-list/);
-  assert.match(styles, /\.story-graph-edge-list/);
-  assert.match(edgeHeaderStyle, /\.story-graph-edge-header span/);
-  assert.match(edgeHeaderStyle, /overflow-wrap:\s*anywhere/);
-  assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*\.story-graph-canvas[\s\S]*grid-template-columns:\s*1fr/);
   assert.doesNotMatch(styles, /graph-canvas-skeleton/);
 });
 
@@ -2038,7 +2272,7 @@ test("Story Graph page loads graph candidates and wires explicit adoption action
   assert.match(page, /targetKind/);
   assert.match(page, /targetKindFromFormData\(formData\)/);
   assert.match(page, /STORY_GRAPH_CANDIDATE_ADOPTION_VALIDATION_FAILED/);
-  assert.match(page, /invalid story graph candidate adoption target/);
+  assert.match(page, /storyGraphAdoptionMessage:\s*tx\(locale,\s*"请选择采用类型",\s*"Choose an adoption type"\)/);
   assert.match(page, /storyGraphAdoptionStatus/);
   assert.doesNotMatch(page, /content_text/);
   assert.doesNotMatch(page, /credential_ref/);
@@ -2054,8 +2288,9 @@ test("Story Graph page loads workflow progress when a build run id is present", 
   assert.match(page, /getWorkflowRunSummary/);
   assert.match(page, /getWorkflowRunEvents/);
   assert.match(page, /selectedRunId/);
-  assert.match(page, /selectedRunId\s*\?\s*await getWorkflowRunSummary/);
-  assert.match(page, /selectedRunId\s*\?\s*await getWorkflowRunEvents/);
+  assert.match(page, /Promise\.all\(\[/);
+  assert.match(page, /selectedRunId && workflowContext[\s\S]*getWorkflowRunSummary/);
+  assert.match(page, /selectedRunId && workflowContext[\s\S]*getWorkflowRunEvents/);
   assert.match(page, /query\.runId\s*\?\?\s*""/);
   assert.match(page, /query\.bondRunId\s*\?\?\s*""/);
   assert.match(page, /runId:\s*status\.runId/);
@@ -2071,7 +2306,7 @@ test("Asset Library shell renders explicit archive memory review controls", asyn
   assert.match(shell, /memoryAssetAction/);
   assert.match(shell, /adoptArchiveMemoryAction/);
   assert.match(shell, /rejectArchiveMemoryAction/);
-  assert.match(shell, /No archive asset selected/);
+  assert.match(shell, /<Bi zh="请选择档案资产。" en="Select an archive asset\." \/>/);
   assert.match(shell, /Adopt memory/);
   assert.match(shell, /Reject memory/);
 });
@@ -2100,7 +2335,7 @@ test("Writer shell exposes recovered stream replay cursor without sensitive cont
   const replaySlice = sourceSlice(shell, "Recovered stream", "Trace Events");
 
   assert.match(page, /const\s+afterEventId\s*=\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
-  assert.match(page, /const\s+selectedRunId\s*=\s*query\.runId\s*\?\?\s*""/);
+  assert.match(page, /const\s+selectedRunId\s*=\s*query\.runId\s*\?\?\s*query\.runtime_run_id\s*\?\?\s*""/);
   assert.match(page, /const\s+selectedTraceId\s*=\s*query\.traceId\s*\?\?\s*""/);
   assert.match(page, /afterEventId:\s*afterEventId/);
   assert.match(page, /selectedRunId=\{selectedRunId\}/);
@@ -2111,22 +2346,22 @@ test("Writer shell exposes recovered stream replay cursor without sensitive cont
   assert.match(shell, /selectedTraceId:\s*string/);
   assert.match(shell, /const\s+replayRunId\s*=\s*runSummary\?\.ok === true \? runSummary\.run_id : selectedRunId/);
   assert.match(shell, /const\s+replayTraceId\s*=\s*selectedTraceId \|\| traceId/);
-  assert.match(shell, /<dd>\{replayRunId \|\| "not selected"\}<\/dd>/);
-  assert.match(shell, /<dd>\{replayTraceId \|\| "not selected"\}<\/dd>/);
+  assert.match(shell, /<dd>\{replayRunId \|\| tx\(locale, "未选择", "not selected"\)\}<\/dd>/);
+  assert.match(shell, /<dd>\{replayTraceId \|\| tx\(locale, "未选择", "not selected"\)\}<\/dd>/);
   assert.match(shell, /value=\{replayTraceId\}/);
   assert.match(replaySlice, /action=\{writerHref\(tenantSlug,\s*projectId\)\}/);
   assert.match(replaySlice, /method="get"/);
   assert.match(replaySlice, /name="runId"/);
   assert.match(replaySlice, /value=\{runSummary\?\.ok === true \? runSummary\.run_id : selectedRunId\}/);
   assert.match(replaySlice, /name="traceId"/);
-  assert.match(replaySlice, /value=\{selectedTraceId \|\| traceId\}/);
+  assert.match(replaySlice, /value=\{selectedTraceId \|\| replayTraceId\}/);
   assert.match(replaySlice, /name="after_event_id"/);
   assert.match(replaySlice, /defaultValue=\{afterEventId\}/);
   assert.match(replaySlice, /Request replay events/);
   assert.match(replaySlice, /Event cursor/);
   assert.doesNotMatch(shell, /JSON\.stringify\(event\.payload/);
   assert.doesNotMatch(replaySlice, /api_key|encrypted_api_key|credential_ref/i);
-  assert.doesNotMatch(replaySlice, /content_text|body_text|draft|manuscript/i);
+  assert.doesNotMatch(replaySlice, /content_text|body_text|draft_text|manuscript_text|prompt|provider_response/i);
 });
 
 test("writer API client reads sanitized worldline saved path picker data", async () => {
@@ -2227,16 +2462,20 @@ test("writer page loads redacted trace events when a run exposes trace_id", asyn
 test("writer shell is an operational workbench, not a marketing page", async () => {
   const shell = await fileText("components/writer-workbench-shell.tsx");
 
-  assert.match(shell, /Writer Run/);
+  assert.match(shell, /Writer Agent/);
+  assert.match(shell, /WriterAgentThread/);
+  assert.match(shell, /writer-agent-layout/);
+  assert.match(shell, /writer-agent-composer/);
+  assert.match(shell, /WriterLiveDraft/);
+  assert.match(shell, /initialEvents=/);
   assert.match(shell, /Writer Events/);
   assert.match(shell, /workflowEvents/);
   assert.match(shell, /Trace/);
   assert.match(shell, /Export redacted trace/);
   assert.match(shell, /exportTraceAction/);
   assert.match(shell, /traceExportStatus/);
-  assert.match(shell, /Command Row/);
   assert.match(shell, /Start writer run/);
-  assert.match(shell, /Context pickers/);
+  assert.match(shell, /Add story context/);
   assert.match(shell, /Project assets/);
   assert.match(shell, /Graph nodes/);
   assert.match(shell, /Worldline paths/);
@@ -2255,6 +2494,7 @@ test("writer shell is an operational workbench, not a marketing page", async () 
   assert.match(shell, /redaction_level/);
   assert.match(shell, /event_type/);
   assert.match(shell, /Draft/);
+  assert.doesNotMatch(shell, /writer-workbench-prose-first|writer-composer-disclosure|writer-agent-rail/);
   assert.doesNotMatch(shell, /credential_ref/);
   assert.doesNotMatch(shell, /hero/i);
   assert.doesNotMatch(shell, /Start trial/i);
@@ -2288,7 +2528,7 @@ test("LLM Facility shell is an operational settings console", async () => {
   const shell = await fileText("components/llm-facility-shell.tsx");
 
   assert.match(shell, /LLM Facility/);
-  assert.match(shell, /Tenant Settings/);
+  assert.match(shell, /Workspace Settings/);
   assert.match(shell, /settingsSnapshot/);
   assert.match(shell, /Channels/);
   assert.match(shell, /Channel Management/);
@@ -2301,15 +2541,12 @@ test("LLM Facility shell is an operational settings console", async () => {
   assert.match(shell, /Sync models/);
   assert.match(shell, /last_sync_status/);
   assert.match(shell, /Models/);
-  assert.match(shell, /Project Binding/);
-  assert.match(shell, /Bind module/);
-  assert.match(shell, /Clear override/);
+  assert.match(shell, /Configure project models/);
+  assert.match(shell, /LLMModuleBindingsPanel/);
+  assert.match(shell, /batchBindModuleAction/);
+  assert.match(shell, /canManageBindings/);
+  assert.match(shell, /channelModels/);
   assert.match(shell, /clearBindingAction/);
-  assert.match(shell, /name="channelId"/);
-  assert.match(shell, /name="modelId"/);
-  assert.match(shell, /name="moduleKey"/);
-  assert.match(shell, /name="moduleMaxConcurrency"/);
-  assert.match(shell, /Module max concurrency/);
   assert.match(shell, /bindingStatus/);
   assert.match(shell, /Module binding/);
   assert.match(shell, /Module Bindings/);
@@ -2318,7 +2555,10 @@ test("LLM Facility shell is an operational settings console", async () => {
   assert.match(shell, /Activity/);
   assert.match(shell, /Usage/);
   assert.match(shell, /Telemetry filter/);
-  assert.match(shell, /name="runId"/);
+  assert.match(shell, /name="run"/);
+  assert.match(shell, /name="channel"/);
+  assert.match(shell, /name="module"/);
+  assert.match(shell, /llmChannelKey/);
   assert.match(shell, /Filter telemetry/);
   assert.match(shell, /writer_composer/);
   assert.doesNotMatch(shell, /api_key/);
@@ -2330,10 +2570,10 @@ test("Asset Library shell is an operational asset console", async () => {
 
   assert.match(shell, /Asset Library/);
   assert.match(shell, /Facets/);
-  assert.match(shell, /FacetGroup label="Tags"/);
+  assert.match(shell, /FacetGroup label=\{tx\(locale, "标签", "Tags"\)\}/);
   assert.match(shell, /Search/);
-  assert.match(shell, /Versions:/);
-  assert.match(shell, /Collections:/);
+  assert.match(shell, /SearchModeSelect/);
+  assert.match(shell, /searchCapabilities/);
   assert.match(shell, /Assets/);
   assert.match(shell, /Create asset/);
   assert.match(shell, /Update asset/);
@@ -2407,4 +2647,186 @@ test("trace JSON blocks stay inside mobile workbench panels", async () => {
   assert.match(css, /\.trace-event pre\s*\{[^}]*max-width:\s*100%/s);
   assert.match(css, /\.trace-event pre\s*\{[^}]*min-width:\s*0/s);
   assert.match(css, /\.trace-event pre\s*\{[^}]*width:\s*100%/s);
+});
+
+test("cookie-backed locale selection controls the root document and bilingual copy", async () => {
+  const locale = await fileText("lib/locale.ts");
+  const requestLocale = await fileText("lib/request-locale.ts");
+  const provider = await fileText("components/locale-provider.tsx");
+  const switcher = await fileText("components/language-switcher.tsx");
+  const bilingualText = await fileText("components/bilingual-text.tsx");
+  const rootLayout = await fileText("app/layout.tsx");
+  const login = await fileText("app/login/page.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+
+  assert.match(locale, /export const LOCALE_COOKIE_NAME = "mirofish_locale"/);
+  assert.match(locale, /export type Locale = "zh-CN" \| "en"/);
+  assert.match(locale, /normalized === "en"/);
+  assert.match(locale, /return "zh-CN"/);
+  assert.match(locale, /return locale === "en" \? en : zh/);
+
+  assert.match(requestLocale, /import \{ cookies \} from "next\/headers"/);
+  assert.match(requestLocale, /const cookieStore = await cookies\(\)/);
+  assert.match(requestLocale, /parseLocale\(cookieStore\.get\(LOCALE_COOKIE_NAME\)\?\.value\)/);
+
+  assert.match(provider, /useState\(initialLocale\)/);
+  assert.match(provider, /desiredLocaleRef/);
+  assert.match(provider, /document\.documentElement\.lang = normalized/);
+  assert.match(provider, /writeLocaleCookie\(normalized\)/);
+  assert.match(provider, /\$\{LOCALE_COOKIE_NAME\}=\$\{locale\}; Path=\/; Max-Age=31536000; SameSite=Lax/);
+  assert.match(provider, /startTransition\(\(\) => \{\s*router\.refresh\(\);\s*\}\)/);
+  assert.match(provider, /LocaleContext\.Provider value=\{\{ locale, selectLocale, switching \}\}/);
+  assert.match(provider, /if \(initialLocale !== desiredLocaleRef\.current\)/);
+
+  assert.match(switcher, /import \{ Globe2 \} from "lucide-react"/);
+  assert.match(switcher, /const nextLocale = locale === "en" \? "zh-CN" : "en"/);
+  assert.match(switcher, /const label = locale === "en" \? "切换为中文" : "Switch to English"/);
+  assert.match(switcher, /aria-label=\{label\}/);
+  assert.match(switcher, /title=\{label\}/);
+  assert.equal((switcher.match(/disabled=\{switching\}/g) ?? []).length, 0);
+  assert.match(switcher, /data-switching=\{switching \? "true" : "false"\}/);
+  assert.match(switcher, /selectLocale\(nextLocale\)/);
+  assert.equal((switcher.match(/<button/g) ?? []).length, 1);
+  assert.match(switcher, /<Globe2[^>]*aria-hidden="true"/);
+
+  assert.match(bilingualText, /const \{ locale \} = useLocale\(\)/);
+  assert.match(bilingualText, /return locale === "en" \? en : zh/);
+  assert.match(rootLayout, /const locale = await currentRequestLocale\(\)/);
+  assert.match(rootLayout, /<html data-scroll-behavior="smooth" lang=\{locale\} suppressHydrationWarning>/);
+  assert.match(rootLayout, /<LocaleProvider initialLocale=\{locale\}>\{children\}<\/LocaleProvider>/);
+  assert.doesNotMatch(login, /<LanguageSwitcher \/>/);
+  assert.match(login, /欢迎回来/);
+  assert.match(login, /auth-shell|login-main/);
+  assert.match(login, /href="\/"/);
+  assert.match(login, /<LoginForm action=\{loginAction\} \/>/);
+  assert.match(nav, /className="sidebar-top-actions"[\s\S]*<LanguageSwitcher \/>/);
+  assert.doesNotMatch(nav, /className="sidebar-bottom-row"/);
+  assert.match(nav, /<Bi zh=\{item\.zh\} en=\{item\.label\} \/>/);
+});
+
+test("login page keeps the reference editorial split-screen proportions", async () => {
+  const styles = await fileText("app/auth-marketing.css");
+
+  assert.match(styles, /\.login-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(560px, 43\.5%\) minmax\(0, 56\.5%\)/s);
+  assert.match(styles, /\.login-copy\s*\{[^}]*width:\s*min\(100% - 80px, 455px\)/s);
+  assert.match(styles, /\.login-form-panel::after\s*\{[^}]*right:\s*-200px;[^}]*width:\s*200px/s);
+  assert.match(styles, /\.login-form-panel\s*\{[^}]*overflow:\s*visible/s);
+  assert.match(styles, /\.login-submit\s*\{[^}]*min-height:\s*66px/s);
+  assert.match(styles, /\.login-visual\s*\{[^}]*background-image:\s*url\("\/landing\/assets\/scene-5-finale\.jpg"\)/s);
+  assert.match(styles, /\.login-visual-copy h2\s*\{[^}]*color:\s*#fffaf2/s);
+  assert.match(styles, /font-size:\s*clamp\(2\.1rem, 2\.7vw, 2\.8rem\)/);
+  assert.match(styles, /@media \(min-width: 961px\) and \(max-height: 800px\)/);
+  assert.match(styles, /@media \(max-width: 960px\)[\s\S]*\.login-copy\s*\{[^}]*margin-right:\s*auto;[^}]*margin-left:\s*auto/s);
+});
+
+test("Project Overview keeps operational detail collapsed by default", async () => {
+  const shell = await fileText("components/overview-seed-shell.tsx");
+  const css = await fileText("app/globals.css");
+
+  assert.ok(((shell.match(/<details className="overview-details">/g) ?? []).length) >= 2);
+  assert.doesNotMatch(shell, /<details className="overview-details" open/);
+  assert.match(shell, /文件与分析记录/);
+  assert.match(shell, /详细信息/);
+  assert.match(shell, /<SeedRunOverview/);
+  assert.match(shell, /className="overview-run-actions"/);
+  assert.match(css, /\.overview-details\s*\{/);
+  assert.match(css, /\.overview-details > summary\s*\{[^}]*min-height:\s*60px/s);
+  assert.match(css, /\.overview-metric-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,/s);
+  assert.match(css, /\.sidebar-top-actions\s*\{/);
+  assert.doesNotMatch(css, /\.sidebar-bottom-row\s*\{/);
+  assert.doesNotMatch(css, /\.sidebar-drawer\[data-open="false"\] \+ \.sidebar-bottom-row/);
+  assert.match(css, /\.language-switcher\s*\{[^}]*width:\s*44px/s);
+  assert.match(css, /\.language-switcher\s*\{[^}]*height:\s*44px/s);
+  assert.match(css, /\.language-switcher\[data-switching="true"\]/);
+});
+
+test("core project routes propagate request locale into bilingual shells", async () => {
+  const routes = [
+    ["overview", "OverviewSeedShell", "overview-seed-shell"],
+    ["assets", "AssetLibraryShell", "asset-library-shell"],
+    ["graph", "StoryGraphShell", "story-graph-shell"],
+    ["worldline", "WorldlineShell", "worldline-shell"],
+    ["character-console", "CharacterConsoleShell", "character-console-shell"],
+    ["writer", "WriterWorkbenchShell", "writer-workbench-shell"],
+    ["llm-facility", "LLMFacilityShell", "llm-facility-shell"],
+  ];
+
+  for (const [route, component, shellName] of routes) {
+    const pagePath = `app/(app)/[tenantSlug]/projects/[projectId]/${route}/page.tsx`;
+    const shellPath = `components/${shellName}.tsx`;
+    const page = await fileText(pagePath);
+    const shell = await fileText(shellPath);
+
+    assert.match(page, /currentRequestLocale/, `${pagePath} must read the locale cookie`);
+    assert.match(page, /const\s+locale\s*=\s*await\s+currentRequestLocale\(\)/, `${pagePath} must resolve its locale`);
+    assert.match(page, new RegExp(`<${component}\\b`), `${pagePath} must render ${component}`);
+    assert.match(page, /locale=\{locale\}/, `${pagePath} must pass locale to ${component}`);
+    assert.match(shell, /locale:\s*Locale;/, `${shellPath} must declare a locale prop`);
+    assert.match(shell, /from "\.\/bilingual-text"/, `${shellPath} must use bilingual display copy`);
+    assert.match(shell, /<Bi\b/, `${shellPath} must render bilingual display copy`);
+  }
+});
+
+test("user-facing shell sources exclude development-only explanatory copy", async () => {
+  const userFacingSources = (
+    await Promise.all(["app", "components"].map((directory) => sourceFiles(directory)))
+  ).flat();
+  const forbiddenCopy = /appears until|backed by Postgres|this SaaS slice|Refactor progress|\b[A-Z][A-Z0-9_]*_RUNTIME_PENDING\b/i;
+
+  assert.ok(userFacingSources.length > 0);
+  for (const { relativePath, source } of userFacingSources) {
+    assert.doesNotMatch(source, forbiddenCopy, `${relativePath} contains development-only copy`);
+  }
+});
+
+test("Paper-ink design tokens and bookish app shell stay explicit", async () => {
+  const css = await fileText("app/globals.css");
+  const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
+  const nav = await fileText("components/project-nav.tsx");
+
+  assert.match(css, /--primary:\s*#8f211b|--primary:\s*var\(--accent-primary\)/);
+  assert.match(css, /--accent-primary:\s*#8f211b/);
+  assert.match(css, /--surface-app:\s*#f3eee4/);
+  assert.match(css, /--radius-panel:\s*8px/);
+  assert.match(css, /--motion-standard:\s*220ms/);
+  assert.match(css, /--ease-natural:\s*cubic-bezier\(0\.2,\s*0\.8,\s*0\.2,\s*1\)/);
+  assert.match(css, /Songti SC/);
+  assert.match(css, /Noto Sans SC/);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+  assert.match(css, /\.mobile-nav-toggle/);
+  assert.match(css, /\.sidebar-drawer\[data-open="true"\]/);
+  assert.match(css, /min-height:\s*44px/);
+  assert.match(css, /grid-template-columns:\s*minmax\(232px,\s*248px\)/);
+  assert.doesNotMatch(css, /--primary:\s*#0f6cbd/);
+
+  assert.match(layout, /className="skip-link"/);
+  assert.match(layout, /WorkspaceContextBar|className="app-command-bar project-context-bar"/);
+  assert.match(layout, /id="workspace-main"/);
+  assert.match(nav, /mobile-nav-toggle/);
+  assert.match(nav, /aria-expanded=\{navigationOpen\}/);
+  assert.match(nav, /LanguageSwitcher/);
+  assert.match(nav, /BookOpenText/);
+});
+
+test("module headers use one Lucide icon language", async () => {
+  const shellPaths = [
+    "components/overview-seed-shell.tsx",
+    "components/asset-library-shell.tsx",
+    "components/story-graph-shell.tsx",
+    "components/worldline-shell.tsx",
+    "components/character-console-shell.tsx",
+    "components/writer-workbench-shell.tsx",
+    "components/llm-facility-shell.tsx",
+  ];
+  const shells = (await Promise.all(shellPaths.map((path) => fileText(path)))).join("\n");
+
+  // WorkspaceHeader owns page-title-icon for Overview/Assets; other shells still inline it.
+  assert.ok((shells.match(/page-title-icon|icon=\{</g) ?? []).length >= shellPaths.length);
+  assert.match(shells, /LayoutDashboard/);
+  assert.match(shells, /Boxes/);
+  assert.match(shells, /Network/);
+  assert.match(shells, /GitBranch/);
+  assert.match(shells, /UsersRound/);
+  assert.match(shells, /PenLine/);
+  assert.match(shells, /Cpu/);
 });

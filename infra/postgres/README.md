@@ -5,11 +5,22 @@ It is intentionally separate from the current FastAPI/SQLite Alembic chain:
 the compatibility backend keeps running on SQLite while the Go control plane,
 Temporal workers, and RLS-backed SaaS data model are introduced.
 
-Apply order:
+Shared, upgraded, staging, production, and compose databases must be migrated by
+the checksum-ledger bootstrap only:
 
 ```bash
-psql "$DATABASE_URL" -f infra/postgres/migrations/0001_core_saas.sql
+docker compose -f infra/docker-compose.yml run --rm schema-init
 ```
+
+`schema-init` validates the contiguous migration set, verifies every recorded
+SHA-256 checksum, applies only missing revisions in order, and checks the schema
+sentinels before application startup. Never replay a raw revision on a database
+that already contains the `mirofish_schema_migrations` ledger, and never apply
+`0001_core_saas.sql` directly to a shared compose database.
+
+Raw `0001_core_saas.sql` execution is permitted only for a deliberately fresh,
+disposable database whose public schema is empty. Test harnesses must fail
+closed when a non-empty database has no migration ledger.
 
 Every request or worker transaction must set tenant context before touching
 tenant-scoped tables:

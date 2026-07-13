@@ -257,7 +257,9 @@ CREATE TABLE IF NOT EXISTS seed_segment_retry_requests (
   status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'running', 'completed', 'failed', 'cancelled')),
   requested_by UUID REFERENCES users(user_id),
   request_id TEXT,
+  retry_attempt_id UUID NOT NULL DEFAULT gen_random_uuid(),
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  worker_attempt INTEGER NOT NULL DEFAULT 0 CHECK (worker_attempt >= 0),
   last_error_code TEXT,
   last_error_message TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -266,6 +268,12 @@ CREATE TABLE IF NOT EXISTS seed_segment_retry_requests (
   UNIQUE (tenant_id, run_id, segment_id),
   FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, project_id) ON DELETE CASCADE
 );
+
+ALTER TABLE seed_segment_retry_requests
+ADD COLUMN IF NOT EXISTS retry_attempt_id UUID NOT NULL DEFAULT gen_random_uuid();
+
+ALTER TABLE seed_segment_retry_requests
+ADD COLUMN IF NOT EXISTS worker_attempt INTEGER NOT NULL DEFAULT 0 CHECK (worker_attempt >= 0);
 
 CREATE TABLE IF NOT EXISTS reading_passes (
   tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -1254,6 +1262,7 @@ CREATE INDEX IF NOT EXISTS idx_text_segments_tenant_project_run_order ON text_se
 CREATE INDEX IF NOT EXISTS idx_text_segments_source_file_order ON text_segments (tenant_id, source_file_id, segment_order);
 CREATE INDEX IF NOT EXISTS idx_seed_segment_retry_requests_run_status ON seed_segment_retry_requests (tenant_id, project_id, run_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_seed_segment_retry_requests_segment ON seed_segment_retry_requests (tenant_id, segment_id, status);
+CREATE INDEX IF NOT EXISTS idx_seed_segment_retry_requests_attempt ON seed_segment_retry_requests (tenant_id, project_id, run_id, retry_attempt_id, status);
 
 DO $$
 BEGIN

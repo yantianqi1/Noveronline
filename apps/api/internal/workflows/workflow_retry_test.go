@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -48,7 +49,12 @@ func TestDisabledSeedSegmentRetrierFailsClosed(t *testing.T) {
 
 func TestSQLSeedSegmentRetrierAdmitsExistingTerminalSegmentsWithSanitizedEvent(t *testing.T) {
 	execer := &recordingTenantWriterAdmissionExecer{}
-	retrier := NewSQLSeedSegmentRetrier(SQLSeedSegmentRetrierConfig{Execer: execer})
+	temporalClient := &recordingRetryTemporalClient{}
+	retrier := NewSQLSeedSegmentRetrier(SQLSeedSegmentRetrierConfig{
+		Execer:    execer,
+		Client:    temporalClient,
+		TaskQueue: "seed-retry-test",
+	})
 
 	retried, err := retrier.RetrySeedSegments(context.Background(), RetrySeedSegmentsInput{
 		TenantID:    "11111111-1111-4111-8111-111111111111",
@@ -65,6 +71,28 @@ func TestSQLSeedSegmentRetrierAdmitsExistingTerminalSegmentsWithSanitizedEvent(t
 	if retried.RunID != "33333333-3333-4333-8333-333333333333" || retried.Status != "retry_requested" || retried.RequestedCount != 2 {
 		t.Fatalf("unexpected retry result: %#v", retried)
 	}
+	if temporalClient.workflowName != SeedSegmentRetryWorkflowName || temporalClient.options.TaskQueue != "seed-retry-test" {
+		t.Fatalf("unexpected segment retry temporal start: %#v", temporalClient)
+	}
+	if !strings.HasPrefix(temporalClient.workflowID, "seed_segment_retry_33333333-3333-4333-8333-333333333333_") {
+		t.Fatalf("unexpected segment retry workflow id: %q", temporalClient.workflowID)
+	}
+	temporalPayload, ok := temporalClient.args[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map segment retry payload, got %#v", temporalClient.args)
+	}
+	if temporalPayload["run_id"] != "33333333-3333-4333-8333-333333333333" ||
+		temporalPayload["workflow_type"] != SeedWorkflowType ||
+		len(temporalPayload["segment_ids"].([]string)) != 2 {
+		t.Fatalf("segment retry temporal payload lost required context: %#v", temporalPayload)
+	}
+	retryAttemptID, ok := temporalPayload["retry_attempt_id"].(string)
+	if !ok || retryAttemptID == "" || !strings.HasSuffix(temporalClient.workflowID, "_"+retryAttemptID) {
+		t.Fatalf("segment retry execution token is not shared by DB and Temporal: %#v", temporalPayload)
+	}
+	if len(execer.args) < 8 || execer.args[6] != retryAttemptID || execer.args[5] != "req-segments" {
+		t.Fatalf("segment retry admission lost request correlation or attempt identity: %#v", execer.args)
+	}
 	if execer.plainCalled || execer.tenantID != "11111111-1111-4111-8111-111111111111" || execer.projectID != "22222222-2222-4222-8222-222222222222" {
 		t.Fatalf("segment retry admission did not use tenant/project context: %#v", execer)
 	}
@@ -77,13 +105,22 @@ func TestSQLSeedSegmentRetrierAdmitsExistingTerminalSegmentsWithSanitizedEvent(t
 		"ON CONFLICT (tenant_id, run_id, segment_id)",
 		"'seed.segments.retry_requested'",
 		"segment_retry_guard AS",
+		"active_retry_conflicts AS",
+		"active_retry_guard AS",
+		"WHERE segment_retry_guard.ok",
+		"AND active_retry_guard.ok",
+		"status IN ('requested', 'running')",
+		"seed_segment_retry_requests.status IN ('completed', 'failed', 'cancelled')",
+		"retry_attempt_id",
 		"COUNT(*) FROM segment_scope",
 		"COUNT(*) FROM requested_segments",
-		"1 / 0",
 	} {
 		if !strings.Contains(execer.query, expected) {
 			t.Fatalf("segment retry admission query missing %q: %s", expected, execer.query)
 		}
+	}
+	if strings.Contains(execer.query, "1 / 0") {
+		t.Fatalf("seed segment retry SQL must not use planner-folded division-by-zero guards: %s", execer.query)
 	}
 	joinedArgs := strings.Join(argsAsStrings(execer.args), "\n")
 	for _, expected := range []string{
@@ -104,11 +141,72 @@ func TestSQLSeedSegmentRetrierAdmitsExistingTerminalSegmentsWithSanitizedEvent(t
 			t.Fatalf("segment retry admission args leaked %q: %s", forbidden, joinedArgs)
 		}
 	}
-	eventPayload := argsAsStrings([]any{execer.args[6]})[0]
+	eventPayload := argsAsStrings([]any{execer.args[7]})[0]
 	if strings.Contains(eventPayload, "44444444-4444-4444-8444-444444444444") ||
 		strings.Contains(eventPayload, "segment_id") ||
 		strings.Contains(eventPayload, "77777777-7777-4777-8777-777777777777") {
 		t.Fatalf("segment retry public event payload leaked private/internal metadata: %s", eventPayload)
+	}
+}
+
+func TestSQLSeedSegmentRetrierFailsClosedWithoutTemporalBeforeAdmission(t *testing.T) {
+	execer := &recordingTenantWriterAdmissionExecer{}
+	retrier := NewSQLSeedSegmentRetrier(SQLSeedSegmentRetrierConfig{Execer: execer})
+
+	_, err := retrier.RetrySeedSegments(context.Background(), RetrySeedSegmentsInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		ProjectID:   "22222222-2222-4222-8222-222222222222",
+		RunID:       "33333333-3333-4333-8333-333333333333",
+		SegmentIDs:  []string{"77777777-7777-4777-8777-777777777777"},
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+	})
+
+	if code := ErrorCode(err); code != "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected missing Temporal to fail closed, got %s (%v)", code, err)
+	}
+	if execer.query != "" {
+		t.Fatalf("missing Temporal must fail before DB admission: %s", execer.query)
+	}
+}
+
+func TestSQLSeedSegmentRetrierCompensatesAdmissionWhenTemporalStartFails(t *testing.T) {
+	execer := &contextRecordingSeedSegmentRetryExecer{}
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	temporalClient := &recordingRetryTemporalClient{
+		err:    errors.New("provider prompt api_key=secret credential_ref=private object_key=private"),
+		cancel: cancelRequest,
+	}
+	retrier := NewSQLSeedSegmentRetrier(SQLSeedSegmentRetrierConfig{
+		Execer: execer,
+		Client: temporalClient,
+	})
+
+	_, err := retrier.RetrySeedSegments(requestContext, RetrySeedSegmentsInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		ProjectID:   "22222222-2222-4222-8222-222222222222",
+		RunID:       "33333333-3333-4333-8333-333333333333",
+		SegmentIDs:  []string{"77777777-7777-4777-8777-777777777777"},
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+		RequestID:   "req-segment-retry",
+	})
+
+	if code := ErrorCode(err); code != "SEED_SEGMENT_RETRY_FAILED" {
+		t.Fatalf("expected stable Temporal start failure, got %s (%v)", code, err)
+	}
+	if len(execer.contextErrors) != 2 || execer.contextErrors[0] != nil || execer.contextErrors[1] != nil {
+		t.Fatalf("start failure compensation reused cancelled request context: %#v", execer.contextErrors)
+	}
+	if !strings.Contains(execer.query, "UPDATE seed_segment_retry_requests") ||
+		!strings.Contains(execer.query, "status = 'failed'") ||
+		!strings.Contains(execer.query, "retry_attempt_id = $6::uuid") ||
+		!strings.Contains(execer.query, "'seed.segments.retry_failed'") {
+		t.Fatalf("segment retry start failure was not compensated: %s", execer.query)
+	}
+	joinedArgs := strings.Join(argsAsStrings(execer.args), "\n")
+	for _, forbidden := range []string{"provider prompt", "api_key", "credential_ref", "object_key"} {
+		if strings.Contains(joinedArgs, forbidden) || strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("segment retry start failure leaked %q: args=%s err=%v", forbidden, joinedArgs, err)
+		}
 	}
 }
 
@@ -206,6 +304,42 @@ func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *test
 		strings.Contains(publicPayload, "api_key") ||
 		strings.Contains(publicPayload, "credential_ref") {
 		t.Fatalf("public retry payload leaked private metadata: %s", publicPayload)
+	}
+}
+
+// Legacy "rerun seed" is retired in favor of an explicit same-run retry. A new
+// run requires a new upload/start admission, so retry must never invent a run.
+func TestSeedRetryReplacesLegacyRerunWithoutCreatingOrAdoptingAnotherRun(t *testing.T) {
+	originalRunID := "33333333-3333-4333-8333-333333333333"
+	temporalClient := &recordingRetryTemporalClient{}
+	store := &recordingWorkflowRetryStore{target: WorkflowRetryTarget{
+		RunID: originalRunID, ProjectID: "22222222-2222-4222-8222-222222222222",
+		WorkflowType: SeedWorkflowType, Status: "failed",
+		UploadID: "55555555-5555-4555-8555-555555555555", SourceFileID: "66666666-6666-4666-8666-666666666666",
+		SourceObjectKey: "objects/private-source.txt", SourceFilename: "novel.txt", SourceMimeType: "text/plain",
+		SourceSizeBytes: 42, SourceSHA256: strings.Repeat("c", 64),
+	}}
+	retrier := NewTemporalWorkflowRetrier(TemporalWorkflowRetrierConfig{Client: temporalClient, Store: store})
+
+	result, err := retrier.RetryWorkflowRun(context.Background(), RetryWorkflowRunInput{
+		TenantID: "11111111-1111-4111-8111-111111111111", RunID: originalRunID,
+		ActorUserID: "44444444-4444-4444-8444-444444444444", RequestID: "req-retired-rerun",
+	})
+	if err != nil {
+		t.Fatalf("retry replacement for retired rerun: %v", err)
+	}
+	if result != (WorkflowRunRetry{RunID: originalRunID, Status: "retry_requested"}) {
+		t.Fatalf("retry fabricated or adopted a different run: %#v", result)
+	}
+	if store.admitInput.RunID != originalRunID || store.admitInput.TemporalWorkflowID != "seed_run_"+originalRunID+"_retry" {
+		t.Fatalf("retry admission did not preserve the original run identity: %#v", store.admitInput)
+	}
+	payload, ok := temporalClient.args[0].(map[string]any)
+	if !ok || payload["run_id"] != originalRunID {
+		t.Fatalf("Temporal retry payload fabricated another run: %#v", temporalClient.args)
+	}
+	if store.targetInput.RunID != originalRunID || temporalClient.workflowID != "seed_run_"+originalRunID+"_retry" {
+		t.Fatalf("retry crossed run identity: target=%#v temporal=%q", store.targetInput, temporalClient.workflowID)
 	}
 }
 
@@ -478,6 +612,7 @@ type recordingRetryTemporalClient struct {
 	workflowName any
 	args         []any
 	err          error
+	cancel       context.CancelFunc
 }
 
 func (c *recordingRetryTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, workflow any, args ...any) (client.WorkflowRun, error) {
@@ -485,9 +620,34 @@ func (c *recordingRetryTemporalClient) ExecuteWorkflow(_ context.Context, option
 	c.workflowID = options.ID
 	c.workflowName = workflow
 	c.args = args
+	if c.cancel != nil {
+		c.cancel()
+	}
 	return nil, c.err
 }
 
 func (c *recordingRetryTemporalClient) CancelWorkflow(context.Context, string, string) error {
 	return nil
+}
+
+type contextRecordingSeedSegmentRetryExecer struct {
+	recordingTenantWriterAdmissionExecer
+	contextErrors []error
+}
+
+func (e *contextRecordingSeedSegmentRetryExecer) ExecTenantContext(
+	ctx context.Context,
+	tenantID string,
+	projectID string,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	e.contextErrors = append(e.contextErrors, ctx.Err())
+	return e.recordingTenantWriterAdmissionExecer.ExecTenantContext(
+		ctx,
+		tenantID,
+		projectID,
+		query,
+		args...,
+	)
 }

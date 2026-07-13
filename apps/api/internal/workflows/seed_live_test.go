@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"mirofish-novel/apps/api/internal/sourcefiles"
+	"mirofish-novel/apps/api/internal/testschema"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/minio/minio-go/v7"
@@ -23,6 +24,7 @@ import (
 
 const liveSeedTenantID = "81111111-1111-1111-1111-111111111111"
 const liveSeedUserID = "82222222-2222-2222-2222-222222222222"
+const liveSeedUserEmail = "seed-go-live@example.test"
 const liveSeedProjectID = "83333333-3333-3333-3333-333333333333"
 const liveSeedRunID = "84444444-4444-4444-4444-444444444444"
 const liveSeedAppRole = "mirofish_seed_go_live_app"
@@ -34,13 +36,18 @@ func TestLiveSeedGoUploadCompleteAndAdmissionUseMinIOAndAppRole(t *testing.T) {
 		t.Skip("set MIROFISH_SEED_LIVE_DATABASE_URL to run live Seed Go upload/complete/admission E2E")
 	}
 	storageConfig := liveSeedObjectStorageConfig(t)
+	requireLiveSeedDisposableDatabase(t, adminURL)
+	objectKey := ""
+	t.Cleanup(func() {
+		cleanupLiveSeedGoFixture(t, adminURL, storageConfig, objectKey)
+	})
 	prepareLiveSeedGoDatabase(t, adminURL)
 	appURL := liveSeedAppDatabaseURL(t, adminURL)
 	appDB, err := sql.Open("pgx", appURL)
 	if err != nil {
 		t.Fatalf("open app db: %v", err)
 	}
-	defer appDB.Close()
+	t.Cleanup(func() { _ = appDB.Close() })
 	writer, err := sourcefiles.NewMinIOObjectWriter(storageConfig)
 	if err != nil {
 		t.Fatalf("new minio writer: %v", err)
@@ -80,6 +87,7 @@ func TestLiveSeedGoUploadCompleteAndAdmissionUseMinIOAndAppRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get upload object metadata: %v", err)
 	}
+	objectKey = objectInput.ObjectKey
 	if err := writer.WriteObject(context.Background(), objectInput, bytes.NewReader(sourceBytes)); err != nil {
 		t.Fatalf("write source object: %v", err)
 	}
@@ -154,7 +162,6 @@ func TestLiveSeedGoUploadCompleteAndAdmissionUseMinIOAndAppRole(t *testing.T) {
 
 func TestLiveSeedGoWorkflowRetryPostgresMinIOUsesStoredSourceHandoffWithRecordingTemporal(t *testing.T) {
 	fixture := prepareLiveSeedGoRetryFixture(t)
-	defer fixture.AppDB.Close()
 	markLiveSeedGoRunFailedForRetry(t, fixture.AdminURL, fixture.Record.UploadID, fixture.Record.FileID)
 
 	temporalClient := &recordingRetryTemporalClient{}
@@ -213,7 +220,6 @@ func TestLiveSeedGoWorkflowRetryPostgresMinIOUsesStoredSourceHandoffWithRecordin
 
 func TestLiveSeedGoWorkflowRetryPostgresMinIOStartFailureReleasesSourceWithRecordingTemporal(t *testing.T) {
 	fixture := prepareLiveSeedGoRetryFixture(t)
-	defer fixture.AppDB.Close()
 	markLiveSeedGoRunFailedForRetry(t, fixture.AdminURL, fixture.Record.UploadID, fixture.Record.FileID)
 
 	temporalClient := &recordingRetryTemporalClient{
@@ -288,12 +294,10 @@ func prepareLiveSeedGoDatabase(t *testing.T, adminURL string) {
 	}
 	defer db.Close()
 	migrationPath := filepath.Join("..", "..", "..", "..", "infra", "postgres", "migrations", "0001_core_saas.sql")
-	migrationSQL, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(migrationSQL)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	if err := testschema.EnsureLiveSchema(context.Background(), db, migrationPath,
+		"tenants", "projects", "source_files", "workflow_runs", "seed_tasks", "workflow_events",
+	); err != nil {
+		t.Fatalf("ensure live Seed schema: %v", err)
 	}
 	if _, err := db.Exec("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mirofish_seed_go_live_app') THEN CREATE ROLE mirofish_seed_go_live_app LOGIN PASSWORD 'mirofish_seed_go_live_password' IN ROLE mirofish_app; ELSE ALTER ROLE mirofish_seed_go_live_app WITH LOGIN PASSWORD 'mirofish_seed_go_live_password'; END IF; END $$; GRANT mirofish_app TO mirofish_seed_go_live_app;"); err != nil {
 		t.Fatalf("ensure app role: %v", err)
@@ -302,8 +306,8 @@ func prepareLiveSeedGoDatabase(t *testing.T, adminURL string) {
 		t.Fatalf("cleanup tenant: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO users (user_id, email, display_name)
-VALUES ($1, 'seed-go-live@example.test', 'Seed Go Live')
-ON CONFLICT (user_id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name`, liveSeedUserID); err != nil {
+	VALUES ($1, $2, 'Seed Go Live')
+	ON CONFLICT (user_id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name`, liveSeedUserID, liveSeedUserEmail); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO tenants (tenant_id, slug, name, tenant_type)
@@ -352,20 +356,24 @@ func prepareLiveSeedGoRetryFixture(t *testing.T) liveSeedGoRetryFixture {
 		t.Skip("set MIROFISH_SEED_LIVE_DATABASE_URL to run live Seed Go retry Postgres/MinIO harness")
 	}
 	storageConfig := liveSeedObjectStorageConfig(t)
+	requireLiveSeedDisposableDatabase(t, adminURL)
+	objectKey := ""
+	t.Cleanup(func() {
+		cleanupLiveSeedGoFixture(t, adminURL, storageConfig, objectKey)
+	})
 	prepareLiveSeedGoDatabase(t, adminURL)
 	appURL := liveSeedAppDatabaseURL(t, adminURL)
 	appDB, err := sql.Open("pgx", appURL)
 	if err != nil {
 		t.Fatalf("open app db: %v", err)
 	}
+	t.Cleanup(func() { _ = appDB.Close() })
 	writer, err := sourcefiles.NewMinIOObjectWriter(storageConfig)
 	if err != nil {
-		appDB.Close()
 		t.Fatalf("new minio writer: %v", err)
 	}
 	verifier, err := sourcefiles.NewMinIOObjectVerifier(sourcefiles.MinIOObjectVerifierConfig(storageConfig))
 	if err != nil {
-		appDB.Close()
 		t.Fatalf("new minio verifier: %v", err)
 	}
 	sourceStore := sourcefiles.NewSQLStore(sourcefiles.SQLStoreConfig{
@@ -385,7 +393,6 @@ func prepareLiveSeedGoRetryFixture(t *testing.T) liveSeedGoRetryFixture {
 		Purpose:     "seed",
 	})
 	if err != nil {
-		appDB.Close()
 		t.Fatalf("create source file: %v", err)
 	}
 	objectInput, err := sourceStore.GetUploadObject(context.Background(), sourcefiles.GetUploadObjectInput{
@@ -393,18 +400,16 @@ func prepareLiveSeedGoRetryFixture(t *testing.T) liveSeedGoRetryFixture {
 		UploadID: record.UploadID,
 	})
 	if err != nil {
-		appDB.Close()
 		t.Fatalf("get upload object metadata: %v", err)
 	}
+	objectKey = objectInput.ObjectKey
 	if err := writer.WriteObject(context.Background(), objectInput, bytes.NewReader(sourceBytes)); err != nil {
-		appDB.Close()
 		t.Fatalf("write source object: %v", err)
 	}
 	if _, err := sourceStore.CompleteUpload(context.Background(), sourcefiles.CompleteInput{
 		TenantID: liveSeedTenantID,
 		UploadID: record.UploadID,
 	}); err != nil {
-		appDB.Close()
 		t.Fatalf("complete upload: code=%s err=%v", sourcefiles.ErrorCode(err), err)
 	}
 	admissionStore := NewSQLSeedAdmissionStore(SQLSeedAdmissionStoreConfig{
@@ -423,12 +428,8 @@ func prepareLiveSeedGoRetryFixture(t *testing.T) liveSeedGoRetryFixture {
 		SourceFileID:       record.FileID,
 		Status:             "queued",
 	}); err != nil {
-		appDB.Close()
 		t.Fatalf("admit seed run: %v", err)
 	}
-	t.Cleanup(func() {
-		cleanupLiveSeedGoRetryFixture(adminURL, storageConfig, objectInput.ObjectKey)
-	})
 	return liveSeedGoRetryFixture{
 		AdminURL:    adminURL,
 		AppDB:       appDB,
@@ -470,19 +471,46 @@ func assertLiveSeedGoTextDoesNotContainMarkers(t *testing.T, text string, surfac
 	}
 }
 
-func cleanupLiveSeedGoRetryFixture(adminURL string, storageConfig sourcefiles.MinIOObjectWriterConfig, objectKey string) {
-	if db, err := sql.Open("pgx", adminURL); err == nil {
-		_, _ = db.Exec("DELETE FROM tenants WHERE tenant_id = $1", liveSeedTenantID)
+func cleanupLiveSeedGoFixture(t *testing.T, adminURL string, storageConfig sourcefiles.MinIOObjectWriterConfig, objectKey string) {
+	t.Helper()
+	db, err := sql.Open("pgx", adminURL)
+	if err != nil {
+		t.Errorf("open admin db for live Seed cleanup: %v", err)
+	} else {
+		if _, err := db.Exec("DELETE FROM tenants WHERE tenant_id = $1", liveSeedTenantID); err != nil {
+			t.Errorf("cleanup live Seed tenant: %v", err)
+		}
+		if _, err := db.Exec("DELETE FROM users WHERE user_id = $1 AND email = $2", liveSeedUserID, liveSeedUserEmail); err != nil {
+			t.Errorf("cleanup live Seed user: %v", err)
+		}
 		_ = db.Close()
+	}
+	if objectKey == "" {
+		return
 	}
 	client, err := minio.New(storageConfig.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(storageConfig.AccessKey, storageConfig.SecretKey, ""),
 		Secure: storageConfig.UseSSL,
 	})
 	if err != nil {
+		t.Errorf("create MinIO client for live Seed cleanup: %v", err)
 		return
 	}
-	_ = client.RemoveObject(context.Background(), storageConfig.Bucket, objectKey, minio.RemoveObjectOptions{})
+	if err := client.RemoveObject(context.Background(), storageConfig.Bucket, objectKey, minio.RemoveObjectOptions{}); err != nil {
+		t.Errorf("cleanup live Seed object: %v", err)
+	}
+}
+
+func requireLiveSeedDisposableDatabase(t *testing.T, adminURL string) {
+	t.Helper()
+	db, err := sql.Open("pgx", adminURL)
+	if err != nil {
+		t.Fatalf("open live Seed database guard: %v", err)
+	}
+	defer db.Close()
+	if err := testschema.RequireDisposableLiveDatabase(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readLiveSeedGoAdmissionRows(t *testing.T, adminURL string, uploadID string) liveSeedGoAdmissionRows {

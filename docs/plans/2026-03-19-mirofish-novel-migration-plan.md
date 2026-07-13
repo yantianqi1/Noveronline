@@ -77,7 +77,7 @@
 ### Task 5: Codex Handoff Docs
 
 **Files:**
-- Create: `docs/CODEX_HANDOFF_GUIDE.md`
+- Update: `AGENTS.md` and `CLAUDE.md`
 - Create: `docs/plans/2026-03-19-mirofish-novel-design.md`
 - Create: `docs/plans/2026-03-19-mirofish-novel-migration-plan.md`
 

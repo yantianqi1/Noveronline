@@ -1,6 +1,6 @@
 # MiroFish-Novel SaaS Refactor Documentation
 
-更新时间：`2026-07-05`
+更新时间：`2026-07-10`
 
 ## 目标
 
@@ -9,6 +9,15 @@
 `Next.js SaaS App -> Go Control Plane -> Temporal Workflows -> Pi Writer Runtime + Python Agent Workers -> Postgres / pgvector / Redis / S3`
 
 文档必须覆盖当前旧系统全部能力，并给后续 AI coding agent 一个足够明确的还原依据：拿到每个模块文档后，可以知道页面如何设计、API 如何切分、数据怎么落库、Agent 怎么运行、旧功能如何迁移和验收。
+
+## SaaS 开发真相源
+
+1. `DEVELOPMENT_PLAN.md` 只定义范围、阶段顺序和最终完成条件。
+2. `24-current-development-progress.md` 是唯一当前进度、关键路径、风险和验证新鲜度入口。
+3. `tasks/refactor-saas-parallel-board.md` 只维护活动任务、依赖和 next gate。
+4. 当前 worktree、schema 和本轮实际测试输出高于任何文档。
+
+Git history 负责保存历史。当前工作树不再保留中途 handoff、追加式 live log、模型专用开发计划或内嵌固定任务的 prompt preset。
 
 ## 文档清单
 
@@ -30,14 +39,13 @@
 - `14-data-model.md`：Postgres 主数据模型、RLS、向量检索、事件表和旧表映射。
 - `15-api-contracts.md`：Go API surface、SSE/WebSocket、worker payload 和兼容路线。
 - `16-deployment-and-ops.md`：部署拓扑、环境、监控、备份、安全、限流和运维。
-- `17-migration-roadmap.md`：从当前仓库迁移到 SaaS 架构的阶段计划。
+- `17-migration-roadmap.md`：目标迁移顺序、原则和最终验收清单；不是当前进度入口。
 - `18-legacy-coverage-matrix.md`：旧页面、路由、表、Agent 模块和功能的覆盖验收矩阵。
-- `19-parallel-development-orchestration.md`：多个 Codex 窗口/多终端/多智能体并行开发编排方案。
-- `20-agent-window-identities-and-prompts.md`：每个开发窗口的身份卡和可复制启动提示词清单。
+- `19-parallel-development-orchestration.md`：不含固定任务的多 agent 并行协作规则。
 - `21-pi-writer-agent-runtime.md`：Writer-first Pi Agent Runtime、写作台最小闭环和分批接入方案。
-- `22-midstream-handoff-summary.md`：当前重构中途总结、完成度估算、风险、下一步建议和新对话启动提示词。
-- `23-a4-story-graph-runner-fix-handoff.md`：A4 Story Graph Runner blocking fixes 历史/外部 handoff note；不是 Wave 0 产出的完成证据，后续 agent 必须先核对实际 git diff/commit 和测试输出再视为 product-complete。
-- `prompts/`：各窗口可直接复制到新 Codex 终端的启动提示词。
+- `24-current-development-progress.md`：截至当前 worktree 的 SaaS 重构总进度、完成定义审计、验证新鲜度、关键风险和下一步队列；当前接手状态以此文档为第二入口。
+- `29-seed-sse-live-progress-experience.md`：小说上传、真实 SSE 实时分析进度、动效、断线恢复和验收标准的设计提案；不代表当前实现已完成。
+- `31-overview-progress-visual-motion-design.md`：Overview 分析进度画布的视觉与动效升级设计（阶段播报、数字缓动、阶段轨道、终态编排）；P1 运行在现有轮询上，P2 对接文档 29 的 SSE。
 
 ## 总体决策
 
@@ -91,13 +99,10 @@
 实施前先读：
 
 1. `DEVELOPMENT_PLAN.md`
-2. `22-midstream-handoff-summary.md`
-3. `21-pi-writer-agent-runtime.md`
-4. `00-product-vision-and-scope.md`
-5. `01-target-architecture.md`
-6. `02-tech-stack.md`
-7. `03-multi-tenant-saas.md`
-8. `18-legacy-coverage-matrix.md`
+2. `24-current-development-progress.md`
+3. `tasks/refactor-saas-parallel-board.md`
+4. 当前任务对应的领域文档
+5. `18-legacy-coverage-matrix.md`（只作需求覆盖清单）
 
 第一阶段开发 Writer-first Pi Agent 最小闭环时，优先读：
 
@@ -119,7 +124,7 @@
 如果要多窗口并行开发，先读：
 
 - `19-parallel-development-orchestration.md`
-- `20-agent-window-identities-and-prompts.md`
+- `24-current-development-progress.md`
 - `tasks/refactor-saas-parallel-board.md`
 
-然后从 `prompts/` 复制对应窗口身份的启动提示词。
+主控必须按当前任务现场生成 Objective、read/write scope、invariants 和 verification；不使用固定窗口 prompt。

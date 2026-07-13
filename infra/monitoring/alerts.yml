@@ -1,0 +1,53 @@
+groups:
+  - name: mirofish-production
+    rules:
+      - alert: MiroFishApiUnavailable
+        expr: up{job="mirofish-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: MiroFish API metrics target is unavailable
+      - alert: MiroFishApiErrorRateHigh
+        expr: |
+          sum(rate(mirofish_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(mirofish_http_requests_total[5m])), 1)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: MiroFish API 5xx ratio exceeds 5 percent
+      - alert: MiroFishWorkflowFailureRateHigh
+        expr: |
+          sum(rate(mirofish_workflow_terminal_total{status="failed"}[15m]))
+          /
+          clamp_min(sum(rate(mirofish_workflow_terminal_total[15m])), 1)
+          > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Workflow failure ratio exceeds 10 percent
+      - alert: MiroFishProviderHealthFailing
+        expr: mirofish_llm_provider_health == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: An enabled LLM provider is unhealthy
+      - alert: MiroFishQuotaReconciliationFailures
+        expr: increase(mirofish_llm_quota_reconciliation_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: LLM quota reconciliation is failing
+      - alert: MiroFishAuthRecoveryDeliveryFailing
+        expr: increase(mirofish_auth_recovery_delivery_total{status=~"retry|dead|backend_error"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Password recovery delivery is retrying, dead, or unavailable

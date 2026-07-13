@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirofish.local/contracts/writer-public-event.schema.json",
+  "title": "Writer public replay event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "run_id", "project_id", "sequence", "event_type", "payload", "created_at"],
+  "properties": {
+    "event_id": { "$ref": "#/$defs/nonEmptyString" },
+    "run_id": { "$ref": "#/$defs/nonEmptyString" },
+    "project_id": { "$ref": "#/$defs/nonEmptyString" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "enum": [
+        "workflow.queued",
+        "writer.run.started",
+        "writer.token",
+        "writer.tool.started",
+        "writer.tool.completed",
+        "writer.draft.saved",
+        "writer.revision.proposed",
+        "writer.approval.required",
+        "writer.approval.resolved",
+        "writer.run.failed",
+        "writer.run.completed",
+        "writer.run.cancelled"
+      ]
+    },
+    "payload": { "type": "object" },
+    "created_at": { "$ref": "#/$defs/nonEmptyString" }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    }
+  }
+}

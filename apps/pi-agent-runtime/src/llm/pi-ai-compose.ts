@@ -50,6 +50,12 @@ export function createPiAIComposeDraft(deps: PiAIComposeDeps = defaultDeps) {
       temperature: numberSetting(request.settings, "temperature"),
       maxTokens: numberSetting(request.settings, "max_tokens"),
       sessionId: request.run_id,
+      headers: {
+        "X-MiroFish-Tenant-Id": request.tenant_id,
+        "X-MiroFish-Project-Id": request.project_id,
+        "X-MiroFish-Run-Id": request.run_id,
+        "X-MiroFish-Module-Key": request.module_key
+      },
       metadata: {
         tenant_id: request.tenant_id,
         project_id: request.project_id,

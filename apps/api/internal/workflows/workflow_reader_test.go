@@ -52,6 +52,32 @@ func TestSQLWorkflowReaderReadsPersistedWorkflowRunWithinTenant(t *testing.T) {
 	}
 }
 
+func TestSQLWorkflowReaderUsesTenantContextForRLSProtectedRuns(t *testing.T) {
+	queryer := &recordingTenantWriterEventQueryer{
+		rows: &fakeWriterEventRows{values: [][]any{{
+			"run-rls", "character_dialogue", "project-1", "completed", 100,
+			"character dialogue completed", "", "",
+			"2026-07-10T01:00:00Z", "2026-07-10T01:01:00Z",
+		}}},
+	}
+	reader := NewSQLWorkflowReader(SQLWorkflowReaderConfig{Queryer: queryer})
+
+	run, err := reader.GetWorkflowRun(context.Background(), GetWorkflowRunInput{
+		TenantID: "tenant-rls",
+		RunID:    "run-rls",
+	})
+
+	if err != nil {
+		t.Fatalf("get RLS-protected workflow run: %v", err)
+	}
+	if queryer.plainCalled || queryer.tenantID != "tenant-rls" {
+		t.Fatalf("workflow reader bypassed tenant query context: %#v", queryer)
+	}
+	if run.RunID != "run-rls" || run.Status != "completed" {
+		t.Fatalf("unexpected workflow run: %#v", run)
+	}
+}
+
 func TestSQLWorkflowReaderReturnsNotFoundForMissingRun(t *testing.T) {
 	queryer := &recordingWriterEventQueryer{rows: &fakeWriterEventRows{}}
 	reader := NewSQLWorkflowReader(SQLWorkflowReaderConfig{Queryer: queryer})

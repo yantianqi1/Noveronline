@@ -15,6 +15,13 @@ from urllib.request import Request, urlopen
 from temporalio import activity, workflow
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.seed.pdf_ocr import (
+    PdfOcrBackend,
+    PdfOcrBackendUnconfiguredError,
+    PdfOcrError,
+    PdfOcrProviderError,
+    configured_pdf_ocr_backend,
+)
 from mirofish_agents.seed.sequential_reader import LLMFacilityError
 
 
@@ -43,10 +50,6 @@ SENSITIVE_WORKFLOW_EVENT_KEYS = {
     "segment_object_key",
     "source_object_key",
 }
-
-
-class PdfOcrBackendUnconfiguredError(Exception):
-    pass
 
 
 SENSITIVE_ARCHIVE_CANDIDATE_KEYS = {
@@ -194,11 +197,25 @@ class SeedSegmentRetryStatusWriter(Protocol):
         *,
         context: AgentContext,
         segment_ids: list[str],
+        retry_attempt_id: str | None = None,
+        worker_attempt: int = 1,
         status: str,
         code: str | None = None,
         message: str | None = None,
     ) -> None:
         """Persist per-segment retry request lifecycle status for the current run."""
+
+
+class SeedSegmentRetryStore(SeedSegmentRetryStatusWriter, Protocol):
+    def claim_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None = None,
+        worker_attempt: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Claim requested retry rows and return same-run text segment refs."""
 
 
 class _UnavailableWorkflowRunStatusWriter:
@@ -569,6 +586,12 @@ class PostgresWorkflowEventWriter:
                     ),
                 )
             connection.commit()
+            # Keep workflow_runs.progress monotonic with stage events for Overview polling.
+            if event_type in {"seed.stage.completed", "seed.stage.pending"}:
+                stage = str(sanitized_payload.get("stage") or "")
+                phase = "completed" if event_type.endswith("completed") else "pending"
+                if stage:
+                    _bump_seed_stage_progress(context=context, stage=stage, phase=phase)
         except Exception:
             _rollback_postgres_connection(connection)
             raise
@@ -735,6 +758,24 @@ class PostgresSeedWorkflowRunStatusWriter:
             result=None,
             code=None,
             message=None,
+            progress=5,
+        )
+
+    def mark_stage_progress(
+        self,
+        *,
+        context: AgentContext,
+        stage: str,
+        status: str = "running",
+        message: str | None = None,
+    ) -> None:
+        self._update_status(
+            context=context,
+            status=status if status in {"queued", "running", "completed", "failed", "cancelled"} else "running",
+            result=None,
+            code=None,
+            message=message or f"seed stage {stage}",
+            progress=_seed_stage_progress(stage, terminal=status in {"completed", "failed"}),
         )
 
     def mark_completed(
@@ -774,12 +815,19 @@ class PostgresSeedWorkflowRunStatusWriter:
         result: dict[str, Any] | None,
         code: str | None,
         message: str | None,
+        progress: int | None = None,
     ) -> None:
         if context.project_id is None:
             raise LLMFacilityError("WORKFLOW_RUN_NOT_FOUND", "seed workflow admission parent row is missing")
         encoded_result = json.dumps(result, ensure_ascii=False, separators=(",", ":")) if result is not None else None
         connection = self._connect()
         missing_parent = False
+        resolved_progress = progress
+        if resolved_progress is None:
+            if status in {"completed", "failed"}:
+                resolved_progress = 100
+            elif status == "running":
+                resolved_progress = 5
         try:
             with connection.cursor() as cursor:
                 _set_postgres_tenant_context(cursor, context)
@@ -787,7 +835,11 @@ class PostgresSeedWorkflowRunStatusWriter:
                     """WITH workflow_update AS (
                          UPDATE workflow_runs
                             SET status = %s,
-                                progress = CASE WHEN %s IN ('completed', 'failed') THEN 100 ELSE progress END,
+                                progress = CASE
+                                  WHEN %s IN ('completed', 'failed') THEN 100
+                                  WHEN %s::int IS NULL THEN progress
+                                  ELSE GREATEST(progress, LEAST(%s::int, 99))
+                                END,
                                 message = %s,
                                 result_jsonb = CASE
                                   WHEN %s::jsonb IS NULL THEN result_jsonb
@@ -806,6 +858,8 @@ class PostgresSeedWorkflowRunStatusWriter:
                     (
                         status,
                         status,
+                        resolved_progress,
+                        resolved_progress,
                         _seed_workflow_status_message(status, result, message),
                         encoded_result,
                         encoded_result,
@@ -840,6 +894,511 @@ class PostgresSeedWorkflowRunStatusWriter:
             connection.close()
         if missing_parent:
             raise LLMFacilityError("WORKFLOW_RUN_NOT_FOUND", "seed workflow admission parent row is missing")
+
+
+class PostgresSeedSegmentRetryStore:
+    def __init__(self, *, connect: Callable[[], Any]) -> None:
+        self._connect = connect
+
+    @classmethod
+    def from_database_url(cls, database_url: str) -> "PostgresSeedSegmentRetryStore":
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover - depends on optional runtime packaging
+            raise RuntimeError("psycopg is required for DATABASE_URL seed segment retry persistence") from exc
+
+        return cls(connect=lambda: psycopg.connect(database_url, row_factory=dict_row))
+
+    def claim_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None = None,
+        worker_attempt: int = 1,
+    ) -> list[dict[str, Any]]:
+        normalized_segment_ids = _required_segment_retry_context(context, segment_ids)
+        normalized_retry_attempt_id = _required_segment_retry_attempt_id(retry_attempt_id)
+        normalized_worker_attempt = _required_segment_retry_worker_attempt(worker_attempt)
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                cursor.execute(
+                    """WITH retry_context AS (
+                         SELECT
+                           %s::uuid[] AS segment_ids,
+                           %s::uuid AS tenant_id,
+                           %s::uuid AS project_id,
+                           %s::uuid AS run_id,
+                           %s::uuid AS retry_attempt_id,
+                           %s::integer AS worker_attempt
+                       ),
+                       requested_segments AS (
+                         SELECT DISTINCT unnest(retry_context.segment_ids) AS segment_id
+                         FROM retry_context
+                       ),
+                       eligible_retries AS (
+                         SELECT retry_requests.segment_id
+                         FROM seed_segment_retry_requests AS retry_requests
+                         JOIN requested_segments
+                           ON requested_segments.segment_id = retry_requests.segment_id
+                         JOIN text_segments
+                           ON text_segments.tenant_id = retry_requests.tenant_id
+                          AND text_segments.project_id = retry_requests.project_id
+                          AND text_segments.run_id = retry_requests.run_id
+                          AND text_segments.segment_id = retry_requests.segment_id
+                         WHERE retry_requests.tenant_id = (SELECT tenant_id FROM retry_context)
+                           AND retry_requests.project_id = (SELECT project_id FROM retry_context)
+                           AND retry_requests.run_id = (SELECT run_id FROM retry_context)
+                           AND retry_requests.retry_attempt_id = (SELECT retry_attempt_id FROM retry_context)
+                           AND (
+                             retry_requests.status = 'requested'
+                             OR (
+                               retry_requests.status = 'running'
+                               AND retry_requests.worker_attempt < (SELECT worker_attempt FROM retry_context)
+                             )
+                           )
+                         FOR UPDATE OF retry_requests SKIP LOCKED
+                       ),
+                       claim_guard AS (
+                         SELECT
+                           cardinality((SELECT segment_ids FROM retry_context)) AS requested_count,
+                           (SELECT COUNT(*) FROM eligible_retries) AS eligible_count
+                       ),
+                       claimed_retries AS (
+                         UPDATE seed_segment_retry_requests AS retry_requests
+                            SET status = 'running',
+                                attempts = attempts + 1,
+                                worker_attempt = (SELECT worker_attempt FROM retry_context),
+                                last_error_code = NULL,
+                                last_error_message = NULL,
+                                updated_at = now()
+                           FROM eligible_retries, claim_guard
+                          WHERE retry_requests.tenant_id = (SELECT tenant_id FROM retry_context)
+                            AND retry_requests.project_id = (SELECT project_id FROM retry_context)
+                            AND retry_requests.run_id = (SELECT run_id FROM retry_context)
+                            AND retry_requests.segment_id = eligible_retries.segment_id
+                            AND claim_guard.requested_count = claim_guard.eligible_count
+                         RETURNING retry_requests.segment_id
+                       )
+                       SELECT
+                         text_segments.segment_id::text AS segment_id,
+                         text_segments.segment_order,
+                         text_segments.chapter_guess,
+                         text_segments.title_guess,
+                         text_segments.object_key
+                       FROM claimed_retries
+                       JOIN text_segments
+                         ON text_segments.tenant_id = (SELECT tenant_id FROM retry_context)
+                        AND text_segments.project_id = (SELECT project_id FROM retry_context)
+                        AND text_segments.run_id = (SELECT run_id FROM retry_context)
+                        AND text_segments.segment_id = claimed_retries.segment_id
+                       ORDER BY text_segments.segment_order ASC""",
+                    (
+                        normalized_segment_ids,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        normalized_retry_attempt_id,
+                        normalized_worker_attempt,
+                    ),
+                )
+                rows = cursor.fetchall()
+            connection.commit()
+            return [_segment_retry_reference_from_row(row) for row in rows]
+        except LLMFacilityError:
+            _rollback_postgres_connection(connection)
+            raise
+        except Exception as exc:
+            _rollback_postgres_connection(connection)
+            raise LLMFacilityError(
+                "SEED_SEGMENT_RETRY_CLAIM_FAILED",
+                "seed segment retry claim failed",
+            ) from exc
+        finally:
+            connection.close()
+
+    def mark_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None = None,
+        worker_attempt: int = 1,
+        status: str,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        normalized_segment_ids = _required_segment_retry_context(context, segment_ids)
+        normalized_retry_attempt_id = _required_segment_retry_attempt_id(retry_attempt_id)
+        normalized_worker_attempt = _required_segment_retry_worker_attempt(worker_attempt)
+        normalized_status = _required_segment_retry_status(status)
+        public_code, public_message = _segment_retry_status_error(normalized_status, code, message)
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                cursor.execute(
+                    """UPDATE seed_segment_retry_requests
+                          SET status = %s,
+                              last_error_code = %s,
+                              last_error_message = %s,
+                              updated_at = now()
+                        WHERE tenant_id = %s
+                          AND project_id = %s
+                          AND run_id = %s
+                          AND segment_id = ANY(%s::uuid[])
+                          AND retry_attempt_id = %s::uuid
+                          AND worker_attempt = %s
+                          AND status = 'running'""",
+                    (
+                        normalized_status,
+                        public_code,
+                        public_message,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        normalized_segment_ids,
+                        normalized_retry_attempt_id,
+                        normalized_worker_attempt,
+                    ),
+                )
+                if getattr(cursor, "rowcount", len(normalized_segment_ids)) != len(normalized_segment_ids):
+                    raise LLMFacilityError(
+                        "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED",
+                        "seed segment retry status write failed",
+                    )
+            connection.commit()
+        except LLMFacilityError:
+            _rollback_postgres_connection(connection)
+            raise
+        except Exception as exc:
+            _rollback_postgres_connection(connection)
+            raise LLMFacilityError(
+                "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED",
+                "seed segment retry status write failed",
+            ) from exc
+        finally:
+            connection.close()
+
+    def complete_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None,
+        worker_attempt: int,
+        requested_count: int,
+        segment_count: int,
+        note_count: int,
+        model_id: str | None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "stage": "segment_retry",
+            "status": "completed",
+            "requested_count": requested_count,
+            "segment_count": segment_count,
+            "note_count": note_count,
+        }
+        if model_id is not None:
+            payload["model_id"] = model_id
+        self._finish_seed_segment_retries(
+            context=context,
+            segment_ids=segment_ids,
+            retry_attempt_id=retry_attempt_id,
+            worker_attempt=worker_attempt,
+            status="completed",
+            code=None,
+            message=None,
+            event_type="seed.segments.retry_completed",
+            event_payload=payload,
+        )
+
+    def complete_seed_segment_retry_notes(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None,
+        worker_attempt: int,
+        pass_id: str,
+        module_key: str | None,
+        model_id: str | None,
+        notes: list[dict[str, Any]],
+    ) -> None:
+        payload: dict[str, object] = {
+            "stage": "segment_retry",
+            "status": "completed",
+            "requested_count": len(segment_ids),
+            "segment_count": len(segment_ids),
+            "note_count": len(notes),
+        }
+        if model_id is not None:
+            payload["model_id"] = model_id
+        normalized_retry_attempt_id = _required_segment_retry_attempt_id(retry_attempt_id)
+        self._finish_seed_segment_retries(
+            context=context,
+            segment_ids=segment_ids,
+            retry_attempt_id=normalized_retry_attempt_id,
+            worker_attempt=worker_attempt,
+            status="completed",
+            code=None,
+            message=None,
+            event_type="seed.segments.retry_completed",
+            event_payload=payload,
+            reading_notes_write={
+                "pass_id": _required_text_value(pass_id, "pass_id"),
+                "module_key": module_key,
+                "model_id": model_id,
+                "notes": notes,
+                "metadata_jsonb": {
+                    "retry": True,
+                    "last_retry_segment_count": len(segment_ids),
+                    "last_retry_attempt_id": normalized_retry_attempt_id,
+                },
+            },
+        )
+
+    def fail_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None,
+        worker_attempt: int,
+        requested_count: int,
+        segment_count: int | None,
+        code: str,
+        message: str,
+    ) -> None:
+        payload: dict[str, object] = {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": requested_count,
+            "error_code": code,
+            "error_message": message,
+        }
+        if segment_count is not None:
+            payload["segment_count"] = segment_count
+        self._finish_seed_segment_retries(
+            context=context,
+            segment_ids=segment_ids,
+            retry_attempt_id=retry_attempt_id,
+            worker_attempt=worker_attempt,
+            status="failed",
+            code=code,
+            message=message,
+            event_type="seed.segments.retry_failed",
+            event_payload=payload,
+        )
+
+    def _finish_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None,
+        worker_attempt: int,
+        status: str,
+        code: str | None,
+        message: str | None,
+        event_type: str,
+        event_payload: dict[str, object],
+        reading_notes_write: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_segment_ids = _required_segment_retry_context(context, segment_ids)
+        normalized_retry_attempt_id = _required_segment_retry_attempt_id(retry_attempt_id)
+        normalized_worker_attempt = _required_segment_retry_worker_attempt(worker_attempt)
+        normalized_status = _required_segment_retry_status(status)
+        public_code, public_message = _segment_retry_status_error(normalized_status, code, message)
+        encoded_payload = json.dumps(
+            _sanitize_workflow_event_payload(event_payload),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                self._lock_seed_segment_retry_finish_scope(
+                    cursor,
+                    context=context,
+                    segment_ids=normalized_segment_ids,
+                    retry_attempt_id=normalized_retry_attempt_id,
+                    worker_attempt=normalized_worker_attempt,
+                )
+                if reading_notes_write is not None:
+                    _record_reading_notes_on_cursor(
+                        cursor,
+                        context=context,
+                        pass_id=reading_notes_write["pass_id"],
+                        pass_type="sequential_reading",
+                        status="completed",
+                        module_key=reading_notes_write["module_key"],
+                        model_id=reading_notes_write["model_id"],
+                        notes=reading_notes_write["notes"],
+                        metadata_jsonb=reading_notes_write["metadata_jsonb"],
+                    )
+                self._update_finished_seed_segment_retries(
+                    cursor,
+                    context=context,
+                    segment_ids=normalized_segment_ids,
+                    retry_attempt_id=normalized_retry_attempt_id,
+                    worker_attempt=normalized_worker_attempt,
+                    status=normalized_status,
+                    code=public_code,
+                    message=public_message,
+                )
+                self._insert_seed_segment_retry_event(
+                    cursor,
+                    context=context,
+                    event_type=event_type,
+                    encoded_payload=encoded_payload,
+                )
+            connection.commit()
+        except LLMFacilityError:
+            _rollback_postgres_connection(connection)
+            raise
+        except Exception as exc:
+            _rollback_postgres_connection(connection)
+            raise LLMFacilityError(
+                "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED",
+                "seed segment retry completion write failed",
+            ) from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _lock_seed_segment_retry_finish_scope(
+        cursor: Any,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str,
+        worker_attempt: int,
+    ) -> None:
+        cursor.execute(
+            """WITH requested_segments AS (
+                 SELECT unnest(%s::uuid[]) AS segment_id
+               )
+               SELECT retry_requests.segment_id::text AS segment_id
+               FROM requested_segments
+               JOIN seed_segment_retry_requests AS retry_requests
+                 ON retry_requests.segment_id = requested_segments.segment_id
+               JOIN workflow_runs
+                 ON workflow_runs.tenant_id = retry_requests.tenant_id
+                AND workflow_runs.project_id = retry_requests.project_id
+                AND workflow_runs.run_id = retry_requests.run_id
+                AND workflow_runs.workflow_type = 'seed_pipeline'
+               WHERE retry_requests.tenant_id = %s
+                 AND retry_requests.project_id = %s
+                 AND retry_requests.run_id = %s
+                 AND retry_requests.retry_attempt_id = %s::uuid
+                 AND retry_requests.worker_attempt = %s
+                 AND retry_requests.status = 'running'
+               ORDER BY retry_requests.segment_id
+               FOR UPDATE OF retry_requests, workflow_runs""",
+            (
+                segment_ids,
+                context.tenant_id,
+                context.project_id,
+                context.run_id,
+                retry_attempt_id,
+                worker_attempt,
+            ),
+        )
+        if not _seed_segment_retry_rows_match(cursor.fetchall(), segment_ids):
+            _raise_seed_segment_retry_completion_write_failed()
+
+    @staticmethod
+    def _update_finished_seed_segment_retries(
+        cursor: Any,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str,
+        worker_attempt: int,
+        status: str,
+        code: str | None,
+        message: str | None,
+    ) -> None:
+        cursor.execute(
+            """UPDATE seed_segment_retry_requests
+                  SET status = %s,
+                      last_error_code = %s,
+                      last_error_message = %s,
+                      updated_at = now()
+                WHERE tenant_id = %s
+                  AND project_id = %s
+                  AND run_id = %s
+                  AND segment_id = ANY(%s::uuid[])
+                  AND retry_attempt_id = %s::uuid
+                  AND worker_attempt = %s
+                  AND status = 'running'
+              RETURNING segment_id::text AS segment_id""",
+            (
+                status,
+                code,
+                message,
+                context.tenant_id,
+                context.project_id,
+                context.run_id,
+                segment_ids,
+                retry_attempt_id,
+                worker_attempt,
+            ),
+        )
+        if not _seed_segment_retry_rows_match(cursor.fetchall(), segment_ids):
+            _raise_seed_segment_retry_completion_write_failed()
+
+    @staticmethod
+    def _insert_seed_segment_retry_event(
+        cursor: Any,
+        *,
+        context: AgentContext,
+        event_type: str,
+        encoded_payload: str,
+    ) -> None:
+        cursor.execute(
+            """INSERT INTO workflow_events (
+                 tenant_id, run_id, workflow_type, project_id, event_type, sequence, payload_jsonb
+               )
+               SELECT
+                 %s, %s, 'seed_pipeline', %s, %s,
+                 COALESCE(MAX(sequence), 0) + 1,
+                 %s::jsonb
+               FROM workflow_events
+               WHERE tenant_id = %s
+                 AND run_id = %s""",
+            (
+                context.tenant_id,
+                context.run_id,
+                context.project_id,
+                event_type,
+                encoded_payload,
+                context.tenant_id,
+                context.run_id,
+            ),
+        )
+        if getattr(cursor, "rowcount", 1) != 1:
+            _raise_seed_segment_retry_completion_write_failed()
+
+
+def _raise_seed_segment_retry_completion_write_failed() -> None:
+    raise LLMFacilityError(
+        "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED",
+        "seed segment retry completion write failed",
+    )
+
+
+def _seed_segment_retry_rows_match(rows: list[Any], segment_ids: list[str]) -> bool:
+    try:
+        returned_segment_ids = [str(row["segment_id"]) for row in rows]
+    except (KeyError, TypeError):
+        return False
+    return len(returned_segment_ids) == len(segment_ids) and set(returned_segment_ids) == set(segment_ids)
 
 
 class PostgresTextSegmentWriter:
@@ -920,7 +1479,7 @@ class PostgresTextSegmentWriter:
 def _set_postgres_tenant_context(cursor: Any, context: AgentContext) -> None:
     cursor.execute(
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        (context.tenant_id, context.project_id),
+        (context.tenant_id, context.actor_user_id),
     )
 
 
@@ -966,59 +1525,113 @@ class PostgresReadingNotesWriter:
         try:
             with connection.cursor() as cursor:
                 _set_postgres_tenant_context(cursor, context)
-                cursor.execute(
-                    """INSERT INTO reading_passes (
-                         tenant_id, project_id, run_id, pass_id, pass_type, status,
-                         module_key, model_id, metadata_jsonb
-                       )
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                       ON CONFLICT (pass_id)
-                       DO UPDATE SET
-                         pass_type = EXCLUDED.pass_type,
-                         status = EXCLUDED.status,
-                         module_key = EXCLUDED.module_key,
-                         model_id = EXCLUDED.model_id,
-                         metadata_jsonb = EXCLUDED.metadata_jsonb,
-                         updated_at = now()""",
-                    (
-                        context.tenant_id,
-                        context.project_id,
-                        context.run_id,
-                        normalized_pass_id,
-                        _required_text_value(pass_type, "pass_type"),
-                        _required_text_value(status, "status"),
-                        module_key,
-                        model_id,
-                        _json_object(metadata_jsonb or {}),
-                    ),
+                _record_reading_notes_on_cursor(
+                    cursor,
+                    context=context,
+                    pass_id=normalized_pass_id,
+                    pass_type=pass_type,
+                    status=status,
+                    module_key=module_key,
+                    model_id=model_id,
+                    notes=notes,
+                    metadata_jsonb=metadata_jsonb,
                 )
-                for note in notes:
-                    cursor.execute(
-                        """INSERT INTO reading_segment_notes (
-                             tenant_id, project_id, run_id, segment_id, pass_id, payload_jsonb, summary
-                           )
-                           VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
-                           ON CONFLICT (tenant_id, run_id, segment_id, pass_id)
-                           DO UPDATE SET
-                             payload_jsonb = EXCLUDED.payload_jsonb,
-                             summary = EXCLUDED.summary,
-                             updated_at = now()""",
-                        (
-                            context.tenant_id,
-                            context.project_id,
-                            context.run_id,
-                            _required_note_segment_id(note),
-                            normalized_pass_id,
-                            _note_payload_json(note),
-                            _optional_text(note, "summary"),
-                        ),
-                    )
             connection.commit()
         except Exception:
             _rollback_postgres_connection(connection)
             raise
         finally:
             connection.close()
+
+
+def _record_reading_notes_on_cursor(
+    cursor: Any,
+    *,
+    context: AgentContext,
+    pass_id: str,
+    pass_type: str,
+    status: str,
+    module_key: str | None,
+    model_id: str | None,
+    notes: list[dict[str, Any]],
+    metadata_jsonb: dict[str, Any] | None,
+) -> None:
+    cursor.execute(
+        """INSERT INTO reading_passes (
+             tenant_id, project_id, run_id, pass_id, pass_type, status,
+             module_key, model_id, metadata_jsonb
+           )
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+           ON CONFLICT (pass_id)
+           DO UPDATE SET
+             pass_type = EXCLUDED.pass_type,
+             status = EXCLUDED.status,
+             module_key = EXCLUDED.module_key,
+             model_id = EXCLUDED.model_id,
+             metadata_jsonb = reading_passes.metadata_jsonb || EXCLUDED.metadata_jsonb,
+             updated_at = now()
+           WHERE reading_passes.tenant_id = EXCLUDED.tenant_id
+             AND reading_passes.project_id = EXCLUDED.project_id
+             AND reading_passes.run_id = EXCLUDED.run_id
+           RETURNING reading_passes.pass_id""",
+        (
+            context.tenant_id,
+            context.project_id,
+            context.run_id,
+            pass_id,
+            _required_text_value(pass_type, "pass_type"),
+            _required_text_value(status, "status"),
+            module_key,
+            model_id,
+            _json_object(metadata_jsonb or {}),
+        ),
+    )
+    if cursor.fetchone() is None:
+        raise RuntimeError("reading pass scope write failed")
+    for note in notes:
+        cursor.execute(
+            """INSERT INTO reading_segment_notes (
+                 tenant_id, project_id, run_id, segment_id, pass_id, payload_jsonb, summary
+               )
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+               ON CONFLICT (tenant_id, run_id, segment_id, pass_id)
+               DO UPDATE SET
+                 payload_jsonb = EXCLUDED.payload_jsonb,
+                 summary = EXCLUDED.summary,
+                 updated_at = now()""",
+            (
+                context.tenant_id,
+                context.project_id,
+                context.run_id,
+                _required_note_segment_id(note),
+                pass_id,
+                _note_payload_json(note),
+                _optional_text(note, "summary"),
+            ),
+        )
+    cursor.execute(
+        """UPDATE reading_passes AS reading_pass
+              SET metadata_jsonb = reading_pass.metadata_jsonb || jsonb_build_object(
+                    'segment_count',
+                    (
+                      SELECT COUNT(*)
+                      FROM reading_segment_notes AS reading_note
+                      WHERE reading_note.tenant_id = reading_pass.tenant_id
+                        AND reading_note.project_id = reading_pass.project_id
+                        AND reading_note.run_id = reading_pass.run_id
+                        AND reading_note.pass_id = reading_pass.pass_id
+                    )
+                  ),
+                  updated_at = now()
+            WHERE reading_pass.tenant_id = %s
+              AND reading_pass.project_id = %s
+              AND reading_pass.run_id = %s
+              AND reading_pass.pass_id = %s
+           RETURNING reading_pass.pass_id""",
+        (context.tenant_id, context.project_id, context.run_id, pass_id),
+    )
+    if cursor.fetchone() is None:
+        raise RuntimeError("reading pass segment count update failed")
 
 
 class PostgresSeedAnalysisWriter:
@@ -2059,9 +2672,22 @@ class PostgresSeedAssetIndexer:
                    AND source_run_id::text = %s
                  ON CONFLICT (tenant_id, project_id, source_kind, source_ref, asset_type, title)
                  DO UPDATE SET
-                   summary = EXCLUDED.summary,
-                   content_text = EXCLUDED.content_text,
-                   payload_jsonb = EXCLUDED.payload_jsonb,
+                   summary = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.summary
+                     ELSE assets.summary
+                   END,
+                   content_text = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.content_text
+                     ELSE assets.content_text
+                   END,
+                   payload_jsonb = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.payload_jsonb
+                     ELSE assets.payload_jsonb
+                   END,
+                   enabled = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN true
+                     ELSE assets.enabled
+                   END,
                    updated_at = now()
                  RETURNING asset_id
                )
@@ -2106,9 +2732,22 @@ class PostgresSeedAssetIndexer:
                    AND source_run_id::text = %s
                  ON CONFLICT (tenant_id, project_id, source_kind, source_ref, asset_type, title)
                  DO UPDATE SET
-                   summary = EXCLUDED.summary,
-                   content_text = EXCLUDED.content_text,
-                   payload_jsonb = EXCLUDED.payload_jsonb,
+                   summary = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.summary
+                     ELSE assets.summary
+                   END,
+                   content_text = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.content_text
+                     ELSE assets.content_text
+                   END,
+                   payload_jsonb = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.payload_jsonb
+                     ELSE assets.payload_jsonb
+                   END,
+                   enabled = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN true
+                     ELSE assets.enabled
+                   END,
                    updated_at = now()
                  RETURNING asset_id
                )
@@ -2152,9 +2791,22 @@ class PostgresSeedAssetIndexer:
                    AND run_id::text = %s
                  ON CONFLICT (tenant_id, project_id, source_kind, source_ref, asset_type, title)
                  DO UPDATE SET
-                   summary = EXCLUDED.summary,
-                   content_text = EXCLUDED.content_text,
-                   payload_jsonb = EXCLUDED.payload_jsonb,
+                   summary = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.summary
+                     ELSE assets.summary
+                   END,
+                   content_text = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.content_text
+                     ELSE assets.content_text
+                   END,
+                   payload_jsonb = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.payload_jsonb
+                     ELSE assets.payload_jsonb
+                   END,
+                   enabled = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN true
+                     ELSE assets.enabled
+                   END,
                    updated_at = now()
                  RETURNING asset_id
                )
@@ -2198,9 +2850,22 @@ class PostgresSeedAssetIndexer:
                    AND source_run_id::text = %s
                  ON CONFLICT (tenant_id, project_id, source_kind, source_ref, asset_type, title)
                  DO UPDATE SET
-                   summary = EXCLUDED.summary,
-                   content_text = EXCLUDED.content_text,
-                   payload_jsonb = EXCLUDED.payload_jsonb,
+                   summary = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.summary
+                     ELSE assets.summary
+                   END,
+                   content_text = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.content_text
+                     ELSE assets.content_text
+                   END,
+                   payload_jsonb = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.payload_jsonb
+                     ELSE assets.payload_jsonb
+                   END,
+                   enabled = CASE
+                     WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN true
+                     ELSE assets.enabled
+                   END,
                    updated_at = now()
                  RETURNING asset_id
                )
@@ -2237,6 +2902,7 @@ class PostgresSeedAssetIndexer:
                    AND project_id = %s
                    AND source_kind = 'seed_pipeline'
                    AND payload_jsonb->>'source_run_id' = %s
+                   AND enabled = true
                  ON CONFLICT (tenant_id, project_id, source, source_ref)
                  DO UPDATE SET
                    entity_type = EXCLUDED.entity_type,
@@ -2290,14 +2956,24 @@ class PostgresProjectReadinessUpdater:
                              FROM entities
                              WHERE tenant_id = %s
                                AND project_id = %s
-                               AND source_run_id::text = %s
+                               AND (
+                                 source_run_id::text = %s
+                                 OR metadata_jsonb @> jsonb_build_object(
+                                   'observed_source_run_ids', jsonb_build_array(%s::text)
+                                 )
+                               )
                            ) AS ready_entity_count,
                            (
                              SELECT count(*)::int
                              FROM relationships
                              WHERE tenant_id = %s
                                AND project_id = %s
-                               AND source_run_id::text = %s
+                               AND (
+                                 source_run_id::text = %s
+                                 OR metadata_jsonb @> jsonb_build_object(
+                                   'observed_source_run_ids', jsonb_build_array(%s::text)
+                                 )
+                               )
                            ) AS ready_relationship_count,
                            (
                              SELECT count(*)::int
@@ -2340,8 +3016,10 @@ class PostgresProjectReadinessUpdater:
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
+                        context.run_id,
                         context.tenant_id,
                         context.project_id,
+                        context.run_id,
                         context.run_id,
                         context.tenant_id,
                         context.project_id,
@@ -2544,7 +3222,17 @@ class PostgresRuntimeFactsWriter:
                  importance = COALESCE(EXCLUDED.importance, entities.importance),
                  state_summary = COALESCE(EXCLUDED.state_summary, entities.state_summary),
                  first_seen_segment_id = COALESCE(entities.first_seen_segment_id, EXCLUDED.first_seen_segment_id),
-                 metadata_jsonb = entities.metadata_jsonb || EXCLUDED.metadata_jsonb,
+                 metadata_jsonb = jsonb_set(
+                   entities.metadata_jsonb || (EXCLUDED.metadata_jsonb - 'observed_source_run_ids'),
+                   '{observed_source_run_ids}',
+                   CASE
+                     WHEN COALESCE(entities.metadata_jsonb->'observed_source_run_ids', '[]'::jsonb)
+                          @> (EXCLUDED.metadata_jsonb->'observed_source_run_ids')
+                     THEN COALESCE(entities.metadata_jsonb->'observed_source_run_ids', '[]'::jsonb)
+                     ELSE COALESCE(entities.metadata_jsonb->'observed_source_run_ids', '[]'::jsonb)
+                          || (EXCLUDED.metadata_jsonb->'observed_source_run_ids')
+                   END
+                 ),
                  updated_at = now()
                RETURNING entity_id""",
             (
@@ -2556,7 +3244,12 @@ class PostgresRuntimeFactsWriter:
                 entity["importance"],
                 entity["state_summary"],
                 segment_id,
-                _json_object({"source": "sequential_reading"}),
+                _json_object(
+                    {
+                        "source": "sequential_reading",
+                        "observed_source_run_ids": [context.run_id],
+                    }
+                ),
             ),
         )
         row = cursor.fetchone()
@@ -2632,12 +3325,23 @@ class PostgresRuntimeFactsWriter:
                  relationship_type, summary, source_run_id, first_seen_segment_id,
                  evidence_text, metadata_jsonb
                )
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '{}'::jsonb)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                ON CONFLICT (tenant_id, project_id, source_entity_name, target_entity_name, relationship_type)
                DO UPDATE SET
                  summary = COALESCE(EXCLUDED.summary, relationships.summary),
                  first_seen_segment_id = COALESCE(relationships.first_seen_segment_id, EXCLUDED.first_seen_segment_id),
                  evidence_text = COALESCE(EXCLUDED.evidence_text, relationships.evidence_text),
+                 metadata_jsonb = jsonb_set(
+                   relationships.metadata_jsonb || (EXCLUDED.metadata_jsonb - 'observed_source_run_ids'),
+                   '{observed_source_run_ids}',
+                   CASE
+                     WHEN COALESCE(relationships.metadata_jsonb->'observed_source_run_ids', '[]'::jsonb)
+                          @> (EXCLUDED.metadata_jsonb->'observed_source_run_ids')
+                     THEN COALESCE(relationships.metadata_jsonb->'observed_source_run_ids', '[]'::jsonb)
+                     ELSE COALESCE(relationships.metadata_jsonb->'observed_source_run_ids', '[]'::jsonb)
+                          || (EXCLUDED.metadata_jsonb->'observed_source_run_ids')
+                   END
+                 ),
                  updated_at = now()""",
             (
                 context.tenant_id,
@@ -2649,6 +3353,7 @@ class PostgresRuntimeFactsWriter:
                 context.run_id,
                 segment_id,
                 relationship["evidence"],
+                _json_object({"observed_source_run_ids": [context.run_id]}),
             ),
         )
 
@@ -3841,6 +4546,60 @@ def _mark_seed_workflow_running(
     return True
 
 
+def _seed_stage_progress(stage: str, *, terminal: bool = False) -> int:
+    """Monotonic public progress for Overview while Seed activities advance."""
+    order = {
+        "parse_file": 12,
+        "segment_text": 24,
+        "sequential_reading": 42,
+        "persist_runtime_facts": 52,
+        "global_aggregation": 62,
+        "story_ontology": 72,
+        "entity_resolution": 80,
+        "agent_profiles": 86,
+        "archive_candidates": 92,
+        "index_assets": 96,
+        "finalize": 100,
+    }
+    if terminal or stage == "finalize":
+        return 100
+    return int(order.get(str(stage or "").strip(), 8))
+
+
+def _bump_seed_stage_progress(
+    *,
+    context: AgentContext,
+    stage: str,
+    phase: str = "completed",
+) -> None:
+    """Best-effort progress write; never fails the Seed activity on status drift."""
+    try:
+        writer = _workflow_status_writer_from_env()
+    except Exception:
+        return
+    if writer is None or not hasattr(writer, "mark_stage_progress"):
+        return
+    try:
+        # Intermediate stage completions keep workflow status=running with rising progress.
+        workflow_status = "running"
+        message = f"seed stage {stage} {phase}"
+        if phase == "pending":
+            # Slightly below completed value so UI shows movement when stage starts.
+            progress = max(5, _seed_stage_progress(stage) - 4)
+            writer._update_status(  # noqa: SLF001 - internal status path used by worker only
+                context=context,
+                status=workflow_status,
+                result=None,
+                code=None,
+                message=message,
+                progress=progress,
+            )
+            return
+        writer.mark_stage_progress(context=context, stage=stage, status=workflow_status, message=message)
+    except Exception:
+        return
+
+
 def _mark_seed_workflow_completed(
     writer: WorkflowRunStatusWriter | None,
     *,
@@ -3858,6 +4617,8 @@ def _mark_seed_segment_retries(
     *,
     context: AgentContext,
     segment_ids: list[str],
+    retry_attempt_id: str | None = None,
+    worker_attempt: int = 1,
     status: str,
     code: str | None = None,
     message: str | None = None,
@@ -3867,6 +4628,8 @@ def _mark_seed_segment_retries(
     writer.mark_seed_segment_retries(
         context=context,
         segment_ids=segment_ids,
+        retry_attempt_id=retry_attempt_id,
+        worker_attempt=worker_attempt,
         status=status,
         code=code,
         message=message,
@@ -3888,6 +4651,260 @@ def _normalized_segment_retry_ids(value: Any) -> list[str]:
         seen.add(normalized)
         segment_ids.append(normalized)
     return segment_ids
+
+
+def _required_segment_retry_context(
+    context: AgentContext,
+    segment_ids: list[str],
+) -> list[str]:
+    if context.project_id is None:
+        raise LLMFacilityError("VALIDATION_FAILED", "project_id is required for seed segment retry")
+    normalized_segment_ids = _normalized_segment_retry_ids(segment_ids)
+    if not normalized_segment_ids or len(normalized_segment_ids) != len(segment_ids):
+        raise LLMFacilityError("VALIDATION_FAILED", "segment_ids are invalid")
+    try:
+        for segment_id in normalized_segment_ids:
+            uuid.UUID(segment_id)
+    except (ValueError, AttributeError) as exc:
+        raise LLMFacilityError("VALIDATION_FAILED", "segment_ids are invalid") from exc
+    return normalized_segment_ids
+
+
+def _required_segment_retry_status(value: str) -> str:
+    normalized = _required_text_value(value, "status")
+    if normalized not in {"running", "completed", "failed", "cancelled"}:
+        raise LLMFacilityError("VALIDATION_FAILED", "seed segment retry status is invalid")
+    return normalized
+
+
+def _required_segment_retry_attempt_id(value: str | None) -> str:
+    if not isinstance(value, str):
+        raise LLMFacilityError("VALIDATION_FAILED", "retry_attempt_id is invalid")
+    try:
+        normalized = _required_text_value(value, "retry_attempt_id")
+        uuid.UUID(normalized)
+    except (ValueError, AttributeError) as exc:
+        raise LLMFacilityError("VALIDATION_FAILED", "retry_attempt_id is invalid") from exc
+    return normalized
+
+
+def _required_segment_retry_worker_attempt(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise LLMFacilityError("VALIDATION_FAILED", "seed segment retry worker attempt is invalid")
+    return value
+
+
+def _segment_retry_worker_attempt() -> int:
+    try:
+        attempt = activity.info().attempt
+    except Exception:
+        return 1
+    return attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0 else 1
+
+
+def _segment_retry_status_error(
+    status: str,
+    code: str | None,
+    message: str | None,
+) -> tuple[str | None, str | None]:
+    _ = message
+    if status not in {"failed", "cancelled"}:
+        return None, None
+    allowed_codes = {
+        "LLM_MODULE_UNBOUND",
+        "LLM_CREDENTIAL_KEY_UNCONFIGURED",
+        "LLM_CREDENTIAL_KEY_INVALID",
+        "LLM_CREDENTIAL_UNAVAILABLE",
+        "LLM_CREDENTIAL_DECRYPT_FAILED",
+        "LLM_CONCURRENCY_LIMITED",
+        "OBJECT_STORAGE_BACKEND_MISCONFIGURED",
+        "LLM_PROVIDER_ERROR",
+        "SCHEMA_VALIDATION_FAILED",
+        "READING_NOTES_WRITE_FAILED",
+        "READING_NOTES_WRITER_UNCONFIGURED",
+        "LLM_READER_UNCONFIGURED",
+        "SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND",
+        "SEED_SEGMENT_RETRY_STORE_UNCONFIGURED",
+        "SEED_SEGMENT_RETRY_CLAIM_FAILED",
+        "SEED_SEGMENT_RETRY_CANON_OWNERSHIP_CONFLICT",
+        "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED",
+        "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED",
+        "SEED_SEGMENT_RETRY_PROJECTION_WRITE_FAILED",
+        "WORKFLOW_EVENT_WRITE_FAILED",
+    }
+    normalized_code = code.strip() if isinstance(code, str) else ""
+    if normalized_code not in allowed_codes:
+        normalized_code = "SEED_SEGMENT_RETRY_FAILED"
+    return normalized_code, _public_segment_retry_error_message(normalized_code)
+
+
+def _segment_retry_reference_from_row(row: Any) -> dict[str, Any]:
+    return {
+        key: value
+        for key in ("segment_id", "segment_order", "chapter_guess", "title_guess", "object_key")
+        if (value := _row_get(row, key)) is not None
+    }
+
+
+def _validate_segment_retry_claims(
+    *,
+    segment_refs: list[dict[str, Any]],
+    segment_ids: list[str],
+) -> None:
+    requested_ids = set(segment_ids)
+    claimed_ids: list[str] = []
+    for segment_ref in segment_refs:
+        segment_id = segment_ref.get("segment_id")
+        object_key = segment_ref.get("object_key")
+        if not isinstance(segment_id, str) or not segment_id.strip():
+            raise ValueError("claimed segment_id is required")
+        if not isinstance(object_key, str) or not object_key.strip():
+            raise ValueError("claimed segment object_key is required")
+        claimed_ids.append(segment_id.strip())
+    if len(claimed_ids) != len(set(claimed_ids)):
+        raise LookupError("duplicate claimed segment retry rows")
+    if set(claimed_ids) != requested_ids:
+        raise LookupError("claimed segment retry rows do not match requested segments")
+
+
+def _public_segment_retry_error_message(code: str) -> str:
+    if code == "LLM_MODULE_UNBOUND":
+        return "LLM module is not bound"
+    if code == "SCHEMA_VALIDATION_FAILED":
+        return "segment retry output schema validation failed"
+    if code == "READING_NOTES_WRITE_FAILED":
+        return "reading notes write failed"
+    if code == "READING_NOTES_WRITER_UNCONFIGURED":
+        return "reading notes writer is unconfigured"
+    if code == "LLM_READER_UNCONFIGURED":
+        return "LLM reader is unconfigured"
+    if code == "SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND":
+        return "seed segment retry request not found"
+    if code == "SEED_SEGMENT_RETRY_STORE_UNCONFIGURED":
+        return "seed segment retry store is not configured"
+    if code == "SEED_SEGMENT_RETRY_CLAIM_FAILED":
+        return "seed segment retry claim failed"
+    if code == "SEED_SEGMENT_RETRY_CANON_OWNERSHIP_CONFLICT":
+        return "seed segment retry canon ownership conflict"
+    if code == "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED":
+        return "seed segment retry status write failed"
+    if code == "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED":
+        return "seed segment retry completion write failed"
+    if code == "SEED_SEGMENT_RETRY_PROJECTION_WRITE_FAILED":
+        return "seed segment retry projection write failed"
+    if code == "SEED_SEGMENT_RETRY_FAILED":
+        return "seed segment retry failed"
+    return _public_llm_error_message(code)
+
+
+def _segment_retry_failed_result(
+    *,
+    context: AgentContext,
+    requested_count: int,
+    segment_count: int | None,
+    code: str,
+    message: str,
+    retry_store: SeedSegmentRetryStore | None,
+    segment_ids: list[str],
+    workflow_event_writer: WorkflowEventWriter | None,
+    retry_attempt_id: str | None = None,
+    worker_attempt: int = 1,
+) -> dict[str, Any]:
+    public_code, public_message = _segment_retry_status_error("failed", code, message)
+    if public_code is None or public_message is None:
+        public_code = "SEED_SEGMENT_RETRY_FAILED"
+        public_message = _public_segment_retry_error_message(public_code)
+    atomic_failure_writer = getattr(retry_store, "fail_seed_segment_retries", None)
+    if retry_attempt_id is not None and callable(atomic_failure_writer):
+        try:
+            atomic_failure_writer(
+                context=context,
+                segment_ids=segment_ids,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+                requested_count=requested_count,
+                segment_count=segment_count,
+                code=public_code,
+                message=public_message,
+            )
+        except Exception:
+            return {
+                "stage": "segment_retry",
+                "status": "failed",
+                "requested_count": requested_count,
+                **({"segment_count": segment_count} if segment_count is not None else {}),
+                "error": {
+                    "code": "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED",
+                    "message": "seed segment retry completion write failed",
+                },
+                "retry_status_persisted": False,
+                "stage_event_persisted": False,
+            }
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": requested_count,
+            **({"segment_count": segment_count} if segment_count is not None else {}),
+            "error": {"code": public_code, "message": public_message},
+            "retry_status_persisted": True,
+            "stage_event_persisted": True,
+        }
+    try:
+        retry_status_persisted = _mark_seed_segment_retries(
+            retry_store,
+            context=context,
+            segment_ids=segment_ids,
+            retry_attempt_id=retry_attempt_id,
+            worker_attempt=worker_attempt,
+            status="failed",
+            code=public_code,
+            message=public_message,
+        )
+    except Exception:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": requested_count,
+            **({"segment_count": segment_count} if segment_count is not None else {}),
+            "error": {
+                "code": "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED",
+                "message": "seed segment retry status write failed",
+            },
+            "retry_status_persisted": False,
+        }
+    try:
+        stage_event_persisted = _record_failed_segment_retry_event(
+            context=context,
+            requested_count=requested_count,
+            segment_count=segment_count,
+            error_code=public_code,
+            error_message=public_message,
+            workflow_event_writer=workflow_event_writer,
+        )
+    except Exception:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": requested_count,
+            **({"segment_count": segment_count} if segment_count is not None else {}),
+            "error": {
+                "code": "WORKFLOW_EVENT_WRITE_FAILED",
+                "message": "workflow event write failed",
+            },
+            "retry_status_persisted": retry_status_persisted,
+        }
+    return {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": requested_count,
+        **({"segment_count": segment_count} if segment_count is not None else {}),
+        "error": {
+            "code": public_code,
+            "message": public_message,
+        },
+        "retry_status_persisted": retry_status_persisted,
+        "stage_event_persisted": stage_event_persisted,
+    }
 
 
 def _required_artifact_type(value: str) -> str:
@@ -3992,6 +5009,17 @@ def _workflow_status_writer_from_env() -> WorkflowRunStatusWriter | None:
     return PostgresSeedWorkflowRunStatusWriter.from_database_url(database_url)
 
 
+def _seed_segment_retry_store_from_env() -> SeedSegmentRetryStore | None:
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        return None
+    from mirofish_agents.temporal.seed_retry_projection import (
+        PostgresSeedSegmentRetryProjectionStore,
+    )
+
+    return PostgresSeedSegmentRetryProjectionStore.from_database_url(database_url)
+
+
 def _text_segment_writer_from_env() -> TextSegmentWriter | None:
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if not database_url:
@@ -4035,7 +5063,6 @@ def _global_aggregator_from_env(
     )
     from mirofish_agents.seed.sequential_reader import (
         AesGcmCredentialDecryptor,
-        OpenAICompatibleJSONClient,
         PostgresCredentialProvider,
         PostgresModuleBindingResolver,
     )
@@ -4056,7 +5083,11 @@ def _global_aggregator_from_env(
     return LLMFacilityGlobalAggregator(
         binding_resolver=binding_resolver,
         credential_provider=credential_provider,
-        chat_client=OpenAICompatibleJSONClient(http_request=http_request),
+        chat_client=_seed_chat_client(
+            database_url=database_url,
+            connect=connect,
+            http_request=http_request,
+        ),
         aggregate_source=aggregate_source,
     )
 
@@ -4071,7 +5102,6 @@ def _ontology_runner_from_env(
         return None
     from mirofish_agents.seed.sequential_reader import (
         AesGcmCredentialDecryptor,
-        OpenAICompatibleJSONClient,
         PostgresCredentialProvider,
         PostgresModuleBindingResolver,
     )
@@ -4092,7 +5122,11 @@ def _ontology_runner_from_env(
     return LLMFacilityOntologyRunner(
         binding_resolver=binding_resolver,
         credential_provider=credential_provider,
-        chat_client=OpenAICompatibleJSONClient(http_request=http_request),
+        chat_client=_seed_chat_client(
+            database_url=database_url,
+            connect=connect,
+            http_request=http_request,
+        ),
         ontology_snapshot_writer=ontology_snapshot_writer,
     )
 
@@ -4107,7 +5141,6 @@ def _entity_resolution_runner_from_env(
         return None
     from mirofish_agents.seed.sequential_reader import (
         AesGcmCredentialDecryptor,
-        OpenAICompatibleJSONClient,
         PostgresCredentialProvider,
         PostgresModuleBindingResolver,
     )
@@ -4128,7 +5161,11 @@ def _entity_resolution_runner_from_env(
     return LLMFacilityEntityResolutionRunner(
         binding_resolver=binding_resolver,
         credential_provider=credential_provider,
-        chat_client=OpenAICompatibleJSONClient(http_request=http_request),
+        chat_client=_seed_chat_client(
+            database_url=database_url,
+            connect=connect,
+            http_request=http_request,
+        ),
         entity_resolution_snapshot_writer=entity_resolution_snapshot_writer,
     )
 
@@ -4143,7 +5180,6 @@ def _agent_profile_runner_from_env(
         return None
     from mirofish_agents.seed.sequential_reader import (
         AesGcmCredentialDecryptor,
-        OpenAICompatibleJSONClient,
         PostgresCredentialProvider,
         PostgresModuleBindingResolver,
     )
@@ -4166,7 +5202,11 @@ def _agent_profile_runner_from_env(
     return LLMFacilityAgentProfileRunner(
         binding_resolver=binding_resolver,
         credential_provider=credential_provider,
-        chat_client=OpenAICompatibleJSONClient(http_request=http_request),
+        chat_client=_seed_chat_client(
+            database_url=database_url,
+            connect=connect,
+            http_request=http_request,
+        ),
         agent_profile_snapshot_writer=agent_profile_snapshot_writer,
         agent_profile_context_loader=agent_profile_context_loader,
     )
@@ -4177,7 +5217,6 @@ def _archive_candidate_runner_from_env() -> ArchiveCandidateRunner | None:
     if not database_url:
         return None
     from mirofish_agents.seed.sequential_reader import (
-        OpenAICompatibleJSONClient,
         PostgresCredentialProvider,
         PostgresModuleBindingResolver,
     )
@@ -4188,7 +5227,7 @@ def _archive_candidate_runner_from_env() -> ArchiveCandidateRunner | None:
             database_url=database_url,
             key_material=os.environ.get("LLM_CREDENTIAL_ENCRYPTION_KEY"),
         ),
-        chat_client=OpenAICompatibleJSONClient(),
+        chat_client=_seed_chat_client(database_url=database_url),
         archive_candidate_writer=PostgresArchiveCandidateWriter.from_database_url(database_url),
     )
 
@@ -4229,7 +5268,6 @@ def _sequential_reader_from_env(
     from mirofish_agents.seed.sequential_reader import (
         AesGcmCredentialDecryptor,
         LLMFacilitySequentialReader,
-        OpenAICompatibleJSONClient,
         PostgresCredentialProvider,
         PostgresModuleBindingResolver,
     )
@@ -4248,8 +5286,32 @@ def _sequential_reader_from_env(
     return LLMFacilitySequentialReader(
         binding_resolver=binding_resolver,
         credential_provider=credential_provider,
-        chat_client=OpenAICompatibleJSONClient(http_request=http_request),
+        chat_client=_seed_chat_client(
+            database_url=database_url,
+            connect=connect,
+            http_request=http_request,
+        ),
         segment_text_store=text_store,
+    )
+
+
+def _seed_chat_client(
+    *,
+    database_url: str,
+    connect: Callable[[], Any] | None = None,
+    http_request: Callable[[Request], bytes] | None = None,
+) -> Any:
+    from mirofish_agents.seed.sequential_reader import OpenAICompatibleJSONClient
+
+    # Explicit connections are test seams whose scripted cursors predate quota tables.
+    if connect is not None:
+        return OpenAICompatibleJSONClient(http_request=http_request)
+    from mirofish_agents.llm_quota import PostgresQuotaStore, ProviderQuotaGate, QuotaAwareJSONChatClient
+    from mirofish_agents.seed.quota_chat_client import SeedQuotaAwareJSONChatClient
+
+    return SeedQuotaAwareJSONChatClient(
+        quota_gate=ProviderQuotaGate(PostgresQuotaStore.from_database_url(database_url)),
+        provider_client=QuotaAwareJSONChatClient(http_request=http_request),
     )
 
 
@@ -4294,22 +5356,54 @@ def _record_failed_segment_retry_event(
     *,
     context: AgentContext,
     requested_count: int,
+    segment_count: int | None = None,
     error_code: str,
     error_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
 ) -> bool:
     if workflow_event_writer is None:
         return False
+    payload: dict[str, object] = {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": requested_count,
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+    if segment_count is not None:
+        payload["segment_count"] = segment_count
     workflow_event_writer.record_workflow_event(
         context=context,
         event_type="seed.segments.retry_failed",
-        payload={
-            "stage": "segment_retry",
-            "status": "failed",
-            "requested_count": requested_count,
-            "error_code": error_code,
-            "error_message": error_message,
-        },
+        payload=payload,
+    )
+    return True
+
+
+def _record_completed_segment_retry_event(
+    *,
+    context: AgentContext,
+    requested_count: int,
+    segment_count: int,
+    note_count: int,
+    model_id: str | None,
+    workflow_event_writer: WorkflowEventWriter | None,
+) -> bool:
+    if workflow_event_writer is None:
+        return False
+    payload: dict[str, object] = {
+        "stage": "segment_retry",
+        "status": "completed",
+        "requested_count": requested_count,
+        "segment_count": segment_count,
+        "note_count": note_count,
+    }
+    if model_id is not None:
+        payload["model_id"] = model_id
+    workflow_event_writer.record_workflow_event(
+        context=context,
+        event_type="seed.segments.retry_completed",
+        payload=payload,
     )
     return True
 
@@ -4362,9 +5456,25 @@ def _extract_pdf_text(source_bytes: bytes) -> str:
     page_texts = [(page.extract_text() or "").strip() for page in reader.pages]
     extracted_text = "\n\n".join(text for text in page_texts if text)
     if not extracted_text.strip():
-        raise PdfOcrBackendUnconfiguredError(
-            "OCR backend is not configured for scanned PDF"
-        )
+        raise PdfOcrBackendUnconfiguredError()
+    return extracted_text
+
+
+def _extract_pdf_ocr_text(
+    source_bytes: bytes,
+    pdf_ocr_backend: PdfOcrBackend | None,
+) -> str:
+    backend = pdf_ocr_backend if pdf_ocr_backend is not None else configured_pdf_ocr_backend()
+    if backend is None:
+        raise PdfOcrBackendUnconfiguredError()
+    try:
+        extracted_text = backend.extract_text(source_bytes).strip()
+    except PdfOcrError:
+        raise
+    except Exception as exc:
+        raise PdfOcrProviderError() from exc
+    if not extracted_text:
+        raise PdfOcrProviderError()
     return extracted_text
 
 
@@ -5459,6 +6569,7 @@ def parse_file_activity(
     source_status_writer: SourceFileStatusWriter | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
     workflow_status_writer: WorkflowRunStatusWriter | None = None,
+    pdf_ocr_backend: PdfOcrBackend | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -5611,17 +6722,20 @@ def parse_file_activity(
     try:
         extracted_text = _extract_source_text(source_bytes, mime_type)
     except PdfOcrBackendUnconfiguredError:
-        return _parse_file_failed_result(
-            base=base,
-            context=context,
-            source_file_id=normalized_source_file_id,
-            code="OCR_BACKEND_UNCONFIGURED",
-            message="OCR backend is not configured for scanned PDF",
-            public_message="OCR backend is not configured for scanned PDF",
-            workflow_event_writer=workflow_event_writer,
-            source_status_writer=status_writer,
-            workflow_status_writer=workflow_status_writer,
-        )
+        try:
+            extracted_text = _extract_pdf_ocr_text(source_bytes, pdf_ocr_backend)
+        except PdfOcrError as exc:
+            return _parse_file_failed_result(
+                base=base,
+                context=context,
+                source_file_id=normalized_source_file_id,
+                code=exc.code,
+                message=exc.public_message,
+                public_message=exc.public_message,
+                workflow_event_writer=workflow_event_writer,
+                source_status_writer=status_writer,
+                workflow_status_writer=workflow_status_writer,
+            )
     except (UnicodeDecodeError, ValueError, PyPdfError):
         return _parse_file_failed_result(
             base=base,
@@ -7155,12 +8269,21 @@ def seed_pipeline_activity(
 @activity.defn
 def seed_segment_retry_activity(
     payload: dict[str, Any],
+    retry_store: SeedSegmentRetryStore | None = None,
+    llm_reader: SequentialReadingReader | None = None,
+    reading_notes_writer: ReadingNotesWriter | None = None,
     retry_status_writer: SeedSegmentRetryStatusWriter | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
-    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     segment_ids = _normalized_segment_retry_ids(payload.get("segment_ids"))
+    retry_attempt_id_value = payload.get("retry_attempt_id")
+    retry_attempt_id = (
+        retry_attempt_id_value.strip()
+        if isinstance(retry_attempt_id_value, str) and retry_attempt_id_value.strip()
+        else None
+    )
+    worker_attempt = _segment_retry_worker_attempt()
     error_code = "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED"
     error_message = "seed segment retry runner is not configured"
     if context.workflow_type != "seed_pipeline":
@@ -7194,6 +8317,428 @@ def seed_segment_retry_activity(
             },
         }
 
+    try:
+        writer = _resolved_workflow_event_writer(workflow_event_writer)
+    except Exception:
+        return {
+            "stage": "segment_retry",
+            "status": "failed",
+            "requested_count": len(segment_ids),
+            "error": {
+                "code": "WORKFLOW_EVENT_WRITE_FAILED",
+                "message": "workflow event write failed",
+            },
+        }
+
+    if retry_store is None:
+        try:
+            retry_store = _seed_segment_retry_store_from_env()
+        except Exception:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=None,
+                code="SEED_SEGMENT_RETRY_STORE_UNCONFIGURED",
+                message="seed segment retry store is not configured",
+                retry_store=None,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+            )
+
+    if retry_store is not None:
+        try:
+            claimed_segments = retry_store.claim_seed_segment_retries(
+                context=context,
+                segment_ids=segment_ids,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        except LLMFacilityError as exc:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=None,
+                code=exc.code,
+                message=exc.message,
+                retry_store=None,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+            )
+        except Exception:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=None,
+                code="SEED_SEGMENT_RETRY_CLAIM_FAILED",
+                message="seed segment retry claim failed",
+                retry_store=None,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+            )
+        if not claimed_segments:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=0,
+                code="SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND",
+                message="seed segment retry request not found",
+                retry_store=None,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+            )
+        try:
+            segment_refs = [_sanitize_segment_reference(segment) for segment in claimed_segments]
+            _validate_segment_retry_claims(segment_refs=segment_refs, segment_ids=segment_ids)
+        except LookupError:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(claimed_segments),
+                code="SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND",
+                message="seed segment retry request not found",
+                retry_store=None,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+            )
+        except Exception:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(claimed_segments),
+                code="SCHEMA_VALIDATION_FAILED",
+                message="segment retry segment refs are invalid",
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        atomic_notes_completion_writer = getattr(
+            retry_store,
+            "complete_seed_segment_retry_notes",
+            None,
+        )
+        notes_writer: ReadingNotesWriter | None = None
+        if retry_attempt_id is None or not callable(atomic_notes_completion_writer):
+            try:
+                notes_writer = (
+                    reading_notes_writer
+                    if reading_notes_writer is not None
+                    else _reading_notes_writer_from_env()
+                )
+            except Exception:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code="READING_NOTES_WRITER_UNCONFIGURED",
+                    message="reading notes writer is unconfigured",
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+            if notes_writer is None:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code="READING_NOTES_WRITER_UNCONFIGURED",
+                    message="reading notes writer is unconfigured",
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+        if llm_reader is not None:
+            reader = llm_reader
+        else:
+            try:
+                reader = _sequential_reader_from_env()
+            except LLMFacilityError as exc:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code=exc.code,
+                    message=exc.message,
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+            except Exception:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code="LLM_READER_UNCONFIGURED",
+                    message="LLM reader is unconfigured",
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+        if reader is None:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code="LLM_READER_UNCONFIGURED",
+                message="LLM reader is unconfigured",
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        try:
+            reading_result = reader.read_segments(
+                context=context,
+                module_key="sequential_reading",
+                segments=segment_refs,
+            )
+        except LLMFacilityError as exc:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code=exc.code,
+                message=exc.message,
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        except Exception:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code="LLM_PROVIDER_ERROR",
+                message="sequential reading provider failed",
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        if not isinstance(reading_result, dict):
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code="SCHEMA_VALIDATION_FAILED",
+                message="segment retry output schema validation failed",
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        if reading_result.get("status") != "completed":
+            error = reading_result.get("error") if isinstance(reading_result.get("error"), dict) else {}
+            code = error.get("code") if isinstance(error.get("code"), str) else "LLM_PROVIDER_ERROR"
+            message = error.get("message") if isinstance(error.get("message"), str) else "sequential reading failed"
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code=code,
+                message=message,
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        try:
+            validated_result = _validated_sequential_reading_result(
+                reading_result,
+                segment_refs=segment_refs,
+                require_all_segments=True,
+            )
+        except ValueError:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code="SCHEMA_VALIDATION_FAILED",
+                message="segment retry output schema validation failed",
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        notes = validated_result["notes"]
+        if retry_attempt_id is not None and callable(atomic_notes_completion_writer):
+            try:
+                atomic_notes_completion_writer(
+                    context=context,
+                    segment_ids=segment_ids,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                    pass_id=validated_result["pass_id"],
+                    module_key=validated_result["module_key"],
+                    model_id=validated_result["model_id"],
+                    notes=notes,
+                )
+            except LLMFacilityError as exc:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code=exc.code,
+                    message=exc.message,
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+            except Exception:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code="SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED",
+                    message="seed segment retry completion write failed",
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+            return {
+                "stage": "segment_retry",
+                "status": "completed",
+                "requested_count": len(segment_ids),
+                "segment_count": len(segment_refs),
+                "note_count": len(notes),
+                "retry_status_persisted": True,
+                "stage_event_persisted": True,
+            }
+        retry_metadata: dict[str, Any] = {
+            "retry": True,
+            "last_retry_segment_count": len(segment_refs),
+        }
+        if retry_attempt_id is not None:
+            retry_metadata["last_retry_attempt_id"] = retry_attempt_id
+        try:
+            if notes_writer is None:
+                raise RuntimeError("reading notes writer is unconfigured")
+            notes_writer.record_reading_notes(
+                context=context,
+                pass_id=validated_result["pass_id"],
+                pass_type="sequential_reading",
+                status="completed",
+                module_key=validated_result["module_key"],
+                model_id=validated_result["model_id"],
+                notes=notes,
+                metadata_jsonb=retry_metadata,
+            )
+        except Exception:
+            return _segment_retry_failed_result(
+                context=context,
+                requested_count=len(segment_ids),
+                segment_count=len(segment_refs),
+                code="READING_NOTES_WRITE_FAILED",
+                message="reading notes write failed",
+                retry_store=retry_store,
+                segment_ids=segment_ids,
+                workflow_event_writer=writer,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+            )
+        atomic_completion_writer = getattr(retry_store, "complete_seed_segment_retries", None)
+        if retry_attempt_id is not None and callable(atomic_completion_writer):
+            try:
+                atomic_completion_writer(
+                    context=context,
+                    segment_ids=segment_ids,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    note_count=len(notes),
+                    model_id=validated_result["model_id"],
+                )
+            except Exception:
+                return _segment_retry_failed_result(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    code="SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED",
+                    message="seed segment retry completion write failed",
+                    retry_store=retry_store,
+                    segment_ids=segment_ids,
+                    workflow_event_writer=writer,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                )
+            retry_status_persisted = True
+            stage_event_persisted = True
+        else:
+            try:
+                retry_status_persisted = _mark_seed_segment_retries(
+                    retry_store,
+                    context=context,
+                    segment_ids=segment_ids,
+                    retry_attempt_id=retry_attempt_id,
+                    worker_attempt=worker_attempt,
+                    status="completed",
+                )
+            except Exception:
+                return {
+                    "stage": "segment_retry",
+                    "status": "failed",
+                    "requested_count": len(segment_ids),
+                    "segment_count": len(segment_refs),
+                    "error": {
+                        "code": "SEED_SEGMENT_RETRY_STATUS_WRITE_FAILED",
+                        "message": "seed segment retry status write failed",
+                    },
+                    "retry_status_persisted": False,
+                    "stage_event_persisted": False,
+                }
+            try:
+                stage_event_persisted = _record_completed_segment_retry_event(
+                    context=context,
+                    requested_count=len(segment_ids),
+                    segment_count=len(segment_refs),
+                    note_count=len(notes),
+                    model_id=validated_result["model_id"],
+                    workflow_event_writer=writer,
+                )
+            except Exception:
+                return {
+                    "stage": "segment_retry",
+                    "status": "failed",
+                    "requested_count": len(segment_ids),
+                    "segment_count": len(segment_refs),
+                    "error": {
+                        "code": "WORKFLOW_EVENT_WRITE_FAILED",
+                        "message": "workflow event write failed",
+                    },
+                    "retry_status_persisted": retry_status_persisted,
+                    "stage_event_persisted": False,
+                }
+        return {
+            "stage": "segment_retry",
+            "status": "completed",
+            "requested_count": len(segment_ids),
+            "segment_count": len(segment_refs),
+            "note_count": len(notes),
+            "retry_status_persisted": retry_status_persisted,
+            "stage_event_persisted": stage_event_persisted,
+        }
+
     retry_status_persisted = False
     try:
         retry_status_persisted = _mark_seed_segment_retries(
@@ -7217,7 +8762,6 @@ def seed_segment_retry_activity(
         }
 
     try:
-        writer = _resolved_workflow_event_writer(workflow_event_writer)
         stage_event_persisted = _record_failed_segment_retry_event(
             context=context,
             requested_count=len(segment_ids),
@@ -7237,28 +8781,6 @@ def seed_segment_retry_activity(
             "retry_status_persisted": retry_status_persisted,
         }
 
-    try:
-        if workflow_status_writer is None:
-            workflow_status_writer = _workflow_status_writer_from_env()
-        workflow_status_persisted = _mark_seed_workflow_failed(
-            workflow_status_writer,
-            context=context,
-            code=error_code,
-            message=error_message,
-        )
-    except Exception:
-        return {
-            "stage": "segment_retry",
-            "status": "failed",
-            "requested_count": len(segment_ids),
-            "error": {
-                "code": "WORKFLOW_STATUS_WRITE_FAILED",
-                "message": "seed workflow status write failed",
-            },
-            "retry_status_persisted": retry_status_persisted,
-            "stage_event_persisted": stage_event_persisted,
-        }
-
     return {
         "stage": "segment_retry",
         "status": "failed",
@@ -7269,7 +8791,6 @@ def seed_segment_retry_activity(
         },
         "retry_status_persisted": retry_status_persisted,
         "stage_event_persisted": stage_event_persisted,
-        "workflow_status_persisted": workflow_status_persisted,
     }
 
 
@@ -7690,6 +9211,7 @@ def _validated_sequential_reading_result(
     reading_result: dict[str, Any],
     *,
     segment_refs: list[dict[str, Any]],
+    require_all_segments: bool = False,
 ) -> dict[str, Any]:
     if reading_result.get("status") != "completed":
         raise ValueError("status must be completed")
@@ -7707,6 +9229,14 @@ def _validated_sequential_reading_result(
         if isinstance(segment.get("segment_id"), str) and segment["segment_id"].strip()
     }
     notes = [_validated_reading_note(note, known_segment_ids=known_segment_ids) for note in raw_notes]
+    if require_all_segments:
+        if not known_segment_ids or len(known_segment_ids) != len(segment_refs):
+            raise ValueError("segment retry requires complete segment refs")
+        note_segment_ids = [note["segment_id"] for note in notes]
+        if len(note_segment_ids) != len(set(note_segment_ids)):
+            raise ValueError("segment retry notes must not duplicate segment refs")
+        if set(note_segment_ids) != known_segment_ids:
+            raise ValueError("segment retry notes must cover every claimed segment")
     return {
         "pass_id": pass_id,
         "module_key": module_key,

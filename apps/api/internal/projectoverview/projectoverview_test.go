@@ -41,6 +41,7 @@ func TestSQLReaderGetsProjectOverviewWithTenantContextAndPublicColumns(t *testin
 				1,
 				0,
 				"2026-07-07T01:03:00Z",
+				true,
 				"failed-run-1",
 				"seed_pipeline",
 				"LLM_MODULE_UNBOUND",
@@ -92,6 +93,9 @@ func TestSQLReaderGetsProjectOverviewWithTenantContextAndPublicColumns(t *testin
 		overview.LLMLatestSyncAt != "2026-07-07T01:03:00Z" {
 		t.Fatalf("unexpected LLM model sync health counts: %#v", overview)
 	}
+	if !overview.LLMHasQuotaPolicy {
+		t.Fatalf("expected llm_has_quota_policy=true, got %#v", overview)
+	}
 	if overview.LatestFailedWorkflowRunID != "failed-run-1" ||
 		overview.LatestFailedWorkflowType != "seed_pipeline" ||
 		overview.LatestFailedWorkflowErrorCode != "LLM_MODULE_UNBOUND" ||
@@ -119,6 +123,8 @@ func TestSQLReaderGetsProjectOverviewWithTenantContextAndPublicColumns(t *testin
 		!strings.Contains(queryer.query, "required_llm_modules") ||
 		!strings.Contains(queryer.query, "writer_composer") ||
 		!strings.Contains(queryer.query, "llm_model_sync_health") ||
+		!strings.Contains(queryer.query, "llm_quota_policy_counts") ||
+		!strings.Contains(queryer.query, "llm_quota_policies") ||
 		!strings.Contains(queryer.query, "last_sync_status LIKE 'ok:%'") ||
 		!strings.Contains(queryer.query, "last_sync_at") ||
 		!strings.Contains(queryer.query, "latest_failed_workflow") ||

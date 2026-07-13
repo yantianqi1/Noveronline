@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirofish.local/contracts/writer-tool-request.schema.json",
+  "title": "Writer tool execution request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant_id",
+    "project_id",
+    "run_id",
+    "selected_asset_ids",
+    "graph_node_ids",
+    "worldline_path_ids",
+    "tool_name"
+  ],
+  "properties": {
+    "tenant_id": { "$ref": "#/$defs/nonEmptyString" },
+    "project_id": { "$ref": "#/$defs/nonEmptyString" },
+    "run_id": { "$ref": "#/$defs/nonEmptyString" },
+    "chapter_id": { "$ref": "#/$defs/nonEmptyString" },
+    "scene_id": { "$ref": "#/$defs/nonEmptyString" },
+    "selected_asset_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "graph_node_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "worldline_path_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "tool_name": {
+      "enum": [
+        "query_project_context",
+        "query_chapter_scene",
+        "query_assets",
+        "query_world_rules",
+        "query_character_profile",
+        "query_graph_neighbors",
+        "query_worldline_paths",
+        "query_manuscript_context",
+        "save_draft_revision"
+      ]
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonEmptyString" },
+      "uniqueItems": true
+    }
+  }
+}

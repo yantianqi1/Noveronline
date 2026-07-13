@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Table, delete
+from sqlalchemy import Table, delete, select
 
 from ..database import get_engine
 from ..repositories.archive_repo import ArchiveRepository
@@ -25,6 +25,7 @@ from ..tables import assets as assets_tables
 from ..tables import llm as llm_tables
 from ..tables import novel as novel_tables
 from ..tables import worldline as worldline_tables
+from ..tables import writer_runs as writer_tables
 from ..tables.base import metadata
 
 
@@ -63,6 +64,10 @@ COVERED_BY_REPO_METHODS: tuple[Table, ...] = (
 # 需要本服务主动删除的表（所有带 project_id 但不在上面清单里的）。
 # 显式列出便于审阅；有新表时必须主动追加。
 ALL_PROJECT_SCOPED_TABLES: tuple[Table, ...] = (
+    # writer_runs.py, child rows before parent runs
+    writer_tables.writer_run_events,
+    writer_tables.writer_drafts,
+    writer_tables.writer_runs,
     # archive.py 剩余
     archive_tables.archive_agent_memory,
     archive_tables.archive_agent_memory_events,
@@ -147,6 +152,16 @@ def cascade_delete_project(project_id: str) -> dict[str, int]:
 
     # 2) 剩余表：单个事务批删
     with engine.begin() as conn:
+        project_draft_ids = select(writer_tables.writer_drafts.c.draft_id).where(
+            writer_tables.writer_drafts.c.project_id == project_id,
+        )
+        result = conn.execute(
+            delete(writer_tables.writer_draft_events).where(
+                writer_tables.writer_draft_events.c.draft_id.in_(project_draft_ids),
+            ),
+        )
+        stats[writer_tables.writer_draft_events.name] = result.rowcount or 0
+
         for table in ALL_PROJECT_SCOPED_TABLES:
             result = conn.execute(
                 delete(table).where(table.c.project_id == project_id),

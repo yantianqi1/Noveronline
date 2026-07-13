@@ -3,28 +3,118 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"mirofish-novel/apps/api/internal/assetcatalog"
+	"mirofish-novel/apps/api/internal/assetdistillation"
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
+	"mirofish-novel/apps/api/internal/authrecovery"
 	"mirofish-novel/apps/api/internal/characterconsole"
+	"mirofish-novel/apps/api/internal/collaboration"
 	"mirofish-novel/apps/api/internal/httpapi"
 	"mirofish-novel/apps/api/internal/llm"
+	"mirofish-novel/apps/api/internal/llmadmin"
+	"mirofish-novel/apps/api/internal/manuscriptexport"
+	"mirofish-novel/apps/api/internal/manuscriptworkspace"
+	"mirofish-novel/apps/api/internal/observability"
+	"mirofish-novel/apps/api/internal/platformratelimit"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
+	"mirofish-novel/apps/api/internal/registration"
 	"mirofish-novel/apps/api/internal/sourcefiles"
 	"mirofish-novel/apps/api/internal/storygraph"
 	"mirofish-novel/apps/api/internal/traces"
 	"mirofish-novel/apps/api/internal/workflows"
 	"mirofish-novel/apps/api/internal/worldline"
+	"mirofish-novel/apps/api/internal/writerplanning"
+	"mirofish-novel/apps/api/internal/writerworkspace"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"go.temporal.io/sdk/client"
 )
+
+const (
+	appDatabaseMaxOpenConnections  = 4
+	authDatabaseMaxOpenConnections = 8
+	authDatabaseMaxIdleConnections = 4
+)
+
+func openAppDatabase(databaseURL string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(appDatabaseMaxOpenConnections)
+	db.SetMaxIdleConns(0)
+	db.SetConnMaxIdleTime(time.Minute)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	return db, nil
+}
+
+func openAuthDatabase(databaseURL string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(authDatabaseMaxOpenConnections)
+	db.SetMaxIdleConns(authDatabaseMaxIdleConnections)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	return db, nil
+}
+
+type authRuntime struct {
+	db                    *sql.DB
+	reader                auth.Reader
+	passwordAuthenticator auth.PasswordAuthenticator
+	passwordChanger       auth.PasswordChanger
+	registrationService   *registration.Service
+	sessionStore          auth.SessionStore
+	authorizer            auth.Authorizer
+}
+
+func newAuthRuntime(databaseURL string) (authRuntime, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		reader := auth.NewDisabledReader()
+		return authRuntime{
+			reader:              reader,
+			registrationService: registration.NewService(registration.ServiceConfig{}),
+			authorizer:          auth.NewReaderBackedAuthorizer(reader),
+		}, nil, nil
+	}
+	db, err := openAuthDatabase(databaseURL)
+	if err != nil {
+		return authRuntime{}, nil, err
+	}
+	queryer := auth.NewSQLDBQueryer(db)
+	reader := auth.NewSQLReader(auth.SQLReaderConfig{Queryer: queryer})
+	return authRuntime{
+		db:     db,
+		reader: reader,
+		passwordAuthenticator: auth.NewSQLPasswordAuthenticator(auth.SQLPasswordAuthenticatorConfig{
+			Queryer: queryer,
+			Reader:  reader,
+		}),
+		passwordChanger: auth.NewSQLPasswordChanger(auth.SQLPasswordChangerConfig{
+			Queryer: queryer,
+			Execer:  queryer,
+		}),
+		registrationService: registration.NewService(registration.ServiceConfig{DB: db}),
+		sessionStore: auth.NewSQLSessionStore(auth.SQLSessionStoreConfig{
+			Queryer: queryer,
+			Execer:  queryer,
+		}),
+		authorizer: auth.NewSQLAuthorizer(auth.SQLAuthorizerConfig{Queryer: queryer}),
+	}, db.Close, nil
+}
 
 func main() {
 	addr := os.Getenv("MIROFISH_API_ADDR")
@@ -33,39 +123,22 @@ func main() {
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 
-	authReader, closeAuthReader, err := newAuthReader(databaseURL)
+	authDependencies, closeAuthRuntime, err := newAuthRuntime(databaseURL)
 	if err != nil {
-		log.Fatalf("configure auth reader: %v", err)
+		log.Fatalf("configure auth runtime: %v", err)
 	}
-	if closeAuthReader != nil {
+	if closeAuthRuntime != nil {
 		defer func() {
-			if err := closeAuthReader(); err != nil {
-				log.Printf("close auth reader: %v", err)
+			if err := closeAuthRuntime(); err != nil {
+				log.Printf("close auth runtime: %v", err)
 			}
 		}()
 	}
-	passwordAuthenticator, closePasswordAuthenticator, err := newPasswordAuthenticator(databaseURL)
-	if err != nil {
-		log.Fatalf("configure password authenticator: %v", err)
-	}
-	if closePasswordAuthenticator != nil {
-		defer func() {
-			if err := closePasswordAuthenticator(); err != nil {
-				log.Printf("close password authenticator: %v", err)
-			}
-		}()
-	}
-	authSessionStore, closeAuthSessionStore, err := newAuthSessionStore(databaseURL)
-	if err != nil {
-		log.Fatalf("configure auth session store: %v", err)
-	}
-	if closeAuthSessionStore != nil {
-		defer func() {
-			if err := closeAuthSessionStore(); err != nil {
-				log.Printf("close auth session store: %v", err)
-			}
-		}()
-	}
+	authReader := authDependencies.reader
+	passwordAuthenticator := authDependencies.passwordAuthenticator
+	passwordChanger := authDependencies.passwordChanger
+	registrationService := authDependencies.registrationService
+	authSessionStore := authDependencies.sessionStore
 
 	writerStarter := workflows.WriterStarter(workflows.NewLocalWriterStarter())
 	writerCanceller := workflows.WriterCanceller(workflows.NewDisabledWriterCanceller())
@@ -98,9 +171,9 @@ func main() {
 			}
 		}()
 	}
-	draftReviewStore, closeDraftReview, err := newDraftReviewStore(databaseURL)
+	draftReviewReader, closeDraftReview, err := newDraftReviewStore(databaseURL)
 	if err != nil {
-		log.Fatalf("configure draft review store: %v", err)
+		log.Fatalf("configure draft review reader: %v", err)
 	}
 	if closeDraftReview != nil {
 		defer func() {
@@ -109,6 +182,20 @@ func main() {
 			}
 		}()
 	}
+	draftReviewRuntimeStore, draftReviewIssueStore, closeDraftReviewRuntime, err := newDraftReviewRuntimeStores(databaseURL)
+	if err != nil {
+		log.Fatalf("configure draft review runtime store: %v", err)
+	}
+	if closeDraftReviewRuntime != nil {
+		defer func() {
+			if err := closeDraftReviewRuntime(); err != nil {
+				log.Printf("close draft review runtime store: %v", err)
+			}
+		}()
+	}
+	draftReviewStore := workflows.DraftReviewStore(
+		workflows.NewDraftReviewRuntimeService(nil, draftReviewReader),
+	)
 	seedAdmissionStore, closeSeedAdmission, err := newSeedAdmissionStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure seed admission store: %v", err)
@@ -177,6 +264,7 @@ func main() {
 	}
 	var closeTemporal func()
 	var temporalWorkflowClient workflows.TemporalWorkflowClient
+	var temporalReadinessClient client.Client
 	if temporalAddress := os.Getenv("TEMPORAL_ADDRESS"); temporalAddress != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		temporalClient, err := client.DialContext(ctx, client.Options{
@@ -206,6 +294,17 @@ func main() {
 			writerCanceller = canceller
 		}
 		temporalWorkflowClient = temporalClient
+		temporalReadinessClient = temporalClient
+		if draftReviewRuntimeStore != nil {
+			draftReviewStore = workflows.NewDraftReviewRuntimeService(
+				workflows.NewTemporalDraftReviewStarter(workflows.TemporalDraftReviewConfig{
+					Client:         temporalClient,
+					TaskQueue:      os.Getenv("WRITER_REVIEW_TASK_QUEUE"),
+					AdmissionStore: draftReviewRuntimeStore,
+				}),
+				draftReviewReader,
+			)
+		}
 		closeTemporal = temporalClient.Close
 	}
 	if closeTemporal != nil {
@@ -226,6 +325,17 @@ func main() {
 	manuscriptReader, closeManuscriptReader, err := newManuscriptReader(databaseURL)
 	if err != nil {
 		log.Fatalf("configure manuscript reader: %v", err)
+	}
+	manuscriptArtifactExporter, closeManuscriptArtifactExporter, err := newManuscriptArtifactExporter(databaseURL)
+	if err != nil {
+		log.Fatalf("configure manuscript artifact exporter: %v", err)
+	}
+	if closeManuscriptArtifactExporter != nil {
+		defer func() {
+			if err := closeManuscriptArtifactExporter(); err != nil {
+				log.Printf("close manuscript artifact exporter: %v", err)
+			}
+		}()
 	}
 	if closeManuscriptReader != nil {
 		defer func() {
@@ -322,7 +432,11 @@ func main() {
 			}
 		}()
 	}
-	seedSegmentRetrier, closeSeedSegmentRetrier, err := newSeedSegmentRetrier(databaseURL)
+	seedSegmentRetrier, closeSeedSegmentRetrier, err := newSeedSegmentRetrier(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("SEED_TASK_QUEUE"),
+	)
 	if err != nil {
 		log.Fatalf("configure seed segment retrier: %v", err)
 	}
@@ -413,6 +527,17 @@ func main() {
 			}
 		}()
 	}
+	llmQuotaStore, closeLLMQuotaStore, err := newLLMQuotaStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure LLM quota store: %v", err)
+	}
+	if closeLLMQuotaStore != nil {
+		defer func() {
+			if err := closeLLMQuotaStore(); err != nil {
+				log.Printf("close LLM quota store: %v", err)
+			}
+		}()
+	}
 	traceReader, closeTraceReader, err := newTraceReader(databaseURL)
 	if err != nil {
 		log.Fatalf("configure agent trace reader: %v", err)
@@ -450,7 +575,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure source file object writer: %v", err)
 	}
-	assetReader, closeAssets, err := newAssetReader(databaseURL)
+	assetBundle, closeAssets, err := newAssetReaderBundle(databaseURL)
 	if err != nil {
 		log.Fatalf("configure asset reader: %v", err)
 	}
@@ -593,7 +718,11 @@ func main() {
 			}
 		}()
 	}
-	worldlineStepStarter, closeWorldlineStepStarter, err := newWorldlineStepStarter(databaseURL)
+	worldlineStepStarter, closeWorldlineStepStarter, err := newWorldlineStepStarter(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("WORLDLINE_TASK_QUEUE"),
+	)
 	if err != nil {
 		log.Fatalf("configure worldline step starter: %v", err)
 	}
@@ -601,6 +730,21 @@ func main() {
 		defer func() {
 			if err := closeWorldlineStepStarter(); err != nil {
 				log.Printf("close worldline step starter: %v", err)
+			}
+		}()
+	}
+	worldlineAutoEvolutionStarter, closeWorldlineAutoEvolutionStarter, err := newWorldlineAutoEvolutionStarter(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("WORLDLINE_TASK_QUEUE"),
+	)
+	if err != nil {
+		log.Fatalf("configure worldline auto-evolution starter: %v", err)
+	}
+	if closeWorldlineAutoEvolutionStarter != nil {
+		defer func() {
+			if err := closeWorldlineAutoEvolutionStarter(); err != nil {
+				log.Printf("close worldline auto-evolution starter: %v", err)
 			}
 		}()
 	}
@@ -659,6 +803,21 @@ func main() {
 			}
 		}()
 	}
+	worldlinePreparationStarter, closeWorldlinePreparationStarter, err := newWorldlinePreparationStarter(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("WORLDLINE_TASK_QUEUE"),
+	)
+	if err != nil {
+		log.Fatalf("configure worldline preparation starter: %v", err)
+	}
+	if closeWorldlinePreparationStarter != nil {
+		defer func() {
+			if err := closeWorldlinePreparationStarter(); err != nil {
+				log.Printf("close worldline preparation starter: %v", err)
+			}
+		}()
+	}
 	worldlineVariableStore, closeWorldlineVariableStore, err := newWorldlineVariableStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure worldline variable store: %v", err)
@@ -681,19 +840,206 @@ func main() {
 			}
 		}()
 	}
+	characterProposalStore, closeCharacterProposalStore, err := newCharacterProposalStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure character proposal store: %v", err)
+	}
+	if closeCharacterProposalStore != nil {
+		defer func() {
+			if err := closeCharacterProposalStore(); err != nil {
+				log.Printf("close character proposal store: %v", err)
+			}
+		}()
+	}
+	characterDialogueStarter, closeCharacterDialogueStarter, err := newCharacterDialogueStarter(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("CHARACTER_TASK_QUEUE"),
+	)
+	if err != nil {
+		log.Fatalf("configure character dialogue starter: %v", err)
+	}
+	if closeCharacterDialogueStarter != nil {
+		defer func() {
+			if err := closeCharacterDialogueStarter(); err != nil {
+				log.Printf("close character dialogue starter: %v", err)
+			}
+		}()
+	}
+	centralAuthorizer := authDependencies.authorizer
+	writerPlanningStarter, closeWriterPlanningStarter, err := newWriterPlanningStarter(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("WRITER_PLANNING_TASK_QUEUE"),
+	)
+	if err != nil {
+		log.Fatalf("configure writer planning starter: %v", err)
+	}
+	if closeWriterPlanningStarter != nil {
+		defer func() {
+			if err := closeWriterPlanningStarter(); err != nil {
+				log.Printf("close writer planning starter: %v", err)
+			}
+		}()
+	}
+	writerWorkspaceHandler, closeWriterWorkspaceHandler, err := newWriterWorkspaceHandler(databaseURL, centralAuthorizer, writerPlanningStarter)
+	if err != nil {
+		log.Fatalf("configure writer workspace handler: %v", err)
+	}
+	if closeWriterWorkspaceHandler != nil {
+		defer func() {
+			if err := closeWriterWorkspaceHandler(); err != nil {
+				log.Printf("close writer workspace handler: %v", err)
+			}
+		}()
+	}
+	manuscriptWorkspaceHandler, manuscriptExportHandler, closeManuscriptWorkspaceHandler, err := newManuscriptWorkspaceHandlers(
+		databaseURL,
+		os.Getenv("MANUSCRIPT_ARTIFACT_ROOT"),
+		centralAuthorizer,
+		writerStarter,
+		manuscriptArtifactExporter,
+		writerPlanningStarter,
+	)
+	if err != nil {
+		log.Fatalf("configure manuscript workspace handlers: %v", err)
+	}
+	if closeManuscriptWorkspaceHandler != nil {
+		defer func() {
+			if err := closeManuscriptWorkspaceHandler(); err != nil {
+				log.Printf("close manuscript workspace handlers: %v", err)
+			}
+		}()
+	}
+	assetCatalogHandler, closeAssetCatalogHandler, err := newAssetCatalogHandler(databaseURL, centralAuthorizer)
+	if err != nil {
+		log.Fatalf("configure asset catalog handler: %v", err)
+	}
+	if closeAssetCatalogHandler != nil {
+		defer func() {
+			if err := closeAssetCatalogHandler(); err != nil {
+				log.Printf("close asset catalog handler: %v", err)
+			}
+		}()
+	}
+	assetDistillationBundle, closeAssetDistillationHandler, err := newAssetDistillationHandler(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("WRITER_PLANNING_TASK_QUEUE"),
+		centralAuthorizer,
+	)
+	if err != nil {
+		log.Fatalf("configure asset distillation handler: %v", err)
+	}
+	if closeAssetDistillationHandler != nil {
+		defer func() {
+			if err := closeAssetDistillationHandler(); err != nil {
+				log.Printf("close asset distillation handler: %v", err)
+			}
+		}()
+	}
+	var assetDistillationHandler http.Handler
+	var distillationEnqueuer httpapi.DistillationEnqueuer
+	if assetDistillationBundle != nil {
+		assetDistillationHandler = assetDistillationBundle
+		distillationEnqueuer = assetDistillationBundle
+	}
+	metricsRegistry := observability.NewRegistry()
+	platformRateLimiter, closePlatformRateLimiter, err := newPlatformRateLimiter(
+		os.Getenv("MIROFISH_DEPLOYMENT_ENV"),
+		os.Getenv("MIROFISH_AUTH_RATE_LIMIT_REDIS_URL"),
+		os.Getenv("MIROFISH_RATE_LIMIT_KEY_SECRET"),
+		os.Getenv("MIROFISH_RATE_LIMIT_POLICIES_JSON"),
+	)
+	if err != nil {
+		log.Fatalf("configure platform rate limiter: %v", err)
+	}
+	if closePlatformRateLimiter != nil {
+		defer func() {
+			if err := closePlatformRateLimiter(); err != nil {
+				log.Printf("close platform rate limiter: %v", err)
+			}
+		}()
+	}
+	trustedClientProofVerifier, err := newTrustedClientProofVerifier(
+		os.Getenv("MIROFISH_RECOVERY_CLIENT_PROOF_SECRET"),
+		platformRateLimiter != nil,
+	)
+	if err != nil {
+		log.Fatalf("configure trusted client proof verifier: %v", err)
+	}
+	authRecoveryHandler, collaborationHandler, llmAdminHandler, recoveryDispatcher, closePlatformHandlers, err := newPlatformHandlers(
+		databaseURL,
+		os.Getenv("LLM_CREDENTIAL_ENCRYPTION_KEY"),
+		metricsRegistry,
+		platformRateLimiter,
+		trustedClientProofVerifier,
+	)
+	if err != nil {
+		log.Fatalf("configure platform handlers: %v", err)
+	}
+	if closePlatformHandlers != nil {
+		defer func() {
+			if err := closePlatformHandlers(); err != nil {
+				log.Printf("close platform handlers: %v", err)
+			}
+		}()
+	}
+	if recoveryDispatcher != nil {
+		startAuthRecoveryDispatcher(recoveryDispatcher)
+	}
+	readinessChecker, closeReadinessChecker, err := newProductionReadinessChecker(productionReadinessConfig{
+		DeploymentEnvironment:  os.Getenv("MIROFISH_DEPLOYMENT_ENV"),
+		Timeout:                os.Getenv("MIROFISH_READINESS_TIMEOUT"),
+		DatabaseURL:            databaseURL,
+		RequiredMigration:      latestRequiredMigration,
+		RequiredMigrationCount: requiredMigrationCount,
+		RedisURL:               os.Getenv("MIROFISH_AUTH_RATE_LIMIT_REDIS_URL"),
+		TemporalAddress:        os.Getenv("TEMPORAL_ADDRESS"),
+		TemporalNamespace:      temporalNamespace(),
+		TemporalClient:         temporalReadinessClient,
+		TemporalTaskQueues: []string{
+			os.Getenv("HELLO_AGENT_TASK_QUEUE"), os.Getenv("SEED_TASK_QUEUE"),
+			os.Getenv("ASSET_TASK_QUEUE"), os.Getenv("GRAPH_TASK_QUEUE"),
+			os.Getenv("WORLDLINE_TASK_QUEUE"), os.Getenv("CHARACTER_TASK_QUEUE"),
+			os.Getenv("WRITER_REVIEW_TASK_QUEUE"), os.Getenv("WRITER_PLANNING_TASK_QUEUE"),
+			os.Getenv("WRITER_TASK_QUEUE"),
+			os.Getenv("LEGACY_IMPORT_TASK_QUEUE"),
+		},
+		ObjectEndpoint:  os.Getenv("MIROFISH_OBJECT_STORAGE_ENDPOINT"),
+		ObjectBucket:    os.Getenv("MIROFISH_OBJECT_STORAGE_BUCKET"),
+		ObjectAccessKey: os.Getenv("MIROFISH_OBJECT_STORAGE_ACCESS_KEY"),
+		ObjectSecretKey: os.Getenv("MIROFISH_OBJECT_STORAGE_SECRET_KEY"),
+		ObjectUseSSL:    parseBoolEnv(os.Getenv("MIROFISH_OBJECT_STORAGE_USE_SSL")),
+	})
+	if err != nil {
+		log.Fatalf("configure production readiness: %v", err)
+	}
+	if closeReadinessChecker != nil {
+		defer func() {
+			if err := closeReadinessChecker(); err != nil {
+				log.Printf("close production readiness: %v", err)
+			}
+		}()
+	}
 
 	serverConfig := withSessionAuthSecret(httpapi.Config{
 		AuthReader:                       authReader,
 		PasswordAuthenticator:            passwordAuthenticator,
+		PasswordChanger:                  passwordChanger,
+		RegistrationService:              registrationService,
 		AuthSessionStore:                 authSessionStore,
-		Authorizer:                       auth.NewReaderBackedAuthorizer(authReader),
+		Authorizer:                       centralAuthorizer,
 		WriterStarter:                    writerStarter,
 		WriterReader:                     writerReader,
 		WriterEventReader:                writerEventReader,
 		WriterCanceller:                  writerCanceller,
 		DraftAdoptionStore:               draftAdoptionStore,
 		DraftReviewStore:                 draftReviewStore,
+		DraftReviewOwnerLookup:           draftReviewRuntimeStore,
+		DraftReviewIssueStore:            draftReviewIssueStore,
 		ManuscriptReader:                 manuscriptReader,
+		ManuscriptArtifactExporter:       manuscriptArtifactExporter,
 		WorkflowReader:                   workflowReader,
 		WorkflowEventReader:              workflowEventReader,
 		WorkflowCanceller:                workflowCanceller,
@@ -711,11 +1057,14 @@ func main() {
 		LLMModelSyncer:                   llmModelSyncer,
 		LLMSettingsReader:                llmSettingsReader,
 		LLMTelemetryReader:               llmTelemetryReader,
+		LLMQuotaStore:                    llmQuotaStore,
 		TraceReader:                      traceReader,
 		TraceExportAuditor:               traceExportAuditor,
 		SourceFileStore:                  sourceFileStore,
 		SourceFileObjectWriter:           sourceFileObjectWriter,
-		AssetReader:                      assetReader,
+		AssetReader:                      assetBundle.Reader,
+		AssetQueryEmbeddingResolver:      assetBundle.QueryEmbeddingResolver,
+		AssetSearchIndexChecker:          assetBundle.SearchIndexChecker,
 		ArchiveMemoryReader:              archiveMemoryReader,
 		ArchiveMemoryReviewStore:         archiveMemoryReviewStore,
 		AssetAdoptionStore:               assetAdoptionStore,
@@ -734,25 +1083,56 @@ func main() {
 		WorldlineSavedPathStore:          worldlineSavedPathStore,
 		WorldlineSessionStarter:          worldlineSessionStarter,
 		WorldlineStepStarter:             worldlineStepStarter,
+		WorldlineAutoEvolutionStarter:    worldlineAutoEvolutionStarter,
 		WorldlineSessionReader:           worldlineSessionReader,
 		WorldlineTimelineReader:          worldlineTimelineReader,
 		WorldlineEventReader:             worldlineEventReader,
 		WorldlineEventAdoptionStore:      worldlineEventAdoptionStore,
 		WorldlineEventMutationStore:      worldlineEventMutationStore,
 		WorldlineVariableStore:           worldlineVariableStore,
+		WorldlinePreparationStarter:      worldlinePreparationStarter,
 		WorldlinePreparationStore:        worldlinePreparationStore,
 		CharacterConsoleStore:            characterConsoleStore,
+		CharacterProposalStore:           characterProposalStore,
+		CharacterDialogueStarter:         characterDialogueStarter,
+		WriterWorkspaceHandler:           writerWorkspaceHandler,
+		ManuscriptWorkspaceHandler:       manuscriptWorkspaceHandler,
+		ManuscriptExportHandler:          manuscriptExportHandler,
+		AssetCatalogHandler:              assetCatalogHandler,
+		AssetDistillationHandler:         assetDistillationHandler,
+		DistillationEnqueuer:             distillationEnqueuer,
+		AuthRecoveryHandler:              authRecoveryHandler,
+		CollaborationHandler:             collaborationHandler,
+		LLMAdminHandler:                  llmAdminHandler,
+		RateLimiter:                      platformRateLimiter,
+		TrustedClientProofVerifier:       trustedClientProofVerifier,
+		ReadinessChecker:                 readinessChecker,
 	})
 	server := httpapi.NewServer(serverConfig)
+	rootHandler := http.NewServeMux()
+	rootHandler.Handle("/metrics", metricsRegistry.Handler())
+	rootHandler.Handle("/", metricsRegistry.Middleware(server))
 	log.Printf("mirofish api listening on %s", addr)
-	if err := http.ListenAndServe(addr, server); err != nil {
+	if err := http.ListenAndServe(addr, rootHandler); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func withSessionAuthSecret(config httpapi.Config) httpapi.Config {
 	config.SessionAuthSecret = strings.TrimSpace(os.Getenv("MIROFISH_AUTH_SESSION_SECRET"))
+	config.ForceSecureSessionCookies = isProductionLike(os.Getenv("MIROFISH_DEPLOYMENT_ENV"))
+	config.AllowDevelopmentAuth = developmentAuthAllowed(
+		os.Getenv("MIROFISH_DEPLOYMENT_ENV"),
+		os.Getenv("MIROFISH_ENABLE_DEVELOPMENT_AUTH"),
+	)
 	return config
+}
+
+func developmentAuthAllowed(deploymentEnvironment string, enabled string) bool {
+	if strings.ToLower(strings.TrimSpace(deploymentEnvironment)) != "local" {
+		return false
+	}
+	return parseBoolEnv(enabled)
 }
 
 func temporalNamespace() string {
@@ -763,11 +1143,514 @@ func temporalNamespace() string {
 	return namespace
 }
 
+func newPlatformRateLimiter(
+	deploymentEnvironment string,
+	redisURL string,
+	keySecret string,
+	policiesJSON string,
+) (platformratelimit.Limiter, func() error, error) {
+	deploymentEnvironment = strings.ToLower(strings.TrimSpace(deploymentEnvironment))
+	redisURL = strings.TrimSpace(redisURL)
+	keySecret = strings.TrimSpace(keySecret)
+	policiesJSON = strings.TrimSpace(policiesJSON)
+	configured := redisURL != "" || keySecret != "" || policiesJSON != ""
+	required := deploymentEnvironment == "production" || deploymentEnvironment == "staging"
+	if !configured {
+		if required {
+			return nil, nil, errors.New("platform rate limiter is required for staging and production")
+		}
+		return nil, nil, nil
+	}
+	if redisURL == "" || keySecret == "" || policiesJSON == "" {
+		return nil, nil, errors.New("platform rate limiter configuration is incomplete")
+	}
+	policies, err := platformratelimit.ParseProductionPolicies(policiesJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	limiter, err := platformratelimit.NewRedisLimiter(platformratelimit.Config{
+		URL:               redisURL,
+		KeyHMACSecret:     []byte(keySecret),
+		Prefix:            "mirofish:ratelimit:v1",
+		CommandTimeout:    500 * time.Millisecond,
+		ConnectTimeout:    2 * time.Second,
+		Policies:          policies,
+		RequireAllClasses: true,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return limiter, limiter.Close, nil
+}
+
+func newTrustedClientProofVerifier(keyMaterial string, required bool) (*authrecovery.ClientProofVerifier, error) {
+	keyMaterial = strings.TrimSpace(keyMaterial)
+	if keyMaterial == "" {
+		if required {
+			return nil, errors.New("trusted client proof verifier is required with platform rate limiting")
+		}
+		return nil, nil
+	}
+	return authrecovery.NewClientProofVerifier([]byte(keyMaterial), nil, 2*time.Minute)
+}
+
+type writerWorkspaceActorResolver struct{}
+
+func (writerWorkspaceActorResolver) ResolveActor(ctx context.Context, request *http.Request) (writerworkspace.Actor, error) {
+	userID, ok := httpapi.ActorUserIDFromContext(ctx)
+	if !ok {
+		return writerworkspace.Actor{}, errors.New("authenticated actor context is required")
+	}
+	return writerworkspace.Actor{
+		UserID: userID, TenantID: strings.TrimSpace(request.Header.Get("X-Tenant-Id")),
+		RequestID: strings.TrimSpace(request.Header.Get("X-Request-Id")),
+	}, nil
+}
+
+type writerWorkspaceAuthorizer struct{ base auth.Authorizer }
+
+func (a writerWorkspaceAuthorizer) Authorize(ctx context.Context, input writerworkspace.AuthorizeInput) error {
+	permission := auth.PermissionProjectRead
+	switch input.Operation {
+	case writerworkspace.OperationWrite:
+		permission = auth.PermissionCreativeWrite
+	case writerworkspace.OperationTenantPresetManage:
+		permission = auth.PermissionTenantSessionManage
+	}
+	return a.base.Authorize(ctx, auth.AuthorizeInput{
+		UserID: input.Actor.UserID, TenantID: input.Actor.TenantID, ProjectID: input.ProjectID,
+		Permission: permission, RequestID: input.Actor.RequestID,
+	})
+}
+
+type manuscriptContextResolver struct{ db *sql.DB }
+
+func (r manuscriptContextResolver) ResolveManuscriptContext(ctx context.Context, request *http.Request, projectID string) (manuscriptworkspace.Scope, error) {
+	userID, ok := httpapi.ActorUserIDFromContext(ctx)
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	projectID = strings.TrimSpace(projectID)
+	if !ok || tenantID == "" || projectID == "" || r.db == nil {
+		return manuscriptworkspace.Scope{}, errors.New("trusted manuscript context is required")
+	}
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return manuscriptworkspace.Scope{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, $2::uuid, false)", tenantID, userID); err != nil {
+		return manuscriptworkspace.Scope{}, err
+	}
+	var existingProjectID string
+	if err = tx.QueryRowContext(ctx, "SELECT project_id::text FROM projects WHERE tenant_id::text=$1 AND project_id::text=$2", tenantID, projectID).Scan(&existingProjectID); err != nil {
+		return manuscriptworkspace.Scope{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return manuscriptworkspace.Scope{}, err
+	}
+	return manuscriptworkspace.Scope{
+		TenantID: tenantID, ProjectID: existingProjectID, ActorUserID: userID,
+		RequestID: strings.TrimSpace(request.Header.Get("X-Request-Id")),
+	}, nil
+}
+
+type manuscriptAuthorizer struct{ base auth.Authorizer }
+
+func (a manuscriptAuthorizer) AuthorizeManuscript(ctx context.Context, scope manuscriptworkspace.Scope, permission string) error {
+	authPermission := auth.PermissionProjectRead
+	if permission == manuscriptworkspace.PermissionWrite {
+		authPermission = auth.PermissionCreativeWrite
+	}
+	return a.base.Authorize(ctx, auth.AuthorizeInput{
+		UserID: scope.ActorUserID, TenantID: scope.TenantID, ProjectID: scope.ProjectID,
+		Permission: authPermission, RequestID: scope.RequestID,
+	})
+}
+
+type mountedActorResolver struct{}
+
+func (mountedActorResolver) ResolveActor(ctx context.Context, _ *http.Request) (string, error) {
+	userID, ok := httpapi.ActorUserIDFromContext(ctx)
+	if !ok {
+		return "", errors.New("authenticated actor context is required")
+	}
+	return userID, nil
+}
+
+func newWriterPlanningStarter(
+	temporalClient workflows.TemporalWorkflowClient,
+	databaseURL string,
+	taskQueue string,
+) (writerplanning.Starter, func() error, error) {
+	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	store := writerplanning.NewSQLStore(db)
+	return writerplanning.NewTemporalStarter(writerplanning.TemporalConfig{
+		Client: temporalClient, Store: store, TaskQueue: taskQueue,
+	}), db.Close, nil
+}
+
+func newAssetDistillationHandler(
+	temporalClient workflows.TemporalWorkflowClient,
+	databaseURL string,
+	taskQueue string,
+	authorizer auth.Authorizer,
+) (*assetDistillationBundle, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	store := assetdistillation.NewSQLStore(db)
+	var starter assetdistillation.Starter
+	if temporalClient != nil {
+		starter = assetdistillation.NewTemporalStarter(temporalClient, store, taskQueue)
+		go runAssetDistillationDispatcher(assetdistillation.NewDispatcher(store, starter))
+	}
+	handler := assetdistillation.NewHandler(assetdistillation.HandlerConfig{
+		Store: store, Starter: starter, Actors: mountedActorResolver{},
+		Authorizer: authorizer,
+	})
+	return &assetDistillationBundle{handler: handler, enqueuer: assetdistillation.NewEnqueuer(store, starter)}, db.Close, nil
+}
+
+type assetDistillationBundle struct {
+	handler  http.Handler
+	enqueuer *assetdistillation.Enqueuer
+}
+
+func (b *assetDistillationBundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if b == nil || b.handler == nil {
+		http.Error(w, "asset distillation backend is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	b.handler.ServeHTTP(w, r)
+}
+
+func (b *assetDistillationBundle) EnqueueAfterAdoption(ctx context.Context, input httpapi.DistillationEnqueueInput) error {
+	if b == nil || b.enqueuer == nil {
+		return nil
+	}
+	return b.enqueuer.EnqueueAfterAdoption(ctx, assetdistillation.AfterAdoptionInput{
+		TenantID: input.TenantID, ProjectID: input.ProjectID, ActorUserID: input.ActorUserID,
+		RequestID: input.RequestID, BlockID: input.BlockID, ChapterID: input.ChapterID, SceneID: input.SceneID,
+	})
+}
+
+func runAssetDistillationDispatcher(dispatcher *assetdistillation.Dispatcher) {
+	if dispatcher == nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, _ = dispatcher.Tick(ctx, 20)
+		cancel()
+	}
+}
+
+func newWriterWorkspaceHandler(databaseURL string, authorizer auth.Authorizer, planning writerplanning.Starter) (http.Handler, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	store := writerworkspace.NewSQLStore(db)
+	handler := writerworkspace.NewHandler(writerworkspace.HandlerConfig{
+		Store: store, Actors: writerWorkspaceActorResolver{},
+		Authorizer: writerWorkspaceAuthorizer{base: authorizer}, OwnerLookup: store,
+		Planning: planning,
+	})
+	return handler, db.Close, nil
+}
+
+func newManuscriptWorkspaceHandlers(
+	databaseURL string,
+	artifactRoot string,
+	authorizer auth.Authorizer,
+	writerStarter workflows.WriterStarter,
+	exporter workflows.ManuscriptArtifactExporter,
+	planning writerplanning.Starter,
+) (http.Handler, http.Handler, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil, nil
+	}
+	artifactStore, err := manuscriptexport.NewFileArtifactStore(artifactRoot)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	store := manuscriptworkspace.NewSQLStore(db)
+	commandStarter := manuscriptworkspace.NewWriterCommandStarter(writerStarter)
+	commands := manuscriptworkspace.NewCommandService(store, commandStarter, commandStarter)
+	generator := manuscriptexport.NewGenerator(manuscriptexport.GeneratorConfig{
+		States: store, Exporter: exporter, Artifacts: artifactStore,
+	})
+	workspaceHandler := manuscriptworkspace.NewHandler(manuscriptworkspace.HandlerConfig{
+		Store: store, Commands: commands, CommandReader: store, Exports: store,
+		ExportGenerator: generator, Dedup: store, Resolver: manuscriptContextResolver{db: db},
+		Authorizer: manuscriptAuthorizer{base: authorizer}, Planning: planning,
+	})
+	downloadHandler := manuscriptexport.NewHandler(manuscriptexport.Config{
+		Exporter: exporter, States: store, Artifacts: artifactStore,
+		Authorizer: authorizer, ActorResolver: mountedActorResolver{},
+	})
+	return workspaceHandler, downloadHandler, db.Close, nil
+}
+
+type assetCatalogSecurityHandler struct {
+	next       http.Handler
+	authorizer auth.Authorizer
+}
+
+func (h assetCatalogSecurityHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	userID, ok := httpapi.ActorUserIDFromContext(request.Context())
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
+	if !ok || tenantID == "" || len(parts) < 5 || parts[0] != "v1" || parts[1] != "projects" || parts[3] != "asset-catalog" {
+		writeMountedHandlerError(response, http.StatusUnauthorized, auth.CodeUnauthenticated, "authentication is required")
+		return
+	}
+	projectID := strings.TrimSpace(parts[2])
+	requestID := strings.TrimSpace(request.Header.Get("X-Request-Id"))
+	baseInput := auth.AuthorizeInput{
+		UserID: userID, TenantID: tenantID, ProjectID: projectID,
+		Permission: auth.PermissionProjectRead, RequestID: requestID,
+	}
+	if h.authorizer == nil || h.authorizer.Authorize(request.Context(), baseInput) != nil {
+		writeMountedHandlerError(response, http.StatusForbidden, auth.CodeAccessDenied, "asset catalog access is required")
+		return
+	}
+	requiresManage := request.Method != http.MethodGet || request.URL.Query().Get("include_private") == "true"
+	canManage := false
+	manageInput := baseInput
+	manageInput.Permission = auth.PermissionAssetManage
+	if err := h.authorizer.Authorize(request.Context(), manageInput); err == nil {
+		canManage = true
+	} else if requiresManage {
+		writeMountedHandlerError(response, http.StatusForbidden, auth.CodeAccessDenied, "asset catalog management access is required")
+		return
+	} else if auth.ErrorCode(err) != auth.CodeAccessDenied {
+		writeMountedHandlerError(response, http.StatusServiceUnavailable, auth.CodeLookupFailed, "authorization backend is unavailable")
+		return
+	}
+	permissions := map[assetcatalog.Permission]bool{
+		assetcatalog.PermissionReadPrivate: canManage,
+		assetcatalog.PermissionMutate:      canManage,
+		assetcatalog.PermissionCollections: canManage,
+	}
+	scope := assetcatalog.RequestScope{
+		ActorID: userID, TenantID: tenantID, ProjectID: projectID, Permissions: permissions,
+	}
+	h.next.ServeHTTP(response, request.WithContext(assetcatalog.WithRequestScope(request.Context(), scope)))
+}
+
+func writeMountedHandlerError(response http.ResponseWriter, status int, code string, message string) {
+	response.Header().Set("Content-Type", "application/json")
+	response.Header().Set("Cache-Control", "private, no-store")
+	response.WriteHeader(status)
+	_, _ = response.Write([]byte(`{"error":{"code":"` + code + `","message":"` + message + `"}}`))
+}
+
+func newAssetCatalogHandler(databaseURL string, authorizer auth.Authorizer) (http.Handler, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return assetCatalogSecurityHandler{
+		next: assetcatalog.NewHandler(assetcatalog.NewSQLStore(db)), authorizer: authorizer,
+	}, db.Close, nil
+}
+
+type mountedCSRFVerifier struct{}
+
+func (mountedCSRFVerifier) VerifyCSRF(ctx context.Context, _ *http.Request) error {
+	if !httpapi.RequestCSRFVerified(ctx) {
+		return errors.New("CSRF verification is required")
+	}
+	return nil
+}
+
+type mountedTrustedClientKeyResolver struct {
+	verifier httpapi.TrustedClientProofVerifier
+}
+
+func (r mountedTrustedClientKeyResolver) ResolveTrustedClientKey(_ context.Context, request *http.Request) (string, error) {
+	if r.verifier == nil {
+		return "", errors.New("trusted client verification is unavailable")
+	}
+	return r.verifier.Verify(request.Header.Get(authrecovery.RecoveryClientProofHeader))
+}
+
+func newPlatformHandlers(
+	databaseURL string,
+	credentialKey string,
+	metrics *observability.Registry,
+	rateLimiter platformratelimit.Limiter,
+	trustedClientVerifier *authrecovery.ClientProofVerifier,
+) (http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
+	tokenCipher, err := newRecoveryTokenCipher(
+		os.Getenv("MIROFISH_DEPLOYMENT_ENV"),
+		os.Getenv("AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY"),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil, nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	fail := func(err error) (http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
+		_ = db.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+
+	recoveryStore := authrecovery.NewSQLStore(db)
+	recoveryService := authrecovery.NewService(authrecovery.ServiceConfig{DB: db, Store: recoveryStore, TokenCipher: tokenCipher})
+	recoveryHandler := authrecovery.NewHandler(authrecovery.HandlerConfig{
+		Service: recoveryService, ClientProofVerifier: trustedClientVerifier,
+	})
+
+	recoveryNotifier, invitationNotifier, err := configuredSMTPNotifiers()
+	if err != nil {
+		return fail(err)
+	}
+	var recoveryDispatcher *authrecovery.DeliveryDispatcher
+	if recoveryNotifier != nil && tokenCipher != nil {
+		recoveryDispatcher, err = authrecovery.NewDeliveryDispatcher(authrecovery.DeliveryDispatcherConfig{
+			Store: recoveryStore, Notifier: recoveryNotifier, TokenCipher: tokenCipher,
+			WorkerID: "api-auth-recovery", Lease: time.Minute, RetryDelay: time.Minute, MaxAttempts: 5,
+			Metrics: metrics,
+		})
+		if err != nil {
+			return fail(err)
+		}
+	}
+	collaborationHandler := collaboration.NewHandler(collaboration.HandlerConfig{
+		Service:       collaboration.NewService(collaboration.ServiceConfig{DB: db, Notifier: invitationNotifier}),
+		ActorResolver: mountedActorResolver{}, CSRFVerifier: mountedCSRFVerifier{},
+		RateLimiter:              rateLimiter,
+		TrustedClientKeyResolver: mountedTrustedClientKeyResolver{verifier: trustedClientVerifier},
+	})
+
+	llmStore := llmadmin.NewSQLStore(db)
+	var healthService *llmadmin.HealthService
+	healthResolver, healthErr := llmadmin.NewSQLHealthCredentialResolver(llmadmin.SQLHealthCredentialResolverConfig{
+		Queryer: llm.NewSQLDBQueryer(db), CredentialKeyMaterial: credentialKey,
+	})
+	if healthErr != nil {
+		log.Printf("LLM provider health disabled: %s", llmadmin.ErrorCode(healthErr))
+	} else {
+		healthService = llmadmin.NewHealthService(
+			healthResolver,
+			llmadmin.NewHTTPHealthExecutor(http.DefaultClient, 10*time.Second, 1<<20),
+			llmadmin.NewSQLHealthRecorder(db),
+		).WithMetrics(metrics)
+	}
+	llmAdminHandler := llmadmin.NewHandler(llmadmin.Config{
+		Store: llmStore, Access: llmadmin.NewSQLAccessController(db), ActorResolver: mountedActorResolver{},
+		Health: healthService, Metrics: metrics, RateLimiter: rateLimiter,
+	})
+	return recoveryHandler, collaborationHandler, llmAdminHandler, recoveryDispatcher, db.Close, nil
+}
+
+func newRecoveryTokenCipher(deploymentEnvironment string, encodedKey string) (*authrecovery.TokenCipher, error) {
+	deploymentEnvironment = strings.ToLower(strings.TrimSpace(deploymentEnvironment))
+	encodedKey = strings.TrimSpace(encodedKey)
+	if encodedKey == "" {
+		if deploymentEnvironment == "staging" || deploymentEnvironment == "production" {
+			return nil, errors.New("auth recovery outbox encryption key is required")
+		}
+		return nil, nil
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(encodedKey)
+	if err != nil {
+		return nil, errors.New("auth recovery outbox encryption key must use standard base64")
+	}
+	if len(decoded) != 32 {
+		return nil, errors.New("auth recovery outbox encryption key must decode to exactly 32 bytes")
+	}
+	return authrecovery.NewTokenCipher(decoded)
+}
+
+func configuredSMTPNotifiers() (authrecovery.ResetNotifier, collaboration.InvitationNotifier, error) {
+	host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
+	portValue := strings.TrimSpace(os.Getenv("SMTP_PORT"))
+	username := strings.TrimSpace(os.Getenv("SMTP_USERNAME"))
+	password := strings.TrimSpace(os.Getenv("SMTP_PASSWORD"))
+	from := strings.TrimSpace(os.Getenv("SMTP_FROM"))
+	tlsMode := strings.TrimSpace(os.Getenv("SMTP_TLS_MODE"))
+	resetURL := strings.TrimSpace(os.Getenv("AUTH_RECOVERY_RESET_BASE_URL"))
+	acceptURL := strings.TrimSpace(os.Getenv("COLLABORATION_ACCEPT_BASE_URL"))
+	configured := host != "" || portValue != "" || username != "" || password != "" || from != "" || tlsMode != "" || resetURL != "" || acceptURL != ""
+	if !configured {
+		return nil, nil, nil
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil || port <= 0 || host == "" || username == "" || password == "" || from == "" || tlsMode == "" {
+		return nil, nil, errors.New("SMTP delivery configuration is incomplete")
+	}
+	var recoveryNotifier authrecovery.ResetNotifier
+	if resetURL != "" {
+		recoveryNotifier, err = authrecovery.NewSMTPNotifier(authrecovery.SMTPNotifierConfig{
+			Host: host, Port: port, Username: username, Password: password, From: from,
+			ResetBaseURL: resetURL, TLSMode: tlsMode,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	var invitationNotifier collaboration.InvitationNotifier
+	if acceptURL != "" {
+		invitationNotifier, err = collaboration.NewSMTPNotifier(collaboration.SMTPNotifierConfig{
+			Host: host, Port: port, Username: username, Password: password, From: from,
+			AcceptBaseURL: acceptURL, TLSMode: tlsMode,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return recoveryNotifier, invitationNotifier, nil
+}
+
+func startAuthRecoveryDispatcher(dispatcher *authrecovery.DeliveryDispatcher) {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_, err := dispatcher.DispatchOne(ctx)
+			cancel()
+			if err != nil {
+				log.Printf("auth recovery delivery attempt failed")
+			}
+		}
+	}()
+}
+
 func newAuthReader(databaseURL string) (auth.Reader, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return auth.NewDisabledReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -780,7 +1663,7 @@ func newPasswordAuthenticator(databaseURL string) (auth.PasswordAuthenticator, f
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -791,11 +1674,26 @@ func newPasswordAuthenticator(databaseURL string) (auth.PasswordAuthenticator, f
 	}), db.Close, nil
 }
 
+func newPasswordChanger(databaseURL string) (auth.PasswordChanger, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	queryer := auth.NewSQLDBQueryer(db)
+	return auth.NewSQLPasswordChanger(auth.SQLPasswordChangerConfig{
+		Queryer: queryer,
+		Execer:  queryer,
+	}), db.Close, nil
+}
+
 func newAuthSessionStore(databaseURL string) (auth.SessionStore, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -891,7 +1789,7 @@ func newWriterAdmissionStore(databaseURL string) (workflows.WriterAdmissionStore
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -904,7 +1802,7 @@ func newDraftAdoptionStore(databaseURL string) (workflows.DraftAdoptionStore, fu
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -917,7 +1815,7 @@ func newDraftReviewStore(databaseURL string) (workflows.DraftReviewStore, func()
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledDraftReviewStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -927,11 +1825,27 @@ func newDraftReviewStore(databaseURL string) (workflows.DraftReviewStore, func()
 	}), db.Close, nil
 }
 
+func newDraftReviewRuntimeStores(databaseURL string) (
+	*workflows.SQLDraftReviewRuntimeStore,
+	workflows.DraftReviewIssueStore,
+	func() error,
+	error,
+) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return workflows.NewSQLDraftReviewRuntimeStore(db), workflows.NewSQLDraftReviewIssueStore(db), db.Close, nil
+}
+
 func newSeedAdmissionStore(databaseURL string) (workflows.SeedAdmissionStore, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -944,7 +1858,7 @@ func newAssetIngestionAdmissionStore(databaseURL string) (workflows.AssetIngesti
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -957,7 +1871,7 @@ func newStyleExtractionAdmissionStore(databaseURL string) (workflows.StyleExtrac
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -970,7 +1884,7 @@ func newAssetReindexAdmissionStore(databaseURL string) (workflows.AssetReindexAd
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -983,7 +1897,7 @@ func newStoryGraphBuildAdmissionStore(databaseURL string) (workflows.StoryGraphB
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -996,7 +1910,7 @@ func newStoryGraphBondGenerationAdmissionStore(databaseURL string) (workflows.St
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1009,7 +1923,7 @@ func newWriterReader(databaseURL string) (workflows.WriterReader, func() error, 
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1022,7 +1936,7 @@ func newManuscriptReader(databaseURL string) (workflows.ManuscriptReader, func()
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1031,11 +1945,24 @@ func newManuscriptReader(databaseURL string) (workflows.ManuscriptReader, func()
 	}), db.Close, nil
 }
 
+func newManuscriptArtifactExporter(databaseURL string) (workflows.ManuscriptArtifactExporter, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewSQLManuscriptArtifactExporter(workflows.SQLManuscriptArtifactExporterConfig{
+		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
+	}), db.Close, nil
+}
+
 func newWorkflowReader(databaseURL string) (workflows.WorkflowReader, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledWorkflowReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1048,7 +1975,7 @@ func newWorkflowEventReader(databaseURL string) (workflows.WorkflowEventReader, 
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledWorkflowEventReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1061,7 +1988,7 @@ func newSeedRunReader(databaseURL string) (workflows.SeedRunReader, func() error
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledSeedRunReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1074,7 +2001,7 @@ func newProjectReadinessReader(databaseURL string) (projectreadiness.Reader, fun
 	if strings.TrimSpace(databaseURL) == "" {
 		return projectreadiness.NewDisabledReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1087,7 +2014,7 @@ func newProjectOverviewReader(databaseURL string) (projectoverview.Reader, func(
 	if strings.TrimSpace(databaseURL) == "" {
 		return projectoverview.NewDisabledReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1100,7 +2027,7 @@ func newStoryGraphReader(databaseURL string) (storygraph.Reader, func() error, e
 	if strings.TrimSpace(databaseURL) == "" {
 		return storygraph.NewDisabledReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1113,7 +2040,7 @@ func newStoryGraphCandidateAdoptionStore(databaseURL string) (storygraph.Candida
 	if strings.TrimSpace(databaseURL) == "" {
 		return storygraph.NewDisabledCandidateAdoptionStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1126,7 +2053,7 @@ func newWorldlineSavedPathReader(databaseURL string) (worldline.SavedPathReader,
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledSavedPathReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1139,7 +2066,7 @@ func newWorldlineSavedPathStore(databaseURL string) (worldline.SavedPathStore, f
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledSavedPathStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1154,7 +2081,7 @@ func newWorldlineSessionStore(databaseURL string) (worldline.SessionStarter, wor
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledSessionStarter(), worldline.NewDisabledSessionReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1166,18 +2093,38 @@ func newWorldlineSessionStore(databaseURL string) (worldline.SessionStarter, wor
 	return store, store, db.Close, nil
 }
 
-func newWorldlineStepStarter(databaseURL string) (worldline.StepStarter, func() error, error) {
-	if strings.TrimSpace(databaseURL) == "" {
+func newWorldlineStepStarter(temporalClient worldline.TemporalWorkflowClient, databaseURL string, taskQueue string) (worldline.StepStarter, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" || temporalClient == nil {
 		return worldline.NewDisabledStepStarter(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
 	queryer := worldline.NewSQLDBQueryer(db)
 	return worldline.NewSQLStepStarter(worldline.SQLStepStarterConfig{
-		Queryer: queryer,
-		Execer:  queryer,
+		Execer:    queryer,
+		Client:    temporalClient,
+		TaskQueue: taskQueue,
+	}), db.Close, nil
+}
+
+func newWorldlineAutoEvolutionStarter(
+	temporalClient worldline.TemporalWorkflowClient,
+	databaseURL string,
+	taskQueue string,
+) (worldline.AutoEvolutionStarter, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" || temporalClient == nil {
+		return worldline.NewDisabledAutoEvolutionStarter(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return worldline.NewSQLAutoEvolutionStarter(worldline.SQLAutoEvolutionStarterConfig{
+		Store:     worldline.NewSQLAutoEvolutionAdmissionStore(db),
+		Client:    temporalClient,
+		TaskQueue: taskQueue,
 	}), db.Close, nil
 }
 
@@ -1185,7 +2132,7 @@ func newWorldlinePreparationStore(databaseURL string) (worldline.PreparationStor
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledPreparationStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1196,11 +2143,30 @@ func newWorldlinePreparationStore(databaseURL string) (worldline.PreparationStor
 	}), db.Close, nil
 }
 
+func newWorldlinePreparationStarter(
+	temporalClient worldline.TemporalWorkflowClient,
+	databaseURL string,
+	taskQueue string,
+) (worldline.PreparationStarter, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" || temporalClient == nil {
+		return worldline.NewDisabledPreparationStarter(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return worldline.NewSQLPreparationStarter(worldline.SQLPreparationStarterConfig{
+		Store:     worldline.NewSQLPreparationAdmissionStore(db),
+		Client:    temporalClient,
+		TaskQueue: taskQueue,
+	}), db.Close, nil
+}
+
 func newWorldlineTimelineReader(databaseURL string) (worldline.TimelineReader, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledTimelineReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1213,7 +2179,7 @@ func newWorldlineEventReader(databaseURL string) (worldline.EventReader, func() 
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledEventReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1226,7 +2192,7 @@ func newWorldlineEventAdoptionStore(databaseURL string) (worldline.EventAdoption
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledEventAdoptionStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1239,7 +2205,7 @@ func newWorldlineEventMutationStore(databaseURL string) (worldline.EventMutation
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledEventMutationStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1252,7 +2218,7 @@ func newWorldlineVariableStore(databaseURL string) (worldline.VariableStore, fun
 	if strings.TrimSpace(databaseURL) == "" {
 		return worldline.NewDisabledVariableStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1267,7 +2233,7 @@ func newCharacterConsoleStore(databaseURL string) (characterconsole.Store, func(
 	if strings.TrimSpace(databaseURL) == "" {
 		return characterconsole.NewDisabledStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1278,11 +2244,41 @@ func newCharacterConsoleStore(databaseURL string) (characterconsole.Store, func(
 	}), db.Close, nil
 }
 
+func newCharacterProposalStore(databaseURL string) (characterconsole.ProposalStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return characterconsole.NewDisabledProposalStore(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return characterconsole.NewSQLProposalStore(db, 100), db.Close, nil
+}
+
+func newCharacterDialogueStarter(
+	temporalClient workflows.TemporalWorkflowClient,
+	databaseURL string,
+	taskQueue string,
+) (workflows.CharacterDialogueStarter, func() error, error) {
+	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
+		return workflows.NewDisabledCharacterDialogueStarter(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewTemporalCharacterDialogueStarter(workflows.TemporalCharacterDialogueConfig{
+		Client:         temporalClient,
+		TaskQueue:      taskQueue,
+		AdmissionStore: workflows.NewSQLCharacterDialogueAdmissionStore(db),
+	}), db.Close, nil
+}
+
 func newWorkflowCanceller(temporalClient workflows.TemporalWorkflowClient, databaseURL string) (workflows.WorkflowCanceller, func() error, error) {
 	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledWorkflowCanceller(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1300,7 +2296,7 @@ func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databas
 	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledWorkflowRetrier(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1315,16 +2311,22 @@ func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databas
 	}), db.Close, nil
 }
 
-func newSeedSegmentRetrier(databaseURL string) (workflows.SeedSegmentRetrier, func() error, error) {
-	if strings.TrimSpace(databaseURL) == "" {
+func newSeedSegmentRetrier(
+	temporalClient workflows.TemporalWorkflowClient,
+	databaseURL string,
+	seedTaskQueue string,
+) (workflows.SeedSegmentRetrier, func() error, error) {
+	if temporalClient == nil || strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledSeedSegmentRetrier(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
 	return workflows.NewSQLSeedSegmentRetrier(workflows.SQLSeedSegmentRetrierConfig{
-		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
+		Execer:    workflows.NewSQLDBWriterAdmissionExecer(db),
+		Client:    temporalClient,
+		TaskQueue: seedTaskQueue,
 	}), db.Close, nil
 }
 
@@ -1336,7 +2338,7 @@ func newSourceFileStore(databaseURL string) (sourcefiles.Store, func() error, er
 	if err != nil {
 		return nil, nil, err
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1346,24 +2348,54 @@ func newSourceFileStore(databaseURL string) (sourcefiles.Store, func() error, er
 	}), db.Close, nil
 }
 
-func newAssetReader(databaseURL string) (assets.Reader, func() error, error) {
+type assetReaderBundle struct {
+	Reader                 assets.Reader
+	QueryEmbeddingResolver assets.QueryEmbeddingResolver
+	SearchIndexChecker     assets.SearchIndexChecker
+}
+
+func newAssetReaderBundle(databaseURL string) (assetReaderBundle, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
-		return assets.NewDisabledReader(), nil, nil
+		return assetReaderBundle{Reader: assets.NewDisabledReader()}, nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return assetReaderBundle{}, nil, err
+	}
+	queryer := assets.NewSQLDBQueryer(db)
+	baseReader := assets.NewSQLReader(assets.SQLReaderConfig{Queryer: queryer})
+	resolver := assets.NewSQLQueryEmbeddingResolver(assets.SQLQueryEmbeddingResolverConfig{
+		Queryer:               queryer,
+		CredentialKeyMaterial: os.Getenv("LLM_CREDENTIAL_ENCRYPTION_KEY"),
+	})
+	return assetReaderBundle{
+		Reader: assets.NewPublicSearchReader(assets.PublicSearchReaderConfig{
+			Base:     baseReader,
+			Resolver: resolver,
+			Provider: assets.NewOpenAICompatibleQueryEmbeddingProvider(nil),
+			Index:    baseReader,
+		}),
+		QueryEmbeddingResolver: resolver,
+		SearchIndexChecker:     baseReader,
+	}, db.Close, nil
+}
+
+func newLLMQuotaStore(databaseURL string) (llm.QuotaPolicyStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
-	return assets.NewSQLReader(assets.SQLReaderConfig{
-		Queryer: assets.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	return llm.NewSQLQuotaStore(db), db.Close, nil
 }
 
 func newArchiveMemoryReader(databaseURL string) (assets.ArchiveMemoryReader, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return assets.NewDisabledArchiveMemoryReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1376,7 +2408,7 @@ func newArchiveMemoryReviewStore(databaseURL string) (assets.ArchiveMemoryReview
 	if strings.TrimSpace(databaseURL) == "" {
 		return assets.NewDisabledArchiveMemoryReviewStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1389,7 +2421,7 @@ func newAssetAdoptionStore(databaseURL string) (assets.AdoptionStore, func() err
 	if strings.TrimSpace(databaseURL) == "" {
 		return assets.NewDisabledAdoptionStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1402,7 +2434,7 @@ func newAssetMutationStore(databaseURL string) (assets.MutationStore, func() err
 	if strings.TrimSpace(databaseURL) == "" {
 		return assets.NewDisabledMutationStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1415,7 +2447,7 @@ func newAssetBulkActionStore(databaseURL string) (assets.BulkActionStore, func()
 	if strings.TrimSpace(databaseURL) == "" {
 		return assets.NewDisabledBulkActionStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1428,7 +2460,7 @@ func newAssetIngestionReader(databaseURL string) (workflows.AssetIngestionReader
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledAssetIngestionReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1442,7 +2474,7 @@ func newStyleExtractionReader(databaseURL string) (workflows.StyleExtractionRead
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledStyleExtractionReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1495,7 +2527,7 @@ func newLLMResolver(databaseURL string) (llm.Resolver, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewStaticResolver(nil), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1508,7 +2540,7 @@ func newLLMBindingStore(databaseURL string) (llm.BindingStore, func() error, err
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewDisabledBindingStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1521,7 +2553,7 @@ func newLLMCatalogReader(databaseURL string) (llm.CatalogReader, func() error, e
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewDisabledCatalogReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1534,7 +2566,7 @@ func newLLMChannelStore(databaseURL string, credentialKey string) (llm.ChannelSt
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewDisabledChannelStore(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1548,7 +2580,7 @@ func newLLMModelSyncer(databaseURL string, credentialKey string) (llm.ModelSynce
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewDisabledModelSyncer(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1562,7 +2594,7 @@ func newLLMSettingsReader(databaseURL string) (llm.SettingsReader, func() error,
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewDisabledSettingsReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1575,7 +2607,7 @@ func newLLMTelemetryReader(databaseURL string) (llm.TelemetryReader, func() erro
 	if strings.TrimSpace(databaseURL) == "" {
 		return llm.NewDisabledTelemetryReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1588,7 +2620,7 @@ func newTraceReader(databaseURL string) (traces.Reader, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return traces.NewDisabledReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1601,7 +2633,7 @@ func newTraceExportAuditor(databaseURL string) (traces.ExportAuditor, func() err
 	if strings.TrimSpace(databaseURL) == "" {
 		return traces.NewDisabledExportAuditor(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1614,7 +2646,7 @@ func newWriterEventReader(databaseURL string) (workflows.WriterEventReader, func
 	if strings.TrimSpace(databaseURL) == "" {
 		return workflows.NewDisabledWriterEventReader(), nil, nil
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openAppDatabase(databaseURL)
 	if err != nil {
 		return nil, nil, err
 	}

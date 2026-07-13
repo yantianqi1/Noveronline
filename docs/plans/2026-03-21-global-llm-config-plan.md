@@ -33,7 +33,7 @@ Run: `cd /Users/项目/MiroFish-Novel/backend && ./.venv/bin/pytest tests/test_l
 - Modify: `.env`
 - Modify: `.env.example`
 - Modify: `README.md`
-- Modify: `docs/CODEX_HANDOFF_GUIDE.md`
+- Modify: `AGENTS.md` and `CLAUDE.md`
 
 **Step 1: Remove old `LLM_*` env examples**
 

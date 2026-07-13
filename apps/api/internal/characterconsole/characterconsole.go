@@ -63,6 +63,12 @@ type ListTurnsInput struct {
 	InteractionID string
 }
 
+type ListEventsInput struct {
+	TenantID      string
+	InteractionID string
+	AfterEventID  string
+}
+
 type InteractionRecord struct {
 	InteractionID      string         `json:"interaction_id"`
 	ProjectID          string         `json:"project_id"`
@@ -96,6 +102,15 @@ type TurnRecord struct {
 	CreatedAt       string         `json:"created_at"`
 }
 
+type EventRecord struct {
+	EventID       string         `json:"event_id"`
+	InteractionID string         `json:"interaction_id"`
+	Sequence      int            `json:"sequence"`
+	EventType     string         `json:"event_type"`
+	Payload       map[string]any `json:"payload"`
+	CreatedAt     string         `json:"created_at"`
+}
+
 type Store interface {
 	CreateInteraction(context.Context, CreateInteractionInput) (InteractionRecord, error)
 	ListInteractions(context.Context, ListInteractionsInput) ([]InteractionRecord, error)
@@ -103,6 +118,7 @@ type Store interface {
 	UpdateInteractionStatus(context.Context, UpdateInteractionStatusInput) (InteractionRecord, error)
 	AppendTurn(context.Context, AppendTurnInput) (TurnRecord, error)
 	ListTurns(context.Context, ListTurnsInput) ([]TurnRecord, error)
+	ListEvents(context.Context, ListEventsInput) ([]EventRecord, error)
 }
 
 type AppError struct {
@@ -149,6 +165,10 @@ func (s *DisabledStore) AppendTurn(context.Context, AppendTurnInput) (TurnRecord
 }
 
 func (s *DisabledStore) ListTurns(context.Context, ListTurnsInput) ([]TurnRecord, error) {
+	return nil, backendUnconfigured()
+}
+
+func (s *DisabledStore) ListEvents(context.Context, ListEventsInput) ([]EventRecord, error) {
 	return nil, backendUnconfigured()
 }
 
@@ -309,13 +329,13 @@ func (s *SQLStore) CreateInteraction(ctx context.Context, input CreateInteractio
 	rows, err := s.queryRows(ctx, tenantID, `
 WITH scoped_project AS (
   SELECT $2::uuid AS project_id
-  WHERE NULLIF($4, '') IS NULL
+  WHERE NULLIF($4::text, '') IS NULL
   UNION ALL
   SELECT project_id
   FROM worldline_sessions
-  WHERE tenant_id::text = $1
-    AND project_id::text = $2
-    AND session_id::text = $4
+  WHERE tenant_id = $1::uuid
+    AND project_id = $2::uuid
+    AND session_id = NULLIF($4::text, '')::uuid
 )
 INSERT INTO character_interaction_sessions (
   tenant_id,
@@ -536,14 +556,18 @@ func (s *SQLStore) AppendTurn(ctx context.Context, input AppendTurnInput) (TurnR
 WITH scoped_interaction AS (
   SELECT project_id
   FROM character_interaction_sessions
-  WHERE tenant_id::text = $1
-    AND interaction_id::text = $2
+  WHERE tenant_id = $1::uuid
+    AND interaction_id = $2::uuid
+),
+turn_lock AS (
+  SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))
 ),
 next_turn AS (
   SELECT COALESCE(MAX(turn_order), 0) + 1 AS turn_order
   FROM character_interaction_turns
-  WHERE tenant_id::text = $1
-    AND interaction_id::text = $2
+  CROSS JOIN turn_lock
+  WHERE tenant_id = $1::uuid
+    AND interaction_id = $2::uuid
 )
 INSERT INTO character_interaction_turns (
   tenant_id,
@@ -640,6 +664,89 @@ ORDER BY turn_order ASC
 		return nil, characterInteractionQueryFailed("character interaction turn query failed")
 	}
 	if err := closeCharacterConsoleRows(rows, "character interaction turn query failed"); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s *SQLStore) ListEvents(ctx context.Context, input ListEventsInput) ([]EventRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	interactionID := strings.TrimSpace(input.InteractionID)
+	afterEventID := strings.TrimSpace(input.AfterEventID)
+	if tenantID == "" || interactionID == "" {
+		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and interaction_id are required"}
+	}
+	rows, err := s.queryRows(ctx, tenantID, `
+WITH after_cursor AS (
+  SELECT created_at, event_id
+  FROM workflow_events
+  WHERE tenant_id::text = $1
+    AND workflow_type = 'character_dialogue'
+    AND payload_jsonb->>'interaction_id' = $2
+    AND event_id::text = $3
+  LIMIT 1
+),
+cursor_state AS (
+  SELECT ($3 = '' OR EXISTS (SELECT 1 FROM after_cursor)) AS cursor_found
+),
+event_rows AS (
+  SELECT event_id::text, sequence, event_type, payload_jsonb::text, created_at::text
+  FROM workflow_events
+  WHERE tenant_id::text = $1
+    AND workflow_type = 'character_dialogue'
+    AND payload_jsonb->>'interaction_id' = $2
+    AND (
+      $3 = '' OR (created_at, event_id) > (
+        SELECT created_at, event_id FROM after_cursor
+      )
+    )
+  ORDER BY created_at, event_id
+  LIMIT $4
+)
+SELECT cursor_state.cursor_found, event_rows.event_id, event_rows.sequence,
+       event_rows.event_type, event_rows.payload_jsonb, event_rows.created_at
+FROM cursor_state
+LEFT JOIN event_rows ON true
+ORDER BY event_rows.created_at NULLS LAST, event_rows.event_id NULLS LAST`,
+		tenantID, interactionID, afterEventID, s.limit,
+	)
+	if err != nil {
+		return nil, characterInteractionQueryFailed("character interaction event query failed")
+	}
+
+	records := []EventRecord{}
+	for rows.Next() {
+		var cursorFound bool
+		var eventID sql.NullString
+		var sequence sql.NullInt64
+		var eventType sql.NullString
+		var payloadJSON sql.NullString
+		var createdAt sql.NullString
+		if err := rows.Scan(&cursorFound, &eventID, &sequence, &eventType, &payloadJSON, &createdAt); err != nil {
+			_ = abortCharacterConsoleRows(rows)
+			return nil, characterInteractionQueryFailed("character interaction event query failed")
+		}
+		if !cursorFound {
+			_ = abortCharacterConsoleRows(rows)
+			return nil, &AppError{Code: "EVENT_CURSOR_NOT_FOUND", Message: "character interaction event cursor was not found"}
+		}
+		if !eventID.Valid {
+			continue
+		}
+		records = append(records, EventRecord{
+			EventID:       eventID.String,
+			InteractionID: interactionID,
+			Sequence:      int(sequence.Int64),
+			EventType:     eventType.String,
+			Payload:       decodeMap(payloadJSON.String),
+			CreatedAt:     createdAt.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, characterInteractionQueryFailed("character interaction event query failed")
+	}
+	if err := closeCharacterConsoleRows(rows, "character interaction event query failed"); err != nil {
 		return nil, err
 	}
 	return records, nil

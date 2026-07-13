@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -24,9 +26,22 @@ type ListFacetsInput struct {
 }
 
 type SearchAssetsInput struct {
-	TenantID  string
-	ProjectID string
-	Query     string
+	TenantID       string
+	ProjectID      string
+	Query          string
+	Mode           string
+	Filters        SearchFilters
+	QueryEmbedding []float64
+	EmbeddingModel string
+}
+
+type SearchFilters struct {
+	AssetTypes []string `json:"asset_types,omitempty"`
+	Categories []string `json:"categories,omitempty"`
+	Lifecycles []string `json:"lifecycles,omitempty"`
+	Sources    []string `json:"sources,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Pinned     *bool    `json:"pinned,omitempty"`
 }
 
 type ListArchiveMemoriesInput struct {
@@ -170,8 +185,26 @@ type SearchRecord struct {
 	Payload          map[string]any  `json:"payload"`
 	Version          VersionSummary  `json:"version"`
 	Collections      []CollectionRef `json:"collections"`
+	Ranking          RankingMetadata `json:"ranking"`
 	CreatedAt        string          `json:"created_at"`
 	UpdatedAt        string          `json:"updated_at"`
+}
+
+type RankingMetadata struct {
+	Mode                string  `json:"mode"`
+	KeywordScore        float64 `json:"keyword_score"`
+	VectorScore         float64 `json:"vector_score"`
+	KeywordWeight       float64 `json:"keyword_weight"`
+	VectorWeight        float64 `json:"vector_weight"`
+	KeywordContribution float64 `json:"keyword_contribution"`
+	VectorContribution  float64 `json:"vector_contribution"`
+	RecencyBoost        float64 `json:"recency_boost"`
+	LifecycleBoost      float64 `json:"lifecycle_boost"`
+	PinnedBoost         float64 `json:"pinned_boost"`
+	FinalScore          float64 `json:"final_score"`
+	Rank                int     `json:"rank"`
+	EmbeddingModel      string  `json:"embedding_model,omitempty"`
+	Explanation         string  `json:"explanation"`
 }
 
 type VersionSummary struct {
@@ -742,39 +775,163 @@ func (r *SQLReader) SearchAssets(ctx context.Context, input SearchAssetsInput) (
 	if query == "" {
 		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "query is required"}
 	}
+	mode, embeddingLiteral, embeddingModel, err := validateSearchMode(input)
+	if err != nil {
+		return nil, err
+	}
+	filters := normalizeSearchFilters(input.Filters)
 	if r.queryer == nil {
 		return nil, &AppError{Code: "ASSET_BACKEND_UNCONFIGURED", Message: "asset backend is not configured"}
 	}
-	sql := `SELECT
-  search_doc.search_document_id::text,
-  search_doc.source,
-  search_doc.source_ref,
-  search_doc.project_id::text,
-  COALESCE(search_doc.entity_type, ''),
-  search_doc.title,
-  search_doc.tags_jsonb::text,
-  search_doc.payload_jsonb::text,
+	sql := `WITH search_input AS (
+  SELECT
+    $1::text AS tenant_id,
+    $2::text AS project_id,
+    $3::text AS query_text,
+    $4::text AS keyword_pattern,
+    $5::text AS search_mode,
+    CASE WHEN $5::text = 'keyword' THEN NULL::vector ELSE $6::vector END AS query_embedding,
+    $7::text AS embedding_model,
+    $8::text[] AS asset_types,
+    $9::text[] AS categories,
+    $10::text[] AS lifecycles,
+    $11::text[] AS sources,
+    $12::text[] AS tags,
+    $13::boolean AS pinned
+),
+candidate_scores AS (
+  SELECT
+    search_doc.search_document_id,
+    search_doc.source,
+    search_doc.source_ref,
+    search_doc.project_id,
+    search_doc.entity_type,
+    search_doc.title,
+    search_doc.tags_jsonb,
+    search_doc.payload_jsonb,
+    search_doc.created_at,
+    search_doc.updated_at,
+    asset.asset_id,
+    asset.lifecycle,
+    asset.pinned,
+    input.search_mode,
+    COALESCE(embedding.embedding_model, '') AS embedding_model,
+    GREATEST(
+      ts_rank_cd(search_doc.search_vector, websearch_to_tsquery('simple'::regconfig, input.query_text)),
+      CASE
+        WHEN search_doc.title ILIKE input.keyword_pattern
+          OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern THEN 0.5
+        ELSE 0.0
+      END
+    )::float8 AS keyword_score,
+    CASE
+      WHEN input.search_mode = 'keyword' THEN 0.0
+      ELSE GREATEST(0.0, LEAST(1.0, 1.0 - (embedding.embedding <=> input.query_embedding)))
+    END::float8 AS vector_score
+  FROM global_search_index search_doc
+  JOIN assets asset
+    ON search_doc.source = 'asset'
+    AND asset.tenant_id = search_doc.tenant_id
+    AND asset.project_id = search_doc.project_id
+    AND asset.asset_id::text = search_doc.source_ref
+    AND asset.enabled = true
+  CROSS JOIN search_input input
+  LEFT JOIN asset_embeddings embedding
+    ON embedding.tenant_id = asset.tenant_id
+    AND embedding.project_id = asset.project_id
+    AND embedding.asset_id = asset.asset_id
+    AND embedding.embedding_model = input.embedding_model
+    AND embedding.dimensions = vector_dims(input.query_embedding)
+  WHERE search_doc.tenant_id::text = input.tenant_id
+    AND search_doc.project_id::text = input.project_id
+    AND (cardinality(input.asset_types) = 0 OR asset.asset_type = ANY(input.asset_types))
+    AND (cardinality(input.categories) = 0 OR asset.category = ANY(input.categories))
+    AND (cardinality(input.lifecycles) = 0 OR asset.lifecycle = ANY(input.lifecycles))
+    AND (cardinality(input.sources) = 0 OR asset.source_kind = ANY(input.sources))
+    AND (cardinality(input.tags) = 0 OR asset.tags_jsonb ?| input.tags)
+    AND (input.pinned IS NULL OR asset.pinned = input.pinned)
+    AND (
+      (
+        input.search_mode = 'keyword'
+        AND (
+          search_doc.search_vector @@ websearch_to_tsquery('simple'::regconfig, input.query_text)
+          OR search_doc.title ILIKE input.keyword_pattern
+          OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
+        )
+      )
+      OR (
+        input.search_mode IN ('vector', 'hybrid')
+        AND embedding.embedding_id IS NOT NULL
+      )
+    )
+),
+boosted_scores AS (
+  SELECT
+    candidate.*,
+    (0.05 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - candidate.updated_at)) / 86400.0, 0.0) / 365.0))::float8 AS recency_boost,
+    CASE candidate.lifecycle
+      WHEN 'canon' THEN 0.08
+      WHEN 'manuscript' THEN 0.08
+      WHEN 'seed' THEN 0.04
+      WHEN 'material' THEN 0.04
+      WHEN 'candidate' THEN 0.01
+      ELSE 0.0
+    END::float8 AS lifecycle_boost,
+    CASE WHEN candidate.pinned THEN 0.05 ELSE 0.0 END::float8 AS pinned_boost
+  FROM candidate_scores candidate
+),
+final_scores AS (
+  SELECT
+    boosted.*,
+    CASE boosted.search_mode
+      WHEN 'keyword' THEN boosted.keyword_score
+      WHEN 'vector' THEN boosted.vector_score
+      ELSE (0.45 * boosted.keyword_score) + (0.55 * boosted.vector_score)
+    END + boosted.recency_boost + boosted.lifecycle_boost + boosted.pinned_boost AS final_score
+  FROM boosted_scores boosted
+),
+ranked AS (
+  SELECT
+    final_scores.*,
+    row_number() OVER (
+      ORDER BY final_score DESC, keyword_score DESC, vector_score DESC, updated_at DESC, search_document_id::text ASC
+    )::int AS result_rank
+  FROM final_scores
+)
+SELECT
+  ranked.search_document_id::text,
+  ranked.source,
+  ranked.source_ref,
+  ranked.project_id::text,
+  COALESCE(ranked.entity_type, ''),
+  ranked.title,
+  ranked.tags_jsonb::text,
+  ranked.payload_jsonb::text,
   COALESCE(version_meta.version_count, 0)::int,
   COALESCE(version_meta.latest_version, 0)::int,
   COALESCE(version_meta.latest_version_id, ''),
   COALESCE(collection_meta.collections_json, '[]'),
-  search_doc.created_at::text,
-  search_doc.updated_at::text
-FROM global_search_index search_doc
-LEFT JOIN assets asset
-  ON search_doc.source = 'asset'
-  AND asset.tenant_id = search_doc.tenant_id
-  AND asset.project_id = search_doc.project_id
-  AND asset.asset_id::text = search_doc.source_ref
+  ranked.created_at::text,
+  ranked.updated_at::text,
+  ranked.search_mode,
+  ranked.keyword_score,
+  ranked.vector_score,
+  ranked.recency_boost,
+  ranked.lifecycle_boost,
+  ranked.pinned_boost,
+  ranked.final_score::float8,
+  ranked.result_rank,
+  ranked.embedding_model
+FROM ranked
 LEFT JOIN LATERAL (
   SELECT
     COUNT(*)::int AS version_count,
     COALESCE(MAX(version_number), 0)::int AS latest_version,
     COALESCE((ARRAY_AGG(asset_version_id::text ORDER BY version_number DESC, created_at DESC))[1], '') AS latest_version_id
   FROM asset_versions
-  WHERE tenant_id = search_doc.tenant_id
-    AND project_id = search_doc.project_id
-    AND asset_id = asset.asset_id
+  WHERE tenant_id::text = $1
+    AND project_id = ranked.project_id
+    AND asset_id = ranked.asset_id
 ) version_meta ON TRUE
 LEFT JOIN LATERAL (
   SELECT COALESCE(
@@ -793,16 +950,32 @@ LEFT JOIN LATERAL (
     ON collection.tenant_id = item.tenant_id
     AND collection.project_id = item.project_id
     AND collection.collection_id = item.collection_id
-  WHERE item.tenant_id = search_doc.tenant_id
-    AND item.project_id = search_doc.project_id
-    AND item.asset_id = asset.asset_id
+  WHERE item.tenant_id::text = $1
+    AND item.project_id = ranked.project_id
+    AND item.asset_id = ranked.asset_id
 ) collection_meta ON TRUE
-WHERE search_doc.tenant_id::text = $1
-  AND search_doc.project_id::text = $2
-  AND (search_doc.title ILIKE $3 OR COALESCE(search_doc.body, '') ILIKE $3)
-ORDER BY search_doc.updated_at DESC, search_doc.search_document_id::text ASC
-LIMIT $4`
-	rows, err := queryWithTenantContext(ctx, r.queryer, input.TenantID, sql, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), "%"+query+"%", r.limit)
+ORDER BY ranked.result_rank ASC
+LIMIT $14`
+	rows, err := queryWithTenantContext(
+		ctx,
+		r.queryer,
+		input.TenantID,
+		sql,
+		strings.TrimSpace(input.TenantID),
+		strings.TrimSpace(input.ProjectID),
+		query,
+		"%"+query+"%",
+		mode,
+		embeddingLiteral,
+		embeddingModel,
+		filters.AssetTypes,
+		filters.Categories,
+		filters.Lifecycles,
+		filters.Sources,
+		filters.Tags,
+		filters.Pinned,
+		r.limit,
+	)
 	if err != nil {
 		return nil, &AppError{Code: "ASSET_SEARCH_FAILED", Message: "asset search failed"}
 	}
@@ -829,18 +1002,105 @@ LIMIT $4`
 			&collectionsJSON,
 			&record.CreatedAt,
 			&record.UpdatedAt,
+			&record.Ranking.Mode,
+			&record.Ranking.KeywordScore,
+			&record.Ranking.VectorScore,
+			&record.Ranking.RecencyBoost,
+			&record.Ranking.LifecycleBoost,
+			&record.Ranking.PinnedBoost,
+			&record.Ranking.FinalScore,
+			&record.Ranking.Rank,
+			&record.Ranking.EmbeddingModel,
 		); err != nil {
 			return nil, &AppError{Code: "ASSET_SEARCH_FAILED", Message: "asset search failed"}
 		}
 		record.Tags = sanitizeTags(decodeTags(tagsJSON))
 		record.Payload = sanitizeObject(decodeObject(payloadJSON))
 		record.Collections = decodeCollectionRefs(collectionsJSON)
+		populateRankingExplanation(&record.Ranking)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, &AppError{Code: "ASSET_SEARCH_FAILED", Message: "asset search failed"}
 	}
 	return records, nil
+}
+
+func normalizeSearchFilters(filters SearchFilters) SearchFilters {
+	return SearchFilters{
+		AssetTypes: normalizeSearchFilterValues(filters.AssetTypes),
+		Categories: normalizeSearchFilterValues(filters.Categories),
+		Lifecycles: normalizeSearchFilterValues(filters.Lifecycles),
+		Sources:    normalizeSearchFilterValues(filters.Sources),
+		Tags:       normalizeSearchFilterValues(filters.Tags),
+		Pinned:     filters.Pinned,
+	}
+}
+
+func normalizeSearchFilterValues(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func populateRankingExplanation(ranking *RankingMetadata) {
+	switch ranking.Mode {
+	case "keyword":
+		ranking.KeywordWeight = 1
+		ranking.Explanation = "keyword relevance plus recency, lifecycle, and pinned boosts"
+	case "vector":
+		ranking.VectorWeight = 1
+		ranking.Explanation = "vector similarity plus recency, lifecycle, and pinned boosts"
+	case "hybrid":
+		ranking.KeywordWeight = 0.45
+		ranking.VectorWeight = 0.55
+		ranking.Explanation = "45% keyword relevance and 55% vector similarity plus recency, lifecycle, and pinned boosts"
+	}
+	ranking.KeywordContribution = ranking.KeywordScore * ranking.KeywordWeight
+	ranking.VectorContribution = ranking.VectorScore * ranking.VectorWeight
+}
+
+func validateSearchMode(input SearchAssetsInput) (string, any, string, error) {
+	mode := strings.ToLower(strings.TrimSpace(input.Mode))
+	if mode == "" {
+		mode = "keyword"
+	}
+	if mode != "keyword" && mode != "vector" && mode != "hybrid" {
+		return "", nil, "", &AppError{Code: "VALIDATION_FAILED", Message: "search mode must be keyword, vector, or hybrid"}
+	}
+	if mode == "keyword" {
+		return mode, nil, "", nil
+	}
+	embeddingModel := strings.TrimSpace(input.EmbeddingModel)
+	if embeddingModel == "" || len(input.QueryEmbedding) == 0 {
+		return "", nil, "", &AppError{Code: "ASSET_QUERY_EMBEDDING_REQUIRED", Message: "query embedding and model are required for vector search"}
+	}
+	nonZero := false
+	parts := make([]string, len(input.QueryEmbedding))
+	for index, component := range input.QueryEmbedding {
+		if math.IsNaN(component) || math.IsInf(component, 0) {
+			return "", nil, "", &AppError{Code: "VALIDATION_FAILED", Message: "query embedding components must be finite"}
+		}
+		if component != 0 {
+			nonZero = true
+		}
+		parts[index] = strconv.FormatFloat(component, 'g', -1, 64)
+	}
+	if !nonZero {
+		return "", nil, "", &AppError{Code: "VALIDATION_FAILED", Message: "query embedding must not be a zero vector"}
+	}
+	return mode, "[" + strings.Join(parts, ",") + "]", embeddingModel, nil
 }
 
 func (r *SQLArchiveMemoryReader) ListMemories(ctx context.Context, input ListArchiveMemoriesInput) ([]ArchiveMemoryRecord, error) {

@@ -258,9 +258,10 @@ func (q *recordingSQLQueryer) QueryContext(ctx context.Context, query string, ar
 }
 
 type fakeSQLRows struct {
-	values [][]any
-	index  int
-	err    error
+	values   [][]any
+	index    int
+	err      error
+	closeErr error
 }
 
 func (r *fakeSQLRows) Next() bool {
@@ -279,6 +280,15 @@ func (r *fakeSQLRows) Scan(dest ...any) error {
 			*target = value.(string)
 		case *int:
 			*target = value.(int)
+		case *int64:
+			*target = value.(int64)
+		case **int64:
+			if value == nil {
+				*target = nil
+			} else {
+				parsed := value.(int64)
+				*target = &parsed
+			}
 		case *float64:
 			*target = value.(float64)
 		case *bool:
@@ -291,7 +301,7 @@ func (r *fakeSQLRows) Scan(dest ...any) error {
 }
 
 func (r *fakeSQLRows) Close() error {
-	return nil
+	return r.closeErr
 }
 
 func (r *fakeSQLRows) Err() error {

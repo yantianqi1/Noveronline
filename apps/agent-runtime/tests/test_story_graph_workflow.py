@@ -11,6 +11,10 @@ from mirofish_agents.temporal.graph import (
     PostgresStoryGraphBuilder,
     PostgresWorkflowRunStatusWriter,
     STORY_GRAPH_BUILD_MODULE_KEY,
+    _assign_graph_clusters,
+    _deterministic_cluster_layout,
+    _entity_name_index,
+    _merge_entity_nodes,
     _story_graph_builder_from_env,
     graph_bond_generation_activity,
     story_graph_build_activity,
@@ -816,6 +820,31 @@ def test_postgres_workflow_run_status_writer_updates_workflow_runs_with_sanitize
     assert connection.closed is True
 
 
+def test_postgres_workflow_run_status_writer_sets_app_role_tenant_context() -> None:
+    connection = FakeWorkflowStatusConnection([{"workflow_updated": "1"}])
+    writer = PostgresWorkflowRunStatusWriter(connect=lambda: connection)
+    context = _context().model_copy(
+        update={
+            "tenant_id": "11111111-1111-4111-8111-111111111111",
+            "project_id": "22222222-2222-4222-8222-222222222222",
+            "run_id": "33333333-3333-4333-8333-333333333333",
+            "actor_user_id": "44444444-4444-4444-8444-444444444444",
+        }
+    )
+
+    writer.mark_completed(context=context, result={"graph_id": "graph-1", "node_count": 2})
+
+    assert len(connection.cursor_instance.executed) == 2
+    context_query, context_params = connection.cursor_instance.executed[0]
+    update_query, update_params = connection.cursor_instance.executed[1]
+    assert "app_set_tenant_context" in context_query
+    assert context_params == (context.tenant_id, context.actor_user_id)
+    assert "UPDATE workflow_runs" in update_query
+    assert update_params[-4:] == (context.tenant_id, context.project_id, context.run_id, context.workflow_type)
+    assert connection.committed is True
+    assert connection.closed is True
+
+
 def test_postgres_workflow_run_status_writer_describes_completed_graph_bond_generation() -> None:
     connection = FakeWorkflowStatusConnection([{"workflow_updated": "1"}])
     writer = PostgresWorkflowRunStatusWriter(connect=lambda: connection)
@@ -996,6 +1025,116 @@ def test_postgres_story_graph_builder_persists_snapshot_nodes_edges_evidence_lay
         assert forbidden not in joined
     assert connection.committed is True
     assert connection.closed is True
+
+
+def test_story_graph_semantic_merge_deduplicates_alias_entities_and_relationship_edges() -> None:
+    graph_id = "80d8a69e-6be3-47e9-94d2-b144c96bde71"
+    entities = [
+        {
+            "entity_id": "24db71c0-9ec2-49da-9338-9ed095583ecf",
+            "canonical_name": "林澈",
+            "entity_type": "character",
+            "importance": "high",
+            "state_summary": "公开摘要 A",
+            "first_seen_segment_id": None,
+            "metadata_jsonb": {},
+        },
+        {
+            "entity_id": "2d271cbf-363e-41c8-8349-2f879b006d83",
+            "canonical_name": "谈判者",
+            "entity_type": "character",
+            "importance": "medium",
+            "state_summary": "公开摘要 B",
+            "first_seen_segment_id": None,
+            "metadata_jsonb": {},
+        },
+        {
+            "entity_id": "690df97d-b4cb-4356-854d-6db263bf13d8",
+            "canonical_name": "白塔会",
+            "entity_type": "organization",
+            "importance": "medium",
+            "state_summary": "公开摘要 C",
+            "first_seen_segment_id": None,
+            "metadata_jsonb": {},
+        },
+    ]
+    aliases = [
+        {"entity_id": "2d271cbf-363e-41c8-8349-2f879b006d83", "alias": "林澈"},
+        {"entity_id": "24db71c0-9ec2-49da-9338-9ed095583ecf", "alias": "小林"},
+    ]
+    nodes = _merge_entity_nodes(graph_id=graph_id, entities=entities, aliases=aliases)
+    repeated = _merge_entity_nodes(graph_id=graph_id, entities=list(reversed(entities)), aliases=list(reversed(aliases)))
+
+    assert len(nodes) == 2
+    assert [node["node_id"] for node in nodes] == [node["node_id"] for node in repeated]
+    merged = next(node for node in nodes if node["node_type"] == "character")
+    assert merged["attributes"]["merged_source_count"] == 2
+    assert set(merged["attributes"]["aliases"]) == {"小林", "谈判者"}
+    builder = PostgresStoryGraphBuilder(connect=lambda: FakeStoryGraphConnection({}))
+    edges = builder._build_edges(
+        graph_id=graph_id,
+        relationships=[
+            {
+                "relationship_id": "relationship-a",
+                "source_entity_name": "林澈",
+                "target_entity_name": "白塔会",
+                "relationship_type": "opposes",
+                "summary": "公开关系摘要",
+                "first_seen_segment_id": None,
+                "metadata_jsonb": {},
+            },
+            {
+                "relationship_id": "relationship-b",
+                "source_entity_name": "谈判者",
+                "target_entity_name": "白塔会",
+                "relationship_type": "opposes",
+                "summary": "重复关系摘要",
+                "first_seen_segment_id": None,
+                "metadata_jsonb": {},
+            },
+        ],
+        node_by_entity_name=_entity_name_index(nodes),
+    )
+
+    assert len(edges) == 1
+    assert edges[0]["weight"] == 2
+    assert len(edges[0]["evidence"]) == 2
+    assert edges[0]["attributes"]["source_count"] == 2
+
+
+def test_story_graph_large_layout_persists_every_node_and_only_recommends_cluster_overview() -> None:
+    graph_id = "9bc50694-1551-43fb-9b7a-9b1b192753d4"
+    entities = [
+        {
+            "entity_id": f"00000000-0000-4000-8000-{index:012d}",
+            "canonical_name": f"角色 {index:04d}",
+            "entity_type": "character" if index % 2 == 0 else "organization",
+            "importance": (index % 10) / 10,
+            "state_summary": f"公开摘要 {index}",
+            "first_seen_segment_id": None,
+            "metadata_jsonb": {},
+        }
+        for index in range(1, 1002)
+    ]
+    nodes = _merge_entity_nodes(graph_id=graph_id, entities=entities, aliases=[])
+    clusters = _assign_graph_clusters(graph_id=graph_id, nodes=nodes, edges=[])
+    layout = _deterministic_cluster_layout(nodes=nodes, edges=[], clusters=clusters, viewport_node_budget=300)
+    repeated = _deterministic_cluster_layout(nodes=nodes, edges=[], clusters=clusters, viewport_node_budget=300)
+
+    assert len(nodes) == 1001
+    assert len(layout["nodes"]) == 1001
+    assert {item["node_id"] for item in layout["nodes"]} == {node["node_id"] for node in nodes}
+    assert layout == repeated
+    assert layout["schema_version"] == 2
+    assert layout["strategy"] == "deterministic_cluster_grid"
+    assert layout["viewport"] == {
+        "mode": "cluster_overview",
+        "total_node_count": 1001,
+        "total_cluster_count": 2,
+        "recommended_page_size": 300,
+        "omitted_node_count": 0,
+        "strategy_basis": "all node positions persisted; cluster overview recommended when the interactive node budget is exceeded",
+    }
 
 
 def test_story_graph_build_activity_uses_env_db_builder_when_configured(monkeypatch: Any) -> None:

@@ -1,0 +1,1171 @@
+/* ── Auth / Login · warm paper aligned with marketing landing ── */
+.auth-shell,
+.login-main {
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-height: 100dvh;
+  align-content: start;
+  gap: 0;
+  padding: 0 0 48px;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(155, 44, 44, 0.12), transparent 36%),
+    radial-gradient(circle at 82% 78%, rgba(61, 90, 128, 0.12), transparent 40%),
+    linear-gradient(165deg, #faf7f2 0%, #f3ebe0 48%, #e8dccb 100%);
+  color: #2c2420;
+}
+
+.auth-shell .language-switcher,
+.login-main .language-switcher {
+  border-color: rgba(44, 36, 32, 0.14);
+  background: rgba(255, 252, 247, 0.78);
+  color: #5a4f47;
+}
+
+.auth-shell .language-switcher:hover,
+.login-main .language-switcher:hover {
+  border-color: rgba(155, 44, 44, 0.28);
+  background: rgba(155, 44, 44, 0.08);
+  color: #9b2c2c;
+}
+
+.auth-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.auth-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(8px);
+  opacity: 0.55;
+}
+
+.auth-orb-a {
+  top: -8%;
+  right: -4%;
+  width: min(42vw, 420px);
+  height: min(42vw, 420px);
+  background: radial-gradient(circle, rgba(196, 60, 60, 0.22), transparent 68%);
+}
+
+.auth-orb-b {
+  bottom: -12%;
+  left: -8%;
+  width: min(48vw, 480px);
+  height: min(48vw, 480px);
+  background: radial-gradient(circle, rgba(61, 90, 128, 0.16), transparent 70%);
+}
+
+.auth-grain {
+  position: absolute;
+  inset: 0;
+  opacity: 0.35;
+  background-image: repeating-linear-gradient(
+    -18deg,
+    rgba(44, 36, 32, 0.03) 0,
+    rgba(44, 36, 32, 0.03) 1px,
+    transparent 1px,
+    transparent 14px
+  );
+}
+
+.auth-topbar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: min(1120px, calc(100% - 32px));
+  min-height: 72px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 auto;
+  padding: 18px 0 8px;
+}
+
+.auth-brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.auth-brand-mark {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #9b2c2c;
+  box-shadow: 0 10px 24px rgba(155, 44, 44, 0.22);
+  color: #fff7f2;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  transform: rotate(-4deg);
+}
+
+.auth-brand-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.auth-brand-copy strong {
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+}
+
+.auth-brand-copy small {
+  color: #8a7d72;
+  font-size: 0.78rem;
+}
+
+.auth-top-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-ghost-link {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  border: 1px solid rgba(44, 36, 32, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.7);
+  color: #5a4f47;
+  padding: 0 14px;
+  font-size: 0.88rem;
+  text-decoration: none;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease,
+    background-color 160ms ease;
+}
+
+.auth-ghost-link:hover {
+  border-color: rgba(155, 44, 44, 0.28);
+  background: rgba(255, 248, 242, 0.95);
+  color: #9b2c2c;
+}
+
+.auth-stage {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: min(1120px, calc(100% - 32px));
+  grid-template-columns: minmax(0, 470px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: stretch;
+  margin: 18px auto 0;
+}
+
+.login-window,
+.auth-card {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(44, 36, 32, 0.1);
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.9);
+  box-shadow:
+    0 24px 60px rgba(44, 36, 32, 0.1),
+    0 8px 18px rgba(44, 36, 32, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+}
+
+.auth-card-accent,
+.login-window::before {
+  display: block;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, #9b2c2c, #c05621 55%, #3d5a80);
+  content: "";
+}
+
+.login-titlebar {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(44, 36, 32, 0.08);
+  padding: 12px 18px;
+}
+
+.login-titlebar .language-switcher {
+  width: 44px;
+  flex: 0 0 auto;
+}
+
+.auth-icon-mark,
+.login-titlebar .brand-mark {
+  border-color: rgba(155, 44, 44, 0.16);
+  background: rgba(155, 44, 44, 0.08);
+  color: #9b2c2c;
+}
+
+.login-panel {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 28px;
+}
+
+.login-symbol {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 16px;
+  place-items: center;
+  border: 1px solid rgba(155, 44, 44, 0.16);
+  border-radius: 12px;
+  background: rgba(155, 44, 44, 0.08);
+  color: #9b2c2c;
+}
+
+.auth-eyebrow,
+.login-panel .eyebrow {
+  margin: 0 0 8px;
+  color: #9b2c2c;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.login-panel h1 {
+  margin: 0 0 10px;
+  color: #2c2420;
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", "Segoe UI", serif;
+  font-size: 1.9rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.25;
+}
+
+.auth-lede {
+  margin: 0 0 22px;
+  color: #5a4f47;
+  font-size: 0.94rem;
+  line-height: 1.65;
+}
+
+.auth-form.binding-form,
+.login-panel .binding-form {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-form label,
+.login-panel label {
+  color: #5a4f47;
+  font-size: 0.86rem;
+  font-weight: 500;
+}
+
+.auth-form input,
+.login-panel input {
+  margin-bottom: 8px;
+  border: 1px solid rgba(44, 36, 32, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  color: #2c2420;
+}
+
+.auth-form input:focus,
+.login-panel input:focus {
+  border-color: rgba(155, 44, 44, 0.42);
+  outline: 2px solid rgba(155, 44, 44, 0.16);
+  outline-offset: 1px;
+}
+
+.auth-submit,
+.login-panel button[type="submit"] {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #c43c3c, #9b2c2c 58%, #742a2a);
+  box-shadow: 0 12px 28px rgba(155, 44, 44, 0.24);
+  color: #fff8f4;
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    filter 160ms ease;
+}
+
+.auth-submit:hover,
+.login-panel button[type="submit"]:hover {
+  box-shadow: 0 16px 34px rgba(155, 44, 44, 0.3);
+  filter: brightness(1.03);
+  transform: translateY(-1px);
+}
+
+.auth-submit-arrow {
+  font-size: 1.05rem;
+  opacity: 0.9;
+}
+
+.auth-error,
+.login-panel .error-box {
+  margin-bottom: 18px;
+  border: 1px solid rgba(155, 44, 44, 0.22);
+  border-radius: 12px;
+  background: rgba(155, 44, 44, 0.06);
+  padding: 12px 14px;
+}
+
+.login-panel .error-box p {
+  margin: 4px 0 0;
+  color: #5a4f47;
+}
+
+.auth-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  margin-top: 18px;
+}
+
+.auth-footer-links a {
+  color: #5a4f47;
+  font-size: 0.88rem;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.auth-footer-links a:hover {
+  border-bottom-color: rgba(155, 44, 44, 0.35);
+  color: #9b2c2c;
+}
+
+.auth-aside {
+  display: grid;
+  align-content: end;
+  gap: 12px;
+  min-height: 100%;
+  border: 1px solid rgba(44, 36, 32, 0.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(160deg, rgba(255, 252, 247, 0.42), rgba(243, 235, 224, 0.28)),
+    radial-gradient(circle at 80% 20%, rgba(155, 44, 44, 0.1), transparent 42%);
+  padding: 36px 32px;
+}
+
+.auth-aside-eyebrow {
+  margin: 0;
+  color: #9b2c2c;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+.auth-aside-title {
+  margin: 0;
+  max-width: 16ch;
+  color: #2c2420;
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1.28;
+}
+
+.auth-aside-list {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  color: #5a4f47;
+}
+
+.auth-aside-list li {
+  position: relative;
+  padding-left: 18px;
+  font-size: 0.95rem;
+}
+
+.auth-aside-list li::before {
+  position: absolute;
+  top: 0.55em;
+  left: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #c43c3c, #3d5a80);
+  content: "";
+}
+
+.landing-fallback {
+  position: fixed;
+  z-index: 50;
+  right: 16px;
+  bottom: 16px;
+  display: grid;
+  gap: 8px;
+  max-width: 280px;
+  border: 1px solid rgba(44, 36, 32, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 252, 247, 0.94);
+  box-shadow: 0 12px 30px rgba(44, 36, 32, 0.12);
+  padding: 14px 16px;
+  color: #2c2420;
+}
+
+.landing-fallback p {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.landing-fallback-link {
+  color: #9b2c2c;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.landing-host {
+  min-height: 100dvh;
+}
+
+@media (max-width: 860px) {
+  .auth-shell,
+  .login-main {
+    padding-bottom: 28px;
+  }
+
+  .auth-topbar {
+    width: min(100% - 24px, 1120px);
+    min-height: 64px;
+    padding-top: 14px;
+  }
+
+  .auth-ghost-link {
+    display: none;
+  }
+
+  .auth-stage {
+    width: min(100% - 24px, 1120px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 8px;
+  }
+
+  .auth-aside {
+    order: -1;
+    min-height: 0;
+    padding: 22px 20px;
+  }
+
+  .auth-aside-title {
+    max-width: none;
+    font-size: 1.45rem;
+  }
+
+  .auth-aside-list {
+    display: none;
+  }
+
+  .login-titlebar {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .login-titlebar .language-switcher {
+    width: 44px;
+  }
+
+  .login-panel {
+    padding: 22px 18px;
+  }
+}
+
+/* Chinese editorial login surface */
+.login-page {
+  --login-paper: #f6f0e6;
+  --login-surface: #fffdf8;
+  --login-ink: #1d2832;
+  --login-muted: #5e6569;
+  --login-line: #c9c2b7;
+  --login-red: #a51d1d;
+  --login-red-strong: #861414;
+  position: relative;
+  display: block;
+  min-height: 100dvh;
+  overflow: hidden;
+  padding: 0;
+  background: var(--login-paper);
+  color: var(--login-ink);
+}
+
+.login-page .auth-topbar {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  left: 0;
+  width: 100%;
+  min-height: 112px;
+  margin: 0;
+  padding: 32px 50px 20px 40px;
+}
+
+.login-page .auth-brand {
+  gap: 14px;
+}
+
+.login-page .auth-brand-mark {
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #9b1717, #b52121);
+  box-shadow: 0 10px 24px rgba(93, 20, 20, 0.18);
+  font-size: 1.05rem;
+  letter-spacing: 0;
+  transform: none;
+}
+
+.login-page .auth-brand-copy {
+  gap: 4px;
+}
+
+.login-page .auth-brand-copy strong {
+  color: var(--login-ink);
+  font-family: Georgia, "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.login-page .auth-brand-copy small {
+  color: #5d6468;
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+.login-page .auth-ghost-link {
+  min-height: 58px;
+  gap: 10px;
+  border-color: rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  background: rgba(20, 24, 33, 0.14);
+  color: rgba(255, 250, 244, 0.94);
+  padding: 0 20px;
+  font-size: 1rem;
+  letter-spacing: 0;
+  backdrop-filter: blur(6px);
+}
+
+.login-page .auth-ghost-link:hover {
+  border-color: rgba(255, 255, 255, 0.44);
+  background: rgba(20, 24, 33, 0.28);
+  color: #ffffff;
+}
+
+.login-page .auth-ghost-link:focus-visible,
+.login-page a:focus-visible,
+.login-page button:focus-visible {
+  outline: 3px solid rgba(165, 29, 29, 0.28);
+  outline-offset: 3px;
+}
+
+.login-page .auth-stage {
+  display: block;
+  width: 100%;
+  min-height: 100dvh;
+  margin: 0;
+}
+
+.login-workspace {
+  display: grid;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: var(--login-paper);
+  grid-template-columns: minmax(560px, 43.5%) minmax(0, 56.5%);
+}
+
+.login-form-panel {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  min-width: 0;
+  min-height: 100dvh;
+  align-items: center;
+  overflow: visible;
+  background:
+    linear-gradient(rgba(246, 240, 230, 0.98), rgba(246, 240, 230, 0.98)),
+    repeating-linear-gradient(24deg, rgba(88, 62, 38, 0.018) 0, rgba(88, 62, 38, 0.018) 1px, transparent 1px, transparent 7px);
+}
+
+.login-form-panel::after {
+  position: absolute;
+  top: 0;
+  right: -200px;
+  width: 200px;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(246, 240, 230, 0.96), rgba(246, 240, 230, 0));
+  content: "";
+  pointer-events: none;
+}
+
+.login-copy {
+  width: min(100% - 80px, 455px);
+  min-width: 0;
+  margin-right: auto;
+  margin-left: clamp(72px, 6.7vw, 120px);
+  padding: 144px 0 80px;
+}
+
+.login-kicker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 28px;
+  color: var(--login-red);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.login-kicker::before {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--login-red);
+  content: "";
+}
+
+.login-copy h1 {
+  margin: 0;
+  color: var(--login-ink);
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 3.5rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.18;
+}
+
+.login-intro {
+  max-width: 28rem;
+  margin: 18px 0 48px;
+  color: var(--login-muted);
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.login-form {
+  display: grid;
+  gap: 30px;
+}
+
+.login-field {
+  display: grid;
+  gap: 10px;
+}
+
+.login-field label,
+.login-label-row {
+  color: #25313a;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.login-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.login-label-row a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  color: var(--login-red);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.login-label-row a:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.login-input-wrap {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #c9c6bd;
+  border-radius: 6px;
+  background: rgba(255, 253, 248, 0.7);
+  padding: 0 16px;
+  color: #77818a;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.login-input-wrap:focus-within {
+  border-color: var(--login-red);
+  background: #fffefb;
+  box-shadow: 0 0 0 3px rgba(155, 44, 44, 0.12);
+  color: var(--login-red);
+}
+
+.login-input-wrap input {
+  width: 100%;
+  min-width: 0;
+  min-height: 56px;
+  margin: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--login-ink);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+.login-input-wrap input::placeholder {
+  color: #9ba2a8;
+  opacity: 1;
+}
+
+.login-password-toggle {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #69727a;
+  cursor: pointer;
+}
+
+.login-password-toggle:hover {
+  background: #f3f0e9;
+  color: var(--login-red);
+}
+
+.login-submit {
+  display: inline-flex;
+  width: 100%;
+  min-height: 66px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 6px;
+  border: 1px solid var(--login-red);
+  border-radius: 6px;
+  background: linear-gradient(135deg, #951313 0%, #c32222 100%);
+  box-shadow: 0 10px 24px rgba(127, 36, 36, 0.2);
+  color: #fff;
+  cursor: pointer;
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.login-submit:hover:not(:disabled) {
+  border-color: var(--login-red-strong);
+  background: var(--login-red-strong);
+  box-shadow: 0 12px 28px rgba(127, 36, 36, 0.24);
+}
+
+.login-join {
+  display: grid;
+  align-items: center;
+  gap: 18px;
+  margin-top: 38px;
+  grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
+}
+
+.login-join > span {
+  height: 1px;
+  background: var(--login-line);
+}
+
+.login-join p {
+  margin: 0;
+  color: #4e565b;
+  font-size: 0.92rem;
+  white-space: nowrap;
+}
+
+.login-join a {
+  color: var(--login-red);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.login-join a:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.login-submit:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.login-submit-spinner {
+  animation: login-spin 800ms linear infinite;
+}
+
+@keyframes login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.login-error {
+  display: grid;
+  gap: 4px;
+  margin: -10px 0 24px;
+  border: 1px solid rgba(155, 44, 44, 0.3);
+  border-left: 4px solid var(--login-red);
+  border-radius: 6px;
+  background: #fff5f3;
+  padding: 12px 14px;
+  color: #682222;
+}
+
+.login-error p {
+  margin: 0;
+  color: #70413e;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.login-error small {
+  display: block;
+  margin-top: 4px;
+  color: #7f2424;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.login-error code {
+  overflow-wrap: anywhere;
+}
+
+.signup-page {
+  overflow-y: auto;
+}
+
+.signup-page .login-workspace,
+.signup-page .login-form-panel {
+  min-height: max(100dvh, 980px);
+}
+
+.signup-copy {
+  width: min(100% - 80px, 500px);
+  padding-top: 128px;
+  padding-bottom: 48px;
+}
+
+.signup-copy h1 {
+  font-size: 3.2rem;
+}
+
+.signup-page .login-intro {
+  margin-top: 12px;
+  margin-bottom: 26px;
+}
+
+.signup-form {
+  gap: 18px;
+}
+
+.signup-form .login-field {
+  gap: 7px;
+}
+
+.signup-page .login-input-wrap,
+.signup-page .login-input-wrap input {
+  min-height: 52px;
+}
+
+.signup-page .login-submit {
+  min-height: 60px;
+  margin-top: 2px;
+}
+
+.signup-error {
+  margin: 0;
+}
+
+.signup-field-error,
+.signup-field-hint {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.signup-field-error {
+  color: #8a1f1f;
+}
+
+.signup-field-hint {
+  margin-top: -13px;
+  color: var(--login-muted);
+}
+
+.login-visual {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  overflow: hidden;
+  background-color: #1a2332;
+  background-image: url("/landing/assets/scene-5-finale.jpg");
+  background-position: 50% center;
+  background-size: cover;
+}
+
+.login-visual::after {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(17, 21, 29, 0.06) 30%, rgba(12, 14, 20, 0.7) 100%),
+    rgba(18, 24, 34, 0.2);
+  content: "";
+}
+
+.login-visual-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 40rem;
+  padding: 64px 48px 112px 28px;
+  color: #fff;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+}
+
+.login-visual-copy p {
+  position: relative;
+  margin: 0 0 30px;
+  color: #fff7ed;
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 1.1rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.login-visual-copy p::after {
+  position: absolute;
+  bottom: -14px;
+  left: 0;
+  width: 38px;
+  height: 2px;
+  background: #d14537;
+  content: "";
+}
+
+.login-visual-copy h2 {
+  margin: 0;
+  color: #fffaf2;
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: clamp(2.1rem, 2.7vw, 2.8rem);
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.42;
+}
+
+@media (min-width: 961px) and (max-height: 800px) {
+  .login-page {
+    overflow-y: auto;
+  }
+
+  .login-workspace,
+  .login-form-panel {
+    min-height: 800px;
+  }
+}
+
+@media (max-width: 960px) {
+  .login-page {
+    min-height: 100dvh;
+    overflow: auto;
+  }
+
+  .login-page .auth-topbar {
+    min-height: 96px;
+    padding: 20px 24px;
+  }
+
+  .login-page .auth-brand-mark {
+    width: 52px;
+    height: 52px;
+  }
+
+  .login-page .auth-brand-copy strong {
+    font-size: 1.12rem;
+  }
+
+  .login-page .auth-brand-copy small {
+    font-size: 0.85rem;
+  }
+
+  .login-page .auth-ghost-link {
+    display: inline-flex;
+    min-height: 48px;
+    border-color: rgba(37, 49, 58, 0.16);
+    background: rgba(255, 253, 248, 0.66);
+    color: #39454d;
+    backdrop-filter: blur(8px);
+  }
+
+  .login-page .auth-ghost-link:hover {
+    border-color: rgba(165, 29, 29, 0.3);
+    background: #fffaf4;
+    color: var(--login-red);
+  }
+
+  .login-workspace {
+    min-height: 100dvh;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .login-form-panel {
+    min-height: 100dvh;
+    background:
+      linear-gradient(rgba(246, 240, 230, 0.94), rgba(246, 240, 230, 0.98)),
+      url("/landing/assets/scene-5-finale.jpg") center / cover;
+  }
+
+  .login-form-panel::after {
+    display: none;
+  }
+
+  .login-copy {
+    width: min(100% - 48px, 520px);
+    margin-right: auto;
+    margin-left: auto;
+    padding: 138px 0 56px;
+  }
+
+  .login-visual {
+    display: none;
+  }
+
+  .signup-page .login-workspace,
+  .signup-page .login-form-panel {
+    min-height: max(100dvh, 940px);
+  }
+
+  .signup-copy {
+    width: min(100% - 48px, 520px);
+    padding-top: 124px;
+    padding-bottom: 48px;
+  }
+}
+
+@media (max-width: 520px) {
+  .login-page .auth-topbar {
+    min-height: 84px;
+    padding: 16px;
+  }
+
+  .login-page .auth-brand {
+    gap: 10px;
+  }
+
+  .login-page .auth-brand-mark {
+    width: 46px;
+    height: 46px;
+    border-radius: 7px;
+    font-size: 0.8rem;
+  }
+
+  .login-page .auth-brand-copy strong {
+    font-size: 0.96rem;
+  }
+
+  .login-page .auth-brand-copy small {
+    display: none;
+  }
+
+  .login-page .auth-ghost-link {
+    min-height: 44px;
+    padding: 0 9px;
+    font-size: 0;
+  }
+
+  .login-page .auth-ghost-link svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .login-copy {
+    width: min(100% - 32px, 440px);
+    padding: 116px 0 40px;
+  }
+
+  .login-copy h1 {
+    font-size: 2.65rem;
+  }
+
+  .login-intro {
+    margin: 14px 0 28px;
+    font-size: 1rem;
+  }
+
+  .login-form {
+    gap: 24px;
+  }
+
+  .login-submit {
+    min-height: 60px;
+  }
+
+  .login-join {
+    gap: 12px;
+    margin-top: 30px;
+  }
+
+  .signup-copy {
+    width: min(100% - 32px, 440px);
+    padding-top: 104px;
+    padding-bottom: 32px;
+  }
+
+  .signup-copy h1 {
+    font-size: 2.4rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-page *,
+  .login-page *::before,
+  .login-page *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

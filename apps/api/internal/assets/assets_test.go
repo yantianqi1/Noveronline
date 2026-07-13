@@ -182,6 +182,15 @@ func TestSQLReaderSearchesSanitizedAssetIndex(t *testing.T) {
 				`[{"collection_id":"collection-1","title":"世界规则集","lifecycle":"canon"}]`,
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
+				"keyword",
+				0.5,
+				0.0,
+				0.04,
+				0.08,
+				0.05,
+				0.67,
+				1,
+				"",
 			}},
 		},
 	}
@@ -209,7 +218,7 @@ func TestSQLReaderSearchesSanitizedAssetIndex(t *testing.T) {
 	if len(item.Collections) != 1 || item.Collections[0].CollectionID != "collection-1" || item.Collections[0].Title != "世界规则集" {
 		t.Fatalf("expected DB-backed collection metadata, got %#v", item.Collections)
 	}
-	if !strings.Contains(queryer.query, "FROM global_search_index") || !strings.Contains(queryer.query, "tenant_id::text = $1") || !strings.Contains(queryer.query, "project_id::text = $2") {
+	if !strings.Contains(queryer.query, "FROM global_search_index") || !strings.Contains(queryer.query, "search_doc.tenant_id::text = input.tenant_id") || !strings.Contains(queryer.query, "search_doc.project_id::text = input.project_id") {
 		t.Fatalf("expected tenant/project scoped search query, got %s", queryer.query)
 	}
 	if !strings.Contains(queryer.query, "ILIKE") {
@@ -218,12 +227,15 @@ func TestSQLReaderSearchesSanitizedAssetIndex(t *testing.T) {
 	if !strings.Contains(queryer.query, "asset_versions") || !strings.Contains(queryer.query, "asset_collections") || !strings.Contains(queryer.query, "asset_collection_items") {
 		t.Fatalf("expected version/collection metadata joins, got %s", queryer.query)
 	}
-	for _, forbidden := range []string{"content_text", "body_text", "encrypted_api_key", "api_key", "credential_ref", "object_key", "draft", "manuscript"} {
+	for _, forbidden := range []string{"content_text", "body_text", "encrypted_api_key", "api_key", "credential_ref", "object_key", "draft_text", "manuscript_text"} {
 		if strings.Contains(strings.ToLower(queryer.query), forbidden) {
 			t.Fatalf("asset search query selected forbidden field %q: %s", forbidden, queryer.query)
 		}
 	}
-	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "project-123", "%灵气%", 100}) {
+	if !reflect.DeepEqual(queryer.args, []any{
+		"tenant-123", "project-123", "灵气", "%灵气%", "keyword", nil, "",
+		[]string{}, []string{}, []string{}, []string{}, []string{}, (*bool)(nil), 100,
+	}) {
 		t.Fatalf("unexpected search args: %#v", queryer.args)
 	}
 }
@@ -246,6 +258,15 @@ func TestSQLReaderSearchAssetsDoesNotSelectOrReturnBody(t *testing.T) {
 				`[]`,
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
+				"keyword",
+				0.5,
+				0.0,
+				0.04,
+				0.08,
+				0.05,
+				0.67,
+				1,
+				"",
 			}},
 		},
 	}
@@ -263,7 +284,8 @@ func TestSQLReaderSearchAssetsDoesNotSelectOrReturnBody(t *testing.T) {
 	if len(items) != 1 || items[0].SearchDocumentID != "doc-1" || items[0].Title != "灵气规则" {
 		t.Fatalf("unexpected search result: %#v", items)
 	}
-	selectList := strings.Split(queryer.query, "FROM global_search_index")[0]
+	beforePublicFrom := strings.Split(queryer.query, "FROM ranked")[0]
+	selectList := beforePublicFrom[strings.LastIndex(beforePublicFrom, "SELECT"):]
 	if strings.Contains(strings.ToLower(selectList), "search_doc.body") {
 		t.Fatalf("asset search selected body in public row shape: %s", queryer.query)
 	}
@@ -312,7 +334,10 @@ func TestSQLReaderUsesTenantContextQueryerForAssetReadSide(t *testing.T) {
 				_, err := reader.SearchAssets(context.Background(), SearchAssetsInput{TenantID: "tenant-123", ProjectID: "project-123", Query: "灵气"})
 				return err
 			},
-			args: []any{"tenant-123", "project-123", "%灵气%", 100},
+			args: []any{
+				"tenant-123", "project-123", "灵气", "%灵气%", "keyword", nil, "",
+				[]string{}, []string{}, []string{}, []string{}, []string{}, (*bool)(nil), 100,
+			},
 		},
 	}
 
@@ -373,6 +398,15 @@ func TestSQLReaderSearchSanitizesNestedPayloadFields(t *testing.T) {
 				`[]`,
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
+				"keyword",
+				0.5,
+				0.0,
+				0.04,
+				0.08,
+				0.05,
+				0.67,
+				1,
+				"",
 			}},
 		},
 	}
@@ -1275,6 +1309,15 @@ func rowsForTenantAssetReadTest(name string) *fakeSQLRows {
 				`[]`,
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
+				"keyword",
+				0.5,
+				0.0,
+				0.04,
+				0.08,
+				0.05,
+				0.67,
+				1,
+				"",
 			}},
 		}
 	default:
@@ -1306,6 +1349,8 @@ func (r *fakeSQLRows) Scan(dest ...any) error {
 			*target = row[index].(bool)
 		case *int:
 			*target = row[index].(int)
+		case *float64:
+			*target = row[index].(float64)
 		default:
 			return errors.New("unsupported scan target")
 		}

@@ -2101,7 +2101,7 @@ def test_postgres_archive_candidate_writer_persists_candidate_archive_assets_and
     queries = [query for query, _params in connection.cursor_instance.executed]
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO assets" in queries[1]
     assert "INSERT INTO archive_memories" in queries[2]
@@ -2327,7 +2327,7 @@ def test_postgres_seed_asset_indexer_projects_canon_into_assets_and_search() -> 
     assert len(queries) == 6
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO assets" in queries[1]
     assert "FROM entities" in queries[1]
@@ -2337,7 +2337,19 @@ def test_postgres_seed_asset_indexer_projects_canon_into_assets_and_search() -> 
     assert "FROM world_rule_evidence" in queries[3]
     assert "INSERT INTO assets" in queries[4]
     assert "FROM plot_threads" in queries[4]
+    for asset_query in queries[1:5]:
+        for column in ("summary", "content_text", "payload_jsonb"):
+            assert f"{column} = CASE" in asset_query
+            assert (
+                f"WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN EXCLUDED.{column}"
+                in asset_query
+            )
+            assert f"ELSE assets.{column}" in asset_query
+        assert "enabled = CASE" in asset_query
+        assert "WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN true" in asset_query
+        assert "ELSE assets.enabled" in asset_query
     assert "INSERT INTO global_search_index" in queries[5]
+    assert "AND enabled = true" in queries[5]
     assert all(params == ("tenant-1", "project-1", "run-1") for _query, params in connection.cursor_instance.executed[1:])
     assert "evidence_text" not in str(result)
     assert "body" not in result
@@ -2412,12 +2424,14 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
     queries = [query for query, _params in connection.cursor_instance.executed]
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO project_readiness_snapshots" in queries[1]
     assert "FROM assets" in queries[1]
     assert "FROM entities" in queries[1]
     assert "FROM relationships" in queries[1]
+    assert queries[1].count("observed_source_run_ids") == 2
+    assert queries[1].count("jsonb_build_array(%s::text)") == 2
     assert "FROM world_rule_evidence" in queries[1]
     assert "RETURNING" in queries[1]
     assert "project_readiness_snapshot_id::text AS project_readiness_snapshot_id" in queries[1]
@@ -2425,6 +2439,13 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
     assert "tenant-1" in joined_params
     assert "project-1" in joined_params
     assert "run-1" in joined_params
+    assert connection.cursor_instance.executed[1][1] == (
+        "tenant-1", "project-1", "run-1",
+        "tenant-1", "project-1", "run-1", "run-1",
+        "tenant-1", "project-1", "run-1", "run-1",
+        "tenant-1", "project-1", "run-1",
+        "tenant-1", "project-1", "run-1",
+    )
     assert "readiness_report" not in joined_params
     assert "private readiness body" not in joined_params
     assert connection.committed is True
@@ -2765,6 +2786,8 @@ class RecordingSeedSegmentRetryStatusWriter:
         *,
         context: AgentContext,
         segment_ids: list[str],
+        retry_attempt_id: str | None = None,
+        worker_attempt: int = 1,
         status: str,
         code: str | None = None,
         message: str | None = None,
@@ -2780,6 +2803,44 @@ class RecordingSeedSegmentRetryStatusWriter:
                 "message": message,
             }
         )
+
+
+class RecordingSeedSegmentRetryStore(RecordingSeedSegmentRetryStatusWriter):
+    def __init__(self, claimed_segments: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.claimed_segments = claimed_segments
+        self.claims: list[dict[str, object]] = []
+
+    def claim_seed_segment_retries(
+        self,
+        *,
+        context: AgentContext,
+        segment_ids: list[str],
+        retry_attempt_id: str | None = None,
+        worker_attempt: int = 1,
+    ) -> list[dict[str, object]]:
+        self.claims.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+                "segment_ids": list(segment_ids),
+            }
+        )
+        claimed_ids = {
+            segment.get("segment_id")
+            for segment in self.claimed_segments
+            if isinstance(segment.get("segment_id"), str)
+        }
+        if claimed_ids == set(segment_ids):
+            self.mark_seed_segment_retries(
+                context=context,
+                segment_ids=segment_ids,
+                retry_attempt_id=retry_attempt_id,
+                worker_attempt=worker_attempt,
+                status="running",
+            )
+        return list(self.claimed_segments)
 
 
 class RecordingTextArtifactWriter:
@@ -3669,6 +3730,25 @@ class FakeConnection:
         self.closed = True
 
 
+class FakeReadingNotesCursor(FakeCursor):
+    def __init__(self, rows: list[dict[str, object] | None]) -> None:
+        super().__init__()
+        self.rows = list(rows)
+
+    def fetchone(self) -> dict[str, object] | None:
+        if not self.rows:
+            raise AssertionError("unexpected fetchone call")
+        return self.rows.pop(0)
+
+
+class FakeReadingNotesConnection(FakeConnection):
+    def __init__(self, rows: list[dict[str, object] | None]) -> None:
+        self.cursor_instance = FakeReadingNotesCursor(rows)
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+
+
 class FakeOntologySnapshotCursor(FakeCursor):
     def __init__(self, rows: list[dict[str, object]]) -> None:
         super().__init__()
@@ -3710,6 +3790,24 @@ class FakeWorkflowStatusCursor(FakeCursor):
 class FakeWorkflowStatusConnection(FakeConnection):
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self.cursor_instance = FakeWorkflowStatusCursor(rows)
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+
+
+class FakeSegmentRetryCursor(FakeCursor):
+    def __init__(self, rows: list[dict[str, object]], *, rowcount: int | None = None) -> None:
+        super().__init__()
+        self.rows = list(rows)
+        self.rowcount = len(rows) if rowcount is None else rowcount
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return list(self.rows)
+
+
+class FakeSegmentRetryConnection(FakeConnection):
+    def __init__(self, rows: list[dict[str, object]], *, rowcount: int | None = None) -> None:
+        self.cursor_instance = FakeSegmentRetryCursor(rows, rowcount=rowcount)
         self.committed = False
         self.rolled_back = False
         self.closed = False
@@ -4282,7 +4380,7 @@ def test_postgres_workflow_event_writer_inserts_sanitized_workflow_event() -> No
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO workflow_events" in connection.cursor_instance.query
     assert "COALESCE(MAX(sequence), 0) + 1" in connection.cursor_instance.query
@@ -4623,6 +4721,44 @@ def test_parse_file_activity_fails_closed_for_valid_blank_pdf_without_configured
         label for label, marker in forbidden_public_markers if marker in public_body
     ]
     assert leaked_marker_labels == []
+
+
+def test_parse_file_activity_uses_configured_ocr_backend_for_scanned_pdf() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    artifact_writer = RecordingTextArtifactWriter()
+    status_writer = RecordingSourceFileStatusWriter()
+    raw_pdf = _minimal_blank_pdf_with_metadata("private scanned source")
+    object_store = InMemoryObjectStore({"uploads/source-1.pdf": raw_pdf})
+
+    class OcrBackend:
+        def extract_text(self, pdf_bytes: bytes) -> str:
+            assert pdf_bytes == raw_pdf
+            return "第一章 雨夜\n\nThe gate opened from inside."
+
+    result = parse_file_activity(
+        {
+            "context": _context().model_dump(),
+            "source_file_id": "file-1",
+            "source_object_key": "uploads/source-1.pdf",
+            "mime_type": "application/pdf",
+        },
+        source_object_store=object_store,
+        artifact_object_store=object_store,
+        text_artifact_writer=artifact_writer,
+        workflow_event_writer=workflow_writer,
+        source_status_writer=status_writer,
+        pdf_ocr_backend=OcrBackend(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["next_stage"] == "segment_text"
+    assert object_store.writes[0][1].decode("utf-8") == (
+        "第一章 雨夜\n\nThe gate opened from inside."
+    )
+    assert artifact_writer.artifacts[0]["char_count"] > 0
+    assert status_writer.statuses[0]["parse_status"] == "parsed"
+    assert workflow_writer.events[0]["payload"]["status"] == "completed"
+    assert "第一章" not in str(workflow_writer.events)
 
 
 def test_parse_file_activity_fails_closed_for_unextractable_pdf_without_leaking_bytes() -> None:
@@ -6418,6 +6554,9 @@ class SuccessfulSequentialReader:
 
 
 class EchoSequentialReader:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
     def read_segments(
         self,
         *,
@@ -6425,6 +6564,15 @@ class EchoSequentialReader:
         module_key: str,
         segments: list[dict[str, object]],
     ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+                "module_key": module_key,
+                "segments": list(segments),
+            }
+        )
         return {
             "status": "completed",
             "pass_id": "pass-1",
@@ -6463,6 +6611,32 @@ class InvalidSequentialReader:
             "module_key": module_key,
             "model_id": "model-a",
             "notes": [{"segment_id": "segment-1", "payload_jsonb": {"characters": "not-a-list"}}],
+        }
+
+
+class EmptyNotesSequentialReader(EchoSequentialReader):
+    def read_segments(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        segments: list[dict[str, object]],
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+                "module_key": module_key,
+                "segments": list(segments),
+            }
+        )
+        return {
+            "status": "completed",
+            "pass_id": "pass-empty",
+            "module_key": module_key,
+            "model_id": "model-a",
+            "notes": [],
         }
 
 
@@ -6564,7 +6738,7 @@ def test_postgres_text_artifact_writer_upserts_sanitized_artifact_reference() ->
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO project_text_artifacts" in connection.cursor_instance.query
     assert (
@@ -6598,7 +6772,7 @@ def test_postgres_source_file_status_writer_updates_parse_status_with_tenant_con
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "UPDATE source_files" in connection.cursor_instance.query
     assert "parse_status = %s" in connection.cursor_instance.query
@@ -6651,18 +6825,19 @@ def test_postgres_seed_workflow_status_writer_marks_failed_with_tenant_context_a
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     query, params = connection.cursor_instance.executed[1]
     assert "UPDATE workflow_runs" in query
     assert "workflow_type = 'seed_pipeline'" in query
-    assert params[:4] == (
+    assert params == (
         "failed",
         "failed",
+        100,
+        100,
         "reading notes writer is unconfigured",
         None,
-    )
-    assert params[5:] == (
+        None,
         "READING_NOTES_WRITER_UNCONFIGURED",
         "reading notes writer is unconfigured",
         "tenant-1",
@@ -6684,21 +6859,25 @@ def test_postgres_seed_workflow_status_writer_marks_running_with_tenant_context(
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     query, params = connection.cursor_instance.executed[1]
     assert "UPDATE workflow_runs" in query
     assert "workflow_type = 'seed_pipeline'" in query
-    assert params[:7] == (
+    assert params == (
         "running",
         "running",
+        5,
+        5,
         "seed pipeline running",
         None,
         None,
         None,
         None,
+        "tenant-1",
+        "project-1",
+        "run-1",
     )
-    assert params[7:] == ("tenant-1", "project-1", "run-1")
     assert connection.committed is True
     assert connection.closed is True
 
@@ -6724,7 +6903,7 @@ def test_postgres_seed_analysis_writer_upserts_sanitized_private_snapshot() -> N
     assert snapshot_id == "snapshot-1"
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO seed_analysis_snapshots" in connection.cursor_instance.query
     assert (
@@ -6809,7 +6988,7 @@ def test_postgres_ontology_snapshot_writer_upserts_sanitized_private_snapshot() 
     assert snapshot_id == "ontology-snapshot-1"
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO seed_ontology_snapshots" in connection.cursor_instance.query
     assert (
@@ -6958,7 +7137,7 @@ def test_postgres_entity_resolution_snapshot_writer_upserts_sanitized_private_sn
     assert snapshot_id == "resolution-snapshot-1"
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO seed_entity_resolution_snapshots" in connection.cursor_instance.query
     assert (
@@ -7101,7 +7280,7 @@ def test_postgres_agent_profile_snapshot_writer_upserts_sanitized_private_snapsh
     assert snapshot_id == "profile-snapshot-1"
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO seed_agent_profile_snapshots" in connection.cursor_instance.query
     assert (
@@ -7787,7 +7966,7 @@ def test_postgres_text_segment_writer_upserts_sanitized_segments() -> None:
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert "INSERT INTO text_segments" in connection.cursor_instance.query
     assert "segment_id" in connection.cursor_instance.query
@@ -7883,6 +8062,23 @@ def test_postgres_reading_notes_writer_requires_project_context() -> None:
 def test_postgres_reading_notes_writer_upserts_sanitized_pass_and_notes() -> None:
     connection = FakeConnection()
     writer = PostgresReadingNotesWriter(connect=lambda: connection)
+    metadata = {
+        "retry": True,
+        "last_retry_segment_count": 1,
+        "prompt": "must not be stored",
+    }
+    note = {
+        "segment_id": "segment-1",
+        "summary": "段落概要",
+        "payload_jsonb": {
+            "characters": [{"name": "阿澜"}],
+            "prompt": "must not be stored",
+            "content": "raw source must not be stored",
+            "api_key": "sk-test",
+        },
+    }
+    original_metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
+    original_note = json.loads(json.dumps(note, ensure_ascii=False))
 
     writer.record_reading_notes(
         context=_context(),
@@ -7891,28 +8087,25 @@ def test_postgres_reading_notes_writer_upserts_sanitized_pass_and_notes() -> Non
         status="completed",
         module_key="sequential_reading",
         model_id="model-a",
-        notes=[
-            {
-                "segment_id": "segment-1",
-                "summary": "段落概要",
-                "payload_jsonb": {
-                    "characters": [{"name": "阿澜"}],
-                    "prompt": "must not be stored",
-                    "content": "raw source must not be stored",
-                    "api_key": "sk-test",
-                },
-            }
-        ],
+        notes=[note],
+        metadata_jsonb=metadata,
     )
 
-    assert len(connection.cursor_instance.executed) == 3
+    assert metadata == original_metadata
+    assert note == original_note
+    assert len(connection.cursor_instance.executed) == 4
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     pass_query, pass_params = connection.cursor_instance.executed[1]
     assert "INSERT INTO reading_passes" in pass_query
     assert "ON CONFLICT (pass_id)" in pass_query
+    assert "metadata_jsonb = reading_passes.metadata_jsonb || EXCLUDED.metadata_jsonb" in pass_query
+    assert "reading_passes.tenant_id = EXCLUDED.tenant_id" in pass_query
+    assert "reading_passes.project_id = EXCLUDED.project_id" in pass_query
+    assert "reading_passes.run_id = EXCLUDED.run_id" in pass_query
+    assert "RETURNING reading_passes.pass_id" in pass_query
     assert pass_params == (
         "tenant-1",
         "project-1",
@@ -7922,7 +8115,7 @@ def test_postgres_reading_notes_writer_upserts_sanitized_pass_and_notes() -> Non
         "completed",
         "sequential_reading",
         "model-a",
-        "{}",
+        '{"retry":true,"last_retry_segment_count":1}',
     )
 
     note_query, note_params = connection.cursor_instance.executed[2]
@@ -7937,12 +8130,30 @@ def test_postgres_reading_notes_writer_upserts_sanitized_pass_and_notes() -> Non
         '{"characters":[{"name":"阿澜"}]}',
         "段落概要",
     )
+    count_query, count_params = connection.cursor_instance.executed[3]
+    assert "UPDATE reading_passes AS reading_pass" in count_query
+    assert "SELECT COUNT(*)" in count_query
+    assert "FROM reading_segment_notes AS reading_note" in count_query
+    assert "reading_note.tenant_id = reading_pass.tenant_id" in count_query
+    assert "reading_note.project_id = reading_pass.project_id" in count_query
+    assert "reading_note.run_id = reading_pass.run_id" in count_query
+    assert "reading_note.pass_id = reading_pass.pass_id" in count_query
+    assert "jsonb_build_object" in count_query
+    assert "'segment_count'" in count_query
+    assert "RETURNING reading_pass.pass_id" in count_query
+    assert "workflow_runs" not in "\n".join(
+        query for query, _ in connection.cursor_instance.executed
+    )
+    assert count_params == ("tenant-1", "project-1", "run-1", "pass-1")
     assert connection.committed is True
     assert connection.closed is True
 
 
-def test_postgres_reading_notes_writer_rolls_back_on_database_failure() -> None:
-    connection = FailingConnection(fail_on_execute=2)
+@pytest.mark.parametrize("fail_on_execute", [2, 3, 4])
+def test_postgres_reading_notes_writer_rolls_back_on_database_failure(
+    fail_on_execute: int,
+) -> None:
+    connection = FailingConnection(fail_on_execute=fail_on_execute)
     writer = PostgresReadingNotesWriter(connect=lambda: connection)
 
     with pytest.raises(RuntimeError, match="driver failure"):
@@ -7967,6 +8178,48 @@ def test_postgres_reading_notes_writer_rolls_back_on_database_failure() -> None:
     assert connection.closed is True
 
 
+@pytest.mark.parametrize(
+    ("rows", "message", "execute_count"),
+    [
+        ([None], "reading pass scope write failed", 2),
+        (
+            [{"pass_id": "pass-1"}, None],
+            "reading pass segment count update failed",
+            4,
+        ),
+    ],
+)
+def test_postgres_reading_notes_writer_rolls_back_when_scoped_update_misses(
+    rows: list[dict[str, object] | None],
+    message: str,
+    execute_count: int,
+) -> None:
+    connection = FakeReadingNotesConnection(rows)
+    writer = PostgresReadingNotesWriter(connect=lambda: connection)
+
+    with pytest.raises(RuntimeError, match=message):
+        writer.record_reading_notes(
+            context=_context(),
+            pass_id="pass-1",
+            pass_type="sequential_reading",
+            status="completed",
+            module_key="sequential_reading",
+            model_id="model-a",
+            notes=[
+                {
+                    "segment_id": "segment-1",
+                    "summary": "段落概要",
+                    "payload_jsonb": {"characters": [{"name": "阿澜"}]},
+                }
+            ],
+        )
+
+    assert len(connection.cursor_instance.executed) == execute_count
+    assert connection.rolled_back is True
+    assert connection.committed is False
+    assert connection.closed is True
+
+
 def test_postgres_runtime_facts_writer_sets_tenant_context_before_canon_writes() -> None:
     connection = FakeConnection()
     writer = PostgresRuntimeFactsWriter(connect=lambda: connection)
@@ -7975,12 +8228,55 @@ def test_postgres_runtime_facts_writer_sets_tenant_context_before_canon_writes()
 
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
-        ("tenant-1", "project-1"),
+        ("tenant-1", "user-1"),
     )
     assert counts["entity_count"] == 0
     assert counts["segment_summary_count"] == 0
     assert connection.committed is True
     assert connection.closed is True
+
+
+def test_postgres_runtime_facts_writer_tracks_run_lineage_without_reassigning_canon_owner() -> None:
+    connection = FakeConnection()
+    writer = PostgresRuntimeFactsWriter(connect=lambda: connection)
+
+    counts = writer.record_runtime_facts(
+        context=_context(),
+        reading_notes=[
+            {
+                "segment_id": "segment-1",
+                "summary": "public summary",
+                "payload_jsonb": {
+                    "characters": [{"name": "Lin"}],
+                    "organizations": [],
+                    "relationships": [
+                        {"source": "Lin", "target": "North Guild", "type": "member_of"}
+                    ],
+                    "plot_threads": [],
+                    "world_rules": [],
+                    "events": [],
+                    "consistency_notes": [],
+                },
+            }
+        ],
+    )
+
+    assert counts["entity_count"] == 1
+    assert counts["relationship_count"] == 1
+    entity_query, entity_params = next(
+        item for item in connection.cursor_instance.executed if "INSERT INTO entities" in item[0]
+    )
+    relationship_query, relationship_params = next(
+        item for item in connection.cursor_instance.executed if "INSERT INTO relationships" in item[0]
+    )
+    assert "source_run_id = EXCLUDED.source_run_id" not in entity_query
+    assert "source_run_id = EXCLUDED.source_run_id" not in relationship_query
+    assert "observed_source_run_ids" in entity_query
+    assert "observed_source_run_ids" in relationship_query
+    assert "|| (EXCLUDED.metadata_jsonb->'observed_source_run_ids')" in entity_query
+    assert "|| (EXCLUDED.metadata_jsonb->'observed_source_run_ids')" in relationship_query
+    assert json.loads(entity_params[-1])["observed_source_run_ids"] == ["run-1"]
+    assert json.loads(relationship_params[-1])["observed_source_run_ids"] == ["run-1"]
 
 
 def test_postgres_runtime_facts_writer_rolls_back_on_database_failure() -> None:
@@ -8036,7 +8332,6 @@ def test_seed_worker_spec_registers_temporal_workflow_and_activity() -> None:
 def test_seed_segment_retry_activity_fails_closed_without_runner_and_marks_requests_failed() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
     retry_status_writer = RecordingSeedSegmentRetryStatusWriter()
-    workflow_status_writer = RecordingWorkflowRunStatusWriter()
     payload = {
         "context": _context().model_dump(),
         "segment_ids": [
@@ -8055,7 +8350,6 @@ def test_seed_segment_retry_activity_fails_closed_without_runner_and_marks_reque
         payload,
         retry_status_writer=retry_status_writer,
         workflow_event_writer=workflow_writer,
-        workflow_status_writer=workflow_status_writer,
     )
 
     assert result == {
@@ -8068,7 +8362,6 @@ def test_seed_segment_retry_activity_fails_closed_without_runner_and_marks_reque
         },
         "retry_status_persisted": True,
         "stage_event_persisted": True,
-        "workflow_status_persisted": True,
     }
     assert retry_status_writer.statuses == [
         {
@@ -8100,15 +8393,6 @@ def test_seed_segment_retry_activity_fails_closed_without_runner_and_marks_reque
             },
         }
     ]
-    assert workflow_status_writer.failed == [
-        {
-            "tenant_id": "tenant-1",
-            "project_id": "project-1",
-            "run_id": "run-1",
-            "code": "SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED",
-            "message": "seed segment retry runner is not configured",
-        }
-    ]
     public_body = json.dumps([result, workflow_writer.events], ensure_ascii=False)
     for forbidden in (
         "77777777",
@@ -8128,7 +8412,6 @@ def test_seed_segment_retry_activity_fails_closed_without_runner_and_marks_reque
 def test_seed_segment_retry_activity_denies_before_side_effects() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
     retry_status_writer = RecordingSeedSegmentRetryStatusWriter()
-    workflow_status_writer = RecordingWorkflowRunStatusWriter()
     context = _context().model_copy(update={"permissions": {}})
 
     result = seed_segment_retry_activity(
@@ -8138,7 +8421,6 @@ def test_seed_segment_retry_activity_denies_before_side_effects() -> None:
         },
         retry_status_writer=retry_status_writer,
         workflow_event_writer=workflow_writer,
-        workflow_status_writer=workflow_status_writer,
     )
 
     assert result == {
@@ -8152,7 +8434,887 @@ def test_seed_segment_retry_activity_denies_before_side_effects() -> None:
     }
     assert retry_status_writer.statuses == []
     assert workflow_writer.events == []
-    assert workflow_status_writer.failed == []
+
+
+def test_postgres_seed_segment_retry_store_claims_only_requested_same_run_segments() -> None:
+    rows = [
+        {
+            "segment_id": "77777777-7777-4777-8777-777777777777",
+            "segment_order": 7,
+            "chapter_guess": "第七章",
+            "title_guess": "重逢",
+            "object_key": "projects/project-1/private/segment-7.txt",
+        },
+        {
+            "segment_id": "88888888-8888-4888-8888-888888888888",
+            "segment_order": 8,
+            "chapter_guess": "第八章",
+            "title_guess": "追踪",
+            "object_key": "projects/project-1/private/segment-8.txt",
+        },
+    ]
+    connection = FakeSegmentRetryConnection(rows)
+    store = seed_module.PostgresSeedSegmentRetryStore(connect=lambda: connection)
+
+    claimed = store.claim_seed_segment_retries(
+        context=_context(),
+        segment_ids=[
+            "77777777-7777-4777-8777-777777777777",
+            "88888888-8888-4888-8888-888888888888",
+        ],
+        retry_attempt_id="99999999-9999-4999-8999-999999999999",
+        worker_attempt=2,
+    )
+
+    assert claimed == rows
+    assert connection.cursor_instance.executed[0] == (
+        "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
+        ("tenant-1", "user-1"),
+    )
+    query, params = connection.cursor_instance.executed[1]
+    assert "UPDATE seed_segment_retry_requests" in query
+    assert "JOIN text_segments" in query
+    assert "status = 'requested'" in query
+    assert "retry_requests.status = 'running'" in query
+    assert "retry_requests.worker_attempt <" in query
+    assert "worker_attempt = (SELECT worker_attempt FROM retry_context)" in query
+    assert "attempts = attempts + 1" in query
+    assert "cardinality" in query
+    assert "FOR UPDATE OF retry_requests SKIP LOCKED" in query
+    assert "content_excerpt" not in query
+    assert params == (
+        [
+            "77777777-7777-4777-8777-777777777777",
+            "88888888-8888-4888-8888-888888888888",
+        ],
+        "tenant-1",
+        "project-1",
+        "run-1",
+        "99999999-9999-4999-8999-999999999999",
+        2,
+    )
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_seed_segment_retry_store_marks_all_requested_rows_with_public_failure() -> None:
+    connection = FakeSegmentRetryConnection([], rowcount=2)
+    store = seed_module.PostgresSeedSegmentRetryStore(connect=lambda: connection)
+
+    store.mark_seed_segment_retries(
+        context=_context(),
+        segment_ids=[
+            "77777777-7777-4777-8777-777777777777",
+            "88888888-8888-4888-8888-888888888888",
+        ],
+        retry_attempt_id="99999999-9999-4999-8999-999999999999",
+        worker_attempt=2,
+        status="failed",
+        code="LLM_MODULE_UNBOUND",
+        message="private prompt api_key=sk-hidden credential_ref=secret object_key=private",
+    )
+
+    query, params = connection.cursor_instance.executed[1]
+    assert "UPDATE seed_segment_retry_requests" in query
+    assert "last_error_code" in query
+    assert "AND status = 'running'" in query
+    assert "AND retry_attempt_id = %s::uuid" in query
+    assert "AND worker_attempt = %s" in query
+    assert params == (
+        "failed",
+        "LLM_MODULE_UNBOUND",
+        "LLM module is not bound",
+        "tenant-1",
+        "project-1",
+        "run-1",
+        [
+            "77777777-7777-4777-8777-777777777777",
+            "88888888-8888-4888-8888-888888888888",
+        ],
+        "99999999-9999-4999-8999-999999999999",
+        2,
+    )
+    encoded = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
+    for forbidden in ("private prompt", "sk-hidden", "credential_ref", "object_key=private"):
+        assert forbidden not in encoded
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_seed_segment_retry_store_atomically_completes_status_and_event() -> None:
+    segment_id = "77777777-7777-4777-8777-777777777777"
+    connection = FakeSegmentRetryConnection([{"segment_id": segment_id}], rowcount=1)
+    store = seed_module.PostgresSeedSegmentRetryStore(connect=lambda: connection)
+
+    store.complete_seed_segment_retries(
+        context=_context(),
+        segment_ids=[segment_id],
+        retry_attempt_id="99999999-9999-4999-8999-999999999999",
+        worker_attempt=2,
+        requested_count=1,
+        segment_count=1,
+        note_count=1,
+        model_id="model-a",
+    )
+
+    lock_query, lock_params = connection.cursor_instance.executed[1]
+    assert "FOR UPDATE OF retry_requests, workflow_runs" in lock_query
+    assert "retry_requests.retry_attempt_id = %s::uuid" in lock_query
+    assert "retry_requests.worker_attempt = %s" in lock_query
+    assert lock_params == (
+        [segment_id],
+        "tenant-1",
+        "project-1",
+        "run-1",
+        "99999999-9999-4999-8999-999999999999",
+        2,
+    )
+    update_query, update_params = connection.cursor_instance.executed[2]
+    assert "UPDATE seed_segment_retry_requests" in update_query
+    assert "RETURNING segment_id::text AS segment_id" in update_query
+    assert update_params == (
+        "completed",
+        None,
+        None,
+        "tenant-1",
+        "project-1",
+        "run-1",
+        [segment_id],
+        "99999999-9999-4999-8999-999999999999",
+        2,
+    )
+    event_query, event_params = connection.cursor_instance.executed[3]
+    assert "INSERT INTO workflow_events" in event_query
+    assert "COALESCE(MAX(sequence), 0) + 1" in event_query
+    assert event_params[:4] == (
+        "tenant-1",
+        "run-1",
+        "project-1",
+        "seed.segments.retry_completed",
+    )
+    assert json.loads(event_params[4]) == {
+        "stage": "segment_retry",
+        "status": "completed",
+        "requested_count": 1,
+        "segment_count": 1,
+        "note_count": 1,
+        "model_id": "model-a",
+    }
+    assert connection.committed is True
+    assert connection.rolled_back is False
+    assert connection.closed is True
+
+
+def test_postgres_seed_segment_retry_store_atomically_writes_notes_before_terminal_state() -> None:
+    segment_id = "77777777-7777-4777-8777-777777777777"
+    retry_attempt_id = "99999999-9999-4999-8999-999999999999"
+    connection = FakeSegmentRetryConnection([{"segment_id": segment_id}], rowcount=1)
+    store = seed_module.PostgresSeedSegmentRetryStore(connect=lambda: connection)
+
+    store.complete_seed_segment_retry_notes(
+        context=_context(),
+        segment_ids=[segment_id],
+        retry_attempt_id=retry_attempt_id,
+        worker_attempt=2,
+        pass_id="66666666-6666-4666-8666-666666666666",
+        module_key="sequential_reading",
+        model_id="model-a",
+        notes=[
+            {
+                "segment_id": segment_id,
+                "summary": "new summary",
+                "payload_jsonb": {
+                    "characters": [],
+                    "prompt": "private prompt",
+                },
+            }
+        ],
+    )
+
+    queries = [query for query, _params in connection.cursor_instance.executed]
+    assert "FOR UPDATE OF retry_requests, workflow_runs" in queries[1]
+    assert "INSERT INTO reading_passes" in queries[2]
+    assert "INSERT INTO reading_segment_notes" in queries[3]
+    assert "UPDATE reading_passes AS reading_pass" in queries[4]
+    assert "UPDATE seed_segment_retry_requests" in queries[5]
+    assert "INSERT INTO workflow_events" in queries[6]
+    pass_metadata = json.loads(connection.cursor_instance.executed[2][1][8])
+    assert pass_metadata == {
+        "retry": True,
+        "last_retry_segment_count": 1,
+        "last_retry_attempt_id": retry_attempt_id,
+    }
+    note_payload = json.loads(connection.cursor_instance.executed[3][1][5])
+    assert note_payload == {"characters": []}
+    assert all("UPDATE workflow_runs" not in query for query in queries)
+    assert connection.committed is True
+    assert connection.rolled_back is False
+
+
+def test_postgres_seed_segment_retry_store_rejects_stale_finish_scope_before_mutation() -> None:
+    connection = FakeSegmentRetryConnection([{"segment_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}], rowcount=1)
+    store = seed_module.PostgresSeedSegmentRetryStore(connect=lambda: connection)
+
+    with pytest.raises(LLMFacilityError) as exc_info:
+        store.complete_seed_segment_retries(
+            context=_context(),
+            segment_ids=["77777777-7777-4777-8777-777777777777"],
+            retry_attempt_id="99999999-9999-4999-8999-999999999999",
+            worker_attempt=1,
+            requested_count=1,
+            segment_count=1,
+            note_count=1,
+            model_id="model-a",
+        )
+
+    assert exc_info.value.code == "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED"
+    assert len(connection.cursor_instance.executed) == 2
+    assert connection.rolled_back is True
+    assert connection.committed is False
+    assert connection.closed is True
+
+
+def test_postgres_seed_segment_retry_store_rolls_back_atomic_completion_failure() -> None:
+    connection = FailingConnection(fail_on_execute=2)
+    store = seed_module.PostgresSeedSegmentRetryStore(connect=lambda: connection)
+
+    with pytest.raises(LLMFacilityError) as exc_info:
+        store.complete_seed_segment_retries(
+            context=_context(),
+            segment_ids=["77777777-7777-4777-8777-777777777777"],
+            retry_attempt_id="99999999-9999-4999-8999-999999999999",
+            worker_attempt=1,
+            requested_count=1,
+            segment_count=1,
+            note_count=1,
+            model_id="model-a",
+        )
+
+    assert exc_info.value.code == "SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED"
+    assert exc_info.value.message == "seed segment retry completion write failed"
+    assert connection.rolled_back is True
+    assert connection.committed is False
+    assert connection.closed is True
+
+
+def test_seed_segment_retry_activity_resolves_default_store_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+            }
+        ]
+    )
+    monkeypatch.setattr(seed_module, "_seed_segment_retry_store_from_env", lambda: retry_store)
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+            "retry_attempt_id": "99999999-9999-4999-8999-999999999999",
+        },
+        llm_reader=EchoSequentialReader(),
+        reading_notes_writer=RecordingReadingNotesWriter(),
+        workflow_event_writer=RecordingWorkflowEventWriter(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["segment_count"] == 1
+    assert [status["status"] for status in retry_store.statuses] == ["running", "completed"]
+
+
+def test_seed_segment_retry_activity_uses_attempt_guarded_atomic_notes_completion() -> None:
+    segment_id = "77777777-7777-4777-8777-777777777777"
+    retry_attempt_id = "99999999-9999-4999-8999-999999999999"
+
+    class AtomicNotesRetryStore(RecordingSeedSegmentRetryStore):
+        def __init__(self) -> None:
+            super().__init__(
+                [{"segment_id": segment_id, "segment_order": 7, "object_key": "private/segment.txt"}]
+            )
+            self.atomic_notes: list[dict[str, object]] = []
+
+        def complete_seed_segment_retry_notes(self, **kwargs: object) -> None:
+            self.atomic_notes.append(dict(kwargs))
+
+    retry_store = AtomicNotesRetryStore()
+    workflow_writer = RecordingWorkflowEventWriter()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": [segment_id],
+            "retry_attempt_id": retry_attempt_id,
+        },
+        retry_store=retry_store,
+        llm_reader=EchoSequentialReader(),
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "completed",
+        "requested_count": 1,
+        "segment_count": 1,
+        "note_count": 1,
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+    }
+    assert len(retry_store.atomic_notes) == 1
+    assert retry_store.atomic_notes[0]["retry_attempt_id"] == retry_attempt_id
+    assert retry_store.atomic_notes[0]["segment_ids"] == [segment_id]
+    assert retry_store.atomic_notes[0]["notes"] == [
+        {
+            "segment_id": segment_id,
+            "summary": "segment 7",
+            "payload_jsonb": {
+                "characters": [],
+                "organizations": [],
+                "relationships": [],
+                "plot_threads": [],
+                "world_rules": [],
+                "events": [],
+                "consistency_notes": [],
+            },
+        }
+    ]
+    assert workflow_writer.events == []
+
+
+def test_seed_segment_retry_activity_sanitizes_default_store_resolution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_store_resolution() -> object:
+        raise RuntimeError(
+            "private prompt api_key=sk-hidden credential_ref=secret object_key=private draft manuscript"
+        )
+
+    monkeypatch.setattr(seed_module, "_seed_segment_retry_store_from_env", fail_store_resolution)
+    workflow_writer = RecordingWorkflowEventWriter()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+        },
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "error": {
+            "code": "SEED_SEGMENT_RETRY_STORE_UNCONFIGURED",
+            "message": "seed segment retry store is not configured",
+        },
+        "retry_status_persisted": False,
+        "stage_event_persisted": True,
+    }
+    public_body = json.dumps([result, workflow_writer.events], ensure_ascii=False)
+    for forbidden in ("private prompt", "sk-hidden", "credential_ref", "object_key", "draft", "manuscript"):
+        assert forbidden not in public_body
+
+
+def test_seed_segment_retry_activity_claims_requested_segments_and_persists_notes() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+                "content_excerpt": "private raw segment text",
+                "summary": "public summary 7",
+            },
+            {
+                "segment_id": "88888888-8888-4888-8888-888888888888",
+                "segment_order": 8,
+                "object_key": "projects/project-1/private/segment-8.txt",
+                "content_excerpt": "private raw segment text",
+                "summary": "public summary 8",
+            },
+        ]
+    )
+    notes_writer = RecordingReadingNotesWriter()
+    reader = EchoSequentialReader()
+    payload = {
+        "context": _context().model_dump(),
+        "segment_ids": [
+            "77777777-7777-4777-8777-777777777777",
+            "88888888-8888-4888-8888-888888888888",
+        ],
+        "retry_attempt_id": "99999999-9999-4999-8999-999999999999",
+        "segments": [
+            {
+                "segment_id": "99999999-9999-4999-8999-999999999998",
+                "segment_order": 999,
+                "object_key": "spoofed/private.txt",
+                "content": "spoofed raw body",
+            }
+        ],
+        "source_object_key": "objects/private.txt",
+        "prompt": "private prompt",
+        "api_key": "sk-hidden",
+    }
+    original_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+
+    result = seed_segment_retry_activity(
+        payload,
+        retry_store=retry_store,
+        llm_reader=reader,
+        reading_notes_writer=notes_writer,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert payload == original_payload
+    assert result == {
+        "stage": "segment_retry",
+        "status": "completed",
+        "requested_count": 2,
+        "segment_count": 2,
+        "note_count": 2,
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+    }
+    assert retry_store.claims == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "segment_ids": [
+                "77777777-7777-4777-8777-777777777777",
+                "88888888-8888-4888-8888-888888888888",
+            ],
+        }
+    ]
+    assert [status["status"] for status in retry_store.statuses] == ["running", "completed"]
+    assert reader.calls == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "module_key": "sequential_reading",
+            "segments": [
+                {
+                    "segment_id": "77777777-7777-4777-8777-777777777777",
+                    "segment_order": 7,
+                    "object_key": "projects/project-1/private/segment-7.txt",
+                },
+                {
+                    "segment_id": "88888888-8888-4888-8888-888888888888",
+                    "segment_order": 8,
+                    "object_key": "projects/project-1/private/segment-8.txt",
+                },
+            ],
+        }
+    ]
+    assert notes_writer.passes == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "pass_id": "pass-1",
+            "pass_type": "sequential_reading",
+            "status": "completed",
+            "module_key": "sequential_reading",
+            "model_id": "model-a",
+            "notes": [
+                {
+                    "segment_id": "77777777-7777-4777-8777-777777777777",
+                    "summary": "segment 7",
+                    "payload_jsonb": {
+                        "characters": [],
+                        "organizations": [],
+                        "relationships": [],
+                        "plot_threads": [],
+                        "world_rules": [],
+                        "events": [],
+                        "consistency_notes": [],
+                    },
+                },
+                {
+                    "segment_id": "88888888-8888-4888-8888-888888888888",
+                    "summary": "segment 8",
+                    "payload_jsonb": {
+                        "characters": [],
+                        "organizations": [],
+                        "relationships": [],
+                        "plot_threads": [],
+                        "world_rules": [],
+                        "events": [],
+                        "consistency_notes": [],
+                    },
+                },
+            ],
+            "metadata_jsonb": {
+                "retry": True,
+                "last_retry_segment_count": 2,
+                "last_retry_attempt_id": "99999999-9999-4999-8999-999999999999",
+            },
+        }
+    ]
+    assert workflow_writer.events == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "workflow_type": "seed_pipeline",
+            "event_type": "seed.segments.retry_completed",
+            "payload": {
+                "stage": "segment_retry",
+                "status": "completed",
+                "requested_count": 2,
+                "segment_count": 2,
+                "note_count": 2,
+                "model_id": "model-a",
+            },
+        }
+    ]
+    public_body = json.dumps([result, workflow_writer.events], ensure_ascii=False)
+    for forbidden in (
+        "77777777",
+        "88888888",
+        "projects/project-1/private",
+        "private raw segment text",
+        "objects/private.txt",
+        "private prompt",
+        "api_key",
+        "sk-hidden",
+        "99999999-9999-4999-8999-999999999999",
+        "99999999-9999-4999-8999-999999999998",
+        "spoofed",
+    ):
+        assert forbidden not in public_body
+
+
+def test_seed_segment_retry_activity_fails_closed_when_claim_returns_no_segments() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore([])
+    notes_writer = RecordingReadingNotesWriter()
+    reader = EchoSequentialReader()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+        },
+        retry_store=retry_store,
+        llm_reader=reader,
+        reading_notes_writer=notes_writer,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "segment_count": 0,
+        "error": {
+            "code": "SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND",
+            "message": "seed segment retry request not found",
+        },
+        "retry_status_persisted": False,
+        "stage_event_persisted": True,
+    }
+    assert retry_store.statuses == []
+    assert reader.calls == []
+    assert notes_writer.passes == []
+    assert workflow_writer.events == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "workflow_type": "seed_pipeline",
+            "event_type": "seed.segments.retry_failed",
+            "payload": {
+                "stage": "segment_retry",
+                "status": "failed",
+                "requested_count": 1,
+                "segment_count": 0,
+                "error_code": "SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND",
+                "error_message": "seed segment retry request not found",
+            },
+        }
+    ]
+
+
+def test_seed_segment_retry_activity_fails_closed_when_claim_is_partial() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+            }
+        ]
+    )
+    reader = EchoSequentialReader()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": [
+                "77777777-7777-4777-8777-777777777777",
+                "88888888-8888-4888-8888-888888888888",
+            ],
+        },
+        retry_store=retry_store,
+        llm_reader=reader,
+        reading_notes_writer=RecordingReadingNotesWriter(),
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 2,
+        "segment_count": 1,
+        "error": {
+            "code": "SEED_SEGMENT_RETRY_REQUEST_NOT_FOUND",
+            "message": "seed segment retry request not found",
+        },
+        "retry_status_persisted": False,
+        "stage_event_persisted": True,
+    }
+    assert retry_store.statuses == []
+    assert reader.calls == []
+    public_body = json.dumps([result, workflow_writer.events], ensure_ascii=False)
+    assert "77777777" not in public_body
+    assert "88888888" not in public_body
+    assert "projects/project-1/private" not in public_body
+
+
+def test_seed_segment_retry_activity_rejects_incomplete_claimed_refs_before_reader_call() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+            }
+        ]
+    )
+    reader = EchoSequentialReader()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+        },
+        retry_store=retry_store,
+        llm_reader=reader,
+        reading_notes_writer=RecordingReadingNotesWriter(),
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "segment_count": 1,
+        "error": {
+            "code": "SCHEMA_VALIDATION_FAILED",
+            "message": "segment retry output schema validation failed",
+        },
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+    }
+    assert [status["status"] for status in retry_store.statuses] == ["running", "failed"]
+    assert reader.calls == []
+
+
+def test_seed_segment_retry_activity_rejects_completed_reader_with_empty_notes() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+            }
+        ]
+    )
+    notes_writer = RecordingReadingNotesWriter()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+        },
+        retry_store=retry_store,
+        llm_reader=EmptyNotesSequentialReader(),
+        reading_notes_writer=notes_writer,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "segment_count": 1,
+        "error": {
+            "code": "SCHEMA_VALIDATION_FAILED",
+            "message": "segment retry output schema validation failed",
+        },
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+    }
+    assert [status["status"] for status in retry_store.statuses] == ["running", "failed"]
+    assert notes_writer.passes == []
+    assert "retry_completed" not in json.dumps(workflow_writer.events)
+
+
+def test_seed_segment_retry_activity_reports_missing_notes_writer_without_reader_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(seed_module, "_reading_notes_writer_from_env", lambda: None)
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+            }
+        ]
+    )
+    reader = EchoSequentialReader()
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+            "prompt": "private prompt",
+            "api_key": "sk-hidden",
+        },
+        retry_store=retry_store,
+        llm_reader=reader,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "segment_count": 1,
+        "error": {
+            "code": "READING_NOTES_WRITER_UNCONFIGURED",
+            "message": "reading notes writer is unconfigured",
+        },
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+    }
+    assert [status["status"] for status in retry_store.statuses] == ["running", "failed"]
+    assert reader.calls == []
+    public_body = json.dumps([result, workflow_writer.events, retry_store.statuses], ensure_ascii=False)
+    assert "projects/project-1/private" not in public_body
+    assert "private prompt" not in public_body
+    assert "api_key" not in public_body
+    assert "sk-hidden" not in public_body
+
+
+def test_seed_segment_retry_activity_marks_failed_without_completed_success() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+            }
+        ]
+    )
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+        },
+        retry_store=retry_store,
+        llm_reader=FailingSequentialReader("LLM_MODULE_UNBOUND", "sequential_reading module is not bound"),
+        reading_notes_writer=RecordingReadingNotesWriter(),
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result == {
+        "stage": "segment_retry",
+        "status": "failed",
+        "requested_count": 1,
+        "segment_count": 1,
+        "error": {
+            "code": "LLM_MODULE_UNBOUND",
+            "message": "LLM module is not bound",
+        },
+        "retry_status_persisted": True,
+        "stage_event_persisted": True,
+    }
+    assert [status["status"] for status in retry_store.statuses] == ["running", "failed"]
+    assert workflow_writer.events == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "workflow_type": "seed_pipeline",
+            "event_type": "seed.segments.retry_failed",
+            "payload": {
+                "stage": "segment_retry",
+                "status": "failed",
+                "requested_count": 1,
+                "segment_count": 1,
+                "error_code": "LLM_MODULE_UNBOUND",
+                "error_message": "LLM module is not bound",
+            },
+        }
+    ]
+    assert "retry_completed" not in json.dumps(workflow_writer.events)
+
+
+def test_seed_segment_retry_activity_normalizes_untrusted_reader_error_code() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    retry_store = RecordingSeedSegmentRetryStore(
+        [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 7,
+                "object_key": "projects/project-1/private/segment-7.txt",
+            }
+        ]
+    )
+
+    result = seed_segment_retry_activity(
+        {
+            "context": _context().model_dump(),
+            "segment_ids": ["77777777-7777-4777-8777-777777777777"],
+            "retry_attempt_id": "99999999-9999-4999-8999-999999999999",
+        },
+        retry_store=retry_store,
+        llm_reader=FailingSequentialReader(
+            "PRIVATE_prompt_api_key_credential_ref",
+            "private provider response object_key draft manuscript",
+        ),
+        reading_notes_writer=RecordingReadingNotesWriter(),
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result["error"] == {
+        "code": "SEED_SEGMENT_RETRY_FAILED",
+        "message": "seed segment retry failed",
+    }
+    public_body = json.dumps([result, workflow_writer.events, retry_store.statuses], ensure_ascii=False)
+    for forbidden in (
+        "PRIVATE_prompt",
+        "api_key",
+        "credential_ref",
+        "private provider response",
+        "object_key",
+        "draft",
+        "manuscript",
+    ):
+        assert forbidden not in public_body
 
 
 def test_temporal_seed_worker_registers_parse_file_activity() -> None:

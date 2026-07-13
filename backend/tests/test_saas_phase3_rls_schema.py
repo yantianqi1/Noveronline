@@ -96,6 +96,13 @@ def test_core_saas_schema_declares_minimum_phase3_tables() -> None:
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
 
 
+def test_seed_segment_retry_schema_tracks_batch_and_worker_attempts() -> None:
+    table_sql = _table_block(_schema_sql(), "seed_segment_retry_requests")
+
+    assert re.search(r"\bretry_attempt_id\s+UUID\s+NOT NULL\b", table_sql, re.IGNORECASE)
+    assert re.search(r"\bworker_attempt\s+INTEGER\s+NOT NULL\b", table_sql, re.IGNORECASE)
+
+
 def test_tenant_business_tables_have_tenant_id_and_timestamps() -> None:
     sql = _schema_sql()
     for table_name in (

@@ -12,16 +12,21 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"mirofish-novel/apps/api/internal/assetdistillation"
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
+	"mirofish-novel/apps/api/internal/authrecovery"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/llm"
+	"mirofish-novel/apps/api/internal/platformratelimit"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
+	"mirofish-novel/apps/api/internal/registration"
 	"mirofish-novel/apps/api/internal/sourcefiles"
 	"mirofish-novel/apps/api/internal/storygraph"
 	"mirofish-novel/apps/api/internal/traces"
@@ -31,8 +36,12 @@ import (
 
 type Config struct {
 	SessionAuthSecret                string
+	AllowDevelopmentAuth             bool
+	ForceSecureSessionCookies        bool
 	AuthReader                       auth.Reader
 	PasswordAuthenticator            auth.PasswordAuthenticator
+	PasswordChanger                  auth.PasswordChanger
+	RegistrationService              RegistrationService
 	AuthSessionStore                 auth.SessionStore
 	Authorizer                       auth.Authorizer
 	WriterStarter                    workflows.WriterStarter
@@ -41,7 +50,10 @@ type Config struct {
 	WriterCanceller                  workflows.WriterCanceller
 	DraftAdoptionStore               workflows.DraftAdoptionStore
 	DraftReviewStore                 workflows.DraftReviewStore
+	DraftReviewOwnerLookup           workflows.DraftReviewOwnerLookup
+	DraftReviewIssueStore            workflows.DraftReviewIssueStore
 	ManuscriptReader                 workflows.ManuscriptReader
+	ManuscriptArtifactExporter       workflows.ManuscriptArtifactExporter
 	WorkflowReader                   workflows.WorkflowReader
 	WorkflowEventReader              workflows.WorkflowEventReader
 	WorkflowCanceller                workflows.WorkflowCanceller
@@ -57,9 +69,13 @@ type Config struct {
 	LLMBindingStore                  llm.BindingStore
 	LLMCatalogReader                 llm.CatalogReader
 	LLMChannelStore                  llm.ChannelStore
+	LLMModelStore                    llm.ModelStore
 	LLMModelSyncer                   llm.ModelSyncer
 	LLMSettingsReader                llm.SettingsReader
 	LLMTelemetryReader               llm.TelemetryReader
+	LLMQuotaStore                    llm.QuotaPolicyStore
+	AssetQueryEmbeddingResolver      assets.QueryEmbeddingResolver
+	AssetSearchIndexChecker          assets.SearchIndexChecker
 	TraceReader                      traces.Reader
 	TraceAccessChecker               traces.AccessChecker
 	TraceExportAuditor               traces.ExportAuditor
@@ -85,20 +101,78 @@ type Config struct {
 	WorldlineSavedPathStore          worldline.SavedPathStore
 	WorldlineSessionStarter          worldline.SessionStarter
 	WorldlineStepStarter             worldline.StepStarter
+	WorldlineAutoEvolutionStarter    worldline.AutoEvolutionStarter
 	WorldlineSessionReader           worldline.SessionReader
 	WorldlineTimelineReader          worldline.TimelineReader
 	WorldlineEventReader             worldline.EventReader
 	WorldlineEventAdoptionStore      worldline.EventAdoptionStore
 	WorldlineEventMutationStore      worldline.EventMutationStore
 	WorldlineVariableStore           worldline.VariableStore
+	WorldlinePreparationStarter      worldline.PreparationStarter
 	WorldlinePreparationStore        worldline.PreparationStore
 	CharacterConsoleStore            characterconsole.Store
+	CharacterProposalStore           characterconsole.ProposalStore
+	CharacterDialogueStarter         workflows.CharacterDialogueStarter
+	WriterWorkspaceHandler           http.Handler
+	ManuscriptWorkspaceHandler       http.Handler
+	ManuscriptExportHandler          http.Handler
+	AssetCatalogHandler              http.Handler
+	AssetDistillationHandler         http.Handler
+	DistillationEnqueuer             DistillationEnqueuer
+	AuthRecoveryHandler              http.Handler
+	CollaborationHandler             http.Handler
+	LLMAdminHandler                  http.Handler
+	RateLimiter                      platformratelimit.Limiter
+	TrustedClientProofVerifier       TrustedClientProofVerifier
+	ReadinessChecker                 ReadinessChecker
+}
+
+type DistillationEnqueueInput struct {
+	TenantID    string
+	ProjectID   string
+	ActorUserID string
+	RequestID   string
+	BlockID     string
+	ChapterID   string
+	SceneID     string
+}
+
+type DistillationEnqueuer interface {
+	EnqueueAfterAdoption(context.Context, DistillationEnqueueInput) error
+}
+
+type TrustedClientProofVerifier interface {
+	Verify(string) (string, error)
+}
+
+type RegistrationService interface {
+	Register(context.Context, registration.RegisterInput) (registration.Result, error)
+}
+
+type ReadinessDependency struct {
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+type ReadinessReport struct {
+	Status       string                `json:"status"`
+	Dependencies []ReadinessDependency `json:"dependencies"`
+	CheckedAt    time.Time             `json:"-"`
+}
+
+type ReadinessChecker interface {
+	Check(context.Context) ReadinessReport
 }
 
 type Server struct {
 	sessionAuthSecret                string
+	allowDevelopmentAuth             bool
+	forceSecureSessionCookies        bool
 	authReader                       auth.Reader
 	passwordAuthenticator            auth.PasswordAuthenticator
+	passwordChanger                  auth.PasswordChanger
+	registrationService              RegistrationService
 	authSessionStore                 auth.SessionStore
 	authorizer                       auth.Authorizer
 	writerStarter                    workflows.WriterStarter
@@ -107,7 +181,10 @@ type Server struct {
 	writerCanceller                  workflows.WriterCanceller
 	draftAdoptionStore               workflows.DraftAdoptionStore
 	draftReviewStore                 workflows.DraftReviewStore
+	draftReviewOwnerLookup           workflows.DraftReviewOwnerLookup
+	draftReviewIssueStore            workflows.DraftReviewIssueStore
 	manuscriptReader                 workflows.ManuscriptReader
+	manuscriptArtifactExporter       workflows.ManuscriptArtifactExporter
 	workflowReader                   workflows.WorkflowReader
 	workflowEventReader              workflows.WorkflowEventReader
 	workflowCanceller                workflows.WorkflowCanceller
@@ -123,9 +200,13 @@ type Server struct {
 	llmBindingStore                  llm.BindingStore
 	llmCatalogReader                 llm.CatalogReader
 	llmChannelStore                  llm.ChannelStore
+	llmModelStore                    llm.ModelStore
 	llmModelSyncer                   llm.ModelSyncer
 	llmSettingsReader                llm.SettingsReader
 	llmTelemetryReader               llm.TelemetryReader
+	llmQuotaStore                    llm.QuotaPolicyStore
+	assetQueryEmbeddingResolver      assets.QueryEmbeddingResolver
+	assetSearchIndexChecker          assets.SearchIndexChecker
 	traceReader                      traces.Reader
 	traceAccessChecker               traces.AccessChecker
 	traceExportAuditor               traces.ExportAuditor
@@ -151,14 +232,30 @@ type Server struct {
 	worldlineSavedPathStore          worldline.SavedPathStore
 	worldlineSessionStarter          worldline.SessionStarter
 	worldlineStepStarter             worldline.StepStarter
+	worldlineAutoEvolutionStarter    worldline.AutoEvolutionStarter
 	worldlineSessionReader           worldline.SessionReader
 	worldlineTimelineReader          worldline.TimelineReader
 	worldlineEventReader             worldline.EventReader
 	worldlineEventAdoptionStore      worldline.EventAdoptionStore
 	worldlineEventMutationStore      worldline.EventMutationStore
 	worldlineVariableStore           worldline.VariableStore
+	worldlinePreparationStarter      worldline.PreparationStarter
 	worldlinePreparationStore        worldline.PreparationStore
 	characterConsoleStore            characterconsole.Store
+	characterProposalStore           characterconsole.ProposalStore
+	characterDialogueStarter         workflows.CharacterDialogueStarter
+	writerWorkspaceHandler           http.Handler
+	manuscriptWorkspaceHandler       http.Handler
+	manuscriptExportHandler          http.Handler
+	assetCatalogHandler              http.Handler
+	assetDistillationHandler         http.Handler
+	distillationEnqueuer             DistillationEnqueuer
+	authRecoveryHandler              http.Handler
+	collaborationHandler             http.Handler
+	llmAdminHandler                  http.Handler
+	rateLimiter                      platformratelimit.Limiter
+	trustedClientProofVerifier       TrustedClientProofVerifier
+	readinessChecker                 ReadinessChecker
 }
 
 type apiError struct {
@@ -175,6 +272,7 @@ const jwtSessionAudience = "mirofish-api"
 const sessionTTL = 7 * 24 * time.Hour
 
 type actorUserIDContextKey struct{}
+type csrfVerifiedContextKey struct{}
 
 type errorEnvelope struct {
 	Error apiError `json:"error"`
@@ -195,6 +293,18 @@ type passwordLoginRequest struct {
 	Password string `json:"password"`
 }
 
+type signupRequest struct {
+	DisplayName  string `json:"display_name"`
+	Email        string `json:"email"`
+	Password     string `json:"password"`
+	ProjectTitle string `json:"project_title"`
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
 type sessionAccessTokenResponse struct {
 	AccessToken string    `json:"access_token"`
 	TokenType   string    `json:"token_type"`
@@ -202,10 +312,18 @@ type sessionAccessTokenResponse struct {
 }
 
 type startWriterRunResponse struct {
-	RunID     string `json:"run_id"`
-	TraceID   string `json:"trace_id"`
-	ProjectID string `json:"project_id"`
-	Status    string `json:"status"`
+	RunID       string `json:"run_id"`
+	TraceID     string `json:"trace_id"`
+	ProjectID   string `json:"project_id"`
+	Mode        string `json:"mode"`
+	Instruction string `json:"instruction"`
+	Status      string `json:"status"`
+}
+
+type characterInteractionEventsResponse struct {
+	InteractionID string                         `json:"interaction_id"`
+	AfterEventID  string                         `json:"after_event_id"`
+	Items         []characterconsole.EventRecord `json:"items"`
 }
 
 type adoptDraftRequest struct {
@@ -221,6 +339,11 @@ type startDraftReviewRequest struct {
 	RunID         string         `json:"run_id"`
 	Note          string         `json:"note"`
 	Options       map[string]any `json:"options"`
+}
+
+type updateDraftReviewIssueRequest struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
 }
 
 type startHelloAgentResponse struct {
@@ -253,6 +376,12 @@ type startWorldlineStepRequest struct {
 	Options      map[string]any `json:"options"`
 }
 
+type startWorldlineAutoEvolutionRequest struct {
+	BodyTenantID string         `json:"tenant_id"`
+	MaxSteps     int            `json:"max_steps"`
+	Options      map[string]any `json:"options"`
+}
+
 type createCharacterInteractionRequest struct {
 	BodyTenantID       string         `json:"tenant_id"`
 	BodyProjectID      string         `json:"project_id"`
@@ -277,6 +406,19 @@ type appendCharacterInteractionTurnRequest struct {
 	TraceID         string         `json:"trace_id"`
 }
 
+type startCharacterDialogueRequest struct {
+	UserTurnID string `json:"user_turn_id"`
+}
+
+type adoptCharacterProposalRequest struct {
+	Note string `json:"note"`
+}
+
+type characterProposalsResponse struct {
+	InteractionID string                            `json:"interaction_id"`
+	Items         []characterconsole.ProposalRecord `json:"items"`
+}
+
 type updateCharacterInteractionStatusRequest struct {
 	BodyTenantID string `json:"tenant_id"`
 	Status       string `json:"status"`
@@ -285,6 +427,7 @@ type updateCharacterInteractionStatusRequest struct {
 type convertCharacterInteractionToChapterDraftRequest struct {
 	BodyTenantID      string   `json:"tenant_id"`
 	TargetChapterID   string   `json:"target_chapter_id"`
+	TargetSceneID     string   `json:"target_scene_id"`
 	POVMode           string   `json:"pov_mode"`
 	StyleAssetIDs     []string `json:"style_asset_ids"`
 	AuthorInstruction string   `json:"author_instruction"`
@@ -312,10 +455,12 @@ type startWorldlineSessionResponse struct {
 }
 
 type createWorldlinePreparationRequest struct {
-	BodyTenantID string         `json:"tenant_id"`
-	Goal         string         `json:"goal"`
-	AnchorPathID string         `json:"anchor_path_id"`
-	Options      map[string]any `json:"options"`
+	BodyTenantID string                           `json:"tenant_id"`
+	Goal         string                           `json:"goal"`
+	AnchorPathID string                           `json:"anchor_path_id"`
+	AgentRefs    []worldline.PreparationAgentRef  `json:"agent_refs"`
+	SourceRefs   []worldline.PreparationSourceRef `json:"source_refs"`
+	Options      map[string]any                   `json:"options"`
 }
 
 type injectWorldlineVariableRequest struct {
@@ -394,20 +539,30 @@ type upsertLLMModuleBindingRequest struct {
 }
 
 type createLLMChannelRequest struct {
-	Name           string `json:"name"`
-	Provider       string `json:"provider"`
-	BaseURL        string `json:"base_url"`
-	APIKey         string `json:"api_key"`
-	MaxConcurrency int    `json:"max_concurrency"`
-	Enabled        *bool  `json:"enabled"`
+	Name                  string `json:"name"`
+	Provider              string `json:"provider"`
+	BaseURL               string `json:"base_url"`
+	APIKey                string `json:"api_key"`
+	MaxConcurrency        int    `json:"max_concurrency"`
+	ExternalProviderOptIn bool   `json:"external_provider_opt_in"`
+	Enabled               *bool  `json:"enabled"`
 }
 
 type patchLLMChannelRequest struct {
-	Name           string `json:"name"`
-	BaseURL        string `json:"base_url"`
-	APIKey         string `json:"api_key"`
-	MaxConcurrency int    `json:"max_concurrency"`
-	Enabled        *bool  `json:"enabled"`
+	Name                  string `json:"name"`
+	BaseURL               string `json:"base_url"`
+	APIKey                string `json:"api_key"`
+	MaxConcurrency        int    `json:"max_concurrency"`
+	ExternalProviderOptIn bool   `json:"external_provider_opt_in"`
+	Enabled               *bool  `json:"enabled"`
+}
+
+type patchLLMChannelModelRequest struct {
+	ContextWindow *int     `json:"context_window"`
+	SupportsTools *bool    `json:"supports_tools"`
+	SupportsJSON  *bool    `json:"supports_json"`
+	InputCost     *float64 `json:"input_cost"`
+	OutputCost    *float64 `json:"output_cost"`
 }
 
 type listResponse[T any] struct {
@@ -463,8 +618,10 @@ type traceExportResponse struct {
 }
 
 type assetSearchRequest struct {
-	ProjectID string `json:"project_id"`
-	Query     string `json:"query"`
+	ProjectID string               `json:"project_id"`
+	Query     string               `json:"query"`
+	Mode      string               `json:"mode"`
+	Filters   assets.SearchFilters `json:"filters"`
 }
 
 type adoptAssetRequest struct {
@@ -704,6 +861,14 @@ func NewServer(config Config) *Server {
 	if llmChannelStore == nil {
 		llmChannelStore = llm.NewDisabledChannelStore()
 	}
+	llmModelStore := config.LLMModelStore
+	if llmModelStore == nil {
+		if store, ok := llmChannelStore.(llm.ModelStore); ok {
+			llmModelStore = store
+		} else {
+			llmModelStore = llm.NewDisabledModelStore()
+		}
+	}
 	llmModelSyncer := config.LLMModelSyncer
 	if llmModelSyncer == nil {
 		llmModelSyncer = llm.NewDisabledModelSyncer()
@@ -816,6 +981,10 @@ func NewServer(config Config) *Server {
 	if worldlineStepStarter == nil {
 		worldlineStepStarter = worldline.NewDisabledStepStarter()
 	}
+	worldlineAutoEvolutionStarter := config.WorldlineAutoEvolutionStarter
+	if worldlineAutoEvolutionStarter == nil {
+		worldlineAutoEvolutionStarter = worldline.NewDisabledAutoEvolutionStarter()
+	}
 	worldlineSessionReader := config.WorldlineSessionReader
 	if worldlineSessionReader == nil {
 		worldlineSessionReader = worldline.NewDisabledSessionReader()
@@ -840,6 +1009,10 @@ func NewServer(config Config) *Server {
 	if worldlineVariableStore == nil {
 		worldlineVariableStore = worldline.NewDisabledVariableStore()
 	}
+	worldlinePreparationStarter := config.WorldlinePreparationStarter
+	if worldlinePreparationStarter == nil {
+		worldlinePreparationStarter = worldline.NewDisabledPreparationStarter()
+	}
 	worldlinePreparationStore := config.WorldlinePreparationStore
 	if worldlinePreparationStore == nil {
 		worldlinePreparationStore = worldline.NewDisabledPreparationStore()
@@ -848,10 +1021,22 @@ func NewServer(config Config) *Server {
 	if characterConsoleStore == nil {
 		characterConsoleStore = characterconsole.NewDisabledStore()
 	}
+	characterProposalStore := config.CharacterProposalStore
+	if characterProposalStore == nil {
+		characterProposalStore = characterconsole.NewDisabledProposalStore()
+	}
+	characterDialogueStarter := config.CharacterDialogueStarter
+	if characterDialogueStarter == nil {
+		characterDialogueStarter = workflows.NewDisabledCharacterDialogueStarter()
+	}
 	return &Server{
 		sessionAuthSecret:                strings.TrimSpace(config.SessionAuthSecret),
+		allowDevelopmentAuth:             config.AllowDevelopmentAuth,
+		forceSecureSessionCookies:        config.ForceSecureSessionCookies,
 		authReader:                       authReader,
 		passwordAuthenticator:            config.PasswordAuthenticator,
+		passwordChanger:                  config.PasswordChanger,
+		registrationService:              config.RegistrationService,
 		authSessionStore:                 config.AuthSessionStore,
 		authorizer:                       authorizer,
 		writerStarter:                    starter,
@@ -860,7 +1045,10 @@ func NewServer(config Config) *Server {
 		writerCanceller:                  writerCanceller,
 		draftAdoptionStore:               draftAdoptionStore,
 		draftReviewStore:                 draftReviewStore,
+		draftReviewOwnerLookup:           config.DraftReviewOwnerLookup,
+		draftReviewIssueStore:            config.DraftReviewIssueStore,
 		manuscriptReader:                 manuscriptReader,
+		manuscriptArtifactExporter:       config.ManuscriptArtifactExporter,
 		workflowReader:                   workflowReader,
 		workflowEventReader:              workflowEventReader,
 		workflowCanceller:                workflowCanceller,
@@ -876,9 +1064,13 @@ func NewServer(config Config) *Server {
 		llmBindingStore:                  llmBindingStore,
 		llmCatalogReader:                 llmCatalogReader,
 		llmChannelStore:                  llmChannelStore,
+		llmModelStore:                    llmModelStore,
 		llmModelSyncer:                   llmModelSyncer,
 		llmSettingsReader:                llmSettingsReader,
 		llmTelemetryReader:               llmTelemetryReader,
+		llmQuotaStore:                    config.LLMQuotaStore,
+		assetQueryEmbeddingResolver:      config.AssetQueryEmbeddingResolver,
+		assetSearchIndexChecker:          config.AssetSearchIndexChecker,
 		traceReader:                      traceReader,
 		traceAccessChecker:               traceAccessChecker,
 		traceExportAuditor:               traceExportAuditor,
@@ -904,19 +1096,46 @@ func NewServer(config Config) *Server {
 		worldlineSavedPathStore:          worldlineSavedPathStore,
 		worldlineSessionStarter:          worldlineSessionStarter,
 		worldlineStepStarter:             worldlineStepStarter,
+		worldlineAutoEvolutionStarter:    worldlineAutoEvolutionStarter,
 		worldlineSessionReader:           worldlineSessionReader,
 		worldlineTimelineReader:          worldlineTimelineReader,
 		worldlineEventReader:             worldlineEventReader,
 		worldlineEventAdoptionStore:      worldlineEventAdoptionStore,
 		worldlineEventMutationStore:      worldlineEventMutationStore,
 		worldlineVariableStore:           worldlineVariableStore,
+		worldlinePreparationStarter:      worldlinePreparationStarter,
 		worldlinePreparationStore:        worldlinePreparationStore,
 		characterConsoleStore:            characterConsoleStore,
+		characterProposalStore:           characterProposalStore,
+		characterDialogueStarter:         characterDialogueStarter,
+		writerWorkspaceHandler:           config.WriterWorkspaceHandler,
+		manuscriptWorkspaceHandler:       config.ManuscriptWorkspaceHandler,
+		manuscriptExportHandler:          config.ManuscriptExportHandler,
+		assetCatalogHandler:              config.AssetCatalogHandler,
+		assetDistillationHandler:         config.AssetDistillationHandler,
+		distillationEnqueuer:             config.DistillationEnqueuer,
+		authRecoveryHandler:              config.AuthRecoveryHandler,
+		collaborationHandler:             config.CollaborationHandler,
+		llmAdminHandler:                  config.LLMAdminHandler,
+		rateLimiter:                      config.RateLimiter,
+		trustedClientProofVerifier:       config.TrustedClientProofVerifier,
+		readinessChecker:                 config.ReadinessChecker,
 	}
 }
 
+func ActorUserIDFromContext(ctx context.Context) (string, bool) {
+	userID, ok := ctx.Value(actorUserIDContextKey{}).(string)
+	userID = strings.TrimSpace(userID)
+	return userID, ok && userID != ""
+}
+
+func RequestCSRFVerified(ctx context.Context) bool {
+	verified, _ := ctx.Value(csrfVerifiedContextKey{}).(bool)
+	return verified
+}
+
 func (s *Server) actorUserID(request *http.Request) string {
-	if userID, ok := request.Context().Value(actorUserIDContextKey{}).(string); ok {
+	if userID, ok := ActorUserIDFromContext(request.Context()); ok {
 		return userID
 	}
 	userID, _ := s.resolveActorUserID(request)
@@ -959,6 +1178,9 @@ func (s *Server) resolveActorUserID(request *http.Request) (string, bool) {
 	}
 	if cookie, err := request.Cookie(sessionCookieName); err == nil {
 		return s.resolveSessionToken(request, cookie.Value)
+	}
+	if !s.allowDevelopmentAuth {
+		return "", false
 	}
 	userID := strings.TrimSpace(request.Header.Get("X-User-Id"))
 	return userID, userID != ""
@@ -1229,6 +1451,7 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "seed run retry", method: http.MethodPost, match: isSeedRunRetryPath},
 	{name: "seed segment retry", method: http.MethodPost, match: isSeedSegmentRetryPath},
 	{name: "worldline session step", method: http.MethodPost, match: isWorldlineSessionStepPath},
+	{name: "worldline session auto evolution", method: http.MethodPost, match: isWorldlineSessionAutoEvolutionPath},
 	{name: "worldline session variables", method: http.MethodPost, match: isWorldlineSessionVariablesPath},
 	{name: "worldline session saved paths", method: http.MethodPost, match: isWorldlineSessionSavedPathsPath},
 	{name: "worldline session detail", method: http.MethodGet, match: isWorldlineSessionDetailPath},
@@ -1239,12 +1462,19 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "worldline event adoption", method: http.MethodPost, match: isWorldlineEventAdoptionPath},
 	{name: "worldline event mutation", method: http.MethodPatch, match: isWorldlineEventMutationPath},
 	{name: "character interaction turn", method: http.MethodPost, match: matchCharacterInteractionNestedPath("turns")},
+	{name: "character interaction dialogue", method: http.MethodPost, match: matchCharacterInteractionNestedPath("dialogue")},
 	{name: "character interaction chapter draft", method: http.MethodPost, match: matchCharacterInteractionNestedPath("chapter-drafts")},
+	{name: "character interaction detail", method: http.MethodGet, match: isCharacterInteractionMutationPath},
+	{name: "character interaction turns", method: http.MethodGet, match: matchCharacterInteractionNestedPath("turns")},
+	{name: "character interaction events", method: http.MethodGet, match: matchCharacterInteractionNestedPath("events")},
+	{name: "character interaction proposals", method: http.MethodGet, match: matchCharacterInteractionNestedPath("proposals")},
+	{name: "character proposal adoption", method: http.MethodPost, match: isCharacterProposalAdoptionPath},
 	{name: "source upload object", method: http.MethodPut, match: isUploadSourceObjectPath},
 	{name: "source upload complete", method: http.MethodPost, match: isCompleteUploadPath},
 	{name: "character interaction mutation", method: http.MethodPatch, match: isCharacterInteractionMutationPath},
 	{name: "llm settings", method: http.MethodGet, match: pathEquals("/v1/llm/settings")},
 	{name: "llm channel create", method: http.MethodPost, match: pathEquals("/v1/llm/channels")},
+	{name: "llm channel model patch", method: http.MethodPatch, match: isLLMChannelModelMutationPath},
 	{name: "llm channel patch", method: http.MethodPatch, match: isLLMChannelMutationPath},
 	{name: "llm channel delete", method: http.MethodDelete, match: isLLMChannelMutationPath},
 	{name: "llm channel sync", method: http.MethodPost, match: isLLMChannelSyncPath},
@@ -1252,11 +1482,14 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "writer run cancel", method: http.MethodPost, match: isWriterRunCancelPath},
 	{name: "draft adoption", method: http.MethodPost, match: isDraftAdoptionPath},
 	{name: "draft review", method: http.MethodPost, match: isDraftReviewPath},
+	{name: "draft review list", method: http.MethodGet, match: isDraftReviewPath},
+	{name: "draft review issue mutation", method: http.MethodPatch, match: isDraftReviewIssuePath},
 	{name: "asset adoption", method: http.MethodPost, match: isAssetAdoptionPath},
 	{name: "asset patch", method: http.MethodPatch, match: isAssetMutationPath},
 	{name: "asset delete", method: http.MethodDelete, match: isAssetMutationPath},
 	{name: "asset detail", method: http.MethodGet, match: isAssetDetailPath},
 	{name: "asset bulk action", method: http.MethodPost, match: pathEquals("/v1/assets/bulk-actions")},
+	{name: "asset search", method: http.MethodPost, match: pathEquals("/v1/assets/search")},
 	{name: "archive memory adoption", method: http.MethodPost, match: isArchiveMemoryAdoptionPath},
 	{name: "archive memory rejection", method: http.MethodPost, match: isArchiveMemoryRejectionPath},
 }
@@ -1276,6 +1509,9 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "story graph edge", method: http.MethodGet, match: matchStoryGraphPath("edges")},
 	{name: "story graph layout", method: http.MethodGet, match: matchStoryGraphPath("layouts")},
 	{name: "story graph clusters", method: http.MethodGet, match: matchProjectSuffixPath("story-graph/clusters")},
+	{name: "llm quota policies list", method: http.MethodGet, match: matchProjectSuffixPath("llm/quota-policies")},
+	{name: "llm quota policies put", method: http.MethodPut, match: matchProjectSuffixPath("llm/quota-policies")},
+	{name: "llm billing usage", method: http.MethodGet, match: matchProjectSuffixPath("llm/billing-usage")},
 	{name: "llm modules", method: http.MethodGet, match: matchProjectSuffixPath("llm/modules")},
 	{name: "llm module bindings", method: http.MethodGet, match: matchProjectSuffixPath("llm/module-bindings")},
 	{name: "llm resolution", method: http.MethodGet, match: hasLLMResolutionPathShape},
@@ -1288,6 +1524,7 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "seed run start", method: http.MethodPost, match: matchProjectSuffixPath("seed-runs")},
 	{name: "upload create", method: http.MethodPost, match: matchProjectSuffixPath("uploads")},
 	{name: "worldline session start", method: http.MethodPost, match: matchProjectSuffixPath("worldline-sessions")},
+	{name: "worldline preparation list", method: http.MethodGet, match: matchProjectSuffixPath("worldlines/preparations")},
 	{name: "worldline preparation create", method: http.MethodPost, match: matchProjectSuffixPath("worldlines/preparations")},
 	{name: "character interaction create", method: http.MethodPost, match: matchProjectSuffixPath("character-interactions")},
 	{name: "writer run start", method: http.MethodPost, match: matchProjectSuffixPath("writer-runs")},
@@ -1295,6 +1532,7 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "asset create", method: http.MethodPost, match: matchProjectSuffixPath("assets")},
 	{name: "asset ingestion start", method: http.MethodPost, match: matchProjectSuffixPath("asset-ingestions")},
 	{name: "style extraction start", method: http.MethodPost, match: matchProjectSuffixPath("style-extractions")},
+	{name: "asset search capabilities", method: http.MethodGet, match: matchProjectSuffixPath("assets/search-capabilities")},
 	{name: "asset reindex start", method: http.MethodPost, match: matchProjectSuffixPath("assets/reindex")},
 	{name: "story graph build start", method: http.MethodPost, match: matchProjectSuffixPath("story-graph/builds")},
 	{name: "story graph bond generation start", method: http.MethodPost, match: matchProjectSuffixPath("story-graph/bond-generations")},
@@ -1377,7 +1615,166 @@ func (s *Server) verifyUnsafeActorSensitiveCookieCSRF(response http.ResponseWrit
 }
 
 func isActorSensitiveRoute(request *http.Request) bool {
-	return matchesProtectedRoute(actorSensitiveRoutes, request.Method, request.URL.Path) || projectActorSensitiveRoute(request)
+	return matchesProtectedRoute(actorSensitiveRoutes, request.Method, request.URL.Path) ||
+		projectActorSensitiveRoute(request) ||
+		isWriterWorkspaceRoute(request.Method, request.URL.Path) ||
+		isManuscriptWorkspaceRoute(request.Method, request.URL.Path) ||
+		isManuscriptExportDownloadRoute(request.Method, request.URL.Path) ||
+		isAssetCatalogRoute(request.Method, request.URL.Path) ||
+		isAssetDistillationRoute(request.Method, request.URL.Path) ||
+		isCollaborationRoute(request.Method, request.URL.Path) ||
+		isLLMAdminRoute(request.Method, request.URL.Path)
+}
+
+func isAssetDistillationRoute(method string, path string) bool {
+	return assetdistillation.IsRoute(method, path)
+}
+
+func isAuthRecoveryRoute(method string, path string) bool {
+	return method == http.MethodPost &&
+		(path == "/v1/auth/recovery/request" || path == "/v1/auth/recovery/reset")
+}
+
+func isCollaborationRoute(method string, path string) bool {
+	parts := canonicalPathSegments(path)
+	if len(parts) == 4 && parts[0] == "v1" && parts[1] == "collaboration" && parts[2] == "invitations" && parts[3] == "accept" {
+		return method == http.MethodPost
+	}
+	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" {
+		return false
+	}
+	switch {
+	case len(parts) == 4 && parts[3] == "invitations":
+		return method == http.MethodGet || method == http.MethodPost
+	case len(parts) == 5 && parts[3] == "invitations":
+		return method == http.MethodDelete
+	case len(parts) == 6 && parts[3] == "invitations" && parts[5] == "resend":
+		return method == http.MethodPost
+	case len(parts) == 4 && parts[3] == "members":
+		return method == http.MethodGet
+	case len(parts) == 5 && parts[3] == "members":
+		return method == http.MethodPatch || method == http.MethodDelete
+	case len(parts) == 6 && parts[3] == "projects" && parts[5] == "members":
+		return method == http.MethodGet
+	case len(parts) == 7 && parts[3] == "projects" && parts[5] == "members":
+		return method == http.MethodPatch || method == http.MethodDelete
+	default:
+		return false
+	}
+}
+
+func isLLMAdminRoute(method string, path string) bool {
+	parts := canonicalPathSegments(path)
+	if len(parts) < 3 || parts[0] != "v1" || parts[1] != "llm-admin" {
+		return false
+	}
+	switch {
+	case len(parts) == 3 && parts[2] == "policies":
+		return method == http.MethodGet || method == http.MethodPost
+	case len(parts) == 4 && parts[2] == "policies":
+		return method == http.MethodPut || method == http.MethodDelete
+	case len(parts) == 3 && (parts[2] == "resolution" || parts[2] == "reservations" || parts[2] == "reconciliation"):
+		return method == http.MethodGet
+	case len(parts) == 3 && parts[2] == "provider-health":
+		return method == http.MethodPost
+	default:
+		return false
+	}
+}
+
+func isWriterWorkspaceRoute(method string, path string) bool {
+	parts := canonicalPathSegments(path)
+	if len(parts) < 3 || parts[0] != "v1" {
+		return false
+	}
+	if len(parts) >= 4 && parts[1] == "projects" {
+		switch parts[3] {
+		case "chapters":
+			return (len(parts) == 4 && (method == http.MethodGet || method == http.MethodPost)) ||
+				(len(parts) == 5 && parts[4] == "reorder" && method == http.MethodPost)
+		case "book-plans":
+			return (len(parts) == 4 && (method == http.MethodGet || method == http.MethodPost)) ||
+				(len(parts) == 6 && parts[4] != "" && parts[5] == "generations" && method == http.MethodPost)
+		case "outlines", "writer-presets", "forbidden-lexicon":
+			return len(parts) == 4 && (method == http.MethodGet || method == http.MethodPost)
+		}
+	}
+	if len(parts) == 4 && parts[1] == "tenants" && parts[3] == "writer-presets" {
+		return method == http.MethodGet || method == http.MethodPost
+	}
+	switch parts[1] {
+	case "chapters":
+		return (len(parts) == 3 && (method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete)) ||
+			(len(parts) == 4 && parts[3] == "versions" && method == http.MethodGet) ||
+			(len(parts) == 4 && parts[3] == "scenes" && (method == http.MethodGet || method == http.MethodPost)) ||
+			(len(parts) == 5 && parts[3] == "scenes" && parts[4] == "reorder" && method == http.MethodPost)
+	case "scenes":
+		return (len(parts) == 3 && (method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete)) ||
+			(len(parts) == 4 && parts[3] == "versions" && method == http.MethodGet)
+	case "outline-versions":
+		return len(parts) == 4 && parts[3] == "restore" && method == http.MethodPost
+	case "book-plans":
+		return (len(parts) == 3 && (method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete)) ||
+			(len(parts) == 4 && parts[3] == "events" && (method == http.MethodGet || method == http.MethodPost)) ||
+			(len(parts) == 4 && parts[3] == "runs" && method == http.MethodPost)
+	case "writer-presets", "forbidden-lexicon":
+		return len(parts) == 3 && (method == http.MethodPatch || method == http.MethodDelete)
+	default:
+		return false
+	}
+}
+
+func isManuscriptWorkspaceRoute(method string, path string) bool {
+	parts := canonicalPathSegments(path)
+	if len(parts) < 5 || parts[0] != "v1" || parts[1] != "projects" || parts[3] != "manuscript-workspace" {
+		return false
+	}
+	switch parts[4] {
+	case "blocks":
+		return (len(parts) == 5 && method == http.MethodGet) ||
+			(len(parts) == 6 && parts[5] == "reorder" && method == http.MethodPost) ||
+			(len(parts) == 6 && (method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete)) ||
+			(len(parts) == 7 && parts[6] == "move" && method == http.MethodPost) ||
+			(len(parts) == 7 && parts[6] == "tags" && method == http.MethodPut) ||
+			(len(parts) == 7 && parts[6] == "versions" && method == http.MethodGet) ||
+			(len(parts) == 8 && parts[6] == "versions" && method == http.MethodGet) ||
+			(len(parts) == 9 && parts[6] == "versions" && parts[8] == "restore" && method == http.MethodPost)
+	case "commands":
+		return (len(parts) == 5 && method == http.MethodPost) || (len(parts) == 6 && method == http.MethodGet)
+	case "exports":
+		return len(parts) == 5 && (method == http.MethodGet || method == http.MethodPost)
+	case "dedup-extractions":
+		return len(parts) == 5 && method == http.MethodPost
+	case "dedup-patterns":
+		return (len(parts) == 5 && method == http.MethodGet) ||
+			(len(parts) == 7 && (parts[6] == "accept" || parts[6] == "reject") && method == http.MethodPost)
+	default:
+		return false
+	}
+}
+
+func isAssetCatalogRoute(_ string, path string) bool {
+	parts := canonicalPathSegments(path)
+	return len(parts) >= 5 && parts[0] == "v1" && parts[1] == "projects" && parts[2] != "" && parts[3] == "asset-catalog"
+}
+
+func isManuscriptExportDownloadRoute(method string, path string) bool {
+	parts := canonicalPathSegments(path)
+	return method == http.MethodGet && len(parts) == 7 && parts[0] == "v1" && parts[1] == "projects" &&
+		parts[2] != "" && parts[3] == "manuscript" && parts[4] == "exports" && parts[5] != "" && parts[6] == "download"
+}
+
+func canonicalPathSegments(path string) []string {
+	if path == "" || path == "/" || strings.Contains(path, "//") || strings.HasSuffix(path, "/") {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			return nil
+		}
+	}
+	return parts
 }
 
 func isAssetDetailPath(path string) bool {
@@ -1441,6 +1838,10 @@ func isWorldlineSessionEventsPath(path string) bool {
 
 func isWorldlineSessionStepPath(path string) bool {
 	return worldlineSessionPathPart(path, "steps") != ""
+}
+
+func isWorldlineSessionAutoEvolutionPath(path string) bool {
+	return worldlineSessionPathPart(path, "auto-evolutions") != ""
 }
 
 func isWorldlineSessionVariablesPath(path string) bool {
@@ -1661,6 +2062,7 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 	if !s.verifyUnsafeActorSensitiveCookieCSRF(response, request) {
 		return
 	}
+	request = request.WithContext(context.WithValue(request.Context(), csrfVerifiedContextKey{}, true))
 	if isActorSensitiveRoute(request) {
 		var ok bool
 		request, ok = s.withResolvedActorUserID(response, request)
@@ -1675,8 +2077,16 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 			"status":  "ok",
 			"service": "mirofish-api",
 		})
+	case request.Method == http.MethodGet && request.URL.Path == "/readyz":
+		s.handleReadiness(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/login":
 		s.handlePasswordLogin(response, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/signup":
+		s.handleSignup(response, request)
+	case isAuthRecoveryRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.authRecoveryHandler, "AUTH_RECOVERY_BACKEND_UNCONFIGURED")
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/password/change":
+		s.handleChangePassword(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/dev-sessions":
 		s.handleCreateDevSession(response, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/auth/csrf-token":
@@ -1743,6 +2153,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCreateAsset(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/assets"):
 		s.handleListAssets(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/assets/search-capabilities"):
+		s.handleGetAssetSearchCapabilities(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/assets/reindex"):
 		s.handleStartAssetReindex(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/story-graph/builds"):
@@ -1799,6 +2211,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartWorldlineSession(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldline-sessions"):
 		s.handleListWorldlineSessions(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldlines/preparations"):
+		s.handleListWorldlinePreparations(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldlines/preparations"):
 		s.handleCreateWorldlinePreparation(response, request)
 	case request.Method == http.MethodGet && isWorldlinePreparationAgentsPath(request.URL.Path):
@@ -1811,6 +2225,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListWorldlineEvents(response, request)
 	case request.Method == http.MethodPost && isWorldlineSessionStepPath(request.URL.Path):
 		s.handleStartWorldlineStep(response, request)
+	case request.Method == http.MethodPost && isWorldlineSessionAutoEvolutionPath(request.URL.Path):
+		s.handleStartWorldlineAutoEvolution(response, request)
 	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(request.URL.Path):
 		s.handleAdoptWorldlineEvent(response, request)
 	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(request.URL.Path):
@@ -1829,10 +2245,16 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListCharacterInteractions(response, request)
 	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(request.URL.Path, "turns"):
 		s.handleAppendCharacterInteractionTurn(response, request)
+	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(request.URL.Path, "dialogue"):
+		s.handleStartCharacterDialogue(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") && strings.HasSuffix(request.URL.Path, "/turns"):
 		s.handleListCharacterInteractionTurns(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/character-interactions/") && strings.HasSuffix(request.URL.Path, "/events"):
-		s.handleCharacterConsoleRuntimePending(response, request)
+		s.handleListCharacterInteractionEvents(response, request)
+	case request.Method == http.MethodGet && isCharacterInteractionNestedPath(request.URL.Path, "proposals"):
+		s.handleListCharacterProposals(response, request)
+	case request.Method == http.MethodPost && isCharacterProposalAdoptionPath(request.URL.Path):
+		s.handleAdoptCharacterProposal(response, request)
 	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(request.URL.Path, "chapter-drafts"):
 		s.handleConvertCharacterInteractionToChapterDraft(response, request)
 	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(request.URL.Path):
@@ -1849,6 +2271,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartDraftReview(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
 		s.handleListDraftReviews(response, request)
+	case request.Method == http.MethodPatch && isDraftReviewIssuePath(request.URL.Path):
+		s.handleUpdateDraftReviewIssue(response, request)
 	case request.Method == http.MethodGet && isWriterRunEventsPath(request.URL.Path):
 		s.handleListWriterRunEvents(response, request)
 	case request.Method == http.MethodGet && isWriterRunDetailPath(request.URL.Path):
@@ -1857,6 +2281,12 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartHelloAgent(response, request)
 	case request.Method == http.MethodGet && hasLLMResolutionPathShape(request.URL.Path):
 		s.handleResolveLLMModuleBinding(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/quota-policies"):
+		s.handleListLLMQuotaPolicies(response, request)
+	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/quota-policies"):
+		s.handleUpsertLLMQuotaPolicy(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/billing-usage"):
+		s.handleListLLMBillingUsage(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/modules"):
 		s.handleListLLMModules(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/llm/module-bindings"):
@@ -1875,6 +2305,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCreateLLMChannel(response, request)
 	case request.Method == http.MethodPost && isLLMChannelSyncPath(request.URL.Path):
 		s.handleSyncLLMChannelModels(response, request)
+	case request.Method == http.MethodPatch && isLLMChannelModelMutationPath(request.URL.Path):
+		s.handlePatchLLMChannelModel(response, request)
 	case request.Method == http.MethodPatch && isLLMChannelMutationPath(request.URL.Path):
 		s.handlePatchLLMChannel(response, request)
 	case request.Method == http.MethodDelete && isLLMChannelMutationPath(request.URL.Path):
@@ -1887,12 +2319,104 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListAgentTraceEvents(response, request)
 	case request.Method == http.MethodPost && hasTraceExportPathShape(request.URL.Path):
 		s.handleExportAgentTrace(response, request)
+	case isWriterWorkspaceRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.writerWorkspaceHandler, "WRITER_WORKSPACE_BACKEND_UNCONFIGURED")
+	case isManuscriptWorkspaceRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.manuscriptWorkspaceHandler, "MANUSCRIPT_WORKSPACE_BACKEND_UNCONFIGURED")
+	case isManuscriptExportDownloadRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.manuscriptExportHandler, "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED")
+	case isAssetCatalogRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.assetCatalogHandler, "ASSET_CATALOG_BACKEND_UNCONFIGURED")
+	case isAssetDistillationRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.assetDistillationHandler, "ASSET_DISTILLATION_BACKEND_UNCONFIGURED")
+	case isCollaborationRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.collaborationHandler, "COLLABORATION_BACKEND_UNCONFIGURED")
+	case isLLMAdminRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.llmAdminHandler, "LLM_ADMIN_BACKEND_UNCONFIGURED")
 	default:
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
 	}
 }
 
+func (s *Server) handleReadiness(response http.ResponseWriter, request *http.Request) {
+	report := ReadinessReport{
+		Status: "unavailable",
+		Dependencies: []ReadinessDependency{{
+			Name: "readiness", Status: "unavailable", ErrorCode: "READINESS_UNCONFIGURED",
+		}},
+		CheckedAt: time.Now().UTC(),
+	}
+	if s.readinessChecker != nil {
+		report = sanitizeReadinessReport(s.readinessChecker.Check(request.Context()))
+	}
+	checkedAt := report.CheckedAt.UTC()
+	if checkedAt.IsZero() {
+		checkedAt = time.Now().UTC()
+	}
+	status := http.StatusOK
+	if report.Status != "ready" {
+		status = http.StatusServiceUnavailable
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	writeJSON(response, status, map[string]any{
+		"status": report.Status, "dependencies": report.Dependencies,
+		"timestamp": checkedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func sanitizeReadinessReport(report ReadinessReport) ReadinessReport {
+	if len(report.Dependencies) == 0 {
+		report.Status = "unavailable"
+		report.Dependencies = []ReadinessDependency{{
+			Name: "readiness", Status: "unavailable", ErrorCode: "READINESS_EMPTY",
+		}}
+		return report
+	}
+	report.Status = "ready"
+	for index := range report.Dependencies {
+		dependency := &report.Dependencies[index]
+		dependency.Name = sanitizeReadinessToken(dependency.Name, "dependency")
+		if dependency.Status != "ready" && dependency.Status != "disabled" {
+			dependency.Status = "unavailable"
+			dependency.ErrorCode = sanitizeReadinessToken(dependency.ErrorCode, "DEPENDENCY_UNAVAILABLE")
+			report.Status = "unavailable"
+		} else {
+			dependency.ErrorCode = ""
+		}
+	}
+	sort.Slice(report.Dependencies, func(left, right int) bool {
+		return report.Dependencies[left].Name < report.Dependencies[right].Name
+	})
+	return report
+}
+
+func sanitizeReadinessToken(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	for _, character := range value {
+		if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') && character != '_' && character != '-' {
+			return fallback
+		}
+	}
+	return value
+}
+
+func (s *Server) serveMountedHandler(response http.ResponseWriter, request *http.Request, handler http.Handler, code string) {
+	if handler == nil {
+		writeError(response, request, http.StatusServiceUnavailable, code, "requested backend is not configured", nil)
+		return
+	}
+	handler.ServeHTTP(response, request)
+}
+
 func (s *Server) handleCreateDevSession(response http.ResponseWriter, request *http.Request) {
+	if !s.allowDevelopmentAuth {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+		return
+	}
 	if strings.TrimSpace(s.sessionAuthSecret) == "" {
 		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "session auth secret is not configured", nil)
 		return
@@ -1926,6 +2450,19 @@ func (s *Server) handlePasswordLogin(response http.ResponseWriter, request *http
 		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "auth password login backend is not configured", nil)
 		return
 	}
+	clientHash := ""
+	if s.rateLimiter != nil {
+		if s.trustedClientProofVerifier == nil {
+			writeError(response, request, http.StatusServiceUnavailable, "TRUSTED_CLIENT_PROOF_BACKEND_UNCONFIGURED", "trusted client verification is unavailable", nil)
+			return
+		}
+		var err error
+		clientHash, err = s.trustedClientProofVerifier.Verify(request.Header.Get(authrecovery.RecoveryClientProofHeader))
+		if err != nil {
+			writeError(response, request, http.StatusForbidden, "TRUSTED_CLIENT_PROOF_INVALID", "trusted client proof is invalid", nil)
+			return
+		}
+	}
 	var payload passwordLoginRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -1933,8 +2470,14 @@ func (s *Server) handlePasswordLogin(response http.ResponseWriter, request *http
 		writeError(response, request, http.StatusBadRequest, auth.CodeValidationFailed, "invalid login payload", nil)
 		return
 	}
+	email := strings.ToLower(strings.TrimSpace(payload.Email))
+	if !s.allowPlatformRequest(response, request, platformratelimit.Input{
+		Class: platformratelimit.ClassAuthLogin, KeyParts: []string{clientHash, email}, Cost: 1,
+	}) {
+		return
+	}
 	currentUser, err := s.passwordAuthenticator.AuthenticatePassword(request.Context(), auth.PasswordLoginInput{
-		Email:     strings.TrimSpace(payload.Email),
+		Email:     email,
 		Password:  payload.Password,
 		RequestID: requestID(request),
 	})
@@ -1944,6 +2487,222 @@ func (s *Server) handlePasswordLogin(response http.ResponseWriter, request *http
 		return
 	}
 	s.issueSessionCookie(response, request, currentUser)
+}
+
+func (s *Server) handleSignup(response http.ResponseWriter, request *http.Request) {
+	if s.registrationService == nil || strings.TrimSpace(s.sessionAuthSecret) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, registration.CodeBackendUnconfigured, "registration backend is not configured", nil)
+		return
+	}
+	clientHash := ""
+	if s.rateLimiter != nil {
+		if s.trustedClientProofVerifier == nil {
+			writeError(response, request, http.StatusServiceUnavailable, "TRUSTED_CLIENT_PROOF_BACKEND_UNCONFIGURED", "trusted client verification is unavailable", nil)
+			return
+		}
+		var err error
+		clientHash, err = s.trustedClientProofVerifier.Verify(request.Header.Get(authrecovery.RecoveryClientProofHeader))
+		if err != nil {
+			writeError(response, request, http.StatusForbidden, "TRUSTED_CLIENT_PROOF_INVALID", "trusted client proof is invalid", nil)
+			return
+		}
+	}
+	var payload signupRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, registration.CodeValidationFailed, "invalid registration payload", nil)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, registration.CodeValidationFailed, "invalid registration payload", nil)
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(payload.Email))
+	if !s.allowPlatformRequest(response, request, platformratelimit.Input{
+		Class: platformratelimit.ClassAuthSignup, KeyParts: []string{clientHash, email}, Cost: 1,
+	}) {
+		return
+	}
+	initialSessionToken := ""
+	result, err := s.registrationService.Register(request.Context(), registration.RegisterInput{
+		DisplayName:  payload.DisplayName,
+		Email:        email,
+		Password:     payload.Password,
+		ProjectTitle: payload.ProjectTitle,
+		InitialSessionFactory: func(userID string) (registration.InitialSession, error) {
+			token, ok := s.signSessionToken(userID)
+			if !ok {
+				return registration.InitialSession{}, errors.New("initial session token generation failed")
+			}
+			initialSessionToken = token
+			return registration.InitialSession{
+				TokenHash: hashSessionToken(token),
+				ExpiresAt: time.Now().UTC().Add(sessionTTL),
+			}, nil
+		},
+	})
+	if err != nil {
+		code := registration.ErrorCode(err)
+		status := http.StatusServiceUnavailable
+		message := "registration failed"
+		details := map[string]any(nil)
+		switch code {
+		case registration.CodeValidationFailed:
+			status = http.StatusBadRequest
+			message = "registration details are invalid"
+			if field := registration.ErrorField(err); field != "" {
+				details = map[string]any{"field": field}
+			}
+		case registration.CodeEmailConflict:
+			status = http.StatusConflict
+			message = "an account already exists for this email"
+		case registration.CodeBackendUnconfigured:
+			message = "registration backend is not configured"
+		}
+		writeError(response, request, status, code, message, details)
+		return
+	}
+	if strings.TrimSpace(initialSessionToken) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, registration.CodeRegistrationFailed, "registration failed", nil)
+		return
+	}
+	currentUser := auth.CurrentUser{
+		User: auth.UserSummary{
+			UserID:      result.User.UserID,
+			Email:       result.User.Email,
+			DisplayName: result.User.DisplayName,
+		},
+		ActiveTenants: []auth.TenantMembershipSummary{{
+			TenantID: result.Workspace.TenantID,
+			Name:     result.Workspace.Name,
+			Role:     result.Workspace.Role,
+			Status:   result.Workspace.Status,
+		}},
+		ActiveProjects: []auth.ProjectMembershipSummary{{
+			TenantID:  result.Project.TenantID,
+			ProjectID: result.Project.ProjectID,
+			Name:      result.Project.Title,
+			Role:      result.Project.Role,
+			Status:    result.Project.Status,
+		}},
+	}
+	s.writeCreatedSession(response, request, currentUser, initialSessionToken)
+}
+
+func (s *Server) handleChangePassword(response http.ResponseWriter, request *http.Request) {
+	if s.passwordChanger == nil || s.authSessionStore == nil || strings.TrimSpace(s.sessionAuthSecret) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, "auth password change backend is not configured", nil)
+		return
+	}
+	userID, tokenHash, fromCookie, ok := s.passwordChangeCredential(response, request)
+	if !ok {
+		return
+	}
+	if fromCookie && !s.verifySessionCSRFToken(tokenHash, request.Header.Get(csrfHeaderName)) {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	if !s.allowSessionMutation(response, request, userID, tokenHash, "password_change") {
+		return
+	}
+	if err := s.authSessionStore.ValidateSession(request.Context(), auth.ValidateSessionInput{
+		UserID: userID, TokenHash: tokenHash, Now: time.Now().UTC(), RequestID: requestID(request),
+	}); err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+
+	var payload changePasswordRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, auth.CodeValidationFailed, authPublicErrorMessage(auth.CodeValidationFailed), nil)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, auth.CodeValidationFailed, authPublicErrorMessage(auth.CodeValidationFailed), nil)
+		return
+	}
+	if err := s.passwordChanger.ChangePassword(request.Context(), auth.ChangePasswordInput{
+		UserID: userID, CurrentPassword: payload.CurrentPassword, NewPassword: payload.NewPassword,
+		Now: time.Now().UTC(), RequestID: requestID(request),
+	}); err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return
+	}
+	if fromCookie {
+		s.clearSessionCookie(response, request)
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) allowSessionMutation(response http.ResponseWriter, request *http.Request, userID string, tokenHash string, operation string) bool {
+	return s.allowPlatformRequest(response, request, platformratelimit.Input{
+		Class:    platformratelimit.ClassAuthSessionMutation,
+		KeyParts: []string{strings.TrimSpace(userID), strings.TrimSpace(tokenHash), strings.TrimSpace(operation)}, Cost: 1,
+	})
+}
+
+func (s *Server) allowPlatformRequest(response http.ResponseWriter, request *http.Request, input platformratelimit.Input) bool {
+	if s.rateLimiter == nil {
+		return true
+	}
+	decision, err := s.rateLimiter.Allow(request.Context(), input)
+	if err != nil {
+		code := platformratelimit.ErrorCode(err)
+		if code != "RATE_LIMIT_POLICY_UNCONFIGURED" {
+			code = "RATE_LIMIT_BACKEND_UNAVAILABLE"
+		}
+		writeError(response, request, http.StatusServiceUnavailable, code, "rate limit service is unavailable", nil)
+		return false
+	}
+	if decision.Allowed {
+		return true
+	}
+	retryAfter := int64((decision.RetryAfter + time.Second - 1) / time.Second)
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	response.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+	writeError(response, request, http.StatusTooManyRequests, "RATE_LIMITED", "request rate limit exceeded", nil)
+	return false
+}
+
+func (s *Server) passwordChangeCredential(response http.ResponseWriter, request *http.Request) (string, string, bool, bool) {
+	var token string
+	fromCookie := false
+	authorizationValues := request.Header.Values("Authorization")
+	if len(authorizationValues) > 0 {
+		if len(authorizationValues) != 1 {
+			writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+			return "", "", false, false
+		}
+		var ok bool
+		token, ok = bearerToken(authorizationValues[0])
+		if !ok {
+			writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+			return "", "", false, false
+		}
+	} else if cookie, err := request.Cookie(sessionCookieName); err == nil {
+		token = cookie.Value
+		fromCookie = true
+	}
+	userID, tokenHash, ok := s.verifySignedSessionToken(token)
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return "", "", false, false
+	}
+	return userID, tokenHash, fromCookie, true
+}
+
+func (s *Server) clearSessionCookie(response http.ResponseWriter, request *http.Request) {
+	http.SetCookie(response, &http.Cookie{
+		Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(0, 0).UTC(),
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureSessionCookie(request),
+	})
 }
 
 func (s *Server) issueSessionCookie(response http.ResponseWriter, request *http.Request, currentUser auth.CurrentUser) {
@@ -1966,6 +2725,10 @@ func (s *Server) issueSessionCookie(response http.ResponseWriter, request *http.
 			return
 		}
 	}
+	s.writeCreatedSession(response, request, currentUser, token)
+}
+
+func (s *Server) writeCreatedSession(response http.ResponseWriter, request *http.Request, currentUser auth.CurrentUser, token string) {
 	http.SetCookie(response, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -1973,9 +2736,13 @@ func (s *Server) issueSessionCookie(response http.ResponseWriter, request *http.
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   request.TLS != nil,
+		Secure:   s.secureSessionCookie(request),
 	})
 	writeJSON(response, http.StatusCreated, currentUser)
+}
+
+func (s *Server) secureSessionCookie(request *http.Request) bool {
+	return s.forceSecureSessionCookies || request.TLS != nil
 }
 
 func (s *Server) handleGetSessionCSRFToken(response http.ResponseWriter, request *http.Request) {
@@ -2070,6 +2837,9 @@ func (s *Server) handleRevokeCurrentSession(response http.ResponseWriter, reques
 		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
 		return
 	}
+	if !s.allowSessionMutation(response, request, userID, tokenHash, "revoke_current") {
+		return
+	}
 	if s.authSessionStore != nil {
 		err := s.authSessionStore.RevokeSession(request.Context(), auth.RevokeSessionInput{
 			UserID:    userID,
@@ -2118,6 +2888,9 @@ func (s *Server) handleRevokeAllCurrentUserSessions(response http.ResponseWriter
 		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
 		return
 	}
+	if !s.allowSessionMutation(response, request, userID, tokenHash, "revoke_all") {
+		return
+	}
 	err := s.authSessionStore.RevokeUserSessions(request.Context(), auth.RevokeUserSessionsInput{
 		UserID:    userID,
 		TokenHash: tokenHash,
@@ -2153,13 +2926,17 @@ func (s *Server) handleRevokeTenantSessions(response http.ResponseWriter, reques
 	if !s.authorizeTenantSessionManage(response, request, tenantID) {
 		return
 	}
+	actorID := s.actorUserID(request)
+	if !s.allowSessionMutation(response, request, actorID, tenantID, "revoke_tenant") {
+		return
+	}
 	if s.authSessionStore == nil {
 		writeError(response, request, http.StatusServiceUnavailable, auth.CodeBackendUnconfigured, authPublicErrorMessage(auth.CodeBackendUnconfigured), nil)
 		return
 	}
 	err := s.authSessionStore.RevokeTenantSessions(request.Context(), auth.RevokeTenantSessionsInput{
 		TenantID:  tenantID,
-		ActorID:   s.actorUserID(request),
+		ActorID:   actorID,
 		Now:       time.Now().UTC(),
 		RequestID: requestID(request),
 	})
@@ -2188,6 +2965,9 @@ func (s *Server) handleRotateCurrentSession(response http.ResponseWriter, reques
 	}
 	if !s.verifySessionCSRFToken(oldTokenHash, request.Header.Get(csrfHeaderName)) {
 		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	if !s.allowSessionMutation(response, request, userID, oldTokenHash, "rotate") {
 		return
 	}
 	newToken, ok := s.signSessionToken(userID)
@@ -2240,6 +3020,9 @@ func (s *Server) handleRotateCurrentSessionToJWT(response http.ResponseWriter, r
 	}
 	if !s.verifySessionCSRFToken(oldTokenHash, request.Header.Get(csrfHeaderName)) {
 		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	if !s.allowSessionMutation(response, request, userID, oldTokenHash, "rotate_jwt") {
 		return
 	}
 	sessionID, ok := randomSessionID()
@@ -2296,6 +3079,9 @@ func (s *Server) handleCreateCurrentSessionAccessToken(response http.ResponseWri
 	}
 	if !s.verifySessionCSRFToken(oldTokenHash, request.Header.Get(csrfHeaderName)) {
 		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return
+	}
+	if !s.allowSessionMutation(response, request, userID, oldTokenHash, "access_token") {
 		return
 	}
 	now := time.Now().UTC()
@@ -2355,6 +3141,9 @@ func (s *Server) handleRefreshJWTBearerSession(response http.ResponseWriter, req
 	userID, oldTokenHash, ok := s.verifyJWTSessionToken(token)
 	if !ok {
 		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return
+	}
+	if !s.allowSessionMutation(response, request, userID, oldTokenHash, "jwt_refresh") {
 		return
 	}
 	now := time.Now().UTC()
@@ -2463,9 +3252,10 @@ func (s *Server) authorizeGlobalWorkflowRunControl(response http.ResponseWriter,
 }
 
 const (
-	worldlineSessionWorkflowType     = "worldline_session"
-	worldlineStepWorkflowType        = "worldline_step"
-	worldlinePreparationWorkflowType = "worldline_preparation"
+	worldlineSessionWorkflowType       = "worldline_session"
+	worldlineStepWorkflowType          = "worldline_step"
+	worldlinePreparationWorkflowType   = "worldline_preparation"
+	worldlineAutoEvolutionWorkflowType = "worldline_auto_evolution"
 )
 
 func permissionForWorkflowRunControl(workflowType string) (auth.Permission, bool) {
@@ -2475,7 +3265,7 @@ func permissionForWorkflowRunControl(workflowType string) (auth.Permission, bool
 	case workflows.WriterWorkflowType, workflows.WriterReviewWorkflowType, workflows.SeedWorkflowType,
 		workflows.StoryGraphBuildWorkflowType, workflows.StoryGraphBondGenerationWorkflowType,
 		workflows.HelloAgentWorkflowType, worldlineSessionWorkflowType, worldlineStepWorkflowType,
-		worldlinePreparationWorkflowType:
+		worldlinePreparationWorkflowType, worldlineAutoEvolutionWorkflowType:
 		return auth.PermissionCreativeWrite, true
 	default:
 		return "", false
@@ -2511,7 +3301,7 @@ func (s *Server) authorizeSingleAssetManage(response http.ResponseWriter, reques
 	return s.authorizeAssetManage(response, request, tenantID, record.ProjectID)
 }
 
-func (s *Server) authorizeWorldlineSessionCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, sessionID string) bool {
+func (s *Server) authorizeWorldlineSessionCreativeWrite(response http.ResponseWriter, request *http.Request, tenantID string, sessionID string) (worldline.SessionRecord, bool) {
 	record, err := s.worldlineSessionReader.GetSession(request.Context(), worldline.GetSessionInput{
 		TenantID:  tenantID,
 		SessionID: sessionID,
@@ -2519,14 +3309,17 @@ func (s *Server) authorizeWorldlineSessionCreativeWrite(response http.ResponseWr
 	if err != nil {
 		code := worldline.ErrorCode(err)
 		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
-		return false
+		return worldline.SessionRecord{}, false
 	}
 	projectID := strings.TrimSpace(record.ProjectID)
 	if projectID == "" {
 		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
-		return false
+		return worldline.SessionRecord{}, false
 	}
-	return s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite)
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return worldline.SessionRecord{}, false
+	}
+	return record, true
 }
 
 func (s *Server) authorizeWorldlineSessionProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, sessionID string) (worldline.SessionRecord, bool) {
@@ -2611,6 +3404,28 @@ func (s *Server) authorizeCharacterInteractionCreativeWrite(response http.Respon
 	return record, true
 }
 
+func (s *Server) authorizeCharacterInteractionProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, interactionID string) (characterconsole.InteractionRecord, bool) {
+	record, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
+		TenantID:      tenantID,
+		InteractionID: interactionID,
+	})
+	if err != nil {
+		code := characterconsole.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, characterInteractionOwnerPreflightPublicErrorMessage(code), nil)
+		return characterconsole.InteractionRecord{}, false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return characterconsole.InteractionRecord{}, false
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return characterconsole.InteractionRecord{}, false
+	}
+	record.ProjectID = projectID
+	return record, true
+}
+
 func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -2662,10 +3477,12 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startWriterRunResponse{
-		RunID:     run.RunID,
-		TraceID:   run.TraceID,
-		ProjectID: run.ProjectID,
-		Status:    run.Status,
+		RunID:       run.RunID,
+		TraceID:     run.TraceID,
+		ProjectID:   run.ProjectID,
+		Mode:        run.Mode,
+		Instruction: run.Instruction,
+		Status:      run.Status,
 	})
 }
 
@@ -3346,12 +4163,8 @@ func (s *Server) handleGetCharacterInteraction(response http.ResponseWriter, req
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction route not found", nil)
 		return
 	}
-	record, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
-		TenantID:      tenantID,
-		InteractionID: interactionID,
-	})
-	if err != nil {
-		writeCharacterConsoleError(response, request, err)
+	record, ok := s.authorizeCharacterInteractionProjectRead(response, request, tenantID, interactionID)
+	if !ok {
 		return
 	}
 	turns, err := s.characterConsoleStore.ListTurns(request.Context(), characterconsole.ListTurnsInput{
@@ -3455,11 +4268,7 @@ func (s *Server) handleListCharacterInteractionTurns(response http.ResponseWrite
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction turn route not found", nil)
 		return
 	}
-	if _, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
-		TenantID:      tenantID,
-		InteractionID: interactionID,
-	}); err != nil {
-		writeCharacterConsoleError(response, request, err)
+	if _, ok := s.authorizeCharacterInteractionProjectRead(response, request, tenantID, interactionID); !ok {
 		return
 	}
 	items, err := s.characterConsoleStore.ListTurns(request.Context(), characterconsole.ListTurnsInput{
@@ -3473,7 +4282,45 @@ func (s *Server) handleListCharacterInteractionTurns(response http.ResponseWrite
 	writeJSON(response, http.StatusOK, listResponse[characterconsole.TurnRecord]{Items: sanitizeCharacterInteractionTurns(items)})
 }
 
-func (s *Server) handleCharacterConsoleRuntimePending(response http.ResponseWriter, request *http.Request) {
+func (s *Server) handleStartCharacterDialogue(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	interactionID := characterInteractionNestedPathPart(request.URL.Path, "dialogue")
+	if interactionID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character dialogue route not found", nil)
+		return
+	}
+	interaction, ok := s.authorizeCharacterInteractionCreativeWrite(response, request, tenantID, interactionID)
+	if !ok {
+		return
+	}
+	var payload startCharacterDialogueRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid character dialogue payload", nil)
+		return
+	}
+	run, err := s.characterDialogueStarter.StartCharacterDialogue(request.Context(), workflows.StartCharacterDialogueInput{
+		TenantID:      tenantID,
+		ProjectID:     interaction.ProjectID,
+		InteractionID: interactionID,
+		UserTurnID:    strings.TrimSpace(payload.UserTurnID),
+		ActorUserID:   s.actorUserID(request),
+		RequestID:     requestID(request),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, characterDialoguePublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, run)
+}
+
+func (s *Server) handleListCharacterInteractionEvents(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
@@ -3481,20 +4328,85 @@ func (s *Server) handleCharacterConsoleRuntimePending(response http.ResponseWrit
 	}
 	interactionID := characterInteractionNestedPathPart(request.URL.Path, "events")
 	if interactionID == "" {
-		interactionID = characterInteractionNestedPathPart(request.URL.Path, "chapter-drafts")
-	}
-	if interactionID == "" {
-		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction runtime route not found", nil)
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character interaction event route not found", nil)
 		return
 	}
-	if _, err := s.characterConsoleStore.GetInteraction(request.Context(), characterconsole.GetInteractionInput{
-		TenantID:      tenantID,
-		InteractionID: interactionID,
-	}); err != nil {
+	if _, ok := s.authorizeCharacterInteractionProjectRead(response, request, tenantID, interactionID); !ok {
+		return
+	}
+	afterEventID := afterEventIDFromRequest(request)
+	items, err := s.characterConsoleStore.ListEvents(request.Context(), characterconsole.ListEventsInput{
+		TenantID: tenantID, InteractionID: interactionID, AfterEventID: afterEventID,
+	})
+	if err != nil {
 		writeCharacterConsoleError(response, request, err)
 		return
 	}
-	writeError(response, request, http.StatusServiceUnavailable, "CHARACTER_CONSOLE_RUNTIME_PENDING", "character console runtime is pending", nil)
+	writeJSON(response, http.StatusOK, characterInteractionEventsResponse{
+		InteractionID: interactionID,
+		AfterEventID:  afterEventID,
+		Items:         items,
+	})
+}
+
+func (s *Server) handleListCharacterProposals(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	interactionID := characterInteractionNestedPathPart(request.URL.Path, "proposals")
+	if interactionID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character proposal route not found", nil)
+		return
+	}
+	interaction, ok := s.authorizeCharacterInteractionProjectRead(response, request, tenantID, interactionID)
+	if !ok {
+		return
+	}
+	items, err := s.characterProposalStore.ListProposals(request.Context(), characterconsole.ListProposalsInput{
+		TenantID: tenantID, ProjectID: interaction.ProjectID, InteractionID: interactionID,
+		ActorUserID: s.actorUserID(request),
+	})
+	if err != nil {
+		writeCharacterProposalError(response, request, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, characterProposalsResponse{InteractionID: interactionID, Items: items})
+}
+
+func (s *Server) handleAdoptCharacterProposal(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	interactionID, assetID := characterProposalAdoptionPathParts(request.URL.Path)
+	if interactionID == "" || assetID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character proposal adoption route not found", nil)
+		return
+	}
+	interaction, ok := s.authorizeCharacterInteractionCreativeWrite(response, request, tenantID, interactionID)
+	if !ok {
+		return
+	}
+	var payload adoptCharacterProposalRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid character proposal adoption payload", nil)
+		return
+	}
+	result, err := s.characterProposalStore.AdoptProposal(request.Context(), characterconsole.AdoptProposalInput{
+		TenantID: tenantID, ProjectID: interaction.ProjectID, InteractionID: interactionID,
+		AssetID: assetID, ActorUserID: s.actorUserID(request), RequestID: requestID(request),
+		Note: strings.TrimSpace(payload.Note),
+	})
+	if err != nil {
+		writeCharacterProposalError(response, request, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (s *Server) handleConvertCharacterInteractionToChapterDraft(response http.ResponseWriter, request *http.Request) {
@@ -3583,7 +4495,8 @@ func (s *Server) handleStartWorldlineStep(response http.ResponseWriter, request 
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline step route not found", nil)
 		return
 	}
-	if !s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID) {
+	session, authorized := s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID)
+	if !authorized {
 		return
 	}
 	var payload startWorldlineStepRequest
@@ -3595,6 +4508,7 @@ func (s *Server) handleStartWorldlineStep(response http.ResponseWriter, request 
 	}
 	run, err := s.worldlineStepStarter.StartStep(request.Context(), worldline.StartStepInput{
 		TenantID:    tenantID,
+		ProjectID:   strings.TrimSpace(session.ProjectID),
 		SessionID:   sessionID,
 		ActorUserID: s.actorUserID(request),
 		RequestID:   requestID(request),
@@ -3606,6 +4520,71 @@ func (s *Server) handleStartWorldlineStep(response http.ResponseWriter, request 
 		return
 	}
 	writeJSON(response, http.StatusAccepted, run)
+}
+
+func (s *Server) handleStartWorldlineAutoEvolution(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	sessionID := worldlineSessionPathPart(request.URL.Path, "auto-evolutions")
+	if sessionID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline auto-evolution route not found", nil)
+		return
+	}
+	session, authorized := s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID)
+	if !authorized {
+		return
+	}
+	var payload startWorldlineAutoEvolutionRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid worldline auto-evolution payload", nil)
+		return
+	}
+	run, err := s.worldlineAutoEvolutionStarter.StartAutoEvolution(request.Context(), worldline.StartAutoEvolutionInput{
+		TenantID:    tenantID,
+		ProjectID:   strings.TrimSpace(session.ProjectID),
+		SessionID:   sessionID,
+		ActorUserID: s.actorUserID(request),
+		RequestID:   requestID(request),
+		MaxSteps:    payload.MaxSteps,
+		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineAutoEvolutionPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, run)
+}
+
+func (s *Server) handleListWorldlinePreparations(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "worldlines/preparations")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project worldline preparations route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
+	items, err := s.worldlinePreparationStore.ListPreparations(request.Context(), worldline.ListPreparationsInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlinePreparationListPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, listResponse[worldline.PreparationRecord]{Items: items})
 }
 
 func (s *Server) handleCreateWorldlinePreparation(response http.ResponseWriter, request *http.Request) {
@@ -3629,17 +4608,20 @@ func (s *Server) handleCreateWorldlinePreparation(response http.ResponseWriter, 
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid worldline preparation payload", nil)
 		return
 	}
-	record, err := s.worldlinePreparationStore.CreatePreparation(request.Context(), worldline.CreatePreparationInput{
+	record, err := s.worldlinePreparationStarter.StartPreparation(request.Context(), worldline.CreatePreparationInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
 		ActorUserID:  s.actorUserID(request),
 		RequestID:    requestID(request),
 		Goal:         strings.TrimSpace(payload.Goal),
 		AnchorPathID: strings.TrimSpace(payload.AnchorPathID),
+		AgentRefs:    append([]worldline.PreparationAgentRef(nil), payload.AgentRefs...),
+		SourceRefs:   append([]worldline.PreparationSourceRef(nil), payload.SourceRefs...),
 		Options:      cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlinePreparationStartPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, record)
@@ -3826,7 +4808,7 @@ func (s *Server) handleInjectWorldlineVariable(response http.ResponseWriter, req
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline variable route not found", nil)
 		return
 	}
-	if !s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID) {
+	if _, authorized := s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID); !authorized {
 		return
 	}
 	var payload injectWorldlineVariableRequest
@@ -3866,7 +4848,7 @@ func (s *Server) handleCreateWorldlineSavedPath(response http.ResponseWriter, re
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline saved path route not found", nil)
 		return
 	}
-	if !s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID) {
+	if _, authorized := s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID); !authorized {
 		return
 	}
 	var payload createWorldlineSavedPathRequest
@@ -3984,10 +4966,54 @@ func (s *Server) handleCreateAsset(response http.ResponseWriter, request *http.R
 	writeJSON(response, http.StatusCreated, record)
 }
 
+func (s *Server) handleGetAssetSearchCapabilities(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "assets/search-capabilities")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project asset search capabilities route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
+	capabilities, err := assets.GetSearchCapabilities(request.Context(), tenantID, projectID, s.assetQueryEmbeddingResolver, s.assetSearchIndexChecker)
+	if err != nil {
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetSearchCapabilitiesPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, capabilities)
+}
+
+func assetSearchCapabilitiesPublicErrorMessage(code string) string {
+	switch code {
+	case "ASSET_BACKEND_UNCONFIGURED":
+		return "asset backend is not configured"
+	case "ASSET_SEARCH_INDEX_QUERY_FAILED":
+		return "asset vector search index check failed"
+	case "LLM_BINDING_BACKEND_UNCONFIGURED":
+		return "LLM binding backend is not configured"
+	case "LLM_BINDING_QUERY_FAILED":
+		return "asset query embedding binding query failed"
+	case "VALIDATION_FAILED":
+		return "invalid asset search capabilities request"
+	default:
+		return "asset search capabilities query failed"
+	}
+}
+
 func (s *Server) handleSearchAssets(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
 		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	if s.actorUserID(request) == "" {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, "user context is required", nil)
 		return
 	}
 	var payload assetSearchRequest
@@ -3997,10 +5023,16 @@ func (s *Server) handleSearchAssets(response http.ResponseWriter, request *http.
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid asset search payload", nil)
 		return
 	}
+	projectID := strings.TrimSpace(payload.ProjectID)
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	items, err := s.assetReader.SearchAssets(request.Context(), assets.SearchAssetsInput{
 		TenantID:  tenantID,
-		ProjectID: strings.TrimSpace(payload.ProjectID),
+		ProjectID: projectID,
 		Query:     strings.TrimSpace(payload.Query),
+		Mode:      strings.TrimSpace(payload.Mode),
+		Filters:   payload.Filters,
 	})
 	if err != nil {
 		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
@@ -4543,12 +5575,17 @@ func (s *Server) handleGetStoryGraphView(response http.ResponseWriter, request *
 		}
 		limit = parsedLimit
 	}
+	offset, ok := queryOffset(response, request, "story graph offset must be a non-negative integer")
+	if !ok {
+		return
+	}
 	view, err := s.storyGraphReader.GetView(request.Context(), storygraph.GetViewInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
 		ViewID:       viewID,
 		Types:        commaList(request.URL.Query().Get("types")),
 		Limit:        limit,
+		Offset:       offset,
 		IncludeEdges: queryBool(request.URL.Query().Get("include_edges")),
 	})
 	if err != nil {
@@ -4649,10 +5686,15 @@ func (s *Server) handleListStoryGraphClusters(response http.ResponseWriter, requ
 	if !ok {
 		return
 	}
+	offset, ok := queryOffset(response, request, "story graph cluster offset must be a non-negative integer")
+	if !ok {
+		return
+	}
 	clusters, err := s.storyGraphReader.ListClusters(request.Context(), storygraph.ListClustersInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
 		Limit:     limit,
+		Offset:    offset,
 	})
 	if err != nil {
 		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
@@ -5096,13 +6138,14 @@ func (s *Server) handleCreateLLMChannel(response http.ResponseWriter, request *h
 		enabled = *payload.Enabled
 	}
 	channel, err := s.llmChannelStore.CreateChannel(request.Context(), llm.CreateChannelInput{
-		TenantID:       tenantID,
-		Name:           strings.TrimSpace(payload.Name),
-		Provider:       strings.TrimSpace(payload.Provider),
-		BaseURL:        strings.TrimSpace(payload.BaseURL),
-		APIKey:         strings.TrimSpace(payload.APIKey),
-		MaxConcurrency: payload.MaxConcurrency,
-		Enabled:        enabled,
+		TenantID:              tenantID,
+		Name:                  strings.TrimSpace(payload.Name),
+		Provider:              strings.TrimSpace(payload.Provider),
+		BaseURL:               strings.TrimSpace(payload.BaseURL),
+		APIKey:                strings.TrimSpace(payload.APIKey),
+		MaxConcurrency:        payload.MaxConcurrency,
+		ExternalProviderOptIn: payload.ExternalProviderOptIn,
+		Enabled:               enabled,
 	})
 	if err != nil {
 		writeLLMError(response, request, err)
@@ -5137,13 +6180,14 @@ func (s *Server) handlePatchLLMChannel(response http.ResponseWriter, request *ht
 		enabled = *payload.Enabled
 	}
 	channel, err := s.llmChannelStore.UpdateChannel(request.Context(), llm.UpdateChannelInput{
-		TenantID:       tenantID,
-		ChannelID:      channelID,
-		Name:           strings.TrimSpace(payload.Name),
-		BaseURL:        strings.TrimSpace(payload.BaseURL),
-		APIKey:         strings.TrimSpace(payload.APIKey),
-		MaxConcurrency: payload.MaxConcurrency,
-		Enabled:        enabled,
+		TenantID:              tenantID,
+		ChannelID:             channelID,
+		Name:                  strings.TrimSpace(payload.Name),
+		BaseURL:               strings.TrimSpace(payload.BaseURL),
+		APIKey:                strings.TrimSpace(payload.APIKey),
+		MaxConcurrency:        payload.MaxConcurrency,
+		ExternalProviderOptIn: payload.ExternalProviderOptIn,
+		Enabled:               enabled,
 	})
 	if err != nil {
 		writeLLMError(response, request, err)
@@ -5200,6 +6244,52 @@ func (s *Server) handleSyncLLMChannelModels(response http.ResponseWriter, reques
 		return
 	}
 	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) handlePatchLLMChannelModel(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	channelID, modelID := llmChannelModelPathParts(request.URL.Path)
+	if channelID == "" || modelID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "llm channel model route not found", nil)
+		return
+	}
+	if !s.authorizeLLMTenantManage(response, request, tenantID) {
+		return
+	}
+	var payload patchLLMChannelModelRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid llm model payload", nil)
+		return
+	}
+	supportsTools := false
+	if payload.SupportsTools != nil {
+		supportsTools = *payload.SupportsTools
+	}
+	supportsJSON := false
+	if payload.SupportsJSON != nil {
+		supportsJSON = *payload.SupportsJSON
+	}
+	model, err := s.llmModelStore.UpdateModel(request.Context(), llm.UpdateModelInput{
+		TenantID:      tenantID,
+		ChannelID:     channelID,
+		ModelID:       modelID,
+		ContextWindow: payload.ContextWindow,
+		SupportsTools: supportsTools,
+		SupportsJSON:  supportsJSON,
+		InputCost:     payload.InputCost,
+		OutputCost:    payload.OutputCost,
+	})
+	if err != nil {
+		writeLLMError(response, request, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, model)
 }
 
 func (s *Server) handleListLLMActivity(response http.ResponseWriter, request *http.Request) {
@@ -5333,6 +6423,12 @@ func llmPublicErrorMessage(code string) string {
 		return "LLM channel was not found"
 	case "LLM_CHANNEL_UPDATE_FAILED":
 		return "LLM channel update failed"
+	case "LLM_MODEL_BACKEND_UNCONFIGURED":
+		return "LLM model backend is not configured"
+	case "LLM_MODEL_NOT_FOUND":
+		return "LLM model was not found"
+	case "LLM_MODEL_UPDATE_FAILED":
+		return "LLM model update failed"
 	case "LLM_CREDENTIAL_DECRYPTION_FAILED":
 		return "LLM credential decrypt failed"
 	case "LLM_CREDENTIAL_ENCRYPTION_FAILED":
@@ -5349,6 +6445,10 @@ func llmPublicErrorMessage(code string) string {
 		return "LLM model sync status update failed"
 	case "LLM_MODULE_UNBOUND":
 		return "LLM module is not bound"
+	case "LLM_QUOTA_BACKEND_FAILED":
+		return "LLM quota backend failed"
+	case "LLM_BILLING_USAGE_QUERY_FAILED":
+		return "LLM billing usage query failed"
 	case "LLM_PROVIDER_ERROR":
 		return "LLM provider error"
 	case "LLM_SETTINGS_BACKEND_UNCONFIGURED":
@@ -5406,6 +6506,32 @@ func writeCharacterConsoleError(response http.ResponseWriter, request *http.Requ
 	code := characterconsole.ErrorCode(err)
 	message := characterConsolePublicErrorMessage(code)
 	writeError(response, request, statusForAppCode(code), code, message, nil)
+}
+
+func writeCharacterProposalError(response http.ResponseWriter, request *http.Request, err error) {
+	code := characterconsole.ErrorCode(err)
+	writeError(response, request, statusForAppCode(code), code, characterProposalPublicErrorMessage(code), nil)
+}
+
+func characterProposalPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "invalid character proposal request"
+	case "NOT_FOUND":
+		return "character proposal was not found"
+	case "CHARACTER_PROPOSAL_ALREADY_ADOPTED":
+		return "character proposal is no longer a candidate"
+	case "CHARACTER_PROPOSAL_TARGET_CONFLICT":
+		return "character proposal target is no longer a candidate"
+	case "CHARACTER_PROPOSAL_BACKEND_UNCONFIGURED":
+		return "character proposal backend is not configured"
+	case "CHARACTER_PROPOSAL_QUERY_FAILED":
+		return "character proposal query failed"
+	case "CHARACTER_PROPOSAL_ADOPTION_FAILED":
+		return "character proposal adoption failed"
+	default:
+		return "character proposal request failed"
+	}
 }
 
 func writeCharacterConsoleLLMError(response http.ResponseWriter, request *http.Request, err error) {
@@ -5622,10 +6748,12 @@ func (s *Server) handleGetWriterRun(response http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(response, http.StatusOK, startWriterRunResponse{
-		RunID:     run.RunID,
-		TraceID:   run.TraceID,
-		ProjectID: run.ProjectID,
-		Status:    run.Status,
+		RunID:       run.RunID,
+		TraceID:     run.TraceID,
+		ProjectID:   run.ProjectID,
+		Mode:        run.Mode,
+		Instruction: run.Instruction,
+		Status:      run.Status,
 	})
 }
 
@@ -5678,10 +6806,11 @@ func (s *Server) handleListWriterRunEvents(response http.ResponseWriter, request
 	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
+	cursor := afterEventIDFromRequest(request)
 	events, err := s.writerEventReader.ListWriterEvents(request.Context(), workflows.ListWriterEventsInput{
 		TenantID:     tenantID,
 		RunID:        runID,
-		AfterEventID: afterEventIDFromRequest(request),
+		AfterEventID: cursor,
 	})
 	if err != nil {
 		code := workflows.ErrorCode(err)
@@ -5690,6 +6819,12 @@ func (s *Server) handleListWriterRunEvents(response http.ResponseWriter, request
 	}
 	events = sanitizeWriterEvents(events)
 	if strings.Contains(request.Header.Get("Accept"), "text/event-stream") {
+		// Held-open SSE when stream=1 (or active run); otherwise batch-dump for compatibility.
+		holdOpen := request.URL.Query().Get("stream") == "1" || isActiveWriterRunStatus(run.Status)
+		if holdOpen {
+			writeWriterEventsSSEHeldOpen(response, request, s.writerEventReader, s.writerReader, tenantID, runID, cursor, events, run.Status)
+			return
+		}
 		writeWriterEventsSSE(response, events)
 		return
 	}
@@ -5811,6 +6946,17 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 		writeError(response, request, statusForWorkflowError(err), code, publicDraftAdoptionErrorMessage(code), nil)
 		return
 	}
+	if s.distillationEnqueuer != nil && strings.TrimSpace(adoption.ProjectID) != "" && strings.TrimSpace(adoption.BlockID) != "" {
+		_ = s.distillationEnqueuer.EnqueueAfterAdoption(request.Context(), DistillationEnqueueInput{
+			TenantID:    tenantID,
+			ProjectID:   adoption.ProjectID,
+			ActorUserID: s.actorUserID(request),
+			RequestID:   requestID(request),
+			BlockID:     adoption.BlockID,
+			ChapterID:   adoption.ChapterID,
+			SceneID:     adoption.SceneID,
+		})
+	}
 	writeJSON(response, http.StatusAccepted, adoption)
 }
 
@@ -5825,6 +6971,13 @@ func (s *Server) handleStartDraftReview(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft review route not found", nil)
 		return
 	}
+	projectID, ok := s.lookupDraftReviewOwnerProject(response, request, tenantID, draftID, "")
+	if !ok {
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
 	var payload startDraftReviewRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -5832,9 +6985,9 @@ func (s *Server) handleStartDraftReview(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid draft review payload", nil)
 		return
 	}
-	projectID := strings.TrimSpace(payload.BodyProjectID)
-	if projectID == "" {
-		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "project_id is required for draft review", nil)
+	bodyProjectID := strings.TrimSpace(payload.BodyProjectID)
+	if bodyProjectID != "" && bodyProjectID != projectID {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "draft review project_id does not match the draft owner", nil)
 		return
 	}
 	moduleKey := "writer_reviewer"
@@ -5879,6 +7032,13 @@ func (s *Server) handleListDraftReviews(response http.ResponseWriter, request *h
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft review route not found", nil)
 		return
 	}
+	projectID, ok := s.lookupDraftReviewOwnerProject(response, request, tenantID, draftID, "")
+	if !ok {
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
 	reviews, err := s.draftReviewStore.ListDraftReviews(request.Context(), workflows.ListDraftReviewsInput{
 		TenantID: tenantID,
 		DraftID:  draftID,
@@ -5889,6 +7049,79 @@ func (s *Server) handleListDraftReviews(response http.ResponseWriter, request *h
 		return
 	}
 	writeJSON(response, http.StatusOK, sanitizeDraftReviewList(reviews))
+}
+
+func (s *Server) handleUpdateDraftReviewIssue(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	issueID := draftReviewIssuePathPart(request.URL.Path)
+	if issueID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft review issue route not found", nil)
+		return
+	}
+	projectID, ok := s.lookupDraftReviewOwnerProject(response, request, tenantID, "", issueID)
+	if !ok {
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
+	if s.draftReviewIssueStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WRITER_REVIEW_BACKEND_UNCONFIGURED", publicDraftReviewErrorMessage("WRITER_REVIEW_BACKEND_UNCONFIGURED"), nil)
+		return
+	}
+	var payload updateDraftReviewIssueRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid draft review issue payload", nil)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid draft review issue payload", nil)
+		return
+	}
+	result, err := s.draftReviewIssueStore.UpdateIssueStatus(request.Context(), workflows.UpdateDraftReviewIssueInput{
+		TenantID: tenantID, ProjectID: projectID, IssueID: issueID,
+		ActorUserID: s.actorUserID(request), RequestID: requestID(request),
+		Status: strings.TrimSpace(payload.Status), Version: strings.TrimSpace(payload.Version),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftReviewErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) lookupDraftReviewOwnerProject(
+	response http.ResponseWriter,
+	request *http.Request,
+	tenantID string,
+	draftID string,
+	issueID string,
+) (string, bool) {
+	if s.draftReviewOwnerLookup == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WRITER_REVIEW_BACKEND_UNCONFIGURED", publicDraftReviewErrorMessage("WRITER_REVIEW_BACKEND_UNCONFIGURED"), nil)
+		return "", false
+	}
+	projectID, err := s.draftReviewOwnerLookup.LookupDraftReviewProject(request.Context(), workflows.DraftReviewOwnerLookupInput{
+		TenantID: tenantID, DraftID: draftID, IssueID: issueID, ActorUserID: s.actorUserID(request),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftReviewErrorMessage(code), nil)
+		return "", false
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusServiceUnavailable, "WRITER_REVIEW_QUERY_FAILED", publicDraftReviewErrorMessage("WRITER_REVIEW_QUERY_FAILED"), nil)
+		return "", false
+	}
+	return projectID, true
 }
 
 func (s *Server) handleGetManuscript(response http.ResponseWriter, request *http.Request) {
@@ -5931,6 +7164,10 @@ func (s *Server) handleGetManuscriptExport(response http.ResponseWriter, request
 	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(request.URL.Query().Get("format")), workflows.ManuscriptArtifactFormatTXT) {
+		s.handleDownloadManuscriptArtifact(response, request, tenantID, projectID)
+		return
+	}
 	manifest, err := s.manuscriptReader.GetManuscriptExport(request.Context(), workflows.GetManuscriptExportInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -5942,6 +7179,46 @@ func (s *Server) handleGetManuscriptExport(response http.ResponseWriter, request
 		return
 	}
 	writeJSON(response, http.StatusOK, sanitizeManuscriptExportManifest(manifest, projectID))
+}
+
+func (s *Server) handleDownloadManuscriptArtifact(
+	response http.ResponseWriter,
+	request *http.Request,
+	tenantID string,
+	projectID string,
+) {
+	if s.manuscriptArtifactExporter == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED", "manuscript export backend is not configured", nil)
+		return
+	}
+	artifact, err := s.manuscriptArtifactExporter.ExportManuscriptArtifact(request.Context(), workflows.ExportManuscriptArtifactInput{
+		TenantID: tenantID, ProjectID: projectID, Format: workflows.ManuscriptArtifactFormatTXT,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForManuscriptArtifactError(code), code, publicManuscriptExportErrorMessage(code), nil)
+		return
+	}
+	response.Header().Set("Content-Type", artifact.ContentType)
+	response.Header().Set("Content-Disposition", `attachment; filename="`+artifact.FileName+`"`)
+	response.Header().Set("Content-Length", strconv.FormatInt(artifact.SizeBytes, 10))
+	response.Header().Set("X-Content-SHA256", artifact.SHA256)
+	response.Header().Set("Cache-Control", "private, no-store")
+	response.WriteHeader(http.StatusOK)
+	_, _ = response.Write(artifact.Content)
+}
+
+func statusForManuscriptArtifactError(code string) int {
+	switch code {
+	case "VALIDATION_FAILED", "MANUSCRIPT_EXPORT_FORMAT_UNSUPPORTED":
+		return http.StatusBadRequest
+	case "MANUSCRIPT_EMPTY":
+		return http.StatusConflict
+	case "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) handleCancelWorkflowRun(response http.ResponseWriter, request *http.Request) {
@@ -6108,6 +7385,19 @@ func queryLimit(response http.ResponseWriter, request *http.Request, message str
 	return parsedLimit, true
 }
 
+func queryOffset(response http.ResponseWriter, request *http.Request, message string) (int, bool) {
+	rawOffset := strings.TrimSpace(request.URL.Query().Get("offset"))
+	if rawOffset == "" {
+		return 0, true
+	}
+	parsedOffset, err := strconv.Atoi(rawOffset)
+	if err != nil || parsedOffset < 0 {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", message, nil)
+		return 0, false
+	}
+	return parsedOffset, true
+}
+
 func queryBool(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "1", "true", "yes", "on":
@@ -6166,6 +7456,29 @@ func llmChannelIDFromPath(path string) string {
 
 func isLLMChannelMutationPath(path string) bool {
 	return llmChannelIDFromPath(path) != ""
+}
+
+func llmChannelModelPathParts(path string) (string, string) {
+	remainder := strings.TrimPrefix(path, "/v1/llm/channels/")
+	channelID, rest, ok := strings.Cut(remainder, "/")
+	if !ok {
+		return "", ""
+	}
+	prefix, modelID, ok := strings.Cut(rest, "/")
+	if !ok || prefix != "models" {
+		return "", ""
+	}
+	channelID = strings.TrimSpace(channelID)
+	modelID = strings.TrimSpace(modelID)
+	if channelID == "" || modelID == "" || strings.Contains(modelID, "/") {
+		return "", ""
+	}
+	return channelID, modelID
+}
+
+func isLLMChannelModelMutationPath(path string) bool {
+	channelID, modelID := llmChannelModelPathParts(path)
+	return channelID != "" && modelID != ""
 }
 
 func llmChannelSyncPathPart(path string) string {
@@ -6557,6 +7870,11 @@ func characterInteractionChapterDraftInstruction(record characterconsole.Interac
 		builder.WriteString(chapterID)
 		builder.WriteString("\n")
 	}
+	if sceneID := strings.TrimSpace(payload.TargetSceneID); sceneID != "" {
+		builder.WriteString("Target scene id: ")
+		builder.WriteString(sceneID)
+		builder.WriteString("\n")
+	}
 	if povMode := strings.TrimSpace(payload.POVMode); povMode != "" {
 		builder.WriteString("POV mode: ")
 		builder.WriteString(povMode)
@@ -6611,6 +7929,9 @@ func characterInteractionChapterDraftOptions(record characterconsole.Interaction
 	}
 	if targetChapterID := strings.TrimSpace(payload.TargetChapterID); targetChapterID != "" {
 		options["target_chapter_id"] = targetChapterID
+	}
+	if targetSceneID := strings.TrimSpace(payload.TargetSceneID); targetSceneID != "" {
+		options["target_scene_id"] = targetSceneID
 	}
 	if povMode := strings.TrimSpace(payload.POVMode); povMode != "" {
 		options["pov_mode"] = povMode
@@ -6897,6 +8218,19 @@ func isDraftReviewPath(path string) bool {
 	return draftReviewPathPart(path) != ""
 }
 
+func isDraftReviewIssuePath(path string) bool {
+	return draftReviewIssuePathPart(path) != ""
+}
+
+func draftReviewIssuePathPart(path string) string {
+	const prefix = "/v1/draft-review-issues/"
+	issueID := strings.TrimSpace(strings.TrimPrefix(path, prefix))
+	if issueID == "" || issueID == path || strings.Contains(issueID, "/") {
+		return ""
+	}
+	return issueID
+}
+
 func characterInteractionNestedPathPart(path string, expectedSuffix string) string {
 	const prefix = "/v1/character-interactions/"
 	if !strings.HasPrefix(path, prefix) {
@@ -6921,6 +8255,28 @@ func characterInteractionPathPart(path string) string {
 		return ""
 	}
 	return interactionID
+}
+
+func characterProposalAdoptionPathParts(path string) (string, string) {
+	const prefix = "/v1/character-interactions/"
+	remainder, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return "", ""
+	}
+	interactionID, remainder, ok := strings.Cut(remainder, "/proposals/")
+	if !ok || !isSinglePathSegment(interactionID) {
+		return "", ""
+	}
+	assetID, suffix, ok := strings.Cut(remainder, "/")
+	if !ok || suffix != "adoptions" || !isSinglePathSegment(assetID) {
+		return "", ""
+	}
+	return strings.TrimSpace(interactionID), strings.TrimSpace(assetID)
+}
+
+func isCharacterProposalAdoptionPath(path string) bool {
+	interactionID, assetID := characterProposalAdoptionPathParts(path)
+	return interactionID != "" && assetID != ""
 }
 
 func workflowRunCancelPathPart(path string) string {
@@ -7113,6 +8469,14 @@ func publicDraftReviewErrorMessage(code string) string {
 		return "writer review admission failed"
 	case "WRITER_REVIEW_QUERY_FAILED":
 		return "writer review query failed"
+	case "WRITER_REVIEW_ISSUE_WRITE_FAILED":
+		return "writer review issue update failed"
+	case "WRITER_REVIEW_ISSUE_CONFLICT":
+		return "writer review issue changed; reload before updating"
+	case "DRAFT_NOT_CANDIDATE":
+		return "writer review requires a candidate draft"
+	case "IDEMPOTENCY_CONFLICT":
+		return "request_id was already used with a different writer review request"
 	case "NOT_FOUND":
 		return "draft review not found"
 	case "VALIDATION_FAILED":
@@ -7141,7 +8505,9 @@ func publicManuscriptExportErrorMessage(code string) string {
 		return "manuscript export backend is not configured"
 	case "MANUSCRIPT_EXPORT_QUERY_FAILED":
 		return "manuscript export query failed"
-	case "VALIDATION_FAILED":
+	case "MANUSCRIPT_EMPTY":
+		return "manuscript has no adopted content to export"
+	case "MANUSCRIPT_EXPORT_FORMAT_UNSUPPORTED", "VALIDATION_FAILED":
 		return "invalid manuscript export request"
 	default:
 		return "manuscript export request failed"
@@ -7200,11 +8566,15 @@ func statusForAppCode(code string) int {
 	switch code {
 	case "VALIDATION_FAILED":
 		return http.StatusBadRequest
+	case "DRAFT_NOT_CANDIDATE":
+		return http.StatusConflict
 	case "EVENT_CURSOR_NOT_FOUND":
 		return http.StatusBadRequest
 	case "NOT_FOUND":
 		return http.StatusNotFound
 	case "LLM_CHANNEL_NOT_FOUND":
+		return http.StatusNotFound
+	case "LLM_MODEL_NOT_FOUND":
 		return http.StatusNotFound
 	case "LLM_BINDING_NOT_FOUND":
 		return http.StatusNotFound
@@ -7226,8 +8596,41 @@ func statusForAppCode(code string) int {
 		return http.StatusConflict
 	case "WORKFLOW_RETRY_NOT_ALLOWED":
 		return http.StatusConflict
+	case "WORLDLINE_STEP_ACTIVE":
+		return http.StatusConflict
+	case "WORLDLINE_AUTO_EVOLUTION_ACTIVE":
+		return http.StatusConflict
+	case "CURRENT_WORLD_REQUIRED":
+		return http.StatusConflict
+	case "WORLDLINE_SESSION_NOT_ACTIVE":
+		return http.StatusConflict
+	case "IDEMPOTENCY_CONFLICT":
+		return http.StatusConflict
+	case "WRITER_REVIEW_ISSUE_CONFLICT":
+		return http.StatusConflict
+	case "CHARACTER_TURN_ACTIVE":
+		return http.StatusConflict
+	case "CHARACTER_PROPOSAL_ALREADY_ADOPTED":
+		return http.StatusConflict
+	case "CHARACTER_PROPOSAL_TARGET_CONFLICT":
+		return http.StatusConflict
 	default:
 		return http.StatusServiceUnavailable
+	}
+}
+
+func characterDialoguePublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "invalid character dialogue request"
+	case "CHARACTER_TURN_ACTIVE":
+		return "character interaction already has an active dialogue turn"
+	case "CHARACTER_DIALOGUE_BACKEND_UNCONFIGURED":
+		return "character dialogue backend is not configured"
+	case "WORKFLOW_FAILED":
+		return "character dialogue workflow failed to start"
+	default:
+		return "character dialogue request failed"
 	}
 }
 
@@ -7256,6 +8659,61 @@ func worldlineSessionOwnerPreflightPublicErrorMessage(code string) string {
 		return "worldline session lookup failed"
 	default:
 		return "worldline session lookup failed"
+	}
+}
+
+func worldlineAutoEvolutionPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "invalid worldline auto-evolution request"
+	case "NOT_FOUND":
+		return "worldline session was not found"
+	case "CURRENT_WORLD_REQUIRED":
+		return "worldline auto-evolution requires the active current_world session"
+	case "WORLDLINE_SESSION_NOT_ACTIVE":
+		return "worldline session is not active"
+	case "WORLDLINE_AUTO_EVOLUTION_ACTIVE":
+		return "worldline session already has an active auto-evolution"
+	case "WORLDLINE_AUTO_EVOLUTION_BACKEND_UNCONFIGURED":
+		return "worldline auto-evolution backend is not configured"
+	case "WORKFLOW_ADMISSION_FAILED":
+		return "worldline auto-evolution admission failed"
+	case "WORKFLOW_FAILED":
+		return "worldline auto-evolution workflow failed to start"
+	default:
+		return "worldline auto-evolution request failed"
+	}
+}
+
+func worldlinePreparationListPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "invalid worldline preparation list request"
+	case "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED":
+		return "worldline preparation backend is not configured"
+	case "WORLDLINE_QUERY_FAILED":
+		return "worldline preparation query failed"
+	default:
+		return "worldline preparation list request failed"
+	}
+}
+
+func worldlinePreparationStartPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "invalid worldline preparation request"
+	case "IDEMPOTENCY_CONFLICT":
+		return "worldline preparation request_id conflicts with an existing request"
+	case "NOT_FOUND":
+		return "worldline preparation source was not found"
+	case "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED":
+		return "worldline preparation backend is not configured"
+	case "WORKFLOW_ADMISSION_FAILED":
+		return "worldline preparation admission failed"
+	case "WORKFLOW_FAILED":
+		return "worldline preparation workflow failed to start"
+	default:
+		return "worldline preparation request failed"
 	}
 }
 
@@ -7350,19 +8808,139 @@ func writeJSON(response http.ResponseWriter, status int, body any) {
 func writeWriterEventsSSE(response http.ResponseWriter, events []workflows.WriterEvent) {
 	response.Header().Set("Content-Type", "text/event-stream")
 	response.Header().Set("Cache-Control", "no-cache")
+	response.Header().Set("Connection", "keep-alive")
 	response.Header().Set("X-Accel-Buffering", "no")
 	response.WriteHeader(http.StatusOK)
 	for _, event := range events {
-		payload, err := json.Marshal(event)
-		if err != nil {
-			continue
-		}
-		_, _ = response.Write([]byte("id: " + event.EventID + "\n"))
-		_, _ = response.Write([]byte("event: workflow.event\n"))
-		_, _ = response.Write([]byte("data: " + string(payload) + "\n\n"))
+		writeWriterEventSSEFrame(response, event)
 	}
 	if flusher, ok := response.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+func isActiveWriterRunStatus(status string) bool {
+	status = strings.TrimSpace(status)
+	return status == "queued" || status == "running"
+}
+
+func isTerminalWriterEventType(eventType string) bool {
+	switch eventType {
+	case "writer.run.completed", "writer.run.failed", "writer.run.cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeWriterEventSSEFrame(response http.ResponseWriter, event workflows.WriterEvent) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	_, _ = response.Write([]byte("id: " + event.EventID + "\n"))
+	_, _ = response.Write([]byte("event: workflow.event\n"))
+	_, _ = response.Write([]byte("data: " + string(payload) + "\n\n"))
+}
+
+// writeWriterEventsSSEHeldOpen streams known events then poll-forwards new ones until
+// terminal event, client disconnect, or hold budget (25s) is exhausted.
+func writeWriterEventsSSEHeldOpen(
+	response http.ResponseWriter,
+	request *http.Request,
+	eventReader workflows.WriterEventReader,
+	runReader workflows.WriterReader,
+	tenantID string,
+	runID string,
+	initialCursor string,
+	initialEvents []workflows.WriterEvent,
+	initialStatus string,
+) {
+	response.Header().Set("Content-Type", "text/event-stream")
+	response.Header().Set("Cache-Control", "no-cache")
+	response.Header().Set("Connection", "keep-alive")
+	response.Header().Set("X-Accel-Buffering", "no")
+	response.WriteHeader(http.StatusOK)
+	flusher, _ := response.(http.Flusher)
+
+	cursor := strings.TrimSpace(initialCursor)
+	for _, event := range initialEvents {
+		writeWriterEventSSEFrame(response, event)
+		cursor = event.EventID
+		if isTerminalWriterEventType(event.EventType) {
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	status := strings.TrimSpace(initialStatus)
+	if !isActiveWriterRunStatus(status) {
+		return
+	}
+
+	deadline := time.Now().Add(25 * time.Second)
+	ticker := time.NewTicker(700 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				_, _ = response.Write([]byte(": hold-timeout\n\n"))
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return
+			}
+			if eventReader == nil {
+				return
+			}
+			next, err := eventReader.ListWriterEvents(request.Context(), workflows.ListWriterEventsInput{
+				TenantID:     tenantID,
+				RunID:        runID,
+				AfterEventID: cursor,
+			})
+			if err != nil {
+				_, _ = response.Write([]byte(": poll-error\n\n"))
+				if flusher != nil {
+					flusher.Flush()
+				}
+				continue
+			}
+			next = sanitizeWriterEvents(next)
+			for _, event := range next {
+				writeWriterEventSSEFrame(response, event)
+				cursor = event.EventID
+				if isTerminalWriterEventType(event.EventType) {
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return
+				}
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if runReader != nil {
+				if run, err := runReader.GetWriterRun(request.Context(), workflows.GetWriterRunInput{TenantID: tenantID, RunID: runID}); err == nil {
+					status = run.Status
+					if !isActiveWriterRunStatus(status) {
+						return
+					}
+				}
+			}
+			// Heartbeat keeps intermediaries from buffering/closing idle streams.
+			_, _ = response.Write([]byte(": keepalive\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 	}
 }
 

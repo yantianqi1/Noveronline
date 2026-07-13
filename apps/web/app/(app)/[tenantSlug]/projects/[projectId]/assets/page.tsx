@@ -7,9 +7,11 @@ import {
   createAsset,
   deleteAsset,
   getAssetFacets,
+  getAssetSearchCapabilities,
   getArchiveAssetMemories,
   getArchiveAssetMemoryEvents,
   getProjectAssets,
+  getWorkflowRunSummary,
   searchAssets,
   rejectArchiveMemory,
   startAssetIngestion,
@@ -17,7 +19,9 @@ import {
   startStyleExtraction,
   updateAsset,
 } from "../../../../../../lib/api";
-import { webApiContext } from "../../../../../../lib/server-auth";
+import { type Locale, tx } from "../../../../../../lib/locale";
+import { currentRequestLocale } from "../../../../../../lib/request-locale";
+import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -30,37 +34,61 @@ export default async function AssetsPage({
     assetCode?: string;
     assetMessage?: string;
     assetStatus?: string;
+    assetType?: string;
     bulkCode?: string;
     bulkMessage?: string;
     bulkStatus?: string;
+    category?: string;
     ingestionCode?: string;
     ingestionMessage?: string;
     ingestionStatus?: string;
+    lifecycle?: string;
     memoryAssetId?: string;
     memoryCode?: string;
     memoryMessage?: string;
     memoryStatus?: string;
+    mode?: string;
+    pinned?: string;
     query?: string;
     reindexCode?: string;
     reindexMessage?: string;
+    reindexRunId?: string;
     reindexStatus?: string;
+    source?: string;
     styleCode?: string;
     styleMessage?: string;
     styleStatus?: string;
+    tag?: string;
   }>;
 }) {
   const { tenantSlug, projectId } = await params;
+  const locale = await currentRequestLocale();
   const query = searchParams ? await searchParams : {};
   const searchQuery = query.query?.trim() || "";
+  const searchMode = normalizeSearchMode(query.mode);
+  const searchFilters = {
+    asset_types: optionalFilterValues(query.assetType),
+    categories: optionalFilterValues(query.category),
+    lifecycles: optionalFilterValues(query.lifecycle),
+    sources: optionalFilterValues(query.source),
+    tags: optionalFilterValues(query.tag),
+    pinned: optionalBooleanQuery(query.pinned),
+  };
+  const searchState: AssetSearchState = { query: searchQuery, mode: searchMode, ...searchFilters };
   const memoryAssetId = query.memoryAssetId?.trim() || "";
-  const apiContext = await webApiContext({ tenantId: tenantSlug, projectId });
+  const reindexRunId = query.reindexRunId?.trim() || "";
+  const apiContext = webReadApiContext({ tenantId: tenantSlug, projectId });
 
-  const [assets, facets, searchResults, archiveMemories, archiveMemoryEvents] = await Promise.all([
+  const [assets, facets, searchCapabilities, searchResults, archiveMemories, archiveMemoryEvents, reindexRun] = await Promise.all([
     getProjectAssets(apiContext),
     getAssetFacets(apiContext),
-    searchQuery ? searchAssets({ ...apiContext, query: searchQuery }) : Promise.resolve(null),
+    getAssetSearchCapabilities(apiContext),
+    searchQuery
+      ? searchAssets({ ...apiContext, query: searchQuery, mode: searchMode, filters: compactSearchFilters(searchFilters) })
+      : Promise.resolve(null),
     memoryAssetId ? getArchiveAssetMemories({ ...apiContext, assetId: memoryAssetId }) : Promise.resolve(null),
     memoryAssetId ? getArchiveAssetMemoryEvents({ ...apiContext, assetId: memoryAssetId }) : Promise.resolve(null),
+    reindexRunId ? getWorkflowRunSummary({ ...apiContext, runId: reindexRunId }) : Promise.resolve(null),
   ]);
 
   async function searchAction(formData: FormData) {
@@ -71,13 +99,20 @@ export default async function AssetsPage({
     if (nextSearch) {
       nextQuery.set("query", nextSearch);
     }
+    nextQuery.set("mode", normalizeSearchMode(stringFromFormData(formData, "mode")));
+    setOptionalQuery(nextQuery, "assetType", stringFromFormData(formData, "assetType"));
+    setOptionalQuery(nextQuery, "category", stringFromFormData(formData, "category"));
+    setOptionalQuery(nextQuery, "lifecycle", stringFromFormData(formData, "lifecycle"));
+    setOptionalQuery(nextQuery, "source", stringFromFormData(formData, "source"));
+    setOptionalQuery(nextQuery, "tag", stringFromFormData(formData, "tag"));
+    setOptionalQuery(nextQuery, "pinned", stringFromFormData(formData, "pinned"));
     redirect(assetRoute(tenantSlug, projectId, nextQuery));
   }
 
   async function memoryAssetAction(formData: FormData) {
     "use server";
 
-    const nextQuery = baseAssetQuery(searchQuery);
+    const nextQuery = baseAssetQuery(searchState);
     const assetId = stringFromFormData(formData, "memoryAssetId");
     if (assetId) {
       nextQuery.set("memoryAssetId", assetId);
@@ -88,9 +123,9 @@ export default async function AssetsPage({
   async function createAssetAction(formData: FormData) {
     "use server";
 
-    const payload = jsonObjectFromFormData(formData, "payload");
+    const payload = jsonObjectFromFormData(formData, "payload", locale);
     if (!payload.ok) {
-      redirect(assetStatusRoute(tenantSlug, projectId, searchQuery, "error", payload.code, payload.message));
+      redirect(assetStatusRoute(tenantSlug, projectId, searchState, "error", payload.code, payload.message));
     }
     const result = await createAsset({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
@@ -113,10 +148,10 @@ export default async function AssetsPage({
       assetStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_CREATED" : result.code,
-        result.ok ? `${result.title} created` : result.message,
+        result.ok ? tx(locale, `已创建「${result.title}」`, `“${result.title}” created`) : result.message,
       ),
     );
   }
@@ -125,9 +160,9 @@ export default async function AssetsPage({
     "use server";
 
     const assetId = stringFromFormData(formData, "assetId");
-    const payload = optionalJsonObjectFromFormData(formData, "payload");
+    const payload = optionalJsonObjectFromFormData(formData, "payload", locale);
     if (!payload.ok) {
-      redirect(assetStatusRoute(tenantSlug, projectId, searchQuery, "error", payload.code, payload.message));
+      redirect(assetStatusRoute(tenantSlug, projectId, searchState, "error", payload.code, payload.message));
     }
     const result = await updateAsset({
       ...(await webApiContext({ tenantId: tenantSlug })),
@@ -145,10 +180,12 @@ export default async function AssetsPage({
       assetStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_UPDATED" : result.code,
-        result.ok ? `${result.title || result.asset_id} updated` : result.message,
+        result.ok
+          ? tx(locale, `已更新「${result.title || result.asset_id}」`, `“${result.title || result.asset_id}” updated`)
+          : result.message,
       ),
     );
   }
@@ -165,10 +202,10 @@ export default async function AssetsPage({
       assetStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_DELETED" : result.code,
-        result.ok ? `${result.asset_id} deleted` : result.message,
+        result.ok ? tx(locale, "资产已删除", "Asset deleted") : result.message,
       ),
     );
   }
@@ -186,10 +223,12 @@ export default async function AssetsPage({
       assetStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_ADOPTED" : result.code,
-        result.ok ? `${result.title || result.asset_id} adopted as ${result.lifecycle}` : result.message,
+        result.ok
+          ? tx(locale, `已采纳「${result.title || result.asset_id}」`, `“${result.title || result.asset_id}” adopted`)
+          : result.message,
       ),
     );
   }
@@ -207,11 +246,11 @@ export default async function AssetsPage({
       memoryStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         memoryAssetId,
         result.ok ? "success" : "error",
         result.ok ? "ARCHIVE_MEMORY_ADOPTED" : result.code,
-        result.ok ? `${result.memory_id} adopted` : result.message,
+        result.ok ? tx(locale, "记忆已采纳", "Memory adopted") : result.message,
       ),
     );
   }
@@ -229,11 +268,11 @@ export default async function AssetsPage({
       memoryStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         memoryAssetId,
         result.ok ? "success" : "error",
         result.ok ? "ARCHIVE_MEMORY_REJECTED" : result.code,
-        result.ok ? `${result.memory_id} rejected` : result.message,
+        result.ok ? tx(locale, "记忆已拒绝", "Memory rejected") : result.message,
       ),
     );
   }
@@ -257,10 +296,16 @@ export default async function AssetsPage({
       bulkStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_BULK_ACTION_ACCEPTED" : result.code,
-        result.ok ? `${result.action} ${result.status}: ${result.updated_count}/${result.matched_count}` : result.message,
+        result.ok
+          ? tx(
+              locale,
+              `已更新 ${result.updated_count}/${result.matched_count} 项资产`,
+              `${result.updated_count}/${result.matched_count} assets updated`,
+            )
+          : result.message,
       ),
     );
   }
@@ -280,10 +325,10 @@ export default async function AssetsPage({
       ingestionStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_INGESTION_QUEUED" : result.code,
-        result.ok ? `${result.run_id} queued` : result.message,
+        result.ok ? tx(locale, "素材导入任务已加入队列", "Material ingestion queued") : result.message,
       ),
     );
   }
@@ -302,10 +347,11 @@ export default async function AssetsPage({
       reindexStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "ASSET_REINDEX_QUEUED" : result.code,
-        result.ok ? `${result.run_id} queued` : result.message,
+        result.ok ? tx(locale, "索引任务已加入队列", "Reindex queued") : result.message,
+        result.ok ? result.run_id : "",
       ),
     );
   }
@@ -325,19 +371,22 @@ export default async function AssetsPage({
       styleStatusRoute(
         tenantSlug,
         projectId,
-        searchQuery,
+        searchState,
         result.ok ? "success" : "error",
         result.ok ? "STYLE_EXTRACTION_QUEUED" : result.code,
-        result.ok ? `${result.run_id} queued` : result.message,
+        result.ok ? tx(locale, "风格提取任务已加入队列", "Style extraction queued") : result.message,
       ),
     );
   }
 
   return (
     <AssetLibraryShell
+      locale={locale}
       tenantSlug={tenantSlug}
       projectId={projectId}
       searchQuery={searchQuery}
+      searchMode={searchMode}
+      searchFilters={searchFilters}
       assetStatus={query.assetStatus?.trim() || ""}
       assetCode={query.assetCode?.trim() || ""}
       assetMessage={query.assetMessage?.trim() || ""}
@@ -353,11 +402,13 @@ export default async function AssetsPage({
       reindexStatus={query.reindexStatus?.trim() || ""}
       reindexCode={query.reindexCode?.trim() || ""}
       reindexMessage={query.reindexMessage?.trim() || ""}
+      reindexRun={reindexRun}
       styleStatus={query.styleStatus?.trim() || ""}
       styleCode={query.styleCode?.trim() || ""}
       styleMessage={query.styleMessage?.trim() || ""}
       assets={assets}
       facets={facets}
+      searchCapabilities={searchCapabilities}
       searchResults={searchResults}
       memoryAssetId={memoryAssetId}
       archiveMemories={archiveMemories}
@@ -381,12 +432,12 @@ export default async function AssetsPage({
 function assetStatusRoute(
   tenantSlug: string,
   projectId: string,
-  searchQuery: string,
+  searchState: AssetSearchState,
   status: string,
   code: string,
   message: string,
 ) {
-  const params = baseAssetQuery(searchQuery);
+  const params = baseAssetQuery(searchState);
   params.set("assetStatus", status);
   params.set("assetCode", code);
   params.set("assetMessage", message);
@@ -396,12 +447,12 @@ function assetStatusRoute(
 function ingestionStatusRoute(
   tenantSlug: string,
   projectId: string,
-  searchQuery: string,
+  searchState: AssetSearchState,
   status: string,
   code: string,
   message: string,
 ) {
-  const params = baseAssetQuery(searchQuery);
+  const params = baseAssetQuery(searchState);
   params.set("ingestionStatus", status);
   params.set("ingestionCode", code);
   params.set("ingestionMessage", message);
@@ -411,13 +462,13 @@ function ingestionStatusRoute(
 function memoryStatusRoute(
   tenantSlug: string,
   projectId: string,
-  searchQuery: string,
+  searchState: AssetSearchState,
   memoryAssetId: string,
   status: string,
   code: string,
   message: string,
 ) {
-  const params = baseAssetQuery(searchQuery);
+  const params = baseAssetQuery(searchState);
   if (memoryAssetId) {
     params.set("memoryAssetId", memoryAssetId);
   }
@@ -430,12 +481,12 @@ function memoryStatusRoute(
 function bulkStatusRoute(
   tenantSlug: string,
   projectId: string,
-  searchQuery: string,
+  searchState: AssetSearchState,
   status: string,
   code: string,
   message: string,
 ) {
-  const params = baseAssetQuery(searchQuery);
+  const params = baseAssetQuery(searchState);
   params.set("bulkStatus", status);
   params.set("bulkCode", code);
   params.set("bulkMessage", message);
@@ -445,27 +496,31 @@ function bulkStatusRoute(
 function reindexStatusRoute(
   tenantSlug: string,
   projectId: string,
-  searchQuery: string,
+  searchState: AssetSearchState,
   status: string,
   code: string,
   message: string,
+  runId: string,
 ) {
-  const params = baseAssetQuery(searchQuery);
+  const params = baseAssetQuery(searchState);
   params.set("reindexStatus", status);
   params.set("reindexCode", code);
   params.set("reindexMessage", message);
+  if (runId) {
+    params.set("reindexRunId", runId);
+  }
   return assetRoute(tenantSlug, projectId, params);
 }
 
 function styleStatusRoute(
   tenantSlug: string,
   projectId: string,
-  searchQuery: string,
+  searchState: AssetSearchState,
   status: string,
   code: string,
   message: string,
 ) {
-  const params = baseAssetQuery(searchQuery);
+  const params = baseAssetQuery(searchState);
   params.set("styleStatus", status);
   params.set("styleCode", code);
   params.set("styleMessage", message);
@@ -477,17 +532,76 @@ function assetRoute(tenantSlug: string, projectId: string, params: URLSearchPara
   return `/${tenantSlug}/projects/${projectId}/assets${query ? `?${query}` : ""}`;
 }
 
-function baseAssetQuery(searchQuery: string) {
+type AssetSearchState = {
+  query: string;
+  mode: "keyword" | "vector" | "hybrid";
+  asset_types: string[];
+  categories: string[];
+  lifecycles: string[];
+  sources: string[];
+  tags: string[];
+  pinned?: boolean;
+};
+
+function baseAssetQuery(searchState: AssetSearchState) {
   const params = new URLSearchParams();
-  if (searchQuery) {
-    params.set("query", searchQuery);
+  if (searchState.query) {
+    params.set("query", searchState.query);
+  }
+  params.set("mode", searchState.mode);
+  setOptionalQuery(params, "assetType", searchState.asset_types[0] || "");
+  setOptionalQuery(params, "category", searchState.categories[0] || "");
+  setOptionalQuery(params, "lifecycle", searchState.lifecycles[0] || "");
+  setOptionalQuery(params, "source", searchState.sources[0] || "");
+  setOptionalQuery(params, "tag", searchState.tags[0] || "");
+  if (searchState.pinned !== undefined) {
+    params.set("pinned", String(searchState.pinned));
   }
   return params;
+}
+
+function setOptionalQuery(params: URLSearchParams, key: string, value: string) {
+  if (value) {
+    params.set(key, value);
+  }
+}
+
+function optionalFilterValues(value: string | undefined) {
+  const normalized = value?.trim();
+  return normalized ? [normalized] : [];
+}
+
+function optionalBooleanQuery(value: string | undefined) {
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function compactSearchFilters(filters: Omit<AssetSearchState, "query" | "mode">) {
+  const compact = Object.fromEntries(
+    Object.entries(filters).filter(([, value]) => value !== undefined && (!Array.isArray(value) || value.length > 0)),
+  );
+  return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
 function stringFromFormData(formData: FormData, key: string) {
   const value = formData.get(key);
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeSearchMode(value: string | undefined): "keyword" | "vector" | "hybrid" {
+  switch (value?.trim().toLowerCase()) {
+    case "vector":
+      return "vector";
+    case "hybrid":
+      return "hybrid";
+    default:
+      return "keyword";
+  }
 }
 
 function optionalStringFromFormData(formData: FormData, key: string) {
@@ -525,25 +639,33 @@ function optionalBooleanFromFormData(formData: FormData, key: string) {
   return undefined;
 }
 
-function jsonObjectFromFormData(formData: FormData, key: string) {
+function jsonObjectFromFormData(formData: FormData, key: string, locale: Locale) {
   const raw = stringFromFormData(formData, key) || "{}";
-  return parseJsonObject(raw);
+  return parseJsonObject(raw, locale);
 }
 
-function optionalJsonObjectFromFormData(formData: FormData, key: string) {
+function optionalJsonObjectFromFormData(formData: FormData, key: string, locale: Locale) {
   const raw = stringFromFormData(formData, key);
-  return raw ? parseJsonObject(raw) : { ok: true as const, value: undefined };
+  return raw ? parseJsonObject(raw, locale) : { ok: true as const, value: undefined };
 }
 
-function parseJsonObject(raw: string) {
+function parseJsonObject(raw: string, locale: Locale) {
   try {
     const value = JSON.parse(raw) as unknown;
     if (value && typeof value === "object" && !Array.isArray(value)) {
       return { ok: true as const, value: value as Record<string, unknown> };
     }
-    return { ok: false as const, code: "ASSET_PAYLOAD_INVALID", message: "payload must be a JSON object" };
+    return {
+      ok: false as const,
+      code: "ASSET_PAYLOAD_INVALID",
+      message: tx(locale, "请输入 JSON 对象", "Enter a JSON object"),
+    };
   } catch {
-    return { ok: false as const, code: "ASSET_PAYLOAD_INVALID", message: "payload must be valid JSON" };
+    return {
+      ok: false as const,
+      code: "ASSET_PAYLOAD_INVALID",
+      message: tx(locale, "JSON 格式无效", "Invalid JSON"),
+    };
   }
 }
 

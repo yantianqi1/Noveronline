@@ -2,34 +2,57 @@
 
 import { useEffect } from "react";
 
+import type { CurrentUserSessionsSummary } from "../lib/api";
+
 const SESSION_REFRESH_STORAGE_KEY = "mf_auto_refresh_at";
 const SESSION_REFRESH_STATUS_KEY = "mf_auto_refresh_status";
 const SESSION_REFRESH_COOLDOWN_MS = 25 * 60 * 1000;
 const SESSION_REFRESH_THRESHOLD_MS = 15 * 60 * 1000;
 
-export function SessionAutoRefresh(input: { currentSessionExpiresAt?: string; enabled: boolean }) {
+export function SessionAutoRefresh(input: { enabled: boolean }) {
   useEffect(() => {
     if (!input.enabled) {
       return;
     }
 
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void refreshSessionWhenNeeded(controller.signal);
+    }, 1000);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [input.enabled]);
+
+  return null;
+}
+
+async function refreshSessionWhenNeeded(signal: AbortSignal) {
+  try {
+    const response = await fetch("/api/auth/sessions", {
+      credentials: "same-origin",
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      return;
+    }
+    const summary = await response.json() as CurrentUserSessionsSummary;
+    const currentSession = summary.ok
+      ? summary.sessions.find((session) => session.current)
+      : undefined;
     const now = Date.now();
-    const expiresAt = Date.parse(input.currentSessionExpiresAt ?? "");
+    const expiresAt = Date.parse(currentSession?.expires_at ?? "");
     if (!Number.isFinite(expiresAt) || expiresAt - now > SESSION_REFRESH_THRESHOLD_MS) {
       return;
     }
-    if (!claimRefreshWindow(now)) {
-      return;
+    if (claimRefreshWindow(now)) {
+      await refreshSession(signal);
     }
-
-    const controller = new AbortController();
-    void refreshSession(controller.signal);
-    return () => {
-      controller.abort();
-    };
-  }, [input.currentSessionExpiresAt, input.enabled]);
-
-  return null;
+  } catch {
+    return;
+  }
 }
 
 function claimRefreshWindow(now: number) {

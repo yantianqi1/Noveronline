@@ -1,6 +1,6 @@
 # 08. Asset Library
 
-更新时间：`2026-07-05`
+更新时间：`2026-07-13`
 
 ## 模块定位
 
@@ -113,6 +113,37 @@ archived
 - `draft`：草稿。
 - `manuscript`：进入手稿。
 - `archived`：不活跃但保留。
+
+## Manuscript 反哺资产契约（规划中）
+
+本节是 [28. Zero-start Writer and Manuscript Asset Distillation](./28-zero-start-writer-and-manuscript-asset-distillation.md) 的资产域摘要，尚不应被解读为现有 API 或 runtime 已实现。
+
+### 来源与幂等边界
+
+- 提取只从服务端已持久化的 `manuscript_block` 版本区间读取，或在 draft 被用户显式采用后以新 manuscript 版本为源。不从按键、流式 token、未保存缓冲区或客户端重传的正文启动。
+- 每个候选保留 `source_block_id`、from/to version、chapter/scene 和可审计的 evidence range/hash；公开 workflow event 只返回 run/count/type 摘要，不返回正文或候选 body。
+- 同一 request id 与同一源版本范围必须幂等；源文本继续修改后，旧候选标记为 stale，不静默覆盖。
+
+### 候选隔离和采用
+
+- manuscript 提取产物必须创建为 `lifecycle = candidate` 且 `enabled = false`。这一特定契约严于通用手工 ingestion，防止未审知识反向污染 Writer 上下文。
+- 用户可执行新建采用、编辑后采用、合并到已有资产或拒绝。只有显式采用到 `canon` 或 `material` 后才可启用并进入 Writer 检索。
+- 合并必须携带目标资产乐观版本，冲突返回 `409`。批量审阅按 candidate type 和冲突目标分组，不提供跨类型、跨目标的盲目“全部接受”。
+- 任何决策都写 audit log；提取、审阅和采用不得修改原 manuscript 正文。
+
+### 目标 API（未实现）
+
+```http
+GET   /v1/projects/{projectId}/asset-distillation-settings
+PATCH /v1/projects/{projectId}/asset-distillation-settings
+POST  /v1/projects/{projectId}/manuscript-asset-distillations
+GET   /v1/manuscript-asset-distillations/{runId}
+GET   /v1/projects/{projectId}/asset-proposals?status=pending&source=manuscript_distillation
+GET   /v1/asset-proposals/{candidateAssetId}
+POST  /v1/asset-proposals/{candidateAssetId}/decisions
+```
+
+所有写入请求必须携带 request id；提取 admission 只接受 block ids + expected versions 或 chapter id + expected block versions，不接受正文 body。bulk decision 是后续增强，不是首个闭环前置条件。
 
 ## 标准资产格式
 

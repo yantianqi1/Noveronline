@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import logging
 import uuid
@@ -59,17 +58,7 @@ class SeedTaskProgressTracker:
         self._run_task_coro(self.task_manager.mutate_task(self.task_id, mutator))
 
     def _run_task_coro(self, coro) -> None:
-        """Run task updates from seed worker threads without the request loop.
-
-        Starlette TestClient tears down the request event loop after the HTTP
-        response. The seed pipeline continues in a sync worker thread, so using
-        the cached request loop there can leave the task stuck in processing.
-        """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(coro)
-            return
+        """Schedule worker updates on TaskManager's single owning loop."""
         self.task_manager.sync_bridge(coro)
 
     def enter_stage(self, stage: str, label: str, progress: int, detail: str = "") -> None:

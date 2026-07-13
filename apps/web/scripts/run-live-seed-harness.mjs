@@ -26,10 +26,12 @@ const SAFE_CHILD_ENV_NAMES = [
 ];
 const LIVE_CHILD_ENV_SUFFIXES = new Set([
   "ALLOW_MUTATION",
+  "APP_DEV_BYPASS",
   "API_BASE_URL",
   "APP_BASE_URL",
   "CONSUME_RETRY_RUN",
   "DISPOSABLE_PROJECT_MARKER",
+  "EXPECT_COMPLETED",
   "PROJECT_ID",
   "REQUIRE_WORKER_RETRY",
   "RETRY_RUN_ID",
@@ -130,14 +132,15 @@ async function preflightLiveSeedServices(config, fetchImpl) {
       url: new URL("/", config.browser.appBaseUrl).toString(),
       label: "Next app",
       acceptStatus: (response) => Number(response.status) < 500,
+      requestInit: { redirect: "manual" },
     });
   }
 }
 
-async function assertServiceReachable({ fetchImpl, url, label, acceptStatus }) {
+async function assertServiceReachable({ fetchImpl, url, label, acceptStatus, requestInit = {} }) {
   let response;
   try {
-    response = await fetchImpl(url, { method: "GET" });
+    response = await fetchImpl(url, { method: "GET", ...requestInit });
   } catch {
     throw new Error(`${label} preflight failed`);
   }
@@ -234,6 +237,7 @@ function redactedLiveConfig(config, options) {
     retryRunId: config.retryRunId ? REDACTED : "",
     consumeRetryRun: config.consumeRetryRun,
     requireWorkerRetry: config.requireWorkerRetry,
+    expectCompleted: config.expectCompleted,
     workerRetryTimeoutMs: config.workerRetryTimeoutMs,
   };
   if (options.browser) {
@@ -279,6 +283,9 @@ function assertLiveConfig(config, prefix, options) {
   if (options.browser && config.requireWorkerRetry && (config.consumeRetryRun || config.retryRunId)) {
     throw new Error("worker retry mode must retry the browser-uploaded run");
   }
+  if (options.browser && config.expectCompleted && (config.requireWorkerRetry || config.consumeRetryRun || config.retryRunId)) {
+    throw new Error("completed mode cannot enable retry-run options");
+  }
   if (missing.length > 0) {
     throw new Error(`live Seed runner config is incomplete; missing env names: ${missing.join(", ")}`);
   }
@@ -304,6 +311,8 @@ function readLiveConfig(env, prefix, options) {
     config.appBaseUrl = envText(env, `${prefix}APP_BASE_URL`);
     config.requireWorkerRetry = envText(env, `${prefix}REQUIRE_WORKER_RETRY`) === "1";
     config.workerRetryTimeoutMs = envPositiveInt(env, `${prefix}WORKER_RETRY_TIMEOUT_MS`, 120000);
+    config.appDevBypass = envText(env, `${prefix}APP_DEV_BYPASS`) === "1";
+    config.expectCompleted = envText(env, `${prefix}EXPECT_COMPLETED`) === "1";
   }
   return config;
 }

@@ -2,7 +2,6 @@ package workflows
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -13,6 +12,8 @@ const (
 	AssetReindexWorkflowType = "asset_reindex"
 	AssetReindexModuleKey    = "asset_reindex"
 	AssetReindexWorkflowName = "AssetReindexWorkflow"
+
+	assetReindexStartFailedMessage = "failed to start asset_reindex workflow"
 )
 
 type StartAssetReindexInput struct {
@@ -65,6 +66,7 @@ type AssetReindexAdmissionInput struct {
 
 type AssetReindexAdmissionStore interface {
 	AdmitAssetReindexRun(context.Context, AssetReindexAdmissionInput) error
+	RecordAssetReindexStartFailure(context.Context, AssetReindexAdmissionInput) error
 }
 
 type TemporalAssetReindexConfig struct {
@@ -94,16 +96,18 @@ func NewTemporalAssetReindexStarter(config TemporalAssetReindexConfig) *Temporal
 func (s *TemporalAssetReindexStarter) StartAssetReindex(ctx context.Context, input StartAssetReindexInput) (AssetReindexRun, error) {
 	tenantID := strings.TrimSpace(input.TenantID)
 	projectID := strings.TrimSpace(input.ProjectID)
-	if tenantID == "" || projectID == "" {
+	actorUserID := strings.TrimSpace(input.ActorUserID)
+	requestID := strings.TrimSpace(input.RequestID)
+	if tenantID == "" || projectID == "" || actorUserID == "" || requestID == "" {
 		return AssetReindexRun{}, &AppError{
 			Code:    "VALIDATION_FAILED",
-			Message: "tenant_id and project_id are required",
+			Message: "tenant_id, project_id, actor_user_id, and request_id are required",
 		}
 	}
-	if s.client == nil {
+	if s.client == nil || s.admissionStore == nil {
 		return AssetReindexRun{}, &AppError{
 			Code:    "ASSET_REINDEX_BACKEND_UNCONFIGURED",
-			Message: "Temporal workflow client is not configured for asset_reindex",
+			Message: "asset reindex workflow backend is not configured",
 		}
 	}
 	runID, err := newRunID()
@@ -116,8 +120,6 @@ func (s *TemporalAssetReindexStarter) StartAssetReindex(ctx context.Context, inp
 	traceID := traceIDForRun(runID)
 	scope := NormalizeAssetReindexScope(input.Scope)
 	mode := NormalizeAssetReindexMode(input.Mode)
-	actorUserID := strings.TrimSpace(input.ActorUserID)
-	requestID := strings.TrimSpace(input.RequestID)
 	temporalWorkflowID := "asset_reindex_" + runID
 	permissions := map[string][]string{
 		AssetReindexModuleKey: {"run"},
@@ -146,26 +148,22 @@ func (s *TemporalAssetReindexStarter) StartAssetReindex(ctx context.Context, inp
 		"mode":          mode,
 		"options":       sanitizeAssetReindexOptions(input.Options),
 	}
-	if s.admissionStore != nil {
-		err = s.admissionStore.AdmitAssetReindexRun(ctx, AssetReindexAdmissionInput{
-			TenantID:           tenantID,
-			ProjectID:          projectID,
-			RunID:              runID,
-			TraceID:            traceID,
-			WorkflowType:       AssetReindexWorkflowType,
-			TemporalWorkflowID: temporalWorkflowID,
-			ActorUserID:        actorUserID,
-			RequestID:          requestID,
-			Scope:              scope,
-			Mode:               mode,
-			Status:             "queued",
-		})
-		if err != nil {
-			if ErrorCode(err) == "WORKFLOW_ADMISSION_FAILED" {
-				return AssetReindexRun{}, err
-			}
-			return AssetReindexRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
-		}
+	admissionInput := AssetReindexAdmissionInput{
+		TenantID:           tenantID,
+		ProjectID:          projectID,
+		RunID:              runID,
+		TraceID:            traceID,
+		WorkflowType:       AssetReindexWorkflowType,
+		TemporalWorkflowID: temporalWorkflowID,
+		ActorUserID:        actorUserID,
+		RequestID:          requestID,
+		Scope:              scope,
+		Mode:               mode,
+		Status:             "queued",
+	}
+	err = s.admissionStore.AdmitAssetReindexRun(ctx, admissionInput)
+	if err != nil {
+		return AssetReindexRun{}, assetReindexAdmissionFailed()
 	}
 	_, err = s.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                       temporalWorkflowID,
@@ -174,9 +172,14 @@ func (s *TemporalAssetReindexStarter) StartAssetReindex(ctx context.Context, inp
 		WorkflowRunTimeout:       2 * time.Hour,
 	}, AssetReindexWorkflowName, payload)
 	if err != nil {
+		compensationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if compensateErr := s.admissionStore.RecordAssetReindexStartFailure(compensationContext, admissionInput); compensateErr != nil {
+			return AssetReindexRun{}, assetReindexStartFailureRecordFailed()
+		}
 		return AssetReindexRun{}, &AppError{
 			Code:    "WORKFLOW_FAILED",
-			Message: fmt.Sprintf("failed to start asset_reindex workflow: %v", err),
+			Message: assetReindexStartFailedMessage,
 		}
 	}
 	return AssetReindexRun{

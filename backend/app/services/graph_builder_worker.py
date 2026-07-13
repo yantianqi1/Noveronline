@@ -1,6 +1,5 @@
 """本地图谱构建后台任务逻辑。"""
 
-import asyncio
 import traceback
 from typing import Any, Dict, List
 
@@ -21,17 +20,7 @@ _STAGE_FLOOR = {
 
 
 def _run_task_coro(task_manager, coro):
-    """Run TaskManager updates from the graph worker thread.
-
-    ``run_graph_build`` is dispatched through ``asyncio.to_thread``. Using the
-    request loop cached in ``TaskManager.sync_bridge`` makes these writes
-    vulnerable to TestClient/portal cancellation after the HTTP response
-    returns, so worker-thread updates get their own short-lived loop.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
+    """Schedule graph worker updates on TaskManager's single owning loop."""
     return task_manager.sync_bridge(coro)
 
 

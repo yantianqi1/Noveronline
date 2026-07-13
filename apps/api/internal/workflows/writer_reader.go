@@ -32,15 +32,19 @@ func (r *SQLWriterReader) GetWriterRun(ctx context.Context, input GetWriterRunIn
 		}
 	}
 	query := `SELECT
-  run_id::text,
-  project_id::text,
-  status
+	  run_id::text,
+	  project_id::text,
+	  mode,
+	  instruction,
+	  status
 FROM writer_runs
 WHERE tenant_id::text = $1
   AND run_id::text = $2
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(
+	rows, err := queryWorkflowEventRows(
 		ctx,
+		r.queryer,
+		strings.TrimSpace(input.TenantID),
 		query,
 		strings.TrimSpace(input.TenantID),
 		strings.TrimSpace(input.RunID),
@@ -48,18 +52,29 @@ LIMIT 1`
 	if err != nil {
 		return WriterRun{}, writerRunQueryFailed()
 	}
-	defer rows.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = rows.Close()
+		}
+	}()
 
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return WriterRun{}, writerRunQueryFailed()
 		}
+		if err := rows.Close(); err != nil {
+			return WriterRun{}, writerRunQueryFailed()
+		}
+		closed = true
 		return WriterRun{}, &AppError{Code: "NOT_FOUND", Message: "writer run not found"}
 	}
 	var runID string
 	var projectID string
+	var mode string
+	var instruction string
 	var status string
-	if err := rows.Scan(&runID, &projectID, &status); err != nil {
+	if err := rows.Scan(&runID, &projectID, &mode, &instruction, &status); err != nil {
 		if err == sql.ErrNoRows {
 			return WriterRun{}, &AppError{Code: "NOT_FOUND", Message: "writer run not found"}
 		}
@@ -68,12 +83,18 @@ LIMIT 1`
 	if err := rows.Err(); err != nil {
 		return WriterRun{}, writerRunQueryFailed()
 	}
+	if err := rows.Close(); err != nil {
+		return WriterRun{}, writerRunQueryFailed()
+	}
+	closed = true
 	return WriterRun{
-		RunID:     runID,
-		TraceID:   traceIDForRun(runID),
-		TenantID:  strings.TrimSpace(input.TenantID),
-		ProjectID: projectID,
-		Status:    status,
+		RunID:       runID,
+		TraceID:     traceIDForRun(runID),
+		TenantID:    strings.TrimSpace(input.TenantID),
+		ProjectID:   projectID,
+		Mode:        mode,
+		Instruction: instruction,
+		Status:      status,
 	}, nil
 }
 

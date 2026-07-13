@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirofish.local/contracts/writer-workflow-input.schema.json",
+  "title": "Writer workflow input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant_id",
+    "project_id",
+    "run_id",
+    "trace_id",
+    "requested_by",
+    "mode",
+    "instruction",
+    "options"
+  ],
+  "properties": {
+    "tenant_id": { "$ref": "#/$defs/nonEmptyString" },
+    "project_id": { "$ref": "#/$defs/nonEmptyString" },
+    "run_id": { "$ref": "#/$defs/nonEmptyString" },
+    "trace_id": { "$ref": "#/$defs/nonEmptyString" },
+    "requested_by": { "$ref": "#/$defs/nonEmptyString" },
+    "request_id": { "$ref": "#/$defs/nonEmptyString" },
+    "workflow_type": { "const": "writer_run" },
+    "mode": { "enum": ["draft", "continue", "outline", "revise"] },
+    "chapter_id": { "$ref": "#/$defs/nonEmptyString" },
+    "scene_id": { "$ref": "#/$defs/nonEmptyString" },
+    "instruction": { "$ref": "#/$defs/nonEmptyString" },
+    "selected_asset_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "graph_node_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "worldline_path_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "options": {
+      "type": "object",
+      "required": ["module_key"],
+      "properties": {
+        "module_key": { "enum": ["writer_composer", "writer_orchestrator"] },
+        "thinking_level": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh"] },
+        "target_words": { "type": "integer", "minimum": 1 },
+        "review_after_write": { "type": "boolean" },
+        "llm_resolution": { "$ref": "#/$defs/llmResolution" },
+        "revise": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["block_id", "selection_text"],
+          "properties": {
+            "block_id": { "$ref": "#/$defs/nonEmptyString" },
+            "selection_text": { "$ref": "#/$defs/nonEmptyString" },
+            "selection_start": { "type": "integer", "minimum": 0 },
+            "selection_end": { "type": "integer", "minimum": 0 },
+            "expected_version": { "type": "integer", "minimum": 1 },
+            "action": { "enum": ["rewrite", "expand", "condense", "polish", "correct", "custom"] }
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonEmptyString" },
+      "uniqueItems": true
+    },
+    "llmResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "module_key",
+        "channel_id",
+        "model_id",
+        "provider",
+        "base_url",
+        "credential_ref",
+        "supports_tools",
+        "supports_json",
+        "settings"
+      ],
+      "properties": {
+        "module_key": { "$ref": "#/$defs/nonEmptyString" },
+        "channel_id": { "$ref": "#/$defs/nonEmptyString" },
+        "model_id": { "$ref": "#/$defs/nonEmptyString" },
+        "provider": { "$ref": "#/$defs/nonEmptyString" },
+        "base_url": { "$ref": "#/$defs/nonEmptyString" },
+        "credential_ref": { "$ref": "#/$defs/nonEmptyString" },
+        "supports_tools": { "type": "boolean" },
+        "supports_json": { "type": "boolean" },
+        "settings": { "type": "object" }
+      }
+    }
+  }
+}

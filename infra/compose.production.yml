@@ -1,0 +1,153 @@
+services:
+  minio-init:
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        mc alias set mirofish-minio http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "mirofish-minio/$${MIROFISH_OBJECT_STORAGE_BUCKET}" &&
+        mc version enable "mirofish-minio/$${MIROFISH_OBJECT_STORAGE_BUCKET}"
+  postgres:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  temporal:
+    ports: !reset []
+  temporal-ui:
+    profiles: ["operations-ui"]
+    ports: !reset []
+  minio:
+    ports: !reset []
+  api:
+    environment:
+      MIROFISH_DEPLOYMENT_ENV: ${MIROFISH_DEPLOYMENT_ENV:?MIROFISH_DEPLOYMENT_ENV is required}
+      MIROFISH_ENABLE_DEVELOPMENT_AUTH: "0"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      MIROFISH_AUTH_SESSION_SECRET: ${MIROFISH_AUTH_SESSION_SECRET:?MIROFISH_AUTH_SESSION_SECRET is required}
+      MIROFISH_RECOVERY_CLIENT_PROOF_SECRET: ${MIROFISH_RECOVERY_CLIENT_PROOF_SECRET:?MIROFISH_RECOVERY_CLIENT_PROOF_SECRET is required}
+      AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY: ${AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY:?AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY is required}
+      MIROFISH_AUTH_RATE_LIMIT_REDIS_URL: ${MIROFISH_AUTH_RATE_LIMIT_REDIS_URL:?MIROFISH_AUTH_RATE_LIMIT_REDIS_URL is required}
+      MIROFISH_RATE_LIMIT_KEY_SECRET: ${MIROFISH_RATE_LIMIT_KEY_SECRET:?MIROFISH_RATE_LIMIT_KEY_SECRET is required}
+      MIROFISH_RATE_LIMIT_POLICIES_JSON: ${MIROFISH_RATE_LIMIT_POLICIES_JSON:?MIROFISH_RATE_LIMIT_POLICIES_JSON is required}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+      MIROFISH_OBJECT_STORAGE_ENDPOINT: ${MIROFISH_OBJECT_STORAGE_ENDPOINT:?MIROFISH_OBJECT_STORAGE_ENDPOINT is required}
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:?MIROFISH_OBJECT_STORAGE_BUCKET is required}
+      MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MIROFISH_OBJECT_STORAGE_ACCESS_KEY:?MIROFISH_OBJECT_STORAGE_ACCESS_KEY is required}
+      MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MIROFISH_OBJECT_STORAGE_SECRET_KEY:?MIROFISH_OBJECT_STORAGE_SECRET_KEY is required}
+      MIROFISH_OBJECT_STORAGE_USE_SSL: ${MIROFISH_OBJECT_STORAGE_USE_SSL:?MIROFISH_OBJECT_STORAGE_USE_SSL is required}
+      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST is required}
+      SMTP_PORT: ${SMTP_PORT:?SMTP_PORT is required}
+      SMTP_USERNAME: ${SMTP_USERNAME:?SMTP_USERNAME is required}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD is required}
+      SMTP_FROM: ${SMTP_FROM:?SMTP_FROM is required}
+      SMTP_TLS_MODE: ${SMTP_TLS_MODE:?SMTP_TLS_MODE is required}
+      AUTH_RECOVERY_RESET_BASE_URL: ${AUTH_RECOVERY_RESET_BASE_URL:?AUTH_RECOVERY_RESET_BASE_URL is required}
+      COLLABORATION_ACCEPT_BASE_URL: ${COLLABORATION_ACCEPT_BASE_URL:?COLLABORATION_ACCEPT_BASE_URL is required}
+    ports:
+      - "${PUBLIC_BIND_ADDRESS:-127.0.0.1}:${API_PORT:?API_PORT is required}:8080"
+    security_opt: &service-security
+      - no-new-privileges:true
+    stop_grace_period: 30s
+  web:
+    environment:
+      MIROFISH_API_BASE_URL: http://api:8080
+      MIROFISH_WEB_DEV_BYPASS_LOGIN: "0"
+      MIROFISH_RECOVERY_CLIENT_PROOF_SECRET: ${MIROFISH_RECOVERY_CLIENT_PROOF_SECRET:?MIROFISH_RECOVERY_CLIENT_PROOF_SECRET is required}
+      MIROFISH_TRUSTED_CLIENT_IP_HEADER: ${MIROFISH_TRUSTED_CLIENT_IP_HEADER:?MIROFISH_TRUSTED_CLIENT_IP_HEADER is required}
+    ports:
+      - "${PUBLIC_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:?WEB_PORT is required}:3000"
+    security_opt: *service-security
+    stop_grace_period: 30s
+  agent-runtime:
+    security_opt: *service-security
+  agent-runtime-seed:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  agent-runtime-asset:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  agent-runtime-graph:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  agent-runtime-worldline:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  agent-runtime-character:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  agent-runtime-reviewer:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  agent-runtime-writer-planning:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  pi-agent-runtime:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  legacy-import-worker:
+    build:
+      context: ../apps/agent-runtime
+    command: python -m mirofish_agents.temporal.legacy_import_worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+      LEGACY_IMPORT_TASK_QUEUE: ${LEGACY_IMPORT_TASK_QUEUE:-legacy-import}
+      LEGACY_IMPORT_DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LEGACY_IMPORT_SOURCE_ROOT: /legacy-import-source
+      MIROFISH_OBJECT_STORAGE_ENDPOINT: ${MIROFISH_OBJECT_STORAGE_ENDPOINT:?MIROFISH_OBJECT_STORAGE_ENDPOINT is required}
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:?MIROFISH_OBJECT_STORAGE_BUCKET is required}
+      MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MIROFISH_OBJECT_STORAGE_ACCESS_KEY:?MIROFISH_OBJECT_STORAGE_ACCESS_KEY is required}
+      MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MIROFISH_OBJECT_STORAGE_SECRET_KEY:?MIROFISH_OBJECT_STORAGE_SECRET_KEY is required}
+      MIROFISH_OBJECT_STORAGE_USE_SSL: ${MIROFISH_OBJECT_STORAGE_USE_SSL:?MIROFISH_OBJECT_STORAGE_USE_SSL is required}
+      MIROFISH_OBJECT_STORAGE_REGION: ${MIROFISH_OBJECT_STORAGE_REGION:?MIROFISH_OBJECT_STORAGE_REGION is required}
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1770
+    security_opt: *service-security
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'legacy_import_worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    security_opt: *service-security
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:

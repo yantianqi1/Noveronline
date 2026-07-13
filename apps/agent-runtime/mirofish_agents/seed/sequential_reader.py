@@ -126,9 +126,34 @@ class PostgresModuleBindingResolver:
                           ON m.channel_id = b.channel_id
                           AND m.model_id = b.model_id
                           AND (m.tenant_id = b.tenant_id OR m.tenant_id IS NULL)
+                          AND m.enabled = TRUE
                          WHERE b.tenant_id::text = i.tenant_id
                            AND (b.project_id::text = i.project_id OR b.project_id IS NULL)
                            AND b.module_key = i.module_key
+                         UNION ALL
+                         SELECT
+                           i.tenant_id::uuid AS tenant_id,
+                           NULL::uuid AS project_id,
+                           d.module_key,
+                           d.channel_id,
+                           d.model_id,
+                           c.provider,
+                           c.base_url,
+                           COALESCE(m.supports_json, false) AS supports_json,
+                           d.settings_jsonb,
+                           2 AS binding_rank
+                         FROM llm_platform_module_defaults d
+                         JOIN input i
+                           ON i.module_key = d.module_key
+                         JOIN llm_channels c
+                           ON c.channel_id = d.channel_id
+                          AND c.enabled = TRUE
+                          AND c.tenant_id IS NULL
+                         JOIN llm_models m
+                           ON m.channel_id = d.channel_id
+                          AND m.model_id = d.model_id
+                          AND m.tenant_id IS NULL
+                          AND m.enabled = TRUE
                        ) ranked_bindings
                        ORDER BY binding_rank, module_key
                        LIMIT 1""",

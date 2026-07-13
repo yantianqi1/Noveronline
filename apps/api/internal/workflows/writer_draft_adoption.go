@@ -211,7 +211,7 @@ func draftAdoptionWriteFailed() *AppError {
 }
 
 func adoptDraftReturningQuery() string {
-	return `WITH candidate_draft AS (
+	return `WITH draft_scope AS (
   SELECT
     tenant_id,
     draft_id,
@@ -220,16 +220,37 @@ func adoptDraftReturningQuery() string {
     COALESCE(NULLIF($6, '')::uuid, chapter_id) AS chapter_id,
     scene_id,
     content_text,
-    word_count
+    word_count,
+    status,
+    adopted_block_id
   FROM writer_drafts
   WHERE tenant_id::text = $1
     AND draft_id::text = $2
-    AND status = 'candidate'
+    AND status IN ('candidate', 'adopted')
   LIMIT 1
   FOR UPDATE
 ),
-adoption_context AS (
-  SELECT $4 AS request_id
+candidate_draft AS (
+  SELECT *
+  FROM draft_scope
+  WHERE status = 'candidate'
+),
+existing_adoption AS (
+  SELECT
+    draft_scope.draft_id::text AS draft_id,
+    existing.block_id::text AS block_id,
+    draft_scope.project_id::text AS project_id,
+    draft_scope.status,
+    COALESCE(existing.chapter_id::text, draft_scope.chapter_id::text, '') AS chapter_id,
+    COALESCE(existing.scene_id::text, draft_scope.scene_id::text, '') AS scene_id,
+    existing.block_order
+  FROM draft_scope
+  JOIN manuscript_blocks existing
+    ON existing.tenant_id = draft_scope.tenant_id
+   AND existing.project_id = draft_scope.project_id
+   AND existing.block_id = draft_scope.adopted_block_id
+   AND existing.source_draft_id = draft_scope.draft_id
+  WHERE draft_scope.status = 'adopted'
 ),
 next_order AS (
   SELECT
@@ -248,27 +269,75 @@ inserted_block AS (
     tenant_id,
     project_id,
     chapter_id,
+    scene_id,
     source_draft_id,
+    source_writer_run_id,
     block_order,
     content_text,
     word_count,
-    created_by
+    version,
+    status,
+    created_by,
+    updated_by
   )
   SELECT
     candidate_draft.tenant_id,
     candidate_draft.project_id,
     candidate_draft.chapter_id,
+    candidate_draft.scene_id,
     candidate_draft.draft_id,
+    candidate_draft.run_id,
     next_order.block_order,
     candidate_draft.content_text,
     candidate_draft.word_count,
+    1,
+    'active',
+    NULLIF($3, '')::uuid,
     NULLIF($3, '')::uuid
   FROM candidate_draft
   JOIN next_order
     ON next_order.tenant_id = candidate_draft.tenant_id
    AND next_order.project_id = candidate_draft.project_id
-  CROSS JOIN adoption_context
-  RETURNING block_id, source_draft_id, project_id, chapter_id, block_order
+  RETURNING block_id, source_draft_id, project_id, chapter_id, scene_id, block_order, content_text, word_count, version, status, tags, source_writer_run_id
+),
+inserted_version AS (
+  INSERT INTO manuscript_block_versions (
+    tenant_id,
+    project_id,
+    block_id,
+    version_number,
+    chapter_id,
+    scene_id,
+    status,
+    tags,
+    block_order,
+    content_text,
+    word_count,
+    source_draft_id,
+    source_writer_run_id,
+    snapshot_reason,
+    created_by
+  )
+  SELECT
+    candidate_draft.tenant_id,
+    inserted_block.project_id,
+    inserted_block.block_id,
+    1,
+    inserted_block.chapter_id,
+    inserted_block.scene_id,
+    inserted_block.status,
+    inserted_block.tags,
+    inserted_block.block_order,
+    inserted_block.content_text,
+    inserted_block.word_count,
+    inserted_block.source_draft_id,
+    inserted_block.source_writer_run_id,
+    'adopt',
+    NULLIF($3, '')::uuid
+  FROM candidate_draft
+  JOIN inserted_block
+    ON inserted_block.source_draft_id = candidate_draft.draft_id
+  RETURNING block_id
 ),
 updated_draft AS (
   UPDATE writer_drafts
@@ -287,16 +356,72 @@ updated_draft AS (
     writer_drafts.scene_id,
     writer_drafts.status,
     writer_drafts.adopted_block_id
+),
+audit_insert AS (
+  INSERT INTO audit_logs (
+    tenant_id,
+    actor_user_id,
+    action,
+    resource_type,
+    resource_id,
+    project_id,
+    run_id,
+    request_id,
+    metadata_jsonb
+  )
+  SELECT
+    candidate_draft.tenant_id,
+    NULLIF($3, '')::uuid,
+    'writer.draft_adopted',
+    'writer_draft',
+    candidate_draft.draft_id,
+    candidate_draft.project_id,
+    candidate_draft.run_id,
+    NULLIF($4, ''),
+    jsonb_build_object(
+      'block_id', inserted_block.block_id,
+      'block_order', inserted_block.block_order
+    )
+  FROM candidate_draft
+  JOIN inserted_block
+    ON inserted_block.source_draft_id = candidate_draft.draft_id
+  JOIN updated_draft
+    ON updated_draft.draft_id = candidate_draft.draft_id
+  JOIN inserted_version
+    ON inserted_version.block_id = inserted_block.block_id
+  RETURNING resource_id
+),
+new_adoption AS (
+  SELECT
+    updated_draft.draft_id::text AS draft_id,
+    inserted_block.block_id::text AS block_id,
+    updated_draft.project_id::text AS project_id,
+    updated_draft.status,
+    COALESCE(inserted_block.chapter_id::text, updated_draft.chapter_id::text, '') AS chapter_id,
+    COALESCE(inserted_block.scene_id::text, updated_draft.scene_id::text, '') AS scene_id,
+    inserted_block.block_order
+  FROM updated_draft
+  JOIN inserted_block
+    ON inserted_block.block_id = updated_draft.adopted_block_id
 )
 SELECT
-  updated_draft.draft_id::text,
-  inserted_block.block_id::text,
-  updated_draft.project_id::text,
-  updated_draft.status,
-  COALESCE(inserted_block.chapter_id::text, updated_draft.chapter_id::text, ''),
-  COALESCE(updated_draft.scene_id::text, ''),
-  inserted_block.block_order
-FROM updated_draft
-JOIN inserted_block
-  ON inserted_block.block_id = updated_draft.adopted_block_id`
+  draft_id,
+  block_id,
+  project_id,
+  status,
+  chapter_id,
+  scene_id,
+  block_order
+FROM new_adoption
+UNION ALL
+SELECT
+  draft_id,
+  block_id,
+  project_id,
+  status,
+  chapter_id,
+  scene_id,
+  block_order
+FROM existing_adoption
+LIMIT 1`
 }

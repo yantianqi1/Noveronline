@@ -12,18 +12,11 @@
 ## 本地开发
 
 ```bash
-# 后端
-cd backend
-uv sync
-APP_PORT=3888 uv run python run.py
-
-# 前端
-cd frontend
-npm install
-npm run dev
+cp infra/.env.example infra/.env
+docker compose -f infra/docker-compose.yml up -d --build
 ```
 
-如果没有 `uv`，可以使用 `backend/.venv/bin/python run.py` 或按 `README.md` 创建虚拟环境。
+Web 位于 `http://localhost:3999`，API 位于 `http://localhost:3888`。`apps/web` 是唯一前端目录；根目录旧 `frontend/` 已退役，不接受恢复它的 PR。
 
 ## 提交 PR
 
@@ -38,21 +31,29 @@ PR 描述应包含：
 ## 代码原则
 
 - 修根因，不用 mock 成功或静默 fallback 掩盖问题。
-- 所有 schema 变更通过新的 Alembic revision 完成。
-- 服务层通过 repository 访问数据库，不直接拼接 SQL。
+- 所有 schema 变更通过新 migration 完成，不直接修改已应用 revision。
+- 数据库访问使用参数化查询和现有 repository/store 边界。
 - 所有 LLM 调用走统一 LLM 设施面板的模块绑定。
 - 保持小说创作领域语义，避免引入上游舆情分析抽象。
 
 ## 测试
 
 ```bash
-cd backend
-env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest tests
+cd apps/api
+go test ./...
 
-cd frontend
-npm run lint
-npm run build
+cd apps/web
 npm run test
+npm run typecheck
+npm run build
+
+cd apps/agent-runtime
+env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider tests -q
+
+cd apps/pi-agent-runtime
+npm test
+npm run typecheck
+npm run build
 ```
 
 如果某项检查因为环境缺失无法运行，请在 PR 中明确说明原因。

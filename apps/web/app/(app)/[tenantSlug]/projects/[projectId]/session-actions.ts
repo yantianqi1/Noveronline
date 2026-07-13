@@ -1,21 +1,53 @@
 "use server";
 
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 import {
-  getSessionCSRFToken,
+	changePassword,
+	getSessionCSRFToken,
   revokeAllCurrentUserSessions,
   revokeCurrentSession,
   revokeTenantSessions,
   rotateCurrentSession,
 } from "../../../../../lib/api";
 
+export async function changePasswordAction(securityPath: string, formData: FormData) {
+	"use server";
+
+	const currentPassword = passwordFromFormData(formData, "currentPassword");
+	const newPassword = passwordFromFormData(formData, "newPassword");
+	const confirmPassword = passwordFromFormData(formData, "confirmPassword");
+	if (!currentPassword || !newPassword || newPassword !== confirmPassword) {
+		redirect(`${securityPath}?password_error=VALIDATION_FAILED`);
+	}
+	const { actionCookieStore, actionSessionCookie } = await readActionSessionCookie();
+	if (!actionSessionCookie) {
+		redirect("/login?error=SESSION_REQUIRED");
+	}
+	const csrfResult = await requireActionCSRFToken(actionSessionCookie);
+	const result = await changePassword({
+		currentPassword,
+		newPassword,
+		sessionCookie: actionSessionCookie,
+		csrfToken: csrfResult.csrf_token,
+	});
+	if (!result.ok) {
+		const errorCode = result.code === "VALIDATION_FAILED" || result.code === "UNAUTHENTICATED"
+			? result.code
+			: "PASSWORD_CHANGE_FAILED";
+		redirect(`${securityPath}?password_error=${errorCode}`);
+	}
+	actionCookieStore.delete("mirofish_session");
+	redirect("/login?password_changed=1");
+}
+
 export async function logoutAction() {
   "use server";
 
   const { actionCookieStore, actionSessionCookie } = await readActionSessionCookie();
   if (!actionSessionCookie) {
-    return;
+    redirect("/login");
   }
   const csrfResult = await requireActionCSRFToken(actionSessionCookie);
   const result = await revokeCurrentSession({ sessionCookie: actionSessionCookie, csrfToken: csrfResult.csrf_token });
@@ -23,6 +55,7 @@ export async function logoutAction() {
     throw new Error("SESSION_REVOKE_FAILED");
   }
   actionCookieStore.delete("mirofish_session");
+  redirect("/login");
 }
 
 export async function rotateSessionAction() {
@@ -90,5 +123,10 @@ async function requireActionCSRFToken(actionSessionCookie: string) {
   if (!csrfResult.ok) {
     throw new Error("SESSION_CSRF_TOKEN_UNAVAILABLE");
   }
-  return csrfResult;
+	return csrfResult;
+}
+
+function passwordFromFormData(formData: FormData, field: string) {
+	const value = formData.get(field);
+	return typeof value === "string" ? value : "";
 }

@@ -9,8 +9,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 )
 
 func TestLocalWriterStarterCreatesQueuedRunWithContext(t *testing.T) {
@@ -36,7 +38,7 @@ func TestLocalWriterStarterCreatesQueuedRunWithContext(t *testing.T) {
 	if run.TraceID != traceIDForRun(run.RunID) {
 		t.Fatalf("expected trace id to derive from run id, got %#v", run)
 	}
-	if run.ProjectID != "project-1" || run.Status != "queued" {
+	if run.ProjectID != "project-1" || run.Mode != "draft" || run.Instruction != "写一段正文" || run.Status != "queued" {
 		t.Fatalf("unexpected run: %#v", run)
 	}
 }
@@ -60,7 +62,7 @@ func TestLocalWriterStarterReadsCreatedRunWithinTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get writer run: %v", err)
 	}
-	if readRun.RunID != run.RunID || readRun.TraceID != run.TraceID || readRun.ProjectID != "project-1" || readRun.Status != "queued" {
+	if readRun.RunID != run.RunID || readRun.TraceID != run.TraceID || readRun.ProjectID != "project-1" || readRun.Mode != "draft" || readRun.Instruction != "写一段正文" || readRun.Status != "queued" {
 		t.Fatalf("unexpected run: %#v", readRun)
 	}
 
@@ -96,6 +98,8 @@ func TestSQLWriterReaderReadsPersistedRunWithinTenant(t *testing.T) {
 			values: [][]any{{
 				"run-1",
 				"project-1",
+				"continue",
+				"续写雨夜谈判",
 				"completed",
 			}},
 		},
@@ -110,7 +114,7 @@ func TestSQLWriterReaderReadsPersistedRunWithinTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get writer run: %v", err)
 	}
-	if run.RunID != "run-1" || run.TraceID != traceIDForRun("run-1") || run.ProjectID != "project-1" || run.Status != "completed" {
+	if run.RunID != "run-1" || run.TraceID != traceIDForRun("run-1") || run.ProjectID != "project-1" || run.Mode != "continue" || run.Instruction != "续写雨夜谈判" || run.Status != "completed" {
 		t.Fatalf("unexpected run: %#v", run)
 	}
 	if !strings.Contains(queryer.query, "FROM writer_runs") {
@@ -132,6 +136,21 @@ func TestSQLWriterReaderReturnsNotFoundForMissingRun(t *testing.T) {
 
 	if code := ErrorCode(err); code != "NOT_FOUND" {
 		t.Fatalf("expected not found, got %s (%v)", code, err)
+	}
+}
+
+func TestSQLWriterReaderUsesTenantContextForRefreshRecovery(t *testing.T) {
+	queryer := &recordingTenantWriterEventQueryer{
+		rows: &fakeWriterEventRows{values: [][]any{{"run-1", "project-1", "draft", "写下一场谈判", "completed"}}},
+	}
+	reader := NewSQLWriterReader(SQLWriterReaderConfig{Queryer: queryer})
+
+	run, err := reader.GetWriterRun(context.Background(), GetWriterRunInput{TenantID: "tenant-1", RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("get persisted writer run: %v", err)
+	}
+	if run.Status != "completed" || queryer.plainCalled || queryer.tenantID != "tenant-1" {
+		t.Fatalf("writer refresh did not use persisted tenant-scoped run: run=%#v queryer=%#v", run, queryer)
 	}
 }
 
@@ -504,6 +523,29 @@ func TestSQLWriterEventReaderRejectsMissingCursor(t *testing.T) {
 	}
 }
 
+func TestSQLWriterEventReaderReplayCursorIsStrictlyExclusiveAndStable(t *testing.T) {
+	queryer := &recordingWriterEventQueryer{rows: &fakeWriterEventRows{values: [][]any{
+		{true, "evt-terminal", "run-1", "project-1", 101, "writer.run.completed", `{"status":"completed","draft_id":"draft-1"}`, "2026-07-10T01:00:00Z"},
+	}}}
+	reader := NewSQLWriterEventReader(SQLWriterEventReaderConfig{Queryer: queryer, Limit: 100})
+
+	events, err := reader.ListWriterEvents(context.Background(), ListWriterEventsInput{
+		TenantID: "tenant-1", RunID: "run-1", AfterEventID: "evt-100",
+	})
+	if err != nil {
+		t.Fatalf("replay terminal event: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "evt-terminal" || events[0].EventType != "writer.run.completed" {
+		t.Fatalf("terminal event was lost during replay: %#v", events)
+	}
+	if !strings.Contains(queryer.query, "sequence >") || strings.Contains(queryer.query, "sequence >=") {
+		t.Fatalf("replay cursor must be exclusive to avoid duplicates: %s", queryer.query)
+	}
+	if !strings.Contains(queryer.query, "ORDER BY sequence ASC") {
+		t.Fatalf("replay must remain ordered by persisted sequence: %s", queryer.query)
+	}
+}
+
 func TestSQLWriterEventReaderSanitizesPublicPayload(t *testing.T) {
 	queryer := &recordingWriterEventQueryer{
 		rows: &fakeWriterEventRows{
@@ -775,8 +817,8 @@ func TestTemporalWriterStarterDoesNotStartWorkflowWhenAdmissionFails(t *testing.
 }
 
 func TestTemporalWriterStarterCancelsTemporalWorkflowAndPersistsCancelledState(t *testing.T) {
-	temporalClient := &recordingWriterTemporalClient{}
-	cancellationStore := &recordingWriterCancellationStore{}
+	temporalClient := &recordingWriterTemporalClient{completionErr: temporal.NewCanceledError()}
+	cancellationStore := &recordingWriterCancellationStore{temporalWaited: func() bool { return temporalClient.waited }}
 	starter := NewTemporalWriterStarter(TemporalWriterConfig{
 		Client:            temporalClient,
 		TaskQueue:         WriterTaskQueue,
@@ -799,6 +841,9 @@ func TestTemporalWriterStarterCancelsTemporalWorkflowAndPersistsCancelledState(t
 	if temporalClient.cancelWorkflowID != "writer_run_run-1" || temporalClient.cancelRunID != "" {
 		t.Fatalf("unexpected Temporal cancel target: workflow=%q run=%q", temporalClient.cancelWorkflowID, temporalClient.cancelRunID)
 	}
+	if !temporalClient.waited || cancellationStore.calledBeforeTemporalCompletion {
+		t.Fatalf("public cancellation was persisted before Temporal cleanup completed: client=%#v store=%#v", temporalClient, cancellationStore)
+	}
 	if cancellationStore.input.TenantID != "tenant-1" || cancellationStore.input.RunID != "run-1" {
 		t.Fatalf("cancellation store lost tenant/run context: %#v", cancellationStore.input)
 	}
@@ -810,6 +855,67 @@ func TestTemporalWriterStarterCancelsTemporalWorkflowAndPersistsCancelledState(t
 	}
 	if cancelled.RunID != "run-1" || cancelled.Status != "cancelled" {
 		t.Fatalf("unexpected cancellation response: %#v", cancelled)
+	}
+}
+
+func TestTemporalWriterStarterDoesNotExposeCancelledUntilTemporalCleanupCompletes(t *testing.T) {
+	waitStarted := make(chan struct{}, 1)
+	waitRelease := make(chan struct{})
+	temporalClient := &recordingWriterTemporalClient{
+		completionErr: temporal.NewCanceledError(), waitStarted: waitStarted, waitRelease: waitRelease,
+	}
+	cancellationStore := &recordingWriterCancellationStore{temporalWaited: func() bool { return temporalClient.waited }}
+	starter := NewTemporalWriterStarter(TemporalWriterConfig{
+		Client: temporalClient, TaskQueue: WriterTaskQueue, CancellationStore: cancellationStore,
+		CancellationWaitTimeout: time.Second,
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := starter.CancelWriterRun(context.Background(), CancelWriterRunInput{TenantID: "tenant-1", RunID: "run-1"})
+		result <- err
+	}()
+
+	select {
+	case <-waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("writer cancellation did not wait for Temporal completion")
+	}
+	if cancellationStore.called {
+		t.Fatal("writer cancellation became public before Pi cleanup completed")
+	}
+	close(waitRelease)
+	if err := <-result; err != nil {
+		t.Fatalf("cancel after cleanup: %v", err)
+	}
+	if !cancellationStore.called || cancellationStore.calledBeforeTemporalCompletion {
+		t.Fatalf("writer cancellation was not persisted after cleanup: %#v", cancellationStore)
+	}
+}
+
+func TestTemporalWriterStarterFailsClosedWhenCancellationCompletionIsUnconfirmed(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		completionErr error
+		expectedCode  string
+	}{
+		{name: "workflow completed before cancellation", completionErr: nil, expectedCode: "WORKFLOW_CANCEL_NOT_ACTIVE"},
+		{name: "workflow terminal lookup failed", completionErr: errors.New("private temporal failure"), expectedCode: "WORKFLOW_CANCEL_CONFIRM_FAILED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			temporalClient := &recordingWriterTemporalClient{completionErr: test.completionErr}
+			store := &recordingWriterCancellationStore{}
+			starter := NewTemporalWriterStarter(TemporalWriterConfig{Client: temporalClient, CancellationStore: store})
+			_, err := starter.CancelWriterRun(context.Background(), CancelWriterRunInput{TenantID: "tenant-1", RunID: "run-1"})
+			if code := ErrorCode(err); code != test.expectedCode {
+				t.Fatalf("expected %s, got %s (%v)", test.expectedCode, code, err)
+			}
+			if store.called {
+				t.Fatal("unconfirmed Temporal cancellation was persisted")
+			}
+			if strings.Contains(err.Error(), "private temporal failure") {
+				t.Fatalf("cancellation confirmation leaked Temporal detail: %v", err)
+			}
+		})
 	}
 }
 
@@ -1033,10 +1139,17 @@ func TestSQLDraftAdoptionStoreAdoptsTenantScopedCandidateIntoManuscriptMetadataO
 		!strings.Contains(queryer.query, "status = 'candidate'") ||
 		!strings.Contains(queryer.query, "INSERT INTO manuscript_blocks") ||
 		!strings.Contains(queryer.query, "source_draft_id") ||
+		!strings.Contains(queryer.query, "source_writer_run_id") ||
+		!strings.Contains(queryer.query, "scene_id") ||
+		!strings.Contains(queryer.query, "INSERT INTO manuscript_block_versions") ||
+		!strings.Contains(queryer.query, "'adopt'") ||
 		!strings.Contains(queryer.query, "UPDATE writer_drafts") ||
 		!strings.Contains(queryer.query, "adopted_block_id") ||
 		!strings.Contains(queryer.query, "COALESCE(MAX(block_order), 0) + 1") ||
-		!strings.Contains(queryer.query, "FOR UPDATE") {
+		!strings.Contains(queryer.query, "FOR UPDATE") ||
+		!strings.Contains(queryer.query, "INSERT INTO audit_logs") ||
+		!strings.Contains(queryer.query, "writer.draft_adopted") ||
+		!strings.Contains(queryer.query, "existing_adoption") {
 		t.Fatalf("adoption SQL did not express candidate-to-manuscript transition: %s", queryer.query)
 	}
 	if !reflect.DeepEqual(queryer.args, []any{
@@ -1057,6 +1170,35 @@ func TestSQLDraftAdoptionStoreAdoptsTenantScopedCandidateIntoManuscriptMetadataO
 		if strings.Contains(string(resultJSON), forbidden) {
 			t.Fatalf("adoption result leaked forbidden field %q: %s", forbidden, resultJSON)
 		}
+	}
+}
+
+func TestSQLDraftAdoptionStoreReturnsExistingAdoptionWithoutCreatingAnotherBlock(t *testing.T) {
+	queryer := &recordingDraftAdoptionQueryer{rows: &fakeWriterEventRows{values: [][]any{{
+		"33333333-3333-4333-8333-333333333333",
+		"55555555-5555-4555-8555-555555555555",
+		"22222222-2222-4222-8222-222222222222",
+		"adopted",
+		nil,
+		nil,
+		4,
+	}}}}
+	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
+
+	result, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
+		TenantID:  "11111111-1111-4111-8111-111111111111",
+		DraftID:   "33333333-3333-4333-8333-333333333333",
+		RequestID: "retry-request",
+	})
+	if err != nil {
+		t.Fatalf("retry explicit adoption: %v", err)
+	}
+	if result.Status != "adopted" || result.BlockID != "55555555-5555-4555-8555-555555555555" || result.BlockOrder != 4 {
+		t.Fatalf("adoption retry did not return existing manuscript block: %#v", result)
+	}
+	if !strings.Contains(queryer.query, "status IN ('candidate', 'adopted')") ||
+		!strings.Contains(queryer.query, "existing.block_id = draft_scope.adopted_block_id") {
+		t.Fatalf("adoption retry SQL is not idempotent: %s", queryer.query)
 	}
 }
 
@@ -1210,6 +1352,8 @@ func TestSQLDraftReviewStoreListsReviewMetadataAndIssuesWithoutBodies(t *testing
 				"public summary",
 				"public suggestion",
 				"open",
+				"2026-07-07T01:02:30Z",
+				"2026-07-07T01:02:30Z",
 				"2026-07-07T01:02:03Z",
 				"2026-07-07T01:03:03Z",
 			}},
@@ -1411,14 +1555,19 @@ func (s *recordingWriterAdmissionStore) AdmitWriterRun(_ context.Context, input 
 }
 
 type recordingWriterCancellationStore struct {
-	input  WriterCancellationInput
-	err    error
-	called bool
+	input                          WriterCancellationInput
+	err                            error
+	called                         bool
+	temporalWaited                 func() bool
+	calledBeforeTemporalCompletion bool
 }
 
 func (s *recordingWriterCancellationStore) CancelWriterRun(_ context.Context, input WriterCancellationInput) error {
 	s.input = input
 	s.called = true
+	if s.temporalWaited != nil && !s.temporalWaited() {
+		s.calledBeforeTemporalCompletion = true
+	}
 	return s.err
 }
 
@@ -1499,6 +1648,10 @@ type recordingWriterTemporalClient struct {
 	cancelRunID      string
 	err              error
 	cancelErr        error
+	completionErr    error
+	waitStarted      chan struct{}
+	waitRelease      <-chan struct{}
+	waited           bool
 }
 
 func (c *recordingWriterTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, workflow any, args ...any) (client.WorkflowRun, error) {
@@ -1514,6 +1667,39 @@ func (c *recordingWriterTemporalClient) CancelWorkflow(_ context.Context, workfl
 	c.cancelWorkflowID = workflowID
 	c.cancelRunID = runID
 	return c.cancelErr
+}
+
+func (c *recordingWriterTemporalClient) GetWorkflow(_ context.Context, workflowID string, runID string) client.WorkflowRun {
+	return &recordingWriterCancellationRun{client: c, workflowID: workflowID, runID: runID}
+}
+
+type recordingWriterCancellationRun struct {
+	client     *recordingWriterTemporalClient
+	workflowID string
+	runID      string
+}
+
+func (r *recordingWriterCancellationRun) GetID() string    { return r.workflowID }
+func (r *recordingWriterCancellationRun) GetRunID() string { return r.runID }
+func (r *recordingWriterCancellationRun) Get(ctx context.Context, _ any) error {
+	r.client.waited = true
+	if r.client.waitStarted != nil {
+		select {
+		case r.client.waitStarted <- struct{}{}:
+		default:
+		}
+	}
+	if r.client.waitRelease != nil {
+		select {
+		case <-r.client.waitRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.client.completionErr
+}
+func (r *recordingWriterCancellationRun) GetWithOptions(ctx context.Context, value any, _ client.WorkflowRunGetOptions) error {
+	return r.Get(ctx, value)
 }
 
 func (c *recordingWriterTemporalClient) Close() {}

@@ -1,0 +1,97 @@
+"use client";
+
+import { BookOpenText, ChevronRight } from "lucide-react";
+import { usePathname } from "next/navigation";
+import type { ReactNode } from "react";
+
+import { Bi } from "./bilingual-text";
+
+type WorkspaceContextBarProps = {
+  projectName: ReactNode;
+};
+
+const STAGES: Record<string, { label: ReactNode; activity: ReactNode }> = {
+  overview: {
+    label: <Bi zh="项目总览" en="Overview" />,
+    activity: <Bi zh="下一步与分析进度" en="Next step and analysis" />,
+  },
+  assets: {
+    label: <Bi zh="资产库" en="Assets" />,
+    activity: <Bi zh="浏览与检索创作资料" en="Browse story materials" />,
+  },
+  graph: {
+    label: <Bi zh="故事图谱" en="Story Graph" />,
+    activity: <Bi zh="探索关系与结构" en="Explore relations and structure" />,
+  },
+  worldline: {
+    label: <Bi zh="世界线" en="Worldline" />,
+    activity: <Bi zh="当前世界时间线" en="Current-world timeline" />,
+  },
+  "character-console": {
+    label: <Bi zh="角色控制" en="Character Console" />,
+    activity: <Bi zh="角色互动与回合" en="Character turns" />,
+  },
+  characters: {
+    label: <Bi zh="角色控制" en="Character Console" />,
+    activity: <Bi zh="角色互动与回合" en="Character turns" />,
+  },
+  writer: {
+    label: <Bi zh="写作台" en="Writer" />,
+    activity: <Bi zh="手稿正文与审校" en="Prose and review" />,
+  },
+  "llm-facility": {
+    label: <Bi zh="LLM 设施" en="LLM Facility" />,
+    activity: <Bi zh="模块绑定与渠道" en="Module bindings" />,
+  },
+  llm: {
+    label: <Bi zh="LLM 设施" en="LLM Facility" />,
+    activity: <Bi zh="模块绑定与渠道" en="Module bindings" />,
+  },
+  members: {
+    label: <Bi zh="成员" en="Members" />,
+    activity: <Bi zh="协作与邀请" en="Collaboration" />,
+  },
+  security: {
+    label: <Bi zh="账户安全" en="Security" />,
+    activity: <Bi zh="密码与会话" en="Password and sessions" />,
+  },
+};
+
+export function WorkspaceContextBar({ projectName }: WorkspaceContextBarProps) {
+  const pathname = usePathname() || "";
+  const stage = stageFromPathname(pathname);
+
+  return (
+    <div className="app-command-bar project-context-bar" aria-label="工作区上下文 / Workspace context">
+      <div className="app-breadcrumb">
+        <span className="app-breadcrumb-icon" aria-hidden="true">
+          <BookOpenText size={17} strokeWidth={1.8} />
+        </span>
+        <span>MiroFish Novel</span>
+        <ChevronRight aria-hidden="true" size={14} />
+        <strong>{projectName}</strong>
+        <ChevronRight aria-hidden="true" size={14} />
+        <span className="app-stage-label">{stage.label}</span>
+      </div>
+      <span className="app-command-label">
+        <span className="app-activity-dot" aria-hidden="true" />
+        {stage.activity}
+      </span>
+    </div>
+  );
+}
+
+function stageFromPathname(pathname: string) {
+  const parts = pathname.split("/").filter(Boolean);
+  // /p/{key}/section or /tenant/projects/id/section
+  let segment = "overview";
+  const projectsIdx = parts.indexOf("projects");
+  if (projectsIdx >= 0 && parts[projectsIdx + 2]) {
+    segment = parts[projectsIdx + 2];
+  } else if (parts[0] === "p" && parts[2]) {
+    segment = parts[2];
+  } else if (parts.length === 2 && parts[0] === "p") {
+    segment = "overview";
+  }
+  return STAGES[segment] || STAGES.overview;
+}

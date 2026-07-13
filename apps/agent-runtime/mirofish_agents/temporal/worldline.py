@@ -16,15 +16,25 @@ from mirofish_agents.seed.sequential_reader import (
     LLMFacilityError,
     ModuleBindingResolution,
     ModuleBindingResolver,
-    OpenAICompatibleJSONClient,
     PostgresCredentialProvider,
     PostgresModuleBindingResolver,
     set_postgres_tenant_context,
+)
+from mirofish_agents.temporal.worldline_prepare import (
+    LLMFacilityWorldlinePrepareRunner,
+    PostgresWorldlinePrepareLifecycleWriter,
+    PostgresWorldlinePrepareScopeStore,
+    WORLDLINE_PREPARE_MODULE_KEY,
+    WORLDLINE_PREPARE_WORKFLOW_TYPE,
+    WorldlinePrepareWorkflow,
+    run_worldline_prepare_workflow_locally,
+    worldline_prepare_activity,
 )
 
 
 WORLDLINE_TASK_QUEUE = "worldline-interactive"
 WORLDLINE_STEP_WORKFLOW_TYPE = "worldline_step"
+WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE = "worldline_auto_evolution"
 WORLDLINE_STEP_MODULE_KEY = "worldline_director"
 SENSITIVE_WORLDLINE_KEYS = {
     "api_key",
@@ -75,6 +85,7 @@ class WorkflowRunStatusWriter(Protocol):
         self,
         *,
         context: AgentContext,
+        session_id: str,
         code: str,
         message: str,
     ) -> None:
@@ -103,6 +114,8 @@ class WorldlineCandidateEventWriter(Protocol):
         model_id: str | None,
         mode: str,
         events: list[dict[str, Any]],
+        source_step_index: int = 1,
+        workflow_type: str = WORLDLINE_STEP_WORKFLOW_TYPE,
     ) -> dict[str, Any]:
         ...
 
@@ -178,13 +191,42 @@ class LLMFacilityWorldlineStepRunner:
         resolution: ModuleBindingResolution | None = None
         completed_telemetry_recorded = False
         try:
-            source_refs = _source_refs(options)
+            source_run_id = _required_uuid_text(context.run_id, "run_id")
+            source_step_index = (
+                _source_step_index(options)
+                if context.workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE
+                else 1
+            )
+            runtime_options = dict(options)
+            if context.workflow_type != WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+                runtime_options.pop("source_step_index", None)
+            replayed = _read_candidate_replay(
+                self._candidate_event_writer,
+                context=context,
+                session_id=session_id,
+                source_run_id=source_run_id,
+                source_step_index=source_step_index,
+                workflow_type=context.workflow_type,
+            )
+            if replayed is not None:
+                replay_result = {
+                    "status": "completed",
+                    "module_key": WORLDLINE_STEP_MODULE_KEY,
+                    "model_id": replayed.get("model_id"),
+                    "session_id": session_id,
+                    "mode": mode,
+                    "candidate_event_count": replayed["candidate_event_count"],
+                    "step": replayed["step"],
+                }
+                if context.workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+                    replay_result.update(source_step_index=source_step_index, replayed=True)
+                return replay_result
+            source_refs = _source_refs(runtime_options)
             source_summaries = self._load_source_summaries(
                 context=context,
                 session_id=session_id,
                 source_refs=source_refs,
             )
-            source_run_id = _required_uuid_text(context.run_id, "run_id")
             resolution = self._binding_resolver.resolve_module_binding(
                 context=context,
                 module_key=WORLDLINE_STEP_MODULE_KEY,
@@ -204,14 +246,14 @@ class LLMFacilityWorldlineStepRunner:
                     context=context,
                     session_id=session_id,
                     mode=mode,
-                    options=options,
+                    options=runtime_options,
                     source_summaries=source_summaries,
                 ),
             )
             usage = _llm_usage_from_response(response_json)
-            step = _step_number(options)
+            requested_step = _step_number(runtime_options)
             candidate_events = [
-                _candidate_event(candidate, step=step)
+                _candidate_event(candidate, step=requested_step)
                 for candidate in _candidate_event_list(response_json.get("candidate_events"))
             ]
             _record_completed_llm_telemetry(
@@ -223,14 +265,20 @@ class LLMFacilityWorldlineStepRunner:
             )
             completed_telemetry_recorded = True
             try:
-                persisted = self._candidate_event_writer.write_candidate_events(
-                    context=context,
-                    session_id=session_id,
-                    source_run_id=source_run_id,
-                    model_id=resolution.model_id,
-                    mode=mode,
-                    events=candidate_events,
-                )
+                writer_args = {
+                    "context": context,
+                    "session_id": session_id,
+                    "source_run_id": source_run_id,
+                    "model_id": resolution.model_id,
+                    "mode": mode,
+                    "events": candidate_events,
+                }
+                if context.workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+                    writer_args.update(
+                        source_step_index=source_step_index,
+                        workflow_type=context.workflow_type,
+                    )
+                persisted = self._candidate_event_writer.write_candidate_events(**writer_args)
             except LLMFacilityError:
                 raise
             except Exception as exc:
@@ -267,7 +315,8 @@ class LLMFacilityWorldlineStepRunner:
                     return _runner_failed(telemetry_exc.code, telemetry_exc.message)
             return _runner_failed("LLM_PROVIDER_ERROR", "worldline provider call failed")
 
-        return {
+        step = _positive_int(persisted.get("step"), default=requested_step)
+        public_result = {
             "status": "completed",
             "module_key": WORLDLINE_STEP_MODULE_KEY,
             "model_id": resolution.model_id,
@@ -276,6 +325,10 @@ class LLMFacilityWorldlineStepRunner:
             "candidate_event_count": persisted.get("candidate_event_count", len(candidate_events)),
             "step": step,
         }
+        if context.workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+            public_result["source_step_index"] = source_step_index
+            public_result["replayed"] = bool(persisted.get("replayed"))
+        return public_result
 
     def _load_source_summaries(
         self,
@@ -326,6 +379,78 @@ class PostgresWorldlineCandidateEventWriter:
 
         return cls(connect=lambda: psycopg.connect(database_url))
 
+    def read_candidate_events(
+        self,
+        *,
+        context: AgentContext,
+        session_id: str,
+        source_run_id: str,
+        source_step_index: int = 1,
+        workflow_type: str = WORLDLINE_STEP_WORKFLOW_TYPE,
+    ) -> dict[str, Any] | None:
+        if not context.project_id:
+            raise LLMFacilityError("VALIDATION_FAILED", "project_id is required to read worldline candidate events")
+        normalized_session_id = _required_text(session_id, "session_id")
+        normalized_source_run_id = _required_uuid_text(source_run_id, "source_run_id")
+        normalized_source_step_index = _required_positive_int(source_step_index, "source_step_index")
+        normalized_workflow_type = _worldline_runtime_workflow_type(workflow_type)
+        connection = self._connect()
+        try:
+            set_postgres_tenant_context(connection, context=context)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT COUNT(*)::int AS event_count,
+                              COALESCE(MIN(step), 0)::int AS min_step,
+                              COALESCE(MAX(step), 0)::int AS max_step,
+                              MAX(NULLIF(state_changes_jsonb->>'model_id', '')) AS model_id
+                         FROM worldline_events
+                        WHERE tenant_id = %s
+                          AND project_id = %s
+                          AND session_id = %s
+                          AND source_run_id = %s
+                          AND (
+                            %s = 'worldline_step'
+                            OR state_changes_jsonb->>'source_step_index' = %s
+                          )""",
+                    (
+                        context.tenant_id,
+                        context.project_id,
+                        normalized_session_id,
+                        normalized_source_run_id,
+                        normalized_workflow_type,
+                        str(normalized_source_step_index),
+                    ),
+                )
+                row = cursor.fetchone()
+        except LLMFacilityError:
+            _rollback_quietly(connection)
+            raise
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise LLMFacilityError(
+                "WORLDLINE_CANDIDATE_EVENT_READ_FAILED",
+                "worldline candidate event replay read failed",
+            ) from exc
+        finally:
+            connection.close()
+        event_count = _count_value(_row_value(row, "event_count", 0))
+        if event_count == 0:
+            return None
+        min_step = _count_value(_row_value(row, "min_step", 1))
+        max_step = _count_value(_row_value(row, "max_step", 2))
+        if min_step < 1 or min_step != max_step:
+            raise LLMFacilityError(
+                "WORLDLINE_STEP_STATE_INVALID",
+                "worldline step candidate state is inconsistent",
+            )
+        return {
+            "candidate_event_count": event_count,
+            "step": min_step,
+            "model_id": _optional_text(_row_value(row, "model_id", 3)) or None,
+            "source_step_index": normalized_source_step_index,
+            "replayed": True,
+        }
+
     def write_candidate_events(
         self,
         *,
@@ -335,16 +460,41 @@ class PostgresWorldlineCandidateEventWriter:
         model_id: str | None,
         mode: str,
         events: list[dict[str, Any]],
+        source_step_index: int = 1,
+        workflow_type: str = WORLDLINE_STEP_WORKFLOW_TYPE,
     ) -> dict[str, Any]:
         if not context.project_id:
             raise LLMFacilityError("VALIDATION_FAILED", "project_id is required to write worldline candidate events")
         normalized_session_id = _required_text(session_id, "session_id")
         normalized_source_run_id = _required_uuid_text(source_run_id, "source_run_id")
+        normalized_source_step_index = _required_positive_int(source_step_index, "source_step_index")
+        normalized_workflow_type = _worldline_runtime_workflow_type(workflow_type)
         normalized_events = [_candidate_event(event, step=_step_from_event(event)) for event in events]
         connection = self._connect()
         try:
             set_postgres_tenant_context(connection, context=context)
             with connection.cursor() as cursor:
+                step, existing_count = self._lock_and_resolve_step(
+                    cursor,
+                    context=context,
+                    session_id=normalized_session_id,
+                    source_run_id=normalized_source_run_id,
+                    source_step_index=normalized_source_step_index,
+                    workflow_type=normalized_workflow_type,
+                )
+                if existing_count > 0:
+                    connection.commit()
+                    replayed_result = {
+                        "status": "completed",
+                        "candidate_event_count": existing_count,
+                        "step": step,
+                    }
+                    if normalized_workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+                        replayed_result.update(
+                            source_step_index=normalized_source_step_index,
+                            replayed=True,
+                        )
+                    return replayed_result
                 for event in normalized_events:
                     cursor.execute(
                         """INSERT INTO worldline_events (
@@ -365,7 +515,7 @@ class PostgresWorldlineCandidateEventWriter:
                              AND worldline_sessions.session_id = %s
                            RETURNING event_id""",
                         (
-                            event["step"],
+                            step,
                             event["title"],
                             event["summary"],
                             event["kind"],
@@ -376,6 +526,8 @@ class PostgresWorldlineCandidateEventWriter:
                                     event=event,
                                     model_id=model_id,
                                     mode=mode,
+                                    source_step_index=normalized_source_step_index,
+                                    workflow_type=normalized_workflow_type,
                                 ),
                                 ensure_ascii=False,
                                 separators=(",", ":"),
@@ -404,7 +556,109 @@ class PostgresWorldlineCandidateEventWriter:
             ) from exc
         finally:
             connection.close()
-        return {"status": "completed", "candidate_event_count": len(normalized_events)}
+        result = {
+            "status": "completed",
+            "candidate_event_count": len(normalized_events),
+            "step": step,
+        }
+        if normalized_workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+            result.update(source_step_index=normalized_source_step_index, replayed=False)
+        return result
+
+    @staticmethod
+    def _lock_and_resolve_step(
+        cursor: Any,
+        *,
+        context: AgentContext,
+        session_id: str,
+        source_run_id: str,
+        source_step_index: int,
+        workflow_type: str,
+    ) -> tuple[int, int]:
+        cursor.execute(
+            """SELECT status
+                 FROM worldline_sessions
+                WHERE tenant_id = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                FOR UPDATE""",
+            (context.tenant_id, context.project_id, session_id),
+        )
+        if cursor.fetchone() is None:
+            raise LLMFacilityError(
+                "WORLDLINE_SESSION_NOT_FOUND",
+                "worldline session was not admitted for this tenant/project",
+            )
+        cursor.execute(
+            """SELECT COUNT(*)::int AS event_count,
+                      COALESCE(MIN(step), 0)::int AS min_step,
+                      COALESCE(MAX(step), 0)::int AS max_step
+                 FROM worldline_events
+                WHERE tenant_id = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND source_run_id = %s
+                  AND (
+                    %s = 'worldline_step'
+                    OR state_changes_jsonb->>'source_step_index' = %s
+                  )""",
+            (
+                context.tenant_id,
+                context.project_id,
+                session_id,
+                source_run_id,
+                workflow_type,
+                str(source_step_index),
+            ),
+        )
+        existing = cursor.fetchone()
+        existing_count = _count_value(_row_value(existing, "event_count", 0))
+        min_step = _count_value(_row_value(existing, "min_step", 1))
+        max_step = _count_value(_row_value(existing, "max_step", 2))
+        if existing_count > 0:
+            if min_step < 1 or min_step != max_step:
+                raise LLMFacilityError(
+                    "WORLDLINE_STEP_STATE_INVALID",
+                    "worldline step candidate state is inconsistent",
+                )
+            return min_step, existing_count
+        cursor.execute(
+            """SELECT 1
+                 FROM workflow_runs AS workflow_run
+                 JOIN workflow_events AS queued_event
+                   ON queued_event.tenant_id = workflow_run.tenant_id
+                  AND queued_event.run_id = workflow_run.run_id
+                  AND queued_event.workflow_type = workflow_run.workflow_type
+                WHERE workflow_run.tenant_id = %s
+                  AND workflow_run.project_id = %s
+                  AND workflow_run.run_id = %s
+                  AND workflow_run.workflow_type = %s
+                  AND workflow_run.status IN ('queued', 'running')
+                  AND queued_event.event_type = 'workflow.queued'
+                  AND queued_event.payload_jsonb->>'session_id' = %s
+                LIMIT 1""",
+            (context.tenant_id, context.project_id, source_run_id, workflow_type, session_id),
+        )
+        if cursor.fetchone() is None:
+            raise LLMFacilityError(
+                _inactive_worldline_workflow_code(workflow_type),
+                _inactive_worldline_workflow_message(workflow_type),
+            )
+        cursor.execute(
+            """SELECT COALESCE(MAX(step), 0)::int + 1 AS next_step
+                 FROM worldline_events
+                WHERE tenant_id = %s
+                  AND project_id = %s
+                  AND session_id = %s""",
+            (context.tenant_id, context.project_id, session_id),
+        )
+        next_step = _count_value(_row_value(cursor.fetchone(), "next_step", 0))
+        if next_step < 1:
+            raise LLMFacilityError(
+                "WORLDLINE_STEP_STATE_INVALID",
+                "worldline step could not be allocated",
+            )
+        return next_step, 0
 
 
 class PostgresWorldlineSourceLoader:
@@ -695,6 +949,15 @@ class PostgresWorkflowEventWriter:
         payload: dict[str, Any],
     ) -> None:
         sanitized_payload = _sanitize_worldline_value(payload)
+        if event_type.startswith("worldline.auto_evolution."):
+            self._write_auto_evolution_event(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload=sanitized_payload,
+            )
+            return
         connection = self._connect()
         missing_parent = False
         try:
@@ -750,6 +1013,105 @@ class PostgresWorkflowEventWriter:
         if missing_parent:
             raise RuntimeError("WORKFLOW_RUN_NOT_FOUND: worldline step admission parent row is missing")
 
+    def _write_auto_evolution_event(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str | None,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        source_step_index = payload.get("source_step_index")
+        identity = str(source_step_index) if isinstance(source_step_index, int) else None
+        connection = self._connect()
+        parent_count = 0
+        event_count = 0
+        try:
+            _set_postgres_tenant_context_for_ids(connection, tenant_id=tenant_id)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """WITH admitted_run AS MATERIALIZED (
+                         SELECT tenant_id, project_id, run_id, workflow_type
+                           FROM workflow_runs
+                          WHERE tenant_id = %s
+                            AND project_id = %s
+                            AND run_id = %s
+                            AND workflow_type = 'worldline_auto_evolution'
+                          FOR UPDATE
+                       ),
+                       existing_event AS MATERIALIZED (
+                         SELECT 1
+                           FROM workflow_events
+                           JOIN admitted_run
+                             ON admitted_run.tenant_id = workflow_events.tenant_id
+                            AND admitted_run.run_id = workflow_events.run_id
+                            AND admitted_run.workflow_type = workflow_events.workflow_type
+                          WHERE workflow_events.event_type = %s
+                            AND (
+                              %s::text IS NULL
+                              OR workflow_events.payload_jsonb->>'source_step_index' = %s::text
+                            )
+                       ),
+                       event_insert AS (
+                         INSERT INTO workflow_events (
+                           tenant_id, run_id, workflow_type, project_id, event_type, sequence, payload_jsonb
+                         )
+                         SELECT
+                           admitted_run.tenant_id,
+                           admitted_run.run_id,
+                           admitted_run.workflow_type,
+                           admitted_run.project_id,
+                           %s,
+                           COALESCE((
+                             SELECT MAX(sequence)
+                               FROM workflow_events
+                              WHERE tenant_id = admitted_run.tenant_id
+                                AND run_id = admitted_run.run_id
+                           ), 0) + 1,
+                           %s::jsonb
+                         FROM admitted_run
+                         WHERE NOT EXISTS (SELECT 1 FROM existing_event)
+                         RETURNING 1
+                       )
+                       SELECT
+                         (SELECT COUNT(*)::int FROM admitted_run) AS parent_count,
+                         ((SELECT COUNT(*)::int FROM existing_event) +
+                          (SELECT COUNT(*)::int FROM event_insert)) AS event_count""",
+                    (
+                        tenant_id,
+                        project_id,
+                        run_id,
+                        event_type,
+                        identity,
+                        identity,
+                        event_type,
+                        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    ),
+                )
+                row = cursor.fetchone()
+                parent_count = _count_value(_row_value(row, "parent_count", 0))
+                event_count = _count_value(_row_value(row, "event_count", 1))
+            if parent_count != 1 or event_count != 1:
+                _rollback_quietly(connection)
+            else:
+                connection.commit()
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise RuntimeError(
+                "WORKFLOW_EVENT_WRITE_FAILED: worldline auto-evolution workflow event write failed"
+            ) from exc
+        finally:
+            connection.close()
+        if parent_count != 1:
+            raise RuntimeError(
+                "WORKFLOW_RUN_NOT_FOUND: worldline auto-evolution admission parent row is missing"
+            )
+        if event_count != 1:
+            raise RuntimeError(
+                "WORKFLOW_EVENT_WRITE_FAILED: worldline auto-evolution workflow event state is inconsistent"
+            )
+
 
 class PostgresWorkflowRunStatusWriter:
     def __init__(self, *, connect: Callable[[], Any]) -> None:
@@ -783,11 +1145,13 @@ class PostgresWorkflowRunStatusWriter:
         self,
         *,
         context: AgentContext,
+        session_id: str,
         code: str,
         message: str,
     ) -> None:
         self._update_status(
             context=context,
+            session_id=session_id,
             status="failed",
             result=None,
             code=code,
@@ -798,6 +1162,7 @@ class PostgresWorkflowRunStatusWriter:
         self,
         *,
         context: AgentContext,
+        session_id: str | None = None,
         status: str,
         result: dict[str, Any] | None,
         code: str | None,
@@ -805,6 +1170,21 @@ class PostgresWorkflowRunStatusWriter:
     ) -> None:
         if not context.project_id:
             raise RuntimeError("WORKFLOW_RUN_NOT_FOUND: project_id is required to update worldline step status")
+        normalized_session_id = _required_text(
+            session_id if session_id is not None else (result or {}).get("session_id"),
+            "session_id",
+        )
+        if context.workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+            self._update_auto_evolution_status(
+                context=context,
+                session_id=normalized_session_id,
+                status=status,
+                result=result,
+                code=code,
+                message=message,
+            )
+            return
+        step = _positive_int((result or {}).get("step"), default=0)
         encoded_result = json.dumps(result, ensure_ascii=False, separators=(",", ":")) if result is not None else None
         connection = self._connect()
         missing_parent = False
@@ -812,7 +1192,15 @@ class PostgresWorkflowRunStatusWriter:
             set_postgres_tenant_context(connection, context=context)
             with connection.cursor() as cursor:
                 cursor.execute(
-                    """WITH workflow_update AS (
+                    """WITH session_lock AS MATERIALIZED (
+                         SELECT session_id
+                           FROM worldline_sessions
+                          WHERE tenant_id = %s
+                            AND project_id = %s
+                            AND session_id = %s
+                          FOR UPDATE
+                       ),
+                       workflow_update AS (
                          UPDATE workflow_runs
                             SET status = %s,
                                 progress = CASE WHEN %s IN ('completed', 'failed') THEN 100 ELSE progress END,
@@ -828,10 +1216,49 @@ class PostgresWorkflowRunStatusWriter:
                             AND project_id = %s
                             AND run_id = %s
                             AND workflow_type = 'worldline_step'
+                            AND status IN ('queued', 'running')
+                            AND EXISTS (SELECT 1 FROM session_lock)
+                            AND EXISTS (
+                              SELECT 1
+                                FROM workflow_events AS queued_event
+                               WHERE queued_event.tenant_id = workflow_runs.tenant_id
+                                 AND queued_event.project_id = workflow_runs.project_id
+                                 AND queued_event.run_id = workflow_runs.run_id
+                                 AND queued_event.workflow_type = workflow_runs.workflow_type
+                                 AND queued_event.event_type = 'workflow.queued'
+                                 AND queued_event.payload_jsonb->>'session_id' = %s
+                            )
+                         RETURNING 1
+                       ),
+                       session_update AS (
+                         UPDATE worldline_sessions
+                            SET status = 'paused', updated_at = now()
+                          WHERE tenant_id = %s
+                            AND project_id = %s
+                            AND session_id = %s
+                            AND status = 'running'
+                            AND EXISTS (SELECT 1 FROM workflow_update)
+                            AND (
+                              %s <> 'completed'
+                              OR EXISTS (
+                                SELECT 1
+                                  FROM worldline_events
+                                 WHERE tenant_id = %s
+                                   AND project_id = %s
+                                   AND session_id = %s
+                                   AND source_run_id = %s
+                                   AND step = %s
+                              )
+                            )
                          RETURNING 1
                        )
-                       SELECT COUNT(*)::int AS workflow_updated FROM workflow_update""",
+                       SELECT
+                         (SELECT COUNT(*)::int FROM workflow_update) AS workflow_updated,
+                         (SELECT COUNT(*)::int FROM session_update) AS session_updated""",
                     (
+                        context.tenant_id,
+                        context.project_id,
+                        normalized_session_id,
                         status,
                         status,
                         _workflow_status_message(status, result, message),
@@ -842,10 +1269,23 @@ class PostgresWorkflowRunStatusWriter:
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
+                        normalized_session_id,
+                        context.tenant_id,
+                        context.project_id,
+                        normalized_session_id,
+                        status,
+                        context.tenant_id,
+                        context.project_id,
+                        normalized_session_id,
+                        context.run_id,
+                        step,
                     ),
                 )
                 row = cursor.fetchone()
-                missing_parent = _count_value(_row_value(row, "workflow_updated", 0)) < 1
+                missing_parent = (
+                    _count_value(_row_value(row, "workflow_updated", 0)) != 1
+                    or _count_value(_row_value(row, "session_updated", 1)) != 1
+                )
             if missing_parent:
                 _rollback_quietly(connection)
             else:
@@ -859,6 +1299,170 @@ class PostgresWorkflowRunStatusWriter:
             connection.close()
         if missing_parent:
             raise RuntimeError("WORKFLOW_RUN_NOT_FOUND: worldline step admission parent row is missing")
+
+    def _update_auto_evolution_status(
+        self,
+        *,
+        context: AgentContext,
+        session_id: str,
+        status: str,
+        result: dict[str, Any] | None,
+        code: str | None,
+        message: str | None,
+    ) -> None:
+        encoded_result = json.dumps(result, ensure_ascii=False, separators=(",", ":")) if result is not None else None
+        connection = self._connect()
+        try:
+            set_postgres_tenant_context(connection, context=context)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT workflow_run.status AS workflow_status,
+                              COALESCE((queued_event.payload_jsonb->>'max_steps')::int, 0) AS max_steps,
+                              worldline_session.status AS session_status
+                         FROM workflow_runs AS workflow_run
+                         JOIN workflow_events AS queued_event
+                           ON queued_event.tenant_id = workflow_run.tenant_id
+                          AND queued_event.project_id = workflow_run.project_id
+                          AND queued_event.run_id = workflow_run.run_id
+                          AND queued_event.workflow_type = workflow_run.workflow_type
+                          AND queued_event.event_type = 'workflow.queued'
+                         JOIN worldline_sessions AS worldline_session
+                           ON worldline_session.tenant_id = workflow_run.tenant_id
+                          AND worldline_session.project_id = workflow_run.project_id
+                          AND worldline_session.session_id::text = queued_event.payload_jsonb->>'session_id'
+                        WHERE workflow_run.tenant_id = %s
+                          AND workflow_run.project_id = %s
+                          AND workflow_run.run_id = %s
+                          AND workflow_run.workflow_type = 'worldline_auto_evolution'
+                          AND worldline_session.session_id = %s
+                          AND queued_event.payload_jsonb->>'world_scope' = 'current_world'
+                        FOR UPDATE OF workflow_run, worldline_session""",
+                    (context.tenant_id, context.project_id, context.run_id, session_id),
+                )
+                state = cursor.fetchone()
+                if state is None:
+                    raise RuntimeError(
+                        "WORKFLOW_RUN_NOT_FOUND: worldline auto-evolution admission parent row is missing"
+                    )
+                current_status = _optional_text(_row_value(state, "workflow_status", 0))
+                admitted_max_steps = _count_value(_row_value(state, "max_steps", 1))
+                if current_status in {"completed", "failed"}:
+                    if current_status != status:
+                        raise RuntimeError(
+                            "WORKFLOW_STATUS_CONFLICT: worldline auto-evolution terminal status cannot change"
+                        )
+                    connection.commit()
+                    return
+                if current_status not in {"queued", "running"}:
+                    raise RuntimeError(
+                        "WORKFLOW_STATUS_CONFLICT: worldline auto-evolution is not active"
+                    )
+                if status == "completed":
+                    self._validate_auto_evolution_completion(
+                        cursor,
+                        context=context,
+                        session_id=session_id,
+                        result=result,
+                        admitted_max_steps=admitted_max_steps,
+                    )
+                cursor.execute(
+                    """UPDATE workflow_runs
+                          SET status = %s,
+                              progress = 100,
+                              message = %s,
+                              result_jsonb = CASE
+                                WHEN %s::jsonb IS NULL THEN result_jsonb
+                                ELSE %s::jsonb
+                              END,
+                              error_code = %s,
+                              error_message = %s,
+                              updated_at = now()
+                        WHERE tenant_id = %s
+                          AND project_id = %s
+                          AND run_id = %s
+                          AND workflow_type = 'worldline_auto_evolution'
+                          AND status IN ('queued', 'running')
+                        RETURNING run_id""",
+                    (
+                        status,
+                        _workflow_status_message(status, result, message),
+                        encoded_result,
+                        encoded_result,
+                        code,
+                        message,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                    ),
+                )
+                if cursor.fetchone() is None:
+                    raise RuntimeError(
+                        "WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution workflow status write failed"
+                    )
+                cursor.execute(
+                    """UPDATE worldline_sessions
+                          SET status = 'paused', updated_at = now()
+                        WHERE tenant_id = %s
+                          AND project_id = %s
+                          AND session_id = %s
+                          AND lifecycle = 'active'
+                          AND status IN ('queued', 'running', 'paused')
+                        RETURNING session_id""",
+                    (context.tenant_id, context.project_id, session_id),
+                )
+                if cursor.fetchone() is None:
+                    raise RuntimeError(
+                        "WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution session status write failed"
+                    )
+            connection.commit()
+        except RuntimeError:
+            _rollback_quietly(connection)
+            raise
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise RuntimeError(
+                "WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution workflow status write failed"
+            ) from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _validate_auto_evolution_completion(
+        cursor: Any,
+        *,
+        context: AgentContext,
+        session_id: str,
+        result: dict[str, Any] | None,
+        admitted_max_steps: int,
+    ) -> None:
+        completed_steps = _positive_int((result or {}).get("completed_steps"), default=0)
+        result_max_steps = _positive_int((result or {}).get("max_steps"), default=0)
+        if admitted_max_steps < 1 or completed_steps != admitted_max_steps or result_max_steps != admitted_max_steps:
+            raise RuntimeError(
+                "WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution completion is incomplete"
+            )
+        cursor.execute(
+            """SELECT
+                 COUNT(DISTINCT (state_changes_jsonb->>'source_step_index')::int)::int AS completed_steps,
+                 COALESCE(MIN((state_changes_jsonb->>'source_step_index')::int), 0)::int AS min_step_index,
+                 COALESCE(MAX((state_changes_jsonb->>'source_step_index')::int), 0)::int AS max_step_index
+               FROM worldline_events
+              WHERE tenant_id = %s
+                AND project_id = %s
+                AND session_id = %s
+                AND source_run_id = %s
+                AND state_changes_jsonb->>'source_workflow_type' = 'worldline_auto_evolution'
+                AND state_changes_jsonb->>'source_step_index' ~ '^[1-9][0-9]*$'""",
+            (context.tenant_id, context.project_id, session_id, context.run_id),
+        )
+        progress = cursor.fetchone()
+        persisted_steps = _count_value(_row_value(progress, "completed_steps", 0))
+        min_step_index = _count_value(_row_value(progress, "min_step_index", 1))
+        max_step_index = _count_value(_row_value(progress, "max_step_index", 2))
+        if persisted_steps != admitted_max_steps or min_step_index != 1 or max_step_index != admitted_max_steps:
+            raise RuntimeError(
+                "WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution candidate steps are incomplete"
+            )
 
 
 def _base_payload(context: AgentContext) -> dict[str, str | None]:
@@ -944,6 +1548,7 @@ def _failed_result(
     workflow_status_persisted = _mark_workflow_failed(
         workflow_status_writer,
         context=context,
+        session_id=session_id,
         code=code,
         message=message,
     )
@@ -996,6 +1601,7 @@ def _persistence_failure_result(
             workflow_status_persisted = _mark_workflow_failed(
                 workflow_status_writer,
                 context=context,
+                session_id=session_id,
                 code=code,
                 message=message,
             )
@@ -1055,15 +1661,26 @@ def _worldline_step_runner_from_env() -> WorldlineStepRunner | None:
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if not database_url:
         return None
+    from mirofish_agents.llm_quota import (
+        PostgresQuotaStore,
+        ProviderQuotaGate,
+        QuotaAwareJSONChatClient,
+        QuotaEnforcedJSONChatClient,
+    )
+
     return LLMFacilityWorldlineStepRunner(
         binding_resolver=PostgresModuleBindingResolver.from_database_url(database_url),
         credential_provider=PostgresCredentialProvider.from_database_url(
             database_url=database_url,
             key_material=os.environ.get("LLM_CREDENTIAL_ENCRYPTION_KEY"),
         ),
-        chat_client=OpenAICompatibleJSONClient(),
+        chat_client=QuotaEnforcedJSONChatClient(
+            quota_gate=ProviderQuotaGate(PostgresQuotaStore.from_database_url(database_url)),
+            stage_prefix="worldline_director",
+            provider_client=QuotaAwareJSONChatClient(),
+        ),
         candidate_event_writer=PostgresWorldlineCandidateEventWriter.from_database_url(database_url),
-        telemetry_writer=PostgresLLMTelemetryWriter.from_database_url(database_url),
+        telemetry_writer=None,
         source_loader=PostgresWorldlineSourceLoader.from_database_url(database_url),
     )
 
@@ -1072,12 +1689,13 @@ def _mark_workflow_failed(
     writer: WorkflowRunStatusWriter | None,
     *,
     context: AgentContext,
+    session_id: str,
     code: str,
     message: str,
 ) -> bool:
     if writer is None:
         return False
-    writer.mark_failed(context=context, code=code, message=message)
+    writer.mark_failed(context=context, session_id=session_id, code=code, message=message)
     return True
 
 
@@ -1096,7 +1714,17 @@ def _mark_workflow_completed(
 def _public_status_result(result: dict[str, Any]) -> dict[str, Any]:
     public = _sanitize_worldline_value(result)
     allowed: dict[str, Any] = {}
-    for key in ("session_id", "mode", "step", "candidate_event_count", "model_id"):
+    for key in (
+        "session_id",
+        "mode",
+        "step",
+        "candidate_event_count",
+        "model_id",
+        "completed_steps",
+        "max_steps",
+        "last_step",
+        "world_scope",
+    ):
         value = public.get(key)
         if value is not None:
             allowed[key] = value
@@ -1105,6 +1733,9 @@ def _public_status_result(result: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_status_message(status: str, result: dict[str, Any] | None, message: str | None) -> str:
     if status == "completed":
+        completed_steps = result.get("completed_steps") if isinstance(result, dict) else None
+        if isinstance(completed_steps, int) and completed_steps > 0:
+            return f"worldline auto-evolution completed {completed_steps} steps"
         count = result.get("candidate_event_count", 0) if isinstance(result, dict) else 0
         return f"worldline step completed with {count} candidate events"
     if status == "failed":
@@ -1126,6 +1757,42 @@ def _count_value(value: Any) -> int:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return 0
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    normalized = _count_value(value)
+    return normalized if normalized > 0 else default
+
+
+def _required_positive_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise LLMFacilityError("VALIDATION_FAILED", f"{field_name} must be a positive integer")
+    return value
+
+
+def _worldline_runtime_workflow_type(value: Any) -> str:
+    normalized = _required_text(value, "workflow_type")
+    if normalized not in {
+        WORLDLINE_STEP_WORKFLOW_TYPE,
+        WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE,
+    }:
+        raise LLMFacilityError(
+            "VALIDATION_FAILED",
+            "workflow_type is not supported by the worldline runtime",
+        )
+    return normalized
+
+
+def _inactive_worldline_workflow_code(workflow_type: str) -> str:
+    if workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+        return "WORLDLINE_AUTO_EVOLUTION_NOT_ACTIVE"
+    return "WORLDLINE_STEP_NOT_ACTIVE"
+
+
+def _inactive_worldline_workflow_message(workflow_type: str) -> str:
+    if workflow_type == WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE:
+        return "worldline auto-evolution is not active for this session"
+    return "worldline step is not active for this session"
 
 
 def _required_text(value: Any, field_name: str) -> str:
@@ -1450,17 +2117,24 @@ def _candidate_event(value: dict[str, Any], *, step: int) -> dict[str, Any]:
 
 def _step_number(options: dict[str, Any]) -> int:
     value = options.get("step")
-    if isinstance(value, int) and value >= 0:
+    if isinstance(value, int) and value > 0:
         return value
     value = options.get("step_number")
-    if isinstance(value, int) and value >= 0:
+    if isinstance(value, int) and value > 0:
         return value
     return 1
 
 
+def _source_step_index(options: dict[str, Any]) -> int:
+    value = options.get("source_step_index")
+    if value is None:
+        return 1
+    return _required_positive_int(value, "source_step_index")
+
+
 def _step_from_event(event: dict[str, Any]) -> int:
     value = event.get("step")
-    if isinstance(value, int) and value >= 0:
+    if isinstance(value, int) and value > 0:
         return value
     return 1
 
@@ -1487,14 +2161,58 @@ def _string_list(value: Any) -> list[str]:
     return result
 
 
-def _state_changes_payload(*, event: dict[str, Any], model_id: str | None, mode: str) -> dict[str, Any]:
+def _state_changes_payload(
+    *,
+    event: dict[str, Any],
+    model_id: str | None,
+    mode: str,
+    source_step_index: int = 1,
+    workflow_type: str = WORLDLINE_STEP_WORKFLOW_TYPE,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "summary": event.get("state_change_summary", ""),
         "mode": mode,
+        "source_step_index": source_step_index,
+        "source_workflow_type": workflow_type,
     }
     if model_id:
         payload["model_id"] = model_id
     return payload
+
+
+def _read_candidate_replay(
+    writer: WorldlineCandidateEventWriter,
+    *,
+    context: AgentContext,
+    session_id: str,
+    source_run_id: str,
+    source_step_index: int,
+    workflow_type: str,
+) -> dict[str, Any] | None:
+    reader = getattr(writer, "read_candidate_events", None)
+    if not callable(reader):
+        return None
+    replayed = reader(
+        context=context,
+        session_id=session_id,
+        source_run_id=source_run_id,
+        source_step_index=source_step_index,
+        workflow_type=workflow_type,
+    )
+    if replayed is None:
+        return None
+    count = _positive_int(replayed.get("candidate_event_count"), default=0)
+    step = _positive_int(replayed.get("step"), default=0)
+    if count < 1 or step < 1:
+        raise LLMFacilityError(
+            "WORLDLINE_STEP_STATE_INVALID",
+            "worldline step candidate replay state is inconsistent",
+        )
+    return {
+        "candidate_event_count": count,
+        "step": step,
+        "model_id": _optional_text(replayed.get("model_id")) or None,
+    }
 
 
 def _uuid_or_none(value: Any) -> str | None:
@@ -1714,6 +2432,15 @@ def run_worldline_step_workflow_locally(
 def worker_spec() -> dict[str, list[str] | str]:
     return {
         "task_queue": WORLDLINE_TASK_QUEUE,
-        "workflows": [WorldlineStepWorkflow.__name__],
-        "activities": [worldline_step_activity.__name__],
+        "workflows": [
+            WorldlineStepWorkflow.__name__,
+            WorldlinePrepareWorkflow.__name__,
+            "WorldlineAutoEvolutionWorkflow",
+        ],
+        "activities": [
+            worldline_step_activity.__name__,
+            worldline_prepare_activity.__name__,
+            "worldline_auto_evolution_step_activity",
+            "worldline_auto_evolution_finalize_activity",
+        ],
     }

@@ -49,8 +49,11 @@ backend/logs/
 *.sqlite3
 *.db
 
-# Frontend build
-frontend/dist/
+# Active Next.js frontend build
+apps/web/.next-dev/
+
+# Local Go build output
+/apps/api/api
 
 # 重构遗留物（仅本地保留）
 /novelwork-重构备份.zip

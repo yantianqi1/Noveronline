@@ -15,6 +15,7 @@ func TestSQLReaderGetsNodeFromCurrentGraphOnly(t *testing.T) {
 			"node-1",
 			"graph-current",
 			"project-123",
+			"entity-1",
 			"character",
 			"女主",
 			"公开摘要",
@@ -42,6 +43,9 @@ func TestSQLReaderGetsNodeFromCurrentGraphOnly(t *testing.T) {
 	}
 	if detail.Node.GraphID != "graph-current" || detail.Node.NodeID != "node-1" {
 		t.Fatalf("expected node from current graph, got %#v", detail.Node)
+	}
+	if detail.Node.CanonicalEntityID != "entity-1" {
+		t.Fatalf("expected stable canonical entity identity, got %#v", detail.Node)
 	}
 	if detail.Node.Attributes["prompt"] != nil || detail.Node.Attributes["nested"].(map[string]any)["snippet"] != nil {
 		t.Fatalf("expected sanitized attributes, got %#v", detail.Node.Attributes)
@@ -119,6 +123,53 @@ func TestSQLReaderGetsEdgeFromCurrentGraphOnly(t *testing.T) {
 	}
 }
 
+func TestSQLReaderReturnsStableRankedPageWithExplicitContinuation(t *testing.T) {
+	queryer := &recordingStoryGraphQueryer{
+		snapshotRows: [][]any{currentSnapshotRow("graph-current")},
+		nodeRows: [][]any{
+			graphNodeRow("node-a", "entity-a", "甲", 0.9),
+			graphNodeRow("node-b", "entity-b", "乙", 0.8),
+			graphNodeRow("node-c", "entity-c", "丙", 0.7),
+		},
+	}
+	reader := NewSQLReader(SQLReaderConfig{Queryer: queryer})
+
+	view, err := reader.GetView(context.Background(), GetViewInput{
+		TenantID:  "tenant-123",
+		ProjectID: "project-123",
+		ViewID:    "world",
+		Offset:    4,
+		Limit:     2,
+	})
+
+	if err != nil {
+		t.Fatalf("get stable graph page: %v", err)
+	}
+	if len(view.Nodes) != 2 || view.Nodes[0].NodeID != "node-a" || view.Nodes[1].NodeID != "node-b" {
+		t.Fatalf("unexpected graph page: %#v", view.Nodes)
+	}
+	strategy := view.ReadStrategy
+	if strategy.Mode != "stable_ranked_page_with_cluster_summaries" || !strategy.HasMore || strategy.NextOffset != 6 {
+		t.Fatalf("unexpected graph read strategy: %#v", strategy)
+	}
+	if strategy.Offset != 4 || strategy.AppliedLimit != 2 || strategy.ReturnedCount != 2 || strategy.MaxPageSize != 1000 {
+		t.Fatalf("unexpected graph pagination metadata: %#v", strategy)
+	}
+	if strategy.Ordering != "importance_desc,title_asc,node_id_asc" || strategy.EdgeScope != "" {
+		t.Fatalf("unexpected graph ordering metadata: %#v", strategy)
+	}
+	if len(queryer.calls) != 2 {
+		t.Fatalf("expected snapshot and node queries, got %d", len(queryer.calls))
+	}
+	nodeCall := queryer.calls[1]
+	if !strings.Contains(nodeCall.query, "ORDER BY importance DESC, title ASC, node_id ASC") || !strings.Contains(nodeCall.query, "LIMIT $5 OFFSET $6") {
+		t.Fatalf("graph page query is not deterministically ordered: %s", nodeCall.query)
+	}
+	if !reflect.DeepEqual(nodeCall.args, []any{"tenant-123", "project-123", "graph-current", "", 3, 4}) {
+		t.Fatalf("unexpected graph page args: %#v", nodeCall.args)
+	}
+}
+
 func TestSQLCandidateAdoptionStoreAdoptsGraphBondCandidateToRelationship(t *testing.T) {
 	queryer := &recordingStoryGraphQueryer{
 		adoptionRows: [][]any{{
@@ -149,7 +200,7 @@ func TestSQLCandidateAdoptionStoreAdoptsGraphBondCandidateToRelationship(t *test
 	if !strings.Contains(queryer.calls[0].query, "lifecycle = 'candidate'") || !strings.Contains(queryer.calls[0].query, "source_kind = 'graph_bond_generation'") {
 		t.Fatalf("expected candidate/source constrained adoption, got %s", queryer.calls[0].query)
 	}
-	for _, expected := range []string{"INSERT INTO relationships", "source_entity_name", "target_entity_name", "relationship_type", "UPDATE assets", "lifecycle = 'canon'", "INSERT INTO audit_logs", "story_graph.candidate_adopt"} {
+	for _, expected := range []string{"FOR UPDATE OF assets", "FROM workflow_runs, candidate", "INSERT INTO relationships", "source_entity_name", "target_entity_name", "relationship_type", "UPDATE assets", "lifecycle = 'canon'", "INSERT INTO audit_logs", "story_graph.candidate_adopt"} {
 		if !strings.Contains(queryer.calls[0].query, expected) {
 			t.Fatalf("adoption query missing %q: %s", expected, queryer.calls[0].query)
 		}
@@ -194,7 +245,7 @@ func TestSQLCandidateAdoptionStoreAdoptsPlotThreadCandidateToPlotThread(t *testi
 	if result.TargetKind != "plot_thread" || result.TargetID != "thread-123" || result.Status != "adopted" {
 		t.Fatalf("unexpected adoption result: %#v", result)
 	}
-	for _, expected := range []string{"INSERT INTO plot_threads", "source_run_id", "UPDATE assets", "lifecycle = 'canon'", "INSERT INTO audit_logs"} {
+	for _, expected := range []string{"FOR UPDATE OF assets", "FROM workflow_runs, candidate", "INSERT INTO plot_threads", "source_run_id", "UPDATE assets", "lifecycle = 'canon'", "INSERT INTO audit_logs"} {
 		if !strings.Contains(queryer.calls[0].query, expected) {
 			t.Fatalf("plot thread adoption query missing %q: %s", expected, queryer.calls[0].query)
 		}
@@ -239,6 +290,25 @@ func currentSnapshotRow(graphID string) []any {
 		"hash-2",
 		4,
 		5,
+		"2026-07-05T00:00:00Z",
+		"2026-07-05T00:00:01Z",
+	}
+}
+
+func graphNodeRow(nodeID string, entityID string, title string, importance float64) []any {
+	return []any{
+		nodeID,
+		"graph-current",
+		"project-123",
+		entityID,
+		"character",
+		title,
+		"公开摘要",
+		"seed",
+		importance,
+		"cluster-main",
+		`{"stable_identity":"entity:` + entityID + `"}`,
+		1,
 		"2026-07-05T00:00:00Z",
 		"2026-07-05T00:00:01Z",
 	}

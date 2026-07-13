@@ -237,8 +237,8 @@ class TestProgressTrackerSteps:
 
         TaskManager._instance = None
 
-    def test_sync_worker_updates_do_not_depend_on_cached_request_loop(self, monkeypatch, tmp_path):
-        """Seed worker progress writes must survive TestClient request-loop teardown."""
+    def test_sync_worker_updates_use_cached_owning_loop(self, monkeypatch, tmp_path):
+        """Worker progress writes are scheduled onto one owning event loop."""
         import asyncio
         from app.config import Config
         from app.models.task import TaskManager
@@ -247,21 +247,33 @@ class TestProgressTrackerSteps:
         monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path / "uploads"))
         TaskManager._instance = None
 
-        tm = TaskManager()
-        task_id = asyncio.run(tm.create_task(task_type="test", metadata={}))
-        tracker = SeedTaskProgressTracker(tm, task_id, use_llm=False)
+        bridge_calls = []
 
-        def cancelled_request_loop(_coro):
-            raise AssertionError("cached request loop was used")
+        async def exercise_worker_update():
+            tm = TaskManager()
+            task_id = await tm.create_task(task_type="test", metadata={})
+            tm._ensure_loop()
+            tracker = SeedTaskProgressTracker(tm, task_id, use_llm=False)
+            original_sync_bridge = tm.sync_bridge
 
-        monkeypatch.setattr(tm, "sync_bridge", cancelled_request_loop)
+            def recording_sync_bridge(coro):
+                bridge_calls.append(True)
+                return original_sync_bridge(coro)
 
-        tracker.enter_stage("index_rebuild", "正在重建全局索引", 99)
+            monkeypatch.setattr(tm, "sync_bridge", recording_sync_bridge)
+            await asyncio.to_thread(
+                tracker.enter_stage,
+                "index_rebuild",
+                "正在重建全局索引",
+                99,
+            )
+            task = await tm.get_task(task_id)
+            assert task.status.value == "processing"
+            assert task.progress == 99
+            assert task.message == "正在重建全局索引"
 
-        task = asyncio.run(tm.get_task(task_id))
-        assert task.status.value == "processing"
-        assert task.progress == 99
-        assert task.message == "正在重建全局索引"
+        asyncio.run(exercise_worker_update())
+        assert bridge_calls == [True]
 
         TaskManager._instance = None
 

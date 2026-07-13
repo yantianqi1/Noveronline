@@ -136,7 +136,8 @@ def test_unified_metadata_declares_all_regular_tables():
         "task_runs", "thread_entity_links", "thread_lifecycle",
         "volume_summaries", "world_events", "world_rule_evidence",
         "worldline_branches", "worldline_sessions", "writer_presets",
-        "writer_presets_global",
+        "writer_presets_global", "writer_runs", "writer_run_events",
+        "writer_drafts", "writer_draft_events",
     }
 
     assert set(metadata.tables) == expected
@@ -145,6 +146,10 @@ def test_unified_metadata_declares_all_regular_tables():
 def test_project_scoped_tables_include_project_id_column():
     from app.tables import metadata
 
+    indirectly_project_scoped = {
+        # Draft events inherit project ownership from writer_drafts.draft_id.
+        "writer_draft_events",
+    }
     project_scoped = {
         name
         for name in metadata.tables
@@ -152,7 +157,7 @@ def test_project_scoped_tables_include_project_id_column():
             "llm_channels", "llm_models", "llm_module_bindings",
             "writer_presets_global", "task_runs",
             "classification_map",
-        }
+        } | indirectly_project_scoped
     }
 
     missing = [name for name in sorted(project_scoped) if "project_id" not in metadata.tables[name].c]

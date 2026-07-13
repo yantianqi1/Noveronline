@@ -2,23 +2,144 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"go.temporal.io/sdk/client"
 
+	"mirofish-novel/apps/api/internal/assetcatalog"
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
+	"mirofish-novel/apps/api/internal/authrecovery"
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/httpapi"
 	"mirofish-novel/apps/api/internal/llm"
+	"mirofish-novel/apps/api/internal/observability"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
 	"mirofish-novel/apps/api/internal/sourcefiles"
 	"mirofish-novel/apps/api/internal/storygraph"
 	"mirofish-novel/apps/api/internal/workflows"
 	"mirofish-novel/apps/api/internal/worldline"
+	"mirofish-novel/apps/api/internal/writerplanning"
 )
+
+const testPlatformRateLimitPolicies = `{
+		"auth_login":{"limit":5,"window_seconds":60},
+		"auth_signup":{"limit":3,"window_seconds":300},
+	"auth_session_mutation":{"limit":30,"window_seconds":60},
+	"collaboration_invite_create":{"limit":10,"window_seconds":60},
+	"collaboration_invite_accept":{"limit":10,"window_seconds":60},
+	"llm_admin_mutation":{"limit":30,"window_seconds":60},
+	"llm_provider_health":{"limit":5,"window_seconds":60}
+}`
+
+func TestOpenAppDatabaseUsesBoundedPool(t *testing.T) {
+	db, err := openAppDatabase("postgres://app:private@127.0.0.1:1/app?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if db.Stats().MaxOpenConnections != appDatabaseMaxOpenConnections {
+		t.Fatalf("unexpected app database pool bound: %#v", db.Stats())
+	}
+}
+
+func TestNewAuthRuntimeSharesOneBoundedSQLPool(t *testing.T) {
+	runtime, closeRuntime, err := newAuthRuntime("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if err != nil {
+		t.Fatalf("new auth runtime: %v", err)
+	}
+	if closeRuntime == nil || runtime.db == nil {
+		t.Fatal("configured auth runtime did not expose one closeable shared pool")
+	}
+	defer func() {
+		if err := closeRuntime(); err != nil {
+			t.Fatalf("close auth runtime: %v", err)
+		}
+	}()
+	if runtime.db.Stats().MaxOpenConnections != authDatabaseMaxOpenConnections {
+		t.Fatalf("unexpected auth pool bound: %#v", runtime.db.Stats())
+	}
+	if _, ok := runtime.reader.(*auth.SQLReader); !ok {
+		t.Fatalf("expected shared SQL reader, got %T", runtime.reader)
+	}
+	if _, ok := runtime.passwordAuthenticator.(*auth.SQLPasswordAuthenticator); !ok {
+		t.Fatalf("expected shared SQL password authenticator, got %T", runtime.passwordAuthenticator)
+	}
+	if _, ok := runtime.passwordChanger.(*auth.SQLPasswordChanger); !ok {
+		t.Fatalf("expected shared SQL password changer, got %T", runtime.passwordChanger)
+	}
+	if _, ok := runtime.sessionStore.(*auth.SQLSessionStore); !ok {
+		t.Fatalf("expected shared SQL session store, got %T", runtime.sessionStore)
+	}
+	if _, ok := runtime.authorizer.(*auth.SQLAuthorizer); !ok {
+		t.Fatalf("expected targeted SQL authorizer, got %T", runtime.authorizer)
+	}
+}
+
+func TestNewAuthRuntimeKeepsUnconfiguredModeFailClosed(t *testing.T) {
+	runtime, closeRuntime, err := newAuthRuntime("")
+	if err != nil || closeRuntime != nil || runtime.db != nil {
+		t.Fatalf("unexpected unconfigured auth runtime: db=%v close=%v err=%v", runtime.db != nil, closeRuntime != nil, err)
+	}
+	if _, ok := runtime.reader.(auth.DisabledReader); !ok {
+		t.Fatalf("expected disabled auth reader, got %T", runtime.reader)
+	}
+	if runtime.passwordAuthenticator != nil || runtime.passwordChanger != nil || runtime.sessionStore != nil {
+		t.Fatalf("unconfigured auth mutation dependencies must stay disabled: %#v", runtime)
+	}
+}
+
+func TestNewPlatformRateLimiterIsExplicitAndProductionRequired(t *testing.T) {
+	limiter, closeLimiter, err := newPlatformRateLimiter("local", "", "", "")
+	if err != nil || limiter != nil || closeLimiter != nil {
+		t.Fatalf("local unconfigured limiter should be explicitly disabled: limiter=%T close=%v err=%v", limiter, closeLimiter != nil, err)
+	}
+	if _, _, err := newPlatformRateLimiter("production", "", "", ""); err == nil {
+		t.Fatal("production accepted a missing platform rate limiter")
+	}
+	if _, _, err := newPlatformRateLimiter("local", "redis://127.0.0.1:6379/0", "", testPlatformRateLimitPolicies); err == nil {
+		t.Fatal("partial platform rate limiter configuration was accepted")
+	}
+
+	redisServer := miniredis.RunT(t)
+	limiter, closeLimiter, err = newPlatformRateLimiter(
+		"staging",
+		"redis://"+redisServer.Addr()+"/0",
+		"0123456789abcdef0123456789abcdef",
+		testPlatformRateLimitPolicies,
+	)
+	if err != nil || limiter == nil || closeLimiter == nil {
+		t.Fatalf("complete staging limiter was not constructed: limiter=%T close=%v err=%v", limiter, closeLimiter != nil, err)
+	}
+	if err := closeLimiter(); err != nil {
+		t.Fatalf("close platform limiter: %v", err)
+	}
+}
+
+func TestNewTrustedClientProofVerifierFollowsLimiterRequirement(t *testing.T) {
+	verifier, err := newTrustedClientProofVerifier("", false)
+	if err != nil || verifier != nil {
+		t.Fatalf("optional empty verifier should be disabled: verifier=%T err=%v", verifier, err)
+	}
+	if _, err := newTrustedClientProofVerifier("", true); err == nil {
+		t.Fatal("rate-limited deployment accepted a missing trusted client proof verifier")
+	}
+	if _, err := newTrustedClientProofVerifier("short", true); err == nil {
+		t.Fatal("trusted client proof verifier accepted a short key")
+	}
+	verifier, err = newTrustedClientProofVerifier("0123456789abcdef0123456789abcdef", true)
+	if err != nil || verifier == nil {
+		t.Fatalf("valid trusted client proof verifier was rejected: verifier=%T err=%v", verifier, err)
+	}
+}
 
 func TestNewAuthReaderUsesDisabledReaderWithoutDatabaseURL(t *testing.T) {
 	reader, closeReader, err := newAuthReader("")
@@ -125,13 +246,84 @@ func TestNewPasswordAuthenticatorUsesSQLPasswordAuthenticatorWithDatabaseURL(t *
 	}
 }
 
+func TestNewPasswordChangerUsesNilWithoutDatabaseURL(t *testing.T) {
+	changer, closeChanger, err := newPasswordChanger("")
+
+	if err != nil {
+		t.Fatalf("new password changer: %v", err)
+	}
+	if closeChanger != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if changer != nil {
+		t.Fatalf("expected nil password changer without database URL, got %T", changer)
+	}
+}
+
+func TestNewPasswordChangerUsesSQLPasswordChangerWithDatabaseURL(t *testing.T) {
+	changer, closeChanger, err := newPasswordChanger("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeChanger != nil {
+		defer func() {
+			if err := closeChanger(); err != nil {
+				t.Fatalf("close password changer: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new password changer: %v", err)
+	}
+	if _, ok := changer.(*auth.SQLPasswordChanger); !ok {
+		t.Fatalf("expected SQL password changer, got %T", changer)
+	}
+	if closeChanger == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestAuthSessionSecretEnvIsCarriedIntoHTTPConfig(t *testing.T) {
 	t.Setenv("MIROFISH_AUTH_SESSION_SECRET", "session-secret")
+	t.Setenv("MIROFISH_DEPLOYMENT_ENV", "local")
+	t.Setenv("MIROFISH_ENABLE_DEVELOPMENT_AUTH", "1")
 
 	config := withSessionAuthSecret(httpapi.Config{})
 
 	if config.SessionAuthSecret != "session-secret" {
 		t.Fatalf("expected session secret in HTTP config, got %q", config.SessionAuthSecret)
+	}
+	if !config.AllowDevelopmentAuth {
+		t.Fatal("expected explicit local development auth opt-in")
+	}
+	if config.ForceSecureSessionCookies {
+		t.Fatal("local HTTP development unexpectedly forced Secure session cookies")
+	}
+}
+
+func TestProductionLikeEnvironmentsForceSecureSessionCookies(t *testing.T) {
+	for _, environment := range []string{"staging", "production"} {
+		t.Run(environment, func(t *testing.T) {
+			t.Setenv("MIROFISH_DEPLOYMENT_ENV", environment)
+			config := withSessionAuthSecret(httpapi.Config{})
+			if !config.ForceSecureSessionCookies {
+				t.Fatalf("%s did not force Secure session cookies", environment)
+			}
+		})
+	}
+}
+
+func TestDevelopmentAuthCannotBeEnabledOutsideLocalEnvironment(t *testing.T) {
+	for _, environment := range []string{"", "staging", "production"} {
+		t.Run(environment, func(t *testing.T) {
+			if developmentAuthAllowed(environment, "1") {
+				t.Fatalf("development auth enabled in %q environment", environment)
+			}
+		})
+	}
+	if developmentAuthAllowed("local", "0") {
+		t.Fatal("development auth enabled without explicit opt-in")
+	}
+	if !developmentAuthAllowed("local", "true") {
+		t.Fatal("development auth did not enable for explicit local opt-in")
 	}
 }
 
@@ -308,6 +500,253 @@ func TestNewManuscriptReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
 	}
 	if closeReader == nil {
 		t.Fatal("expected close function with database URL")
+	}
+}
+
+func TestNewManuscriptArtifactExporterUsesNilWithoutDatabaseURL(t *testing.T) {
+	exporter, closeExporter, err := newManuscriptArtifactExporter("")
+
+	if err != nil {
+		t.Fatalf("new manuscript artifact exporter: %v", err)
+	}
+	if closeExporter != nil || exporter != nil {
+		t.Fatalf("expected nil exporter/closer without database URL, got exporter=%T closer=%v", exporter, closeExporter != nil)
+	}
+}
+
+func TestNewWorkspaceHandlersRequireDatabaseAndExplicitArtifactRoot(t *testing.T) {
+	authorizer := auth.NewReaderBackedAuthorizer(auth.NewDisabledReader())
+
+	writerHandler, closeWriter, err := newWriterWorkspaceHandler("", authorizer, nil)
+	if err != nil || writerHandler != nil || closeWriter != nil {
+		t.Fatalf("expected disabled writer workspace without database: handler=%T close=%v err=%v", writerHandler, closeWriter != nil, err)
+	}
+	manuscriptHandler, downloadHandler, closeManuscript, err := newManuscriptWorkspaceHandlers("", "", authorizer, nil, nil, nil)
+	if err != nil || manuscriptHandler != nil || downloadHandler != nil || closeManuscript != nil {
+		t.Fatalf("expected disabled manuscript workspace without database: workspace=%T download=%T close=%v err=%v", manuscriptHandler, downloadHandler, closeManuscript != nil, err)
+	}
+
+	databaseURL := "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable"
+	writerHandler, closeWriter, err = newWriterWorkspaceHandler(databaseURL, authorizer, nil)
+	if err != nil || writerHandler == nil || closeWriter == nil {
+		t.Fatalf("expected configured writer workspace: handler=%T close=%v err=%v", writerHandler, closeWriter != nil, err)
+	}
+	defer func() { _ = closeWriter() }()
+
+	if _, _, _, err = newManuscriptWorkspaceHandlers(databaseURL, "", authorizer, nil, nil, nil); err == nil {
+		t.Fatal("expected manuscript workspace to reject an empty artifact root")
+	}
+	manuscriptHandler, downloadHandler, closeManuscript, err = newManuscriptWorkspaceHandlers(databaseURL, t.TempDir(), authorizer, nil, nil, nil)
+	if err != nil || manuscriptHandler == nil || downloadHandler == nil || closeManuscript == nil {
+		t.Fatalf("expected configured manuscript workspace: workspace=%T download=%T close=%v err=%v", manuscriptHandler, downloadHandler, closeManuscript != nil, err)
+	}
+	defer func() { _ = closeManuscript() }()
+}
+
+type permissionRecordingAuthorizer struct {
+	inputs []auth.AuthorizeInput
+	errors map[auth.Permission]error
+}
+
+func (a *permissionRecordingAuthorizer) Authorize(_ context.Context, input auth.AuthorizeInput) error {
+	a.inputs = append(a.inputs, input)
+	return a.errors[input.Permission]
+}
+
+func TestAssetCatalogSecurityHandlerUsesCentralActorAndExplicitCapabilities(t *testing.T) {
+	path := "/v1/projects/project-123/asset-catalog/assets/asset-123"
+
+	t.Run("read-only", func(t *testing.T) {
+		authorizer := &permissionRecordingAuthorizer{errors: map[auth.Permission]error{
+			auth.PermissionAssetManage: &auth.AppError{Code: auth.CodeAccessDenied},
+		}}
+		called := false
+		next := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			called = true
+			scope, ok := assetcatalog.RequestScopeFromContext(request.Context())
+			if !ok || scope.ActorID != "user-123" || scope.TenantID != "tenant-123" || scope.ProjectID != "project-123" {
+				t.Fatalf("unexpected asset scope: %#v ok=%v", scope, ok)
+			}
+			if scope.Can(assetcatalog.PermissionReadPrivate) || scope.Can(assetcatalog.PermissionMutate) || scope.Can(assetcatalog.PermissionCollections) {
+				t.Fatalf("read-only actor received management capabilities: %#v", scope.Permissions)
+			}
+			response.WriteHeader(http.StatusNoContent)
+		})
+		server := httpapi.NewServer(httpapi.Config{AllowDevelopmentAuth: true, AssetCatalogHandler: assetCatalogSecurityHandler{next: next, authorizer: authorizer}})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-User-Id", "user-123")
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNoContent || !called || len(authorizer.inputs) != 2 {
+			t.Fatalf("unexpected read-only result: status=%d called=%v auth=%#v", response.Code, called, authorizer.inputs)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "mutation", method: http.MethodPatch, path: path},
+		{name: "private read", method: http.MethodGet, path: path + "?include_private=true"},
+	} {
+		t.Run(test.name+" denied", func(t *testing.T) {
+			authorizer := &permissionRecordingAuthorizer{errors: map[auth.Permission]error{
+				auth.PermissionAssetManage: &auth.AppError{Code: auth.CodeAccessDenied},
+			}}
+			called := false
+			server := httpapi.NewServer(httpapi.Config{AllowDevelopmentAuth: true, AssetCatalogHandler: assetCatalogSecurityHandler{
+				next: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }), authorizer: authorizer,
+			}})
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("X-User-Id", "user-123")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden || called {
+				t.Fatalf("denied asset request reached handler: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+			}
+		})
+	}
+
+	t.Run("optional capability lookup failure", func(t *testing.T) {
+		authorizer := &permissionRecordingAuthorizer{errors: map[auth.Permission]error{
+			auth.PermissionAssetManage: errors.New("database unavailable"),
+		}}
+		server := httpapi.NewServer(httpapi.Config{AllowDevelopmentAuth: true, AssetCatalogHandler: assetCatalogSecurityHandler{
+			next:       http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("backend failure reached asset handler") }),
+			authorizer: authorizer,
+		}})
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-User-Id", "user-123")
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected authorization backend failure, got %d: %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func TestNewPlatformHandlersAreExplicitlyConfiguredAndFailClosed(t *testing.T) {
+	for _, name := range []string{
+		"AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY", "MIROFISH_RECOVERY_CLIENT_PROOF_SECRET",
+		"SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TLS_MODE",
+		"AUTH_RECOVERY_RESET_BASE_URL", "COLLABORATION_ACCEPT_BASE_URL",
+	} {
+		t.Setenv(name, "")
+	}
+	metrics := observability.NewRegistry()
+	recovery, collaborationHandler, admin, dispatcher, closeHandlers, err := newPlatformHandlers("", "", metrics, nil, nil)
+	if err != nil || recovery != nil || collaborationHandler != nil || admin != nil || dispatcher != nil || closeHandlers != nil {
+		t.Fatalf("expected platform handlers disabled without DB: recovery=%T collaboration=%T admin=%T dispatcher=%v close=%v err=%v", recovery, collaborationHandler, admin, dispatcher != nil, closeHandlers != nil, err)
+	}
+
+	databaseURL := "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable"
+	recovery, collaborationHandler, admin, dispatcher, closeHandlers, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil)
+	if err != nil || recovery == nil || collaborationHandler == nil || admin == nil || dispatcher != nil || closeHandlers == nil {
+		t.Fatalf("expected DB-backed handlers with optional facilities fail-closed: recovery=%T collaboration=%T admin=%T dispatcher=%v close=%v err=%v", recovery, collaborationHandler, admin, dispatcher != nil, closeHandlers != nil, err)
+	}
+	_ = closeHandlers()
+
+	t.Setenv("AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY", "not-standard-base64")
+	if _, _, _, _, _, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil); err == nil {
+		t.Fatal("expected malformed recovery token key to fail construction")
+	}
+	t.Setenv("AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY", "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=")
+	t.Setenv("MIROFISH_RECOVERY_CLIENT_PROOF_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("SMTP_HOST", "smtp.example.test")
+	if _, _, _, _, _, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil); err == nil {
+		t.Fatal("expected partial SMTP configuration to fail construction")
+	}
+}
+
+func TestNewRecoveryTokenCipherRequiresStrictBase64KeyByEnvironment(t *testing.T) {
+	validKey := "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk="
+	tests := []struct {
+		name        string
+		environment string
+		key         string
+		wantCipher  bool
+		wantError   bool
+	}{
+		{name: "empty local", environment: "local"},
+		{name: "missing staging", environment: "staging", wantError: true},
+		{name: "missing production", environment: "production", wantError: true},
+		{name: "malformed base64", environment: "local", key: "not-standard-base64", wantError: true},
+		{name: "non-zero trailing padding bits", environment: "local", key: "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODl=", wantError: true},
+		{name: "wrong decoded length", environment: "local", key: "c2hvcnQ=", wantError: true},
+		{name: "valid 32 byte key", environment: "production", key: validKey, wantCipher: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cipher, err := newRecoveryTokenCipher(test.environment, test.key)
+			if (err != nil) != test.wantError {
+				t.Fatalf("unexpected error state: %v", err)
+			}
+			if (cipher != nil) != test.wantCipher {
+				t.Fatalf("unexpected cipher state: %T", cipher)
+			}
+		})
+	}
+}
+
+func TestNewPlatformHandlersWiresRecoveryDispatcherMetrics(t *testing.T) {
+	for name, value := range map[string]string{
+		"MIROFISH_DEPLOYMENT_ENV":               "local",
+		"AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY":   "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=",
+		"SMTP_HOST":                             "127.0.0.1",
+		"SMTP_PORT":                             "2525",
+		"SMTP_USERNAME":                         "test-user",
+		"SMTP_PASSWORD":                         "test-password",
+		"SMTP_FROM":                             "security@example.test",
+		"SMTP_TLS_MODE":                         authrecovery.SMTPModeLoopbackPlaintext,
+		"AUTH_RECOVERY_RESET_BASE_URL":          "http://localhost/recovery/reset",
+		"COLLABORATION_ACCEPT_BASE_URL":         "",
+		"MIROFISH_RECOVERY_CLIENT_PROOF_SECRET": "",
+	} {
+		t.Setenv(name, value)
+	}
+	metrics := observability.NewRegistry()
+	_, _, _, dispatcher, closeHandlers, err := newPlatformHandlers(
+		"postgres://mirofish:secret@127.0.0.1:1/mirofish?sslmode=disable&connect_timeout=1",
+		"", metrics, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = closeHandlers() }()
+	if dispatcher == nil {
+		t.Fatal("expected recovery dispatcher")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := dispatcher.DispatchOne(ctx); err == nil {
+		t.Fatal("expected unreachable database to fail dispatch")
+	}
+	response := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `mirofish_auth_recovery_delivery_total{status="backend_error"} 1`) {
+		t.Fatalf("constructed dispatcher did not update shared registry: %s", response.Body.String())
+	}
+}
+
+func TestNewManuscriptArtifactExporterUsesSQLExporterWithDatabaseURL(t *testing.T) {
+	exporter, closeExporter, err := newManuscriptArtifactExporter("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeExporter != nil {
+		defer func() {
+			if err := closeExporter(); err != nil {
+				t.Fatalf("close manuscript artifact exporter: %v", err)
+			}
+		}()
+	}
+	if err != nil {
+		t.Fatalf("new manuscript artifact exporter: %v", err)
+	}
+	if _, ok := exporter.(*workflows.SQLManuscriptArtifactExporter); !ok || closeExporter == nil {
+		t.Fatalf("expected SQL manuscript artifact exporter with closer, got %T", exporter)
 	}
 }
 
@@ -567,7 +1006,7 @@ func TestNewWorkflowRetrierUsesTemporalAndSQLStoreWithDatabaseURL(t *testing.T) 
 }
 
 func TestNewSeedSegmentRetrierUsesDisabledRetrierWithoutDatabaseURL(t *testing.T) {
-	retrier, closeRetrier, err := newSeedSegmentRetrier("")
+	retrier, closeRetrier, err := newSeedSegmentRetrier(&mainRecordingTemporalClient{}, "", "seed-heavy-test")
 
 	if err != nil {
 		t.Fatalf("new seed segment retrier: %v", err)
@@ -581,7 +1020,11 @@ func TestNewSeedSegmentRetrierUsesDisabledRetrierWithoutDatabaseURL(t *testing.T
 }
 
 func TestNewSeedSegmentRetrierUsesSQLRetrierWithDatabaseURL(t *testing.T) {
-	retrier, closeRetrier, err := newSeedSegmentRetrier("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	retrier, closeRetrier, err := newSeedSegmentRetrier(
+		&mainRecordingTemporalClient{},
+		"postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable",
+		"seed-segment-retry-test",
+	)
 	if closeRetrier != nil {
 		defer func() {
 			if err := closeRetrier(); err != nil {
@@ -596,8 +1039,29 @@ func TestNewSeedSegmentRetrierUsesSQLRetrierWithDatabaseURL(t *testing.T) {
 	if _, ok := retrier.(*workflows.SQLSeedSegmentRetrier); !ok {
 		t.Fatalf("expected SQL seed segment retrier, got %T", retrier)
 	}
+	if taskQueue := reflect.ValueOf(retrier).Elem().FieldByName("taskQueue").String(); taskQueue != "seed-segment-retry-test" {
+		t.Fatalf("expected segment retry queue to follow configured seed queue, got %q", taskQueue)
+	}
 	if closeRetrier == nil {
 		t.Fatal("expected close function with database URL")
+	}
+}
+
+func TestNewSeedSegmentRetrierUsesDisabledRetrierWithoutTemporal(t *testing.T) {
+	retrier, closeRetrier, err := newSeedSegmentRetrier(
+		nil,
+		"postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable",
+		"seed-heavy-test",
+	)
+
+	if err != nil {
+		t.Fatalf("new seed segment retrier: %v", err)
+	}
+	if closeRetrier != nil {
+		t.Fatal("expected no database connection without Temporal")
+	}
+	if _, ok := retrier.(*workflows.DisabledSeedSegmentRetrier); !ok {
+		t.Fatalf("expected disabled seed segment retrier, got %T", retrier)
 	}
 }
 
@@ -703,6 +1167,39 @@ func TestNewDraftReviewStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
 	}
 	if closeStore == nil {
 		t.Fatal("expected close function with database URL")
+	}
+}
+
+func TestNewDraftReviewRuntimeStoresFailClosedWithoutDatabaseURL(t *testing.T) {
+	runtimeStore, issueStore, closeStore, err := newDraftReviewRuntimeStores("")
+	if err != nil {
+		t.Fatalf("new draft review runtime stores: %v", err)
+	}
+	if runtimeStore != nil || issueStore != nil || closeStore != nil {
+		t.Fatalf("expected unconfigured runtime stores, got runtime=%T issue=%T close=%v", runtimeStore, issueStore, closeStore != nil)
+	}
+}
+
+func TestNewDraftReviewRuntimeStoresUseSharedSQLBackend(t *testing.T) {
+	runtimeStore, issueStore, closeStore, err := newDraftReviewRuntimeStores("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeStore != nil {
+		defer func() {
+			if err := closeStore(); err != nil {
+				t.Fatalf("close draft review runtime stores: %v", err)
+			}
+		}()
+	}
+	if err != nil {
+		t.Fatalf("new draft review runtime stores: %v", err)
+	}
+	if runtimeStore == nil {
+		t.Fatal("expected SQL draft review runtime store")
+	}
+	if _, ok := issueStore.(*workflows.SQLDraftReviewIssueStore); !ok {
+		t.Fatalf("expected SQL draft review issue store, got %T", issueStore)
+	}
+	if closeStore == nil {
+		t.Fatal("expected shared SQL close function")
 	}
 }
 
@@ -925,7 +1422,7 @@ func TestNewSourceFileStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
 }
 
 func TestNewAssetReaderUsesDisabledReaderWithoutDatabaseURL(t *testing.T) {
-	reader, closeReader, err := newAssetReader("")
+	bundle, closeReader, err := newAssetReaderBundle("")
 
 	if err != nil {
 		t.Fatalf("new asset reader: %v", err)
@@ -933,13 +1430,16 @@ func TestNewAssetReaderUsesDisabledReaderWithoutDatabaseURL(t *testing.T) {
 	if closeReader != nil {
 		t.Fatal("expected no close function without database URL")
 	}
-	if _, ok := reader.(assets.DisabledReader); !ok {
-		t.Fatalf("expected disabled asset reader, got %T", reader)
+	if _, ok := bundle.Reader.(assets.DisabledReader); !ok {
+		t.Fatalf("expected disabled asset reader, got %T", bundle.Reader)
+	}
+	if bundle.QueryEmbeddingResolver != nil || bundle.SearchIndexChecker != nil {
+		t.Fatalf("expected nil search capability deps without database URL, got %#v", bundle)
 	}
 }
 
-func TestNewAssetReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
-	reader, closeReader, err := newAssetReader("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+func TestNewAssetReaderUsesPublicSearchReaderWithDatabaseURL(t *testing.T) {
+	bundle, closeReader, err := newAssetReaderBundle("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
 	if closeReader != nil {
 		defer func() {
 			if err := closeReader(); err != nil {
@@ -951,8 +1451,8 @@ func TestNewAssetReaderUsesSQLReaderWithDatabaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new asset reader: %v", err)
 	}
-	if _, ok := reader.(*assets.SQLReader); !ok {
-		t.Fatalf("expected SQL asset reader, got %T", reader)
+	if _, ok := bundle.Reader.(*assets.PublicSearchReader); !ok {
+		t.Fatalf("expected public search asset reader, got %T", bundle.Reader)
 	}
 	if closeReader == nil {
 		t.Fatal("expected close function with database URL")
@@ -1660,7 +2160,7 @@ func TestNewWorldlineVariableStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
 }
 
 func TestNewWorldlineStepStarterUsesDisabledStarterWithoutDatabaseURL(t *testing.T) {
-	starter, closeStarter, err := newWorldlineStepStarter("")
+	starter, closeStarter, err := newWorldlineStepStarter(nil, "", "")
 
 	if err != nil {
 		t.Fatalf("new worldline step starter: %v", err)
@@ -1674,7 +2174,7 @@ func TestNewWorldlineStepStarterUsesDisabledStarterWithoutDatabaseURL(t *testing
 }
 
 func TestNewWorldlineStepStarterUsesSQLStarterWithDatabaseURL(t *testing.T) {
-	starter, closeStarter, err := newWorldlineStepStarter("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	starter, closeStarter, err := newWorldlineStepStarter(&mainRecordingTemporalClient{}, "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable", "worldline-custom")
 	if closeStarter != nil {
 		defer func() {
 			if err := closeStarter(); err != nil {
@@ -1691,6 +2191,115 @@ func TestNewWorldlineStepStarterUsesSQLStarterWithDatabaseURL(t *testing.T) {
 	}
 	if closeStarter == nil {
 		t.Fatal("expected close function with database URL")
+	}
+}
+
+func TestNewWorldlineStepStarterFailsClosedWithoutTemporalClient(t *testing.T) {
+	starter, closeStarter, err := newWorldlineStepStarter(nil, "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable", "")
+	if err != nil {
+		t.Fatalf("new worldline step starter: %v", err)
+	}
+	if closeStarter != nil {
+		t.Fatal("disabled starter must not retain a database handle")
+	}
+	if _, ok := starter.(*worldline.DisabledStepStarter); !ok {
+		t.Fatalf("expected disabled worldline step starter, got %T", starter)
+	}
+}
+
+func TestNewWorldlineAutoEvolutionStarterFailsClosedWithoutCompleteRuntime(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		client   worldline.TemporalWorkflowClient
+		database string
+	}{
+		{name: "missing database", client: &mainRecordingTemporalClient{}},
+		{name: "missing temporal", database: "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			starter, closeStarter, err := newWorldlineAutoEvolutionStarter(tt.client, tt.database, "")
+			if err != nil {
+				t.Fatalf("new worldline auto-evolution starter: %v", err)
+			}
+			if closeStarter != nil {
+				t.Fatal("disabled auto-evolution starter must not retain a database handle")
+			}
+			if _, ok := starter.(*worldline.DisabledAutoEvolutionStarter); !ok {
+				t.Fatalf("expected disabled auto-evolution starter, got %T", starter)
+			}
+		})
+	}
+}
+
+func TestNewWorldlineAutoEvolutionStarterUsesSQLRuntime(t *testing.T) {
+	starter, closeStarter, err := newWorldlineAutoEvolutionStarter(
+		&mainRecordingTemporalClient{},
+		"postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable",
+		"worldline-custom",
+	)
+	if closeStarter != nil {
+		defer func() {
+			if err := closeStarter(); err != nil {
+				t.Fatalf("close worldline auto-evolution starter: %v", err)
+			}
+		}()
+	}
+	if err != nil {
+		t.Fatalf("new worldline auto-evolution starter: %v", err)
+	}
+	if _, ok := starter.(*worldline.SQLAutoEvolutionStarter); !ok {
+		t.Fatalf("expected SQL auto-evolution starter, got %T", starter)
+	}
+	if closeStarter == nil {
+		t.Fatal("expected close function for configured auto-evolution runtime")
+	}
+}
+
+func TestNewWorldlinePreparationStarterFailsClosedWithoutCompleteRuntime(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		client   worldline.TemporalWorkflowClient
+		database string
+	}{
+		{name: "missing database", client: &mainRecordingTemporalClient{}},
+		{name: "missing temporal", database: "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			starter, closeStarter, err := newWorldlinePreparationStarter(tt.client, tt.database, "")
+			if err != nil {
+				t.Fatalf("new worldline preparation starter: %v", err)
+			}
+			if closeStarter != nil {
+				t.Fatal("disabled preparation starter must not retain a database handle")
+			}
+			if _, ok := starter.(*worldline.DisabledPreparationStarter); !ok {
+				t.Fatalf("expected disabled preparation starter, got %T", starter)
+			}
+		})
+	}
+}
+
+func TestNewWorldlinePreparationStarterUsesSQLRuntime(t *testing.T) {
+	starter, closeStarter, err := newWorldlinePreparationStarter(
+		&mainRecordingTemporalClient{},
+		"postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable",
+		"worldline-custom",
+	)
+	if closeStarter != nil {
+		defer func() {
+			if err := closeStarter(); err != nil {
+				t.Fatalf("close worldline preparation starter: %v", err)
+			}
+		}()
+	}
+	if err != nil {
+		t.Fatalf("new worldline preparation starter: %v", err)
+	}
+	if _, ok := starter.(*worldline.SQLPreparationStarter); !ok {
+		t.Fatalf("expected SQL preparation starter, got %T", starter)
+	}
+	if closeStarter == nil {
+		t.Fatal("expected close function for configured preparation runtime")
 	}
 }
 
@@ -1723,6 +2332,39 @@ func TestNewCharacterConsoleStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
 	}
 	if _, ok := store.(*characterconsole.SQLStore); !ok {
 		t.Fatalf("expected SQL character console store, got %T", store)
+	}
+	if closeStore == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
+func TestNewCharacterProposalStoreUsesDisabledStoreWithoutDatabaseURL(t *testing.T) {
+	store, closeStore, err := newCharacterProposalStore("")
+	if err != nil {
+		t.Fatalf("new character proposal store: %v", err)
+	}
+	if closeStore != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if _, ok := store.(characterconsole.DisabledProposalStore); !ok {
+		t.Fatalf("expected disabled character proposal store, got %T", store)
+	}
+}
+
+func TestNewCharacterProposalStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
+	store, closeStore, err := newCharacterProposalStore("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeStore != nil {
+		defer func() {
+			if err := closeStore(); err != nil {
+				t.Fatalf("close character proposal store: %v", err)
+			}
+		}()
+	}
+	if err != nil {
+		t.Fatalf("new character proposal store: %v", err)
+	}
+	if _, ok := store.(*characterconsole.SQLProposalStore); !ok {
+		t.Fatalf("expected SQL character proposal store, got %T", store)
 	}
 	if closeStore == nil {
 		t.Fatal("expected close function with database URL")
@@ -1829,4 +2471,27 @@ func (c *mainRecordingTemporalClient) ExecuteWorkflow(context.Context, client.St
 
 func (c *mainRecordingTemporalClient) CancelWorkflow(context.Context, string, string) error {
 	return nil
+}
+
+func TestNewWriterPlanningStarterRequiresTemporalAndDatabase(t *testing.T) {
+	starter, closeStarter, err := newWriterPlanningStarter(nil, "postgres://app:private@127.0.0.1:1/app?sslmode=disable", "writer-planning-test")
+	if err != nil || starter != nil || closeStarter != nil {
+		t.Fatalf("planning starter without Temporal must be disabled: starter=%T close=%v err=%v", starter, closeStarter != nil, err)
+	}
+	starter, closeStarter, err = newWriterPlanningStarter(&mainRecordingTemporalClient{}, "", "writer-planning-test")
+	if err != nil || starter != nil || closeStarter != nil {
+		t.Fatalf("planning starter without database must be disabled: starter=%T close=%v err=%v", starter, closeStarter != nil, err)
+	}
+	starter, closeStarter, err = newWriterPlanningStarter(
+		&mainRecordingTemporalClient{},
+		"postgres://app:private@127.0.0.1:1/app?sslmode=disable",
+		"writer-planning-test",
+	)
+	if err != nil || closeStarter == nil {
+		t.Fatalf("configured planning starter was not constructed: starter=%T close=%v err=%v", starter, closeStarter != nil, err)
+	}
+	defer func() { _ = closeStarter() }()
+	if _, ok := starter.(*writerplanning.TemporalStarter); !ok {
+		t.Fatalf("expected Temporal writer planning starter, got %T", starter)
+	}
 }

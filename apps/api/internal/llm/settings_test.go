@@ -7,7 +7,7 @@ import (
 )
 
 func TestSQLSettingsReaderReturnsSanitizedTenantSnapshot(t *testing.T) {
-	queryer := &sequenceSQLQueryer{
+	queryer := &settingsTenantQueryer{sequenceSQLQueryer: &sequenceSQLQueryer{
 		rows: []*fakeSQLRows{
 			{
 				values: [][]any{
@@ -44,7 +44,7 @@ func TestSQLSettingsReaderReturnsSanitizedTenantSnapshot(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	reader := NewSQLSettingsReader(SQLSettingsReaderConfig{Queryer: queryer})
 
 	snapshot, err := reader.GetSettings(context.Background(), SettingsInput{TenantID: "tenant-123"})
@@ -52,7 +52,7 @@ func TestSQLSettingsReaderReturnsSanitizedTenantSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if len(snapshot.Modules) != 24 {
+	if len(snapshot.Modules) != 28 {
 		t.Fatalf("expected documented modules in settings snapshot, got %d", len(snapshot.Modules))
 	}
 	if len(snapshot.Channels) != 1 || snapshot.Channels[0].ChannelID != "channel-1" {
@@ -73,10 +73,43 @@ func TestSQLSettingsReaderReturnsSanitizedTenantSnapshot(t *testing.T) {
 	if len(queryer.queries) != 2 {
 		t.Fatalf("expected channel and tenant binding queries, got %#v", queryer.queries)
 	}
+	if queryer.rawCalls != 0 || len(queryer.tenantIDs) != 2 || queryer.tenantIDs[0] != "tenant-123" || queryer.tenantIDs[1] != "tenant-123" {
+		t.Fatalf("settings queries bypassed tenant context: raw=%d tenant_ids=%#v", queryer.rawCalls, queryer.tenantIDs)
+	}
 	joinedQueries := strings.ToLower(strings.Join(queryer.queries, "\n"))
 	if strings.Contains(joinedQueries, "encrypted_api_key") || strings.Contains(joinedQueries, "api_key") || strings.Contains(joinedQueries, "credential_ref") {
 		t.Fatalf("settings queries should not select credential material: %s", joinedQueries)
 	}
+}
+
+func TestSQLSettingsReaderFailsClosedWithoutTenantQueryInterface(t *testing.T) {
+	raw := &rawOnlySQLQueryer{rows: &fakeSQLRows{}}
+	reader := NewSQLSettingsReader(SQLSettingsReaderConfig{Queryer: raw})
+
+	_, err := reader.GetSettings(context.Background(), SettingsInput{TenantID: "tenant-123"})
+
+	if code := ErrorCode(err); code != "LLM_SETTINGS_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected tenant query interface failure, got %s (%v)", code, err)
+	}
+	if raw.calls != 0 {
+		t.Fatalf("settings reader fell back to raw query context: calls=%d", raw.calls)
+	}
+}
+
+type settingsTenantQueryer struct {
+	*sequenceSQLQueryer
+	tenantIDs []string
+	rawCalls  int
+}
+
+func (q *settingsTenantQueryer) QueryContext(context.Context, string, ...any) (SQLRows, error) {
+	q.rawCalls++
+	return nil, nil
+}
+
+func (q *settingsTenantQueryer) QueryTenantContext(ctx context.Context, tenantID, query string, args ...any) (SQLRows, error) {
+	q.tenantIDs = append(q.tenantIDs, tenantID)
+	return q.sequenceSQLQueryer.QueryContext(ctx, query, args...)
 }
 
 func TestDisabledSettingsReaderFailsExplicitly(t *testing.T) {

@@ -49,6 +49,7 @@ type UsageRecord struct {
 type TelemetryReader interface {
 	ListActivity(context.Context, ActivityQueryInput) ([]ActivityRecord, error)
 	ListUsage(context.Context, UsageQueryInput) ([]UsageRecord, error)
+	BillingUsage(context.Context, BillingUsageQuery) ([]BillingUsageRecord, error)
 }
 
 type DisabledTelemetryReader struct{}
@@ -71,6 +72,13 @@ func (DisabledTelemetryReader) ListUsage(context.Context, UsageQueryInput) ([]Us
 	}
 }
 
+func (DisabledTelemetryReader) BillingUsage(context.Context, BillingUsageQuery) ([]BillingUsageRecord, error) {
+	return nil, &AppError{
+		Code:    "LLM_ACTIVITY_BACKEND_UNCONFIGURED",
+		Message: "LLM billing usage backend is not configured",
+	}
+}
+
 type SQLRows interface {
 	Next() bool
 	Scan(...any) error
@@ -84,6 +92,10 @@ type SQLQueryer interface {
 
 type SQLTenantQueryer interface {
 	QueryTenantContext(context.Context, string, string, ...any) (SQLRows, error)
+}
+
+type SQLTenantWriteQueryer interface {
+	QueryTenantWriteContext(context.Context, string, string, ...any) (SQLRows, error)
 }
 
 type SQLTelemetryConfig struct {
@@ -121,6 +133,78 @@ func (q sqlDBQueryer) QueryContext(ctx context.Context, query string, args ...an
 
 func (q sqlDBQueryer) QueryTenantContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
 	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, NULL::uuid, false)", strings.TrimSpace(tenantID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &tenantScopedWriteRows{rows: rows, tx: tx}, nil
+}
+
+type transactionFinalizer interface {
+	Commit() error
+	Rollback() error
+}
+
+type tenantScopedWriteRows struct {
+	rows      SQLRows
+	tx        transactionFinalizer
+	exhausted bool
+	failed    bool
+}
+
+func (r *tenantScopedWriteRows) Next() bool {
+	if r.failed {
+		return false
+	}
+	if r.rows.Next() {
+		return true
+	}
+	if r.rows.Err() != nil {
+		r.failed = true
+	} else {
+		r.exhausted = true
+	}
+	return false
+}
+
+func (r *tenantScopedWriteRows) Scan(dest ...any) error {
+	err := r.rows.Scan(dest...)
+	if err != nil {
+		r.failed = true
+	}
+	return err
+}
+
+func (r *tenantScopedWriteRows) Close() error {
+	closeErr := r.rows.Close()
+	if closeErr != nil || r.failed || !r.exhausted {
+		rollbackErr := r.tx.Rollback()
+		if closeErr != nil {
+			return closeErr
+		}
+		return rollbackErr
+	}
+	return r.tx.Commit()
+}
+
+func (r *tenantScopedWriteRows) Err() error {
+	err := r.rows.Err()
+	if err != nil {
+		r.failed = true
+	}
+	return err
+}
+
+func (q sqlDBQueryer) QueryTenantWriteContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +280,6 @@ LIMIT $%d`, where, len(args)+1)
 	if err != nil {
 		return nil, telemetryQueryError()
 	}
-	defer rows.Close()
 
 	records := []ActivityRecord{}
 	for rows.Next() {
@@ -217,12 +300,17 @@ LIMIT $%d`, where, len(args)+1)
 			&errorJSON,
 			&record.CreatedAt,
 		); err != nil {
+			_ = rows.Close()
 			return nil, telemetryQueryError()
 		}
 		record.Error = decodeErrorJSON(errorJSON)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, telemetryQueryError()
+	}
+	if err := rows.Close(); err != nil {
 		return nil, telemetryQueryError()
 	}
 	return records, nil
@@ -240,14 +328,67 @@ func (r *SQLTelemetryReader) ListUsage(ctx context.Context, input UsageQueryInpu
 	}
 	where, args := telemetryWhere(input.TenantID, input.ProjectID, input.RunID, input.ModuleKey)
 	where = where + " AND usage_type = 'llm_tokens'"
-	query := fmt.Sprintf(`SELECT
+	query := fmt.Sprintf(`WITH normalized_usage AS (
+  SELECT
+    tenant_id,
+    project_id,
+    run_id,
+    module_key,
+    usage_type,
+    quantity,
+    unit,
+    NULLIF(BTRIM(metadata_jsonb->>'provider_call_id'), '') AS provider_call_id,
+    created_at,
+    usage_event_id
+  FROM usage_events
+  WHERE %s
+),
+conflicting_calls AS (
+  SELECT project_id, run_id, module_key, usage_type, provider_call_id
+  FROM normalized_usage
+  WHERE provider_call_id IS NOT NULL
+  GROUP BY project_id, run_id, module_key, usage_type, provider_call_id
+  HAVING MIN(quantity) <> MAX(quantity) OR MIN(unit) <> MAX(unit)
+),
+deduplicated_usage AS (
+  SELECT DISTINCT ON (
+    tenant_id,
+    project_id,
+    run_id,
+    module_key,
+    usage_type,
+    unit,
+    COALESCE(provider_call_id, usage_event_id::text)
+  )
+    usage_type,
+    quantity,
+    unit,
+    module_key,
+    run_id,
+    created_at,
+    usage_event_id
+  FROM normalized_usage
+  ORDER BY
+    tenant_id,
+    project_id,
+    run_id,
+    module_key,
+    usage_type,
+    unit,
+    COALESCE(provider_call_id, usage_event_id::text),
+    created_at,
+    usage_event_id
+)
+SELECT
   usage_type,
-  COALESCE(SUM(quantity), 0)::float8,
+  CASE
+    WHEN EXISTS (SELECT 1 FROM conflicting_calls) THEN -1::float8
+    ELSE COALESCE(SUM(quantity), 0)::float8
+  END,
   unit,
   COALESCE(module_key, ''),
   COALESCE(run_id::text, '')
-FROM usage_events
-WHERE %s
+FROM deduplicated_usage
 GROUP BY usage_type, unit, module_key, run_id
 ORDER BY usage_type, module_key, run_id
 LIMIT $%d`, where, len(args)+1)
@@ -256,7 +397,6 @@ LIMIT $%d`, where, len(args)+1)
 	if err != nil {
 		return nil, telemetryQueryError()
 	}
-	defer rows.Close()
 
 	records := []UsageRecord{}
 	for rows.Next() {
@@ -268,11 +408,20 @@ LIMIT $%d`, where, len(args)+1)
 			&record.ModuleKey,
 			&record.RunID,
 		); err != nil {
+			_ = rows.Close()
+			return nil, telemetryQueryError()
+		}
+		if !finiteNonNegative(record.Quantity) || record.Unit != "tokens" {
+			_ = rows.Close()
 			return nil, telemetryQueryError()
 		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, telemetryQueryError()
+	}
+	if err := rows.Close(); err != nil {
 		return nil, telemetryQueryError()
 	}
 	return records, nil

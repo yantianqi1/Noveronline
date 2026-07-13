@@ -111,6 +111,9 @@ func TestSQLReaderActiveProjectsQueryFiltersInactiveProjectMemberOverrides(t *te
 	if !strings.Contains(projectQuery, "pm.status = 'active'") {
 		t.Fatalf("project member override join must filter active rows: %s", queryer.queries[2])
 	}
+	if !strings.Contains(projectQuery, "tm.access_scope = 'tenant' or pm.user_id is not null") {
+		t.Fatalf("project bridge membership must not inherit unrelated projects: %s", queryer.queries[2])
+	}
 }
 
 func TestSQLReaderUsesAuthContextForMembershipDiscovery(t *testing.T) {
@@ -893,6 +896,122 @@ func TestReaderBackedAuthorizerMapsAuthFailuresToStablePublicErrors(t *testing.T
 	assertAuthError(t, err, CodeBackendUnconfigured, "auth reader is not configured")
 }
 
+func TestSQLAuthorizerQueriesOnlyTheRequestedProjectMembership(t *testing.T) {
+	queryer := &fakeAuthContextQueryer{
+		fakeAuthQueryer: fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"editor"}}}}},
+	}
+	authorizer := NewSQLAuthorizer(SQLAuthorizerConfig{Queryer: queryer})
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID:     " user-123 ",
+		TenantID:   " tenant-123 ",
+		ProjectID:  " project-123 ",
+		Permission: PermissionAssetManage,
+	})
+
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if len(queryer.queries) != 1 || len(queryer.authUserIDs) != 1 || queryer.authUserIDs[0] != "user-123" {
+		t.Fatalf("expected one user-scoped authorization query: queries=%d users=%#v", len(queryer.queries), queryer.authUserIDs)
+	}
+	query := strings.ToLower(queryer.queries[0])
+	for _, required := range []string{
+		"from tenant_memberships", "join projects", "left join project_members",
+		"tm.user_id = $1", "tm.tenant_id = $2", "p.project_id = $3",
+		"tm.status = 'active'", "p.status = 'active'", "coalesce(nullif",
+		"tm.access_scope = 'tenant' or pm.user_id is not null",
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("targeted project authorization query missing %q: %s", required, query)
+		}
+	}
+	if strings.Contains(query, "order by") {
+		t.Fatalf("authorization query loaded a membership collection: %s", query)
+	}
+	if len(queryer.args) != 1 || len(queryer.args[0]) != 3 {
+		t.Fatalf("unexpected authorization args: %#v", queryer.args)
+	}
+	if queryer.args[0][0] != "user-123" || queryer.args[0][1] != "tenant-123" || queryer.args[0][2] != "project-123" {
+		t.Fatalf("authorization args were not normalized: %#v", queryer.args[0])
+	}
+}
+
+func TestSQLAuthorizerUsesTenantOnlyQueryForTenantPermissions(t *testing.T) {
+	queryer := &fakeAuthContextQueryer{
+		fakeAuthQueryer: fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"admin"}}}}},
+	}
+	authorizer := NewSQLAuthorizer(SQLAuthorizerConfig{Queryer: queryer})
+
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID: "user-123", TenantID: "tenant-123", Permission: PermissionTenantSessionManage,
+	})
+
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if len(queryer.queries) != 1 {
+		t.Fatalf("expected one tenant authorization query, got %d", len(queryer.queries))
+	}
+	query := strings.ToLower(queryer.queries[0])
+	if !strings.Contains(query, "from tenant_memberships") || !strings.Contains(query, "join tenants") {
+		t.Fatalf("tenant authorization query did not validate active tenant membership: %s", query)
+	}
+	if !strings.Contains(query, "tm.access_scope = 'tenant'") {
+		t.Fatalf("tenant authorization accepted a project-only bridge membership: %s", query)
+	}
+	if strings.Contains(query, "projects") || strings.Contains(query, "project_members") {
+		t.Fatalf("tenant authorization query loaded project data: %s", query)
+	}
+}
+
+func TestSQLAuthorizerPreservesResolvedProjectRoleMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		role       string
+		permission Permission
+		allowed    bool
+	}{
+		{name: "viewer_can_read", role: "viewer", permission: PermissionProjectRead, allowed: true},
+		{name: "viewer_cannot_write", role: "viewer", permission: PermissionWriterRun, allowed: false},
+		{name: "writer_can_write", role: "writer", permission: PermissionWriterRun, allowed: true},
+		{name: "writer_cannot_manage_assets", role: "writer", permission: PermissionAssetManage, allowed: false},
+		{name: "editor_can_manage_assets", role: "editor", permission: PermissionAssetManage, allowed: true},
+		{name: "project_owner_has_trace_access", role: "project_owner", permission: PermissionTraceFullAccess, allowed: true},
+		{name: "billing_cannot_read", role: "billing", permission: PermissionProjectRead, allowed: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queryer := &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{tt.role}}}}}
+			err := NewSQLAuthorizer(SQLAuthorizerConfig{Queryer: queryer}).Authorize(context.Background(), AuthorizeInput{
+				UserID: "user-123", TenantID: "tenant-123", ProjectID: "project-123", Permission: tt.permission,
+			})
+			if tt.allowed && err != nil {
+				t.Fatalf("expected role %q to be allowed: %v", tt.role, err)
+			}
+			if !tt.allowed {
+				assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+			}
+		})
+	}
+}
+
+func TestSQLAuthorizerFailsClosedAndSanitizesQueryErrors(t *testing.T) {
+	authorizer := NewSQLAuthorizer(SQLAuthorizerConfig{Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{}}}})
+	err := authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID: "user-123", TenantID: "tenant-123", ProjectID: "project-123", Permission: PermissionProjectRead,
+	})
+	assertAuthError(t, err, CodeAccessDenied, "current user access is denied")
+
+	maliciousErr := errors.New("driver api_key=sk-hidden prompt=private body=secret")
+	authorizer = NewSQLAuthorizer(SQLAuthorizerConfig{Queryer: &fakeAuthQueryer{errs: []error{maliciousErr}}})
+	err = authorizer.Authorize(context.Background(), AuthorizeInput{
+		UserID: "user-123", TenantID: "tenant-123", ProjectID: "project-123", Permission: PermissionProjectRead,
+	})
+	assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+	assertNoSensitiveAuthError(t, err)
+}
+
 func TestSQLSessionStoreCreatesSessionWithTokenHashOnly(t *testing.T) {
 	execer := &fakeAuthExecer{}
 	store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: execer})
@@ -931,7 +1050,7 @@ func TestSQLSessionStoreCreatesSessionWithTokenHashOnly(t *testing.T) {
 }
 
 func TestSQLSessionStoreValidatesActiveUnexpiredSession(t *testing.T) {
-	now := time.Now().UTC()
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
 	queryer := &fakeAuthQueryer{
 		rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"session-id"}}}},
 	}
@@ -953,18 +1072,47 @@ func TestSQLSessionStoreValidatesActiveUnexpiredSession(t *testing.T) {
 	}
 	query := strings.ToLower(queryer.queries[0])
 	for required := range map[string]struct{}{
-		"from user_sessions": {},
-		"token_hash = $2":    {},
-		"status = 'active'":  {},
-		"revoked_at is null": {},
-		"expires_at > $3":    {},
+		"from user_sessions":    {},
+		"token_hash = $2":       {},
+		"status = 'active'":     {},
+		"revoked_at is null":    {},
+		"expires_at > $3":       {},
+		"valid_session":         {},
+		"update user_sessions":  {},
+		"coalesce(last_seen_at": {},
+		") <= $4":               {},
 	} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("session validation query missing %q: %s", required, queryer.queries[0])
 		}
 	}
-	if len(execer.queries) != 1 || !strings.Contains(strings.ToLower(execer.queries[0]), "last_seen_at") {
-		t.Fatalf("expected last_seen_at update after validation, got %#v", execer.queries)
+	if len(execer.queries) != 0 {
+		t.Fatalf("session validation performed a second SQL round trip: %#v", execer.queries)
+	}
+	if len(queryer.args) != 1 || len(queryer.args[0]) != 4 {
+		t.Fatalf("unexpected session validation args: %#v", queryer.args)
+	}
+	if queryer.args[0][3] != now.Add(-5*time.Minute) {
+		t.Fatalf("default session touch cutoff is not five minutes: %#v", queryer.args[0])
+	}
+}
+
+func TestSQLSessionStoreUsesConfiguredTouchInterval(t *testing.T) {
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
+	queryer := &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"session-id"}}}}}
+	store := NewSQLSessionStore(SQLSessionStoreConfig{
+		Queryer: queryer, Execer: &fakeAuthExecer{}, TouchInterval: 30 * time.Minute,
+	})
+
+	err := store.ValidateSession(context.Background(), ValidateSessionInput{
+		UserID: "user-session", TokenHash: "token-hash-value", Now: now,
+	})
+
+	if err != nil {
+		t.Fatalf("ValidateSession returned error: %v", err)
+	}
+	if len(queryer.args) != 1 || queryer.args[0][3] != now.Add(-30*time.Minute) {
+		t.Fatalf("configured session touch cutoff was ignored: %#v", queryer.args)
 	}
 }
 
@@ -1313,22 +1461,6 @@ func TestSQLSessionStoreSanitizesPersistenceAndValidationErrors(t *testing.T) {
 		assertNoSensitiveAuthError(t, err)
 	})
 
-	t.Run("last_seen_update", func(t *testing.T) {
-		store := NewSQLSessionStore(SQLSessionStoreConfig{
-			Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{"session-id"}}}}},
-			Execer:  &fakeAuthExecer{err: maliciousErr},
-		})
-
-		err := store.ValidateSession(context.Background(), ValidateSessionInput{
-			UserID:    "user-session",
-			TokenHash: "token-hash-value",
-			Now:       time.Now().UTC(),
-		})
-
-		assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
-		assertNoSensitiveAuthError(t, err)
-	})
-
 	t.Run("revoke", func(t *testing.T) {
 		store := NewSQLSessionStore(SQLSessionStoreConfig{Execer: &fakeAuthExecer{err: maliciousErr}})
 
@@ -1474,8 +1606,110 @@ func TestSQLPasswordAuthenticatorRejectsInvalidPasswordAndSanitizesErrors(t *tes
 	assertNoSensitiveAuthError(t, err)
 }
 
+func TestSQLPasswordChangerReplacesCredentialAndRevokesAllActiveSessions(t *testing.T) {
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("current password value"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash current password: %v", err)
+	}
+	queryer := &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{string(oldHash)}}}}}
+	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 1}}
+	changer := NewSQLPasswordChanger(SQLPasswordChangerConfig{
+		Queryer: queryer, Execer: execer, BcryptCost: bcrypt.MinCost,
+	})
+	now := time.Date(2026, 7, 10, 9, 30, 0, 0, time.UTC)
+
+	err = changer.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: " user-password ", CurrentPassword: "current password value",
+		NewPassword: "new secure password value", Now: now, RequestID: "req-password-change",
+	})
+
+	if err != nil {
+		t.Fatalf("ChangePassword returned error: %v", err)
+	}
+	if len(queryer.queries) != 1 || len(execer.queries) != 1 {
+		t.Fatalf("expected one read and one atomic write: reads=%d writes=%d", len(queryer.queries), len(execer.queries))
+	}
+	credentialQuery := strings.ToLower(queryer.queries[0])
+	for _, required := range []string{"user_password_credentials", "password_hash", "reset_required", "app_user.status = 'active'"} {
+		if !strings.Contains(credentialQuery, required) {
+			t.Fatalf("credential query missing %q: %s", required, credentialQuery)
+		}
+	}
+	writeQuery := strings.ToLower(execer.queries[0])
+	for _, required := range []string{"update user_password_credentials", "changed_credential", "update user_sessions", "status = 'revoked'", "revoked_sessions"} {
+		if !strings.Contains(writeQuery, required) {
+			t.Fatalf("atomic password write missing %q: %s", required, writeQuery)
+		}
+	}
+	if len(execer.args[0]) != 4 || execer.args[0][0] != "user-password" || execer.args[0][2] != string(oldHash) || execer.args[0][3] != now {
+		t.Fatalf("unexpected password change args: %#v", execer.args[0])
+	}
+	newHash, ok := execer.args[0][1].(string)
+	if !ok || newHash == string(oldHash) || bcrypt.CompareHashAndPassword([]byte(newHash), []byte("new secure password value")) != nil {
+		t.Fatalf("new credential was not bcrypt encoded")
+	}
+	for _, forbidden := range []string{"current password value", "new secure password value"} {
+		if strings.Contains(strings.Join(queryer.queries, "\n"), forbidden) || strings.Contains(strings.Join(execer.queries, "\n"), forbidden) {
+			t.Fatalf("SQL text leaked password value")
+		}
+	}
+}
+
+func TestSQLPasswordChangerRejectsInvalidCurrentPasswordWithoutWrite(t *testing.T) {
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("current password value"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash current password: %v", err)
+	}
+	execer := &fakeAuthExecer{result: fakeSQLResult{affected: 1}}
+	changer := NewSQLPasswordChanger(SQLPasswordChangerConfig{
+		Queryer: &fakeAuthQueryer{rows: []SQLRows{&fakeAuthRows{rows: [][]any{{string(oldHash)}}}}},
+		Execer:  execer, BcryptCost: bcrypt.MinCost,
+	})
+
+	err = changer.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: "user-password", CurrentPassword: "wrong current password",
+		NewPassword: "new secure password value",
+	})
+
+	assertAuthError(t, err, CodeUnauthenticated, "current password is invalid")
+	assertNoSensitiveAuthError(t, err)
+	if len(execer.queries) != 0 {
+		t.Fatalf("invalid current password reached write side: %#v", execer.queries)
+	}
+}
+
+func TestPasswordChangerValidationAndFailurePrivacy(t *testing.T) {
+	validationCases := []ChangePasswordInput{
+		{},
+		{UserID: "user", CurrentPassword: "", NewPassword: "new secure password"},
+		{UserID: "user", CurrentPassword: "same secure password", NewPassword: "same secure password"},
+		{UserID: "user", CurrentPassword: "current password", NewPassword: "short"},
+	}
+	for _, input := range validationCases {
+		changer := NewSQLPasswordChanger(SQLPasswordChangerConfig{})
+		if err := changer.ChangePassword(context.Background(), input); err == nil {
+			t.Fatalf("expected validation failure for %#v", input)
+		}
+	}
+
+	maliciousErr := errors.New("driver prompt=hidden api_key=sk-hidden credential_ref=cred current password raw body")
+	changer := NewSQLPasswordChanger(SQLPasswordChangerConfig{
+		Queryer: &fakeAuthQueryer{errs: []error{maliciousErr}}, Execer: &fakeAuthExecer{},
+	})
+	err := changer.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: "user", CurrentPassword: "current password", NewPassword: "new secure password",
+	})
+	assertAuthError(t, err, CodeLookupFailed, "auth lookup failed")
+	assertNoSensitiveAuthError(t, err)
+
+	disabled := NewDisabledPasswordChanger()
+	err = disabled.ChangePassword(context.Background(), ChangePasswordInput{UserID: "user"})
+	assertAuthError(t, err, CodeBackendUnconfigured, "password change backend is not configured")
+}
+
 type fakeAuthQueryer struct {
 	queries []string
+	args    [][]any
 	rows    []SQLRows
 	errs    []error
 }
@@ -1512,6 +1746,7 @@ func (r fakeSQLResult) RowsAffected() (int64, error) {
 
 func (q *fakeAuthQueryer) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
 	q.queries = append(q.queries, query)
+	q.args = append(q.args, args)
 	if len(q.errs) > 0 {
 		err := q.errs[0]
 		q.errs = q.errs[1:]

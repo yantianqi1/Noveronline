@@ -1,166 +1,111 @@
 # MiroFish-Novel
 
-MiroFish-Novel 是一个面向长篇小说创作的多智能体分析与写作平台。它把上传的小说、设定、大纲和素材转化为可检索的世界知识，生成角色 / 组织 / 关系 / 世界规则档案，并通过单世界 worldline 推演与 Writer Agent 工作台辅助作者完成续写、场景写作和审校。
+MiroFish-Novel 是一个面向长篇小说创作的多智能体分析与写作平台。它把小说、设定、大纲、角色卡和自由素材转化为可检索的故事知识，通过单世界 Worldline 和 Writer Agent 帮助作者完成推演、创作、审校与手稿管理。
 
-> 当前状态：活跃开发中，已具备本地离线运行、统一数据库、种子分析、故事图谱、资产库、worldline 与写作工作台等主链能力；仍不建议直接作为生产级 SaaS 暴露到公网。
+> 当前活跃产品是 `apps/* + infra/*` 的 SaaS 实现。根目录旧 `frontend/` 已退役并删除；`apps/web` 是唯一前端代码和 Web 构建上下文。`backend/` 仅作 Legacy import/兼容参考，不是产品运行时。
 
-## 核心能力
-
-- **种子分析**：上传 TXT / MD / PDF 后执行智能分段、顺序精读、全局聚合、故事本体生成和角色 Agent 档案生成。
-- **故事图谱**：基于阅读笔记和 seed analysis 构建角色、组织、关系、事件、世界规则图谱，并写入统一数据库。
-- **统一资产库**：以统一视图聚合素材、档案、伏笔、规则、关系、手稿块，并支持全文检索与 facets 过滤。
-- **档案与记忆**：维护角色 / 组织 / 关系档案，区分 `canon`、`candidate`、`experiment` 记忆层级。
-- **单世界 Worldline**：创建推演会话、准备角色 dossier、变量注入、自动演化、角色动作与对话，旧多分支接口已废弃。
-- **Writer Agent**：支持书籍计划、章节 / 场景管理、续写、场景写作、手稿编译、世界数据更新、审校反馈与去重约束。
-- **LLM 设施面板**：统一管理 OpenAI 兼容渠道、模型同步、模块绑定、并发限制与调用活动追踪。
-
-## 技术栈
-
-| 层 | 技术 |
-| --- | --- |
-| 后端 | Python 3.11+ / FastAPI / Uvicorn / SQLAlchemy 2.0 / Alembic / Pydantic v2 |
-| 前端 | React 19 / TypeScript / Vite 6 / React Router 7 / TanStack Query / Zustand / Tailwind CSS 4 / D3.js |
-| LLM | OpenAI-compatible Chat Completions API，经 LLM 设施面板统一配置 |
-| 存储 | SQLite 默认，Postgres-ready；schema 由 Alembic 管理 |
-
-## 快速开始
-
-### 环境要求
-
-- Python 3.11+
-- Node.js 18+
-- npm 9+
-- 一个 OpenAI 兼容的 LLM API 渠道
-
-### 1. 配置环境变量
-
-```bash
-cp .env.example .env
-```
-
-常用配置：
-
-```bash
-APP_HOST=0.0.0.0
-APP_PORT=3888
-APP_DEBUG=true
-LLM_REQUEST_TIMEOUT_SECONDS=120
-# DATABASE_URL=sqlite:///./data/mirofish.db
-```
-
-LLM API Key 不需要写入 `.env`，请在启动后进入前端「LLM 设施面板」配置渠道、模型和模块绑定。
-
-### 2. 启动后端
-
-推荐使用仓库内虚拟环境或 `uv`：
-
-```bash
-cd backend
-uv sync
-APP_PORT=3888 uv run python run.py
-```
-
-如果本机没有 `uv`：
-
-```bash
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -e .
-APP_PORT=3888 .venv/bin/python run.py
-```
-
-后端启动时会自动执行 `alembic upgrade head`。API 文档地址：`http://localhost:3888/docs`。
-
-### 3. 启动前端
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-前端地址：`http://localhost:3999`。Vite 会把 `/api` 代理到 `http://127.0.0.1:3888`。
-
-## 常用命令
-
-```bash
-# 后端测试
-cd backend
-env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest tests
-
-# 前端检查
-cd frontend
-npm run lint
-npm run build
-npm run test
-
-# 数据库迁移
-cd backend
-uv run alembic upgrade head
-uv run alembic revision -m "add_new_table"
-uv run alembic downgrade -1
-```
-
-## 项目结构
+## 核心产品链
 
 ```text
-backend/
-  app/
-    api_fastapi/      FastAPI 路由，统一挂载在 /api
-    services/         种子分析、图谱、资产、worldline、writer agent 等业务逻辑
-    repositories/     数据访问层；服务应通过 repository 访问数据库
-    tables/           SQLAlchemy 表定义，共享 metadata
-    schemas/          Pydantic 请求 / 响应模型
-    models/           轻量领域模型和运行时管理器
-    middleware/       API Key 鉴权与异常处理
-    utils/            LLM client、JSON 解析、文件解析、日志工具
-  alembic/            数据库迁移
-  tests/              后端测试
-
-frontend/
-  src/
-    pages/            overview、assets、story-graph、worldline、writer 等页面
-    components/       共享业务组件与 ui primitives
-    api/              TypeScript API 客户端和 SSE 客户端
-    stores/           Zustand 状态
-    hooks/            React hooks
-    lib/              工具函数
-    types/            TypeScript 类型
-
-docs/
-  database/           数据库真相源矩阵
-  plans/              设计和迁移计划
-  superpowers/specs/  功能规格文档
+上传小说 -> Seed Pipeline -> Story Graph / Assets -> Worldline / Character -> Writer Agent -> Manuscript
 ```
 
-## 核心约定
+- **Seed Pipeline**：解析 TXT / Markdown / PDF，执行分段精读、全局聚合、ontology 和角色档案生成。
+- **Story Graph / Assets**：管理角色、组织、关系、事件、伏笔、世界规则和写作素材。
+- **Single-world Worldline**：围绕唯一 `current_world` 执行变量注入、剧情推演和角色互动。
+- **Writer Agent**：以连续 Agent thread 作为主交互，流式呈现工具活动与候选正文，并在 artifact workspace 中管理稿件、章节、审校和规划。
+- **LLM Facility**：统一管理渠道、模型、模块绑定、配额、用量与隐私边界。
 
-- **统一数据库优先**：默认数据库为 `backend/data/mirofish.db`；新增持久化能力必须经过 Alembic 迁移。
-- **Repository 优先**：业务服务不直接拼 SQL；通过 `backend/app/repositories/` 访问数据。
-- **LLM 模块绑定优先**：所有 LLM 调用走 `llm_channels`、`llm_models`、`llm_module_bindings`，未绑定模块应显式失败。
-- **单世界 worldline**：当前产品语义是 `current_world` 单世界推进；旧 `/branches` 和 `/comparison` 风格接口不再扩展。
-- **无静默兜底**：不要为了“跑通”加入 mock 成功、吞错、隐式降级或伪数据路径。
-- **小说领域语言**：避免从上游 MiroFish 继承舆情、社媒、Twitter / Reddit 指标等不匹配抽象。
+## 技术架构
 
-## 文档入口
+| 责任 | 技术 / 目录 |
+|---|---|
+| Web 产品 | Next.js 15 + React 19 + TypeScript，`apps/web` |
+| Control Plane | Go HTTP/RBAC/workflow admission/read side，`apps/api` |
+| 领域 Agent Runtime | Python + Temporal，`apps/agent-runtime` |
+| Writer Agent Runtime | TypeScript + Pi Agent + Temporal，`apps/pi-agent-runtime` |
+| 数据与基础设施 | Postgres + Redis + Temporal + MinIO，`infra` |
 
-- `AGENTS.md`：给 AI coding agent 的项目交接与开发约束。
-- `CLAUDE.md`：给 Claude Code 的仓库导航、命令和架构说明。
-- `docs/CODEX_HANDOFF_GUIDE.md`：更细的 Codex 接手指南。
-- `docs/database/database-source-of-truth-matrix.md`：各业务域 DB / legacy JSON 真相源状态。
-- `docs/fastapi-route-manifest.md`：FastAPI 路由清单。
-- `docs/agent-data-schema-reference.md`：Agent 数据结构、prompt 和参数参考。
+## 快速启动
 
-## 贡献
+需要 Docker Desktop / Docker Engine 和 Compose。
 
-欢迎 issue、discussion 和 PR。提交前请阅读：
+```bash
+cp infra/.env.example infra/.env
+docker compose -f infra/docker-compose.yml up -d --build
+```
 
-- `CONTRIBUTING.md`
-- `CODE_OF_CONDUCT.md`
-- `SECURITY.md`
+- Web：`http://localhost:3999`
+- API：`http://localhost:3888`
+- Readiness：`http://localhost:3888/readyz`
 
-本仓库包含本地运行数据目录、LLM 调用日志和上传产物的忽略规则；请不要提交 API Key、用户小说原文、私有数据库或生成过程中的敏感数据。
+LLM 模块未绑定时必须显式失败。不要用环境变量单渠道 fallback、mock 成功或伪数据绕过 LLM Facility。
 
-## License
+## 开发与验证
 
-本项目以 `AGPL-3.0-only` 协议开源，详见 `LICENSE`。
+```bash
+# Go control plane
+cd apps/api
+go test ./...
+
+# Next Web
+cd apps/web
+npm test
+npm run typecheck
+npm run build
+
+# Python Agent Runtime
+cd apps/agent-runtime
+env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider tests -q
+
+# Pi Writer Runtime
+cd apps/pi-agent-runtime
+npm test
+npm run typecheck
+npm run build
+```
+
+会写入数据库、对象存储或队列的 live/E2E 测试必须使用独立测试栈：
+
+```bash
+infra/scripts/run-live-test-stack.sh -- <command>
+```
+
+需要 API/Web 时使用 `--app`。禁止把任何 `*_LIVE_DATABASE_URL` 指向主 `mirofish` 数据库。
+
+## 目录责任
+
+```text
+apps/
+  api/               Go control plane
+  web/               唯一 Next.js 前端
+  agent-runtime/     Seed / Graph / Asset / Worldline workers
+  pi-agent-runtime/  Pi Writer Agent runtime
+infra/               Postgres / Redis / Temporal / MinIO / deployment
+docs/refactor-saas/  SaaS 范围、契约和当前进度
+tasks/               活动任务板
+backend/             Legacy import / compatibility reference only
+```
+
+`docs/plans/` 和 `docs/superpowers/` 是历史设计记录。其中指向旧 `frontend/`、Vue/Vite 或旧 Writer 长页的命令不是当前开发入口。
+
+## 开发约束
+
+- 候选 draft/canon 更改不能自动采用，必须是用户动作或明确策略。
+- 所有 SaaS 数据路径必须携带 tenant/project/run 上下文并经过 RBAC/RLS。
+- 不记录或渲染 API Key、凭证、系统 prompt、provider body、用户小说原文或私有 trace。
+- 不恢复多分支 Worldline、旧 LLM 环境变量 fallback、旧蓝色前端或表单堆叠式 Writer 长页。
+- 工作区可能存在并行未提交改动；编辑前先运行 `git status --short`，不覆盖他人改动。
+
+## 真相源
+
+1. `docs/refactor-saas/DEVELOPMENT_PLAN.md`：范围、阶段和最终完成定义。
+2. `docs/refactor-saas/24-current-development-progress.md`：唯一当前进度、关键路径和验证新鲜度入口。
+3. `tasks/refactor-saas-parallel-board.md`：活动任务、依赖与 next gate。
+4. 当前 worktree、schema 和本轮测试输出：冲突时的最终事实。
+
+## 贡献与许可
+
+提交前请阅读 `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md` 和 `SECURITY.md`。不要提交 API Key、用户小说原文、私有数据库、上传产物或 LLM trace。
+
+本项目使用 `AGPL-3.0-only` 许可，详见 `LICENSE`。

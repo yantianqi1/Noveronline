@@ -1,7 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 
-const DEFAULT_API_BASE_URL = "http://127.0.0.1:8080";
+const DEFAULT_API_BASE_URL = "http://127.0.0.1:3888";
 
 export type ApiContext = {
   tenantId: string;
@@ -98,12 +98,20 @@ export type PasswordLoginSummary =
     } & CurrentUserRecord)
   | ApiFailure;
 
+export type PasswordChangeSummary =
+  | {
+      ok: true;
+    }
+  | ApiFailure;
+
 export type WriterRunSummary =
   | {
       ok: true;
       run_id: string;
       trace_id: string;
       project_id: string;
+      mode: string;
+      instruction: string;
       status: string;
     }
   | ApiFailure;
@@ -162,6 +170,16 @@ export type ProjectManuscriptExportManifestSummary =
       total_word_count: number;
       generated_at: string;
       blocks: ManuscriptExportManifestBlock[];
+    }
+  | ApiFailure;
+
+export type ProjectManuscriptArtifactSummary =
+  | {
+      ok: true;
+      content: Uint8Array;
+      content_type: string;
+      content_disposition: string;
+      sha256: string;
     }
   | ApiFailure;
 
@@ -263,6 +281,7 @@ export type ProjectOverviewRecord = {
   llm_sync_ok_channel_count: number;
   llm_sync_failed_channel_count: number;
   llm_sync_pending_channel_count: number;
+  llm_has_quota_policy: boolean;
   llm_latest_sync_at: string;
   latest_failed_workflow_run_id: string;
   latest_failed_workflow_type: string;
@@ -441,6 +460,12 @@ export type LLMChannelModelsSummary =
     }
   | ApiFailure;
 
+export type LLMModelSummary =
+  | ({
+      ok: true;
+    } & LLMModelRecord)
+  | ApiFailure;
+
 export type LLMModelSyncSummary =
   | {
       ok: true;
@@ -595,6 +620,18 @@ export type WorldlineStepStartSummary =
     }
   | ApiFailure;
 
+export type WorldlineAutoEvolutionStartSummary =
+  | {
+      ok: true;
+      run_id: string;
+      project_id: string;
+      session_id: string;
+      workflow_type: string;
+      status: string;
+      max_steps: number;
+    }
+  | ApiFailure;
+
 export type WorldlineTimelineEventRecord = {
   event_id: string;
   session_id: string;
@@ -687,6 +724,27 @@ export type WorldlinePreparationSummary =
   | ({
       ok: true;
     } & WorldlinePreparationRecord)
+  | ApiFailure;
+
+export type WorldlinePreparationsSummary =
+  | {
+      ok: true;
+      items: WorldlinePreparationRecord[];
+    }
+  | ApiFailure;
+
+export type AssetSearchCapabilitiesRecord = {
+  keyword: boolean;
+  vector: boolean;
+  hybrid: boolean;
+  reason: string;
+  config_href: string;
+};
+
+export type AssetSearchCapabilitiesSummary =
+  | ({
+      ok: true;
+    } & AssetSearchCapabilitiesRecord)
   | ApiFailure;
 
 export type WorldlinePreparedAgentRecord = {
@@ -785,6 +843,18 @@ export type CharacterInteractionTurnSummary =
     } & CharacterInteractionTurnRecord)
   | ApiFailure;
 
+export type CharacterDialogueStartSummary =
+  | {
+      ok: true;
+      run_id: string;
+      trace_id: string;
+      project_id: string;
+      interaction_id: string;
+      workflow_type: string;
+      status: string;
+    }
+  | ApiFailure;
+
 export type CharacterInteractionTurnsSummary =
   | {
       ok: true;
@@ -807,6 +877,40 @@ export type CharacterInteractionEventsSummary =
       interaction_id: string;
       after_event_id: string;
       items: CharacterInteractionEventRecord[];
+    }
+  | ApiFailure;
+
+export type CharacterProposalRecord = {
+  asset_id: string;
+  project_id: string;
+  interaction_id: string;
+  proposal_type: string;
+  asset_type: string;
+  lifecycle: string;
+  title: string;
+  summary: string;
+  target_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CharacterProposalsSummary =
+  | {
+      ok: true;
+      interaction_id: string;
+      items: CharacterProposalRecord[];
+    }
+  | ApiFailure;
+
+export type CharacterProposalAdoptionSummary =
+  | {
+      ok: true;
+      asset_id: string;
+      project_id: string;
+      interaction_id: string;
+      proposal_type: string;
+      target_id: string;
+      status: string;
     }
   | ApiFailure;
 
@@ -855,8 +959,35 @@ export type AssetSearchRecord = {
   payload: Record<string, unknown>;
   version: AssetSearchVersion;
   collections: AssetSearchCollection[];
+  ranking: AssetSearchRanking;
   created_at: string;
   updated_at: string;
+};
+
+export type AssetSearchRanking = {
+  mode: string;
+  keyword_score: number;
+  vector_score: number;
+  keyword_weight: number;
+  vector_weight: number;
+  keyword_contribution: number;
+  vector_contribution: number;
+  recency_boost: number;
+  lifecycle_boost: number;
+  pinned_boost: number;
+  final_score: number;
+  rank: number;
+  embedding_model: string;
+  explanation: string;
+};
+
+export type AssetSearchFilters = {
+  asset_types?: string[];
+  categories?: string[];
+  lifecycles?: string[];
+  sources?: string[];
+  tags?: string[];
+  pinned?: boolean;
 };
 
 export type AssetSearchVersion = {
@@ -1132,9 +1263,10 @@ export type StoryGraphClustersSummary =
 
 export type StartWriterRunInput = ApiContext & {
   projectId: string;
-  mode: "draft" | "continue" | "outline" | "review";
+  mode: "draft" | "continue" | "outline" | "revise";
   instruction: string;
   options?: Record<string, unknown>;
+  idempotencyKey?: string;
 };
 
 export type CreateLLMChannelInput = ApiContext & {
@@ -1297,10 +1429,27 @@ export type StartWorldlineStepInput = ApiContext & {
   options?: Record<string, unknown>;
 };
 
+export type WorldlinePreparationSourceRef = {
+  source_kind: "asset" | "entity" | "saved_path" | "worldline_event";
+  source_id: string;
+};
+
+export type WorldlinePreparationAgentRef = Omit<WorldlinePreparationSourceRef, "source_kind"> & {
+  source_kind: "asset" | "entity";
+};
+
 export type CreateWorldlinePreparationInput = ApiContext & {
   projectId: string;
   goal: string;
   anchorPathId?: string;
+  agentRefs?: WorldlinePreparationAgentRef[];
+  sourceRefs?: WorldlinePreparationSourceRef[];
+  options?: Record<string, unknown>;
+};
+
+export type StartWorldlineAutoEvolutionInput = ApiContext & {
+  sessionId: string;
+  maxSteps: number;
   options?: Record<string, unknown>;
 };
 
@@ -1420,9 +1569,10 @@ function nodeHttpFetch(input: string | URL, init: RequestInit) {
               responseHeaders.set(key, String(value));
             }
           }
+          const status = response.statusCode ?? 599;
           resolve(
-            new Response(Buffer.concat(chunks), {
-              status: response.statusCode ?? 599,
+            new Response(responseStatusHasNoBody(status) ? null : Buffer.concat(chunks), {
+              status,
               statusText: response.statusMessage,
               headers: responseHeaders,
             }),
@@ -1443,6 +1593,10 @@ function nodeHttpFetch(input: string | URL, init: RequestInit) {
     }
     request.end();
   }));
+}
+
+function responseStatusHasNoBody(status: number) {
+  return status === 204 || status === 205 || status === 304;
 }
 
 function hasHeader(headers: Record<string, string>, target: string) {
@@ -1500,12 +1654,13 @@ function currentUserHeaders(input: { actorUserId?: string; sessionCookie?: strin
   return headers;
 }
 
-export async function loginWithPassword(input: { email: string; password: string }): Promise<PasswordLoginSummary> {
+export async function loginWithPassword(input: { email: string; password: string; clientProof?: string }): Promise<PasswordLoginSummary> {
   try {
     const response = await apiFetch(`${apiBaseUrl()}/v1/auth/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...(input.clientProof?.trim() ? { "X-Mirofish-Recovery-Client": input.clientProof.trim() } : {}),
       },
       body: JSON.stringify({
         email: input.email,
@@ -1557,6 +1712,38 @@ export async function revokeCurrentSession(input: { sessionCookie?: string; csrf
     return decodeError(payload, response.status, "SESSION_REVOKE_FAILED");
   } catch (error) {
     return networkFailure(error, "SESSION_REVOKE_FAILED");
+  }
+}
+
+export async function changePassword(input: {
+  currentPassword: string;
+  newPassword: string;
+  sessionCookie?: string;
+  csrfToken?: string;
+}): Promise<PasswordChangeSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/auth/password/change`, {
+      method: "POST",
+      headers: {
+        ...sessionCookieHeaders(input),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        current_password: input.currentPassword,
+        new_password: input.newPassword,
+      }),
+      cache: "no-store",
+    });
+    if (response.ok) {
+      return { ok: true };
+    }
+    const payload = await readLLMPayload(response);
+    if (isApiFailure(payload)) {
+      return payload;
+    }
+    return decodeError(payload, response.status, "PASSWORD_CHANGE_FAILED");
+  } catch (error) {
+    return networkFailure(error, "PASSWORD_CHANGE_FAILED");
   }
 }
 
@@ -1783,6 +1970,7 @@ export async function startWriterRun(input: StartWriterRunInput): Promise<Writer
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : {}),
       ...contextHeaders(input),
     },
     body: JSON.stringify({
@@ -1851,6 +2039,39 @@ export async function getProjectManuscriptExportManifest(
     return await decodeProjectManuscriptExportManifestResponse(response);
   } catch (error) {
     return networkFailure(error, "MANUSCRIPT_EXPORT_QUERY_FAILED");
+  }
+}
+
+export async function downloadProjectManuscriptArtifact(
+  input: ApiContext & { projectId: string },
+): Promise<ProjectManuscriptArtifactSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/manuscript/export?format=txt`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const payload = await readLLMPayload(response);
+      if (isApiFailure(payload)) {
+        return payload;
+      }
+      return decodeError(payload, response.status, "MANUSCRIPT_EXPORT_FAILED");
+    }
+    const content = new Uint8Array(await response.arrayBuffer());
+    const contentDisposition = response.headers.get("content-disposition")?.trim() ?? "";
+    const sha256 = response.headers.get("x-content-sha256")?.trim() ?? "";
+    if (content.length === 0 || !/^attachment; filename="[A-Za-z0-9_-]+\.txt"$/.test(contentDisposition) || !/^[0-9a-f]{64}$/.test(sha256)) {
+      return invalidApiResponse("manuscript artifact response missing required fields");
+    }
+    return {
+      ok: true,
+      content,
+      content_type: response.headers.get("content-type")?.trim() || "text/plain; charset=utf-8",
+      content_disposition: contentDisposition,
+      sha256,
+    };
+  } catch (error) {
+    return networkFailure(error, "MANUSCRIPT_EXPORT_FAILED");
   }
 }
 
@@ -2302,6 +2523,55 @@ export async function syncLLMChannelModels(
   }
 }
 
+export async function updateLLMChannelModel(
+  input: ApiContext & {
+    channelId: string;
+    modelId: string;
+    contextWindow?: number;
+    supportsTools: boolean;
+    supportsJSON: boolean;
+    inputCost?: number;
+    outputCost?: number;
+  },
+): Promise<LLMModelSummary> {
+  try {
+    const body: Record<string, unknown> = {
+      supports_tools: input.supportsTools,
+      supports_json: input.supportsJSON,
+    };
+    if (typeof input.contextWindow === "number" && input.contextWindow > 0) {
+      body.context_window = input.contextWindow;
+    } else {
+      body.context_window = null;
+    }
+    if (typeof input.inputCost === "number" && Number.isFinite(input.inputCost) && input.inputCost >= 0) {
+      body.input_cost = input.inputCost;
+    } else {
+      body.input_cost = null;
+    }
+    if (typeof input.outputCost === "number" && Number.isFinite(input.outputCost) && input.outputCost >= 0) {
+      body.output_cost = input.outputCost;
+    } else {
+      body.output_cost = null;
+    }
+    const response = await apiFetch(
+      `${apiBaseUrl()}/v1/llm/channels/${encodeURIComponent(input.channelId)}/models/${encodeURIComponent(input.modelId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...contextHeaders(input),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      },
+    );
+    return await decodeLLMModelResponse(response);
+  } catch (error) {
+    return networkFailure(error, "LLM_MODEL_UPDATE_FAILED");
+  }
+}
+
 export async function upsertLLMModuleBinding(
   input: ApiContext & {
     projectId: string;
@@ -2599,6 +2869,32 @@ export async function startWorldlineStep(
   }
 }
 
+export async function startWorldlineAutoEvolution(
+  input: StartWorldlineAutoEvolutionInput,
+): Promise<WorldlineAutoEvolutionStartSummary> {
+  try {
+    const response = await apiFetch(
+      `${apiBaseUrl()}/v1/worldline-sessions/${input.sessionId}/auto-evolutions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...contextHeaders(input),
+        },
+        body: JSON.stringify({
+          max_steps: input.maxSteps,
+          options: sanitizeWorldlineAutoEvolutionOptions(input.options ?? {}),
+        }),
+        cache: "no-store",
+      },
+    );
+
+    return await decodeWorldlineAutoEvolutionStartResponse(response);
+  } catch (error) {
+    return networkFailure(error, "WORLDLINE_AUTO_EVOLUTION_START_FAILED");
+  }
+}
+
 export async function injectWorldlineVariable(
   input: InjectWorldlineVariableInput,
 ): Promise<WorldlineVariableSummary> {
@@ -2762,6 +3058,26 @@ export async function appendCharacterInteractionTurn(
   }
 }
 
+export async function startCharacterDialogue(
+  input: ApiContext & { interactionId: string; userTurnId: string },
+): Promise<CharacterDialogueStartSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/dialogue`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...contextHeaders(input),
+      },
+      body: JSON.stringify({ user_turn_id: input.userTurnId }),
+      cache: "no-store",
+    });
+
+    return await decodeCharacterDialogueStartResponse(response);
+  } catch (error) {
+    return networkFailure(error, "CHARACTER_DIALOGUE_START_FAILED");
+  }
+}
+
 export async function getCharacterInteractionEvents(
   input: ApiContext & { interactionId: string; afterEventId?: string },
 ): Promise<CharacterInteractionEventsSummary> {
@@ -2781,10 +3097,44 @@ export async function getCharacterInteractionEvents(
   }
 }
 
+export async function getCharacterProposals(
+  input: ApiContext & { interactionId: string },
+): Promise<CharacterProposalsSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/proposals`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeCharacterProposalsResponse(response);
+  } catch (error) {
+    return networkFailure(error, "CHARACTER_PROPOSAL_QUERY_FAILED");
+  }
+}
+
+export async function adoptCharacterProposal(
+  input: ApiContext & { interactionId: string; assetId: string; note?: string },
+): Promise<CharacterProposalAdoptionSummary> {
+  try {
+    const response = await apiFetch(
+      `${apiBaseUrl()}/v1/character-interactions/${input.interactionId}/proposals/${input.assetId}/adoptions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...contextHeaders(input) },
+        body: JSON.stringify({ note: input.note ?? "" }),
+        cache: "no-store",
+      },
+    );
+    return await decodeCharacterProposalAdoptionResponse(response);
+  } catch (error) {
+    return networkFailure(error, "CHARACTER_PROPOSAL_ADOPTION_FAILED");
+  }
+}
+
 export async function convertCharacterInteractionToChapterDraft(
   input: ApiContext & {
     interactionId: string;
     targetChapterId?: string;
+    targetSceneId?: string;
     povMode?: string;
     styleAssetIds?: string[];
     authorInstruction?: string;
@@ -2799,6 +3149,7 @@ export async function convertCharacterInteractionToChapterDraft(
       },
       body: JSON.stringify({
         target_chapter_id: input.targetChapterId ?? "",
+        target_scene_id: input.targetSceneId ?? "",
         pov_mode: input.povMode ?? "",
         style_asset_ids: input.styleAssetIds ?? [],
         author_instruction: input.authorInstruction ?? "",
@@ -2825,6 +3176,8 @@ export async function createWorldlinePreparation(
       body: JSON.stringify({
         goal: input.goal,
         anchor_path_id: input.anchorPathId ?? "",
+        ...(input.agentRefs === undefined ? {} : { agent_refs: input.agentRefs }),
+        ...(input.sourceRefs === undefined ? {} : { source_refs: input.sourceRefs }),
         options: input.options ?? {},
       }),
       cache: "no-store",
@@ -2833,6 +3186,21 @@ export async function createWorldlinePreparation(
     return await decodeWorldlinePreparationResponse(response, "WORLDLINE_PREPARATION_CREATE_FAILED");
   } catch (error) {
     return networkFailure(error, "WORLDLINE_PREPARATION_CREATE_FAILED");
+  }
+}
+
+export async function listWorldlinePreparations(
+  input: ApiContext & { projectId: string },
+): Promise<WorldlinePreparationsSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldlines/preparations`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+
+    return await decodeWorldlinePreparationsResponse(response);
+  } catch (error) {
+    return networkFailure(error, "WORLDLINE_PREPARATION_LIST_FAILED");
   }
 }
 
@@ -2866,6 +3234,21 @@ export async function getWorldlinePreparedAgents(
   }
 }
 
+export async function getAssetSearchCapabilities(
+  input: ApiContext & { projectId: string },
+): Promise<AssetSearchCapabilitiesSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/assets/search-capabilities`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+
+    return await decodeAssetSearchCapabilitiesResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ASSET_SEARCH_CAPABILITIES_FAILED");
+  }
+}
+
 export async function getAssetFacets(
   input: ApiContext & { projectId: string },
 ): Promise<AssetFacetsSummary> {
@@ -2882,7 +3265,12 @@ export async function getAssetFacets(
 }
 
 export async function searchAssets(
-  input: ApiContext & { projectId: string; query: string },
+  input: ApiContext & {
+    projectId: string;
+    query: string;
+    mode: "keyword" | "vector" | "hybrid";
+    filters?: AssetSearchFilters;
+  },
 ): Promise<AssetSearchSummary> {
   try {
     const response = await apiFetch(`${apiBaseUrl()}/v1/assets/search`, {
@@ -2894,6 +3282,8 @@ export async function searchAssets(
       body: JSON.stringify({
         project_id: input.projectId,
         query: input.query,
+        mode: input.mode,
+        ...(input.filters ? { filters: input.filters } : {}),
       }),
       cache: "no-store",
     });
@@ -3386,8 +3776,10 @@ async function decodeWriterRunResponse(response: Response): Promise<WriterRunSum
   const runId = requiredString(payload, "run_id");
   const traceId = requiredString(payload, "trace_id");
   const projectId = requiredString(payload, "project_id");
+  const mode = requiredString(payload, "mode");
+  const instruction = requiredString(payload, "instruction");
   const status = requiredString(payload, "status");
-  if (!runId || !traceId || !projectId || !status) {
+  if (!runId || !traceId || !projectId || !mode || !instruction || !status) {
     return invalidApiResponse("writer run response missing required fields");
   }
   return {
@@ -3395,6 +3787,8 @@ async function decodeWriterRunResponse(response: Response): Promise<WriterRunSum
     run_id: runId,
     trace_id: traceId,
     project_id: projectId,
+    mode,
+    instruction,
     status,
   };
 }
@@ -3864,6 +4258,21 @@ async function decodeLLMChannelModelsResponse(response: Response): Promise<LLMCh
   };
 }
 
+async function decodeLLMModelResponse(response: Response): Promise<LLMModelSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "LLM_MODEL_UPDATE_FAILED");
+  }
+
+  return {
+    ok: true,
+    ...decodeLLMModelRecord(payload),
+  };
+}
+
 async function decodeLLMModelSyncResponse(response: Response): Promise<LLMModelSyncSummary> {
   const payload = await readLLMPayload(response);
   if (isApiFailure(payload)) {
@@ -4053,6 +4462,37 @@ async function decodeWorldlineStepStartResponse(response: Response): Promise<Wor
   };
 }
 
+async function decodeWorldlineAutoEvolutionStartResponse(
+  response: Response,
+): Promise<WorldlineAutoEvolutionStartSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "WORLDLINE_AUTO_EVOLUTION_START_FAILED");
+  }
+
+  const runId = requiredString(payload, "run_id");
+  const projectId = requiredString(payload, "project_id");
+  const sessionId = requiredString(payload, "session_id");
+  const workflowType = requiredString(payload, "workflow_type");
+  const status = requiredString(payload, "status");
+  const maxSteps = numberFromUnknown(payload.max_steps);
+  if (!runId || !projectId || !sessionId || !workflowType || !status || !Number.isInteger(maxSteps) || maxSteps < 1) {
+    return invalidApiResponse("worldline auto-evolution response missing required fields");
+  }
+  return {
+    ok: true,
+    run_id: runId,
+    project_id: projectId,
+    session_id: sessionId,
+    workflow_type: workflowType,
+    status,
+    max_steps: maxSteps,
+  };
+}
+
 async function decodeWorldlineTimelineResponse(response: Response): Promise<WorldlineTimelineSummary> {
   const payload = await readLLMPayload(response);
   if (isApiFailure(payload)) {
@@ -4131,6 +4571,43 @@ async function decodeWorldlinePreparationResponse(
   return {
     ok: true,
     ...decodeWorldlinePreparationRecord(payload),
+  };
+}
+
+async function decodeWorldlinePreparationsResponse(response: Response): Promise<WorldlinePreparationsSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "WORLDLINE_PREPARATION_LIST_FAILED");
+  }
+  if (!Array.isArray(payload.items)) {
+    return invalidApiResponse("worldline preparations response missing items");
+  }
+
+  return {
+    ok: true,
+    items: payload.items.map((item) => decodeWorldlinePreparationRecord(item)),
+  };
+}
+
+async function decodeAssetSearchCapabilitiesResponse(response: Response): Promise<AssetSearchCapabilitiesSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ASSET_SEARCH_CAPABILITIES_FAILED");
+  }
+  const value = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  return {
+    ok: true,
+    keyword: value.keyword !== false,
+    vector: Boolean(value.vector),
+    hybrid: Boolean(value.hybrid),
+    reason: requiredString(value, "reason"),
+    config_href: requiredString(value, "config_href"),
   };
 }
 
@@ -4219,6 +4696,25 @@ async function decodeCharacterInteractionTurnResponse(response: Response): Promi
   };
 }
 
+async function decodeCharacterDialogueStartResponse(response: Response): Promise<CharacterDialogueStartSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "CHARACTER_DIALOGUE_START_FAILED");
+  }
+  return {
+    ok: true,
+    run_id: requiredString(payload, "run_id"),
+    trace_id: requiredString(payload, "trace_id"),
+    project_id: requiredString(payload, "project_id"),
+    interaction_id: requiredString(payload, "interaction_id"),
+    workflow_type: requiredString(payload, "workflow_type"),
+    status: requiredString(payload, "status"),
+  };
+}
+
 async function decodeCharacterInteractionTurnsResponse(response: Response): Promise<CharacterInteractionTurnsSummary> {
   const payload = await readLLMPayload(response);
   if (isApiFailure(payload)) {
@@ -4254,6 +4750,43 @@ async function decodeCharacterInteractionEventsResponse(response: Response): Pro
     interaction_id: requiredString(payload, "interaction_id"),
     after_event_id: requiredString(payload, "after_event_id"),
     items: payload.items.map((item) => decodeCharacterInteractionEventRecord(item)),
+  };
+}
+
+async function decodeCharacterProposalsResponse(response: Response): Promise<CharacterProposalsSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "CHARACTER_PROPOSAL_QUERY_FAILED");
+  }
+  if (!Array.isArray(payload.items)) {
+    return invalidApiResponse("character proposal response missing items");
+  }
+  return {
+    ok: true,
+    interaction_id: requiredString(payload, "interaction_id"),
+    items: payload.items.map((item) => decodeCharacterProposalRecord(item)),
+  };
+}
+
+async function decodeCharacterProposalAdoptionResponse(response: Response): Promise<CharacterProposalAdoptionSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "CHARACTER_PROPOSAL_ADOPTION_FAILED");
+  }
+  return {
+    ok: true,
+    asset_id: requiredString(payload, "asset_id"),
+    project_id: requiredString(payload, "project_id"),
+    interaction_id: requiredString(payload, "interaction_id"),
+    proposal_type: requiredString(payload, "proposal_type"),
+    target_id: requiredString(payload, "target_id"),
+    status: requiredString(payload, "status"),
   };
 }
 
@@ -4791,6 +5324,7 @@ function decodeProjectOverviewRecord(item: unknown): ProjectOverviewRecord {
     llm_sync_ok_channel_count: numberFromUnknown(value.llm_sync_ok_channel_count),
     llm_sync_failed_channel_count: numberFromUnknown(value.llm_sync_failed_channel_count),
     llm_sync_pending_channel_count: numberFromUnknown(value.llm_sync_pending_channel_count),
+    llm_has_quota_policy: Boolean(value.llm_has_quota_policy),
     llm_latest_sync_at: requiredString(value, "llm_latest_sync_at"),
     latest_failed_workflow_run_id: requiredString(value, "latest_failed_workflow_run_id"),
     latest_failed_workflow_type: requiredString(value, "latest_failed_workflow_type"),
@@ -5182,6 +5716,23 @@ function decodeCharacterInteractionEventRecord(item: unknown): CharacterInteract
   };
 }
 
+function decodeCharacterProposalRecord(item: unknown): CharacterProposalRecord {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  return {
+    asset_id: requiredString(value, "asset_id"),
+    project_id: requiredString(value, "project_id"),
+    interaction_id: requiredString(value, "interaction_id"),
+    proposal_type: requiredString(value, "proposal_type"),
+    asset_type: requiredString(value, "asset_type"),
+    lifecycle: requiredString(value, "lifecycle"),
+    title: requiredString(value, "title"),
+    summary: requiredString(value, "summary"),
+    target_id: requiredString(value, "target_id"),
+    created_at: requiredString(value, "created_at"),
+    updated_at: requiredString(value, "updated_at"),
+  };
+}
+
 function decodeAssetFacetBucket(item: unknown): AssetFacetBucket {
   const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
   return {
@@ -5203,8 +5754,29 @@ function decodeAssetSearchRecord(item: unknown): AssetSearchRecord {
     payload: recordFromUnknown(value.payload),
     version: decodeAssetSearchVersion(value.version),
     collections: arrayFromUnknown(value.collections).map((collection) => decodeAssetSearchCollection(collection)),
+    ranking: decodeAssetSearchRanking(value.ranking),
     created_at: requiredString(value, "created_at"),
     updated_at: requiredString(value, "updated_at"),
+  };
+}
+
+function decodeAssetSearchRanking(item: unknown): AssetSearchRanking {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  return {
+    mode: requiredString(value, "mode"),
+    keyword_score: numberFromUnknown(value.keyword_score),
+    vector_score: numberFromUnknown(value.vector_score),
+    keyword_weight: numberFromUnknown(value.keyword_weight),
+    vector_weight: numberFromUnknown(value.vector_weight),
+    keyword_contribution: numberFromUnknown(value.keyword_contribution),
+    vector_contribution: numberFromUnknown(value.vector_contribution),
+    recency_boost: numberFromUnknown(value.recency_boost),
+    lifecycle_boost: numberFromUnknown(value.lifecycle_boost),
+    pinned_boost: numberFromUnknown(value.pinned_boost),
+    final_score: numberFromUnknown(value.final_score),
+    rank: numberFromUnknown(value.rank),
+    embedding_model: typeof value.embedding_model === "string" ? value.embedding_model : "",
+    explanation: typeof value.explanation === "string" ? value.explanation : "",
   };
 }
 
@@ -5482,6 +6054,80 @@ function stringArrayFromUnknown(value: unknown): string[] {
     return [];
   }
   return value.filter((item): item is string => typeof item === "string");
+}
+
+function sanitizeWorldlineAutoEvolutionOptions(options: Record<string, unknown>): Record<string, unknown> {
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (isForbiddenWorldlineAutoEvolutionOptionKey(key)) {
+      continue;
+    }
+    entries.push([key, sanitizeWorldlineAutoEvolutionOptionValue(value)]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function sanitizeWorldlineAutoEvolutionOptionValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeWorldlineAutoEvolutionOptionValue(item));
+  }
+  if (value && typeof value === "object") {
+    return sanitizeWorldlineAutoEvolutionOptions(value as Record<string, unknown>);
+  }
+  return value;
+}
+
+function isForbiddenWorldlineAutoEvolutionOptionKey(key: string): boolean {
+  const normalized = key.trim().toLowerCase().replaceAll("-", "_");
+  switch (normalized) {
+    case "__proto__":
+    case "prototype":
+    case "constructor":
+    case "api_key":
+    case "apikey":
+    case "body":
+    case "body_text":
+    case "candidate_body":
+    case "candidate_event_body":
+    case "comparison":
+    case "comparisons":
+    case "content":
+    case "content_text":
+    case "credential":
+    case "credentials":
+    case "credential_ref":
+    case "credentialref":
+    case "draft":
+    case "encrypted_api_key":
+    case "encryptedapikey":
+    case "event_body":
+    case "input_text":
+    case "manuscript":
+    case "manuscript_text":
+    case "material_text":
+    case "output_text":
+    case "project_id":
+    case "projectid":
+    case "prompt":
+    case "raw_body":
+    case "raw_content":
+    case "raw_text":
+    case "response":
+    case "source_material":
+    case "source_text":
+    case "tenant_id":
+    case "tenantid":
+    case "text":
+    case "branch":
+    case "branch_id":
+    case "branch_ids":
+    case "branches":
+    case "world_scope":
+    case "worlds":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function numberFromUnknown(value: unknown) {

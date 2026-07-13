@@ -50,7 +50,9 @@ func documentedModules() []ModuleRecord {
 		{ModuleKey: "graph_bond_generator", Group: "Seed / Graph", Label: "Graph Bond Generator", Description: "Generate candidate graph bonds and relationships."},
 		{ModuleKey: "narrative_archives", Group: "Archive / Assets", Label: "Narrative Archives", Description: "Build narrative archive records."},
 		{ModuleKey: "asset_ingestion", Group: "Archive / Assets", Label: "Asset Ingestion", Description: "Ingest freeform material into assets."},
+		{ModuleKey: "asset_search_embedding", Group: "Archive / Assets", Label: "Asset Search Embedding", Description: "Embed asset search queries for vector and hybrid retrieval."},
 		{ModuleKey: "style_extractor", Group: "Archive / Assets", Label: "Style Extractor", Description: "Extract reusable style and voice assets."},
+		{ModuleKey: "character_dialogue", Group: "Character Console", Label: "Character Dialogue", Description: "Generate character dialogue turns and candidate state updates."},
 		{ModuleKey: "parallel_world_config", Group: "Worldline", Label: "Parallel World Config", Description: "Prepare worldline configuration."},
 		{ModuleKey: "worldline_agent_prepare", Group: "Worldline", Label: "Worldline Agent Prepare", Description: "Prepare worldline character agents."},
 		{ModuleKey: "worldline_agent_dialogue", Group: "Worldline", Label: "Worldline Agent Dialogue", Description: "Generate worldline agent dialogue turns."},
@@ -62,6 +64,8 @@ func documentedModules() []ModuleRecord {
 		{ModuleKey: "writer_orchestrator", Group: "Writer", Label: "Writer Orchestrator", Description: "Call tools and assemble writing context."},
 		{ModuleKey: "writer_composer", Group: "Writer", Label: "Writer Composer", Description: "Write draft prose from a writing brief."},
 		{ModuleKey: "writer_dedup_extractor", Group: "Writer", Label: "Writer Dedup Extractor", Description: "Extract repeated-risk patterns from adopted manuscript."},
+		{ModuleKey: "writer_book_planner", Group: "Writer", Label: "Writer Book Planner", Description: "Generate candidate plans for persisted draft book plans."},
+		{ModuleKey: "writer_asset_distiller", Group: "Writer", Label: "Writer Asset Distiller", Description: "Distill adopted manuscript into disabled asset candidates with evidence."},
 		{ModuleKey: "writer_reviewer", Group: "Writer", Label: "Writer Reviewer", Description: "Review drafts for style, continuity, and repetition."},
 	}
 }

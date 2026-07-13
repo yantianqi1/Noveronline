@@ -1,10 +1,10 @@
 # SaaS Refactor Development Plan
 
-更新时间：`2026-07-05`
+更新时间：`2026-07-13`
 
 ## 目的
 
-本文件是 `docs/refactor-saas/` 的开发总纲。后续使用 `/goal` 或多窗口并行开发时，应先以本文件作为唯一入口，再按每个阶段列出的详细文档和子章节执行。
+本文件是 `docs/refactor-saas/` 的开发总纲，只定义范围、阶段顺序和最终完成条件。当前进度、当前关键路径和验证新鲜度以 `24-current-development-progress.md` 为唯一入口；不得根据本文件从 Phase 0 重新开始已完成工作。
 
 本计划采用 **Writer-first Pi Agent vertical slice**：
 
@@ -19,7 +19,7 @@
 建议使用下面的目标描述启动完整开发：
 
 ```text
-按照 docs/refactor-saas/DEVELOPMENT_PLAN.md 从 Phase 0 开始逐阶段实现 MiroFish-Novel SaaS 重构。优先完成 Writer-first Pi Agent vertical slice：打通前端写作台、writer run API、Pi Writer Runtime、LLM Facility adapter、writer tools、流式事件、draft 保存和采用；随后按总纲顺序接入资产库、故事图谱、worldline、角色控制、多租户 SaaS、迁移和运维。每个阶段必须查阅总纲列出的详细文档和子章节，不能新增 mock 成功、静默 fallback、伪数据路径或旧式环境变量 LLM fallback。
+按照 docs/refactor-saas/DEVELOPMENT_PLAN.md 的范围和完成定义继续 MiroFish-Novel SaaS 重构。开始前必须读取 docs/refactor-saas/24-current-development-progress.md 和 tasks/refactor-saas-parallel-board.md，以当前 worktree、schema 和本轮测试为最终事实，从当前最高优先级未完成 next gate 继续，不得重做已完成 Phase 或使用历史 handoff/日志/固定 prompt 判断进度。不能新增 mock 成功、静默 fallback、伪数据路径或旧式环境变量 LLM fallback。
 ```
 
 执行时必须遵守：
@@ -54,13 +54,14 @@
 | `14-data-model.md` | Postgres 表、RLS、向量、旧表映射 |
 | `15-api-contracts.md` | 公网 API、错误格式、SSE、兼容路线 |
 | `16-deployment-and-ops.md` | 部署、监控、备份、安全和成本控制 |
-| `17-migration-roadmap.md` | 迁移路线摘要，必须与本总纲保持一致 |
+| `17-migration-roadmap.md` | 目标迁移顺序和验收摘要，不记录当前进度 |
 | `18-legacy-coverage-matrix.md` | 旧功能覆盖矩阵和状态推进规则 |
-| `19-parallel-development-orchestration.md` | 多窗口并行规则和 worktree/branch 策略 |
-| `20-agent-window-identities-and-prompts.md` | 各开发窗口身份和 prompt 清单 |
+| `19-parallel-development-orchestration.md` | 不含固定任务的多 agent 并行规则 |
 | `21-pi-writer-agent-runtime.md` | Pi Writer Agent 详细设计和阶段接入方案 |
-| `22-midstream-handoff-summary.md` | 当前重构中途总结、完成度估算、风险、下一步建议和新对话启动提示词 |
-| `prompts/` | 可复制给独立 Codex 窗口的启动提示词 |
+| `24-current-development-progress.md` | 当前总进度、完成定义审计、验证新鲜度、关键风险和下一步队列 |
+| `28-zero-start-writer-and-manuscript-asset-distillation.md` | 空项目从零创作、正文资产蒸馏和候选审阅的后续产品扩展方案 |
+
+`28-zero-start-writer-and-manuscript-asset-distillation.md` 是已批准的后续产品设计，不属于当前 MAIN-100 / Phase 0-8 完成定义。只有活动任务板正式启用对应目标后，才能把其中的 planned contract 计入当前进度；仅完成文档设计不得改写 `24-current-development-progress.md` 的实现状态。
 
 ## 总体开发顺序
 
@@ -350,18 +351,22 @@ assets / graph -> worldline -> character console -> writer -> manuscript
 - logs 不含 API Key、完整小说原文或完整 prompt。
 - LLM 成本能按 tenant/project/module 汇总。
 
+## 已批准的后续产品扩展
+
+空项目从零创作和正文反哺资产库的完整方案见 `28-zero-start-writer-and-manuscript-asset-distillation.md`。该扩展把导入小说降为可选 Seed 入口，并新增 `manuscript -> disabled asset candidate -> explicit review/adoption -> Writer retrieval` 闭环；它不恢复 Agent 自动写 canon，不改变本文件 Phase 0-8 的当前完成定义。
+
 ## 并行开发规则
 
 允许并行，但必须以本总纲阶段为主线。
 
-- Phase 0 必须先完成。
+- Phase 0 已冻结；除非当前 contract 明确变化，不重做治理阶段。
 - Phase 1 不建议拆太散，Writer UI/API/Pi worker/LLM adapter 必须高频联调。
 - Phase 2 可以按工具并行，但 shared tool result schema 必须先冻结。
 - Phase 3 可以分 Infra、DB/RLS、Go API、Web Shell、Pi Worker、Python Worker 多窗口并行。
 - Phase 5 可以 Seed、Assets、Graph 并行，但必须共享 canon table 契约。
 - Phase 6 可以 Worldline 和 Writer 引用并行，但 Character Console 依赖 worldline session。
 
-冲突控制详见 `19-parallel-development-orchestration.md` 和 `20-agent-window-identities-and-prompts.md`。
+冲突控制详见 `19-parallel-development-orchestration.md`；具体任务由主控根据当前进度与活动任务板现场生成，不使用固定任务 prompt。
 
 ## 完成定义
 

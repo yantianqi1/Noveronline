@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"go.temporal.io/sdk/client"
 )
 
 func TestDisabledAssetReindexStarterFailsClosed(t *testing.T) {
@@ -23,9 +25,11 @@ func TestDisabledAssetReindexStarterFailsClosed(t *testing.T) {
 
 func TestTemporalAssetReindexStarterStartsWorkflowWithoutWaitingForCompletion(t *testing.T) {
 	temporalClient := &recordingSeedTemporalClient{}
+	admissionStore := &recordingAssetReindexAdmissionStore{}
 	starter := NewTemporalAssetReindexStarter(TemporalAssetReindexConfig{
-		Client:    temporalClient,
-		TaskQueue: AssetIngestionTaskQueue,
+		Client:         temporalClient,
+		TaskQueue:      AssetIngestionTaskQueue,
+		AdmissionStore: admissionStore,
 	})
 
 	run, err := starter.StartAssetReindex(context.Background(), StartAssetReindexInput{
@@ -44,6 +48,9 @@ func TestTemporalAssetReindexStarterStartsWorkflowWithoutWaitingForCompletion(t 
 
 	if err != nil {
 		t.Fatalf("start asset reindex: %v", err)
+	}
+	if admissionStore.input.RunID == "" {
+		t.Fatal("asset reindex workflow started without persisted admission")
 	}
 	if run.RunID == "" || run.ProjectID != "project-1" || run.WorkflowType != AssetReindexWorkflowType || run.Status != "queued" {
 		t.Fatalf("unexpected asset reindex run: %#v", run)
@@ -144,10 +151,12 @@ func TestTemporalAssetReindexStarterDoesNotStartWorkflowWhenAdmissionFails(t *te
 	})
 
 	_, err := starter.StartAssetReindex(context.Background(), StartAssetReindexInput{
-		TenantID:  "tenant-1",
-		ProjectID: "project-1",
-		Scope:     "project",
-		Mode:      "keyword",
+		TenantID:    "tenant-1",
+		ProjectID:   "project-1",
+		ActorUserID: "user-1",
+		RequestID:   "req-1",
+		Scope:       "project",
+		Mode:        "keyword",
 	})
 
 	if code := ErrorCode(err); code != "WORKFLOW_ADMISSION_FAILED" {
@@ -155,6 +164,131 @@ func TestTemporalAssetReindexStarterDoesNotStartWorkflowWhenAdmissionFails(t *te
 	}
 	if temporalClient.started {
 		t.Fatal("Temporal workflow should not start when asset reindex admission persistence fails")
+	}
+	if strings.Contains(err.Error(), "insert workflow_runs failed") {
+		t.Fatalf("asset reindex admission error leaked storage details: %v", err)
+	}
+}
+
+func TestTemporalAssetReindexStarterFailsClosedWithoutAdmissionStore(t *testing.T) {
+	temporalClient := &recordingSeedTemporalClient{}
+	starter := NewTemporalAssetReindexStarter(TemporalAssetReindexConfig{Client: temporalClient})
+
+	_, err := starter.StartAssetReindex(context.Background(), StartAssetReindexInput{
+		TenantID:    "tenant-1",
+		ProjectID:   "project-1",
+		ActorUserID: "user-1",
+		RequestID:   "req-1",
+	})
+
+	if code := ErrorCode(err); code != "ASSET_REINDEX_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected missing admission store to fail closed, got %s (%v)", code, err)
+	}
+	if temporalClient.started {
+		t.Fatal("asset reindex started Temporal without an admission store")
+	}
+}
+
+func TestTemporalAssetReindexStarterRequiresActorAndRequestContext(t *testing.T) {
+	for name, mutate := range map[string]func(*StartAssetReindexInput){
+		"actor":   func(input *StartAssetReindexInput) { input.ActorUserID = " " },
+		"request": func(input *StartAssetReindexInput) { input.RequestID = " " },
+	} {
+		t.Run(name, func(t *testing.T) {
+			temporalClient := &recordingSeedTemporalClient{}
+			admissionStore := &recordingAssetReindexAdmissionStore{}
+			starter := NewTemporalAssetReindexStarter(TemporalAssetReindexConfig{
+				Client:         temporalClient,
+				AdmissionStore: admissionStore,
+			})
+			input := StartAssetReindexInput{
+				TenantID:    "tenant-1",
+				ProjectID:   "project-1",
+				ActorUserID: "user-1",
+				RequestID:   "req-1",
+			}
+			mutate(&input)
+
+			_, err := starter.StartAssetReindex(context.Background(), input)
+
+			if code := ErrorCode(err); code != "VALIDATION_FAILED" {
+				t.Fatalf("expected missing %s context to fail validation, got %s (%v)", name, code, err)
+			}
+			if temporalClient.started || admissionStore.input.RunID != "" {
+				t.Fatalf("missing %s context reached admission or Temporal", name)
+			}
+		})
+	}
+}
+
+func TestTemporalAssetReindexStarterCompensatesStartFailureWithStableError(t *testing.T) {
+	temporalClient := &recordingSeedTemporalClient{
+		err: errors.New("Temporal prompt=private api_key=sk-private credential_ref=secret"),
+	}
+	admissionStore := &recordingAssetReindexAdmissionStore{
+		temporalStarted: func() bool { return temporalClient.started },
+	}
+	starter := NewTemporalAssetReindexStarter(TemporalAssetReindexConfig{
+		Client:         temporalClient,
+		TaskQueue:      AssetIngestionTaskQueue,
+		AdmissionStore: admissionStore,
+	})
+
+	_, err := starter.StartAssetReindex(context.Background(), StartAssetReindexInput{
+		TenantID:    "tenant-1",
+		ProjectID:   "project-1",
+		ActorUserID: "user-1",
+		RequestID:   "req-1",
+		Scope:       "project",
+		Mode:        "keyword",
+	})
+
+	if code := ErrorCode(err); code != "WORKFLOW_FAILED" {
+		t.Fatalf("expected stable workflow failure, got %s (%v)", code, err)
+	}
+	if err.Error() != "failed to start asset_reindex workflow" {
+		t.Fatalf("unexpected public workflow failure: %v", err)
+	}
+	if !admissionStore.failureCalled {
+		t.Fatal("expected admitted asset reindex run to be compensated")
+	}
+	if !admissionStore.failureTemporalWasStartedWhenCalled {
+		t.Fatal("asset reindex compensation must happen after Temporal start is attempted")
+	}
+	if admissionStore.failureInput.RunID == "" || admissionStore.failureInput.RunID != admissionStore.input.RunID {
+		t.Fatalf("compensation lost admitted run identity: %#v", admissionStore.failureInput)
+	}
+	if admissionStore.failureInput.TenantID != "tenant-1" || admissionStore.failureInput.ProjectID != "project-1" || admissionStore.failureInput.ActorUserID != "user-1" {
+		t.Fatalf("compensation lost trusted tenant/project/actor context: %#v", admissionStore.failureInput)
+	}
+	for _, forbidden := range []string{"prompt", "api_key", "sk-private", "credential_ref", "secret"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("asset reindex start error leaked %q: %v", forbidden, err)
+		}
+	}
+}
+
+func TestTemporalAssetReindexStarterUsesDetachedContextForCompensation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	temporalClient := &cancelingAssetReindexTemporalClient{cancel: cancel}
+	admissionStore := &recordingAssetReindexAdmissionStore{}
+	starter := NewTemporalAssetReindexStarter(TemporalAssetReindexConfig{
+		Client:         temporalClient,
+		AdmissionStore: admissionStore,
+	})
+
+	_, err := starter.StartAssetReindex(ctx, StartAssetReindexInput{
+		TenantID:    "tenant-1",
+		ProjectID:   "project-1",
+		ActorUserID: "user-1",
+		RequestID:   "req-1",
+	})
+
+	if code := ErrorCode(err); code != "WORKFLOW_FAILED" {
+		t.Fatalf("expected workflow failure, got %s (%v)", code, err)
+	}
+	if admissionStore.failureContextErr != nil {
+		t.Fatalf("compensation reused cancelled request context: %v", admissionStore.failureContextErr)
 	}
 }
 
@@ -199,11 +333,123 @@ func TestSQLAssetReindexAdmissionStorePersistsWorkflowRunAndQueuedEventWithoutSe
 	}
 }
 
+func TestSQLAssetReindexAdmissionStoreUsesTenantContextForAdmissionAndCompensation(t *testing.T) {
+	execer := &recordingTenantSeedAdmissionExecer{}
+	store := NewSQLAssetReindexAdmissionStore(SQLAssetReindexAdmissionStoreConfig{Execer: execer})
+	input := AssetReindexAdmissionInput{
+		TenantID:           "11111111-1111-4111-8111-111111111111",
+		ProjectID:          "22222222-2222-4222-8222-222222222222",
+		RunID:              "33333333-3333-4333-8333-333333333333",
+		TraceID:            "trace_33333333-3333-4333-8333-333333333333",
+		WorkflowType:       AssetReindexWorkflowType,
+		TemporalWorkflowID: "asset_reindex_33333333-3333-4333-8333-333333333333",
+		ActorUserID:        "44444444-4444-4444-8444-444444444444",
+		RequestID:          "req-asset-reindex",
+		Scope:              "project",
+		Mode:               "keyword",
+		Status:             "queued",
+	}
+
+	if err := store.AdmitAssetReindexRun(context.Background(), input); err != nil {
+		t.Fatalf("admit asset reindex run: %v", err)
+	}
+	if !execer.usedTenantContext || execer.usedPlainExec {
+		t.Fatalf("asset reindex admission bypassed tenant transaction: %#v", execer)
+	}
+	if execer.tenantID != input.TenantID || execer.projectID != input.ActorUserID {
+		t.Fatalf("asset reindex admission lost tenant/user context: %#v", execer)
+	}
+	if !strings.Contains(execer.query, "INSERT INTO workflow_runs") || !strings.Contains(execer.query, "INSERT INTO workflow_events") {
+		t.Fatalf("asset reindex admission was not atomic: %s", execer.query)
+	}
+
+	execer.reset()
+	if err := store.RecordAssetReindexStartFailure(context.Background(), input); err != nil {
+		t.Fatalf("record asset reindex start failure: %v", err)
+	}
+	if !execer.usedTenantContext || execer.usedPlainExec {
+		t.Fatalf("asset reindex compensation bypassed tenant transaction: %#v", execer)
+	}
+	if execer.tenantID != input.TenantID || execer.projectID != input.ActorUserID {
+		t.Fatalf("asset reindex compensation lost tenant/user context: %#v", execer)
+	}
+	if !strings.Contains(execer.query, "UPDATE workflow_runs") || !strings.Contains(execer.query, "workflow.start_failed") || !strings.Contains(execer.query, "status = 'queued'") {
+		t.Fatalf("asset reindex compensation lost queued-only atomic guard: %s", execer.query)
+	}
+}
+
+func TestSQLAssetReindexAdmissionStoreSanitizesDatabaseErrors(t *testing.T) {
+	execer := &recordingWriterAdmissionExecer{
+		err: errors.New("driver prompt=private api_key=sk-private credential_ref=secret raw_content=novel"),
+	}
+	store := NewSQLAssetReindexAdmissionStore(SQLAssetReindexAdmissionStoreConfig{Execer: execer})
+	input := AssetReindexAdmissionInput{
+		TenantID:     "11111111-1111-4111-8111-111111111111",
+		ProjectID:    "22222222-2222-4222-8222-222222222222",
+		RunID:        "33333333-3333-4333-8333-333333333333",
+		WorkflowType: AssetReindexWorkflowType,
+		ActorUserID:  "44444444-4444-4444-8444-444444444444",
+		RequestID:    "req-asset-reindex",
+	}
+
+	for name, testCase := range map[string]struct {
+		call     func() error
+		wantCode string
+	}{
+		"admission": {
+			call:     func() error { return store.AdmitAssetReindexRun(context.Background(), input) },
+			wantCode: "WORKFLOW_ADMISSION_FAILED",
+		},
+		"compensation": {
+			call:     func() error { return store.RecordAssetReindexStartFailure(context.Background(), input) },
+			wantCode: "WORKFLOW_FAILED",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := testCase.call()
+			if code := ErrorCode(err); code != testCase.wantCode {
+				t.Fatalf("expected stable %s failure, got %s (%v)", name, code, err)
+			}
+			for _, forbidden := range []string{"driver", "prompt", "api_key", "sk-private", "credential_ref", "secret", "raw_content", "novel"} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("asset reindex %s error leaked %q: %v", name, forbidden, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSQLAssetReindexAdmissionStoreRejectsUnappliedCompensation(t *testing.T) {
+	execer := &recordingTenantSeedAdmissionExecer{
+		result: fakeSQLResult{rowsAffectedSet: true, rowsAffected: 0},
+	}
+	store := NewSQLAssetReindexAdmissionStore(SQLAssetReindexAdmissionStoreConfig{Execer: execer})
+	input := AssetReindexAdmissionInput{
+		TenantID:     "11111111-1111-4111-8111-111111111111",
+		ProjectID:    "22222222-2222-4222-8222-222222222222",
+		RunID:        "33333333-3333-4333-8333-333333333333",
+		WorkflowType: AssetReindexWorkflowType,
+		ActorUserID:  "44444444-4444-4444-8444-444444444444",
+		RequestID:    "req-asset-reindex",
+	}
+
+	err := store.RecordAssetReindexStartFailure(context.Background(), input)
+
+	if code := ErrorCode(err); code != "WORKFLOW_FAILED" {
+		t.Fatalf("expected zero-row compensation to fail closed, got %s (%v)", code, err)
+	}
+}
+
 type recordingAssetReindexAdmissionStore struct {
-	input                        AssetReindexAdmissionInput
-	err                          error
-	temporalStarted              func() bool
-	temporalWasStartedWhenCalled bool
+	input                               AssetReindexAdmissionInput
+	failureInput                        AssetReindexAdmissionInput
+	err                                 error
+	failureErr                          error
+	temporalStarted                     func() bool
+	temporalWasStartedWhenCalled        bool
+	failureTemporalWasStartedWhenCalled bool
+	failureCalled                       bool
+	failureContextErr                   error
 }
 
 func (s *recordingAssetReindexAdmissionStore) AdmitAssetReindexRun(_ context.Context, input AssetReindexAdmissionInput) error {
@@ -212,4 +458,27 @@ func (s *recordingAssetReindexAdmissionStore) AdmitAssetReindexRun(_ context.Con
 		s.temporalWasStartedWhenCalled = s.temporalStarted()
 	}
 	return s.err
+}
+
+func (s *recordingAssetReindexAdmissionStore) RecordAssetReindexStartFailure(ctx context.Context, input AssetReindexAdmissionInput) error {
+	s.failureInput = input
+	s.failureCalled = true
+	s.failureContextErr = ctx.Err()
+	if s.temporalStarted != nil {
+		s.failureTemporalWasStartedWhenCalled = s.temporalStarted()
+	}
+	return s.failureErr
+}
+
+type cancelingAssetReindexTemporalClient struct {
+	cancel context.CancelFunc
+}
+
+func (c *cancelingAssetReindexTemporalClient) ExecuteWorkflow(context.Context, client.StartWorkflowOptions, any, ...any) (client.WorkflowRun, error) {
+	c.cancel()
+	return nil, context.Canceled
+}
+
+func (c *cancelingAssetReindexTemporalClient) CancelWorkflow(context.Context, string, string) error {
+	return errors.New("not used")
 }

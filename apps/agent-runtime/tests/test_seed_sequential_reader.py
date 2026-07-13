@@ -298,6 +298,10 @@ def test_postgres_module_binding_resolver_resolves_project_binding_without_crede
     )
     assert "encrypted_api_key" not in connection.cursor_instance.query.lower()
     assert "api_key" not in connection.cursor_instance.query.lower()
+    assert "llm_platform_module_defaults" in connection.cursor_instance.query
+    assert "UNION ALL" in connection.cursor_instance.query
+    assert "2 AS binding_rank" in connection.cursor_instance.query
+    assert connection.cursor_instance.query.count("m.enabled = TRUE") == 2
     assert connection.cursor_instance.params == ("tenant-1", "project-1", "sequential_reading")
     assert connection.closed is True
 

@@ -10,7 +10,12 @@ import (
 	"go.temporal.io/sdk/client"
 )
 
-const seedWorkflowRetryStartFailedMessage = "failed to retry seed_pipeline workflow"
+const (
+	seedWorkflowRetryStartFailedMessage = "failed to retry seed_pipeline workflow"
+	seedSegmentRetryStartFailedMessage  = "failed to start seed segment retry workflow"
+
+	SeedSegmentRetryWorkflowName = "SeedSegmentRetryWorkflow"
+)
 
 type RetryWorkflowRunInput struct {
 	TenantID    string
@@ -125,15 +130,27 @@ func (r *DisabledSeedSegmentRetrier) RetrySeedSegments(_ context.Context, _ Retr
 }
 
 type SQLSeedSegmentRetrierConfig struct {
-	Execer WriterAdmissionSQLExecer
+	Execer    WriterAdmissionSQLExecer
+	Client    TemporalWorkflowClient
+	TaskQueue string
 }
 
 type SQLSeedSegmentRetrier struct {
-	execer WriterAdmissionSQLExecer
+	execer    WriterAdmissionSQLExecer
+	client    TemporalWorkflowClient
+	taskQueue string
 }
 
 func NewSQLSeedSegmentRetrier(config SQLSeedSegmentRetrierConfig) *SQLSeedSegmentRetrier {
-	return &SQLSeedSegmentRetrier{execer: config.Execer}
+	taskQueue := strings.TrimSpace(config.TaskQueue)
+	if taskQueue == "" {
+		taskQueue = SeedTaskQueue
+	}
+	return &SQLSeedSegmentRetrier{
+		execer:    config.Execer,
+		client:    config.Client,
+		taskQueue: taskQueue,
+	}
 }
 
 func (r *SQLSeedSegmentRetrier) RetrySeedSegments(ctx context.Context, input RetrySeedSegmentsInput) (SeedSegmentsRetry, error) {
@@ -144,8 +161,12 @@ func (r *SQLSeedSegmentRetrier) RetrySeedSegments(ctx context.Context, input Ret
 	if !validSeedSegmentRetryContext(tenantID, projectID, runID, strings.TrimSpace(input.ActorUserID), segmentIDs) {
 		return SeedSegmentsRetry{}, &AppError{Code: "VALIDATION_FAILED", Message: "seed segment retry context is invalid"}
 	}
-	if r.execer == nil {
+	if r.execer == nil || r.client == nil {
 		return SeedSegmentsRetry{}, &AppError{Code: "SEED_SEGMENT_RETRY_BACKEND_UNCONFIGURED", Message: "seed segment retry backend is not configured"}
+	}
+	executionID, err := newRunID()
+	if err != nil {
+		return SeedSegmentsRetry{}, seedSegmentRetryFailed()
 	}
 	segmentIDsJSON, err := json.Marshal(segmentIDs)
 	if err != nil {
@@ -183,13 +204,23 @@ segment_scope AS (
     AND text_segments.run_id = $3::uuid
     AND EXISTS (SELECT 1 FROM seed_run)
 ),
+active_retry_conflicts AS (
+  SELECT retry_requests.segment_id
+  FROM seed_segment_retry_requests AS retry_requests
+  JOIN requested_segments
+    ON requested_segments.segment_id = retry_requests.segment_id
+  WHERE retry_requests.tenant_id = $1::uuid
+    AND retry_requests.project_id = $2::uuid
+    AND retry_requests.run_id = $3::uuid
+    AND retry_requests.status IN ('requested', 'running')
+),
 segment_retry_guard AS (
-  SELECT CASE
-    WHEN (SELECT COUNT(*) FROM requested_segments) > 0
-     AND (SELECT COUNT(*) FROM segment_scope) = (SELECT COUNT(*) FROM requested_segments)
-    THEN 1
-    ELSE 1 / 0
-  END AS ok
+  SELECT
+    (SELECT COUNT(*) FROM requested_segments) > 0
+    AND (SELECT COUNT(*) FROM segment_scope) = (SELECT COUNT(*) FROM requested_segments) AS ok
+),
+active_retry_guard AS (
+  SELECT (SELECT COUNT(*) FROM active_retry_conflicts) = 0 AS ok
 ),
 upserted AS (
   INSERT INTO seed_segment_retry_requests (
@@ -200,6 +231,7 @@ upserted AS (
     status,
     requested_by,
     request_id,
+    retry_attempt_id,
     requested_at,
     updated_at
   )
@@ -211,17 +243,23 @@ upserted AS (
     'requested',
     NULLIF($5, '')::uuid,
     NULLIF($6, ''),
+    $7::uuid,
     now(),
     now()
   FROM segment_retry_guard
+  CROSS JOIN active_retry_guard
   CROSS JOIN segment_scope
+  WHERE segment_retry_guard.ok
+    AND active_retry_guard.ok
   ON CONFLICT (tenant_id, run_id, segment_id)
   DO UPDATE SET
     status = 'requested',
     requested_by = EXCLUDED.requested_by,
     request_id = EXCLUDED.request_id,
+    retry_attempt_id = EXCLUDED.retry_attempt_id,
     requested_at = EXCLUDED.requested_at,
     updated_at = now()
+  WHERE seed_segment_retry_requests.status IN ('completed', 'failed', 'cancelled')
   RETURNING segment_id
 ),
 next_sequence AS (
@@ -246,7 +284,7 @@ SELECT
   seed_run.project_id,
   'seed.segments.retry_requested',
   next_sequence.sequence,
-  $7::jsonb
+  $8::jsonb
 FROM seed_run
 CROSS JOIN next_sequence
 WHERE (SELECT COUNT(*) FROM upserted) = (SELECT COUNT(*) FROM requested_segments)`
@@ -257,6 +295,7 @@ WHERE (SELECT COUNT(*) FROM upserted) = (SELECT COUNT(*) FROM requested_segments
 		string(segmentIDsJSON),
 		strings.TrimSpace(input.ActorUserID),
 		strings.TrimSpace(input.RequestID),
+		executionID,
 		string(eventPayload),
 	)
 	if err != nil || result == nil {
@@ -266,11 +305,157 @@ WHERE (SELECT COUNT(*) FROM upserted) = (SELECT COUNT(*) FROM requested_segments
 	if err != nil || rowsAffected == 0 {
 		return SeedSegmentsRetry{}, seedSegmentRetryFailed()
 	}
+	temporalWorkflowID := "seed_segment_retry_" + runID + "_" + executionID
+	traceID := traceIDForRun(runID)
+	payload := seedSegmentRetryTemporalPayload(input, tenantID, projectID, runID, segmentIDs, traceID)
+	payload["retry_attempt_id"] = executionID
+	if _, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       temporalWorkflowID,
+		TaskQueue:                r.taskQueue,
+		WorkflowExecutionTimeout: time.Hour,
+		WorkflowRunTimeout:       time.Hour,
+	}, SeedSegmentRetryWorkflowName, payload); err != nil {
+		compensationCtx, cancelCompensation := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		compensationErr := r.recordSeedSegmentRetryStartFailure(
+			compensationCtx,
+			tenantID,
+			projectID,
+			runID,
+			segmentIDs,
+			executionID,
+			strings.TrimSpace(input.RequestID),
+		)
+		cancelCompensation()
+		if compensationErr != nil {
+			return SeedSegmentsRetry{}, seedSegmentRetryFailed()
+		}
+		return SeedSegmentsRetry{}, seedSegmentRetryFailed()
+	}
 	return SeedSegmentsRetry{
 		RunID:          runID,
 		Status:         "retry_requested",
 		RequestedCount: len(segmentIDs),
 	}, nil
+}
+
+func (r *SQLSeedSegmentRetrier) recordSeedSegmentRetryStartFailure(
+	ctx context.Context,
+	tenantID string,
+	projectID string,
+	runID string,
+	segmentIDs []string,
+	retryAttemptID string,
+	requestID string,
+) error {
+	segmentIDsJSON, err := json.Marshal(segmentIDs)
+	if err != nil {
+		return seedSegmentRetryFailed()
+	}
+	eventPayload, err := json.Marshal(SanitizeWorkflowEventPayload(map[string]any{
+		"status":          "failed",
+		"workflow_type":   SeedWorkflowType,
+		"request_id":      requestID,
+		"requested_count": len(segmentIDs),
+		"error_code":      "SEED_SEGMENT_RETRY_FAILED",
+		"error_message":   seedSegmentRetryStartFailedMessage,
+	}))
+	if err != nil {
+		return seedSegmentRetryFailed()
+	}
+	query := `WITH retry_context AS (
+  SELECT
+    $1::uuid AS tenant_id,
+    $2::uuid AS project_id,
+    $3::uuid AS run_id,
+    $4::jsonb AS segment_ids
+),
+requested_segments AS (
+  SELECT DISTINCT value::uuid AS segment_id
+  FROM retry_context,
+       jsonb_array_elements_text(retry_context.segment_ids) AS value
+),
+eligible_retries AS (
+  SELECT retry_requests.segment_id
+  FROM seed_segment_retry_requests AS retry_requests
+  JOIN requested_segments
+    ON requested_segments.segment_id = retry_requests.segment_id
+  WHERE retry_requests.tenant_id = $1::uuid
+    AND retry_requests.project_id = $2::uuid
+    AND retry_requests.run_id = $3::uuid
+    AND retry_requests.status = 'requested'
+    AND retry_requests.retry_attempt_id = $6::uuid
+),
+retry_guard AS (
+  SELECT
+    (SELECT COUNT(*) FROM requested_segments) AS requested_count,
+    (SELECT COUNT(*) FROM eligible_retries) AS eligible_count
+),
+failed_retries AS (
+  UPDATE seed_segment_retry_requests AS retry_requests
+  SET status = 'failed',
+      last_error_code = 'SEED_SEGMENT_RETRY_FAILED',
+      last_error_message = $5,
+      updated_at = now()
+  FROM eligible_retries, retry_guard
+  WHERE retry_requests.tenant_id = $1::uuid
+    AND retry_requests.project_id = $2::uuid
+    AND retry_requests.run_id = $3::uuid
+    AND retry_requests.segment_id = eligible_retries.segment_id
+    AND retry_guard.requested_count = retry_guard.eligible_count
+  RETURNING retry_requests.segment_id
+),
+next_sequence AS (
+  SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+  FROM workflow_events
+  WHERE tenant_id = $1::uuid
+    AND run_id = $3::uuid
+)
+INSERT INTO workflow_events (
+  tenant_id,
+  run_id,
+  workflow_type,
+  project_id,
+  event_type,
+  sequence,
+  payload_jsonb
+)
+SELECT
+  $1::uuid,
+  workflow_runs.run_id,
+  workflow_runs.workflow_type,
+  workflow_runs.project_id,
+  'seed.segments.retry_failed',
+  next_sequence.sequence,
+  $7::jsonb
+FROM workflow_runs
+CROSS JOIN next_sequence
+WHERE workflow_runs.tenant_id = $1::uuid
+  AND workflow_runs.project_id = $2::uuid
+  AND workflow_runs.run_id = $3::uuid
+  AND workflow_runs.workflow_type = 'seed_pipeline'
+  AND (SELECT COUNT(*) FROM failed_retries) = (SELECT COUNT(*) FROM requested_segments)`
+	result, err := execAdmissionSQL(
+		ctx,
+		r.execer,
+		tenantID,
+		projectID,
+		query,
+		tenantID,
+		projectID,
+		runID,
+		string(segmentIDsJSON),
+		seedSegmentRetryStartFailedMessage,
+		retryAttemptID,
+		string(eventPayload),
+	)
+	if err != nil || result == nil {
+		return seedSegmentRetryFailed()
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		return seedSegmentRetryFailed()
+	}
+	return nil
 }
 
 type TemporalWorkflowRetrierConfig struct {
@@ -709,6 +894,39 @@ func seedRetryTemporalPayload(tenantID string, target WorkflowRetryTarget, actor
 		"permissions": map[string][]string{
 			"seed_pipeline": {"run"},
 		},
+	}
+}
+
+func seedSegmentRetryTemporalPayload(
+	input RetrySeedSegmentsInput,
+	tenantID string,
+	projectID string,
+	runID string,
+	segmentIDs []string,
+	traceID string,
+) map[string]any {
+	actorUserID := strings.TrimSpace(input.ActorUserID)
+	requestID := strings.TrimSpace(input.RequestID)
+	permissions := map[string][]string{"seed_pipeline": {"run"}}
+	return map[string]any{
+		"context": map[string]any{
+			"tenant_id":     tenantID,
+			"project_id":    projectID,
+			"run_id":        runID,
+			"workflow_type": SeedWorkflowType,
+			"actor_user_id": actorUserID,
+			"trace_id":      traceID,
+			"permissions":   permissions,
+		},
+		"tenant_id":     tenantID,
+		"project_id":    projectID,
+		"run_id":        runID,
+		"workflow_type": SeedWorkflowType,
+		"actor_user_id": actorUserID,
+		"request_id":    requestID,
+		"trace_id":      traceID,
+		"segment_ids":   append([]string(nil), segmentIDs...),
+		"permissions":   permissions,
 	}
 }
 

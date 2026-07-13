@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+
+	"go.temporal.io/sdk/client"
 )
 
 type ListSavedPathsInput struct {
@@ -70,6 +73,7 @@ type SessionStarter interface {
 
 type StartStepInput struct {
 	TenantID    string
+	ProjectID   string
 	SessionID   string
 	ActorUserID string
 	RequestID   string
@@ -239,6 +243,8 @@ type CreatePreparationInput struct {
 	RequestID    string
 	Goal         string
 	AnchorPathID string
+	AgentRefs    []PreparationAgentRef
+	SourceRefs   []PreparationSourceRef
 	Options      map[string]any
 }
 
@@ -279,9 +285,15 @@ type PreparedAgentRecord struct {
 	UpdatedAt     string `json:"updated_at"`
 }
 
+type ListPreparationsInput struct {
+	TenantID  string
+	ProjectID string
+}
+
 type PreparationStore interface {
 	CreatePreparation(context.Context, CreatePreparationInput) (PreparationRecord, error)
 	GetPreparation(context.Context, GetPreparationInput) (PreparationRecord, error)
+	ListPreparations(context.Context, ListPreparationsInput) ([]PreparationRecord, error)
 	ListPreparedAgents(context.Context, ListPreparedAgentsInput) ([]PreparedAgentRecord, error)
 }
 
@@ -394,6 +406,13 @@ func (s *DisabledPreparationStore) GetPreparation(context.Context, GetPreparatio
 	}
 }
 
+func (s *DisabledPreparationStore) ListPreparations(context.Context, ListPreparationsInput) ([]PreparationRecord, error) {
+	return nil, &AppError{
+		Code:    "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED",
+		Message: "worldline preparation backend is not configured",
+	}
+}
+
 func (s *DisabledPreparationStore) ListPreparedAgents(context.Context, ListPreparedAgentsInput) ([]PreparedAgentRecord, error) {
 	return nil, &AppError{
 		Code:    "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED",
@@ -484,6 +503,26 @@ type SQLExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+type SQLTenantActorExecer interface {
+	ExecTenantActorContext(context.Context, string, string, string, ...any) (sql.Result, error)
+}
+
+type SQLTenantQueryer interface {
+	QueryTenantContext(context.Context, string, string, ...any) (SQLRows, error)
+}
+
+type SQLTenantActorQueryer interface {
+	QueryTenantActorContext(context.Context, string, string, string, ...any) (SQLRows, error)
+}
+
+type SQLStepAdmissionStore interface {
+	AdmitWorldlineStep(context.Context, StartStepInput, StepRun, string, string, string, string) (StepRun, bool, error)
+}
+
+type TemporalWorkflowClient interface {
+	ExecuteWorkflow(context.Context, client.StartWorkflowOptions, any, ...any) (client.WorkflowRun, error)
+}
+
 type SQLQueryer interface {
 	QueryContext(context.Context, string, ...any) (SQLRows, error)
 }
@@ -500,8 +539,214 @@ func (q *SQLDBQueryer) QueryContext(ctx context.Context, query string, args ...a
 	return q.db.QueryContext(ctx, query, args...)
 }
 
+func (q *SQLDBQueryer) QueryTenantContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, NULL::uuid, false)", strings.TrimSpace(tenantID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &sqlTenantRows{Rows: rows, tx: tx}, nil
+}
+
+func (q *SQLDBQueryer) QueryTenantActorContext(ctx context.Context, tenantID string, actorUserID string, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, NULLIF($2, '')::uuid, false)", strings.TrimSpace(tenantID), strings.TrimSpace(actorUserID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &sqlTenantRows{Rows: rows, tx: tx}, nil
+}
+
+type sqlTenantRows struct {
+	*sql.Rows
+	tx *sql.Tx
+}
+
+func (r *sqlTenantRows) Close() error {
+	rowsErr := r.Rows.Close()
+	if rowsErr != nil {
+		_ = r.tx.Rollback()
+		return rowsErr
+	}
+	return r.tx.Commit()
+}
+
 func (q *SQLDBQueryer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	return q.db.ExecContext(ctx, query, args...)
+}
+
+func (q *SQLDBQueryer) ExecTenantActorContext(ctx context.Context, tenantID string, actorUserID string, query string, args ...any) (sql.Result, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, NULLIF($2, '')::uuid, false)", strings.TrimSpace(tenantID), strings.TrimSpace(actorUserID)); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (q *SQLDBQueryer) AdmitWorldlineStep(
+	ctx context.Context,
+	input StartStepInput,
+	proposed StepRun,
+	eventID string,
+	temporalWorkflowID string,
+	traceID string,
+	mode string,
+) (StepRun, bool, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(
+		ctx,
+		"SELECT app_set_tenant_context($1::uuid, NULLIF($2, '')::uuid, false)",
+		strings.TrimSpace(input.TenantID),
+		strings.TrimSpace(input.ActorUserID),
+	); err != nil {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	if err := lockWorldlineSession(ctx, tx, input); err != nil {
+		return StepRun{}, false, err
+	}
+	if existing, found, err := findIdempotentWorldlineStep(ctx, tx, input); err != nil {
+		return StepRun{}, false, err
+	} else if found {
+		if err := tx.Commit(); err != nil {
+			return StepRun{}, false, worldlineStepAdmissionFailed()
+		}
+		return existing, true, nil
+	}
+	if active, err := hasActiveWorldlineStep(ctx, tx, input); err != nil {
+		return StepRun{}, false, err
+	} else if active {
+		return StepRun{}, false, &AppError{
+			Code:    "WORLDLINE_STEP_ACTIVE",
+			Message: "worldline session already has an active step",
+		}
+	}
+	eventPayload, err := worldlineStepQueuedEventPayload(input, traceID, mode)
+	if err != nil {
+		return StepRun{}, false, err
+	}
+	result, err := tx.ExecContext(ctx, startStepExecQuery(),
+		strings.TrimSpace(input.TenantID), strings.TrimSpace(input.SessionID),
+		strings.TrimSpace(input.ProjectID), proposed.RunID, proposed.Status,
+		strings.TrimSpace(input.ActorUserID), eventID, eventPayload, temporalWorkflowID,
+	)
+	if err != nil {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	if err := tx.Commit(); err != nil {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	return proposed, false, nil
+}
+
+func lockWorldlineSession(ctx context.Context, tx *sql.Tx, input StartStepInput) error {
+	var status string
+	err := tx.QueryRowContext(ctx, `SELECT status
+FROM worldline_sessions
+WHERE tenant_id::text = $1 AND project_id::text = $2 AND session_id::text = $3
+FOR UPDATE`, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.SessionID)).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &AppError{Code: "NOT_FOUND", Message: "worldline session not found"}
+	}
+	if err != nil {
+		return worldlineStepAdmissionFailed()
+	}
+	if status != "queued" && status != "running" && status != "paused" {
+		return &AppError{Code: "WORLDLINE_SESSION_NOT_ACTIVE", Message: "worldline session is not active"}
+	}
+	return nil
+}
+
+func findIdempotentWorldlineStep(ctx context.Context, tx *sql.Tx, input StartStepInput) (StepRun, bool, error) {
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" {
+		return StepRun{}, false, nil
+	}
+	var run StepRun
+	err := tx.QueryRowContext(ctx, `SELECT
+  workflow_run.run_id::text,
+  workflow_run.project_id::text,
+  $3::text,
+  workflow_run.workflow_type,
+  workflow_run.status
+FROM workflow_runs AS workflow_run
+JOIN workflow_events AS queued_event
+  ON queued_event.tenant_id = workflow_run.tenant_id
+ AND queued_event.run_id = workflow_run.run_id
+ AND queued_event.workflow_type = workflow_run.workflow_type
+WHERE workflow_run.tenant_id::text = $1
+  AND workflow_run.project_id::text = $2
+  AND workflow_run.workflow_type = 'worldline_step'
+  AND queued_event.event_type = 'workflow.queued'
+  AND queued_event.payload_jsonb->>'session_id' = $3
+  AND queued_event.payload_jsonb->>'request_id' = $4
+ORDER BY queued_event.created_at ASC
+LIMIT 1`, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.SessionID), requestID).Scan(
+		&run.RunID, &run.ProjectID, &run.SessionID, &run.WorkflowType, &run.Status,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StepRun{}, false, nil
+	}
+	if err != nil {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	return run, true, nil
+}
+
+func hasActiveWorldlineStep(ctx context.Context, tx *sql.Tx, input StartStepInput) (bool, error) {
+	var active bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+  SELECT 1
+  FROM workflow_runs AS workflow_run
+  JOIN workflow_events AS queued_event
+    ON queued_event.tenant_id = workflow_run.tenant_id
+   AND queued_event.run_id = workflow_run.run_id
+   AND queued_event.workflow_type = workflow_run.workflow_type
+  WHERE workflow_run.tenant_id::text = $1
+    AND workflow_run.project_id::text = $2
+    AND workflow_run.workflow_type = 'worldline_step'
+    AND workflow_run.status IN ('queued', 'running')
+    AND queued_event.event_type = 'workflow.queued'
+    AND queued_event.payload_jsonb->>'session_id' = $3
+)`, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.SessionID)).Scan(&active)
+	if err != nil {
+		return false, worldlineStepAdmissionFailed()
+	}
+	return active, nil
 }
 
 type SQLSavedPathReaderConfig struct {
@@ -552,7 +797,7 @@ WHERE tenant_id::text = $1
   AND project_id::text = $2
 ORDER BY updated_at DESC, created_at DESC
 LIMIT $3`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, r.limit)
+	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, tenantID, projectID, r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
@@ -681,7 +926,7 @@ func (s *SQLSavedPathStore) CreateSavedPath(ctx context.Context, input CreateSav
 		string(eventPayload),
 	}
 	if s.queryer != nil {
-		return s.createSavedPathReturning(ctx, args)
+		return s.createSavedPathReturning(ctx, tenantID, actorUserID, args)
 	}
 	result, err := s.execer.ExecContext(ctx, createSavedPathExecQuery(), args...)
 	if err != nil {
@@ -701,8 +946,8 @@ func (s *SQLSavedPathStore) CreateSavedPath(ctx context.Context, input CreateSav
 	}, nil
 }
 
-func (s *SQLSavedPathStore) createSavedPathReturning(ctx context.Context, args []any) (SavedPathRecord, error) {
-	rows, err := s.queryer.QueryContext(ctx, createSavedPathReturningQuery(), args...)
+func (s *SQLSavedPathStore) createSavedPathReturning(ctx context.Context, tenantID string, actorUserID string, args []any) (SavedPathRecord, error) {
+	rows, err := queryWorldlineTenantActorSQL(ctx, s.queryer, tenantID, actorUserID, createSavedPathReturningQuery(), args...)
 	if err != nil {
 		return SavedPathRecord{}, &AppError{Code: "WORLDLINE_SAVED_PATH_WRITE_FAILED", Message: err.Error()}
 	}
@@ -747,16 +992,19 @@ SELECT 1 FROM event_insert`
 }
 
 func createSavedPathCTE() string {
-	return `WITH session_scope AS (
+	return `WITH tenant_context AS MATERIALIZED (
+  SELECT app_set_tenant_context($1::uuid, NULLIF($8, '')::uuid, false)
+),
+session_scope AS (
   SELECT
     s.tenant_id,
     s.project_id,
     s.session_id,
     s.run_id
-  FROM (SELECT 1) input
+  FROM tenant_context
   JOIN worldline_sessions s
-    ON s.tenant_id::text = $1
-   AND s.session_id::text = $2
+    ON s.tenant_id = $1::uuid
+   AND s.session_id = $2::uuid
   LIMIT 1
 ),
 input_event_ids AS (
@@ -916,7 +1164,10 @@ func (s *SQLSessionStore) StartSession(ctx context.Context, input StartSessionIn
 	if err != nil {
 		return SessionRun{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline session admission payload must be JSON serializable"}
 	}
-	query := `WITH workflow_insert AS (
+	query := `WITH tenant_context AS MATERIALIZED (
+  SELECT app_set_tenant_context($1::uuid, NULLIF($7, '')::uuid, false)
+),
+workflow_insert AS (
   INSERT INTO workflow_runs (
     tenant_id,
     run_id,
@@ -928,7 +1179,7 @@ func (s *SQLSessionStore) StartSession(ctx context.Context, input StartSessionIn
     started_by,
     temporal_workflow_id
   )
-  VALUES (
+  SELECT
     $1::uuid,
     $3::uuid,
     'worldline_session',
@@ -938,7 +1189,7 @@ func (s *SQLSessionStore) StartSession(ctx context.Context, input StartSessionIn
     'queued',
     NULLIF($7, '')::uuid,
     ''
-  )
+  FROM tenant_context
   RETURNING run_id
 ),
 session_insert AS (
@@ -1025,7 +1276,7 @@ WHERE tenant_id::text = $1
   AND project_id::text = $2
 ORDER BY updated_at DESC, created_at DESC
 LIMIT $3`
-	rows, err := s.queryer.QueryContext(ctx, query, tenantID, projectID, s.limit)
+	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, projectID, s.limit)
 	if err != nil {
 		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
@@ -1057,7 +1308,7 @@ func (s *SQLSessionStore) GetSession(ctx context.Context, input GetSessionInput)
 WHERE tenant_id::text = $1
   AND session_id::text = $2
 LIMIT 1`
-	rows, err := s.queryer.QueryContext(ctx, query, tenantID, sessionID)
+	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, sessionID)
 	if err != nil {
 		return SessionRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
@@ -1092,6 +1343,20 @@ FROM worldline_sessions
 `
 }
 
+func queryWorldlineTenantSQL(ctx context.Context, queryer SQLQueryer, tenantID string, query string, args ...any) (SQLRows, error) {
+	if tenantQueryer, ok := queryer.(SQLTenantQueryer); ok {
+		return tenantQueryer.QueryTenantContext(ctx, tenantID, query, args...)
+	}
+	return queryer.QueryContext(ctx, query, args...)
+}
+
+func queryWorldlineTenantActorSQL(ctx context.Context, queryer SQLQueryer, tenantID string, actorUserID string, query string, args ...any) (SQLRows, error) {
+	if tenantActorQueryer, ok := queryer.(SQLTenantActorQueryer); ok {
+		return tenantActorQueryer.QueryTenantActorContext(ctx, tenantID, actorUserID, query, args...)
+	}
+	return queryer.QueryContext(ctx, query, args...)
+}
+
 func scanSessionRecord(rows SQLRows) (SessionRecord, error) {
 	var record SessionRecord
 	if err := rows.Scan(
@@ -1112,15 +1377,17 @@ func scanSessionRecord(rows SQLRows) (SessionRecord, error) {
 }
 
 type SQLStepStarterConfig struct {
-	Queryer SQLQueryer
-	Execer  SQLExecer
-	NewID   func() string
+	Execer    SQLExecer
+	NewID     func() string
+	Client    TemporalWorkflowClient
+	TaskQueue string
 }
 
 type SQLStepStarter struct {
-	queryer SQLQueryer
-	execer  SQLExecer
-	newID   func() string
+	execer    SQLExecer
+	newID     func() string
+	client    TemporalWorkflowClient
+	taskQueue string
 }
 
 func NewSQLStepStarter(config SQLStepStarterConfig) *SQLStepStarter {
@@ -1129,19 +1396,21 @@ func NewSQLStepStarter(config SQLStepStarterConfig) *SQLStepStarter {
 		newID = newUUID
 	}
 	return &SQLStepStarter{
-		queryer: config.Queryer,
-		execer:  config.Execer,
-		newID:   newID,
+		execer:    config.Execer,
+		newID:     newID,
+		client:    config.Client,
+		taskQueue: normalizeWorldlineTaskQueue(config.TaskQueue),
 	}
 }
 
 func (s *SQLStepStarter) StartStep(ctx context.Context, input StartStepInput) (StepRun, error) {
 	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
 	sessionID := strings.TrimSpace(input.SessionID)
-	if tenantID == "" || sessionID == "" {
-		return StepRun{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and session_id are required"}
+	if tenantID == "" || projectID == "" || sessionID == "" {
+		return StepRun{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, project_id, and session_id are required"}
 	}
-	if s.execer == nil && s.queryer == nil {
+	if s.execer == nil || s.client == nil {
 		return StepRun{}, &AppError{Code: "WORLDLINE_STEP_BACKEND_UNCONFIGURED", Message: "worldline step backend is not configured"}
 	}
 	runID := s.newID()
@@ -1153,14 +1422,8 @@ func (s *SQLStepStarter) StartStep(ctx context.Context, input StartStepInput) (S
 	}
 	actorUserID := strings.TrimSpace(input.ActorUserID)
 	traceID := "trace_" + runID
-	eventPayload, err := json.Marshal(map[string]any{
-		"status":        status,
-		"workflow_type": "worldline_step",
-		"request_id":    strings.TrimSpace(input.RequestID),
-		"trace_id":      traceID,
-		"session_id":    sessionID,
-		"mode":          mode,
-	})
+	temporalWorkflowID := "worldline_step_" + runID
+	eventPayload, err := worldlineStepQueuedEventPayload(input, traceID, mode)
 	if err != nil {
 		return StepRun{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline step admission payload must be JSON serializable"}
 	}
@@ -1168,70 +1431,82 @@ func (s *SQLStepStarter) StartStep(ctx context.Context, input StartStepInput) (S
 	args := []any{
 		tenantID,
 		sessionID,
+		projectID,
 		runID,
 		status,
 		actorUserID,
 		eventID,
-		string(eventPayload),
+		eventPayload,
+		temporalWorkflowID,
 	}
-	if s.queryer != nil {
-		return s.startStepReturning(ctx, args)
-	}
-	result, err := s.execer.ExecContext(ctx, startStepExecQuery(), args...)
+	proposed := StepRun{RunID: runID, ProjectID: projectID, SessionID: sessionID, WorkflowType: "worldline_step", Status: status}
+	run, idempotent, err := s.admitStep(ctx, input, proposed, eventID, temporalWorkflowID, traceID, mode, args)
 	if err != nil {
-		return StepRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
+		return StepRun{}, err
 	}
-	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
-		return StepRun{}, &AppError{Code: "NOT_FOUND", Message: "worldline session not found"}
+	if idempotent {
+		return run, nil
 	}
-	return StepRun{
-		RunID:        runID,
-		SessionID:    sessionID,
-		WorkflowType: "worldline_step",
-		Status:       status,
-	}, nil
-}
-
-func (s *SQLStepStarter) startStepReturning(ctx context.Context, args []any) (StepRun, error) {
-	rows, err := s.queryer.QueryContext(ctx, startStepReturningQuery(), args...)
+	payload := worldlineStepTemporalPayload(input, run, traceID)
+	_, err = s.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       temporalWorkflowID,
+		TaskQueue:                s.taskQueue,
+		WorkflowExecutionTimeout: 2 * time.Hour,
+		WorkflowRunTimeout:       2 * time.Hour,
+	}, "WorldlineStepWorkflow", payload)
 	if err != nil {
-		return StepRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return StepRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
+		compensationContext, cancelCompensation := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelCompensation()
+		if compensationErr := s.compensateStartFailure(compensationContext, input, run); compensationErr != nil {
+			return StepRun{}, compensationErr
 		}
-		return StepRun{}, &AppError{Code: "NOT_FOUND", Message: "worldline session not found"}
-	}
-	var run StepRun
-	if err := rows.Scan(&run.RunID, &run.ProjectID, &run.SessionID, &run.WorkflowType, &run.Status); err != nil {
-		return StepRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
-	}
-	if err := rows.Err(); err != nil {
-		return StepRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
+		return StepRun{}, &AppError{Code: "WORKFLOW_FAILED", Message: "failed to start worldline step workflow"}
 	}
 	return run, nil
 }
 
-func startStepReturningQuery() string {
-	return startStepCTE() + `
-SELECT
-  run_id::text,
-  project_id::text,
-  session_id::text,
-  workflow_type,
-  status
-FROM workflow_insert
-JOIN event_insert
-  ON true
-JOIN session_scope
-  ON true`
+func (s *SQLStepStarter) admitStep(
+	ctx context.Context,
+	input StartStepInput,
+	proposed StepRun,
+	eventID string,
+	temporalWorkflowID string,
+	traceID string,
+	mode string,
+	args []any,
+) (StepRun, bool, error) {
+	if store, ok := s.execer.(SQLStepAdmissionStore); ok {
+		return store.AdmitWorldlineStep(ctx, input, proposed, eventID, temporalWorkflowID, traceID, mode)
+	}
+	result, err := execWorldlineTenantActorSQL(ctx, s.execer, input.TenantID, input.ActorUserID, startStepExecQuery(), args...)
+	if err != nil {
+		return StepRun{}, false, worldlineStepAdmissionFailed()
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return StepRun{}, false, &AppError{Code: "NOT_FOUND", Message: "worldline session not found"}
+	}
+	return proposed, false, nil
+}
+
+func worldlineStepQueuedEventPayload(input StartStepInput, traceID string, mode string) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"status": "queued", "workflow_type": "worldline_step",
+		"request_id": strings.TrimSpace(input.RequestID), "trace_id": traceID,
+		"session_id": strings.TrimSpace(input.SessionID), "mode": mode,
+	})
+	if err != nil {
+		return "", &AppError{Code: "VALIDATION_FAILED", Message: "worldline step admission payload must be JSON serializable"}
+	}
+	return string(payload), nil
+}
+
+func worldlineStepAdmissionFailed() *AppError {
+	return &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: "worldline step admission failed"}
 }
 
 func startStepExecQuery() string {
 	return startStepCTE() + `
-SELECT 1 FROM event_insert`
+SELECT 1 FROM event_insert JOIN session_update ON true`
 }
 
 func startStepCTE() string {
@@ -1241,8 +1516,10 @@ func startStepCTE() string {
     project_id,
     session_id
   FROM worldline_sessions
-  WHERE tenant_id::text = $1
-    AND session_id::text = $2
+	  WHERE tenant_id::text = $1
+	    AND session_id::text = $2
+	    AND project_id::text = $3
+	    AND status IN ('queued', 'running', 'paused')
   LIMIT 1
 ),
 workflow_insert AS (
@@ -1259,14 +1536,14 @@ workflow_insert AS (
   )
   SELECT
     session_scope.tenant_id,
-    $3::uuid,
+	    $4::uuid,
     'worldline_step',
     session_scope.project_id,
-    $4,
+	    $5,
     0,
     'queued',
-    NULLIF($5, '')::uuid,
-    ''
+	    NULLIF($6, '')::uuid,
+	    $9
   FROM session_scope
   RETURNING run_id, workflow_type, project_id, status
 ),
@@ -1283,18 +1560,156 @@ event_insert AS (
   )
   SELECT
     session_scope.tenant_id,
-    $6::uuid,
+	    $7::uuid,
     workflow_insert.run_id,
     'worldline_step',
     session_scope.project_id,
     'workflow.queued',
     1,
-    $7::jsonb
+	    $8::jsonb
   FROM session_scope
   JOIN workflow_insert
     ON true
   RETURNING 1
+) ,
+session_update AS (
+  UPDATE worldline_sessions
+  SET status = 'running', updated_at = now()
+  WHERE tenant_id::text = $1
+    AND project_id::text = $3
+    AND session_id::text = $2
+    AND status IN ('queued', 'running', 'paused')
+    AND EXISTS (SELECT 1 FROM event_insert)
+  RETURNING 1
 )`
+}
+
+func (s *SQLStepStarter) compensateStartFailure(ctx context.Context, input StartStepInput, run StepRun) error {
+	if s.execer == nil {
+		return &AppError{Code: "WORKFLOW_FAILED", Message: "failed to record worldline step start failure"}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"status": "failed", "workflow_type": "worldline_step", "session_id": run.SessionID,
+		"request_id": strings.TrimSpace(input.RequestID), "error_code": "WORKFLOW_FAILED",
+	})
+	query := `WITH session_lock AS (
+  SELECT session_id
+  FROM worldline_sessions
+  WHERE tenant_id::text = $1 AND project_id::text = $2 AND session_id::text = $5
+  FOR UPDATE
+),
+failed_run AS (
+  UPDATE workflow_runs
+  SET status = 'failed', progress = 100, message = 'failed to start',
+      error_code = 'WORKFLOW_FAILED', error_message = 'failed to start worldline step workflow',
+      updated_at = now()
+  WHERE tenant_id::text = $1 AND project_id::text = $2 AND run_id::text = $3
+    AND workflow_type = 'worldline_step' AND status = 'queued'
+    AND EXISTS (SELECT 1 FROM session_lock)
+  RETURNING run_id
+),
+session_update AS (
+  UPDATE worldline_sessions
+  SET status = 'paused', updated_at = now()
+  WHERE tenant_id::text = $1 AND project_id::text = $2 AND session_id::text = $5
+    AND EXISTS (SELECT 1 FROM failed_run)
+    AND NOT EXISTS (
+      SELECT 1
+      FROM workflow_runs AS active_run
+      JOIN workflow_events AS queued_event
+        ON queued_event.tenant_id = active_run.tenant_id
+       AND queued_event.run_id = active_run.run_id
+       AND queued_event.workflow_type = active_run.workflow_type
+      WHERE active_run.tenant_id::text = $1
+        AND active_run.project_id::text = $2
+        AND active_run.workflow_type = 'worldline_step'
+        AND active_run.status IN ('queued', 'running')
+		AND active_run.run_id::text <> $3
+        AND queued_event.event_type = 'workflow.queued'
+        AND queued_event.payload_jsonb->>'session_id' = $5
+    )
+  RETURNING 1
+)
+INSERT INTO workflow_events (tenant_id, run_id, workflow_type, project_id, event_type, sequence, payload_jsonb)
+SELECT $1::uuid, run_id, 'worldline_step', $2::uuid, 'workflow.start_failed', 2, $4::jsonb
+FROM failed_run
+JOIN session_update ON true`
+	result, err := execWorldlineTenantActorSQL(ctx, s.execer, input.TenantID, input.ActorUserID, query,
+		strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), run.RunID, string(payload), run.SessionID)
+	if err != nil {
+		return &AppError{Code: "WORKFLOW_FAILED", Message: "failed to record worldline step start failure"}
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr == nil && affected != 1 {
+		return &AppError{Code: "WORKFLOW_FAILED", Message: "failed to record worldline step start failure"}
+	}
+	return nil
+}
+
+func worldlineStepTemporalPayload(input StartStepInput, run StepRun, traceID string) map[string]any {
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = "director"
+	}
+	contextPayload := map[string]any{
+		"tenant_id": strings.TrimSpace(input.TenantID), "project_id": run.ProjectID, "run_id": run.RunID,
+		"workflow_type": "worldline_step", "actor_user_id": strings.TrimSpace(input.ActorUserID),
+		"module_key": "worldline_director", "trace_id": traceID,
+		"permissions": map[string][]string{"worldline_director": {"run"}},
+	}
+	return map[string]any{
+		"context": contextPayload, "session_id": run.SessionID, "mode": mode,
+		"options": sanitizeWorldlineOptions(input.Options), "request_id": strings.TrimSpace(input.RequestID),
+	}
+}
+
+func execWorldlineTenantActorSQL(ctx context.Context, execer SQLExecer, tenantID string, actorUserID string, query string, args ...any) (sql.Result, error) {
+	if tenantExecer, ok := execer.(SQLTenantActorExecer); ok {
+		return tenantExecer.ExecTenantActorContext(ctx, tenantID, actorUserID, query, args...)
+	}
+	return execer.ExecContext(ctx, query, args...)
+}
+
+func normalizeWorldlineTaskQueue(value string) string {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return "worldline-interactive"
+}
+
+func sanitizeWorldlineOptions(options map[string]any) map[string]any {
+	sanitized := map[string]any{}
+	for key, value := range options {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey == "" || worldlineOptionKeySensitive(normalizedKey) {
+			continue
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			sanitized[key] = sanitizeWorldlineOptions(typed)
+		case []any:
+			items := make([]any, 0, len(typed))
+			for _, item := range typed {
+				if nested, ok := item.(map[string]any); ok {
+					items = append(items, sanitizeWorldlineOptions(nested))
+				} else {
+					items = append(items, item)
+				}
+			}
+			sanitized[key] = items
+		default:
+			sanitized[key] = value
+		}
+	}
+	return sanitized
+}
+
+func worldlineOptionKeySensitive(key string) bool {
+	switch key {
+	case "api_key", "body", "content", "credential_ref", "draft", "encrypted_api_key", "manuscript", "manuscript_text", "prompt", "raw_body", "raw_content", "raw_text", "response", "source_text", "text":
+		return true
+	default:
+		return false
+	}
 }
 
 type SQLPreparationStoreConfig struct {
@@ -1365,7 +1780,7 @@ WHERE s.tenant_id::text = $1
   AND e.workflow_type = 'worldline_session'
 ORDER BY e.sequence ASC, e.created_at ASC
 LIMIT $3`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, sessionID, r.limit)
+	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, tenantID, sessionID, r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
@@ -1473,7 +1888,7 @@ ORDER BY e.step ASC, e.created_at ASC
 LIMIT $%d`, len(args)+1)
 	args = append(args, r.limit)
 
-	rows, err := r.queryer.QueryContext(ctx, query, args...)
+	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, args...)
 	if err != nil {
 		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
@@ -1502,7 +1917,7 @@ func (r *SQLEventReader) GetEvent(ctx context.Context, input GetEventInput) (Eve
 		return EventRecord{}, &AppError{Code: "WORLDLINE_EVENT_BACKEND_UNCONFIGURED", Message: "worldline event backend is not configured"}
 	}
 
-	rows, err := r.queryer.QueryContext(ctx, `
+	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, `
 SELECT
   e.event_id::text,
   e.session_id::text,
@@ -1634,8 +2049,11 @@ func (s *SQLEventMutationStore) UpdateEvent(ctx context.Context, input UpdateEve
 		return EventRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline event mutation payload must be JSON serializable"}
 	}
 
-	rows, err := s.queryer.QueryContext(
+	rows, err := queryWorldlineTenantActorSQL(
 		ctx,
+		s.queryer,
+		tenantID,
+		strings.TrimSpace(input.ActorUserID),
 		updateEventReturningQuery(),
 		tenantID,
 		eventID,
@@ -1666,7 +2084,10 @@ func (s *SQLEventMutationStore) UpdateEvent(ctx context.Context, input UpdateEve
 }
 
 func updateEventReturningQuery() string {
-	return `WITH candidate_scope AS (
+	return `WITH tenant_context AS MATERIALIZED (
+  SELECT app_set_tenant_context($1::uuid, NULL::uuid, false)
+),
+candidate_scope AS (
   SELECT
     e.tenant_id,
     e.project_id,
@@ -1674,12 +2095,13 @@ func updateEventReturningQuery() string {
     e.event_id,
     s.run_id
   FROM worldline_events e
+  CROSS JOIN tenant_context
   JOIN worldline_sessions s
     ON s.tenant_id = e.tenant_id
    AND s.project_id = e.project_id
    AND s.session_id = e.session_id
-  WHERE e.tenant_id::text = $1
-    AND e.event_id::text = $2
+  WHERE e.tenant_id = $1::uuid
+    AND e.event_id = $2::uuid
     AND e.status = 'candidate'
   LIMIT 1
 ),
@@ -1813,8 +2235,11 @@ func (s *SQLEventAdoptionStore) AdoptEvent(ctx context.Context, input AdoptEvent
 		return EventRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline event adoption payload must be JSON serializable"}
 	}
 
-	rows, err := s.queryer.QueryContext(
+	rows, err := queryWorldlineTenantActorSQL(
 		ctx,
+		s.queryer,
+		tenantID,
+		actorUserID,
 		adoptEventReturningQuery(),
 		tenantID,
 		eventID,
@@ -1845,7 +2270,10 @@ func (s *SQLEventAdoptionStore) AdoptEvent(ctx context.Context, input AdoptEvent
 }
 
 func adoptEventReturningQuery() string {
-	return `WITH candidate_scope AS (
+	return `WITH tenant_context AS MATERIALIZED (
+  SELECT app_set_tenant_context($1::uuid, NULLIF($4, '')::uuid, false)
+),
+candidate_scope AS (
   SELECT
     e.tenant_id,
     e.project_id,
@@ -1854,12 +2282,13 @@ func adoptEventReturningQuery() string {
     e.status AS from_status,
     s.run_id
   FROM worldline_events e
+  CROSS JOIN tenant_context
   JOIN worldline_sessions s
     ON s.tenant_id = e.tenant_id
    AND s.project_id = e.project_id
    AND s.session_id = e.session_id
-  WHERE e.tenant_id::text = $1
-    AND e.event_id::text = $2
+  WHERE e.tenant_id = $1::uuid
+    AND e.event_id = $2::uuid
     AND e.status = 'candidate'
   LIMIT 1
 ),
@@ -2043,7 +2472,7 @@ func (s *SQLVariableStore) InjectVariable(ctx context.Context, input InjectVaria
 		string(eventPayload),
 	}
 	if s.queryer != nil {
-		return s.injectVariableReturning(ctx, args)
+		return s.injectVariableReturning(ctx, tenantID, actorUserID, args)
 	}
 	result, err := s.execer.ExecContext(ctx, injectVariableExecQuery(), args...)
 	if err != nil {
@@ -2064,8 +2493,8 @@ func (s *SQLVariableStore) InjectVariable(ctx context.Context, input InjectVaria
 	}, nil
 }
 
-func (s *SQLVariableStore) injectVariableReturning(ctx context.Context, args []any) (VariableRecord, error) {
-	rows, err := s.queryer.QueryContext(ctx, injectVariableReturningQuery(), args...)
+func (s *SQLVariableStore) injectVariableReturning(ctx context.Context, tenantID string, actorUserID string, args []any) (VariableRecord, error) {
+	rows, err := queryWorldlineTenantActorSQL(ctx, s.queryer, tenantID, actorUserID, injectVariableReturningQuery(), args...)
 	if err != nil {
 		return VariableRecord{}, &AppError{Code: "WORLDLINE_VARIABLE_WRITE_FAILED", Message: err.Error()}
 	}
@@ -2111,16 +2540,19 @@ SELECT 1 FROM event_insert`
 }
 
 func injectVariableCTE() string {
-	return `WITH session_scope AS (
+	return `WITH tenant_context AS MATERIALIZED (
+  SELECT app_set_tenant_context($1::uuid, NULLIF($9, '')::uuid, false)
+),
+session_scope AS (
   SELECT
     s.tenant_id,
     s.project_id,
     s.session_id,
     s.run_id
-  FROM (SELECT 1) input
+  FROM tenant_context
   JOIN worldline_sessions s
-    ON s.tenant_id::text = $1
-   AND s.session_id::text = $2
+    ON s.tenant_id = $1::uuid
+   AND s.session_id = $2::uuid
   LIMIT 1
 ),
 variable_insert AS (
@@ -2329,8 +2761,11 @@ SELECT
   1,
   $11::jsonb
 FROM preparation_insert`
-	_, err = s.execer.ExecContext(
+	result, err := execWorldlineTenantActorSQL(
 		ctx,
+		s.execer,
+		tenantID,
+		actorUserID,
 		query,
 		tenantID,
 		projectID,
@@ -2345,7 +2780,10 @@ FROM preparation_insert`
 		string(eventPayload),
 	)
 	if err != nil {
-		return PreparationRecord{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
+		return PreparationRecord{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: "worldline preparation admission failed"}
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil || affected != 1 {
+		return PreparationRecord{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: "worldline preparation admission failed"}
 	}
 	return PreparationRecord{
 		PrepareID:    prepareID,
@@ -2358,6 +2796,39 @@ FROM preparation_insert`
 		AnchorPathID: anchorPathID,
 		CreatedBy:    actorUserID,
 	}, nil
+}
+
+func (s *SQLPreparationStore) ListPreparations(ctx context.Context, input ListPreparationsInput) ([]PreparationRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	if tenantID == "" || projectID == "" {
+		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and project_id are required"}
+	}
+	if s.queryer == nil {
+		return nil, &AppError{Code: "WORLDLINE_PREPARATION_BACKEND_UNCONFIGURED", Message: "worldline preparation backend is not configured"}
+	}
+	query := preparationRecordSelectQuery() + `
+WHERE tenant_id::text = $1
+  AND project_id::text = $2
+ORDER BY updated_at DESC
+LIMIT 20`
+	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, projectID)
+	if err != nil {
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "worldline preparation query failed"}
+	}
+	defer rows.Close()
+	records := []PreparationRecord{}
+	for rows.Next() {
+		record, err := scanPreparationRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "worldline preparation query failed"}
+	}
+	return records, nil
 }
 
 func (s *SQLPreparationStore) GetPreparation(ctx context.Context, input GetPreparationInput) (PreparationRecord, error) {
@@ -2373,14 +2844,14 @@ func (s *SQLPreparationStore) GetPreparation(ctx context.Context, input GetPrepa
 WHERE tenant_id::text = $1
   AND prepare_id::text = $2
 LIMIT 1`
-	rows, err := s.queryer.QueryContext(ctx, query, tenantID, prepareID)
+	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, prepareID)
 	if err != nil {
-		return PreparationRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return PreparationRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "worldline preparation query failed"}
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return PreparationRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+			return PreparationRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "worldline preparation query failed"}
 		}
 		return PreparationRecord{}, &AppError{Code: "NOT_FOUND", Message: "worldline preparation not found"}
 	}
@@ -2417,9 +2888,9 @@ WHERE tenant_id::text = $1
   AND prepare_id::text = $2
 ORDER BY updated_at DESC, created_at DESC
 LIMIT $3`
-	rows, err := s.queryer.QueryContext(ctx, query, tenantID, prepareID, s.limit)
+	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, prepareID, s.limit)
 	if err != nil {
-		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "worldline prepared agents query failed"}
 	}
 	defer rows.Close()
 	records := []PreparedAgentRecord{}
@@ -2431,7 +2902,7 @@ LIMIT $3`
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: "worldline prepared agents query failed"}
 	}
 	return records, nil
 }

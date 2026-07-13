@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 
+import { devEntryRedirectPath } from "../../lib/dev-access";
+
 export default function LegacyCharacterConsolePage() {
-  redirect("/demo/projects/demo-project/character-console");
+  redirect(devEntryRedirectPath());
 }

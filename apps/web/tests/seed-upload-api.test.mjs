@@ -175,6 +175,26 @@ test("Cookie-backed current user request returns sanitized JSON HTTP failures", 
   }
 });
 
+test("Cookie-backed session revocation accepts a 204 response without constructing an invalid body", async () => {
+  const server = createServer((_request, response) => {
+    response.statusCode = 204;
+    response.end();
+  });
+  const baseUrl = await listen(server);
+  process.env.MIROFISH_API_BASE_URL = baseUrl;
+  const api = await import(`../lib/api.ts?sessionRevoke204=${Date.now()}`);
+
+  try {
+    const result = await api.revokeCurrentSession({
+      sessionCookie: "session-token",
+      csrfToken: "csrf-token",
+    });
+    assert.deepEqual(result, { ok: true });
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("Cookie-backed current user request returns stable non-JSON HTTP failures", async () => {
   const server = createServer(async (_request, response) => {
     response.statusCode = 502;
@@ -239,8 +259,10 @@ test("Cookie-backed current user request handles an already-aborted signal witho
 
 test("Cookie-backed current user request handles mid-flight aborts without raw request material", async () => {
   let requestCount = 0;
+  const controller = new AbortController();
   const server = createServer((_request, response) => {
     requestCount += 1;
+    controller.abort();
     setTimeout(() => {
       if (!response.destroyed) {
         writeJson(response, { user: {}, active_tenants: [], active_projects: [] });
@@ -250,9 +272,7 @@ test("Cookie-backed current user request handles mid-flight aborts without raw r
   const baseUrl = await listen(server);
   process.env.MIROFISH_API_BASE_URL = baseUrl;
   const api = await import(`../lib/api.ts?seedMidAbortApi=${Date.now()}`);
-  const controller = new AbortController();
   const resultPromise = api.getCurrentUser({ sessionCookie: "session-token", signal: controller.signal });
-  setTimeout(() => controller.abort(), 10);
 
   try {
     const result = await resultPromise;

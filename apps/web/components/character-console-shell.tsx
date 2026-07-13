@@ -1,15 +1,29 @@
+import { Check, ChevronRight, UsersRound } from "lucide-react";
+
+import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import type {
   CharacterInteractionDetailSummary,
+  CharacterInteractionEventsSummary,
+  CharacterProposalsSummary,
   CharacterInteractionTurnsSummary,
   CharacterInteractionsSummary,
   StoryGraphViewSummary,
   WorldlineEventsSummary,
   WorldlinePreparedAgentsSummary,
+  WorldlinePreparationsSummary,
   WorldlineSavedPathsSummary,
   WorldlineSessionsSummary,
 } from "../lib/api";
+import { tx, type Locale } from "../lib/locale";
+import { InspectorPanel } from "./inspector-panel";
+import { SubmitButton } from "./submit-button";
+import { WorkspaceHeader } from "./workspace-header";
+import { WorkspaceModeSwitcher } from "./workspace-mode-switcher";
 
 type CharacterConsoleShellProps = {
+  locale: Locale;
+  adoptCharacterProposalAction: (formData: FormData) => Promise<void>;
+  characterProposals: CharacterProposalsSummary;
   interactions: CharacterInteractionsSummary;
   tenantSlug: string;
   projectId: string;
@@ -24,6 +38,7 @@ type CharacterConsoleShellProps = {
   inspectWorldlinePreparationAgentsAction: (formData: FormData) => Promise<void>;
   updateCharacterInteractionStatusAction: (formData: FormData) => Promise<void>;
   anchorSessionId: string;
+  currentWorldSessionId: string;
   interactionStatus: {
     status: string;
     code: string;
@@ -31,12 +46,16 @@ type CharacterConsoleShellProps = {
     interactionId: string;
   };
   preparedAgents: WorldlinePreparedAgentsSummary;
+  preparations: WorldlinePreparationsSummary;
   prepareId: string;
+  selectWorldlinePreparationAction: (formData: FormData) => Promise<void>;
   runtimeStatus: {
     status: string;
     code: string;
     message: string;
+    runId: string;
   };
+  runtimeEvents: CharacterInteractionEventsSummary;
   savedPaths: WorldlineSavedPathsSummary;
   selectedInteraction: CharacterInteractionDetailSummary;
   selectedTurns: CharacterInteractionTurnsSummary;
@@ -51,6 +70,9 @@ type CharacterConsoleShellProps = {
 };
 
 export function CharacterConsoleShell({
+  locale,
+  adoptCharacterProposalAction,
+  characterProposals,
   interactions,
   tenantSlug,
   projectId,
@@ -59,16 +81,20 @@ export function CharacterConsoleShell({
   createCharacterInteractionAction,
   graphView,
   inspectCharacterInteractionAction,
-  inspectCharacterInteractionTurnsAction,
   inspectCharacterInteractionEventsAction,
+  inspectCharacterInteractionTurnsAction,
   inspectWorldlineEventAnchorsAction,
   inspectWorldlinePreparationAgentsAction,
   updateCharacterInteractionStatusAction,
   anchorSessionId,
+  currentWorldSessionId,
   interactionStatus,
   preparedAgents,
+  preparations,
   prepareId,
+  selectWorldlinePreparationAction,
   runtimeStatus,
+  runtimeEvents,
   savedPaths,
   selectedInteraction,
   selectedTurns,
@@ -80,6 +106,9 @@ export function CharacterConsoleShell({
   const latestInteractionId = interactions.ok && interactions.items.length > 0
     ? interactions.items[0].interaction_id
     : "";
+  const activeInteractionId = selectedInteraction.ok
+    ? selectedInteraction.interaction_id
+    : latestInteractionId;
   const hasWorldlineEventAnchors = worldlineEvents.ok && worldlineEvents.items.length > 0;
   const hasSavedPathAnchors = savedPaths.ok && savedPaths.items.length > 0;
   const hasGraphNodeAnchors = graphView.ok && graphView.nodes.length > 0;
@@ -94,405 +123,280 @@ export function CharacterConsoleShell({
     : [];
 
   return (
-    <div>
-      <header>
-        <p className="eyebrow">Character Console</p>
-        <h1>Character Console</h1>
-        <p>
-          Tenant <strong>{tenantSlug}</strong> / Project <strong>{projectId}</strong>
-        </p>
-        <div className="status-row">
-          <span className="status-pill">WORLDLINE_SESSION_REQUIRED</span>
-          <span className="status-pill">CHARACTER_CONSOLE_RUNTIME_PENDING</span>
-          <span className="status-pill">{interactionCount} interactions</span>
-          <span className="status-pill">
-            Sessions: {worldlineSessions.ok ? worldlineSessions.items.length : worldlineSessions.code}
-          </span>
-        </div>
-      </header>
+    <div className="character-console-root">
+      <WorkspaceHeader
+        className="character-console-header"
+        eyebrow={<Bi zh="角色控制" en="Character Console" />}
+        icon={<UsersRound size={22} strokeWidth={1.8} />}
+        meta={(
+          <>
+            <span className="status-pill">{interactionCount} <Bi zh="次互动" en="interactions" /></span>
+            <span className="status-pill">
+              <Bi zh="世界线推演" en="Sessions" />: {worldlineSessions.ok ? worldlineSessions.items.length : tx(locale, "暂不可用", "unavailable")}
+            </span>
+          </>
+        )}
+        title={<Bi zh="角色控制台" en="Character Console" />}
+      />
 
-      <div className="workbench-grid" style={{ marginTop: 20 }}>
+      <div className="workbench-grid character-console-workbench">
         <main>
-          <section className="panel" aria-labelledby="create-interaction-heading">
-            <p className="eyebrow">Interaction Metadata</p>
-            <h2 id="create-interaction-heading">Create interaction</h2>
+          <section className="panel" aria-labelledby="character-preparation-heading">
+            <p className="eyebrow"><Bi zh="角色准备" en="Preparation" /></p>
+            <h2 id="character-preparation-heading"><Bi zh="选择角色准备记录" en="Choose preparation" /></h2>
+            <WorldlinePreparationSelector
+              anchorSessionId={anchorSessionId}
+              locale={locale}
+              preparations={preparations}
+              prepareId={prepareId}
+              selectWorldlinePreparationAction={selectWorldlinePreparationAction}
+            />
+          </section>
+          <WorkspaceModeSwitcher
+            aria-label={tx(locale, "角色控制工作模式", "Character console workspace mode")}
+            defaultMode={activeInteractionId ? "play" : "setup"}
+            modes={[
+              { id: "setup", label: <Bi zh="开场" en="Setup" /> },
+              { id: "play", label: <Bi zh="互动" en="Play" /> },
+              { id: "review", label: <Bi zh="回放" en="Review" /> },
+            ]}
+            panels={{
+              setup: (
+          <section className="panel" aria-labelledby="create-interaction-heading" data-character-mode="setup">
+            <p className="eyebrow"><Bi zh="互动" en="Interaction" /></p>
+            <h2 id="create-interaction-heading"><Bi zh="创建互动" en="Create interaction" /></h2>
             <InteractionStatusLine interactionStatus={interactionStatus} />
-            <form action={createCharacterInteractionAction} className="binding-form">
-              <label htmlFor="character-worldline-session">Worldline session</label>
-              {worldlineSessions.ok && worldlineSessions.items.length > 0 ? (
-                <select id="character-worldline-session" name="worldlineSessionId" defaultValue="">
-                  <option value="">No worldline session</option>
-                  {worldlineSessions.items.map((session) => (
-                    <option key={session.session_id} value={session.session_id}>
-                      {session.goal_summary || session.session_id}
-                    </option>
-                  ))}
+            <form action={createCharacterInteractionAction} className="binding-form character-create-form">
+              <input type="hidden" name="anchorType" value="" />
+              <input type="hidden" name="anchorId" value="" />
+              <div className="character-form-field">
+                <label htmlFor="character-worldline-session"><Bi zh="世界线推演" en="Worldline session" /></label>
+                {worldlineSessions.ok && worldlineSessions.items.length > 0 ? (
+                  <select id="character-worldline-session" name="worldlineSessionId" defaultValue={currentWorldSessionId}>
+                    <option value="">{tx(locale, "不关联世界线推演", "No worldline session")}</option>
+                    {worldlineSessions.items.map((session, index) => <option key={session.session_id} value={session.session_id}>{session.goal_summary || tx(locale, `未命名推演 ${index + 1}`, `Untitled session ${index + 1}`)}</option>)}
+                  </select>
+                ) : <select id="character-worldline-session" name="worldlineSessionId" disabled><option value="">{tx(locale, "暂无可用推演", "No session available")}</option></select>}
+                {!worldlineSessions.ok ? <p className="form-hint"><FailureText /></p> : null}
+              </div>
+
+              <div className="character-form-field">
+                <label htmlFor="character-interaction-mode"><Bi zh="模式" en="Mode" /></label>
+                <select id="character-interaction-mode" name="mode" defaultValue="first_person">
+                  <option value="first_person">{tx(locale, "第一人称", "First person")}</option>
+                  <option value="director_assisted">{tx(locale, "导演辅助", "Director assisted")}</option>
+                  <option value="dialogue">{tx(locale, "对话", "Dialogue")}</option>
+                  <option value="replay">{tx(locale, "回放", "Replay")}</option>
                 </select>
-              ) : (
-                <input
-                  id="character-worldline-session"
-                  name="worldlineSessionId"
-                  placeholder="Optional admitted worldline session id"
-                />
-              )}
-              {!worldlineSessions.ok ? (
-                <p className="form-hint">
-                  {worldlineSessions.code}: {worldlineSessions.message}
-                </p>
-              ) : null}
+              </div>
 
-              <label htmlFor="character-anchor-type">Anchor type</label>
-              <select id="character-anchor-type" name="anchorType" defaultValue="worldline_session">
-                <option value="worldline_session">Worldline session</option>
-                <option value="worldline_event">Worldline event</option>
-                <option value="saved_path">Saved path</option>
-                <option value="scene">Scene</option>
-                <option value="graph_node">Graph node</option>
-              </select>
+              <div className="character-form-field">
+                <label htmlFor="character-anchor-id"><Bi zh="类型化锚点" en="Typed anchor" /></label>
+                {hasWorldlineEventAnchors || hasSavedPathAnchors || hasGraphNodeAnchors ? (
+                  <select id="character-anchor-id" name="anchorRef" defaultValue={currentWorldSessionId ? `worldline_session:${currentWorldSessionId}` : ""}>
+                    <option value="">{tx(locale, "不使用锚点", "No anchor")}</option>
+                    {currentWorldSessionId ? <option value={`worldline_session:${currentWorldSessionId}`}>{tx(locale, "当前世界推演", "Current world session")}</option> : null}
+                    {hasWorldlineEventAnchors ? <optgroup label={tx(locale, "世界线事件", "Worldline events")}>{worldlineEvents.items.map((event, index) => <option key={event.event_id} value={`worldline_event:${event.event_id}`}>{event.title || tx(locale, `未命名事件 ${index + 1}`, `Untitled event ${index + 1}`)}</option>)}</optgroup> : null}
+                    {hasSavedPathAnchors ? <optgroup label={tx(locale, "已保存路径", "Saved paths")}>{savedPaths.items.map((path, index) => <option key={path.path_id} value={`saved_path:${path.path_id}`}>{path.title || tx(locale, `未命名路径 ${index + 1}`, `Untitled path ${index + 1}`)}</option>)}</optgroup> : null}
+                    {hasGraphNodeAnchors ? <optgroup label={tx(locale, "图谱节点", "Graph nodes")}>{graphView.nodes.map((node, index) => <option key={node.node_id} value={`entity:${node.node_id}`}>{node.title || tx(locale, `未命名节点 ${index + 1}`, `Untitled node ${index + 1}`)}</option>)}</optgroup> : null}
+                  </select>
+                ) : <select id="character-anchor-id" name="anchorRef" disabled><option value="">{tx(locale, "暂无可用锚点", "No anchor available")}</option></select>}
+                {anchorSessionId && !worldlineEvents.ok ? <p className="form-hint"><FailureText /></p> : null}
+                {!savedPaths.ok ? <p className="form-hint"><FailureText /></p> : null}
+                {!graphView.ok ? <p className="form-hint"><FailureText /></p> : null}
+              </div>
 
-              <label htmlFor="character-anchor-id">Anchor id</label>
-              {hasWorldlineEventAnchors || hasSavedPathAnchors || hasGraphNodeAnchors ? (
-                <select id="character-anchor-id" name="anchorId" defaultValue="">
-                  <option value="">No anchor</option>
-                  {hasWorldlineEventAnchors ? (
-                    <optgroup label="Worldline events">
-                      {worldlineEvents.items.map((event) => (
-                        <option key={event.event_id} value={event.event_id}>
-                          {event.title || event.event_id}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                  {hasSavedPathAnchors ? (
-                    <optgroup label="Saved paths">
-                      {savedPaths.items.map((path) => (
-                        <option key={path.path_id} value={path.path_id}>
-                          {path.title || path.path_id}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                  {hasGraphNodeAnchors ? (
-                    <optgroup label="Graph nodes">
-                      {graphView.nodes.map((node) => (
-                        <option key={node.node_id} value={node.node_id}>
-                          {node.title || node.node_id}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                </select>
-              ) : (
-                <input
-                  id="character-anchor-id"
-                  name="anchorId"
-                  placeholder="Optional public anchor id"
-                />
-              )}
-              {anchorSessionId && !worldlineEvents.ok ? (
-                <p className="form-hint">
-                  {worldlineEvents.code || "WORLDLINE_EVENT_QUERY_FAILED"}: {worldlineEvents.message}
-                </p>
-              ) : null}
-              {!savedPaths.ok ? (
-                <p className="form-hint">
-                  {savedPaths.code || "WORLDLINE_BACKEND_UNCONFIGURED"}: {savedPaths.message}
-                </p>
-              ) : null}
-              {!graphView.ok ? (
-                <p className="form-hint">
-                  {graphView.code || "STORY_GRAPH_BACKEND_UNCONFIGURED"}: {graphView.message}
-                </p>
-              ) : null}
+              <div className="character-form-field">
+                <label htmlFor="character-interaction-title"><Bi zh="标题" en="Title" /></label>
+                <input id="character-interaction-title" name="title" placeholder={tx(locale, "雨夜谈判", "The rain-night negotiation")} required />
+              </div>
 
-              <label htmlFor="character-pov-agent">POV agent</label>
-              {preparedAgents.ok && preparedAgents.items.length > 0 ? (
-                <select id="character-pov-agent" name="povAgentId" defaultValue="">
-                  <option value="">No POV agent</option>
-                  {preparedAgents.items.map((agent) => (
-                    <option key={agent.agent_id} value={agent.agent_id}>
-                      {agent.display_name || agent.agent_id}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  id="character-pov-agent"
-                  name="povAgentId"
-                  placeholder="Optional character or agent id"
-                />
-              )}
-              {prepareId && !preparedAgents.ok ? (
-                <p className="form-hint">
-                  {preparedAgents.code || "WORLDLINE_PREPARED_AGENTS_QUERY_FAILED"}: {preparedAgents.message}
-                </p>
-              ) : null}
+              <div className="character-form-field">
+                <label htmlFor="character-pov-agent"><Bi zh="视角角色" en="POV agent" /></label>
+                {preparedAgents.ok && preparedAgents.items.length > 0 ? (
+                  <select id="character-pov-agent" name="povAgentId" defaultValue="">
+                    <option value="">{tx(locale, "未选择视角角色", "No POV agent")}</option>
+                    {preparedAgents.items.map((agent, index) => <option key={agent.agent_id} value={agent.agent_id}>{agent.display_name || tx(locale, `未命名角色 ${index + 1}`, `Untitled character ${index + 1}`)}</option>)}
+                  </select>
+                ) : <select id="character-pov-agent" name="povAgentId" disabled><option value="">{tx(locale, "暂无可用角色", "No character available")}</option></select>}
+                {prepareId && !preparedAgents.ok ? <p className="form-hint"><FailureText /></p> : null}
+              </div>
 
-              <label htmlFor="character-interaction-mode">Mode</label>
-              <select id="character-interaction-mode" name="mode" defaultValue="first_person">
-                <option value="first_person">First person</option>
-                <option value="director_assisted">Director assisted</option>
-                <option value="dialogue">Dialogue</option>
-                <option value="replay">Replay</option>
-              </select>
+              <div className="character-form-field character-summary-field">
+                <label htmlFor="character-interaction-summary"><Bi zh="摘要" en="Summary" /></label>
+                <textarea id="character-interaction-summary" name="summary" placeholder={tx(locale, "概括互动背景和目标", "Summarize the interaction setup and goal")} rows={3} />
+              </div>
 
-              <label htmlFor="character-interaction-title">Title</label>
-              <input
-                id="character-interaction-title"
-                name="title"
-                placeholder="Rain negotiation before the breach"
-                required
-              />
-
-              <label htmlFor="character-interaction-summary">Summary</label>
-              <textarea
-                id="character-interaction-summary"
-                name="summary"
-                placeholder="Public metadata summary for the interaction setup"
-                rows={3}
-              />
-
-              <p className="form-hint">
-                CHARACTER_INTERACTION_BACKEND_UNCONFIGURED appears until interaction metadata writes are backed by Postgres.
-              </p>
-              <button type="submit">Create interaction</button>
+              <SubmitButton idleLabel={<Bi zh="创建互动" en="Create interaction" />} pendingLabel={<Bi zh="创建中…" en="Creating…" />} />
             </form>
           </section>
-
-          <section className="panel" aria-labelledby="record-turn-heading">
-            <p className="eyebrow">Turn Metadata</p>
-            <h2 id="record-turn-heading">Record turn</h2>
+              ),
+              play: (
+          <section className="panel" aria-labelledby="record-turn-heading" data-character-mode="play">
+            <p className="eyebrow"><Bi zh="回合" en="Turn" /></p>
+            <h2 id="record-turn-heading"><Bi zh="记录回合" en="Record turn" /></h2>
             <TurnStatusLine turnStatus={turnStatus} />
             <form action={appendCharacterInteractionTurnAction} className="binding-form">
-              <label htmlFor="character-turn-interaction">Interaction</label>
+              <label htmlFor="character-turn-interaction"><Bi zh="互动" en="Interaction" /></label>
               {interactions.ok && interactions.items.length > 0 ? (
                 <select
                   id="character-turn-interaction"
                   name="interactionId"
-                  defaultValue={latestInteractionId}
+                  defaultValue={activeInteractionId}
                 >
-                  {interactions.items.map((interaction) => (
+                  {interactions.items.map((interaction, index) => (
                     <option key={interaction.interaction_id} value={interaction.interaction_id}>
-                      {interaction.title || interaction.interaction_id}
+                      {interaction.title || tx(locale, `未命名互动 ${index + 1}`, `Untitled interaction ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="character-turn-interaction"
                   name="interactionId"
-                  placeholder="Persisted interaction id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "请先创建互动", "Create an interaction first")}</option></select>
               )}
 
-              <label htmlFor="character-turn-actor-type">Actor type</label>
+              <label htmlFor="character-turn-actor-type"><Bi zh="行动者类型" en="Actor type" /></label>
               <select id="character-turn-actor-type" name="actorType" defaultValue="user">
-                <option value="user">User</option>
-                <option value="agent">Agent</option>
-                <option value="director">Director</option>
-                <option value="system">System</option>
+                <option value="user">{tx(locale, "用户", "User")}</option>
+                <option value="agent">{tx(locale, "角色", "Agent")}</option>
+                <option value="director">{tx(locale, "导演", "Director")}</option>
+                <option value="system">{tx(locale, "系统", "System")}</option>
               </select>
 
-              <label htmlFor="character-turn-actor-id">Actor id</label>
-              <input
-                id="character-turn-actor-id"
-                name="actorId"
-                placeholder="Optional actor or character id"
-              />
+              <label htmlFor="character-turn-actor-id"><Bi zh="行动者" en="Actor" /></label>
+              {preparedAgents.ok && preparedAgents.items.length > 0 ? (
+                <select id="character-turn-actor-id" name="actorId" defaultValue="">
+                  <option value="">{tx(locale, "不指定角色", "No specific character")}</option>
+                  {preparedAgents.items.map((agent, index) => <option key={agent.agent_id} value={agent.agent_id}>{agent.display_name || tx(locale, `未命名角色 ${index + 1}`, `Untitled character ${index + 1}`)}</option>)}
+                </select>
+              ) : <select id="character-turn-actor-id" name="actorId" disabled><option value="">{tx(locale, "暂无可用角色", "No character available")}</option></select>}
 
-              <label htmlFor="character-turn-kind">Turn kind</label>
+              <label htmlFor="character-turn-kind"><Bi zh="回合类型" en="Turn kind" /></label>
               <select id="character-turn-kind" name="turnKind" defaultValue="action">
-                <option value="action">Action</option>
-                <option value="dialogue">Dialogue</option>
-                <option value="thought">Thought</option>
-                <option value="director_note">Director note</option>
-                <option value="system_note">System note</option>
+                <option value="action">{tx(locale, "行动", "Action")}</option>
+                <option value="dialogue">{tx(locale, "对话", "Dialogue")}</option>
+                <option value="thought">{tx(locale, "思绪", "Thought")}</option>
+                <option value="director_note">{tx(locale, "导演备注", "Director note")}</option>
+                <option value="system_note">{tx(locale, "系统备注", "System note")}</option>
               </select>
 
-              <label htmlFor="character-turn-summary">Summary</label>
+              <label htmlFor="character-turn-summary"><Bi zh="回合内容" en="Turn summary" /></label>
               <textarea
                 id="character-turn-summary"
                 name="turnSummary"
-                placeholder="Public metadata summary of the explicit turn"
+                placeholder={tx(locale, "描述本回合的行动、对话或思绪", "Describe the action, dialogue, or thought")}
                 required
                 rows={3}
               />
 
-              <label htmlFor="character-turn-action-json">Action metadata</label>
-              <textarea
-                id="character-turn-action-json"
-                name="actionJson"
-                placeholder='Optional JSON object, for example {"intent":"negotiate"}'
-                rows={3}
-              />
-
-              <label htmlFor="character-turn-world-delta-json">World state delta metadata</label>
-              <textarea
-                id="character-turn-world-delta-json"
-                name="worldStateDeltaJson"
-                placeholder='Optional JSON object, for example {"tension":"rising"}'
-                rows={3}
-              />
-
-              <label htmlFor="character-turn-trace">Trace id</label>
-              <input
-                id="character-turn-trace"
-                name="traceId"
-                placeholder="Optional trace id"
-              />
-
-              <p className="form-hint">
-                This records explicit public turn metadata only; it does not request an Agent reply.
-              </p>
-              <button type="submit">Record turn</button>
+              <SubmitButton idleLabel={<Bi zh="记录回合" en="Record turn" />} pendingLabel={<Bi zh="记录中…" en="Recording…" />} />
             </form>
           </section>
-
-          <section className="panel error-box" aria-labelledby="interaction-heading">
-            <p className="eyebrow">Interaction</p>
-            <h2 id="interaction-heading">Scene stream</h2>
-            <RuntimeStatusLine runtimeStatus={runtimeStatus} />
-            <div className="binding-form">
-              <p className="form-hint">
-                CHARACTER_CONSOLE_RUNTIME_PENDING: live turns require a persisted interaction session.
-              </p>
-              <form action={inspectCharacterInteractionEventsAction} className="binding-form">
-                <label htmlFor="character-runtime-interaction">Runtime interaction</label>
-                {interactions.ok && interactions.items.length > 0 ? (
-                  <select
-                    id="character-runtime-interaction"
-                    name="runtimeInteractionId"
-                    defaultValue={selectedInteraction.ok ? selectedInteraction.interaction_id : latestInteractionId}
-                  >
-                    {interactions.items.map((interaction) => (
-                      <option key={interaction.interaction_id} value={interaction.interaction_id}>
-                        {interaction.title || interaction.interaction_id}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    id="character-runtime-interaction"
-                    name="runtimeInteractionId"
-                    placeholder="Persisted interaction id"
-                  />
-                )}
-                <button type="submit">Check runtime events</button>
-              </form>
-              <label className="form-hint" htmlFor="character-console-input">
-                First-person turn
-              </label>
-              <textarea
-                disabled
-                id="character-console-input"
-                name="characterConsoleTurn"
-                rows={6}
-                defaultValue=""
-              />
-              <button disabled type="button">Send turn</button>
-            </div>
-          </section>
-
-          <section className="panel" aria-labelledby="interaction-log-heading">
-            <p className="eyebrow">Replay</p>
-            <h2 id="interaction-log-heading">Interaction log</h2>
+              ),
+              review: (
+                <>
+          <section className="panel" aria-labelledby="interaction-log-heading" data-character-mode="review">
+            <p className="eyebrow"><Bi zh="记录" en="History" /></p>
+            <h2 id="interaction-log-heading"><Bi zh="互动记录" en="Interaction log" /></h2>
             <form action={inspectCharacterInteractionAction} className="binding-form">
-              <label htmlFor="selected-character-interaction">Inspect interaction</label>
+              <label htmlFor="selected-character-interaction"><Bi zh="互动" en="Interaction" /></label>
               {interactions.ok && interactions.items.length > 0 ? (
                 <select
                   id="selected-character-interaction"
                   name="selectedInteractionId"
-                  defaultValue={selectedInteraction.ok ? selectedInteraction.interaction_id : latestInteractionId}
+                  defaultValue={activeInteractionId}
                 >
-                  {interactions.items.map((interaction) => (
+                  {interactions.items.map((interaction, index) => (
                     <option key={interaction.interaction_id} value={interaction.interaction_id}>
-                      {interaction.title || interaction.interaction_id}
+                      {interaction.title || tx(locale, `未命名互动 ${index + 1}`, `Untitled interaction ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="selected-character-interaction"
                   name="selectedInteractionId"
-                  placeholder="Persisted interaction id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无互动", "No interaction available")}</option></select>
               )}
-              <button type="submit">Inspect interaction</button>
+              <button type="submit"><Bi zh="查看互动" en="View interaction" /></button>
             </form>
             <form action={inspectCharacterInteractionTurnsAction} className="binding-form">
-              <label htmlFor="selected-character-turns">Public turn replay</label>
+              <label htmlFor="selected-character-turns"><Bi zh="回合记录" en="Turn replay" /></label>
               {interactions.ok && interactions.items.length > 0 ? (
                 <select
                   id="selected-character-turns"
                   name="turnsInteractionId"
-                  defaultValue={selectedInteraction.ok ? selectedInteraction.interaction_id : latestInteractionId}
+                  defaultValue={activeInteractionId}
                 >
-                  {interactions.items.map((interaction) => (
+                  {interactions.items.map((interaction, index) => (
                     <option key={interaction.interaction_id} value={interaction.interaction_id}>
-                      {interaction.title || interaction.interaction_id}
+                      {interaction.title || tx(locale, `未命名互动 ${index + 1}`, `Untitled interaction ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="selected-character-turns"
                   name="turnsInteractionId"
-                  placeholder="Persisted interaction id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无互动", "No interaction available")}</option></select>
               )}
-              <button type="submit">Load public turns</button>
+              <button type="submit"><Bi zh="加载回合" en="Load turns" /></button>
             </form>
             <form action={updateCharacterInteractionStatusAction} className="binding-form">
-              <label htmlFor="status-character-interaction">Status interaction</label>
+              <label htmlFor="status-character-interaction"><Bi zh="互动状态" en="Interaction status" /></label>
               {interactions.ok && interactions.items.length > 0 ? (
                 <select
                   id="status-character-interaction"
                   name="statusInteractionId"
-                  defaultValue={selectedInteraction.ok ? selectedInteraction.interaction_id : latestInteractionId}
+                  defaultValue={activeInteractionId}
                 >
-                  {interactions.items.map((interaction) => (
+                  {interactions.items.map((interaction, index) => (
                     <option key={interaction.interaction_id} value={interaction.interaction_id}>
-                      {interaction.title || interaction.interaction_id}
+                      {interaction.title || tx(locale, `未命名互动 ${index + 1}`, `Untitled interaction ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="status-character-interaction"
                   name="statusInteractionId"
-                  placeholder="Persisted interaction id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无互动", "No interaction available")}</option></select>
               )}
               <div className="status-row">
-                <button type="submit" name="interactionNextStatus" value="saved">Save interaction</button>
-                <button type="submit" name="interactionNextStatus" value="archived">Archive interaction</button>
-                <button type="submit" name="interactionNextStatus" value="active">Restore active</button>
+                <button type="submit" name="interactionNextStatus" value="saved"><Bi zh="保存" en="Save" /></button>
+                <button type="submit" name="interactionNextStatus" value="archived"><Bi zh="归档" en="Archive" /></button>
+                <button type="submit" name="interactionNextStatus" value="active"><Bi zh="恢复" en="Restore" /></button>
               </div>
             </form>
             {interactions.ok ? (
               interactions.items.length > 0 ? (
                 <div className="stack">
-                  {interactions.items.map((interaction) => (
+                  {interactions.items.map((interaction, index) => (
                     <article className="subtle-card" key={interaction.interaction_id}>
                       <div className="status-row">
-                        <span className="status-pill">{interaction.mode}</span>
-                        <span className="status-pill">{interaction.status}</span>
+                        <span className="status-pill"><StatusValue value={interaction.mode} /></span>
+                        <span className="status-pill"><StatusValue value={interaction.status} /></span>
                       </div>
-                      <h3>{interaction.title || interaction.interaction_id}</h3>
-                      <p className="form-hint">{interaction.summary || "No public summary saved."}</p>
+                      <h3>{interaction.title || tx(locale, `未命名互动 ${index + 1}`, `Untitled interaction ${index + 1}`)}</h3>
+                      <p className="form-hint">{interaction.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
                       <p className="form-hint">
-                        Anchor {interaction.anchor_type || "none"} / {interaction.anchor_id || "none"}
+                        <Bi zh="锚点" en="Anchor" /> <StatusValue value={interaction.anchor_type || "none"} />
                       </p>
                     </article>
                   ))}
                 </div>
               ) : (
-                <p className="form-hint">No tenant/project scoped interaction turns are available.</p>
+                <p className="form-hint"><Bi zh="该项目暂无互动记录。" en="No interactions are available for this project." /></p>
               )
             ) : (
               <div className="error-box">
-                <strong>{interactions.code}</strong>
-                <p className="form-hint">{interactions.message}</p>
+                <p className="form-hint"><FailureText /></p>
               </div>
             )}
           </section>
@@ -501,8 +405,8 @@ export function CharacterConsoleShell({
             className={`panel ${selectedInteraction.ok ? "" : "error-box"}`}
             aria-labelledby="selected-interaction-heading"
           >
-            <p className="eyebrow">Selected Interaction</p>
-            <h2 id="selected-interaction-heading">Recorded turns</h2>
+            <p className="eyebrow"><Bi zh="当前互动" en="Selected interaction" /></p>
+            <h2 id="selected-interaction-heading"><Bi zh="已记录回合" en="Recorded turns" /></h2>
             <SelectedInteractionDetail selectedInteraction={selectedInteraction} />
           </section>
 
@@ -510,238 +414,408 @@ export function CharacterConsoleShell({
             className={`panel ${selectedTurns.ok ? "" : "error-box"}`}
             aria-labelledby="public-turn-replay-heading"
           >
-            <p className="eyebrow">Replay</p>
-            <h2 id="public-turn-replay-heading">Public turn replay</h2>
+            <p className="eyebrow"><Bi zh="回放" en="Replay" /></p>
+            <h2 id="public-turn-replay-heading"><Bi zh="回合回放" en="Turn replay" /></h2>
             <SelectedPublicTurnReplay selectedTurns={selectedTurns} />
           </section>
+                </>
+              ),
+            }}
+          />
         </main>
 
-        <aside>
-          <section className="panel error-box" aria-labelledby="anchor-heading">
-            <p className="eyebrow">Anchor</p>
-            <h2 id="anchor-heading">Worldline anchor</h2>
+        <InspectorPanel
+          title={<Bi zh="角色检视" en="Character inspector" />}
+          status={<Bi zh="锚点、档案与转稿" en="Anchors, dossier, and conversion" />}
+        >
+          <details className="character-module-group" open>
+            <summary><span><Bi zh="世界线锚点" en="Worldline anchor" /></span></summary>
+            <div className="character-module-content">
+          <section className="panel" aria-labelledby="anchor-heading">
+            <p className="eyebrow"><Bi zh="锚点" en="Anchor" /></p>
+            <h2 id="anchor-heading"><Bi zh="世界线锚点" en="Worldline anchor" /></h2>
             <form action={inspectWorldlineEventAnchorsAction} className="binding-form">
-              <label htmlFor="character-anchor-session-id">Event anchor session</label>
+              <label htmlFor="character-anchor-session-id"><Bi zh="推演" en="Session" /></label>
               {worldlineSessions.ok && worldlineSessions.items.length > 0 ? (
                 <select
                   id="character-anchor-session-id"
                   name="anchorSessionId"
                   defaultValue={anchorSessionId}
                 >
-                  <option value="">Select session</option>
-                  {worldlineSessions.items.map((session) => (
+                  <option value="">{tx(locale, "选择推演", "Select session")}</option>
+                  {worldlineSessions.items.map((session, index) => (
                     <option key={session.session_id} value={session.session_id}>
-                      {session.goal_summary || session.session_id}
+                      {session.goal_summary || tx(locale, `未命名推演 ${index + 1}`, `Untitled session ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="character-anchor-session-id"
                   name="anchorSessionId"
-                  placeholder="Persisted worldline session id"
-                  defaultValue={anchorSessionId}
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无可用推演", "No session available")}</option></select>
               )}
-              <button type="submit">Load worldline events</button>
+              <button type="submit"><Bi zh="加载世界线事件" en="Load worldline events" /></button>
             </form>
             {worldlineSessions.ok ? (
               worldlineSessions.items.length > 0 ? (
                 <div className="stack">
-                  {worldlineSessions.items.slice(0, 4).map((session) => (
+                  {worldlineSessions.items.slice(0, 4).map((session, index) => (
                     <article className="subtle-card" key={session.session_id}>
                       <div className="status-row">
-                        <span className="status-pill">{session.status}</span>
-                        <span className="status-pill">{session.lifecycle}</span>
+                        <span className="status-pill"><StatusValue value={session.status} /></span>
+                        <span className="status-pill"><StatusValue value={session.lifecycle} /></span>
                       </div>
-                      <h3>{session.goal_summary || session.session_id}</h3>
-                      <p className="form-hint">Session {session.session_id}</p>
+                      <h3>{session.goal_summary || tx(locale, `未命名推演 ${index + 1}`, `Untitled session ${index + 1}`)}</h3>
                     </article>
                   ))}
                 </div>
               ) : (
-                <p className="form-hint">
-                  WORLDLINE_SESSION_REQUIRED: no persisted session or saved path is attached.
-                </p>
+                <p className="form-hint"><Bi zh="暂无可用的世界线推演。" en="No worldline sessions are available." /></p>
               )
             ) : (
               <p className="form-hint">
-                {worldlineSessions.code || "WORLDLINE_SESSION_BACKEND_UNCONFIGURED"}: {worldlineSessions.message}
+                <FailureText />
               </p>
             )}
-            <h3>Saved paths</h3>
+            <h3><Bi zh="已保存路径" en="Saved paths" /></h3>
             {savedPaths.ok ? (
               savedPaths.items.length > 0 ? (
                 <div className="stack">
-                  {savedPaths.items.slice(0, 4).map((path) => (
+                  {savedPaths.items.slice(0, 4).map((path, index) => (
                     <article className="subtle-card" key={path.path_id}>
                       <div className="status-row">
-                        <span className="status-pill">{path.lifecycle}</span>
-                        <span className="status-pill">{path.selected_event_ids.length} events</span>
+                        <span className="status-pill"><StatusValue value={path.lifecycle} /></span>
+                        <span className="status-pill">{path.selected_event_ids.length} <Bi zh="个事件" en="events" /></span>
                       </div>
-                      <h3>{path.title || path.path_id}</h3>
-                      <p className="form-hint">{path.summary || "No public path summary saved."}</p>
+                      <h3>{path.title || tx(locale, `未命名路径 ${index + 1}`, `Untitled path ${index + 1}`)}</h3>
+                      <p className="form-hint">{path.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
                     </article>
                   ))}
                 </div>
               ) : (
-                <p className="form-hint">No saved paths are available for this project.</p>
+                <p className="form-hint"><Bi zh="该项目暂无已保存路径。" en="No saved paths are available for this project." /></p>
               )
             ) : (
               <p className="form-hint">
-                {savedPaths.code || "WORLDLINE_BACKEND_UNCONFIGURED"}: {savedPaths.message}
+                <FailureText />
               </p>
             )}
-            <h3>Graph node anchors</h3>
+            <h3><Bi zh="图谱节点锚点" en="Graph node anchors" /></h3>
             {graphView.ok ? (
               graphView.nodes.length > 0 ? (
                 <div className="stack">
-                  {graphView.nodes.slice(0, 4).map((node) => (
+                  {graphView.nodes.slice(0, 4).map((node, index) => (
                     <article className="subtle-card" key={node.node_id}>
                       <div className="status-row">
                         <span className="status-pill">{node.node_type}</span>
-                        <span className="status-pill">{node.lifecycle}</span>
+                        <span className="status-pill"><StatusValue value={node.lifecycle} /></span>
                       </div>
-                      <h3>{node.title || node.node_id}</h3>
-                      <p className="form-hint">{node.summary || "No public node summary saved."}</p>
+                      <h3>{node.title || tx(locale, `未命名节点 ${index + 1}`, `Untitled node ${index + 1}`)}</h3>
+                      <p className="form-hint">{node.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
                     </article>
                   ))}
                 </div>
               ) : (
-                <p className="form-hint">No Story Graph nodes are available for this project.</p>
+                <p className="form-hint"><Bi zh="该项目暂无故事图谱节点。" en="No Story Graph nodes are available for this project." /></p>
               )
             ) : (
               <p className="form-hint">
-                {graphView.code || "STORY_GRAPH_BACKEND_UNCONFIGURED"}: {graphView.message}
+                <FailureText />
               </p>
             )}
           </section>
+            </div>
+          </details>
 
+          <details className="character-module-group">
+            <summary><span><Bi zh="角色与档案" en="Roster and dossier" /></span></summary>
+            <div className="character-module-content">
           <section className="panel" aria-labelledby="roster-heading">
-            <p className="eyebrow">Roster</p>
-            <h2 id="roster-heading">Characters</h2>
+            <p className="eyebrow"><Bi zh="角色" en="Roster" /></p>
+            <h2 id="roster-heading"><Bi zh="角色列表" en="Characters" /></h2>
             <form action={inspectWorldlinePreparationAgentsAction} className="binding-form">
-              <label htmlFor="character-preparation-id">Worldline preparation</label>
+              <label htmlFor="character-preparation-id"><Bi zh="角色准备记录" en="Worldline preparation" /></label>
               <input
                 id="character-preparation-id"
                 name="prepareId"
-                placeholder="Persisted preparation id"
+                type="hidden"
                 defaultValue={prepareId}
               />
-              <button type="submit">Load prepared agents</button>
+              <button type="submit" disabled={!prepareId}><Bi zh="加载角色" en="Load prepared agents" /></button>
             </form>
             {preparedAgents.ok ? (
               preparedAgents.items.length > 0 ? (
                 <div className="stack">
-                  {preparedAgents.items.map((agent) => (
+                  {preparedAgents.items.map((agent, index) => (
                     <article className="subtle-card" key={agent.agent_id}>
                       <div className="status-row">
-                        <span className="status-pill">{agent.status}</span>
-                        <span className="status-pill">{agent.role}</span>
+                        <span className="status-pill"><StatusValue value={agent.status} /></span>
+                        <span className="status-pill"><StatusValue value={agent.role} /></span>
                       </div>
-                      <h3>{agent.display_name || agent.agent_id}</h3>
-                      <p className="form-hint">{agent.summary || "No public agent summary saved."}</p>
+                      <h3>{agent.display_name || tx(locale, `未命名角色 ${index + 1}`, `Untitled character ${index + 1}`)}</h3>
+                      <p className="form-hint">{agent.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
                     </article>
                   ))}
                 </div>
               ) : (
-                <p className="form-hint">No prepared agents are available for this preparation.</p>
+                <p className="form-hint"><Bi zh="该准备记录暂无角色。" en="No agents are available for this preparation." /></p>
               )
             ) : (
               <p className="form-hint">
-                {preparedAgents.code || "WORLDLINE_PREPARED_AGENTS_QUERY_FAILED"}: {preparedAgents.message}
+                <FailureText />
               </p>
             )}
           </section>
 
           <section className="panel" aria-labelledby="dossier-heading">
-            <p className="eyebrow">Dossier</p>
-            <h2 id="dossier-heading">Character dossier</h2>
+            <p className="eyebrow"><Bi zh="档案" en="Dossier" /></p>
+            <h2 id="dossier-heading"><Bi zh="角色档案" en="Character dossier" /></h2>
             {dossierAgent ? (
-              <article className="subtle-card">
+              <article className="subtle-card" data-agent-id={dossierAgent.agent_id}>
                 <div className="status-row">
-                  <span className="status-pill">{dossierAgent.role}</span>
-                  <span className="status-pill">{dossierAgent.status}</span>
+                  <span className="status-pill"><StatusValue value={dossierAgent.role} /></span>
+                  <span className="status-pill"><StatusValue value={dossierAgent.status} /></span>
                 </div>
-                <h3>{dossierAgent.display_name || dossierAgent.agent_id}</h3>
-                <p className="form-hint">{dossierAgent.summary || "No public dossier summary saved."}</p>
-                <p className="form-hint">Source asset {dossierAgent.source_asset_id || "none"}</p>
+                <h3>{dossierAgent.display_name || <Bi zh="未命名角色" en="Untitled character" />}</h3>
+                <p className="form-hint">{dossierAgent.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
               </article>
             ) : (
               <p className="form-hint">
-                No POV agent public dossier is available for the selected interaction.
+                <Bi zh="当前互动暂无视角角色档案。" en="No POV character dossier is available for this interaction." />
               </p>
             )}
-            <p className="form-hint">No character memory is available for this interaction.</p>
           </section>
+            </div>
+          </details>
 
+          <details className="character-module-group">
+            <summary><span><Bi zh="历史与转稿" en="History and conversion" /></span></summary>
+            <div className="character-module-content">
           <section className="panel" aria-labelledby="public-history-heading">
-            <p className="eyebrow">History</p>
-            <h2 id="public-history-heading">Public turn history</h2>
+            <p className="eyebrow"><Bi zh="历史" en="History" /></p>
+            <h2 id="public-history-heading"><Bi zh="角色回合历史" en="Character turn history" /></h2>
             {agentHistoryTurns.length > 0 ? (
               <div className="stack">
                 {agentHistoryTurns.slice(0, 6).map((historyTurn) => (
                   <article className="subtle-card" key={historyTurn.turn_id}>
                     <div className="status-row">
-                      <span className="status-pill">Turn {historyTurn.turn_order}</span>
-                      <span className="status-pill">{historyTurn.actor_type}</span>
-                      <span className="status-pill">{historyTurn.turn_kind}</span>
+                      <span className="status-pill"><Bi zh="回合" en="Turn" /> {historyTurn.turn_order}</span>
+                      <span className="status-pill"><StatusValue value={historyTurn.actor_type} /></span>
+                      <span className="status-pill"><StatusValue value={historyTurn.turn_kind} /></span>
                     </div>
-                    <p className="form-hint">{historyTurn.summary || "No public turn summary saved."}</p>
+                    <p className="form-hint">{historyTurn.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
                   </article>
                 ))}
               </div>
             ) : (
-              <p className="form-hint">No public turn history is available for this POV agent.</p>
+              <p className="form-hint"><Bi zh="该角色暂无回合历史。" en="No turn history is available for this character." /></p>
             )}
           </section>
 
-          <section className="panel error-box" aria-labelledby="convert-heading">
-            <p className="eyebrow">Draft Handoff</p>
-            <h2 id="convert-heading">Convert to chapter draft</h2>
+          <section className="panel" aria-labelledby="convert-heading">
+            <p className="eyebrow"><Bi zh="写作台" en="Writer" /></p>
+            <h2 id="convert-heading"><Bi zh="转为章节草稿" en="Convert to chapter draft" /></h2>
             <RuntimeStatusLine runtimeStatus={runtimeStatus} />
+            {runtimeStatus.status === "success" && runtimeStatus.runId ? (
+              <a className="overview-next-link" href={writerRunHref(tenantSlug, projectId, runtimeStatus.runId)}>
+                <Bi zh="在写作台查看" en="View in Writer" />
+                <ChevronRight aria-hidden="true" size={18} />
+              </a>
+            ) : null}
             <form action={convertCharacterInteractionToChapterDraftAction} className="binding-form">
-              <label htmlFor="character-convert-interaction">Interaction</label>
+              <label htmlFor="character-convert-interaction"><Bi zh="互动" en="Interaction" /></label>
               {interactions.ok && interactions.items.length > 0 ? (
                 <select
                   id="character-convert-interaction"
                   name="convertInteractionId"
-                  defaultValue={selectedInteraction.ok ? selectedInteraction.interaction_id : latestInteractionId}
+                  defaultValue={activeInteractionId}
                 >
-                  {interactions.items.map((interaction) => (
+                  {interactions.items.map((interaction, index) => (
                     <option key={interaction.interaction_id} value={interaction.interaction_id}>
-                      {interaction.title || interaction.interaction_id}
+                      {interaction.title || tx(locale, `未命名互动 ${index + 1}`, `Untitled interaction ${index + 1}`)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input
+                <select
                   id="character-convert-interaction"
                   name="convertInteractionId"
-                  placeholder="Persisted interaction id"
-                />
+                  disabled
+                ><option value="">{tx(locale, "暂无互动", "No interaction available")}</option></select>
               )}
-              <label htmlFor="character-target-chapter">Target chapter</label>
-              <input
-                id="character-target-chapter"
-                name="targetChapterId"
-                placeholder="Optional chapter id"
-              />
-              <label htmlFor="character-pov-mode">POV mode</label>
+              <label htmlFor="character-target-chapter"><Bi zh="目标章节" en="Target chapter" /></label>
+              <input id="character-target-chapter" name="targetChapterId" placeholder={tx(locale, "可选章节", "Optional chapter")} />
+              <label htmlFor="character-target-scene"><Bi zh="目标场景" en="Target scene" /></label>
+              <input id="character-target-scene" name="targetSceneId" placeholder={tx(locale, "可选场景", "Optional scene")} />
+              <label htmlFor="character-pov-mode"><Bi zh="视角模式" en="POV mode" /></label>
               <select id="character-pov-mode" name="povMode" defaultValue="keep_first_person">
-                <option value="keep_first_person">Keep first person</option>
-                <option value="first_person_to_third_person">First to third person</option>
+                <option value="keep_first_person">{tx(locale, "保持第一人称", "Keep first person")}</option>
+                <option value="first_person_to_third_person">{tx(locale, "第一人称转第三人称", "First to third person")}</option>
               </select>
-              <button type="submit">Request chapter draft conversion</button>
+              <SubmitButton idleLabel={<Bi zh="提交章节草稿" en="Request chapter draft" />} pendingLabel={<Bi zh="提交中…" en="Submitting…" />} />
             </form>
-            <p className="form-hint">
-              Writer run queued: the handoff starts the real Writer pipeline and does not fabricate a draft in this panel.
-            </p>
           </section>
-        </aside>
+
+          <section className="panel" aria-labelledby="character-proposals-heading">
+            <p className="eyebrow"><Bi zh="候选" en="Proposals" /></p>
+            <h2 id="character-proposals-heading"><Bi zh="互动候选" en="Interaction proposals" /></h2>
+            <CharacterProposalReview
+              action={adoptCharacterProposalAction}
+              proposals={characterProposals}
+            />
+          </section>
+            </div>
+          </details>
+        </InspectorPanel>
       </div>
     </div>
   );
+}
+
+function WorldlinePreparationSelector({
+  anchorSessionId,
+  locale,
+  preparations,
+  prepareId,
+  selectWorldlinePreparationAction,
+}: {
+  anchorSessionId: string;
+  locale: Locale;
+  preparations: WorldlinePreparationsSummary;
+  prepareId: string;
+  selectWorldlinePreparationAction: (formData: FormData) => Promise<void>;
+}) {
+  if (!preparations.ok) {
+    return <p className="form-hint"><FailureText /></p>;
+  }
+  if (preparations.items.length === 0) {
+    return (
+      <p className="form-hint">
+        <Bi zh="暂无角色准备记录。请先在「世界线」完成角色准备。" en="No preparations are available yet. Prepare agents in Worldline first." />
+      </p>
+    );
+  }
+
+  return (
+    <form action={selectWorldlinePreparationAction} className="binding-form">
+      <input name="anchorSessionId" type="hidden" value={anchorSessionId} />
+      <label htmlFor="character-preparation-select"><Bi zh="准备记录" en="Preparation" /></label>
+      <select id="character-preparation-select" name="prepareId" defaultValue={prepareId}>
+        <option value="">{tx(locale, "选择准备记录", "Select preparation")}</option>
+        {preparations.items.map((preparation, index) => (
+          <option key={preparation.prepare_id} value={preparation.prepare_id}>
+            {(preparation.goal_summary || tx(locale, `未命名准备 ${index + 1}`, `Untitled preparation ${index + 1}`))
+              + ` · ${preparation.status}`}
+          </option>
+        ))}
+      </select>
+      <button type="submit"><Bi zh="载入准备记录" en="Load preparation" /></button>
+    </form>
+  );
+}
+
+function writerRunHref(tenantSlug: string, projectId: string, runId: string) {
+  const query = new URLSearchParams();
+  query.set("runId", runId);
+  return `/${encodeURIComponent(tenantSlug)}/projects/${encodeURIComponent(projectId)}/writer?${query.toString()}`;
+}
+
+function CharacterProposalReview({
+  action,
+  proposals,
+}: {
+  action: (formData: FormData) => Promise<void>;
+  proposals: CharacterProposalsSummary;
+}) {
+  if (!proposals.ok) {
+    if (proposals.code === "CHARACTER_PROPOSALS_NOT_SELECTED") {
+      return null;
+    }
+    return (
+      <div className="error-box">
+        <p className="form-hint"><FailureText /></p>
+      </div>
+    );
+  }
+  if (proposals.items.length === 0) {
+    return <p className="form-hint"><Bi zh="暂无互动候选。" en="No interaction proposals are available." /></p>;
+  }
+  return (
+    <div className="stack">
+      {proposals.items.map((proposal) => (
+        <article className="subtle-card" key={proposal.asset_id}>
+          <div className="status-row">
+            <span className="status-pill"><StatusValue value={proposal.proposal_type} /></span>
+            <span className="status-pill"><StatusValue value={proposal.lifecycle} /></span>
+          </div>
+          <h3>{proposal.title}</h3>
+          <p className="form-hint">{proposal.summary}</p>
+          {proposal.lifecycle === "candidate" ? (
+            <form action={action} className="binding-form">
+              <input type="hidden" name="proposalInteractionId" value={proposal.interaction_id} />
+              <input type="hidden" name="proposalAssetId" value={proposal.asset_id} />
+              <label htmlFor={`proposal-note-${proposal.asset_id}`}><Bi zh="采用备注" en="Adoption note" /></label>
+              <input id={`proposal-note-${proposal.asset_id}`} name="proposalNote" />
+              <button type="submit">
+                <Check size={16} aria-hidden="true" />
+                <Bi zh="采用" en="Adopt" />
+              </button>
+            </form>
+          ) : null}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function CharacterRuntimeEvents({ events }: { events: CharacterInteractionEventsSummary }) {
+  if (!events.ok) {
+    if (events.code === "CHARACTER_INTERACTION_EVENTS_NOT_SELECTED") {
+      return null;
+    }
+    return (
+      <div className="error-box">
+        <p className="form-hint"><FailureText /></p>
+      </div>
+    );
+  }
+  if (events.items.length === 0) {
+    return <p className="form-hint"><Bi zh="暂无运行事件。" en="No runtime events are available." /></p>;
+  }
+  return (
+    <div className="stack" aria-label="Character runtime events">
+      {events.items.map((event) => (
+        <article className="subtle-card" key={event.event_id}>
+          <div className="status-row">
+            <span className="status-pill"><StatusValue value={event.event_type} /></span>
+            <span className="status-pill">#{event.sequence}</span>
+          </div>
+          <p className="form-hint">
+            <StatusValue value={stringMetadata(event.payload.status) || "recorded"} />
+            {numberMetadata(event.payload.memory_candidate_count) > 0
+              ? ` · memory ${numberMetadata(event.payload.memory_candidate_count)}`
+              : ""}
+            {numberMetadata(event.payload.relation_candidate_count) > 0
+              ? ` · relation ${numberMetadata(event.payload.relation_candidate_count)}`
+              : ""}
+            {numberMetadata(event.payload.world_state_candidate_count) > 0
+              ? ` · world ${numberMetadata(event.payload.world_state_candidate_count)}`
+              : ""}
+          </p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function stringMetadata(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function numberMetadata(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function SelectedPublicTurnReplay({
@@ -752,14 +826,13 @@ function SelectedPublicTurnReplay({
   if (!selectedTurns.ok) {
     return (
       <div>
-        <strong>{selectedTurns.code}</strong>
-        <p className="form-hint">{selectedTurns.message}</p>
+        <p className="form-hint"><FailureText /></p>
       </div>
     );
   }
 
   if (selectedTurns.items.length === 0) {
-    return <p className="form-hint">No public turn metadata is recorded for this interaction.</p>;
+    return <p className="form-hint"><Bi zh="当前互动暂无回合记录。" en="No turns are recorded for this interaction." /></p>;
   }
 
   return (
@@ -767,13 +840,11 @@ function SelectedPublicTurnReplay({
       {selectedTurns.items.map((turn) => (
         <article className="subtle-card" key={turn.turn_id}>
           <div className="status-row">
-            <span className="status-pill">Turn {turn.turn_order}</span>
-            <span className="status-pill">{turn.actor_type}</span>
-            <span className="status-pill">{turn.turn_kind}</span>
+            <span className="status-pill"><Bi zh="回合" en="Turn" /> {turn.turn_order}</span>
+            <span className="status-pill"><StatusValue value={turn.actor_type} /></span>
+            <span className="status-pill"><StatusValue value={turn.turn_kind} /></span>
           </div>
-          <p className="form-hint">{turn.summary || "No public turn summary saved."}</p>
-          <pre className="json-block">{JSON.stringify(turn.action, null, 2)}</pre>
-          <pre className="json-block">{JSON.stringify(turn.world_state_delta, null, 2)}</pre>
+          <p className="form-hint">{turn.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
         </article>
       ))}
     </div>
@@ -788,8 +859,7 @@ function SelectedInteractionDetail({
   if (!selectedInteraction.ok) {
     return (
       <div>
-        <strong>{selectedInteraction.code}</strong>
-        <p className="form-hint">{selectedInteraction.message}</p>
+        <p className="form-hint"><FailureText /></p>
       </div>
     );
   }
@@ -798,29 +868,27 @@ function SelectedInteractionDetail({
     <div className="stack">
       <article className="subtle-card">
         <div className="status-row">
-          <span className="status-pill">{selectedInteraction.mode}</span>
-          <span className="status-pill">{selectedInteraction.status}</span>
-          <span className="status-pill">{selectedInteraction.turns.length} turns</span>
+          <span className="status-pill"><StatusValue value={selectedInteraction.mode} /></span>
+          <span className="status-pill"><StatusValue value={selectedInteraction.status} /></span>
+          <span className="status-pill">{selectedInteraction.turns.length} <Bi zh="个回合" en="turns" /></span>
         </div>
-        <h3>{selectedInteraction.title || selectedInteraction.interaction_id}</h3>
-        <p className="form-hint">{selectedInteraction.summary || "No public summary saved."}</p>
+        <h3>{selectedInteraction.title || <Bi zh="未命名互动" en="Untitled interaction" />}</h3>
+        <p className="form-hint">{selectedInteraction.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
       </article>
 
       {selectedInteraction.turns.length > 0 ? (
         selectedInteraction.turns.map((turn) => (
           <article className="subtle-card" key={turn.turn_id}>
             <div className="status-row">
-              <span className="status-pill">Turn {turn.turn_order}</span>
-              <span className="status-pill">{turn.actor_type}</span>
-              <span className="status-pill">{turn.turn_kind}</span>
+              <span className="status-pill"><Bi zh="回合" en="Turn" /> {turn.turn_order}</span>
+              <span className="status-pill"><StatusValue value={turn.actor_type} /></span>
+              <span className="status-pill"><StatusValue value={turn.turn_kind} /></span>
             </div>
-            <p className="form-hint">{turn.summary || "No public turn summary saved."}</p>
-            <pre className="json-block">{JSON.stringify(turn.action, null, 2)}</pre>
-            <pre className="json-block">{JSON.stringify(turn.world_state_delta, null, 2)}</pre>
+            <p className="form-hint">{turn.summary || <Bi zh="暂无摘要。" en="No summary available." />}</p>
           </article>
         ))
       ) : (
-        <p className="form-hint">No explicit public turns are recorded for this interaction.</p>
+        <p className="form-hint"><Bi zh="当前互动暂无回合记录。" en="No turns are recorded for this interaction." /></p>
       )}
     </div>
   );
@@ -842,11 +910,9 @@ function InteractionStatusLine({
 
   return (
     <div className={interactionStatus.status === "success" ? "success-box" : "error-box"}>
-      <strong>{interactionStatus.code}</strong>
-      <p className="form-hint">{interactionStatus.message}</p>
-      {interactionStatus.interactionId ? (
-        <p className="form-hint">Interaction {interactionStatus.interactionId}</p>
-      ) : null}
+      <p className="form-hint">
+        {interactionStatus.status === "success" ? <Bi zh="互动已更新。" en="Interaction updated." /> : <Bi zh="操作未完成，请检查输入或稍后重试。" en="The action could not be completed. Check the input or try again." />}
+      </p>
     </div>
   );
 }
@@ -867,11 +933,9 @@ function TurnStatusLine({
 
   return (
     <div className={turnStatus.status === "success" ? "success-box" : "error-box"}>
-      <strong>{turnStatus.code}</strong>
-      <p className="form-hint">{turnStatus.message}</p>
-      {turnStatus.turnId ? (
-        <p className="form-hint">Turn {turnStatus.turnId}</p>
-      ) : null}
+      <p className="form-hint">
+        {turnStatus.status === "success" ? <Bi zh="回合已记录。" en="Turn recorded." /> : <Bi zh="操作未完成，请检查输入或稍后重试。" en="The action could not be completed. Check the input or try again." />}
+      </p>
     </div>
   );
 }
@@ -883,16 +947,24 @@ function RuntimeStatusLine({
     status: string;
     code: string;
     message: string;
+    runId: string;
   };
 }) {
   if (!runtimeStatus.status) {
     return null;
   }
 
+  const eventsStatus = runtimeStatus.code === "CHARACTER_INTERACTION_EVENTS_AVAILABLE";
+
   return (
     <div className={runtimeStatus.status === "success" ? "success-box" : "error-box"}>
-      <strong>{runtimeStatus.code}</strong>
-      <p className="form-hint">{runtimeStatus.message}</p>
+      <p className="form-hint">
+        {runtimeStatus.status === "success" ? (
+          eventsStatus
+            ? <Bi zh="运行事件已刷新。" en="Runtime events refreshed." />
+            : <Bi zh="章节候选草稿任务已提交。" en="Chapter draft request submitted as a candidate." />
+        ) : <Bi zh="操作未完成，请检查输入或稍后重试。" en="The action could not be completed. Check the input or try again." />}
+      </p>
     </div>
   );
 }

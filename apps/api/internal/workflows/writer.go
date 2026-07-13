@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 )
 
 const WriterWorkflowType = "writer_run"
@@ -84,11 +85,13 @@ type GetManuscriptExportInput struct {
 }
 
 type WriterRun struct {
-	RunID     string
-	TraceID   string
-	TenantID  string
-	ProjectID string
-	Status    string
+	RunID       string
+	TraceID     string
+	TenantID    string
+	ProjectID   string
+	Mode        string
+	Instruction string
+	Status      string
 }
 
 type Manuscript struct {
@@ -282,11 +285,13 @@ func (s *LocalWriterStarter) StartWriterRun(_ context.Context, input StartWriter
 	}
 	traceID := traceIDForRun(runID)
 	run := WriterRun{
-		RunID:     runID,
-		TraceID:   traceID,
-		TenantID:  input.TenantID,
-		ProjectID: input.ProjectID,
-		Status:    "queued",
+		RunID:       runID,
+		TraceID:     traceID,
+		TenantID:    input.TenantID,
+		ProjectID:   input.ProjectID,
+		Mode:        strings.TrimSpace(input.Mode),
+		Instruction: strings.TrimSpace(input.Instruction),
+		Status:      "queued",
 	}
 	eventID, err := newRunID()
 	if err != nil {
@@ -425,19 +430,26 @@ func (s *DisabledDraftReviewStore) ListDraftReviews(context.Context, ListDraftRe
 }
 
 type TemporalWriterConfig struct {
-	Client            TemporalWorkflowClient
-	TaskQueue         string
-	AdmissionStore    WriterAdmissionStore
-	CancellationStore WriterCancellationStore
+	Client                  TemporalWorkflowClient
+	TaskQueue               string
+	AdmissionStore          WriterAdmissionStore
+	CancellationStore       WriterCancellationStore
+	CancellationWaitTimeout time.Duration
+}
+
+type temporalWriterCompletionClient interface {
+	GetWorkflow(context.Context, string, string) client.WorkflowRun
 }
 
 type TemporalWriterStarter struct {
-	client            TemporalWorkflowClient
-	taskQueue         string
-	admissionStore    WriterAdmissionStore
-	cancellationStore WriterCancellationStore
-	mu                sync.RWMutex
-	runs              map[string]WriterRun
+	client                  TemporalWorkflowClient
+	completionClient        temporalWriterCompletionClient
+	taskQueue               string
+	admissionStore          WriterAdmissionStore
+	cancellationStore       WriterCancellationStore
+	cancellationWaitTimeout time.Duration
+	mu                      sync.RWMutex
+	runs                    map[string]WriterRun
 }
 
 func NewTemporalWriterStarter(config TemporalWriterConfig) *TemporalWriterStarter {
@@ -451,12 +463,19 @@ func NewTemporalWriterStarter(config TemporalWriterConfig) *TemporalWriterStarte
 			cancellationStore = store
 		}
 	}
+	completionClient, _ := config.Client.(temporalWriterCompletionClient)
+	cancellationWaitTimeout := config.CancellationWaitTimeout
+	if cancellationWaitTimeout <= 0 {
+		cancellationWaitTimeout = 30 * time.Second
+	}
 	return &TemporalWriterStarter{
-		client:            config.Client,
-		taskQueue:         taskQueue,
-		admissionStore:    config.AdmissionStore,
-		cancellationStore: cancellationStore,
-		runs:              map[string]WriterRun{},
+		client:                  config.Client,
+		completionClient:        completionClient,
+		taskQueue:               taskQueue,
+		admissionStore:          config.AdmissionStore,
+		cancellationStore:       cancellationStore,
+		cancellationWaitTimeout: cancellationWaitTimeout,
+		runs:                    map[string]WriterRun{},
 	}
 }
 
@@ -555,11 +574,13 @@ func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartW
 		}
 	}
 	run := WriterRun{
-		RunID:     runID,
-		TraceID:   traceID,
-		TenantID:  input.TenantID,
-		ProjectID: input.ProjectID,
-		Status:    "queued",
+		RunID:       runID,
+		TraceID:     traceID,
+		TenantID:    input.TenantID,
+		ProjectID:   input.ProjectID,
+		Mode:        strings.TrimSpace(input.Mode),
+		Instruction: strings.TrimSpace(input.Instruction),
+		Status:      "queued",
 	}
 	s.mu.Lock()
 	s.runs[runID] = run
@@ -607,8 +628,13 @@ func (s *TemporalWriterStarter) CancelWriterRun(ctx context.Context, input Cance
 			Message: fmt.Sprintf("failed to cancel writer_run workflow: %v", err),
 		}
 	}
+	if err := s.waitForTemporalCancellation(ctx, "writer_run_"+runID); err != nil {
+		return WriterRunCancellation{}, err
+	}
 	if s.cancellationStore != nil {
-		err := s.cancellationStore.CancelWriterRun(ctx, WriterCancellationInput{
+		persistContext, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelPersist()
+		err := s.cancellationStore.CancelWriterRun(persistContext, WriterCancellationInput{
 			TenantID:    strings.TrimSpace(input.TenantID),
 			RunID:       runID,
 			ActorUserID: strings.TrimSpace(input.ActorUserID),
@@ -626,6 +652,32 @@ func (s *TemporalWriterStarter) CancelWriterRun(ctx context.Context, input Cance
 	}
 	s.mu.Unlock()
 	return WriterRunCancellation{RunID: runID, Status: status}, nil
+}
+
+func (s *TemporalWriterStarter) waitForTemporalCancellation(ctx context.Context, workflowID string) error {
+	if s.completionClient == nil {
+		return &AppError{
+			Code:    "WORKFLOW_CANCEL_BACKEND_UNCONFIGURED",
+			Message: "Temporal cancellation completion backend is not configured",
+		}
+	}
+	waitContext, cancelWait := context.WithTimeout(context.WithoutCancel(ctx), s.cancellationWaitTimeout)
+	defer cancelWait()
+	err := s.completionClient.GetWorkflow(waitContext, workflowID, "").Get(waitContext, nil)
+	if err == nil {
+		return &AppError{
+			Code:    "WORKFLOW_CANCEL_NOT_ACTIVE",
+			Message: "writer workflow completed before cancellation was confirmed",
+		}
+	}
+	var cancelled *temporal.CanceledError
+	if errors.As(err, &cancelled) {
+		return nil
+	}
+	return &AppError{
+		Code:    "WORKFLOW_CANCEL_CONFIRM_FAILED",
+		Message: "writer workflow cancellation could not be confirmed",
+	}
 }
 
 func newRunID() (string, error) {

@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+const (
+	defaultGraphPageSize   = 300
+	maximumGraphPageSize   = 1000
+	defaultClusterPageSize = 100
+	maximumClusterPageSize = 500
+)
+
 type GetCurrentInput struct {
 	TenantID  string
 	ProjectID string
@@ -18,6 +25,7 @@ type GetViewInput struct {
 	ProjectID    string
 	ViewID       string
 	Types        []string
+	Offset       int
 	Limit        int
 	IncludeEdges bool
 }
@@ -52,6 +60,7 @@ type GetLayoutInput struct {
 type ListClustersInput struct {
 	TenantID  string
 	ProjectID string
+	Offset    int
 	Limit     int
 }
 
@@ -86,19 +95,20 @@ type CurrentSnapshot struct {
 }
 
 type GraphNodeSummary struct {
-	NodeID        string         `json:"node_id"`
-	GraphID       string         `json:"graph_id"`
-	ProjectID     string         `json:"project_id"`
-	NodeType      string         `json:"node_type"`
-	Title         string         `json:"title"`
-	Summary       string         `json:"summary"`
-	Lifecycle     string         `json:"lifecycle"`
-	Importance    float64        `json:"importance"`
-	ClusterID     string         `json:"cluster_id"`
-	Attributes    map[string]any `json:"attributes"`
-	EvidenceCount int            `json:"evidence_count"`
-	CreatedAt     string         `json:"created_at"`
-	UpdatedAt     string         `json:"updated_at"`
+	NodeID            string         `json:"node_id"`
+	GraphID           string         `json:"graph_id"`
+	ProjectID         string         `json:"project_id"`
+	CanonicalEntityID string         `json:"canonical_entity_id"`
+	NodeType          string         `json:"node_type"`
+	Title             string         `json:"title"`
+	Summary           string         `json:"summary"`
+	Lifecycle         string         `json:"lifecycle"`
+	Importance        float64        `json:"importance"`
+	ClusterID         string         `json:"cluster_id"`
+	Attributes        map[string]any `json:"attributes"`
+	EvidenceCount     int            `json:"evidence_count"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
 }
 
 type GraphEdgeSummary struct {
@@ -126,6 +136,19 @@ type GraphView struct {
 	IncludeEdges bool               `json:"include_edges"`
 	Nodes        []GraphNodeSummary `json:"nodes"`
 	Edges        []GraphEdgeSummary `json:"edges"`
+	ReadStrategy GraphReadStrategy  `json:"read_strategy"`
+}
+
+type GraphReadStrategy struct {
+	Mode          string `json:"mode"`
+	Offset        int    `json:"offset"`
+	AppliedLimit  int    `json:"applied_limit"`
+	MaxPageSize   int    `json:"max_page_size"`
+	ReturnedCount int    `json:"returned_count"`
+	HasMore       bool   `json:"has_more"`
+	NextOffset    int    `json:"next_offset,omitempty"`
+	Ordering      string `json:"ordering"`
+	EdgeScope     string `json:"edge_scope,omitempty"`
 }
 
 type GraphNodeDetail struct {
@@ -186,10 +209,11 @@ type GraphClusterRecord struct {
 }
 
 type GraphClusters struct {
-	GraphID   string               `json:"graph_id"`
-	ProjectID string               `json:"project_id"`
-	Limit     int                  `json:"limit"`
-	Items     []GraphClusterRecord `json:"items"`
+	GraphID      string               `json:"graph_id"`
+	ProjectID    string               `json:"project_id"`
+	Limit        int                  `json:"limit"`
+	Items        []GraphClusterRecord `json:"items"`
+	ReadStrategy GraphReadStrategy    `json:"read_strategy"`
 }
 
 type Reader interface {
@@ -423,6 +447,21 @@ func NewSQLCandidateAdoptionStore(config SQLCandidateAdoptionStoreConfig) *SQLCa
 	return &SQLCandidateAdoptionStore{queryer: config.Queryer}
 }
 
+func (r *SQLReader) queryRows(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	if tenantQueryer, ok := r.queryer.(SQLTenantQueryer); ok {
+		return tenantQueryer.QueryTenantContext(ctx, strings.TrimSpace(tenantID), query, args...)
+	}
+	return r.queryer.QueryContext(ctx, query, args...)
+}
+
+func queryFailed() error {
+	return &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: "story graph query failed"}
+}
+
+func candidateAdoptionFailed() error {
+	return &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: "story graph candidate adoption failed"}
+}
+
 func (s *SQLCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input AdoptCandidateInput) (AdoptionResult, error) {
 	tenantID := strings.TrimSpace(input.TenantID)
 	projectID := strings.TrimSpace(input.ProjectID)
@@ -453,7 +492,7 @@ func (s *SQLCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input Ad
 		targetKind,
 	)
 	if err != nil {
-		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+		return AdoptionResult{}, candidateAdoptionFailed()
 	}
 	closeRows := true
 	defer func() {
@@ -463,11 +502,11 @@ func (s *SQLCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input Ad
 	}()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+			return AdoptionResult{}, candidateAdoptionFailed()
 		}
 		closeRows = false
 		if err := rows.Close(); err != nil {
-			return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+			return AdoptionResult{}, candidateAdoptionFailed()
 		}
 		return AdoptionResult{}, &AppError{Code: "NOT_FOUND", Message: "story graph candidate was not found or cannot be adopted"}
 	}
@@ -479,7 +518,7 @@ func (s *SQLCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input Ad
 		} else {
 			_ = rows.Close()
 		}
-		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+		return AdoptionResult{}, candidateAdoptionFailed()
 	}
 	if err := rows.Err(); err != nil {
 		closeRows = false
@@ -488,17 +527,17 @@ func (s *SQLCandidateAdoptionStore) AdoptCandidate(ctx context.Context, input Ad
 		} else {
 			_ = rows.Close()
 		}
-		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+		return AdoptionResult{}, candidateAdoptionFailed()
 	}
 	closeRows = false
 	if err := rows.Close(); err != nil {
-		return AdoptionResult{}, &AppError{Code: "STORY_GRAPH_CANDIDATE_ADOPTION_FAILED", Message: err.Error()}
+		return AdoptionResult{}, candidateAdoptionFailed()
 	}
 	return result, nil
 }
 
 const relationshipCandidateAdoptionSQL = `WITH candidate AS (
-  SELECT
+	SELECT
     asset_id,
     project_id,
     asset_type,
@@ -522,6 +561,14 @@ const relationshipCandidateAdoptionSQL = `WITH candidate AS (
     AND lifecycle = 'candidate'
     AND source_kind = 'graph_bond_generation'
     AND asset_type = 'graph_bond'
+  FOR UPDATE OF assets
+),
+source_run AS (
+  SELECT workflow_runs.run_id
+  FROM workflow_runs, candidate
+  WHERE workflow_runs.tenant_id::text = $1
+    AND workflow_runs.project_id::text = $2
+    AND workflow_runs.run_id::text = candidate.source_run_id
 ),
 relationship_target AS (
   INSERT INTO relationships (
@@ -531,27 +578,31 @@ relationship_target AS (
   )
   SELECT
     $1::uuid,
-    project_id,
-    source_entity_name,
-    target_entity_name,
-    relationship_type,
-    NULLIF(summary, ''),
-    source_run_id::uuid,
-    CASE WHEN first_seen_segment_id IS NULL THEN NULL ELSE first_seen_segment_id::uuid END,
+    candidate.project_id,
+    candidate.source_entity_name,
+    candidate.target_entity_name,
+    candidate.relationship_type,
+    NULLIF(candidate.summary, ''),
+    source_run.run_id,
+    first_segment.segment_id,
     NULL,
     jsonb_strip_nulls(jsonb_build_object(
-      'source_asset_id', asset_id::text,
-      'source_kind', source_kind,
-      'source_ref', source_ref,
+      'source_asset_id', candidate.asset_id::text,
+      'source_kind', candidate.source_kind,
+      'source_ref', candidate.source_ref,
       'proposal_type', 'graph_bond',
-      'confidence', confidence
+      'confidence', candidate.confidence
     ))
   FROM candidate
+  JOIN source_run ON true
+  LEFT JOIN text_segments AS first_segment
+    ON first_segment.tenant_id::text = $1
+   AND first_segment.project_id::text = $2
+   AND first_segment.segment_id::text = candidate.first_seen_segment_id
   WHERE $6 = 'relationship'
-    AND source_entity_name IS NOT NULL
-    AND target_entity_name IS NOT NULL
-    AND relationship_type IS NOT NULL
-    AND source_run_id IS NOT NULL
+    AND candidate.source_entity_name IS NOT NULL
+    AND candidate.target_entity_name IS NOT NULL
+    AND candidate.relationship_type IS NOT NULL
   ON CONFLICT (tenant_id, project_id, source_entity_name, target_entity_name, relationship_type)
   DO UPDATE SET
     summary = COALESCE(EXCLUDED.summary, relationships.summary),
@@ -584,21 +635,21 @@ audit AS (
       ELSE NULL
     END,
     'story_graph.candidate_adopt',
-    $6,
+    $6::text,
     target_id::uuid,
     project_id::uuid,
     NULL,
     $5,
     jsonb_build_object(
       'asset_id', asset_id,
-      'target_kind', $6,
+      'target_kind', $6::text,
       'target_id', target_id,
       'actor_id', $4
     )
   FROM adopted
   RETURNING audit_id
 )
-SELECT asset_id, project_id, $6, target_id, 'adopted'
+SELECT asset_id, project_id, $6::text, target_id, 'adopted'
 FROM adopted`
 
 const plotThreadCandidateAdoptionSQL = `WITH candidate AS (
@@ -623,6 +674,14 @@ const plotThreadCandidateAdoptionSQL = `WITH candidate AS (
     AND lifecycle = 'candidate'
     AND source_kind = 'graph_bond_generation'
     AND asset_type = 'plot_thread'
+  FOR UPDATE OF assets
+),
+source_run AS (
+  SELECT workflow_runs.run_id
+  FROM workflow_runs, candidate
+  WHERE workflow_runs.tenant_id::text = $1
+    AND workflow_runs.project_id::text = $2
+    AND workflow_runs.run_id::text = candidate.source_run_id
 ),
 plot_thread_target AS (
   INSERT INTO plot_threads (
@@ -631,23 +690,32 @@ plot_thread_target AS (
   )
   SELECT
     $1::uuid,
-    project_id,
-    source_run_id::uuid,
-    title,
-    COALESCE(thread_status, 'open'),
-    NULLIF(summary, ''),
-    CASE WHEN first_seen_segment_id IS NULL THEN NULL ELSE first_seen_segment_id::uuid END,
+    candidate.project_id,
+    source_run.run_id,
+    candidate.title,
+    CASE candidate.thread_status
+      WHEN 'open' THEN 'open'
+      WHEN 'resolved' THEN 'resolved'
+      WHEN 'abandoned' THEN 'abandoned'
+      ELSE 'open'
+    END,
+    NULLIF(candidate.summary, ''),
+    first_segment.segment_id,
     NULL,
     jsonb_strip_nulls(jsonb_build_object(
-      'source_asset_id', asset_id::text,
-      'source_kind', source_kind,
-      'source_ref', source_ref,
+      'source_asset_id', candidate.asset_id::text,
+      'source_kind', candidate.source_kind,
+      'source_ref', candidate.source_ref,
       'proposal_type', 'plot_thread',
-      'thread_type', thread_type,
-      'confidence', confidence
+      'thread_type', candidate.thread_type,
+      'confidence', candidate.confidence
     ))
   FROM candidate
-  WHERE source_run_id IS NOT NULL
+  JOIN source_run ON true
+  LEFT JOIN text_segments AS first_segment
+    ON first_segment.tenant_id::text = $1
+   AND first_segment.project_id::text = $2
+   AND first_segment.segment_id::text = candidate.first_seen_segment_id
   ON CONFLICT (tenant_id, project_id, title)
   DO UPDATE SET
     status = COALESCE(EXCLUDED.status, plot_threads.status),
@@ -681,21 +749,21 @@ audit AS (
       ELSE NULL
     END,
     'story_graph.candidate_adopt',
-    $6,
+    $6::text,
     target_id::uuid,
     project_id::uuid,
     NULL,
     $5,
     jsonb_build_object(
       'asset_id', asset_id,
-      'target_kind', $6,
+      'target_kind', $6::text,
       'target_id', target_id,
       'actor_id', $4
     )
   FROM adopted
   RETURNING audit_id
 )
-SELECT asset_id, project_id, $6, target_id, 'adopted'
+SELECT asset_id, project_id, $6::text, target_id, 'adopted'
 FROM adopted`
 
 func (r *SQLReader) GetCurrentSnapshot(ctx context.Context, input GetCurrentInput) (CurrentSnapshot, error) {
@@ -722,16 +790,16 @@ FROM story_graph_snapshots
 WHERE tenant_id::text = $1
   AND project_id::text = $2
   AND status IN ('ready', 'building', 'failed')
-ORDER BY version DESC, created_at DESC
+ORDER BY version DESC, created_at DESC, graph_id ASC
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID)
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID)
 	if err != nil {
-		return CurrentSnapshot{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return CurrentSnapshot{}, queryFailed()
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return CurrentSnapshot{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+			return CurrentSnapshot{}, queryFailed()
 		}
 		return CurrentSnapshot{}, &AppError{Code: "NOT_FOUND", Message: "story graph snapshot not found"}
 	}
@@ -748,7 +816,7 @@ LIMIT 1`
 		&snapshot.CreatedAt,
 		&snapshot.UpdatedAt,
 	); err != nil {
-		return CurrentSnapshot{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return CurrentSnapshot{}, queryFailed()
 	}
 	return snapshot, nil
 }
@@ -768,7 +836,8 @@ func (r *SQLReader) GetView(ctx context.Context, input GetViewInput) (GraphView,
 		return GraphView{}, err
 	}
 	limit := normalizeLimit(input.Limit)
-	nodes, err := r.listNodes(ctx, tenantID, projectID, current.GraphID, input.Types, limit)
+	offset := normalizeOffset(input.Offset)
+	nodes, hasMore, err := r.listNodes(ctx, tenantID, projectID, current.GraphID, input.Types, offset, limit)
 	if err != nil {
 		return GraphView{}, err
 	}
@@ -787,6 +856,7 @@ func (r *SQLReader) GetView(ctx context.Context, input GetViewInput) (GraphView,
 		IncludeEdges: input.IncludeEdges,
 		Nodes:        nodes,
 		Edges:        edges,
+		ReadStrategy: graphViewReadStrategy(offset, limit, len(nodes), hasMore, input.IncludeEdges),
 	}, nil
 }
 
@@ -875,7 +945,7 @@ WHERE tenant_id::text = $1
   AND graph_id::text = $3
   AND owner_type = $4
   AND owner_id::text = $5
-ORDER BY confidence DESC NULLS LAST, created_at DESC
+ORDER BY confidence DESC NULLS LAST, created_at DESC, evidence_id ASC
 LIMIT $6`
 	if input.IncludeSnippet {
 		query = `SELECT
@@ -898,12 +968,12 @@ WHERE tenant_id::text = $1
   AND graph_id::text = $3
   AND owner_type = $4
   AND owner_id::text = $5
-ORDER BY confidence DESC NULLS LAST, created_at DESC
+ORDER BY confidence DESC NULLS LAST, created_at DESC, evidence_id ASC
 LIMIT $6`
 	}
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, current.GraphID, ownerType, ownerID, limit)
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, current.GraphID, ownerType, ownerID, limit)
 	if err != nil {
-		return GraphEvidence{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphEvidence{}, queryFailed()
 	}
 	defer rows.Close()
 	items := []GraphEvidenceRecord{}
@@ -925,7 +995,7 @@ LIMIT $6`
 				&item.CreatedAt,
 				&item.UpdatedAt,
 			); err != nil {
-				return GraphEvidence{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+				return GraphEvidence{}, queryFailed()
 			}
 		} else {
 			if err := rows.Scan(
@@ -942,13 +1012,13 @@ LIMIT $6`
 				&item.CreatedAt,
 				&item.UpdatedAt,
 			); err != nil {
-				return GraphEvidence{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+				return GraphEvidence{}, queryFailed()
 			}
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return GraphEvidence{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphEvidence{}, queryFailed()
 	}
 	return GraphEvidence{GraphID: current.GraphID, ProjectID: projectID, OwnerType: ownerType, OwnerID: ownerID, Limit: limit, Items: items}, nil
 }
@@ -980,21 +1050,21 @@ WHERE tenant_id::text = $1
   AND graph_id::text = $3
   AND view_id = $4
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, current.GraphID, viewID)
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, current.GraphID, viewID)
 	if err != nil {
-		return GraphLayout{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphLayout{}, queryFailed()
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return GraphLayout{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+			return GraphLayout{}, queryFailed()
 		}
 		return GraphLayout{}, &AppError{Code: "NOT_FOUND", Message: "story graph layout not found"}
 	}
 	var layout GraphLayout
 	var layoutText string
 	if err := rows.Scan(&layout.GraphID, &layout.ProjectID, &layout.ViewID, &layoutText, &layout.CreatedAt, &layout.UpdatedAt); err != nil {
-		return GraphLayout{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphLayout{}, queryFailed()
 	}
 	layout.Layout = parseSanitizedAttributes(layoutText)
 	return layout, nil
@@ -1014,6 +1084,7 @@ func (r *SQLReader) ListClusters(ctx context.Context, input ListClustersInput) (
 		return GraphClusters{}, err
 	}
 	limit := normalizeClusterLimit(input.Limit)
+	offset := normalizeOffset(input.Offset)
 	query := `SELECT
   cluster_id::text,
   graph_id::text,
@@ -1029,11 +1100,11 @@ FROM story_graph_clusters
 WHERE tenant_id::text = $1
   AND project_id::text = $2
   AND graph_id::text = $3
-ORDER BY node_count DESC, title ASC
-LIMIT $4`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, current.GraphID, limit)
+ORDER BY node_count DESC, title ASC, cluster_key ASC, cluster_id ASC
+LIMIT $4 OFFSET $5`
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, current.GraphID, limit+1, offset)
 	if err != nil {
-		return GraphClusters{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphClusters{}, queryFailed()
 	}
 	defer rows.Close()
 	items := []GraphClusterRecord{}
@@ -1052,35 +1123,88 @@ LIMIT $4`
 			&item.CreatedAt,
 			&item.UpdatedAt,
 		); err != nil {
-			return GraphClusters{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+			return GraphClusters{}, queryFailed()
 		}
 		item.Payload = parseSanitizedAttributes(payloadText)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return GraphClusters{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphClusters{}, queryFailed()
 	}
-	return GraphClusters{GraphID: current.GraphID, ProjectID: projectID, Limit: limit, Items: items}, nil
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return GraphClusters{
+		GraphID:      current.GraphID,
+		ProjectID:    projectID,
+		Limit:        limit,
+		Items:        items,
+		ReadStrategy: clusterReadStrategy(offset, limit, len(items), hasMore),
+	}, nil
 }
 
 func normalizeLimit(limit int) int {
 	if limit <= 0 {
-		return 300
+		return defaultGraphPageSize
 	}
-	if limit > 1000 {
-		return 1000
+	if limit > maximumGraphPageSize {
+		return maximumGraphPageSize
 	}
 	return limit
 }
 
 func normalizeClusterLimit(limit int) int {
 	if limit <= 0 {
-		return 100
+		return defaultClusterPageSize
 	}
-	if limit > 500 {
-		return 500
+	if limit > maximumClusterPageSize {
+		return maximumClusterPageSize
 	}
 	return limit
+}
+
+func normalizeOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
+func graphViewReadStrategy(offset int, limit int, returned int, hasMore bool, includeEdges bool) GraphReadStrategy {
+	strategy := GraphReadStrategy{
+		Mode:          "stable_ranked_page",
+		Offset:        offset,
+		AppliedLimit:  limit,
+		MaxPageSize:   maximumGraphPageSize,
+		ReturnedCount: returned,
+		HasMore:       hasMore,
+		Ordering:      "importance_desc,title_asc,node_id_asc",
+	}
+	if hasMore {
+		strategy.Mode = "stable_ranked_page_with_cluster_summaries"
+		strategy.NextOffset = offset + returned
+	}
+	if includeEdges {
+		strategy.EdgeScope = "induced_returned_nodes"
+	}
+	return strategy
+}
+
+func clusterReadStrategy(offset int, limit int, returned int, hasMore bool) GraphReadStrategy {
+	strategy := GraphReadStrategy{
+		Mode:          "stable_cluster_page",
+		Offset:        offset,
+		AppliedLimit:  limit,
+		MaxPageSize:   maximumClusterPageSize,
+		ReturnedCount: returned,
+		HasMore:       hasMore,
+		Ordering:      "node_count_desc,title_asc,cluster_key_asc,cluster_id_asc",
+	}
+	if hasMore {
+		strategy.NextOffset = offset + returned
+	}
+	return strategy
 }
 
 func normalizeOwnerType(ownerType string) string {
@@ -1094,11 +1218,12 @@ func normalizeOwnerType(ownerType string) string {
 	}
 }
 
-func (r *SQLReader) listNodes(ctx context.Context, tenantID string, projectID string, graphID string, types []string, limit int) ([]GraphNodeSummary, error) {
+func (r *SQLReader) listNodes(ctx context.Context, tenantID string, projectID string, graphID string, types []string, offset int, limit int) ([]GraphNodeSummary, bool, error) {
 	query := `SELECT
   node_id::text,
   graph_id::text,
   project_id::text,
+  COALESCE(canonical_entity_id::text, ''),
   node_type,
   title,
   COALESCE(summary, ''),
@@ -1114,25 +1239,29 @@ WHERE tenant_id::text = $1
   AND project_id::text = $2
   AND graph_id::text = $3
   AND ($4 = '' OR node_type = ANY(string_to_array($4, ',')))
-ORDER BY importance DESC, title ASC
-LIMIT $5`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, graphID, strings.Join(cleanStrings(types), ","), limit)
+ORDER BY importance DESC, title ASC, node_id ASC
+LIMIT $5 OFFSET $6`
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, graphID, strings.Join(cleanStrings(types), ","), limit+1, offset)
 	if err != nil {
-		return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return nil, false, queryFailed()
 	}
 	defer rows.Close()
 	nodes := []GraphNodeSummary{}
 	for rows.Next() {
 		node, err := scanNodeSummary(rows)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		nodes = append(nodes, node)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return nil, false, queryFailed()
 	}
-	return nodes, nil
+	hasMore := len(nodes) > limit
+	if hasMore {
+		nodes = nodes[:limit]
+	}
+	return nodes, hasMore, nil
 }
 
 func (r *SQLReader) listEdgesForNodes(ctx context.Context, tenantID string, projectID string, graphID string, nodes []GraphNodeSummary) ([]GraphEdgeSummary, error) {
@@ -1161,10 +1290,10 @@ WHERE tenant_id::text = $1
   AND graph_id::text = $3
   AND source_node_id::text = ANY(string_to_array($4, ','))
   AND target_node_id::text = ANY(string_to_array($4, ','))
-ORDER BY weight DESC, edge_type ASC, label ASC`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, graphID, strings.Join(nodeIDs, ","))
+ORDER BY weight DESC, edge_type ASC, label ASC, source_node_id ASC, target_node_id ASC, edge_id ASC`
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, graphID, strings.Join(nodeIDs, ","))
 	if err != nil {
-		return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return nil, queryFailed()
 	}
 	defer rows.Close()
 	edges := []GraphEdgeSummary{}
@@ -1176,7 +1305,7 @@ ORDER BY weight DESC, edge_type ASC, label ASC`
 		edges = append(edges, edge)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return nil, queryFailed()
 	}
 	return edges, nil
 }
@@ -1186,6 +1315,7 @@ func (r *SQLReader) getNodeSummary(ctx context.Context, tenantID string, project
   node_id::text,
   graph_id::text,
   project_id::text,
+  COALESCE(canonical_entity_id::text, ''),
   node_type,
   title,
   COALESCE(summary, ''),
@@ -1202,14 +1332,14 @@ WHERE tenant_id::text = $1
   AND graph_id::text = $3
   AND node_id::text = $4
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, graphID, nodeID)
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, graphID, nodeID)
 	if err != nil {
-		return GraphNodeSummary{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphNodeSummary{}, queryFailed()
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return GraphNodeSummary{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+			return GraphNodeSummary{}, queryFailed()
 		}
 		return GraphNodeSummary{}, &AppError{Code: "NOT_FOUND", Message: "story graph node not found"}
 	}
@@ -1238,14 +1368,14 @@ WHERE tenant_id::text = $1
   AND graph_id::text = $3
   AND edge_id::text = $4
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, graphID, edgeID)
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, graphID, edgeID)
 	if err != nil {
-		return GraphEdgeSummary{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphEdgeSummary{}, queryFailed()
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return GraphEdgeSummary{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+			return GraphEdgeSummary{}, queryFailed()
 		}
 		return GraphEdgeSummary{}, &AppError{Code: "NOT_FOUND", Message: "story graph edge not found"}
 	}
@@ -1254,21 +1384,21 @@ LIMIT 1`
 
 func (r *SQLReader) listNodeStrings(ctx context.Context, tableName string, columnName string, tenantID string, projectID string, graphID string, nodeID string) ([]string, error) {
 	query := "SELECT " + columnName + " FROM " + tableName + " WHERE tenant_id::text = $1 AND project_id::text = $2 AND graph_id::text = $3 AND node_id::text = $4 ORDER BY " + columnName + " ASC"
-	rows, err := r.queryer.QueryContext(ctx, query, tenantID, projectID, graphID, nodeID)
+	rows, err := r.queryRows(ctx, tenantID, query, tenantID, projectID, graphID, nodeID)
 	if err != nil {
-		return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return nil, queryFailed()
 	}
 	defer rows.Close()
 	values := []string{}
 	for rows.Next() {
 		var value string
 		if err := rows.Scan(&value); err != nil {
-			return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+			return nil, queryFailed()
 		}
 		values = append(values, value)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return nil, queryFailed()
 	}
 	return values, nil
 }
@@ -1280,6 +1410,7 @@ func scanNodeSummary(rows SQLRows) (GraphNodeSummary, error) {
 		&node.NodeID,
 		&node.GraphID,
 		&node.ProjectID,
+		&node.CanonicalEntityID,
 		&node.NodeType,
 		&node.Title,
 		&node.Summary,
@@ -1291,7 +1422,7 @@ func scanNodeSummary(rows SQLRows) (GraphNodeSummary, error) {
 		&node.CreatedAt,
 		&node.UpdatedAt,
 	); err != nil {
-		return GraphNodeSummary{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphNodeSummary{}, queryFailed()
 	}
 	node.Attributes = parseSanitizedAttributes(attributesText)
 	return node, nil
@@ -1316,7 +1447,7 @@ func scanEdgeSummary(rows SQLRows) (GraphEdgeSummary, error) {
 		&edge.CreatedAt,
 		&edge.UpdatedAt,
 	); err != nil {
-		return GraphEdgeSummary{}, &AppError{Code: "STORY_GRAPH_QUERY_FAILED", Message: err.Error()}
+		return GraphEdgeSummary{}, queryFailed()
 	}
 	edge.Attributes = parseSanitizedAttributes(attributesText)
 	return edge, nil

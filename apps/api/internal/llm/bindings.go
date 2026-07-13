@@ -129,19 +129,58 @@ FROM (
     ON m.channel_id = b.channel_id
    AND m.model_id = b.model_id
    AND (m.tenant_id = b.tenant_id OR m.tenant_id IS NULL)
+   AND m.enabled = TRUE
   WHERE b.tenant_id::text = $1
     AND (b.project_id::text = $2 OR b.project_id IS NULL)
     AND b.module_key = $3
+  UNION ALL
+  SELECT
+    $1::text AS tenant_id,
+    ''::text AS project_id,
+    p.module_key,
+    p.channel_id::text AS channel_id,
+    p.model_id,
+    c.provider,
+    c.base_url,
+    COALESCE(m.supports_tools, false) AS supports_tools,
+    COALESCE(m.supports_json, false) AS supports_json,
+    p.settings_jsonb::text AS settings_jsonb,
+    2 AS binding_rank
+  FROM llm_platform_module_defaults p
+  JOIN llm_channels c
+    ON c.channel_id = p.channel_id
+   AND c.tenant_id IS NULL
+   AND c.enabled = TRUE
+  JOIN llm_models m
+    ON m.channel_id = p.channel_id
+   AND m.model_id = p.model_id
+   AND m.tenant_id IS NULL
+   AND m.enabled = TRUE
+  WHERE p.module_key = $3
 ) ranked_bindings
 ORDER BY binding_rank, module_key
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.ModuleKey))
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := r.queryRows(
+		ctx,
+		tenantID,
+		query,
+		tenantID,
+		strings.TrimSpace(input.ProjectID),
+		strings.TrimSpace(input.ModuleKey),
+	)
 	if err != nil {
+		if ErrorCode(err) == "LLM_BINDING_BACKEND_UNCONFIGURED" {
+			return ModuleResolution{}, err
+		}
 		return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
+		}
+		if err := rows.Close(); err != nil {
 			return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
 		}
 		return ModuleResolution{}, &AppError{
@@ -163,14 +202,34 @@ LIMIT 1`
 		&resolution.SupportsJSON,
 		&settingsJSON,
 	); err != nil {
+		_ = rows.Close()
 		return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
 	}
+	if rows.Next() {
+		_ = rows.Close()
+		return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: "module resolution returned multiple rows"}
+	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
+	}
+	if err := rows.Close(); err != nil {
 		return ModuleResolution{}, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
 	}
 	resolution.CredentialRef = resolution.ChannelID
 	resolution.Settings = decodeSettingsJSON(settingsJSON)
 	return resolution, nil
+}
+
+func (r *SQLResolver) queryRows(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	tenantQueryer, ok := r.queryer.(SQLTenantQueryer)
+	if !ok {
+		return nil, &AppError{
+			Code:    "LLM_BINDING_BACKEND_UNCONFIGURED",
+			Message: "LLM binding backend does not support tenant-scoped queries",
+		}
+	}
+	return tenantQueryer.QueryTenantContext(ctx, tenantID, query, args...)
 }
 
 type SQLBindingStoreConfig struct {
@@ -201,36 +260,91 @@ func (s *SQLBindingStore) ListModuleBindings(ctx context.Context, input ListModu
 			Message: "LLM binding backend is not configured",
 		}
 	}
-	query := `SELECT DISTINCT ON (b.module_key)
-  b.module_key,
-  CASE WHEN b.project_id IS NULL THEN 'tenant' ELSE 'project' END AS scope,
-  b.channel_id::text,
-  c.name,
-  b.model_id,
-  c.provider,
-  c.base_url,
-  COALESCE(m.supports_tools, false),
-  COALESCE(m.supports_json, false),
-  b.settings_jsonb::text,
-  b.updated_at::text
-FROM llm_module_bindings b
-JOIN llm_channels c
-  ON c.channel_id = b.channel_id
- AND (c.tenant_id = b.tenant_id OR c.tenant_id IS NULL)
-JOIN llm_models m
-  ON m.channel_id = b.channel_id
- AND m.model_id = b.model_id
- AND (m.tenant_id = b.tenant_id OR m.tenant_id IS NULL)
-WHERE b.tenant_id::text = $1
-  AND (b.project_id::text = $2 OR b.project_id IS NULL)
-ORDER BY b.module_key, CASE WHEN b.project_id::text = $2 THEN 0 ELSE 1 END
+	tenantQueryer, ok := s.queryer.(SQLTenantQueryer)
+	if !ok {
+		return nil, &AppError{
+			Code:    "LLM_BINDING_BACKEND_UNCONFIGURED",
+			Message: "LLM binding backend does not support tenant-scoped queries",
+		}
+	}
+	query := `SELECT DISTINCT ON (module_key)
+  module_key,
+  scope,
+  channel_id,
+  channel_name,
+  model_id,
+  provider,
+  base_url,
+  supports_tools,
+  supports_json,
+  settings_jsonb,
+  updated_at
+FROM (
+  SELECT
+    b.module_key,
+    CASE WHEN b.project_id IS NULL THEN 'tenant' ELSE 'project' END AS scope,
+    b.channel_id::text AS channel_id,
+    c.name AS channel_name,
+    b.model_id,
+    c.provider,
+    c.base_url,
+    COALESCE(m.supports_tools, false) AS supports_tools,
+    COALESCE(m.supports_json, false) AS supports_json,
+    b.settings_jsonb::text AS settings_jsonb,
+    b.updated_at::text AS updated_at,
+    CASE WHEN b.project_id::text = $2 THEN 0 ELSE 1 END AS binding_rank
+  FROM llm_module_bindings b
+  JOIN llm_channels c
+    ON c.channel_id = b.channel_id
+   AND (c.tenant_id = b.tenant_id OR c.tenant_id IS NULL)
+  JOIN llm_models m
+    ON m.channel_id = b.channel_id
+   AND m.model_id = b.model_id
+   AND (m.tenant_id = b.tenant_id OR m.tenant_id IS NULL)
+   AND m.enabled = TRUE
+  WHERE b.tenant_id::text = $1
+    AND (b.project_id::text = $2 OR b.project_id IS NULL)
+  UNION ALL
+  SELECT
+    p.module_key,
+    'platform' AS scope,
+    p.channel_id::text AS channel_id,
+    c.name AS channel_name,
+    p.model_id,
+    c.provider,
+    c.base_url,
+    COALESCE(m.supports_tools, false) AS supports_tools,
+    COALESCE(m.supports_json, false) AS supports_json,
+    p.settings_jsonb::text AS settings_jsonb,
+    p.updated_at::text AS updated_at,
+    2 AS binding_rank
+  FROM llm_platform_module_defaults p
+  JOIN llm_channels c
+    ON c.channel_id = p.channel_id
+   AND c.tenant_id IS NULL
+   AND c.enabled = TRUE
+  JOIN llm_models m
+    ON m.channel_id = p.channel_id
+   AND m.model_id = p.model_id
+   AND m.tenant_id IS NULL
+   AND m.enabled = TRUE
+) ranked_bindings
+ORDER BY module_key, binding_rank
 LIMIT $3`
-	rows, err := s.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), s.limit)
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantQueryer.QueryTenantContext(ctx, tenantID, query, tenantID, strings.TrimSpace(input.ProjectID), s.limit)
 	if err != nil {
 		return nil, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	return scanModuleBindingRecords(rows)
+	records, scanErr := scanModuleBindingRecords(rows)
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	if closeErr != nil {
+		return nil, &AppError{Code: "LLM_BINDING_QUERY_FAILED", Message: closeErr.Error()}
+	}
+	return records, nil
 }
 
 func (s *SQLBindingStore) UpsertProjectModuleBinding(ctx context.Context, input UpsertProjectModuleBindingInput) (ModuleBindingRecord, error) {
@@ -241,6 +355,13 @@ func (s *SQLBindingStore) UpsertProjectModuleBinding(ctx context.Context, input 
 		return ModuleBindingRecord{}, &AppError{
 			Code:    "LLM_BINDING_BACKEND_UNCONFIGURED",
 			Message: "LLM binding backend is not configured",
+		}
+	}
+	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return ModuleBindingRecord{}, &AppError{
+			Code:    "LLM_BINDING_BACKEND_UNCONFIGURED",
+			Message: "LLM binding backend does not support tenant-scoped writes",
 		}
 	}
 	settingsJSON, err := json.Marshal(input.Settings)
@@ -254,6 +375,7 @@ func (s *SQLBindingStore) UpsertProjectModuleBinding(ctx context.Context, input 
     ON m.channel_id = c.channel_id
    AND m.model_id = $5
    AND (m.tenant_id::text = $1 OR m.tenant_id IS NULL)
+   AND m.enabled = TRUE
   WHERE c.channel_id::text = $4
     AND c.enabled = TRUE
     AND (c.tenant_id::text = $1 OR c.tenant_id IS NULL)
@@ -262,7 +384,7 @@ func (s *SQLBindingStore) UpsertProjectModuleBinding(ctx context.Context, input 
   INSERT INTO llm_module_bindings (
     tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by, updated_at
   )
-  SELECT $1, $2, $3, target.channel_id, target.model_id, $6::jsonb, NULLIF($7, '')::uuid, now()
+  SELECT $1::uuid, $2::uuid, $3, target.channel_id, target.model_id, $6::jsonb, NULLIF($7, '')::uuid, now()
   FROM target
   ON CONFLICT (tenant_id, project_id, module_key) DO UPDATE SET
     channel_id = EXCLUDED.channel_id,
@@ -290,10 +412,12 @@ JOIN llm_channels c
 JOIN llm_models m
   ON m.channel_id = upserted.channel_id
  AND m.model_id = upserted.model_id`
-	rows, err := s.queryer.QueryContext(
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantWriteQueryer.QueryTenantWriteContext(
 		ctx,
+		tenantID,
 		query,
-		strings.TrimSpace(input.TenantID),
+		tenantID,
 		strings.TrimSpace(input.ProjectID),
 		strings.TrimSpace(input.ModuleKey),
 		strings.TrimSpace(input.ChannelID),
@@ -304,24 +428,12 @@ JOIN llm_models m
 	if err != nil {
 		return ModuleBindingRecord{}, &AppError{Code: "LLM_BINDING_UPDATE_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return ModuleBindingRecord{}, &AppError{Code: "LLM_BINDING_UPDATE_FAILED", Message: err.Error()}
-		}
-		return ModuleBindingRecord{}, &AppError{
-			Code:    "LLM_BINDING_TARGET_NOT_FOUND",
-			Message: "target channel/model is not available for this tenant",
-		}
-	}
-	record, err := scanModuleBindingRecord(rows)
-	if err != nil {
-		return ModuleBindingRecord{}, err
-	}
-	if err := rows.Err(); err != nil {
-		return ModuleBindingRecord{}, &AppError{Code: "LLM_BINDING_UPDATE_FAILED", Message: err.Error()}
-	}
-	return record, nil
+	return finishBindingWrite(
+		rows,
+		"LLM_BINDING_UPDATE_FAILED",
+		"LLM_BINDING_TARGET_NOT_FOUND",
+		"target channel/model is not available for this tenant",
+	)
 }
 
 func (s *SQLBindingStore) DeleteProjectModuleBinding(ctx context.Context, input DeleteProjectModuleBindingInput) (ModuleBindingRecord, error) {
@@ -332,6 +444,13 @@ func (s *SQLBindingStore) DeleteProjectModuleBinding(ctx context.Context, input 
 		return ModuleBindingRecord{}, &AppError{
 			Code:    "LLM_BINDING_BACKEND_UNCONFIGURED",
 			Message: "LLM binding backend is not configured",
+		}
+	}
+	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return ModuleBindingRecord{}, &AppError{
+			Code:    "LLM_BINDING_BACKEND_UNCONFIGURED",
+			Message: "LLM binding backend does not support tenant-scoped writes",
 		}
 	}
 	query := `WITH deleted AS (
@@ -359,32 +478,55 @@ JOIN llm_channels c
 JOIN llm_models m
   ON m.channel_id = deleted.channel_id
  AND m.model_id = deleted.model_id`
-	rows, err := s.queryer.QueryContext(
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantWriteQueryer.QueryTenantWriteContext(
 		ctx,
+		tenantID,
 		query,
-		strings.TrimSpace(input.TenantID),
+		tenantID,
 		strings.TrimSpace(input.ProjectID),
 		strings.TrimSpace(input.ModuleKey),
 	)
 	if err != nil {
 		return ModuleBindingRecord{}, &AppError{Code: "LLM_BINDING_DELETE_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
+	return finishBindingWrite(
+		rows,
+		"LLM_BINDING_DELETE_FAILED",
+		"LLM_BINDING_NOT_FOUND",
+		"project module binding override was not found",
+	)
+}
+
+func finishBindingWrite(rows SQLRows, failureCode, missingCode, missingMessage string) (ModuleBindingRecord, error) {
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return ModuleBindingRecord{}, &AppError{Code: "LLM_BINDING_DELETE_FAILED", Message: err.Error()}
+			_ = rows.Close()
+			return ModuleBindingRecord{}, &AppError{Code: failureCode, Message: err.Error()}
+		}
+		if err := rows.Close(); err != nil {
+			return ModuleBindingRecord{}, &AppError{Code: failureCode, Message: err.Error()}
 		}
 		return ModuleBindingRecord{}, &AppError{
-			Code:    "LLM_BINDING_NOT_FOUND",
-			Message: "project module binding override was not found",
+			Code:    missingCode,
+			Message: missingMessage,
 		}
 	}
 	record, err := scanModuleBindingRecord(rows)
 	if err != nil {
-		return ModuleBindingRecord{}, err
+		_ = rows.Close()
+		return ModuleBindingRecord{}, &AppError{Code: failureCode, Message: err.Error()}
+	}
+	if rows.Next() {
+		_ = rows.Close()
+		return ModuleBindingRecord{}, &AppError{Code: failureCode, Message: "binding mutation returned multiple rows"}
 	}
 	if err := rows.Err(); err != nil {
-		return ModuleBindingRecord{}, &AppError{Code: "LLM_BINDING_DELETE_FAILED", Message: err.Error()}
+		_ = rows.Close()
+		return ModuleBindingRecord{}, &AppError{Code: failureCode, Message: err.Error()}
+	}
+	if err := rows.Close(); err != nil {
+		return ModuleBindingRecord{}, &AppError{Code: failureCode, Message: err.Error()}
 	}
 	return record, nil
 }

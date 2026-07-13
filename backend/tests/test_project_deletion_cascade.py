@@ -24,6 +24,7 @@ from app.tables import assets as assets_tables
 from app.tables import novel as novel_tables
 from app.tables import search as search_tables
 from app.tables import worldline as worldline_tables
+from app.tables import writer_runs as writer_tables
 from app.tables.base import metadata
 
 
@@ -181,6 +182,30 @@ def _insert_sample_rows(engine, pid: str, now: str = "2026-04-16T10:00:00") -> N
             error=None, created_at=now, updated_at=now,
         ))
 
+        # Writer-first compatibility rows. writer_draft_events is scoped
+        # indirectly through writer_drafts and therefore needs explicit
+        # deletion before the project-owned draft/run rows.
+        conn.execute(insert(writer_tables.writer_runs).values(
+            run_id=f"run_{sfx}", tenant_id="local", project_id=pid,
+            status="completed", mode="draft", instruction="write",
+            created_at=now, updated_at=now,
+        ))
+        conn.execute(insert(writer_tables.writer_run_events).values(
+            event_id=f"run_event_{sfx}", tenant_id="local", project_id=pid,
+            run_id=f"run_{sfx}", event_order=1,
+            event_type="writer.run.completed", payload_json="{}", created_at=now,
+        ))
+        conn.execute(insert(writer_tables.writer_drafts).values(
+            draft_id=f"draft_{sfx}", tenant_id="local", project_id=pid,
+            run_id=f"run_{sfx}", status="draft", content="draft",
+            created_at=now, updated_at=now,
+        ))
+        conn.execute(insert(writer_tables.writer_draft_events).values(
+            event_id=f"draft_event_{sfx}", tenant_id="local",
+            draft_id=f"draft_{sfx}", event_type="draft.created",
+            payload_json="{}", created_at=now,
+        ))
+
 
 def _insert_global_asset(engine, now: str = "2026-04-16T10:00:00") -> None:
     """独立插一条 scope=global 的资产，确认级联删除不会碰它。"""
@@ -227,6 +252,10 @@ def test_cascade_delete_project_clears_all_tables(isolated_engine):
     assert stats.get("global_index", 0) >= 1
     assert stats.get("agent_registry", 0) >= 1
     assert stats.get("prepare_runs", 0) >= 1
+    assert stats.get("writer_draft_events", 0) == 1
+    assert stats.get("writer_run_events", 0) == 1
+    assert stats.get("writer_drafts", 0) == 1
+    assert stats.get("writer_runs", 0) == 1
 
     # 全部项目范围表对 pid 零行
     all_project_tables = [
@@ -240,6 +269,20 @@ def test_cascade_delete_project_clears_all_tables(isolated_engine):
 
     # other_pid 的数据未被误删
     assert _count(engine, novel_tables.entities, other_pid) == 1
+    assert _count(engine, writer_tables.writer_runs, other_pid) == 1
+    with engine.connect() as conn:
+        target_draft_events = conn.execute(
+            select(func.count()).select_from(writer_tables.writer_draft_events).where(
+                writer_tables.writer_draft_events.c.draft_id == f"draft_{pid[-6:]}",
+            ),
+        ).scalar_one()
+        other_draft_events = conn.execute(
+            select(func.count()).select_from(writer_tables.writer_draft_events).where(
+                writer_tables.writer_draft_events.c.draft_id == f"draft_{other_pid[-6:]}",
+            ),
+        ).scalar_one()
+    assert target_draft_events == 0
+    assert other_draft_events == 1
     # archive_entity now lives in assets; count it via asset_type filter
     with engine.connect() as conn:
         other_archive_count = conn.execute(

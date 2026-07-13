@@ -1,8 +1,0 @@
-# Build output
-dist/
-
-# TypeScript incremental build cache
-tsconfig.tsbuildinfo
-
-# Vite cache
-.vite/

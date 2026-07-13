@@ -1,6 +1,6 @@
 # 06. Seed Pipeline
 
-更新时间：`2026-07-09`
+更新时间：`2026-07-10`
 
 ## 模块定位
 
@@ -479,6 +479,18 @@ POST /v1/seed-runs/{runId}/cancel
 ```http
 POST /v1/seed-runs/{runId}/retry
 ```
+
+### Segment Retry
+
+```http
+POST /v1/seed-runs/{runId}/segments/retry
+```
+
+P5-001 已把 selected-segment retry 串到真实 DB admission -> Temporal handoff，但尚未完成全部 Seed 下游刷新。Go control plane 在 Postgres 和 Temporal 同时配置时，会先校验 terminal same-tenant/project `seed_pipeline` run 与全部 same-run segment ids，用新生成的 `retry_attempt_id` 将 `seed_segment_retry_requests` 整批写为 `requested`，写入 count-only `seed.segments.retry_requested`，然后在配置的 `SEED_TASK_QUEUE` 上启动 `SeedSegmentRetryWorkflow`。已有 `requested` / `running` 行与本次 segment set 重叠时 admission fail closed，不覆盖 active attempt，不启动第二个 Temporal workflow。Temporal start 失败时，补偿写入使用 `context.WithoutCancel` 派生的有界上下文，只回滚当前 `retry_attempt_id` 的 requested rows 并写 sanitized failed event。
+
+Python worker 默认从 `DATABASE_URL` 装配 `PostgresSeedSegmentRetryStore`，不信任 payload 中的 object refs 或正文。Store 以 `(tenant_id, project_id, run_id, retry_attempt_id, worker_attempt)` claim requested rows 并 join same-run `text_segments`：同一 worker attempt 重复 claim 不会重复执行；Temporal activity 新的 `worker_attempt` 可接管较旧 attempt 遗留的 `running` rows，用于 worker crash reclaim；较旧 attempt 的 completion/failure 无法终结已被新 attempt 接管的 rows。被 claim 的 refs 才会进入既有 `SequentialReadingReader`，schema-valid notes 由 `ReadingNotesWriter` 持久化。终态 retry row update 和 `seed.segments.retry_completed` / `seed.segments.retry_failed` 公开事件在同一 Postgres transaction 内提交；任一 guard、update 或 event insert 失败都 rollback，不留下“状态已终结但事件缺失”的半成功。Seed runtime 的 app-role context helper 现在把 `AgentContext.actor_user_id` 传给 `app_set_tenant_context` 的 user parameter，不再错用 `project_id`。
+
+当前闭环只重跑 selected-segment sequential reading 并更新 reading notes。retry notes 尚未刷新 runtime facts / canon / assets / project readiness；该链路与 browser retry、外部 provider/cluster certification 也不应被写成 Phase 5 完成。该下游刷新是下一 P5-001 产品缺口，随后回到 Worldline `POST /v1/worldline-sessions/{sessionId}/steps` admission -> Temporal handoff。
 
 ### 2026-07-09 Retry Backend Harness Update
 

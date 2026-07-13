@@ -2,9 +2,11 @@
 
 更新时间：`2026-07-03`
 
+> 文档定位：本文件只保留目标迁移顺序、迁移原则和最终验收清单，不记录当前 Phase、当前优先级、完成比例或验证结果。当前进度和 next gate 只读 `24-current-development-progress.md` 与 `tasks/refactor-saas-parallel-board.md`；不得从本路线图的 Phase 0 重新执行。
+
 ## 迁移策略
 
-迁移路线改为 **Writer-first Pi Agent vertical slice**。
+目标迁移路线采用 **Writer-first Pi Agent vertical slice**。
 
 不要一次性推倒重写所有功能，也不要先把完整 SaaS 底座搭完才验证核心创作价值。最优顺序是：
 

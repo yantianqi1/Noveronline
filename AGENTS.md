@@ -2,9 +2,22 @@
 
 ## 目的
 
-这份文档给后续 AI coding agent 快速接手 `MiroFish-Novel` 使用。它应与 `README.md`、`CLAUDE.md` 和 `docs/database/database-source-of-truth-matrix.md` 保持一致。
+这份文档给后续 AI coding agent 快速接手 `MiroFish-Novel` 使用，并明确 legacy 应用与当前 SaaS 重构的边界。
 
-更新时间：`2026-04-25`
+更新时间：`2026-07-13`
+
+## SaaS 开发真相源
+
+完整 SaaS 重构是当前活跃目标。判断范围和进度时只按以下顺序：
+
+1. `docs/refactor-saas/DEVELOPMENT_PLAN.md`：范围、阶段顺序和最终完成定义。
+2. `docs/refactor-saas/24-current-development-progress.md`：唯一当前进度、关键路径和验证新鲜度入口。
+3. `tasks/refactor-saas-parallel-board.md`：活动任务、依赖和 next gate。
+4. 当前 worktree、schema 和本轮实际测试输出：冲突时的最终事实。
+
+不得使用历史 handoff、追加式日志、旧 subagent 计划或固定窗口 prompt 判断当前状态，也不得从 Phase 0 重新开始。
+
+活跃 SaaS 代码位于 `apps/api`、`apps/web`、`apps/agent-runtime`、`apps/pi-agent-runtime` 和 `infra`。`backend/` 仅作 legacy 数据迁移和兼容参考；根目录旧 `frontend/` 已退役并删除，不得重建、运行、复制或用作视觉参考。
 
 ## 项目定位
 
@@ -18,16 +31,48 @@
 
 主链：`上传小说 -> seed pipeline -> ontology / graph -> archives / assets -> worldline -> writer agent -> manuscript`。
 
-## 当前状态
+## Legacy 后端状态（非 SaaS 进度）
 
 - 后端已迁移到 `FastAPI + SQLAlchemy 2.0 + Alembic + Pydantic v2`。
-- 前端已迁移到 `React 19 + TypeScript + Vite 6 + React Router 7`。
-- 默认后端端口：`3888`；默认前端端口：`3999`。
+- 默认后端端口：`3888`。
 - 统一数据库默认位于 `backend/data/mirofish.db`，由 `DATABASE_URL` 决定。
-- LLM 渠道、模型、模块绑定都通过前端 LLM 设施面板写入统一数据库。
+- Legacy 后端不再配套可运行前端，不是产品入口。
 - 当前是活跃开发仓库，工作区可能存在未提交功能分支改动；先看 `git status --short` 再动手。
 
-## 快速命令
+## SaaS 快速命令
+
+```bash
+# Go control plane
+cd apps/api
+go test ./...
+
+# Next Web
+cd apps/web
+npm test
+npm run typecheck
+npm run build
+
+# Python Agent Runtime
+cd apps/agent-runtime
+env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider tests -q
+
+# Pi Writer Runtime
+cd apps/pi-agent-runtime
+npm test
+npm run typecheck
+npm run build
+
+# Local infrastructure
+docker compose -f infra/docker-compose.yml up -d
+```
+
+所有会写数据库、对象存储或队列的 live/E2E 测试必须通过
+`infra/scripts/run-live-test-stack.sh -- <command>` 运行；需要 API/Web 时使用
+`--app`。禁止把任何 `*_LIVE_DATABASE_URL` 指向主 `mirofish` 数据库，也禁止
+硬编码主 Compose 容器名。独立 runner 使用唯一 `mirofish_test_*` 数据库、
+`mirofish.live_test=on` 标记和独立 volumes，退出时执行 `down -v`。
+
+## Legacy 后端快速命令
 
 ```bash
 # 后端
@@ -38,22 +83,28 @@ APP_PORT=3888 uv run python run.py
 cd backend
 APP_PORT=3888 .venv/bin/python run.py
 
-# 前端
-cd frontend
-npm run dev
-
 # 后端测试，中文路径环境建议显式 UTF-8
 cd backend
 env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest tests
-
-# 前端检查
-cd frontend
-npm run lint
-npm run build
-npm run test
 ```
 
-## 目录责任
+## SaaS 目录责任
+
+- `apps/api/`：Go control plane、HTTP/RBAC、workflow admission 和 read side。
+- `apps/web/`：Next.js SaaS shell 与各工作台。
+- `apps/agent-runtime/`：Python Seed/Graph/Worldline/Asset 领域 worker。
+- `apps/pi-agent-runtime/`：Pi Writer Agent Runtime。
+- `infra/`：Postgres baseline、Temporal/Redis/MinIO 和 compose。
+- `docs/refactor-saas/`：SaaS scope、当前进度和领域契约。
+
+## 前端退役边界
+
+- `apps/web/` 是唯一前端代码和唯一 Web 构建上下文。
+- Writer 必须保持 **manuscript-primary（手稿主导）**：主画布是稿件工作区（`manuscript` / `structure` / `review` / `studio` 四类 artifact tabs），Writer Agent 作为**常驻协作者**位于右侧 dock（连续 thread + 常驻 composer + 选区驱动调用），而非占据半屏。当前结构：`writer-agent-layout[data-layout="manuscript-primary"]` 包含 `writer-artifact-canvas`（主导主区）与 `writer-agent-dock`（常驻副区）。
+- 旧蓝色 Vite UI、旧蓝色 Writer 长页截图、`writer-studio-grid`、折叠 composer 和深色 `writer-agent-rail` 均已退役，不得恢复或作为验收基线。
+- `docs/plans/` 与 `docs/superpowers/` 中指向旧 `frontend/` 的内容只是历史记录，不是待执行任务。
+
+## Legacy 后端目录责任
 
 - `backend/app/api_fastapi/`：FastAPI 路由，统一挂载 `/api`。
 - `backend/app/services/`：业务服务，包括 seed、graph、archive、assets、worldline、writer agent。
@@ -61,9 +112,6 @@ npm run test
 - `backend/app/tables/`：SQLAlchemy 表定义；schema 变更必须通过 Alembic revision。
 - `backend/app/schemas/`：Pydantic 请求 / 响应 schema。
 - `backend/app/utils/llm_client.py`：OpenAI-compatible LLM 客户端与 JSON 调用工具。
-- `frontend/src/pages/`：路由页面，核心页面包括 `overview`、`asset-library`、`story-graph`、`worldline`、`writer`、`llm-facility`。
-- `frontend/src/api/`：TypeScript API 客户端和 SSE 客户端。
-- `frontend/src/stores/`：Zustand 状态。
 - `docs/`：设计、迁移和交接文档。
 
 ## 关键产品事实
@@ -82,7 +130,7 @@ npm run test
 
 ### Writer Agent
 
-Writer 工作台覆盖书籍计划、章节、场景、续写、正文生成、手稿编译、审校、去重约束和世界数据更新。`writer_reviewer` 是独立 LLM 审校模块，不是规则硬编码评分。
+Writer 工作台覆盖书籍计划、章节、场景、续写、正文生成、手稿编译、审校、去重约束和世界数据更新。当前产品交互是 Agent thread + artifact workspace，不是后台表单长页。`writer_reviewer` 是独立 LLM 审校模块，不是规则硬编码评分。
 
 ### LLM Facility
 
@@ -105,16 +153,15 @@ Writer 工作台覆盖书籍计划、章节、场景、续写、正文生成、�
 - 优先依赖注入，业务逻辑不要硬编码具体外部实现。
 - 参数过多时使用 options / config 对象。
 - 默认不可变，不修改入参或全局状态。
-- 修改超过约 50 行代码后，应完整重启前后端验证。
+- 修改超过约 50 行代码后，应完整重启受影响的 SaaS API/Web 验证。
 
 ## 接手顺序
 
-1. 读 `README.md`、本文件和 `CLAUDE.md`。
-2. 运行 `git status --short`，确认是否有用户未提交改动。
-3. 若涉及数据源，读 `docs/database/database-source-of-truth-matrix.md`。
-4. 若涉及 API，查 `docs/fastapi-route-manifest.md` 和对应 `api_fastapi` 路由。
-5. 若涉及 Writer，优先读 `backend/app/services/writer_agent/` 与 `frontend/src/pages/writer/`。
-6. 若涉及 Worldline，优先读 `backend/app/services/worldline_*`、`backend/app/services/agents/worldline/` 与 `frontend/src/pages/worldline/`。
+1. 运行 `git status --short`，确认用户和其他 agent 的未提交改动。
+2. SaaS 任务先读 `DEVELOPMENT_PLAN.md`、`24-current-development-progress.md` 和活动任务板，从当前 next gate 继续。
+3. 再读当前任务对应的领域文档、代码、schema 和测试；文档与代码冲突时以当前 worktree/测试为准并校准进度文档。
+4. 涉及 legacy import/兼容时，才读 `docs/database/database-source-of-truth-matrix.md`、`docs/fastapi-route-manifest.md` 和 `backend/` 实现；不得因历史文档重建旧 `frontend/`。
+5. 不创建新的 handoff/progress 副本；完成 milestone 时更新 `24-current-development-progress.md`，任务状态变化时更新活动任务板。
 
 ## 开源维护约定
 

@@ -24,17 +24,18 @@ type ModelQueryInput struct {
 }
 
 type ChannelRecord struct {
-	ChannelID      string `json:"channel_id"`
-	Name           string `json:"name"`
-	Provider       string `json:"provider"`
-	BaseURL        string `json:"base_url"`
-	MaxConcurrency int    `json:"max_concurrency"`
-	Enabled        bool   `json:"enabled"`
-	LastSyncAt     string `json:"last_sync_at,omitempty"`
-	LastSyncStatus string `json:"last_sync_status,omitempty"`
-	Scope          string `json:"scope"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ChannelID             string `json:"channel_id"`
+	Name                  string `json:"name"`
+	Provider              string `json:"provider"`
+	BaseURL               string `json:"base_url"`
+	MaxConcurrency        int    `json:"max_concurrency"`
+	ExternalProviderOptIn bool   `json:"external_provider_opt_in"`
+	Enabled               bool   `json:"enabled"`
+	LastSyncAt            string `json:"last_sync_at,omitempty"`
+	LastSyncStatus        string `json:"last_sync_status,omitempty"`
+	Scope                 string `json:"scope"`
+	CreatedAt             string `json:"created_at"`
+	UpdatedAt             string `json:"updated_at"`
 }
 
 type ModelRecord struct {
@@ -50,28 +51,41 @@ type ModelRecord struct {
 }
 
 type CreateChannelInput struct {
-	TenantID       string
-	Name           string
-	Provider       string
-	BaseURL        string
-	APIKey         string
-	MaxConcurrency int
-	Enabled        bool
+	TenantID              string
+	Name                  string
+	Provider              string
+	BaseURL               string
+	APIKey                string
+	MaxConcurrency        int
+	ExternalProviderOptIn bool
+	Enabled               bool
 }
 
 type UpdateChannelInput struct {
-	TenantID       string
-	ChannelID      string
-	Name           string
-	BaseURL        string
-	APIKey         string
-	MaxConcurrency int
-	Enabled        bool
+	TenantID              string
+	ChannelID             string
+	Name                  string
+	BaseURL               string
+	APIKey                string
+	MaxConcurrency        int
+	ExternalProviderOptIn bool
+	Enabled               bool
 }
 
 type DeleteChannelInput struct {
 	TenantID  string
 	ChannelID string
+}
+
+type UpdateModelInput struct {
+	TenantID      string
+	ChannelID     string
+	ModelID       string
+	ContextWindow *int
+	SupportsTools bool
+	SupportsJSON  bool
+	InputCost     *float64
+	OutputCost    *float64
 }
 
 type CatalogReader interface {
@@ -83,6 +97,10 @@ type ChannelStore interface {
 	CreateChannel(context.Context, CreateChannelInput) (ChannelRecord, error)
 	UpdateChannel(context.Context, UpdateChannelInput) (ChannelRecord, error)
 	DeleteChannel(context.Context, DeleteChannelInput) (ChannelRecord, error)
+}
+
+type ModelStore interface {
+	UpdateModel(context.Context, UpdateModelInput) (ModelRecord, error)
 }
 
 type DisabledCatalogReader struct{}
@@ -115,6 +133,19 @@ func (DisabledChannelStore) CreateChannel(context.Context, CreateChannelInput) (
 	return ChannelRecord{}, &AppError{
 		Code:    "LLM_CHANNEL_BACKEND_UNCONFIGURED",
 		Message: "LLM channel backend is not configured",
+	}
+}
+
+type DisabledModelStore struct{}
+
+func NewDisabledModelStore() DisabledModelStore {
+	return DisabledModelStore{}
+}
+
+func (DisabledModelStore) UpdateModel(context.Context, UpdateModelInput) (ModelRecord, error) {
+	return ModelRecord{}, &AppError{
+		Code:    "LLM_MODEL_BACKEND_UNCONFIGURED",
+		Message: "LLM model backend is not configured",
 	}
 }
 
@@ -175,12 +206,20 @@ func (r *SQLCatalogReader) ListChannels(ctx context.Context, input CatalogQueryI
 			Message: "LLM catalog backend is not configured",
 		}
 	}
+	tenantQueryer, ok := r.queryer.(SQLTenantQueryer)
+	if !ok {
+		return nil, &AppError{
+			Code:    "LLM_CATALOG_BACKEND_UNCONFIGURED",
+			Message: "LLM catalog backend does not support tenant-scoped queries",
+		}
+	}
 	query := `SELECT
   channel_id::text,
   name,
   provider,
   base_url,
   max_concurrency,
+  external_provider_opt_in,
   enabled,
   COALESCE(last_sync_at::text, ''),
   COALESCE(last_sync_status, ''),
@@ -191,11 +230,11 @@ FROM llm_channels
 WHERE (tenant_id::text = $1 OR tenant_id IS NULL)
 ORDER BY scope DESC, name ASC, channel_id::text ASC
 LIMIT $2`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), r.limit)
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantQueryer.QueryTenantContext(ctx, tenantID, query, tenantID, r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
 
 	records := []ChannelRecord{}
 	for rows.Next() {
@@ -206,6 +245,7 @@ LIMIT $2`
 			&record.Provider,
 			&record.BaseURL,
 			&record.MaxConcurrency,
+			&record.ExternalProviderOptIn,
 			&record.Enabled,
 			&record.LastSyncAt,
 			&record.LastSyncStatus,
@@ -213,11 +253,16 @@ LIMIT $2`
 			&record.CreatedAt,
 			&record.UpdatedAt,
 		); err != nil {
+			_ = rows.Close()
 			return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
+	}
+	if err := rows.Close(); err != nil {
 		return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 	}
 	return records, nil
@@ -231,6 +276,13 @@ func (r *SQLCatalogReader) ListModels(ctx context.Context, input ModelQueryInput
 		return nil, &AppError{
 			Code:    "LLM_CATALOG_BACKEND_UNCONFIGURED",
 			Message: "LLM catalog backend is not configured",
+		}
+	}
+	tenantQueryer, ok := r.queryer.(SQLTenantQueryer)
+	if !ok {
+		return nil, &AppError{
+			Code:    "LLM_CATALOG_BACKEND_UNCONFIGURED",
+			Message: "LLM catalog backend does not support tenant-scoped queries",
 		}
 	}
 	query := `SELECT
@@ -251,11 +303,11 @@ WHERE (c.tenant_id::text = $1 OR c.tenant_id IS NULL)
   AND c.channel_id::text = $2
 ORDER BY m.model_id ASC
 LIMIT $3`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID), r.limit)
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantQueryer.QueryTenantContext(ctx, tenantID, query, tenantID, strings.TrimSpace(input.ChannelID), r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
 
 	records := []ModelRecord{}
 	for rows.Next() {
@@ -271,11 +323,16 @@ LIMIT $3`
 			&record.CreatedAt,
 			&record.UpdatedAt,
 		); err != nil {
+			_ = rows.Close()
 			return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
+	}
+	if err := rows.Close(); err != nil {
 		return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 	}
 	return records, nil
@@ -291,42 +348,52 @@ func (s *SQLChannelStore) CreateChannel(ctx context.Context, input CreateChannel
 			Message: "LLM channel backend is not configured",
 		}
 	}
+	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return ChannelRecord{}, &AppError{
+			Code:    "LLM_CHANNEL_BACKEND_UNCONFIGURED",
+			Message: "LLM channel backend does not support tenant-scoped writes",
+		}
+	}
 	encryptedAPIKey, err := s.encryptCredential(strings.TrimSpace(input.APIKey))
 	if err != nil {
 		return ChannelRecord{}, err
 	}
 	query := `INSERT INTO llm_channels (
-  tenant_id, name, provider, base_url, encrypted_api_key, max_concurrency, enabled, updated_at
+  tenant_id, name, provider, base_url, encrypted_api_key, max_concurrency, external_provider_opt_in, enabled, updated_at
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, now()
+  $1, $2, $3, $4, $5, $6, $7, $8, now()
 ) RETURNING
   channel_id::text,
   name,
   provider,
   base_url,
   max_concurrency,
+  external_provider_opt_in,
   enabled,
   COALESCE(last_sync_at::text, ''),
   COALESCE(last_sync_status, ''),
   'tenant' AS scope,
   created_at::text,
   updated_at::text`
-	rows, err := s.queryer.QueryContext(
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantWriteQueryer.QueryTenantWriteContext(
 		ctx,
+		tenantID,
 		query,
-		strings.TrimSpace(input.TenantID),
+		tenantID,
 		strings.TrimSpace(input.Name),
 		strings.TrimSpace(input.Provider),
 		strings.TrimSpace(input.BaseURL),
 		encryptedAPIKey,
 		input.MaxConcurrency,
+		input.ExternalProviderOptIn,
 		input.Enabled,
 	)
 	if err != nil {
 		return ChannelRecord{}, &AppError{Code: "LLM_CHANNEL_UPDATE_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	return scanSingleChannel(rows, "LLM_CHANNEL_UPDATE_FAILED", "channel was not created")
+	return finishChannelWrite(rows, "channel was not created")
 }
 
 func (s *SQLChannelStore) UpdateChannel(ctx context.Context, input UpdateChannelInput) (ChannelRecord, error) {
@@ -337,6 +404,13 @@ func (s *SQLChannelStore) UpdateChannel(ctx context.Context, input UpdateChannel
 		return ChannelRecord{}, &AppError{
 			Code:    "LLM_CHANNEL_BACKEND_UNCONFIGURED",
 			Message: "LLM channel backend is not configured",
+		}
+	}
+	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return ChannelRecord{}, &AppError{
+			Code:    "LLM_CHANNEL_BACKEND_UNCONFIGURED",
+			Message: "LLM channel backend does not support tenant-scoped writes",
 		}
 	}
 	encryptedAPIKey := ""
@@ -352,7 +426,8 @@ SET name = $3,
     base_url = $4,
     max_concurrency = $5,
     encrypted_api_key = COALESCE(NULLIF($6, ''), encrypted_api_key),
-    enabled = $7,
+    external_provider_opt_in = $7,
+    enabled = $8,
     updated_at = now()
 WHERE tenant_id::text = $1
   AND channel_id::text = $2
@@ -362,28 +437,89 @@ RETURNING
   provider,
   base_url,
   max_concurrency,
+  external_provider_opt_in,
   enabled,
   COALESCE(last_sync_at::text, ''),
   COALESCE(last_sync_status, ''),
   'tenant' AS scope,
   created_at::text,
   updated_at::text`
-	rows, err := s.queryer.QueryContext(
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantWriteQueryer.QueryTenantWriteContext(
 		ctx,
+		tenantID,
 		query,
-		strings.TrimSpace(input.TenantID),
+		tenantID,
 		strings.TrimSpace(input.ChannelID),
 		strings.TrimSpace(input.Name),
 		strings.TrimSpace(input.BaseURL),
 		input.MaxConcurrency,
 		encryptedAPIKey,
+		input.ExternalProviderOptIn,
 		input.Enabled,
 	)
 	if err != nil {
 		return ChannelRecord{}, &AppError{Code: "LLM_CHANNEL_UPDATE_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	return scanSingleChannel(rows, "LLM_CHANNEL_UPDATE_FAILED", "channel was not updated")
+	return finishChannelWrite(rows, "channel was not updated")
+}
+
+func (s *SQLChannelStore) UpdateModel(ctx context.Context, input UpdateModelInput) (ModelRecord, error) {
+	if err := validateUpdateModelInput(input); err != nil {
+		return ModelRecord{}, err
+	}
+	if s.queryer == nil {
+		return ModelRecord{}, &AppError{
+			Code:    "LLM_MODEL_BACKEND_UNCONFIGURED",
+			Message: "LLM model backend is not configured",
+		}
+	}
+	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return ModelRecord{}, &AppError{
+			Code:    "LLM_MODEL_BACKEND_UNCONFIGURED",
+			Message: "LLM model backend does not support tenant-scoped writes",
+		}
+	}
+	// Tenant-owned models only. Platform catalog rows (tenant_id IS NULL) stay read-only.
+	query := `UPDATE llm_models AS model
+SET context_window = $4,
+    supports_tools = $5,
+    supports_json = $6,
+    input_cost = $7,
+    output_cost = $8,
+    updated_at = now()
+WHERE model.tenant_id::text = $1
+  AND model.channel_id::text = $2
+  AND model.model_id = $3
+RETURNING
+  model.model_id,
+  COALESCE(model.owned_by, ''),
+  COALESCE(model.context_window, 0),
+  model.supports_tools,
+  model.supports_json,
+  COALESCE(model.input_cost, 0)::float8,
+  COALESCE(model.output_cost, 0)::float8,
+  model.created_at::text,
+  model.updated_at::text`
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantWriteQueryer.QueryTenantWriteContext(
+		ctx,
+		tenantID,
+		query,
+		tenantID,
+		strings.TrimSpace(input.ChannelID),
+		strings.TrimSpace(input.ModelID),
+		nullablePositiveInt(input.ContextWindow),
+		input.SupportsTools,
+		input.SupportsJSON,
+		nullableNonNegativeFloat(input.InputCost),
+		nullableNonNegativeFloat(input.OutputCost),
+	)
+	if err != nil {
+		return ModelRecord{}, &AppError{Code: "LLM_MODEL_UPDATE_FAILED", Message: err.Error()}
+	}
+	return finishModelWrite(rows, "model was not updated")
 }
 
 func (s *SQLChannelStore) DeleteChannel(ctx context.Context, input DeleteChannelInput) (ChannelRecord, error) {
@@ -394,6 +530,13 @@ func (s *SQLChannelStore) DeleteChannel(ctx context.Context, input DeleteChannel
 		return ChannelRecord{}, &AppError{
 			Code:    "LLM_CHANNEL_BACKEND_UNCONFIGURED",
 			Message: "LLM channel backend is not configured",
+		}
+	}
+	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return ChannelRecord{}, &AppError{
+			Code:    "LLM_CHANNEL_BACKEND_UNCONFIGURED",
+			Message: "LLM channel backend does not support tenant-scoped writes",
 		}
 	}
 	query := `UPDATE llm_channels
@@ -407,18 +550,31 @@ RETURNING
   provider,
   base_url,
   max_concurrency,
+  external_provider_opt_in,
   enabled,
   COALESCE(last_sync_at::text, ''),
   COALESCE(last_sync_status, ''),
   'tenant' AS scope,
   created_at::text,
   updated_at::text`
-	rows, err := s.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ChannelID))
+	tenantID := strings.TrimSpace(input.TenantID)
+	rows, err := tenantWriteQueryer.QueryTenantWriteContext(ctx, tenantID, query, tenantID, strings.TrimSpace(input.ChannelID))
 	if err != nil {
 		return ChannelRecord{}, &AppError{Code: "LLM_CHANNEL_UPDATE_FAILED", Message: err.Error()}
 	}
-	defer rows.Close()
-	return scanSingleChannel(rows, "LLM_CHANNEL_UPDATE_FAILED", "channel was not disabled")
+	return finishChannelWrite(rows, "channel was not disabled")
+}
+
+func finishChannelWrite(rows SQLRows, missingMessage string) (ChannelRecord, error) {
+	record, scanErr := scanSingleChannel(rows, "LLM_CHANNEL_UPDATE_FAILED", missingMessage)
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return ChannelRecord{}, scanErr
+	}
+	if closeErr != nil {
+		return ChannelRecord{}, &AppError{Code: "LLM_CHANNEL_UPDATE_FAILED", Message: closeErr.Error()}
+	}
+	return record, nil
 }
 
 func (s *SQLChannelStore) encryptCredential(apiKey string) (string, error) {
@@ -477,6 +633,9 @@ func validateCreateChannelInput(input CreateChannelInput) error {
 	if input.MaxConcurrency <= 0 {
 		return &AppError{Code: "VALIDATION_FAILED", Message: "max_concurrency must be greater than zero"}
 	}
+	if _, err := validateProviderEndpoint(input.BaseURL, "", input.ExternalProviderOptIn); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -490,6 +649,9 @@ func validateUpdateChannelInput(input UpdateChannelInput) error {
 	if input.MaxConcurrency <= 0 {
 		return &AppError{Code: "VALIDATION_FAILED", Message: "max_concurrency must be greater than zero"}
 	}
+	if _, err := validateProviderEndpoint(input.BaseURL, "", input.ExternalProviderOptIn); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -498,6 +660,80 @@ func validateDeleteChannelInput(input DeleteChannelInput) error {
 		return &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and channel_id are required"}
 	}
 	return nil
+}
+
+func validateUpdateModelInput(input UpdateModelInput) error {
+	if strings.TrimSpace(input.TenantID) == "" ||
+		strings.TrimSpace(input.ChannelID) == "" ||
+		strings.TrimSpace(input.ModelID) == "" {
+		return &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, channel_id, and model_id are required"}
+	}
+	if input.ContextWindow != nil && *input.ContextWindow <= 0 {
+		return &AppError{Code: "VALIDATION_FAILED", Message: "context_window must be greater than zero when set"}
+	}
+	if input.InputCost != nil && *input.InputCost < 0 {
+		return &AppError{Code: "VALIDATION_FAILED", Message: "input_cost must be non-negative when set"}
+	}
+	if input.OutputCost != nil && *input.OutputCost < 0 {
+		return &AppError{Code: "VALIDATION_FAILED", Message: "output_cost must be non-negative when set"}
+	}
+	return nil
+}
+
+func nullablePositiveInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableNonNegativeFloat(value *float64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func finishModelWrite(rows SQLRows, missingMessage string) (ModelRecord, error) {
+	record, scanErr := scanSingleModel(rows, "LLM_MODEL_UPDATE_FAILED", missingMessage)
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return ModelRecord{}, scanErr
+	}
+	if closeErr != nil {
+		return ModelRecord{}, &AppError{Code: "LLM_MODEL_UPDATE_FAILED", Message: closeErr.Error()}
+	}
+	return record, nil
+}
+
+func scanSingleModel(rows SQLRows, code string, missingMessage string) (ModelRecord, error) {
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return ModelRecord{}, &AppError{Code: code, Message: err.Error()}
+		}
+		return ModelRecord{}, &AppError{Code: "LLM_MODEL_NOT_FOUND", Message: missingMessage}
+	}
+	var record ModelRecord
+	if err := rows.Scan(
+		&record.ModelID,
+		&record.OwnedBy,
+		&record.ContextWindow,
+		&record.SupportsTools,
+		&record.SupportsJSON,
+		&record.InputCost,
+		&record.OutputCost,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+	); err != nil {
+		return ModelRecord{}, &AppError{Code: code, Message: err.Error()}
+	}
+	if rows.Next() {
+		return ModelRecord{}, &AppError{Code: code, Message: "model mutation returned multiple rows"}
+	}
+	if err := rows.Err(); err != nil {
+		return ModelRecord{}, &AppError{Code: code, Message: err.Error()}
+	}
+	return record, nil
 }
 
 func scanSingleChannel(rows SQLRows, code string, missingMessage string) (ChannelRecord, error) {
@@ -510,6 +746,9 @@ func scanSingleChannel(rows SQLRows, code string, missingMessage string) (Channe
 	record, err := scanChannelRecord(rows)
 	if err != nil {
 		return ChannelRecord{}, &AppError{Code: code, Message: err.Error()}
+	}
+	if rows.Next() {
+		return ChannelRecord{}, &AppError{Code: code, Message: "channel mutation returned multiple rows"}
 	}
 	if err := rows.Err(); err != nil {
 		return ChannelRecord{}, &AppError{Code: code, Message: err.Error()}
@@ -525,6 +764,7 @@ func scanChannelRecord(rows SQLRows) (ChannelRecord, error) {
 		&record.Provider,
 		&record.BaseURL,
 		&record.MaxConcurrency,
+		&record.ExternalProviderOptIn,
 		&record.Enabled,
 		&record.LastSyncAt,
 		&record.LastSyncStatus,

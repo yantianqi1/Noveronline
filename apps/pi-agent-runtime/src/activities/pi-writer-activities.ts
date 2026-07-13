@@ -1,5 +1,14 @@
 import { validateWriterWorkflowPayload } from "../worker-spec.js";
 import type { WriterRunInput } from "../contracts/writer-run.js";
+import { runtimeContextFromInput, type RuntimeContext } from "../contracts/writer-run.js";
+import type { AgentEvent, ToolExecutionMode } from "@earendil-works/pi-agent-core";
+import {
+  providerCallBudget,
+  stableProviderCallId,
+  usageCostMicros,
+  validateProviderUsage,
+  type PricingStatus
+} from "../llm/quota/provider-call.js";
 
 type LLMResolution = NonNullable<WriterRunInput["options"]["llm_resolution"]>;
 
@@ -45,12 +54,81 @@ export interface ComposeDraftRequest {
   provider: string;
   base_url: string;
   instruction: string;
+  writing_brief?: string;
+  target_words?: number;
+  mode?: WriterRunInput["mode"];
+  revise?: WriterRunInput["options"]["revise"];
+  thinking_level?: WriterRunInput["options"]["thinking_level"];
   apiKey: string;
   settings: Record<string, unknown>;
+  provider_call_id?: string;
+  abort_signal?: AbortSignal;
+  onToken?(token: string): Promise<void>;
 }
 
 export interface ComposeDraftResult {
   content: string;
+  usage?: PiWriterUsage;
+}
+
+export type WriterToolName =
+  | "query_project_context"
+  | "query_chapter_scene"
+  | "query_assets"
+  | "query_world_rules"
+  | "query_character_profile"
+  | "query_graph_neighbors"
+  | "query_worldline_paths"
+  | "query_manuscript_context"
+  | "save_draft_revision";
+
+export interface ResolvedLLMModule {
+  module_key: "writer_orchestrator" | "writer_composer";
+  channel_id: string;
+  model_id: string;
+  provider: string;
+  base_url: string;
+  credential_ref: string;
+  supports_tools: boolean;
+  supports_json: boolean;
+  settings: Record<string, unknown>;
+}
+
+export interface ResolveModuleBindingRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  module_key: ResolvedLLMModule["module_key"];
+}
+
+export interface ExecuteWriterToolRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  chapter_id?: string;
+  scene_id?: string;
+  selected_asset_ids: string[];
+  graph_node_ids: string[];
+  worldline_path_ids: string[];
+  tool_name: WriterToolName;
+}
+
+export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest, "writing_brief" | "onToken"> {
+  mode: WriterRunInput["mode"];
+  chapter_id?: string;
+  scene_id?: string;
+  selected_asset_ids: string[];
+  graph_node_ids: string[];
+  worldline_path_ids: string[];
+  tool_execution?: ToolExecutionMode;
+  tool_names: WriterToolName[];
+  runtime_context: RuntimeContext;
+  executeTool(toolName: WriterToolName, toolCallId: string): Promise<Record<string, unknown>>;
+  onAgentEvent?(event: AgentEvent): Promise<void>;
+}
+
+export interface OrchestrateWritingBriefResult {
+  writing_brief: string;
   usage?: PiWriterUsage;
 }
 
@@ -88,6 +166,8 @@ export interface SaveDraftRevisionRequest {
   tenant_id: string;
   project_id: string;
   run_id: string;
+  chapter_id?: string;
+  scene_id?: string;
   content: string;
   status: "candidate";
   metadata?: Record<string, unknown>;
@@ -104,6 +184,7 @@ export interface RecordLLMActivityRequest {
   module_key: string;
   channel_id: string;
   model_id: string;
+  provider_call_id?: string;
   status: "completed" | "failed";
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -139,6 +220,9 @@ export interface RecordAgentTraceEventRequest {
     | "prompt_snapshot"
     | "llm_call_started"
     | "llm_call_completed"
+    | "tool_call"
+    | "tool_result"
+    | "assistant_message"
     | "artifact_written"
     | "error";
   redaction_level: "public" | "summary" | "full";
@@ -156,10 +240,14 @@ export interface RecordWorkflowEventRequest {
     | "writer.tool.started"
     | "writer.tool.completed"
     | "writer.draft.saved"
+    | "writer.revision.proposed"
+    | "writer.approval.required"
+    | "writer.approval.resolved"
     | "writer.run.failed"
     | "writer.run.completed"
     | "writer.run.cancelled";
   payload: Record<string, unknown>;
+  idempotency_key?: string;
 }
 
 export interface UpdateWriterRunStatusRequest {
@@ -174,8 +262,77 @@ export interface UpdateWriterRunStatusRequest {
   };
 }
 
+export interface ReserveLLMQuotaRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  module_key: string;
+  channel_id: string;
+  model_id: string;
+  provider_call_id: string;
+  reserved_tokens: number;
+  reserved_cost_micros: number;
+  pricing_status: PricingStatus;
+  ttl_seconds: number;
+}
+
+export interface LLMQuotaReservation {
+  reservation_id: string;
+  provider_call_id: string;
+  status: "reserved" | "finalized";
+  expires_at: string;
+  actual_prompt_tokens?: number;
+  actual_completion_tokens?: number;
+  actual_cost_micros?: number;
+}
+
+export interface FinalizeLLMQuotaRequest {
+  tenant_id: string;
+  project_id: string;
+  reservation_id: string;
+  provider_call_id: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  actual_cost_micros?: number;
+  pricing_status: PricingStatus;
+}
+
+export interface ReleaseLLMQuotaRequest {
+  tenant_id: string;
+  project_id: string;
+  reservation_id: string;
+  provider_call_id: string;
+}
+
+export interface CompletedWriterRunReplay {
+  draft_id: string;
+  usage?: PiWriterUsage;
+}
+
+export interface ProviderStageCheckpoint {
+  provider_call_id: string;
+  result: unknown;
+  reservation: LLMQuotaReservation;
+  lease: LLMLease;
+}
+
+export interface FindCompletedWriterRunRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+}
+
 export interface PiWriterRunActivityDeps {
+  cancellationSignal?(): AbortSignal | undefined;
+  loadProviderStageCheckpoint?(providerCallID: string): Promise<ProviderStageCheckpoint | undefined>;
+  saveProviderStageCheckpoint?(checkpoint: ProviderStageCheckpoint): Promise<void>;
+  resolveModuleBinding?(request: ResolveModuleBindingRequest): Promise<ResolvedLLMModule>;
+  orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
+  executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;
+  reserveLLMQuota?(request: ReserveLLMQuotaRequest): Promise<LLMQuotaReservation>;
+  finalizeLLMQuota?(request: FinalizeLLMQuotaRequest): Promise<void>;
+  releaseLLMQuota?(request: ReleaseLLMQuotaRequest): Promise<void>;
   acquireLLMLease(request: AcquireLLMLeaseRequest): Promise<LLMLease>;
   composeDraft(request: ComposeDraftRequest): Promise<ComposeDraftResult>;
   releaseLLMLease(request: ReleaseLLMLeaseRequest): Promise<void>;
@@ -185,11 +342,15 @@ export interface PiWriterRunActivityDeps {
   recordAgentTraceEvent(request: RecordAgentTraceEventRequest): Promise<void>;
   recordWorkflowEvent(request: RecordWorkflowEventRequest): Promise<void>;
   updateWriterRunStatus(request: UpdateWriterRunStatusRequest): Promise<void>;
+  findCompletedWriterRun?(request: FindCompletedWriterRunRequest): Promise<CompletedWriterRunReplay | undefined>;
 }
 
 export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps> = {}) {
   return async function runPiWriterRunActivity(payload: unknown): Promise<PiWriterActivityResult> {
     const input = validateWriterWorkflowPayload(payload);
+    if (deps.resolveModuleBinding && deps.orchestrateWritingBrief && deps.executeWriterTool) {
+      return runDualStagePiWriterActivity(input, deps as PiWriterRunActivityDeps);
+    }
     const resolution = input.options.llm_resolution;
     if (!resolution) {
       return failed(input, "LLM_MODULE_UNBOUND", `${input.options.module_key} must be resolved through LLM Facility before Pi writer execution`);
@@ -268,6 +429,7 @@ export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps>
         mode: input.mode,
         instruction: input.instruction,
         selected_asset_ids: input.selected_asset_ids,
+        graph_node_ids: input.graph_node_ids,
         worldline_path_ids: input.worldline_path_ids
       }));
       await runPiWriterStep("Pi writer trace recording failed", () => recordTrace("llm_call_started", "summary", {
@@ -289,6 +451,8 @@ export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps>
           provider: resolution.provider,
           base_url: resolution.base_url,
           instruction: input.instruction,
+          mode: input.mode,
+          revise: input.options.revise,
           apiKey: credential.apiKey,
           settings: resolution.settings
         });
@@ -307,17 +471,32 @@ export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps>
       if (!draft.content.trim()) {
         return failed(input, "WRITER_CONTEXT_EMPTY", "Pi writer provider returned an empty draft");
       }
+      if (input.mode === "revise" && input.options.revise) {
+        await runPiWriterStep("Pi writer revision event recording failed", () => recordWorkflow("writer.revision.proposed", {
+          block_id: input.options.revise!.block_id,
+          selection_text: input.options.revise!.selection_text,
+          selection_start: input.options.revise!.selection_start,
+          selection_end: input.options.revise!.selection_end,
+          proposed_text: draft.content,
+          instruction: input.instruction,
+          status: "candidate"
+        }));
+      }
       const saved = await runPiWriterStep("Pi writer draft persistence failed", () => activityDeps.saveDraftRevision({
         tenant_id: input.tenant_id,
         project_id: input.project_id,
         run_id: input.run_id,
+        chapter_id: input.chapter_id,
+        scene_id: input.scene_id,
         content: draft.content,
         status: "candidate",
         metadata: {
           module_key: resolution.module_key,
           channel_id: resolution.channel_id,
           model_id: resolution.model_id,
-          provider: resolution.provider
+          provider: resolution.provider,
+          mode: input.mode,
+          revise: input.options.revise
         }
       }));
       await runPiWriterStep("Pi writer workflow event recording failed", () => recordWorkflow("writer.draft.saved", {
@@ -558,3 +737,664 @@ function failed(input: WriterRunInput, code: string, message: string): PiWriterA
 }
 
 export const runPiWriterRunActivity = createPiWriterRunActivity();
+
+async function runDualStagePiWriterActivity(
+  input: WriterRunInput,
+  deps: PiWriterRunActivityDeps
+): Promise<PiWriterActivityResult> {
+  const startedAt = Date.now();
+  let eventOrder = 0;
+  let chunkIndex = 0;
+  const recordTrace = async (
+    moduleKey: string,
+    eventType: RecordAgentTraceEventRequest["event_type"],
+    payload: Record<string, unknown>,
+    redaction: RecordAgentTraceEventRequest["redaction_level"] = "summary",
+    status: RecordAgentTraceEventRequest["status"] = "running"
+  ) => deps.recordAgentTraceEvent({
+    tenant_id: input.tenant_id,
+    project_id: input.project_id,
+    run_id: input.run_id,
+    trace_id: input.trace_id,
+    module_key: moduleKey,
+    agent_name: "pi_writer",
+    status,
+    event_order: ++eventOrder,
+    event_type: eventType,
+    redaction_level: redaction,
+    payload
+  });
+  const recordWorkflow = (
+    eventType: RecordWorkflowEventRequest["event_type"],
+    payload: Record<string, unknown>,
+    key: string
+  ) => deps.recordWorkflowEvent({
+    tenant_id: input.tenant_id,
+    project_id: input.project_id,
+    run_id: input.run_id,
+    workflow_type: "writer_run",
+    event_type: eventType,
+    payload,
+    idempotency_key: key
+  });
+
+  try {
+    if (deps.findCompletedWriterRun) {
+      const replay = await deps.findCompletedWriterRun({
+        tenant_id: input.tenant_id,
+        project_id: input.project_id,
+        run_id: input.run_id
+      });
+      if (replay) {
+        return {
+          tenant_id: input.tenant_id,
+          project_id: input.project_id,
+          run_id: input.run_id,
+          status: "completed",
+          draft_id: replay.draft_id,
+          usage: replay.usage
+        };
+      }
+    }
+    await recordWorkflow("writer.run.started", { mode: input.mode, stage: "orchestrator" }, "run:started");
+    await deps.updateWriterRunStatus({ tenant_id: input.tenant_id, project_id: input.project_id, run_id: input.run_id, status: "running" });
+    await recordTrace("writer_orchestrator", "prompt_snapshot", {
+      instruction: input.instruction,
+      mode: input.mode,
+      chapter_id: input.chapter_id,
+      scene_id: input.scene_id,
+      selected_asset_ids: input.selected_asset_ids,
+      graph_node_ids: input.graph_node_ids,
+      worldline_path_ids: input.worldline_path_ids
+    }, "full");
+
+    const orchestrator = await resolveRequiredModule(deps, input, "writer_orchestrator");
+    if (!orchestrator.supports_tools) {
+      throw runtimeFailure("LLM_PROVIDER_ERROR", "writer_orchestrator binding must support tools");
+    }
+    const orchestratorCall = await executeLLMStage(
+      deps,
+      input,
+      orchestrator,
+      "orchestrator",
+      0,
+      async (apiKey, providerCallID) => {
+      let eventWriteChain = Promise.resolve();
+      await recordTrace(orchestrator.module_key, "llm_call_started", resolutionSummary(orchestrator));
+      const toolNames: WriterToolName[] = [
+        "query_project_context",
+        "query_chapter_scene",
+        "query_assets",
+        "query_world_rules",
+        "query_character_profile",
+        "query_graph_neighbors",
+        "query_worldline_paths",
+        "query_manuscript_context"
+      ];
+      const runtimeContext = runtimeContextFromInput(input);
+      const result = await deps.orchestrateWritingBrief!({
+        ...composeRequest(input, orchestrator, apiKey, providerCallID, deps.cancellationSignal?.()),
+        mode: input.mode,
+        chapter_id: input.chapter_id,
+        scene_id: input.scene_id,
+        selected_asset_ids: input.selected_asset_ids,
+        graph_node_ids: input.graph_node_ids,
+        worldline_path_ids: input.worldline_path_ids,
+        tool_execution: input.options.tool_execution,
+        tool_names: toolNames,
+        runtime_context: {
+          ...runtimeContext,
+          permissions: { tools: toolNames, can_write_draft: false }
+        },
+        executeTool: async (toolName, toolCallId) => deps.executeWriterTool!({
+          tenant_id: input.tenant_id,
+          project_id: input.project_id,
+          run_id: input.run_id,
+          chapter_id: input.chapter_id,
+          scene_id: input.scene_id,
+          selected_asset_ids: input.selected_asset_ids,
+          graph_node_ids: input.graph_node_ids,
+          worldline_path_ids: input.worldline_path_ids,
+          tool_name: toolName
+        }),
+        onAgentEvent: (event) => {
+          eventWriteChain = eventWriteChain.then(async () => {
+          if (event.type === "tool_execution_start") {
+            await recordWorkflow("writer.tool.started", {
+              tool_call_id: event.toolCallId,
+              tool_name: event.toolName,
+              status: "running"
+            }, `tool:${event.toolCallId}:started`);
+            await recordTrace(orchestrator.module_key, "tool_call", {
+              tool_call_id: event.toolCallId,
+              tool_name: event.toolName,
+              args: event.args
+            }, "full");
+          }
+          if (event.type === "tool_execution_end") {
+            const toolResult = event.result?.details ?? event.result;
+            await recordWorkflow("writer.tool.completed", {
+              tool_call_id: event.toolCallId,
+              tool_name: event.toolName,
+              status: event.isError ? "failed" : "completed",
+              is_error: event.isError,
+              result: publicWriterToolResult(event.toolName, toolResult)
+            }, `tool:${event.toolCallId}:completed`);
+            await recordTrace(orchestrator.module_key, "tool_result", {
+              tool_call_id: event.toolCallId,
+              tool_name: event.toolName,
+              is_error: event.isError,
+              result: toolResult
+            }, "full");
+          }
+          });
+          return eventWriteChain;
+        }
+      });
+      await eventWriteChain;
+      return result;
+      }
+    );
+    const writingBrief = orchestratorCall.result;
+    await recordStageTelemetry(
+      deps,
+      input,
+      orchestrator,
+      writingBrief.usage,
+      Date.now() - startedAt,
+      orchestratorCall.provider_call_id
+    );
+    await recordTrace(orchestrator.module_key, "llm_call_completed", {
+      ...resolutionSummary(orchestrator),
+      ...writingBrief.usage
+    });
+
+    const composer = await resolveRequiredModule(deps, input, "writer_composer");
+    const composerCall = await executeLLMStage(deps, input, composer, "composer", 0, async (apiKey, providerCallID) => {
+      await recordTrace(composer.module_key, "llm_call_started", resolutionSummary(composer));
+      const result = await deps.composeDraft({
+        ...composeRequest(input, composer, apiKey, providerCallID, deps.cancellationSignal?.()),
+        writing_brief: writingBrief.writing_brief,
+        onToken: async (token) => {
+          const index = ++chunkIndex;
+          await recordWorkflow("writer.token", { token, chunk_index: index }, `composer:token:${index}`);
+        }
+      });
+      return result;
+    });
+    const draft = composerCall.result;
+    await recordStageTelemetry(
+      deps,
+      input,
+      composer,
+      draft.usage,
+      Date.now() - startedAt,
+      composerCall.provider_call_id
+    );
+    await recordTrace(composer.module_key, "llm_call_completed", {
+      ...resolutionSummary(composer),
+      ...draft.usage
+    });
+    await recordTrace(composer.module_key, "assistant_message", { content: draft.content }, "full");
+
+    if (input.mode === "revise" && input.options.revise) {
+      await recordWorkflow("writer.revision.proposed", {
+        block_id: input.options.revise.block_id,
+        selection_text: input.options.revise.selection_text,
+        selection_start: input.options.revise.selection_start,
+        selection_end: input.options.revise.selection_end,
+        proposed_text: draft.content,
+        instruction: input.instruction,
+        status: "candidate"
+      }, "revision:proposed");
+    }
+
+    let saved: SaveDraftRevisionResult;
+    try {
+      saved = await deps.saveDraftRevision({
+        tenant_id: input.tenant_id,
+        project_id: input.project_id,
+        run_id: input.run_id,
+        chapter_id: input.chapter_id,
+        scene_id: input.scene_id,
+        content: draft.content,
+        status: "candidate",
+        metadata: {
+          orchestrator_model_id: orchestrator.model_id,
+          composer_model_id: composer.model_id,
+          mode: input.mode,
+          revise: input.options.revise,
+          source_metadata: writerSourceMetadata(input)
+        }
+      });
+    } catch {
+      throw runtimeFailure("WRITER_DRAFT_SAVE_FAILED", "Pi writer draft persistence failed", composer.module_key);
+    }
+    const sourceMetadata = writerSourceMetadata(input);
+    await recordWorkflow("writer.draft.saved", {
+      draft_id: saved.draft_id,
+      status: "candidate",
+      source_metadata: sourceMetadata
+    }, "draft:saved");
+    await recordTrace(composer.module_key, "artifact_written", {
+      draft_id: saved.draft_id,
+      artifact_type: "writer_draft",
+      status: "candidate",
+      source_metadata: sourceMetadata
+    }, "summary", "completed");
+    await recordWorkflow("writer.run.completed", { draft_id: saved.draft_id, status: "completed" }, "run:completed");
+    await deps.updateWriterRunStatus({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      status: "completed",
+      draft_id: saved.draft_id
+    });
+    return {
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      status: "completed",
+      draft_id: saved.draft_id,
+      usage: combineUsage(writingBrief.usage, draft.usage)
+    };
+  } catch (error) {
+    if (deps.cancellationSignal?.()?.aborted) throw error;
+    const failure = normalizeRuntimeFailure(error);
+    await recordTrace(failure.module_key ?? "writer_composer", "error", {
+      error_code: failure.code,
+      message: failure.message
+    }, "summary", "failed").catch(() => undefined);
+    await recordWorkflow("writer.run.failed", {
+      error_code: failure.code,
+      message: failure.message
+    }, "run:failed").catch(() => undefined);
+    await deps.updateWriterRunStatus({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      status: "failed",
+      error: { code: failure.code, message: failure.message }
+    }).catch(() => undefined);
+    return failed(input, failure.code, failure.message);
+  }
+}
+
+function writerSourceMetadata(input: WriterRunInput): Record<string, unknown> {
+  return {
+    asset_ids: input.selected_asset_ids,
+    graph_node_ids: input.graph_node_ids,
+    worldline_path_ids: input.worldline_path_ids,
+    reference_counts: {
+      assets: input.selected_asset_ids.length,
+      graph_nodes: input.graph_node_ids.length,
+      worldline_paths: input.worldline_path_ids.length
+    }
+  };
+}
+
+function publicWriterToolResult(toolName: string, value: unknown): Record<string, unknown> {
+  const source = objectRecord(value);
+  if (toolName === "query_assets") {
+    return { items: recordArray(source.assets).map((item) => pickFields(item, ["asset_id", "asset_type", "category", "lifecycle", "title", "summary"])) };
+  }
+  if (toolName === "query_world_rules") {
+    return {
+      items: recordArray(source.rules).map((item) => pickFields(item, [
+        "rule_evidence_id", "category", "confidence"
+      ]))
+    };
+  }
+  if (toolName === "query_character_profile") {
+    return {
+      items: recordArray(source.profiles).map((item) => pickFields(item, [
+        "entity_id", "canonical_name", "entity_type", "importance", "state_summary"
+      ]))
+    };
+  }
+  if (toolName === "query_graph_neighbors") {
+    return {
+      node: pickFields(objectRecord(source.node), ["node_id", "node_type", "title", "summary", "lifecycle"]),
+      neighbors: recordArray(source.neighbors).map((item) => pickFields(item, ["node_id", "node_type", "title", "summary", "lifecycle", "relationship", "edge_type", "direction"]))
+    };
+  }
+  if (toolName === "query_worldline_paths") {
+    return { items: recordArray(source.paths).map((item) => pickFields(item, ["path_id", "title", "summary", "lifecycle", "writer_instruction", "selected_event_ids"])) };
+  }
+  if (toolName === "query_chapter_scene") {
+    return { target: pickFields(objectRecord(source.target), ["chapter_id", "scene_id", "mode"]) };
+  }
+  if (toolName === "query_project_context") {
+    return { project: pickFields(objectRecord(source.project), ["title", "genre", "language", "status"]) };
+  }
+  return {};
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function recordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(objectRecord) : [];
+}
+
+function pickFields(source: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  return Object.fromEntries(fields.filter((field) => source[field] !== undefined).map((field) => [field, source[field]]));
+}
+
+async function resolveRequiredModule(
+  deps: PiWriterRunActivityDeps,
+  input: WriterRunInput,
+  moduleKey: ResolvedLLMModule["module_key"]
+): Promise<ResolvedLLMModule> {
+  try {
+    const resolution = await deps.resolveModuleBinding!({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: moduleKey
+    });
+    if (resolution.module_key !== moduleKey || !resolution.channel_id || !resolution.model_id || !resolution.provider || !resolution.base_url || !resolution.credential_ref) {
+      throw runtimeFailure("LLM_PROVIDER_ERROR", `${moduleKey} binding is incomplete`, moduleKey);
+    }
+    return resolution;
+  } catch (error) {
+    if (error instanceof RuntimeFailure) throw error;
+    const code = errorCode(error) === "LLM_MODULE_UNBOUND" ? "LLM_MODULE_UNBOUND" : "LLM_BINDING_QUERY_FAILED";
+    throw runtimeFailure(code, code === "LLM_MODULE_UNBOUND" ? `${moduleKey} module is not bound` : "LLM module binding query failed", moduleKey);
+  }
+}
+
+interface ExecutedLLMStage<T> {
+  result: T;
+  provider_call_id: string;
+}
+
+async function executeLLMStage<T extends { usage?: PiWriterUsage }>(
+  deps: PiWriterRunActivityDeps,
+  input: WriterRunInput,
+  resolution: ResolvedLLMModule,
+  stage: "orchestrator" | "composer",
+  callIndex: number,
+  execute: (apiKey: string, providerCallID: string) => Promise<T>
+): Promise<ExecutedLLMStage<T>> {
+  const providerCallID = stableProviderCallId({
+    tenant_id: input.tenant_id,
+    project_id: input.project_id,
+    run_id: input.run_id,
+    module_key: resolution.module_key,
+    stage,
+    call_index: callIndex
+  });
+  let reservation: LLMQuotaReservation | undefined;
+  let lease: LLMLease | undefined;
+  let providerUsageObserved = false;
+  try {
+    assertQuotaDeps(deps, resolution.module_key);
+    const credential = await deps.resolveCredential({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: resolution.module_key,
+      channel_id: resolution.channel_id,
+      credential_ref: resolution.credential_ref
+    });
+    const budget = providerCallBudget(resolution.settings);
+    reservation = await deps.reserveLLMQuota!({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: resolution.module_key,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      provider_call_id: providerCallID,
+      reserved_tokens: budget.reserved_tokens,
+      reserved_cost_micros: budget.reserved_cost_micros,
+      pricing_status: budget.pricing_status,
+      ttl_seconds: positiveIntegerSetting(resolution.settings, "quota_reservation_ttl_seconds") ?? 300
+    });
+    if (reservation.provider_call_id !== providerCallID) {
+      throw runtimeFailure("LLM_PROVIDER_CALL_CONFLICT", "Pi writer provider call identity conflicts with its reservation", resolution.module_key);
+    }
+    const checkpoint = await deps.loadProviderStageCheckpoint?.(providerCallID);
+    if (checkpoint) {
+      const result = checkpoint.result as T;
+      const usage = validateProviderUsage(result.usage);
+      if (reservation.status === "reserved") {
+        await deps.finalizeLLMQuota!({
+          tenant_id: input.tenant_id,
+          project_id: input.project_id,
+          reservation_id: reservation.reservation_id,
+          provider_call_id: providerCallID,
+          prompt_tokens: usage.prompt_tokens,
+          completion_tokens: usage.completion_tokens,
+          actual_cost_micros: usageCostMicros(usage, budget.pricing_status),
+          pricing_status: budget.pricing_status
+        });
+      }
+      const cleanup = await releaseStageResources(deps, input, checkpoint.lease, undefined);
+      if (cleanup) throw cleanup;
+      return { result, provider_call_id: providerCallID };
+    }
+    if (reservation.status === "finalized") {
+      throw runtimeFailure(
+        "LLM_PROVIDER_CALL_ALREADY_FINALIZED",
+        "Pi writer provider call is already finalized and requires run recovery",
+        resolution.module_key
+      );
+    }
+    lease = await deps.acquireLLMLease({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: resolution.module_key,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      module_max_concurrency: positiveIntegerSetting(resolution.settings, "max_concurrency")
+    });
+    const result = await execute(credential.apiKey, providerCallID);
+    const usage = validateProviderUsage(result.usage);
+    providerUsageObserved = true;
+    await deps.saveProviderStageCheckpoint?.({
+      provider_call_id: providerCallID,
+      result,
+      reservation,
+      lease
+    });
+    await deps.finalizeLLMQuota!({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      reservation_id: reservation.reservation_id,
+      provider_call_id: providerCallID,
+      prompt_tokens: usage.prompt_tokens,
+      completion_tokens: usage.completion_tokens,
+      actual_cost_micros: usageCostMicros(usage, budget.pricing_status),
+      pricing_status: budget.pricing_status
+    });
+    const cleanup = await releaseStageResources(deps, input, lease, undefined);
+    lease = undefined;
+    if (cleanup) throw cleanup;
+    return { result, provider_call_id: providerCallID };
+  } catch (error) {
+    const failure = normalizeStageFailure(error, resolution.module_key);
+    const cleanup = await releaseStageResources(
+      deps,
+      input,
+      lease,
+      reservation?.status === "reserved" && !providerUsageObserved ? reservation : undefined
+    );
+    lease = undefined;
+    reservation = undefined;
+    const surfaced = cleanup
+      ? runtimeFailure(cleanup.code, `${failure.message}; ${cleanup.message}`, resolution.module_key)
+      : failure;
+    await deps.recordLLMActivity({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: resolution.module_key,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      provider_call_id: providerCallID,
+      status: "failed",
+      error: { code: surfaced.code, message: surfaced.message }
+    }).catch(() => undefined);
+    throw surfaced;
+  }
+}
+
+function composeRequest(
+  input: WriterRunInput,
+  resolution: ResolvedLLMModule,
+  apiKey: string,
+  providerCallID: string,
+  abortSignal?: AbortSignal
+): ComposeDraftRequest {
+  return {
+    tenant_id: input.tenant_id,
+    project_id: input.project_id,
+    run_id: input.run_id,
+    module_key: resolution.module_key,
+    channel_id: resolution.channel_id,
+    model_id: resolution.model_id,
+    provider: resolution.provider,
+    base_url: resolution.base_url,
+    instruction: input.instruction,
+    mode: input.mode,
+    revise: input.options.revise,
+    target_words: input.options.target_words,
+    thinking_level: input.options.thinking_level,
+    apiKey,
+    settings: resolution.settings,
+    provider_call_id: providerCallID,
+    abort_signal: abortSignal
+  };
+}
+
+async function recordStageTelemetry(
+  deps: PiWriterRunActivityDeps,
+  input: WriterRunInput,
+  resolution: ResolvedLLMModule,
+  usage: PiWriterUsage | undefined,
+  latency: number,
+  providerCallID: string
+): Promise<void> {
+  await deps.recordLLMActivity({
+    tenant_id: input.tenant_id, project_id: input.project_id, run_id: input.run_id,
+    module_key: resolution.module_key, channel_id: resolution.channel_id, model_id: resolution.model_id,
+    provider_call_id: providerCallID,
+    status: "completed", prompt_tokens: usage?.prompt_tokens, completion_tokens: usage?.completion_tokens,
+    latency_ms: latency, cost_estimate: usage?.cost_estimate
+  });
+}
+
+function assertQuotaDeps(deps: PiWriterRunActivityDeps, moduleKey: string): void {
+  if (!deps.reserveLLMQuota || !deps.finalizeLLMQuota || !deps.releaseLLMQuota) {
+    throw runtimeFailure(
+      "LLM_QUOTA_BACKEND_UNCONFIGURED",
+      "Pi writer LLM quota backend is not configured",
+      moduleKey
+    );
+  }
+}
+
+async function releaseStageResources(
+  deps: PiWriterRunActivityDeps,
+  input: WriterRunInput,
+  lease?: LLMLease,
+  reservation?: LLMQuotaReservation
+): Promise<RuntimeFailure | undefined> {
+  const failures: RuntimeFailure[] = [];
+  if (lease) {
+    try {
+      await boundedCleanup(() => deps.releaseLLMLease({
+        ...lease,
+        tenant_id: input.tenant_id,
+        project_id: input.project_id,
+        run_id: input.run_id
+      }));
+    } catch {
+      failures.push(runtimeFailure("LLM_CONCURRENCY_RELEASE_FAILED", "Pi writer LLM concurrency lease release failed"));
+    }
+  }
+  if (reservation && deps.releaseLLMQuota) {
+    try {
+      await boundedCleanup(() => deps.releaseLLMQuota!({
+        tenant_id: input.tenant_id,
+        project_id: input.project_id,
+        reservation_id: reservation.reservation_id,
+        provider_call_id: reservation.provider_call_id
+      }));
+    } catch {
+      failures.push(runtimeFailure("LLM_QUOTA_RELEASE_FAILED", "Pi writer LLM quota reservation release failed"));
+    }
+  }
+  if (!failures.length) return undefined;
+  return runtimeFailure(
+    failures[0]!.code,
+    failures.map((failure) => failure.message).join("; ")
+  );
+}
+
+async function boundedCleanup(cleanup: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cleanup(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("cleanup timed out")), 5_000);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function normalizeStageFailure(error: unknown, moduleKey: string): RuntimeFailure {
+  if (error instanceof RuntimeFailure) return error;
+  const code = errorCode(error) || "LLM_PROVIDER_ERROR";
+  const messages: Record<string, string> = {
+    LLM_CONCURRENCY_LIMITED: "Pi writer LLM concurrency is limited",
+    LLM_QUOTA_POLICY_UNAVAILABLE: "Pi writer LLM quota policy is unavailable",
+    LLM_QUOTA_PRICING_UNAVAILABLE: "Pi writer LLM pricing is required by the active quota policy",
+    LLM_QUOTA_TOKENS_EXCEEDED: "Pi writer LLM token quota is exceeded",
+    LLM_QUOTA_COST_EXCEEDED: "Pi writer LLM cost quota is exceeded",
+    LLM_QUOTA_CONCURRENCY_EXCEEDED: "Pi writer LLM quota concurrency is exceeded",
+    LLM_PROVIDER_USAGE_MISSING: "Pi writer provider usage is unavailable",
+    LLM_PROVIDER_USAGE_INVALID: "Pi writer provider usage is invalid",
+    LLM_PROVIDER_COST_MISSING: "Pi writer provider cost usage is unavailable",
+    LLM_PROVIDER_COST_INVALID: "Pi writer provider cost usage is invalid",
+    LLM_QUOTA_FINALIZE_FAILED: "Pi writer LLM quota finalization failed"
+  };
+  return runtimeFailure(code, messages[code] ?? "Pi writer provider call failed", moduleKey);
+}
+
+function resolutionSummary(resolution: ResolvedLLMModule): Record<string, unknown> {
+  return { module_key: resolution.module_key, channel_id: resolution.channel_id, model_id: resolution.model_id, provider: resolution.provider };
+}
+
+class RuntimeFailure extends Error {
+  constructor(readonly code: string, message: string, readonly module_key?: string) { super(message); }
+}
+
+function runtimeFailure(code: string, message: string, moduleKey?: string): RuntimeFailure {
+  return new RuntimeFailure(code, message, moduleKey);
+}
+
+function normalizeRuntimeFailure(error: unknown): RuntimeFailure {
+  return error instanceof RuntimeFailure ? error : runtimeFailure("LLM_PROVIDER_ERROR", "Pi writer runtime dependency failed");
+}
+
+function errorCode(error: unknown): string {
+  if (!(error instanceof Error)) return "";
+  const match = /^([A-Z][A-Z0-9_]+):/.exec(error.message);
+  return match?.[1] ?? "";
+}
+
+function combineUsage(first?: PiWriterUsage, second?: PiWriterUsage): PiWriterUsage {
+  return {
+    prompt_tokens: (first?.prompt_tokens ?? 0) + (second?.prompt_tokens ?? 0),
+    completion_tokens: (first?.completion_tokens ?? 0) + (second?.completion_tokens ?? 0),
+    cost_estimate: (first?.cost_estimate ?? 0) + (second?.cost_estimate ?? 0)
+  };
+}

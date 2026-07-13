@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 
-export default function ArchiveLibraryRedirectPage() {
-  redirect("/demo/projects/demo-project/assets");
+import { devEntryRedirectPath } from "../../lib/dev-access";
+
+export default function LegacyArchiveLibraryPage() {
+  redirect(devEntryRedirectPath());
 }

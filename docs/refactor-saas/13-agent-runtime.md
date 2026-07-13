@@ -1,6 +1,6 @@
 # 13. Agent Runtime
 
-更新时间：`2026-07-09`
+更新时间：`2026-07-13`
 
 ## 模块定位
 
@@ -70,7 +70,13 @@ Go `TemporalSeedRunStarter` 在启动 `SeedPipelineWorkflow` 前会递归清洗 
 
 Go `TemporalWorkflowRetrier` 现在只为 terminal `seed_pipeline` same-run retry 提供真实后端。它从已持久化的 Seed queued event 和 `source_files` 恢复内部 worker handoff，在 DB admission 中把同一 source row 重新置为 `parsing`、把同一 `workflow_runs` row 重新置为 `queued`、写入新的 retry Temporal workflow id 和 sanitized `workflow.retry_requested` event，然后重新启动 `SeedPipelineWorkflow`。Temporal start 失败时必须写稳定 `WORKFLOW_RETRY_FAILED` failed event/status，并把 source row 释放回 `uploaded`；非 Seed、非 terminal、缺 DB/Temporal 或 admission guard 未命中都 fail closed。`cmd/api` 必须把配置的 `SEED_TASK_QUEUE` 传给 retry backend，确保 retry workflow 与初始 Seed start 使用同一配置队列，而不是隐式落回默认队列。公开 retry result/event/status 只允许 run/status/workflow/request/trace/upload/source-file public correlation metadata，不得公开 source object key/hash、raw source/segment text、prompt/provider response、API key、encrypted credential、`credential_ref`、draft 或 manuscript。该能力已有 opt-in Postgres/app-role + MinIO recording-client harness 覆盖 stored source handoff、sanitized retry/failure events 和 start-failure compensation；也已有 opt-in Go API + real Temporal worker harness 验证真实 `/v1/seed-runs/{runId}/retry` 在 `workflow.retry_requested` 后被配置队列上的 worker 接收并写入 post-retry `parse_file` / `segment_text` / `story_ontology` failure events。该能力不等于 per-segment retry、replacement-run retry、browser retry、外部 provider/cluster E2E 或完整 Seed recovery closure。
 
-Seed segment retry runtime 目前只落地 fail-closed shell。Python `seed-heavy` 队列注册 `SeedSegmentRetryWorkflow` / `seed_segment_retry_activity`；activity 要求 `workflow_type = seed_pipeline`、`seed_pipeline:run` permission 和 tenant/project/run/trace context，标准化 requested `segment_ids` 后，在缺少真实 segment retry runner/DB consumer 时以 `SEED_SEGMENT_RETRY_RUNNER_UNCONFIGURED` fail closed。该失败路径只能通过 retry status writer 标记 retry requests failed、写 count-only `seed.segments.retry_failed` public event，并把 admitted Seed run 标为 failed；公开 result/event/status 不得包含 segment ids、source/object keys、raw/source/segment text、prompt/provider response/raw body/content、API key、encrypted credential、`credential_ref`、draft 或 manuscript。后续真实 consumer 必须从 DB truth source claim `seed_segment_retry_requests` rows、读取 same-run `text_segments` refs 并重跑真实 selected-segment reading/canon path；缺 store/reader/writer/request rows 必须 fail closed，不能 completed-zero success。该 shell 不代表 per-segment retry closure、browser live retry、provider/cluster retry 或完整 Seed recovery。
+Seed segment retry runtime 已从 injectable shell 推进到默认 DB admission -> Temporal -> Postgres consumer 路径。Go `SQLSeedSegmentRetrier` 只在 Postgres 与 Temporal 都存在时启用：它为整批 requested segments 生成一个 `retry_attempt_id`，在 guarded admission 内 upsert retry rows 与 sanitized `seed.segments.retry_requested`，拒绝与已有 `requested` / `running` rows 重叠的 active retry，再在配置的 `SEED_TASK_QUEUE` 上启动 `SeedSegmentRetryWorkflow`。Temporal start 失败后的 DB compensation 使用 `context.WithTimeout(context.WithoutCancel(ctx), ...)`，只标记当前 attempt 失败，避免客户端取消使补偿也被取消。
+
+Python `seed-heavy` 队列注册 `SeedSegmentRetryWorkflow` / `seed_segment_retry_activity`。Activity 要求 `workflow_type = seed_pipeline`、`seed_pipeline:run` permission 以及 tenant/project/run/trace context，并从 Temporal activity info 获取 `worker_attempt`。配置 `DATABASE_URL` 时默认装配 `PostgresSeedSegmentRetryStore`、DB-backed `SequentialReadingReader` 和 `ReadingNotesWriter`；store 只 claim 与 payload `retry_attempt_id` 一致、属于同 tenant/project/run 且 join 到 same-run `text_segments` 的 rows。同一 `worker_attempt` 的重复 claim 返回空，较大 `worker_attempt` 可以从崩溃的较旧 attempt 接管 `running` rows，而较旧 attempt 的 terminal write 会因 attempt/status guard 失败并 rollback。只有 DB-claimed refs 能进入 `SequentialReadingReader.read_segments(module_key="sequential_reading")`；payload-provided refs/object keys/content 不是权威数据。schema-valid notes 通过 `ReadingNotesWriter.record_reading_notes(..., metadata_jsonb={"segment_count": n, "retry": True})` 持久化。
+
+`PostgresSeedSegmentRetryStore` 对 completed/failed 终态使用 attempt-scoped row lock 和 guarded update，并把 retry row status 与 count-only `seed.segments.retry_completed` / `seed.segments.retry_failed` event 置于同一 Postgres transaction；guard、update、event insert 或 commit 任一失败均 rollback 并返回稳定 `SEED_SEGMENT_RETRY_COMPLETION_WRITE_FAILED`。Seed 共享 `_set_postgres_tenant_context` 现在传入 `(context.tenant_id, context.actor_user_id)`，修正了把 `project_id` 错当 `app_set_tenant_context` user parameter 的语义错误。公开 result/event/status 仍不得包含 segment ids、source/object keys、raw/source/segment text、prompt/provider response/raw body/content、API key、encrypted credential、`credential_ref`、draft 或 manuscript。
+
+Seed segment retry 现在会在同一 app-role transaction 中替换 selected notes、回读完整 deterministic pass、重建 run-scoped facts、对账 Seed assets/search/readiness，再写 retry terminal/event；stale worker attempt 和跨 run aggregate ownership conflict 均 fail closed 并 rollback。该 local-live verified slice 不代表 browser/external-provider/cluster retry、OCR、vector/hybrid search、Phase 5 或完整 Seed recovery 完成。
 
 Seed `seed-heavy` 队列中的 `archive_candidate_activity` 现在可在配置 `DATABASE_URL` 与显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时装配 `LLMFacilityArchiveCandidateRunner`。该 runner 解析 `narrative_archives` module binding、解密 tenant-scoped credential、调用 JSON-capable OpenAI-compatible provider、schema-validate archive entity / memory candidates，并通过 `PostgresArchiveCandidateWriter` 写入 candidate `archive_entity` assets、candidate `archive_memories` 和 `memory.candidate.generated` events。writer 在写入前设置 app-role tenant context，业务 SQL/commit failure 会 rollback 并稳定为 `ARCHIVE_CANDIDATE_WRITE_FAILED` / `archive candidate write failed`。缺少 runner、binding、credential key 或 schema-valid 输出时 fail closed，不生成 mock archive candidates；公开 result/event 只暴露 batch/count/model metadata，不公开 archive candidate body、memory body、profile/seed analysis body、prompt/response 或 credential。
 
@@ -406,6 +412,14 @@ Writer 和 worldline 可以流式输出：
 - reviewer suggestion -> applied revision。
 
 Agent 只生成 candidate，除非用户明确配置 auto-adopt policy。
+
+### Planned: Manuscript Asset Distillation
+
+空项目从零创作和正文资产蒸馏的完整目标契约见 `28-zero-start-writer-and-manuscript-asset-distillation.md`。该能力当前是 planned，不得从本节推导为已实现或已验证。
+
+目标 runtime 新增 `writer_asset_distiller` module 和 `manuscript_asset_distillation` workflow，复用现有 `writer-planning` worker。正文 adoption、内容更新或章节检查点只在原业务事务中写 metadata-only request/outbox，不同步调用 LLM；dispatcher 使用稳定 Temporal workflow id 异步启动。Temporal input/history、公开 workflow event、audit、日志和 DOM 只能包含 tenant/project/run、block/version、content hash、contract version、计数和状态，不得包含正文、证据文本、prompt、provider body 或 credential。
+
+Activity 在 app-role/RLS 私有事务中加载不可变 manuscript version，调用 LLM Facility 前后都校验 source version/content hash。模型输出必须通过严格 JSON schema 和 evidence span 校验；任一候选不合法、来源已变化、quota/telemetry/persistence 未闭合时整批零写入。持久化结果只能是 `lifecycle=candidate` 且 `enabled=false` 的资产候选；正文蒸馏不允许配置 auto-adopt。`creative_write` 可触发提取，`asset_manage` 才能读取私有证据并接受、合并、拒绝或撤销候选。
 
 ## 旧模块映射
 

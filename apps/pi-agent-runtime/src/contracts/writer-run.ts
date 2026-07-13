@@ -6,11 +6,12 @@ export interface WriterRunInput {
   run_id: string;
   trace_id: string;
   requested_by: string;
-  mode: "draft" | "continue" | "outline";
+  mode: "draft" | "continue" | "outline" | "revise";
   chapter_id?: string;
   scene_id?: string;
   instruction: string;
   selected_asset_ids: string[];
+  graph_node_ids: string[];
   worldline_path_ids: string[];
   options: {
     module_key: "writer_composer" | "writer_orchestrator";
@@ -18,6 +19,14 @@ export interface WriterRunInput {
     tool_execution?: ToolExecutionMode;
     target_words?: number;
     review_after_write?: boolean;
+    revise?: {
+      block_id: string;
+      selection_text: string;
+      selection_start?: number;
+      selection_end?: number;
+      expected_version?: number;
+      action?: "rewrite" | "expand" | "condense" | "polish" | "correct" | "custom";
+    };
     llm_resolution?: {
       module_key: string;
       channel_id: string;

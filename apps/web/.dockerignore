@@ -1,0 +1,6 @@
+.next
+.next-*
+node_modules
+npm-debug.log*
+test-results
+playwright-report

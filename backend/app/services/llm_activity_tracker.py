@@ -96,9 +96,9 @@ class LlmActivityTracker:
     def snapshot(self) -> List[dict]:
         """返回当前所有活跃调用的快照列表。
 
-        Return shape matches the frontend ``LlmActiveCall`` contract
-        (see ``frontend/src/types/llm.ts``): module / model_id /
-        elapsed_seconds / started_at / channel_key.
+        This is a legacy-backend-only snapshot. The active SaaS Web does not
+        consume this object; ``apps/web`` reads ``LLMActivityRecord`` from the
+        Go control-plane API instead.
         """
         now = time.monotonic()
         with self._lock:

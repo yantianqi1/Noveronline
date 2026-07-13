@@ -7,7 +7,7 @@ export async function POST() {
   const cookieStore = await cookies();
   const sessionCookie = cookieStore.get("mirofish_session")?.value?.trim();
   if (!sessionCookie) {
-    return new NextResponse(null, { status: 204 });
+    return sessionRefreshFailure("UNAUTHENTICATED", "");
   }
 
   const csrfResult = await getSessionCSRFToken({ sessionCookie });

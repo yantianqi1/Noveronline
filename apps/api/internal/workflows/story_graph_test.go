@@ -215,6 +215,32 @@ func TestSQLStoryGraphBondGenerationAdmissionStorePersistsWorkflowRunAndQueuedEv
 	}
 }
 
+func TestSQLStoryGraphBondGenerationAdmissionStoreUsesTenantContext(t *testing.T) {
+	execer := &recordingTenantWriterAdmissionExecer{}
+	store := NewSQLStoryGraphBondGenerationAdmissionStore(SQLStoryGraphBondGenerationAdmissionStoreConfig{Execer: execer})
+
+	err := store.AdmitStoryGraphBondGeneration(context.Background(), StoryGraphBondGenerationAdmissionInput{
+		TenantID:           "11111111-1111-4111-8111-111111111111",
+		ProjectID:          "22222222-2222-4222-8222-222222222222",
+		RunID:              "33333333-3333-4333-8333-333333333333",
+		WorkflowType:       StoryGraphBondGenerationWorkflowType,
+		TemporalWorkflowID: "story_graph_bond_generation_33333333-3333-4333-8333-333333333333",
+		ActorUserID:        "44444444-4444-4444-8444-444444444444",
+		GraphID:            "graph-1",
+		NodeCount:          2,
+	})
+
+	if err != nil {
+		t.Fatalf("admit story graph bond generation: %v", err)
+	}
+	if execer.plainCalled {
+		t.Fatal("story graph bond admission must not bypass tenant context")
+	}
+	if execer.tenantID != "11111111-1111-4111-8111-111111111111" || execer.projectID != "22222222-2222-4222-8222-222222222222" {
+		t.Fatalf("unexpected tenant context: tenant=%q project=%q", execer.tenantID, execer.projectID)
+	}
+}
+
 func TestTemporalStoryGraphBuildStarterStartsWorkflowWithSanitizedPayload(t *testing.T) {
 	temporalClient := &recordingSeedTemporalClient{}
 	starter := NewTemporalStoryGraphBuildStarter(TemporalStoryGraphBuildConfig{
@@ -379,6 +405,30 @@ func TestSQLStoryGraphBuildAdmissionStorePersistsWorkflowRunAndQueuedEventWithou
 	}
 	if _, err := json.Marshal(execer.args); err != nil {
 		t.Fatalf("expected admission args to be JSON-safe: %v", err)
+	}
+}
+
+func TestSQLStoryGraphBuildAdmissionStoreUsesTenantContext(t *testing.T) {
+	execer := &recordingTenantWriterAdmissionExecer{}
+	store := NewSQLStoryGraphBuildAdmissionStore(SQLStoryGraphBuildAdmissionStoreConfig{Execer: execer})
+
+	err := store.AdmitStoryGraphBuild(context.Background(), StoryGraphBuildAdmissionInput{
+		TenantID:           "11111111-1111-4111-8111-111111111111",
+		ProjectID:          "22222222-2222-4222-8222-222222222222",
+		RunID:              "33333333-3333-4333-8333-333333333333",
+		WorkflowType:       StoryGraphBuildWorkflowType,
+		TemporalWorkflowID: "story_graph_build_33333333-3333-4333-8333-333333333333",
+		ActorUserID:        "44444444-4444-4444-8444-444444444444",
+	})
+
+	if err != nil {
+		t.Fatalf("admit story graph build: %v", err)
+	}
+	if execer.plainCalled {
+		t.Fatal("story graph admission must not bypass tenant context")
+	}
+	if execer.tenantID != "11111111-1111-4111-8111-111111111111" || execer.projectID != "22222222-2222-4222-8222-222222222222" {
+		t.Fatalf("unexpected tenant context: tenant=%q project=%q", execer.tenantID, execer.projectID)
 	}
 }
 

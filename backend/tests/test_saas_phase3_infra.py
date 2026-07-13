@@ -15,7 +15,7 @@ def test_phase3_local_infra_compose_declares_required_dependencies() -> None:
         assert service in compose
 
     for image in (
-        "postgres:16",
+        "pgvector/pgvector:pg16",
         "redis:7",
         "temporalio/auto-setup",
         "minio/minio",
@@ -76,23 +76,31 @@ def test_phase5_compose_initializes_source_file_object_bucket() -> None:
 
 def test_phase5_seed_worker_has_object_storage_and_artifact_db_binding() -> None:
     compose = (ROOT / "infra" / "docker-compose.yml").read_text(encoding="utf-8")
+    seed_service = compose.split("  agent-runtime-seed:", 1)[1].split(
+        "\n  agent-runtime-graph:", 1
+    )[0]
 
     assert "agent-runtime-seed:" in compose
-    assert "DATABASE_URL: postgresql://" in compose
-    assert "MIROFISH_OBJECT_STORAGE_ENDPOINT: minio:9000" in compose
-    assert "MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}" in compose
-    assert "MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-mirofish}" in compose
-    assert "MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}" in compose
-    assert "MIROFISH_OBJECT_STORAGE_USE_SSL: \"false\"" in compose
+    assert "DATABASE_URL: postgresql://" in seed_service
+    assert "MIROFISH_OBJECT_STORAGE_ENDPOINT: minio:9000" in seed_service
+    assert "MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}" in seed_service
+    assert "MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-mirofish}" in seed_service
+    assert "MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}" in seed_service
+    assert "MIROFISH_OBJECT_STORAGE_USE_SSL: \"false\"" in seed_service
+    assert "LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}" in seed_service
 
 
 def test_phase5_graph_worker_has_dedicated_task_queue_and_db_binding() -> None:
     compose = (ROOT / "infra" / "docker-compose.yml").read_text(encoding="utf-8")
+    graph_service = compose.split("  agent-runtime-graph:", 1)[1].split(
+        "\n  agent-runtime-asset:", 1
+    )[0]
 
     assert "agent-runtime-graph:" in compose
-    assert "AGENT_RUNTIME_TASK_QUEUE: graph-heavy" in compose
-    assert "DATABASE_URL: postgresql://" in compose
-    assert "python -m mirofish_agents.temporal.worker" in compose
+    assert "AGENT_RUNTIME_TASK_QUEUE: graph-heavy" in graph_service
+    assert "DATABASE_URL: postgresql://" in graph_service
+    assert "LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}" in graph_service
+    assert "python -m mirofish_agents.temporal.worker" in graph_service
 
 
 def test_phase3_compose_declares_pi_writer_runtime_worker() -> None:
@@ -107,3 +115,38 @@ def test_phase3_compose_declares_pi_writer_runtime_worker() -> None:
     assert "LLM_CREDENTIAL_ENCRYPTION_KEY:" in compose
     assert "npm run worker" in compose
     assert dockerfile.exists()
+
+
+def test_writer_reviewer_has_dedicated_worker_queue_and_credentials() -> None:
+    compose = (ROOT / "infra" / "docker-compose.yml").read_text(encoding="utf-8")
+    reviewer_service = compose.split("  agent-runtime-reviewer:", 1)[1].split(
+        "\n  pi-agent-runtime:", 1
+    )[0]
+    readiness = (ROOT / "infra" / "scripts" / "check-temporal-workers.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python -m mirofish_agents.temporal.writer_review_worker" in reviewer_service
+    assert "WRITER_REVIEW_TASK_QUEUE: writer-reviewer" in reviewer_service
+    assert "DATABASE_URL: postgresql://" in reviewer_service
+    assert "LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}" in reviewer_service
+    assert "agent-runtime-reviewer:" in compose
+    assert "WRITER_REVIEW_TASK_QUEUE: writer-reviewer" in compose
+    assert "writer-reviewer" in readiness
+
+
+def test_worker_readiness_bounds_temporal_describe_fanout() -> None:
+    compose = (ROOT / "infra" / "docker-compose.yml").read_text(encoding="utf-8")
+    worker_readiness = compose.split("  worker-readiness:", 1)[1].split("\nvolumes:", 1)[0]
+    planning_worker = compose.split("  agent-runtime-writer-planning:", 1)[1].split(
+        "\n  legacy-import-worker:", 1
+    )[0]
+    readiness = (ROOT / "infra" / "scripts" / "check-temporal-workers.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TEMPORAL_READINESS_MAX_CONCURRENCY: ${TEMPORAL_READINESS_MAX_CONCURRENCY:-4}" in worker_readiness
+    assert "TEMPORAL_READINESS_MAX_CONCURRENCY" not in planning_worker
+    assert 'max_parallel="${TEMPORAL_READINESS_MAX_CONCURRENCY:-4}"' in readiness
+    assert 'if [ "$batch_size" -ge "$max_parallel" ]' in readiness
+    assert "wait_batch" in readiness

@@ -205,7 +205,13 @@ func TestSQLStoreCreatesInteractionSessionWithPublicMetadataOnly(t *testing.T) {
 		t.Fatalf("unexpected interaction metadata: %#v", record)
 	}
 	query := strings.ToLower(queryer.query)
-	for _, required := range []string{"insert into character_interaction_sessions", "worldline_sessions", "tenant_id", "project_id"} {
+	for _, required := range []string{
+		"insert into character_interaction_sessions",
+		"worldline_sessions",
+		"tenant_id = $1::uuid",
+		"project_id = $2::uuid",
+		"session_id = nullif($4::text, '')::uuid",
+	} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("expected query to include %q, got %s", required, queryer.query)
 		}
@@ -794,7 +800,16 @@ func TestSQLStoreAppendsAndListsTurnsAsMetadataWithoutAutoReply(t *testing.T) {
 		t.Fatalf("unexpected turn metadata: %#v", turn)
 	}
 	query := strings.ToLower(queryer.query)
-	for _, required := range []string{"insert into character_interaction_turns", "character_interaction_sessions", "coalesce(max(turn_order)", "returning"} {
+	for _, required := range []string{
+		"insert into character_interaction_turns",
+		"character_interaction_sessions",
+		"pg_advisory_xact_lock",
+		"coalesce(max(turn_order)",
+		"tenant_id = $1::uuid",
+		"interaction_id = $2::uuid",
+		"$1::text || ':' || $2::text",
+		"returning",
+	} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("expected append query to include %q, got %s", required, queryer.query)
 		}
@@ -851,6 +866,77 @@ func TestSQLStoreListTurnsReturnsNotFoundWhenParentInteractionMissing(t *testing
 	}
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "missing-interaction"}) {
 		t.Fatalf("unexpected parent lookup args: %#v", queryer.args)
+	}
+}
+
+func TestSQLStoreListsCharacterDialogueEventsWithCursorAndPublicPayload(t *testing.T) {
+	rows := &fakeCharacterConsoleRows{values: [][]any{{
+		true,
+		"event-2",
+		3,
+		"character.turn.completed",
+		`{"status":"completed","interaction_id":"interaction-1","prompt":"hidden","api_key":"sk-hidden","nested":{"credential_ref":"secret","count":1}}`,
+		"2026-07-10T12:00:00Z",
+	}}}
+	queryer := &recordingTenantCharacterConsoleQueryer{
+		recordingCharacterConsoleQueryer: recordingCharacterConsoleQueryer{rows: rows},
+	}
+	store := NewSQLStore(SQLStoreConfig{Queryer: queryer, Execer: queryer, Limit: 25})
+
+	events, err := store.ListEvents(context.Background(), ListEventsInput{
+		TenantID: "tenant-123", InteractionID: "interaction-1", AfterEventID: "event-1",
+	})
+
+	if err != nil {
+		t.Fatalf("list character dialogue events: %v", err)
+	}
+	if !queryer.usedTenantContext || queryer.tenantID != "tenant-123" {
+		t.Fatalf("event query did not use tenant context: used=%v tenant=%q", queryer.usedTenantContext, queryer.tenantID)
+	}
+	for _, required := range []string{"workflow_type = 'character_dialogue'", "payload_jsonb->>'interaction_id'", "after_cursor", "order by created_at, event_id", "limit $4"} {
+		if !strings.Contains(strings.ToLower(queryer.query), required) {
+			t.Fatalf("event query missing %q: %s", required, queryer.query)
+		}
+	}
+	if len(queryer.args) != 4 || queryer.args[0] != "tenant-123" || queryer.args[1] != "interaction-1" || queryer.args[2] != "event-1" || queryer.args[3] != 25 {
+		t.Fatalf("unexpected event query args: %#v", queryer.args)
+	}
+	if len(events) != 1 || events[0].EventID != "event-2" || events[0].InteractionID != "interaction-1" || events[0].Sequence != 3 {
+		t.Fatalf("unexpected character dialogue events: %#v", events)
+	}
+	if _, found := events[0].Payload["prompt"]; found {
+		t.Fatalf("public event payload leaked prompt: %#v", events[0].Payload)
+	}
+	if _, found := events[0].Payload["api_key"]; found {
+		t.Fatalf("public event payload leaked api key: %#v", events[0].Payload)
+	}
+	nested, ok := events[0].Payload["nested"].(map[string]any)
+	if !ok || nested["count"] != float64(1) {
+		t.Fatalf("public event payload lost safe nested metadata: %#v", events[0].Payload)
+	}
+	if _, found := nested["credential_ref"]; found {
+		t.Fatalf("public event payload leaked credential ref: %#v", events[0].Payload)
+	}
+}
+
+func TestSQLStoreListCharacterDialogueEventsRejectsForeignCursor(t *testing.T) {
+	rows := &fakeCharacterConsoleRows{values: [][]any{{
+		false, nil, nil, nil, nil, nil,
+	}}}
+	queryer := &recordingTenantCharacterConsoleQueryer{
+		recordingCharacterConsoleQueryer: recordingCharacterConsoleQueryer{rows: rows},
+	}
+	store := NewSQLStore(SQLStoreConfig{Queryer: queryer, Execer: queryer})
+
+	_, err := store.ListEvents(context.Background(), ListEventsInput{
+		TenantID: "tenant-123", InteractionID: "interaction-1", AfterEventID: "foreign-event",
+	})
+
+	if code := ErrorCode(err); code != "EVENT_CURSOR_NOT_FOUND" {
+		t.Fatalf("expected foreign cursor rejection, got %s (%v)", code, err)
+	}
+	if !rows.aborted {
+		t.Fatalf("foreign cursor should abort tenant-scoped rows")
 	}
 }
 
@@ -1038,10 +1124,24 @@ func (r *fakeCharacterConsoleRows) Scan(dest ...any) error {
 	r.index++
 	for i := range dest {
 		switch pointer := dest[i].(type) {
+		case *bool:
+			*pointer = row[i].(bool)
 		case *string:
 			*pointer = row[i].(string)
 		case *int:
 			*pointer = row[i].(int)
+		case *sql.NullString:
+			if row[i] == nil {
+				*pointer = sql.NullString{}
+			} else {
+				*pointer = sql.NullString{String: row[i].(string), Valid: true}
+			}
+		case *sql.NullInt64:
+			if row[i] == nil {
+				*pointer = sql.NullInt64{}
+			} else {
+				*pointer = sql.NullInt64{Int64: int64(row[i].(int)), Valid: true}
+			}
 		default:
 			return nil
 		}

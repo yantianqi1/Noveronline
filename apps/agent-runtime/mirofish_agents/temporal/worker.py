@@ -23,6 +23,11 @@ from mirofish_agents.temporal.graph import (
     graph_bond_generation_activity,
     story_graph_build_activity,
 )
+from mirofish_agents.temporal.character import (
+    CHARACTER_TASK_QUEUE,
+    CharacterDialogueWorkflow,
+    character_dialogue_activity,
+)
 from mirofish_agents.temporal.hello import (
     HELLO_AGENT_TASK_QUEUE,
     HelloAgentWorkflow,
@@ -48,12 +53,27 @@ from mirofish_agents.temporal.seed import (
 )
 from mirofish_agents.temporal.worldline import (
     WORLDLINE_TASK_QUEUE,
+    WorldlinePrepareWorkflow,
     WorldlineStepWorkflow,
+    worldline_prepare_activity,
     worldline_step_activity,
+)
+from mirofish_agents.temporal.worldline_auto_evolution import (
+    WorldlineAutoEvolutionWorkflow,
+    worldline_auto_evolution_finalize_activity,
+    worldline_auto_evolution_step_activity,
 )
 
 
 def worker_components_for_task_queue(task_queue: str) -> dict[str, list[object]]:
+    configured_character_task_queue = os.environ.get("CHARACTER_TASK_QUEUE", "").strip()
+    if task_queue == CHARACTER_TASK_QUEUE or (
+        configured_character_task_queue and task_queue == configured_character_task_queue
+    ):
+        return {
+            "workflows": [CharacterDialogueWorkflow],
+            "activities": [character_dialogue_activity],
+        }
     if task_queue == ASSET_TASK_QUEUE:
         return {
             "workflows": [AssetIngestionWorkflow, StyleExtractionWorkflow, AssetReindexWorkflow],
@@ -66,10 +86,22 @@ def worker_components_for_task_queue(task_queue: str) -> dict[str, list[object]]
         }
     if task_queue == WORLDLINE_TASK_QUEUE:
         return {
-            "workflows": [WorldlineStepWorkflow],
-            "activities": [worldline_step_activity],
+            "workflows": [
+                WorldlineStepWorkflow,
+                WorldlinePrepareWorkflow,
+                WorldlineAutoEvolutionWorkflow,
+            ],
+            "activities": [
+                worldline_step_activity,
+                worldline_prepare_activity,
+                worldline_auto_evolution_step_activity,
+                worldline_auto_evolution_finalize_activity,
+            ],
         }
-    if task_queue == SEED_TASK_QUEUE:
+    configured_seed_task_queue = os.environ.get("SEED_TASK_QUEUE", "").strip()
+    if task_queue == SEED_TASK_QUEUE or (
+        configured_seed_task_queue and task_queue == configured_seed_task_queue
+    ):
         return {
             "workflows": [SeedPipelineWorkflow, SeedSegmentRetryWorkflow],
             "activities": [

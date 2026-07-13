@@ -42,6 +42,7 @@ type Overview struct {
 	LLMSyncFailedChannelCount     int    `json:"llm_sync_failed_channel_count"`
 	LLMSyncPendingChannelCount    int    `json:"llm_sync_pending_channel_count"`
 	LLMLatestSyncAt               string `json:"llm_latest_sync_at"`
+	LLMHasQuotaPolicy             bool   `json:"llm_has_quota_policy"`
 	LatestFailedWorkflowRunID     string `json:"latest_failed_workflow_run_id"`
 	LatestFailedWorkflowType      string `json:"latest_failed_workflow_type"`
 	LatestFailedWorkflowErrorCode string `json:"latest_failed_workflow_error_code"`
@@ -336,6 +337,18 @@ llm_model_sync_health AS (
   WHERE (tenant_id::text = $1 OR tenant_id IS NULL)
     AND enabled = TRUE
 ),
+llm_quota_policy_counts AS (
+  SELECT EXISTS (
+    SELECT 1
+    FROM llm_quota_policies
+    WHERE tenant_id::text = $1
+      AND enabled = TRUE
+      AND (
+        scope_type = 'tenant'
+        OR (scope_type = 'project' AND project_id::text = $2)
+      )
+  ) AS llm_has_quota_policy
+),
 active_workflow AS (
   SELECT
     run_id::text AS active_workflow_run_id,
@@ -417,6 +430,7 @@ SELECT
   COALESCE(llm_model_sync_health.llm_sync_failed_channel_count, 0)::int AS llm_sync_failed_channel_count,
   COALESCE(llm_model_sync_health.llm_sync_pending_channel_count, 0)::int AS llm_sync_pending_channel_count,
   COALESCE(llm_model_sync_health.llm_latest_sync_at, '') AS llm_latest_sync_at,
+  COALESCE(llm_quota_policy_counts.llm_has_quota_policy, false) AS llm_has_quota_policy,
   COALESCE(latest_failed_workflow.latest_failed_workflow_run_id, '') AS latest_failed_workflow_run_id,
   COALESCE(latest_failed_workflow.latest_failed_workflow_type, '') AS latest_failed_workflow_type,
   COALESCE(latest_failed_workflow.latest_failed_workflow_error_code, '') AS latest_failed_workflow_error_code,
@@ -454,6 +468,7 @@ LEFT JOIN llm_enabled_channel_counts ON true
 LEFT JOIN llm_bound_module_counts ON true
 LEFT JOIN llm_missing_core_module_counts ON true
 LEFT JOIN llm_model_sync_health ON true
+LEFT JOIN llm_quota_policy_counts ON true
 LEFT JOIN active_workflow ON true
 LEFT JOIN latest_workflow ON true
 LEFT JOIN latest_failed_workflow ON true`
@@ -518,6 +533,7 @@ func scanOverview(rows SQLRows) (Overview, error) {
 		&overview.LLMSyncFailedChannelCount,
 		&overview.LLMSyncPendingChannelCount,
 		&overview.LLMLatestSyncAt,
+		&overview.LLMHasQuotaPolicy,
 		&overview.LatestFailedWorkflowRunID,
 		&overview.LatestFailedWorkflowType,
 		&overview.LatestFailedWorkflowErrorCode,

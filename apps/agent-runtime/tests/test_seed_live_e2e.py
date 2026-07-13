@@ -42,6 +42,7 @@ from mirofish_agents.temporal.seed import (
     sequential_reading_activity,
     run_seed_workflow_locally,
 )
+from live_schema_guard import ensure_live_schema
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1229,7 +1230,7 @@ def test_seed_story_ontology_live_postgres_provider_persists_snapshot_and_public
                     "run_id": RUN_ID,
                     "workflow_type": "seed_pipeline",
                     "actor_user_id": USER_ID,
-                    "trace_id": "trace-live-seed-story-ontology-repeat",
+                    "trace_id": "trace-live-seed-story-ontology",
                     "permissions": {"seed_pipeline": ["run"]},
                 }
             }
@@ -1254,7 +1255,7 @@ def test_seed_story_ontology_live_postgres_provider_persists_snapshot_and_public
     }
     assert repeat_result["status"] == "completed"
     assert repeat_result["ontology_snapshot_id"] == result["ontology_snapshot_id"]
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == 1
     assert _header(provider.requests[0]["headers"], "Authorization") == "Bearer sk-live-seed-ontology"
     assert _header(provider.requests[0]["headers"], "X-MiroFish-Run-Id") == RUN_ID
     assert _header(provider.requests[0]["headers"], "X-MiroFish-Module-Key") == "story_ontology"
@@ -1318,6 +1319,20 @@ def test_seed_story_ontology_live_postgres_provider_persists_snapshot_and_public
             },
         },
     ]
+    assert len(persisted["quota_reservations"]) == 1
+    assert all(row["status"] == "finalized" for row in persisted["quota_reservations"])
+    assert all(row["actual_prompt_tokens"] == 13 for row in persisted["quota_reservations"])
+    assert all(row["actual_completion_tokens"] == 19 for row in persisted["quota_reservations"])
+    assert len(persisted["usage_events"]) == 2
+    assert {row["usage_type"] for row in persisted["usage_events"]} == {"llm_tokens", "llm_cost_micros"}
+    assert len(persisted["llm_activity"]) == 1
+    assert all(row["status"] == "completed" for row in persisted["llm_activity"])
+    assert len(persisted["agent_trace_events"]) == 1
+    assert all(row["event_type"] == "llm.provider.response" for row in persisted["agent_trace_events"])
+    assert all(row["redaction_level"] == "full" for row in persisted["agent_trace_events"])
+    assert all(row["payload_jsonb"]["provider_call_id"].startswith("llm:") for row in persisted["agent_trace_events"])
+    assert all("seed_ontology" in row["payload_jsonb"]["response"] for row in persisted["agent_trace_events"])
+    _assert_seed_ontology_trace_app_role_isolation(admin_url)
     public_event_body = json.dumps(persisted["workflow_events"], ensure_ascii=False, sort_keys=True)
     encoded = json.dumps({"result": result, "events": persisted["workflow_events"]}, ensure_ascii=False, sort_keys=True)
     for forbidden in (
@@ -3038,17 +3053,31 @@ def _prepare_live_ontology_database(admin_url: str, provider_base_url: str) -> N
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window,
+                     supports_json, supports_tools, input_cost, output_cost
                    )
-                   VALUES (%s, %s, 'model-seed-ontology-live', 'live-provider', true, false)""",
+                   VALUES (%s, %s, 'model-seed-ontology-live', 'live-provider', 8192,
+                           true, false, 1, 2)""",
                 (TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
                 """INSERT INTO llm_module_bindings (
                      tenant_id, project_id, module_key, channel_id, model_id, settings_jsonb, updated_by
                    )
-                   VALUES (%s, %s, 'story_ontology', %s, 'model-seed-ontology-live', '{"temperature":0}'::jsonb, %s)""",
+                   VALUES (%s, %s, 'story_ontology', %s, 'model-seed-ontology-live',
+                           '{"temperature":0,"max_tokens":256,"max_concurrency":1}'::jsonb, %s)""",
                 (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
+            )
+            cursor.executemany(
+                """INSERT INTO llm_quota_policies (
+                     tenant_id, scope_type, project_id, module_key, token_limit,
+                     cost_limit_micros, concurrency_limit, period_seconds, enabled, updated_by
+                   ) VALUES (%s, %s, %s, %s, %s, %s, %s, 3600, true, %s)""",
+                [
+                    (TENANT_ID, "tenant", None, None, 50000, 100000, 4, USER_ID),
+                    (TENANT_ID, "project", PROJECT_ID, None, 25000, 50000, 2, USER_ID),
+                    (TENANT_ID, "module", PROJECT_ID, "story_ontology", 10000, 25000, 1, USER_ID),
+                ],
             )
 
 
@@ -3500,7 +3529,15 @@ def _prepare_live_finalize_database(admin_url: str) -> None:
 def _prepare_live_database_foundation(admin_url: str) -> None:
     with psycopg.connect(admin_url, autocommit=True) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(MIGRATION_SQL.read_text(encoding="utf-8"))
+            ensure_live_schema(
+                cursor,
+                MIGRATION_SQL,
+                (
+                    "tenants", "projects", "source_files", "workflow_runs",
+                    "text_segments", "workflow_events", "assets", "llm_quota_reservations",
+                    "usage_events", "llm_activity", "agent_traces", "agent_trace_events",
+                ),
+            )
             _ensure_app_login_role(cursor)
             cursor.execute("DELETE FROM tenants WHERE tenant_id = %s", (TENANT_ID,))
             cursor.execute(
@@ -3999,10 +4036,65 @@ def _read_seed_ontology_live_rows(admin_url: str) -> dict[str, list[dict[str, An
                 (TENANT_ID, PROJECT_ID, RUN_ID),
             )
             workflow_events = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT provider_call_id, status, actual_prompt_tokens, actual_completion_tokens
+                   FROM llm_quota_reservations
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY created_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            quota_reservations = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT usage_type, quantity, unit, metadata_jsonb
+                   FROM usage_events
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY created_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            usage_events = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT status, module_key, error_jsonb
+                   FROM llm_activity
+                   WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+                   ORDER BY created_at""",
+                (TENANT_ID, PROJECT_ID, RUN_ID),
+            )
+            llm_activity = [_normalize_row(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """SELECT event_type, redaction_level, payload_jsonb
+                   FROM agent_trace_events
+                   WHERE tenant_id = %s AND trace_id = %s
+                   ORDER BY trace_id, event_order""",
+                (TENANT_ID, "trace-live-seed-story-ontology"),
+            )
+            agent_trace_events = [_normalize_row(row) for row in cursor.fetchall()]
     return {
         "seed_ontology_snapshots": seed_ontology_snapshots,
         "workflow_events": workflow_events,
+        "quota_reservations": quota_reservations,
+        "usage_events": usage_events,
+        "llm_activity": llm_activity,
+        "agent_trace_events": agent_trace_events,
     }
+
+
+def _assert_seed_ontology_trace_app_role_isolation(admin_url: str) -> None:
+    app_url = _app_database_url(admin_url)
+    with psycopg.connect(app_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            current_user, is_superuser, bypasses_rls = cursor.fetchone()
+            assert current_user == APP_ROLE
+            assert is_superuser is False
+            assert bypasses_rls is False
+            cursor.execute("SELECT count(*) FROM agent_trace_events")
+            assert cursor.fetchone()[0] == 0
+            cursor.execute("SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)", (TENANT_ID, USER_ID))
+            cursor.execute(
+                """SELECT count(*) FROM agent_trace_events
+                   WHERE event_type = 'llm.provider.response' AND redaction_level = 'full'"""
+            )
+            assert cursor.fetchone()[0] == 1
 
 
 def _read_seed_entity_resolution_live_rows(admin_url: str) -> dict[str, list[dict[str, Any]]]:

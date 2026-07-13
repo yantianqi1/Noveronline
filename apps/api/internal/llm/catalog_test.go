@@ -2,14 +2,15 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestSQLCatalogReaderListsSanitizedChannelsForTenantAndPlatform(t *testing.T) {
-	queryer := &recordingSQLQueryer{
-		rows: &fakeSQLRows{
+	queryer := &tenantRecordingSQLQueryer{
+		recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{
 			values: [][]any{{
 				"channel-1",
 				"Draft Channel",
@@ -17,13 +18,14 @@ func TestSQLCatalogReaderListsSanitizedChannelsForTenantAndPlatform(t *testing.T
 				"https://llm.example.test/v1",
 				4,
 				true,
+				true,
 				"2026-07-04T00:00:00Z",
 				"ok",
 				"tenant",
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
 			}},
-		},
+		}},
 	}
 	reader := NewSQLCatalogReader(SQLCatalogConfig{Queryer: queryer, Limit: 25})
 
@@ -57,11 +59,14 @@ func TestSQLCatalogReaderListsSanitizedChannelsForTenantAndPlatform(t *testing.T
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", 25}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
 	}
+	if queryer.tenantReadID != "tenant-123" || queryer.rawCalls != 0 {
+		t.Fatalf("catalog query bypassed tenant context: tenant=%q raw_calls=%d", queryer.tenantReadID, queryer.rawCalls)
+	}
 }
 
 func TestSQLCatalogReaderListsSanitizedModelsForVisibleChannel(t *testing.T) {
-	queryer := &recordingSQLQueryer{
-		rows: &fakeSQLRows{
+	queryer := &tenantRecordingSQLQueryer{
+		recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{
 			values: [][]any{{
 				"model-1",
 				"provider-owner",
@@ -73,7 +78,7 @@ func TestSQLCatalogReaderListsSanitizedModelsForVisibleChannel(t *testing.T) {
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
 			}},
-		},
+		}},
 	}
 	reader := NewSQLCatalogReader(SQLCatalogConfig{Queryer: queryer})
 
@@ -105,6 +110,25 @@ func TestSQLCatalogReaderListsSanitizedModelsForVisibleChannel(t *testing.T) {
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "channel-1", 100}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
 	}
+	if queryer.tenantReadID != "tenant-123" || queryer.rawCalls != 0 {
+		t.Fatalf("model query bypassed tenant context: tenant=%q raw_calls=%d", queryer.tenantReadID, queryer.rawCalls)
+	}
+}
+
+func TestSQLCatalogReaderFailsClosedWithoutTenantQueryInterface(t *testing.T) {
+	raw := &rawOnlySQLQueryer{rows: &fakeSQLRows{}}
+	reader := NewSQLCatalogReader(SQLCatalogConfig{Queryer: raw})
+
+	_, channelsErr := reader.ListChannels(context.Background(), CatalogQueryInput{TenantID: "tenant-123", ProjectID: "project-123"})
+	_, modelsErr := reader.ListModels(context.Background(), ModelQueryInput{TenantID: "tenant-123", ProjectID: "project-123", ChannelID: "channel-123"})
+	for _, err := range []error{channelsErr, modelsErr} {
+		if code := ErrorCode(err); code != "LLM_CATALOG_BACKEND_UNCONFIGURED" {
+			t.Fatalf("expected tenant query interface failure, got %s (%v)", code, err)
+		}
+	}
+	if raw.calls != 0 {
+		t.Fatalf("catalog fell back to raw QueryContext: calls=%d", raw.calls)
+	}
 }
 
 func TestSQLCatalogReaderRejectsMissingContext(t *testing.T) {
@@ -122,8 +146,8 @@ func TestSQLCatalogReaderRejectsMissingContext(t *testing.T) {
 }
 
 func TestSQLChannelStoreCreatesTenantChannelWithEncryptedCredential(t *testing.T) {
-	queryer := &recordingSQLQueryer{
-		rows: &fakeSQLRows{
+	queryer := &tenantRecordingSQLQueryer{
+		recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{
 			values: [][]any{{
 				"channel-1",
 				"Draft Channel",
@@ -131,13 +155,14 @@ func TestSQLChannelStoreCreatesTenantChannelWithEncryptedCredential(t *testing.T
 				"https://llm.example.test/v1",
 				3,
 				true,
+				true,
 				"",
 				"",
 				"tenant",
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
 			}},
-		},
+		}},
 	}
 	store := NewSQLChannelStore(SQLChannelStoreConfig{
 		Queryer:               queryer,
@@ -145,13 +170,14 @@ func TestSQLChannelStoreCreatesTenantChannelWithEncryptedCredential(t *testing.T
 	})
 
 	channel, err := store.CreateChannel(context.Background(), CreateChannelInput{
-		TenantID:       "tenant-123",
-		Name:           "Draft Channel",
-		Provider:       "openai-compatible",
-		BaseURL:        "https://llm.example.test/v1",
-		APIKey:         "sk-secret",
-		MaxConcurrency: 3,
-		Enabled:        true,
+		TenantID:              "tenant-123",
+		Name:                  "Draft Channel",
+		Provider:              "openai-compatible",
+		BaseURL:               "https://llm.example.test/v1",
+		APIKey:                "sk-secret",
+		MaxConcurrency:        3,
+		ExternalProviderOptIn: true,
+		Enabled:               true,
 	})
 
 	if err != nil {
@@ -163,7 +189,7 @@ func TestSQLChannelStoreCreatesTenantChannelWithEncryptedCredential(t *testing.T
 	if !strings.Contains(queryer.query, "INSERT INTO llm_channels") || !strings.Contains(queryer.query, "encrypted_api_key") {
 		t.Fatalf("expected channel insert with encrypted credential, got %s", queryer.query)
 	}
-	if len(queryer.args) != 7 || queryer.args[0] != "tenant-123" || queryer.args[1] != "Draft Channel" || queryer.args[2] != "openai-compatible" || queryer.args[3] != "https://llm.example.test/v1" || queryer.args[5] != 3 || queryer.args[6] != true {
+	if len(queryer.args) != 8 || queryer.args[0] != "tenant-123" || queryer.args[1] != "Draft Channel" || queryer.args[2] != "openai-compatible" || queryer.args[3] != "https://llm.example.test/v1" || queryer.args[5] != 3 || queryer.args[6] != true || queryer.args[7] != true {
 		t.Fatalf("unexpected create args: %#v", queryer.args)
 	}
 	encrypted, ok := queryer.args[4].(string)
@@ -173,17 +199,21 @@ func TestSQLChannelStoreCreatesTenantChannelWithEncryptedCredential(t *testing.T
 	if encrypted == "sk-secret" || !strings.HasPrefix(encrypted, "aes-256-gcm:v1:") {
 		t.Fatalf("credential was not encrypted with expected envelope: %#v", encrypted)
 	}
+	if queryer.tenantWriteID != "tenant-123" || queryer.rawCalls != 0 {
+		t.Fatalf("channel create bypassed tenant write context: tenant=%q raw_calls=%d", queryer.tenantWriteID, queryer.rawCalls)
+	}
 }
 
 func TestSQLChannelStorePatchesTenantChannelWithoutLeakingCredential(t *testing.T) {
-	queryer := &recordingSQLQueryer{
-		rows: &fakeSQLRows{
+	queryer := &tenantRecordingSQLQueryer{
+		recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{
 			values: [][]any{{
 				"channel-1",
 				"Renamed Channel",
 				"openai-compatible",
 				"https://llm.example.test/v1",
 				5,
+				true,
 				false,
 				"",
 				"",
@@ -191,7 +221,7 @@ func TestSQLChannelStorePatchesTenantChannelWithoutLeakingCredential(t *testing.
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
 			}},
-		},
+		}},
 	}
 	store := NewSQLChannelStore(SQLChannelStoreConfig{
 		Queryer:               queryer,
@@ -199,12 +229,13 @@ func TestSQLChannelStorePatchesTenantChannelWithoutLeakingCredential(t *testing.
 	})
 
 	channel, err := store.UpdateChannel(context.Background(), UpdateChannelInput{
-		TenantID:       "tenant-123",
-		ChannelID:      "channel-1",
-		Name:           "Renamed Channel",
-		BaseURL:        "https://llm.example.test/v1",
-		MaxConcurrency: 5,
-		Enabled:        false,
+		TenantID:              "tenant-123",
+		ChannelID:             "channel-1",
+		Name:                  "Renamed Channel",
+		BaseURL:               "https://llm.example.test/v1",
+		MaxConcurrency:        5,
+		ExternalProviderOptIn: true,
+		Enabled:               false,
 	})
 
 	if err != nil {
@@ -216,20 +247,73 @@ func TestSQLChannelStorePatchesTenantChannelWithoutLeakingCredential(t *testing.
 	if !strings.Contains(queryer.query, "UPDATE llm_channels") || !strings.Contains(queryer.query, "COALESCE(NULLIF($6, ''), encrypted_api_key)") {
 		t.Fatalf("expected patch to preserve credential when api key omitted, got %s", queryer.query)
 	}
-	if len(queryer.args) != 7 || queryer.args[0] != "tenant-123" || queryer.args[1] != "channel-1" || queryer.args[5] != "" {
+	if len(queryer.args) != 8 || queryer.args[0] != "tenant-123" || queryer.args[1] != "channel-1" || queryer.args[5] != "" {
 		t.Fatalf("unexpected update args: %#v", queryer.args)
+	}
+	if queryer.tenantWriteID != "tenant-123" || queryer.rawCalls != 0 {
+		t.Fatalf("channel update bypassed tenant write context: tenant=%q raw_calls=%d", queryer.tenantWriteID, queryer.rawCalls)
+	}
+}
+
+func TestSQLChannelStoreUpdatesTenantModelMetadata(t *testing.T) {
+	queryer := &tenantRecordingSQLQueryer{
+		recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{
+			values: [][]any{{
+				"gpt-5.5",
+				"provider",
+				128000,
+				true,
+				true,
+				0.001,
+				0.002,
+				"2026-07-04T00:00:00Z",
+				"2026-07-04T00:00:00Z",
+			}},
+		}},
+	}
+	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: queryer})
+	contextWindow := 128000
+	inputCost := 0.001
+	outputCost := 0.002
+
+	model, err := store.UpdateModel(context.Background(), UpdateModelInput{
+		TenantID:      "tenant-123",
+		ChannelID:     "channel-1",
+		ModelID:       "gpt-5.5",
+		ContextWindow: &contextWindow,
+		SupportsTools: true,
+		SupportsJSON:  true,
+		InputCost:     &inputCost,
+		OutputCost:    &outputCost,
+	})
+
+	if err != nil {
+		t.Fatalf("update model: %v", err)
+	}
+	if model.ModelID != "gpt-5.5" || model.ContextWindow != 128000 || !model.SupportsJSON || model.InputCost != 0.001 {
+		t.Fatalf("unexpected model: %#v", model)
+	}
+	if !strings.Contains(queryer.query, "UPDATE llm_models") || !strings.Contains(queryer.query, "context_window") {
+		t.Fatalf("expected model metadata update query, got %s", queryer.query)
+	}
+	if queryer.tenantWriteID != "tenant-123" || queryer.rawCalls != 0 {
+		t.Fatalf("model update bypassed tenant write context: tenant=%q raw_calls=%d", queryer.tenantWriteID, queryer.rawCalls)
+	}
+	if len(queryer.args) != 8 || queryer.args[0] != "tenant-123" || queryer.args[1] != "channel-1" || queryer.args[2] != "gpt-5.5" {
+		t.Fatalf("unexpected model update args: %#v", queryer.args)
 	}
 }
 
 func TestSQLChannelStoreDeletesTenantChannel(t *testing.T) {
-	queryer := &recordingSQLQueryer{
-		rows: &fakeSQLRows{
+	queryer := &tenantRecordingSQLQueryer{
+		recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{
 			values: [][]any{{
 				"channel-1",
 				"Draft Channel",
 				"openai-compatible",
 				"https://llm.example.test/v1",
 				3,
+				true,
 				false,
 				"",
 				"",
@@ -237,7 +321,7 @@ func TestSQLChannelStoreDeletesTenantChannel(t *testing.T) {
 				"2026-07-04T00:00:00Z",
 				"2026-07-04T00:00:00Z",
 			}},
-		},
+		}},
 	}
 	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: queryer})
 
@@ -258,23 +342,177 @@ func TestSQLChannelStoreDeletesTenantChannel(t *testing.T) {
 	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "channel-1"}) {
 		t.Fatalf("unexpected delete args: %#v", queryer.args)
 	}
+	if queryer.tenantWriteID != "tenant-123" || queryer.rawCalls != 0 {
+		t.Fatalf("channel delete bypassed tenant write context: tenant=%q raw_calls=%d", queryer.tenantWriteID, queryer.rawCalls)
+	}
+}
+
+func TestSQLChannelStoreFailsClosedWithoutTenantWriteInterface(t *testing.T) {
+	raw := &rawOnlySQLQueryer{rows: &fakeSQLRows{}}
+	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: raw, CredentialKeyMaterial: strings.Repeat("3", 64)})
+
+	_, createErr := store.CreateChannel(context.Background(), CreateChannelInput{
+		TenantID: "tenant-123", Name: "External", Provider: "openai-compatible",
+		BaseURL: "https://llm.example.test/v1", APIKey: "sk-secret", MaxConcurrency: 1,
+		ExternalProviderOptIn: true, Enabled: true,
+	})
+	_, updateErr := store.UpdateChannel(context.Background(), UpdateChannelInput{
+		TenantID: "tenant-123", ChannelID: "channel-123", Name: "External",
+		BaseURL: "https://llm.example.test/v1", MaxConcurrency: 1,
+		ExternalProviderOptIn: true, Enabled: true,
+	})
+	_, deleteErr := store.DeleteChannel(context.Background(), DeleteChannelInput{TenantID: "tenant-123", ChannelID: "channel-123"})
+	for _, err := range []error{createErr, updateErr, deleteErr} {
+		if code := ErrorCode(err); code != "LLM_CHANNEL_BACKEND_UNCONFIGURED" {
+			t.Fatalf("expected tenant write interface failure, got %s (%v)", code, err)
+		}
+	}
+	if raw.calls != 0 {
+		t.Fatalf("channel store fell back to raw QueryContext: calls=%d", raw.calls)
+	}
+}
+
+func TestSQLChannelStoreCommitsOnlyAfterReturnedRowsAreExhausted(t *testing.T) {
+	tx := &transactionFinalizerFixture{}
+	queryer := &catalogTransactionQueryer{
+		rows: &tenantScopedWriteRows{rows: channelRowsFixture(), tx: tx},
+	}
+	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: queryer, CredentialKeyMaterial: strings.Repeat("4", 64)})
+
+	_, err := store.CreateChannel(context.Background(), CreateChannelInput{
+		TenantID: "tenant-123", Name: "External", Provider: "openai-compatible",
+		BaseURL: "https://llm.example.test/v1", APIKey: "sk-secret", MaxConcurrency: 1,
+		ExternalProviderOptIn: true, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if tx.commits != 1 || tx.rollbacks != 0 {
+		t.Fatalf("write transaction finalization mismatch: commits=%d rollbacks=%d", tx.commits, tx.rollbacks)
+	}
+}
+
+func TestSQLChannelStoreRollsBackWhenReturnedRowCannotBeScanned(t *testing.T) {
+	tx := &transactionFinalizerFixture{}
+	queryer := &catalogTransactionQueryer{
+		rows: &tenantScopedWriteRows{rows: &catalogScanErrorRows{rows: channelRowsFixture(), err: errors.New("scan failed")}, tx: tx},
+	}
+	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: queryer, CredentialKeyMaterial: strings.Repeat("5", 64)})
+
+	_, err := store.CreateChannel(context.Background(), CreateChannelInput{
+		TenantID: "tenant-123", Name: "External", Provider: "openai-compatible",
+		BaseURL: "https://llm.example.test/v1", APIKey: "sk-secret", MaxConcurrency: 1,
+		ExternalProviderOptIn: true, Enabled: true,
+	})
+	if code := ErrorCode(err); code != "LLM_CHANNEL_UPDATE_FAILED" {
+		t.Fatalf("expected scan failure, got %s (%v)", code, err)
+	}
+	if tx.commits != 0 || tx.rollbacks != 1 {
+		t.Fatalf("failed write transaction finalization mismatch: commits=%d rollbacks=%d", tx.commits, tx.rollbacks)
+	}
+}
+
+func channelRowsFixture() *fakeSQLRows {
+	return &fakeSQLRows{values: [][]any{{
+		"channel-1", "External", "openai-compatible", "https://llm.example.test/v1",
+		1, true, true, "", "", "tenant", "2026-07-11T00:00:00Z", "2026-07-11T00:00:00Z",
+	}}}
+}
+
+type rawOnlySQLQueryer struct {
+	rows  SQLRows
+	calls int
+}
+
+type tenantRecordingSQLQueryer struct {
+	*recordingSQLQueryer
+	tenantReadID  string
+	tenantWriteID string
+	rawCalls      int
+}
+
+func (q *tenantRecordingSQLQueryer) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
+	q.rawCalls++
+	return q.recordingSQLQueryer.QueryContext(ctx, query, args...)
+}
+
+func (q *tenantRecordingSQLQueryer) QueryTenantContext(ctx context.Context, tenantID, query string, args ...any) (SQLRows, error) {
+	q.tenantReadID = tenantID
+	return q.recordingSQLQueryer.QueryContext(ctx, query, args...)
+}
+
+func (q *tenantRecordingSQLQueryer) QueryTenantWriteContext(ctx context.Context, tenantID, query string, args ...any) (SQLRows, error) {
+	q.tenantWriteID = tenantID
+	return q.recordingSQLQueryer.QueryContext(ctx, query, args...)
+}
+
+type catalogScanErrorRows struct {
+	rows SQLRows
+	err  error
+}
+
+func (r *catalogScanErrorRows) Next() bool        { return r.rows.Next() }
+func (r *catalogScanErrorRows) Scan(...any) error { return r.err }
+func (r *catalogScanErrorRows) Close() error      { return r.rows.Close() }
+func (r *catalogScanErrorRows) Err() error        { return r.rows.Err() }
+
+func (q *rawOnlySQLQueryer) QueryContext(context.Context, string, ...any) (SQLRows, error) {
+	q.calls++
+	return q.rows, nil
+}
+
+type catalogTransactionQueryer struct {
+	rows SQLRows
+}
+
+func (q *catalogTransactionQueryer) QueryContext(context.Context, string, ...any) (SQLRows, error) {
+	return nil, errors.New("raw QueryContext must not be called")
+}
+
+func (q *catalogTransactionQueryer) QueryTenantWriteContext(context.Context, string, string, ...any) (SQLRows, error) {
+	return q.rows, nil
 }
 
 func TestSQLChannelStoreFailsClosedWithoutCredentialKey(t *testing.T) {
-	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: &recordingSQLQueryer{rows: &fakeSQLRows{}}})
+	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: &tenantRecordingSQLQueryer{recordingSQLQueryer: &recordingSQLQueryer{rows: &fakeSQLRows{}}}})
 
 	_, err := store.CreateChannel(context.Background(), CreateChannelInput{
-		TenantID:       "tenant-123",
-		Name:           "Draft Channel",
-		Provider:       "openai-compatible",
-		BaseURL:        "https://llm.example.test/v1",
-		APIKey:         "sk-secret",
-		MaxConcurrency: 1,
-		Enabled:        true,
+		TenantID:              "tenant-123",
+		Name:                  "Draft Channel",
+		Provider:              "openai-compatible",
+		BaseURL:               "https://llm.example.test/v1",
+		APIKey:                "sk-secret",
+		MaxConcurrency:        1,
+		ExternalProviderOptIn: true,
+		Enabled:               true,
 	})
 
 	if code := ErrorCode(err); code != "LLM_CREDENTIAL_ENCRYPTION_UNCONFIGURED" {
 		t.Fatalf("expected credential encryption error, got %s (%v)", code, err)
+	}
+}
+
+func TestCredentialDecryptorRequiresConfiguredKeyAndDecryptsStoredEnvelope(t *testing.T) {
+	if _, err := NewCredentialDecryptor(""); ErrorCode(err) != "LLM_CREDENTIAL_ENCRYPTION_UNCONFIGURED" {
+		t.Fatalf("missing credential key did not fail closed: %v", err)
+	}
+	if _, err := NewCredentialDecryptor("not-a-key"); ErrorCode(err) != "LLM_CREDENTIAL_KEY_INVALID" {
+		t.Fatalf("invalid credential key was accepted: %v", err)
+	}
+
+	keyMaterial := strings.Repeat("7", 64)
+	store := NewSQLChannelStore(SQLChannelStoreConfig{CredentialKeyMaterial: keyMaterial})
+	envelope, err := store.encryptCredential("sk-production-health")
+	if err != nil {
+		t.Fatalf("encrypt fixture credential: %v", err)
+	}
+	decryptor, err := NewCredentialDecryptor(keyMaterial)
+	if err != nil {
+		t.Fatalf("construct decryptor: %v", err)
+	}
+	plaintext, err := decryptor.Decrypt(envelope)
+	if err != nil || plaintext != "sk-production-health" {
+		t.Fatalf("decrypt stored envelope: plaintext=%q err=%v", plaintext, err)
 	}
 }
 

@@ -1,21 +1,30 @@
 import { redirect } from "next/navigation";
 import { CharacterConsoleShell } from "../../../../../../components/character-console-shell";
 import {
+  adoptCharacterProposal,
   appendCharacterInteractionTurn,
   convertCharacterInteractionToChapterDraft,
   createCharacterInteraction,
   getCharacterInteraction,
   getCharacterInteractionEvents,
+  getCharacterProposals,
   getStoryGraphView,
   getWorldlineEvents,
   getWorldlinePreparedAgents,
   getWorldlineSavedPaths,
   getWorldlineSessions,
   listCharacterInteractions,
+  listWorldlinePreparations,
   listCharacterInteractionTurns,
+  startCharacterDialogue,
   updateCharacterInteractionStatus,
 } from "../../../../../../lib/api";
-import { webApiContext } from "../../../../../../lib/server-auth";
+import {
+  parseCharacterAnchorRef,
+  selectCurrentWorldSession,
+} from "../../../../../../lib/worldline-character-journey";
+import { currentRequestLocale } from "../../../../../../lib/request-locale";
+import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +41,9 @@ export default async function CharacterConsolePage({
     anchor_session_id?: string;
     prepare_id?: string;
     runtime_code?: string;
+    runtime_interaction_id?: string;
     runtime_message?: string;
+    runtime_run_id?: string;
     runtime_status?: string;
     selected_interaction_id?: string;
     turns_interaction_id?: string;
@@ -43,13 +54,38 @@ export default async function CharacterConsolePage({
   }>;
 }) {
   const { tenantSlug, projectId } = await params;
+  const locale = await currentRequestLocale();
   const query = searchParams ? await searchParams : {};
-  const apiContext = await webApiContext({ tenantId: tenantSlug });
+  const apiContext = webReadApiContext({ tenantId: tenantSlug });
   const selectedInteractionId = query.selected_interaction_id?.trim() || query.interaction_id?.trim() || "";
   const turnsInteractionId = query.turns_interaction_id?.trim() || "";
   const anchorSessionId = query.anchor_session_id?.trim() || "";
-  const prepareId = query.prepare_id?.trim() || "";
-  const [interactions, worldlineSessions, savedPaths, graphView, worldlineEvents, preparedAgents] = await Promise.all([
+  let prepareId = query.prepare_id?.trim() || "";
+  const runtimeInteractionId = query.runtime_interaction_id?.trim() || "";
+  const proposalInteractionId = runtimeInteractionId || selectedInteractionId;
+  const preparations = await listWorldlinePreparations({
+    ...apiContext,
+    projectId,
+  });
+  if (!prepareId && preparations.ok && preparations.items.length > 0) {
+    const latestReadyPreparation = preparations.items.find(
+      (item) => item.status === "completed" || item.status === "ready",
+    );
+    prepareId = latestReadyPreparation?.prepare_id ?? "";
+  }
+
+  const [
+    interactions,
+    worldlineSessions,
+    savedPaths,
+    graphView,
+    worldlineEvents,
+    preparedAgents,
+    selectedInteraction,
+    selectedTurns,
+    runtimeEvents,
+    characterProposals,
+  ] = await Promise.all([
     listCharacterInteractions({
       ...apiContext,
       projectId,
@@ -91,39 +127,65 @@ export default async function CharacterConsolePage({
           message: "Select a worldline preparation to load prepared agents.",
           request_id: "",
         }),
+    selectedInteractionId
+      ? getCharacterInteraction({
+          ...apiContext,
+          interactionId: selectedInteractionId,
+        })
+      : Promise.resolve({
+          ok: false as const,
+          code: "CHARACTER_INTERACTION_NOT_SELECTED",
+          message: "No interaction is selected.",
+          request_id: "",
+        }),
+    turnsInteractionId
+      ? listCharacterInteractionTurns({
+          ...apiContext,
+          interactionId: turnsInteractionId,
+        })
+      : Promise.resolve({
+          ok: false as const,
+          code: "CHARACTER_INTERACTION_TURNS_NOT_SELECTED",
+          message: "No interaction turn list is selected.",
+          request_id: "",
+        }),
+    runtimeInteractionId
+      ? getCharacterInteractionEvents({
+          ...apiContext,
+          interactionId: runtimeInteractionId,
+        })
+      : Promise.resolve({
+          ok: false as const,
+          code: "CHARACTER_INTERACTION_EVENTS_NOT_SELECTED",
+          message: "No interaction runtime event list is selected.",
+          request_id: "",
+        }),
+    proposalInteractionId
+      ? getCharacterProposals({
+          ...apiContext,
+          interactionId: proposalInteractionId,
+        })
+      : Promise.resolve({
+          ok: false as const,
+          code: "CHARACTER_PROPOSALS_NOT_SELECTED",
+          message: "No interaction proposal list is selected.",
+          request_id: "",
+        }),
   ]);
-  const selectedInteraction = selectedInteractionId
-    ? await getCharacterInteraction({
-        ...apiContext,
-        interactionId: selectedInteractionId,
-      })
-    : {
-        ok: false as const,
-        code: "CHARACTER_INTERACTION_NOT_SELECTED",
-        message: "No interaction is selected.",
-        request_id: "",
-      };
-  const selectedTurns = turnsInteractionId
-    ? await listCharacterInteractionTurns({
-        ...apiContext,
-        interactionId: turnsInteractionId,
-      })
-    : {
-        ok: false as const,
-        code: "CHARACTER_INTERACTION_TURNS_NOT_SELECTED",
-        message: "No interaction turn list is selected.",
-        request_id: "",
-      };
+  const currentWorldSession = selectCurrentWorldSession(worldlineSessions, anchorSessionId);
+  const currentWorldSessionId = currentWorldSession?.session_id ?? "";
 
   async function createCharacterInteractionAction(formData: FormData) {
     "use server";
+
+    const anchor = parseCharacterAnchorRef(stringFromFormData(formData, "anchorRef"));
 
     const result = await createCharacterInteraction({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       worldlineSessionId: stringFromFormData(formData, "worldlineSessionId"),
-      anchorType: stringFromFormData(formData, "anchorType"),
-      anchorId: stringFromFormData(formData, "anchorId"),
+      anchorType: anchor.anchorType || stringFromFormData(formData, "anchorType"),
+      anchorId: anchor.anchorId || stringFromFormData(formData, "anchorId"),
       povAgentId: stringFromFormData(formData, "povAgentId"),
       mode: stringFromFormData(formData, "mode") || "first_person",
       title: stringFromFormData(formData, "title"),
@@ -143,6 +205,8 @@ export default async function CharacterConsolePage({
     if (result.ok) {
       nextQuery.set("interaction_id", result.interaction_id);
       nextQuery.set("selected_interaction_id", result.interaction_id);
+      nextQuery.set("turns_interaction_id", result.interaction_id);
+      nextQuery.set("runtime_interaction_id", result.interaction_id);
     }
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
@@ -160,6 +224,10 @@ export default async function CharacterConsolePage({
     }
 
     nextQuery.set("selected_interaction_id", interactionId);
+    nextQuery.set("turns_interaction_id", interactionId);
+    nextQuery.set("runtime_interaction_id", interactionId);
+    nextQuery.set("turns_interaction_id", interactionId);
+    nextQuery.set("runtime_interaction_id", interactionId);
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
 
@@ -177,6 +245,7 @@ export default async function CharacterConsolePage({
 
     nextQuery.set("selected_interaction_id", interactionId);
     nextQuery.set("turns_interaction_id", interactionId);
+    nextQuery.set("runtime_interaction_id", interactionId);
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
 
@@ -242,6 +311,8 @@ export default async function CharacterConsolePage({
       result.ok ? `${result.items.length} runtime events available.` : result.message,
     );
     nextQuery.set("selected_interaction_id", interactionId);
+    nextQuery.set("runtime_interaction_id", interactionId);
+    nextQuery.set("turns_interaction_id", interactionId);
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
 
@@ -261,6 +332,7 @@ export default async function CharacterConsolePage({
       ...(await webApiContext({ tenantId: tenantSlug })),
       interactionId,
       targetChapterId: stringFromFormData(formData, "targetChapterId"),
+      targetSceneId: stringFromFormData(formData, "targetSceneId"),
       povMode: stringFromFormData(formData, "povMode") || "keep_first_person",
     });
     nextQuery.set("runtime_status", result.ok ? "success" : "error");
@@ -270,6 +342,42 @@ export default async function CharacterConsolePage({
       result.ok ? `Writer run ${result.run_id} queued for chapter draft handoff.` : result.message,
     );
     nextQuery.set("selected_interaction_id", interactionId);
+    nextQuery.set("runtime_interaction_id", interactionId);
+    nextQuery.set("turns_interaction_id", interactionId);
+    if (result.ok) {
+      nextQuery.set("runtime_run_id", result.run_id);
+    }
+    redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
+  }
+
+  async function adoptCharacterProposalAction(formData: FormData) {
+    "use server";
+
+    const nextQuery = new URLSearchParams();
+    const interactionId = stringFromFormData(formData, "proposalInteractionId");
+    const assetId = stringFromFormData(formData, "proposalAssetId");
+    if (!interactionId || !assetId) {
+      nextQuery.set("runtime_status", "error");
+      nextQuery.set("runtime_code", "VALIDATION_FAILED");
+      nextQuery.set("runtime_message", "Select a persisted character proposal before adoption.");
+      redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
+    }
+
+    const result = await adoptCharacterProposal({
+      ...(await webApiContext({ tenantId: tenantSlug })),
+      interactionId,
+      assetId,
+      note: stringFromFormData(formData, "proposalNote"),
+    });
+    nextQuery.set("runtime_status", result.ok ? "success" : "error");
+    nextQuery.set("runtime_code", result.ok ? "CHARACTER_PROPOSAL_ADOPTED" : result.code);
+    nextQuery.set(
+      "runtime_message",
+      result.ok ? `Character ${result.proposal_type} proposal adopted.` : result.message,
+    );
+    nextQuery.set("selected_interaction_id", interactionId);
+    nextQuery.set("runtime_interaction_id", interactionId);
+    nextQuery.set("turns_interaction_id", interactionId);
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
 
@@ -286,6 +394,26 @@ export default async function CharacterConsolePage({
     }
 
     nextQuery.set("anchor_session_id", nextAnchorSessionId);
+    redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
+  }
+
+  async function selectWorldlinePreparationAction(formData: FormData) {
+    "use server";
+
+    const nextQuery = new URLSearchParams();
+    const nextPrepareId = stringFromFormData(formData, "prepareId");
+    const nextAnchorSessionId = stringFromFormData(formData, "anchorSessionId");
+    if (!nextPrepareId) {
+      nextQuery.set("interaction_status", "error");
+      nextQuery.set("interaction_code", "WORLDLINE_PREPARATION_NOT_SELECTED");
+      nextQuery.set("interaction_message", "Select a worldline preparation to continue.");
+      redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
+    }
+
+    nextQuery.set("prepare_id", nextPrepareId);
+    if (nextAnchorSessionId) {
+      nextQuery.set("anchor_session_id", nextAnchorSessionId);
+    }
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
 
@@ -339,10 +467,12 @@ export default async function CharacterConsolePage({
       redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
     }
 
+    const actorType = stringFromFormData(formData, "actorType") || "user";
+    const apiContext = await webApiContext({ tenantId: tenantSlug });
     const result = await appendCharacterInteractionTurn({
-      ...(await webApiContext({ tenantId: tenantSlug })),
+      ...apiContext,
       interactionId,
-      actorType: stringFromFormData(formData, "actorType") || "user",
+      actorType,
       actorId: stringFromFormData(formData, "actorId"),
       turnKind: stringFromFormData(formData, "turnKind") || "action",
       summary: stringFromFormData(formData, "turnSummary"),
@@ -359,13 +489,29 @@ export default async function CharacterConsolePage({
     );
     if (result.ok) {
       nextQuery.set("turn_id", result.turn_id);
+      if (actorType === "user") {
+        const dialogue = await startCharacterDialogue({
+          ...apiContext,
+          interactionId,
+          userTurnId: result.turn_id,
+        });
+        nextQuery.set("runtime_status", dialogue.ok ? "success" : "error");
+        nextQuery.set("runtime_code", dialogue.ok ? "CHARACTER_DIALOGUE_QUEUED" : dialogue.code);
+        nextQuery.set("runtime_message", dialogue.ok ? "Character dialogue queued." : dialogue.message);
+        nextQuery.set("runtime_interaction_id", interactionId);
+        if (dialogue.ok) {
+          nextQuery.set("runtime_run_id", dialogue.run_id);
+        }
+      }
     }
     nextQuery.set("selected_interaction_id", interactionId);
+    nextQuery.set("turns_interaction_id", interactionId);
     redirect(characterConsoleStatusRoute(tenantSlug, projectId, nextQuery));
   }
 
   return (
     <CharacterConsoleShell
+      adoptCharacterProposalAction={adoptCharacterProposalAction}
       appendCharacterInteractionTurnAction={appendCharacterInteractionTurnAction}
       convertCharacterInteractionToChapterDraftAction={convertCharacterInteractionToChapterDraftAction}
       createCharacterInteractionAction={createCharacterInteractionAction}
@@ -376,8 +522,11 @@ export default async function CharacterConsolePage({
       inspectWorldlinePreparationAgentsAction={inspectWorldlinePreparationAgentsAction}
       updateCharacterInteractionStatusAction={updateCharacterInteractionStatusAction}
       anchorSessionId={anchorSessionId}
+      currentWorldSessionId={currentWorldSessionId}
       graphView={graphView}
       interactions={interactions}
+      characterProposals={characterProposals}
+      locale={locale}
       interactionStatus={{
         code: query.interaction_code ?? "",
         interactionId: query.interaction_id ?? "",
@@ -385,13 +534,17 @@ export default async function CharacterConsolePage({
         status: query.interaction_status ?? "",
       }}
       preparedAgents={preparedAgents}
+      preparations={preparations}
       prepareId={prepareId}
       projectId={projectId}
+      selectWorldlinePreparationAction={selectWorldlinePreparationAction}
       runtimeStatus={{
         code: query.runtime_code ?? "",
         message: query.runtime_message ?? "",
+        runId: query.runtime_run_id ?? "",
         status: query.runtime_status ?? "",
       }}
+      runtimeEvents={runtimeEvents}
       savedPaths={savedPaths}
       selectedInteraction={selectedInteraction}
       selectedTurns={selectedTurns}
