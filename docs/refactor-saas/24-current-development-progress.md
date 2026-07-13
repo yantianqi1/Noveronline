@@ -201,12 +201,12 @@ Synthetic inspect/plan/apply/verify/rollback 与 MinIO version ownership 已通�
 |---|---|---|
 | Z0 空项目创作契约 | `verified_current` (app-role) | unit/web 双入口 + bootstrap；disposable Postgres live `TestLiveEmptyProjectWriterPathWithoutSeedArtifacts` passed |
 | Z1 0018 schema/RLS | `verified_current` (app-role) | schema ledger 含 `0018`；live settings/admission/proposals/accept/reject + cross-tenant isolation + evidence private gate passed |
-| Z2 手动蒸馏 | `connected` | 任意 active manuscript 可作蒸馏源（去掉 `source_draft_id` 限制）；长章 window/checkpoint/identity merge；`enabled_asset_types` 过滤 prompt（CONN-001/011） |
-| Z3 Proposal Review | `connected` | accept 时事务性投影 character/relationship/world_rule/plot_thread 到 Graph 源表；accept 成功后启动 `story_graph_build`（失败可见，不回滚 accept）（CONN-003） |
-| Z4 Update/Merge | `connected` | 真实 `expected_target_version`；conflict 状态先提交再返回 typed conflict；finalize 先 supersede 后提升；Update/Restore/Delete 调用 StaleProposals（CONN-005） |
-| Z5 Outbox | `connected` | adoption 与 distillation outbox **同事务**写入；Temporal dispatch 由 outbox dispatcher 恢复；claim/tick 可观测（CONN-004） |
-| Z6 检索/设置 | `connected` | Pi active manuscript 邻域、显式 worldline path、canon 资产规则/角色；Worldline entity 解析 + prepare/goal 上下文；draft chapter/scene COALESCE run 行（CONN-008/010） |
-| Z7 完整认证 | `in_progress` | app-role disposable live 已绿；全栈 Temporal provider + browser journey 仍是最终发布证据 gate |
+| Z2 手动蒸馏 | `connected` + app-role live | 任意 active manuscript 可作蒸馏源；长章 window/checkpoint/identity merge；`enabled_asset_types` 过滤 prompt（CONN-001/011） |
+| Z3 Proposal Review | `connected` + app-role live | accept 投影 character/relationship/world_rule/plot_thread 到 Graph 源表（entities/relationships/plot_threads/world_rule_evidence）；accept 后启动 `story_graph_build`（CONN-003） |
+| Z4 Update/Merge | `connected` + app-role live | 真实 `expected_target_version`；conflict 先提交；Update/Restore/Delete 调用 StaleProposals（CONN-005） |
+| Z5 Outbox | `connected` + app-role live | adoption 与 distillation outbox 同事务；claim/tick 可观测（CONN-004） |
+| Z6 检索/设置 | `connected` + Pi local-provider live | Pi active manuscript 邻域、worldline path、canon 资产规则/角色；draft chapter/scene COALESCE；local-provider Pi live E2E 2/2（CONN-008/010） |
+| Z7 完整认证 | `in_progress` | 2026-07-13：disposable `mirofish_test_*` app-role live 已绿（distillation/manuscript/empty-writer/worldline/character + Pi local-provider）。**未闭合**：Docker CLI socket 权限导致无法 `run-live-test-stack.sh --app` 全栈重建；Playwright Chromium 下载与 headless Chrome 被环境拦截；浏览器仅 MCP 公共页（landing/login）证据，无 authenticated zero-start full journey 截图 |
 
 实现入口：
 
@@ -215,10 +215,16 @@ Synthetic inspect/plan/apply/verify/rollback 与 MinIO version ownership 已通�
 - `infra/postgres/migrations/0018_manuscript_asset_distillation.sql`
 - Writer proposal rail + Overview dual entry
 
-最新 disposable live（Postgres-only schema-init 至 0018）：
+最新 disposable live（2026-07-13，现有 Compose Postgres 上新建 `mirofish_test_z7_conn_*` + `mirofish.live_test=on` + migrations 0001–0019；**未**写主库 `mirofish`）：
 
 ```text
-go test ./internal/assetdistillation/ ./internal/workflows/ \
-  -run 'TestLiveAssetDistillation|TestLiveEmptyProject' -count=1
-# ok assetdistillation ; ok workflows
+go test ./internal/assetdistillation/ -run TestLive -count=1   # ok
+go test ./internal/manuscriptworkspace/ -run TestLive -count=1 # ok
+go test ./internal/workflows/ -run TestLiveEmptyProjectWriter -count=1 # ok
+go test ./internal/worldline/ -run Live -count=1               # ok
+go test ./internal/characterconsole/ -run TestLive -count=1   # ok
+# Pi local-provider (not external HTTPS):
+npx vitest run src/runtime/pi-writer-live-e2e.test.ts         # 2 passed
+# storygraph live still requires graph_nodes alias tables (name drift); projection
+# evidence covered via distillation accept -> entities/relationships.
 ```

@@ -174,17 +174,30 @@ describeLive(`Pi writer Postgres + ${externalBaseURL ? "external-provider" : "lo
     }
     const worldRuleEvent = toolCompletions.find((row) => row.payload_jsonb?.tool_name === "query_world_rules");
     expect(worldRuleEvent?.payload_jsonb?.result).toEqual({
-      items: [{ rule_evidence_id: ids.worldRule, category: "magic", confidence: 0.95 }]
+      items: [{ rule_evidence_id: ids.worldRule, category: "magic", confidence: 0.95, source: "seed_evidence" }]
     });
     const characterEvent = toolCompletions.find((row) => row.payload_jsonb?.tool_name === "query_character_profile");
     expect(characterEvent?.payload_jsonb?.result).toEqual({
-      items: [{
-        entity_id: ids.entity,
-        canonical_name: "Mara Venn",
-        entity_type: "character",
-        importance: "primary",
-        state_summary: "Negotiating at the rain gate."
-      }]
+      items: [
+        {
+          entity_id: ids.entity,
+          canonical_name: "Mara Venn",
+          entity_type: "character",
+          importance: "primary",
+          source: "entity",
+          state_summary: "Negotiating at the rain gate."
+        },
+        {
+          entity_id: ids.asset,
+          canonical_name: "Mara Venn",
+          entity_type: "character",
+          category: null,
+          importance: null,
+          lifecycle: "canon",
+          source: "canon_asset",
+          state_summary: "Negotiator with a strict promise."
+        }
+      ]
     });
     const publicToolEvents = JSON.stringify([worldRuleEvent?.payload_jsonb, characterEvent?.payload_jsonb]);
     for (const privateValue of [

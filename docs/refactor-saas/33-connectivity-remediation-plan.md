@@ -140,6 +140,6 @@ W1 -> W5 CONN-004 事务性 outbox
 | W11 CONN-009 threads/approvals | `connected` |
 | W12 CONN-010 Worldline/Character | `connected` |
 | W13 CONN-011 长章 window | `connected` |
-| Z7 browser 全链证据 | 不在本轮；仍 `in_progress` |
+| Z7 browser 全链证据 | `in_progress`：app-role + Pi local-provider live 已补；authenticated browser journey / `--app` stack 仍 blocked（Docker CLI socket + Playwright install） |
 
 用词约定：`connected` = 代码路径已接线且 focused tests 通过；`verified` 仅在 disposable live / browser 证据齐备后使用。
