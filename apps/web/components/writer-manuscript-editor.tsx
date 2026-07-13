@@ -8,6 +8,14 @@ import type { SelectionAction } from "./writer-selection-toolbar";
 export type PendingRevision = {
   baseText: string;
   proposedText: string;
+  blockId?: string;
+  selectionText?: string;
+  proposedSelectionText?: string;
+  selectionStart?: number;
+  selectionEnd?: number;
+  expectedVersion?: number;
+  instruction?: string;
+  eventId?: string;
 };
 
 export type WriterManuscriptEditorProps = {

@@ -185,28 +185,28 @@ Synthetic inspect/plan/apply/verify/rollback 与 MinIO version ownership 已通�
 | 1.4 顶栏 breadcrumb / save-state | `verified_current` | header eyebrow → 面包屑（项目总览链接 › 写作 Agent，沿用页面内部路由风格，非公钥深链）；meta → `WriterRunStateChip`（idle/active/error 状态点，active 脉冲，`prefers-reduced-motion` 降级）；actions 加 `已同步/Synced` 指示（诚实反映 server-action 即时持久化，Phase 2 接入实时 save-state）；契约锁定 writer-breadcrumb/WriterRunStateChip/writer-sync-chip；Web 串行 full `250` 项 `241 passed, 9 skipped`、typecheck、build passed |
 
 **Phase 1（四区布局）收口：** 1.1–1.4 全部 `verified_current`。写作台已是 manuscript-primary 三区编辑室：左结构导航 / 中手稿画布（四 artifact tabs）/ 右常驻 Agent dock，顶栏含面包屑 + run-state + sync，⌘K 命令面板驱动 tabs。
-| 2 TipTap 编辑器 | `implemented` | `writer-manuscript-editor.tsx` TipTap + 隐藏/PE `textarea name="content"` + `next/dynamic ssr:false`；`WriterManuscriptPanelClient` 集成；书卷纸面 CSS |
-| 3 选区驱动调用 + 行内 diff | `implemented` | 选区工具条、`lib/writer-diff.ts` 纯函数、行内 diff UI；shared `mode=revise` + options.revise；Pi revise 输出 `writer.revision.proposed`；Web reviseSelection action |
-| 4 持久 thread + activity timeline + context chips | `implemented` | migration `0019_writer_threads`（threads/messages/approvals + RLS）；Go store；`writer-activity-timeline` / `writer-context-chip` / thread helpers；shell 可渲持久消息 |
-| 5 真实 SSE 推送 + approvals + continuity | `implemented` | Go held-open SSE（stream=1 / active run + Last-Event-ID）；Web EventSource 优先、poll 回退；`writer-approval-card` + approval 事件类型 |
-| 6 视觉打磨 + a11y + 验收截图 | `implemented`（截图 pending） | paper/selection/diff/timeline/approval CSS、reduced-motion、契约测试；fresh desktop/mobile browser 截图仍待真实登录 + 浏览器实例 |
+| 2 TipTap 编辑器 | `connected` | TipTap + PE textarea；空白 manuscript block 创建；scene 结构元数据不再承载正文（CONN-001） |
+| 3 选区驱动调用 + 行内 diff | `connected` | `writer.revision.proposed` → `pendingRevision` 行内 diff；accept 走块级 optimistic patch，禁止普通整块 adoption（CONN-007）；并发 OPTIMISTIC_CONFLICT 保留 localDraft compare/merge/另存（CONN-006） |
+| 4 持久 thread + activity timeline + context chips | `connected` | SQLWriterThreadStore 中央挂载；user 指令与 Pi agent 完成消息均写入 `writer_thread_messages`；approval create/decide 路径具备；Writer page 传 `threadMessages` + `decideApprovalAction`（CONN-009） |
+| 5 真实 SSE 推送 + approvals + continuity | `connected` | held-open SSE + EventSource；approval 决策接线；Idempotency-Key 进入 requestID；Temporal start 失败补偿（CONN-015） |
+| 6 视觉打磨 + a11y + 验收截图 | `connected`（截图 pending Z7） | paper/selection/diff/timeline/approval CSS；fresh desktop/mobile browser 截图仍待 Z7 |
 
-**Phase 2–6 实现收口（2026-07-13）：** 源码与契约已落地，见 `30-writer-agentification-and-editor-plan.md`。验证以 focused Web/Go/Pi/shared-contracts 为准；fresh browser 视觉证据仍 pending。
+**Phase 2–6 + doc 32 remediation 代码连通（2026-07-13）：** 见 `33-connectivity-remediation-plan.md`。`connected` 表示代码路径与 focused tests 已接线；`verified` 仍要求 disposable live / browser 证据。Z7 全链浏览器认证不在本轮。
 
 ## 并行：Z-028 Zero-start Writer / Manuscript Asset Distillation
 
-范围与切片以 `docs/refactor-saas/28-zero-start-writer-and-manuscript-asset-distillation.md` 为准；**不属于 MAIN-100 / Phase 0-8 完成定义**，不得把 planned distillation API 计为 MAIN complete。
+范围与切片以 `docs/refactor-saas/28-zero-start-writer-and-manuscript-asset-distillation.md` 为准；连通性修复见 `33-connectivity-remediation-plan.md`。**不属于 MAIN-100 / Phase 0-8 完成定义**。
 
 | 切片 | 状态 | 当前证据 |
 |---|---|---|
 | Z0 空项目创作契约 | `verified_current` (app-role) | unit/web 双入口 + bootstrap；disposable Postgres live `TestLiveEmptyProjectWriterPathWithoutSeedArtifacts` passed |
 | Z1 0018 schema/RLS | `verified_current` (app-role) | schema ledger 含 `0018`；live settings/admission/proposals/accept/reject + cross-tenant isolation + evidence private gate passed |
-| Z2 手动蒸馏 | `verified_current` (unit + admission live) | module registry + Go admission fingerprint replay live；Python workflow/validator unit passed；真实 provider Temporal E2E 仍可选增强 |
-| Z3 Proposal Review | `verified_current` (API live + UI wired) | accept_create/reject live；Writer proposal rail + settings UI 已接线 |
-| Z4 Update/Merge | `implemented` | accept_update/version conflict 代码与 unit path 具备；live update merge 用例可后续补强 |
-| Z5 Outbox | `implemented` | adopt snapshot + claim function + adoption enqueuer + dispatcher；live claim 执行无报错 |
-| Z6 检索/设置 | `verified_current` (unit) | Pi lifecycle 白名单；settings API/UI |
-| Z7 完整认证 | `in_progress` | app-role disposable live 已绿；全栈 Temporal provider + browser journey 未跑（compose temporal-db-init 在完整 stack 上曾失败，DB-only path 已证明） |
+| Z2 手动蒸馏 | `connected` | 任意 active manuscript 可作蒸馏源（去掉 `source_draft_id` 限制）；长章 window/checkpoint/identity merge；`enabled_asset_types` 过滤 prompt（CONN-001/011） |
+| Z3 Proposal Review | `connected` | accept 时事务性投影 character/relationship/world_rule/plot_thread 到 Graph 源表；accept 成功后启动 `story_graph_build`（失败可见，不回滚 accept）（CONN-003） |
+| Z4 Update/Merge | `connected` | 真实 `expected_target_version`；conflict 状态先提交再返回 typed conflict；finalize 先 supersede 后提升；Update/Restore/Delete 调用 StaleProposals（CONN-005） |
+| Z5 Outbox | `connected` | adoption 与 distillation outbox **同事务**写入；Temporal dispatch 由 outbox dispatcher 恢复；claim/tick 可观测（CONN-004） |
+| Z6 检索/设置 | `connected` | Pi active manuscript 邻域、显式 worldline path、canon 资产规则/角色；Worldline entity 解析 + prepare/goal 上下文；draft chapter/scene COALESCE run 行（CONN-008/010） |
+| Z7 完整认证 | `in_progress` | app-role disposable live 已绿；全栈 Temporal provider + browser journey 仍是最终发布证据 gate |
 
 实现入口：
 

@@ -2,10 +2,13 @@ package assetdistillation
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"time"
 
 	"go.temporal.io/sdk/client"
+
+	"mirofish-novel/apps/api/internal/workflows"
 )
 
 type TemporalWorkflowClient interface {
@@ -124,17 +127,23 @@ func (d *Dispatcher) Tick(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 	started := 0
+	var firstErr error
 	for _, item := range items {
 		scope := Scope{TenantID: item.TenantID, ProjectID: item.ProjectID}
 		err := d.starter.StartDispatched(ctx, scope, item.RequestID, item.RunID, item.TriggerKind)
 		if err != nil {
 			next := time.Now().UTC().Add(time.Duration(min(item.Attempt+1, 6)) * 30 * time.Second)
-			_ = d.store.MarkDispatchRetry(ctx, item.TenantID, item.RequestID, "DISPATCH_START_FAILED", item.Attempt+1, next)
+			if markErr := d.store.MarkDispatchRetry(ctx, item.TenantID, item.RequestID, "DISPATCH_START_FAILED", item.Attempt+1, next); markErr != nil && firstErr == nil {
+				firstErr = markErr
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		started++
 	}
-	return started, nil
+	return started, firstErr
 }
 
 func min(a, b int) int {
@@ -159,27 +168,82 @@ type AfterAdoptionInput struct {
 	BlockID, ChapterID, SceneID                 string
 }
 
+// EnqueueAfterAdoptionInTx inserts the durable outbox row on the open adoption transaction.
+// Temporal dispatch remains best-effort via the outbox dispatcher after commit.
+func (e *Enqueuer) EnqueueAfterAdoptionInTx(ctx context.Context, rows workflows.DraftAdoptionSQLRows, input workflows.DraftAdoptionInput, result workflows.DraftAdoptionResult) error {
+	if e == nil || e.store == nil || rows == nil {
+		return nil
+	}
+	projectID := strings.TrimSpace(result.ProjectID)
+	blockID := strings.TrimSpace(result.BlockID)
+	if projectID == "" || blockID == "" {
+		return nil
+	}
+	scope := Scope{
+		TenantID: strings.TrimSpace(input.TenantID), ProjectID: projectID,
+		ActorUserID: strings.TrimSpace(input.ActorUserID), RequestID: strings.TrimSpace(input.RequestID),
+	}
+	settings, err := loadSettingsOn(ctx, rows, scope)
+	if err != nil {
+		return err
+	}
+	if settings.TriggerMode != "after_adoption" {
+		return nil
+	}
+	src, err := resolveActiveBlockSourceOn(ctx, rows, scope, blockID)
+	if err != nil {
+		return err
+	}
+	_, _, err = e.store.EnqueueFromSourcesOn(ctx, rows, scope, "draft_adoption", []SourceBlock{src})
+	return err
+}
+
+// EnqueueAfterAdoption remains for compatibility tests and non-transactional callers.
 func (e *Enqueuer) EnqueueAfterAdoption(ctx context.Context, input AfterAdoptionInput) error {
 	if e == nil || e.store == nil {
-		return nil
+		return appError(CodeBackendUnconfigured, "asset distillation enqueuer is not configured")
 	}
 	scope := Scope{
 		TenantID: input.TenantID, ProjectID: input.ProjectID,
 		ActorUserID: input.ActorUserID, RequestID: input.RequestID,
 	}
 	settings, err := e.store.GetSettings(ctx, scope)
-	if err != nil || settings.TriggerMode != "after_adoption" {
+	if err != nil {
+		return err
+	}
+	if settings.TriggerMode != "after_adoption" {
 		return nil
 	}
 	sources, err := e.store.resolveManualSources(ctx, StartManualInput{
 		Scope: scope, BlockIDs: []string{input.BlockID},
 	})
-	if err != nil || len(sources) == 0 {
-		return nil
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		return appError(CodeNotFound, "active manuscript sources were not found")
 	}
 	admission, replay, err := e.store.EnqueueFromSources(ctx, scope, "draft_adoption", sources)
 	if err != nil || replay || e.starter == nil {
 		return err
 	}
 	return e.starter.StartDispatched(ctx, scope, admission.RequestID, admission.RunID, admission.TriggerKind)
+}
+
+func resolveActiveBlockSourceOn(ctx context.Context, q sqlQuerier, scope Scope, blockID string) (SourceBlock, error) {
+	var src SourceBlock
+	var content string
+	err := q.QueryRowContext(ctx, `SELECT block_id::text, version, content_text,
+  COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
+FROM manuscript_blocks
+WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND block_id=$3::uuid AND status='active'`,
+		scope.TenantID, scope.ProjectID, blockID).Scan(&src.BlockID, &src.BlockVersion, &content, &src.ChapterID, &src.SceneID)
+	if err == sql.ErrNoRows {
+		return SourceBlock{}, appError(CodeNotFound, "active manuscript sources were not found")
+	}
+	if err != nil {
+		return SourceBlock{}, err
+	}
+	src.ContentSHA = contentSHA256(content)
+	return src, nil
 }

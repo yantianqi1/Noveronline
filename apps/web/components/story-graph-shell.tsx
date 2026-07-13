@@ -85,13 +85,11 @@ export function StoryGraphShell({
     <div className="overview-root story-graph-root">
       <WorkspaceHeader
         className="story-graph-header"
-        eyebrow={<Bi zh="故事图谱" en="Story Graph" />}
         icon={<Network size={22} strokeWidth={1.8} />}
         meta={(
           <>
-            <span className="status-pill"><Bi zh="图谱：" en="Graph: " />{current.ok ? <StatusValue value={current.status} /> : <Bi zh="暂不可用" en="unavailable" />}</span>
-            <span className="status-pill"><Bi zh="构建：" en="Build: " />{buildStatus || tx(locale, "空闲", "idle")}</span>
-            <span className="status-pill"><Bi zh="关系生成：" en="Bond: " />{bondStatus || tx(locale, "空闲", "idle")}</span>
+            <span className="status-pill">{current.ok ? <StatusValue value={current.status} /> : <Bi zh="暂不可用" en="unavailable" />}</span>
+            <span className="status-pill"><Bi zh="构建" en="Build" /> · {buildStatus || tx(locale, "空闲", "idle")}</span>
           </>
         )}
         title={<Bi zh="故事图谱" en="Story Graph" />}

@@ -14,7 +14,7 @@ func TestEmptyProjectWriterAdmissionSQLDoesNotDependOnSeedArtifacts(t *testing.T
 	execer := &recordingWriterAdmissionExecer{}
 	store := NewSQLWriterAdmissionStore(SQLWriterAdmissionStoreConfig{Execer: execer})
 
-	err := store.AdmitWriterRun(context.Background(), WriterAdmissionInput{
+	_, _, err := store.AdmitWriterRun(context.Background(), WriterAdmissionInput{
 		TenantID:           "11111111-1111-4111-8111-111111111111",
 		ProjectID:          "22222222-2222-4222-8222-222222222222",
 		RunID:              "33333333-3333-4333-8333-333333333333",

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"net/url"
 	"os"
 	"strings"
@@ -123,6 +124,67 @@ func TestLiveAssetDistillationSettingsAdmissionProposalsAndRLS(t *testing.T) {
 	if err := admin.QueryRow(`SELECT lifecycle, enabled FROM assets WHERE asset_id=$1`, candidateID).Scan(&lifecycle, &enabled); err != nil || lifecycle != "canon" || !enabled {
 		t.Fatalf("accepted asset state lifecycle=%s enabled=%v err=%v", lifecycle, enabled, err)
 	}
+	// CONN-003: character accept projects into entities (+ optional aliases).
+	var entityName string
+	if err := admin.QueryRow(`SELECT canonical_name FROM entities
+WHERE tenant_id=$1 AND project_id=$2 AND canonical_name='林晚'`, liveDistillTenant, liveDistillProject).Scan(&entityName); err != nil || entityName != "林晚" {
+		t.Fatalf("graph entity projection missing: name=%q err=%v", entityName, err)
+	}
+	var graphAudit int
+	if err := admin.QueryRow(`SELECT count(*) FROM audit_logs
+WHERE tenant_id=$1 AND action='asset_proposal.graph_projected' AND resource_id=$2::uuid`,
+		liveDistillTenant, candidateID).Scan(&graphAudit); err != nil || graphAudit < 1 {
+		t.Fatalf("graph projection audit missing: count=%d err=%v", graphAudit, err)
+	}
+
+	// Relationship accept must write relationships (Graph edges source table).
+	relCandidate := insertLiveTypedCandidate(t, admin, admission.RequestID, "relationship", "林晚 / 陈舟", map[string]any{
+		"source_entity_name": "林晚",
+		"target_entity_name": "陈舟",
+		"relationship_type":  "ally",
+	})
+	if _, err := store.Decide(ctx, DecisionInput{
+		Scope: scope, CandidateAssetID: relCandidate, Decision: "accept_create", TargetLifecycle: "canon",
+	}); err != nil {
+		t.Fatalf("accept relationship: %v", err)
+	}
+	var relType string
+	if err := admin.QueryRow(`SELECT relationship_type FROM relationships
+WHERE tenant_id=$1 AND project_id=$2 AND source_entity_name='林晚' AND target_entity_name='陈舟'`,
+		liveDistillTenant, liveDistillProject).Scan(&relType); err != nil || relType != "ally" {
+		t.Fatalf("relationship projection missing: type=%q err=%v", relType, err)
+	}
+
+	// plot_thread + world_rule projections.
+	threadCandidate := insertLiveTypedCandidate(t, admin, admission.RequestID, "plot_thread", "灯塔之谜", map[string]any{
+		"status": "open",
+	})
+	if _, err := store.Decide(ctx, DecisionInput{
+		Scope: scope, CandidateAssetID: threadCandidate, Decision: "accept_create", TargetLifecycle: "canon",
+	}); err != nil {
+		t.Fatalf("accept plot_thread: %v", err)
+	}
+	var threadTitle string
+	if err := admin.QueryRow(`SELECT title FROM plot_threads
+WHERE tenant_id=$1 AND project_id=$2 AND title='灯塔之谜'`, liveDistillTenant, liveDistillProject).Scan(&threadTitle); err != nil {
+		t.Fatalf("plot_thread projection missing: %v", err)
+	}
+	_ = threadTitle
+	ruleCandidate := insertLiveTypedCandidate(t, admin, admission.RequestID, "world_rule", "灯塔只在风暴夜点亮", map[string]any{
+		"rule_text": "灯塔只在风暴夜点亮",
+		"category":  "setting",
+	})
+	if _, err := store.Decide(ctx, DecisionInput{
+		Scope: scope, CandidateAssetID: ruleCandidate, Decision: "accept_create", TargetLifecycle: "canon",
+	}); err != nil {
+		t.Fatalf("accept world_rule: %v", err)
+	}
+	var ruleText string
+	if err := admin.QueryRow(`SELECT rule_text FROM world_rule_evidence
+WHERE tenant_id=$1 AND project_id=$2 AND rule_text='灯塔只在风暴夜点亮'`, liveDistillTenant, liveDistillProject).Scan(&ruleText); err != nil {
+		t.Fatalf("world_rule projection missing: %v", err)
+	}
+	_ = ruleText
 	// Replay decision
 	replayDecision, err := store.Decide(ctx, DecisionInput{
 		Scope: scope, CandidateAssetID: candidateID, Decision: "accept_create", TargetLifecycle: "canon",
@@ -256,32 +318,42 @@ func insertLiveCandidate(t *testing.T, db *sql.DB, requestID string) string {
 
 func insertLiveCandidateWithTitle(t *testing.T, db *sql.DB, requestID, title string) string {
 	t.Helper()
+	return insertLiveTypedCandidate(t, db, requestID, "character", title, map[string]any{
+		"aliases": []string{"晚晚"},
+	})
+}
+
+func insertLiveTypedCandidate(t *testing.T, db *sql.DB, requestID, assetType, title string, payload map[string]any) string {
+	t.Helper()
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
 	var assetID string
-	err := db.QueryRow(`INSERT INTO assets(
+	sourceRef := requestID + ":" + assetType + ":" + title
+	err = db.QueryRow(`INSERT INTO assets(
   tenant_id,project_id,scope,asset_type,category,lifecycle,title,summary,payload_jsonb,tags_jsonb,source_kind,source_ref,enabled,pinned,created_by
-) VALUES($1,$2,'project','character','character','candidate',$3,'主角','{}','[]','manuscript_distillation',$4,false,false,$5)
-RETURNING asset_id::text`, liveDistillTenant, liveDistillProject, title, requestID+":"+title, liveDistillUser).Scan(&assetID)
+) VALUES($1,$2,'project',$3,$3,'candidate',$4,$5,$6::jsonb,'[]','manuscript_distillation',$7,false,false,$8)
+RETURNING asset_id::text`, liveDistillTenant, liveDistillProject, assetType, title, "summary for "+title, string(payloadJSON), sourceRef, liveDistillUser).Scan(&assetID)
 	if err != nil {
 		t.Fatalf("insert candidate: %v", err)
 	}
+	identity := assetType + "|" + strings.ToLower(title)
 	if _, err := db.Exec(`INSERT INTO asset_candidate_proposals(
   tenant_id,project_id,candidate_asset_id,request_id,operation,normalized_identity,confidence,review_status
 ) VALUES($1,$2,$3,$4,'create',$5,0.9,'pending')`,
-		liveDistillTenant, liveDistillProject, assetID, requestID, "character|"+strings.ToLower(title)); err != nil {
+		liveDistillTenant, liveDistillProject, assetID, requestID, identity); err != nil {
 		t.Fatalf("insert proposal: %v", err)
 	}
+	sum := sha256Hex("林晚站在灯塔下看着大海。")
 	if _, err := db.Exec(`INSERT INTO asset_candidate_evidence(
   tenant_id,project_id,candidate_asset_id,block_id,block_version,content_sha256,start_offset,end_offset,evidence_text,confidence
 ) VALUES($1,$2,$3,$4,1,$5,0,2,'林晚',0.9)`,
-		liveDistillTenant, liveDistillProject, assetID, liveDistillBlock, sha256Hex("林晚站在灯塔下看着大海。")); err != nil {
-		// content sha of full block for fixture consistency
-		sum := sha256Hex("林晚站在灯塔下看着大海。")
-		if _, err2 := db.Exec(`INSERT INTO asset_candidate_evidence(
-  tenant_id,project_id,candidate_asset_id,block_id,block_version,content_sha256,start_offset,end_offset,evidence_text,confidence
-) VALUES($1,$2,$3,$4,1,$5,0,2,'林晚',0.9)`,
-			liveDistillTenant, liveDistillProject, assetID, liveDistillBlock, sum); err2 != nil {
-			t.Fatalf("insert evidence: %v / %v", err, err2)
-		}
+		liveDistillTenant, liveDistillProject, assetID, liveDistillBlock, sum); err != nil {
+		t.Fatalf("insert evidence: %v", err)
 	}
 	return assetID
 }

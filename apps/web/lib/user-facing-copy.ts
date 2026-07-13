@@ -1,0 +1,195 @@
+import { type Locale, tx } from "./locale";
+
+/**
+ * Author-facing copy helpers. Internal error codes and IDs stay off the default UI;
+ * use data-code attributes or Technical Details for diagnostics.
+ */
+
+const FAILURE_MESSAGES: Record<string, [string, string]> = {
+  UNAUTHENTICATED: ["请先登录后再试。", "Sign in and try again."],
+  FORBIDDEN: ["你没有权限执行此操作。", "You do not have permission for this action."],
+  VALIDATION_FAILED: ["请检查填写内容后重试。", "Check the form and try again."],
+  NOT_FOUND: ["找不到请求的内容。", "The requested item was not found."],
+  RATE_LIMITED: ["操作过于频繁，请稍后再试。", "Too many attempts. Try again shortly."],
+  AUTH_RECOVERY_RATE_LIMITED: ["重置请求过于频繁，请稍后再试。", "Reset requests are limited. Try again shortly."],
+  PASSWORD_LOGIN_FAILED: ["邮箱或密码不正确。", "Email or password is incorrect."],
+  PASSWORD_RESET_TOKEN_INVALID: ["重置链接无效，请重新申请。", "This reset link is invalid. Request a new one."],
+  PASSWORD_RESET_TOKEN_EXPIRED: ["重置链接已过期，请重新申请。", "This reset link expired. Request a new one."],
+  PASSWORD_RESET_TOKEN_ALREADY_USED: ["重置链接已使用，请重新申请。", "This reset link was already used. Request a new one."],
+  LLM_BINDING_UPDATE_FAILED: ["模型绑定未能保存。", "Could not save the model binding."],
+  LLM_BINDING_CLEAR_FAILED: ["未能恢复默认绑定。", "Could not restore the default binding."],
+  LLM_BINDING_BATCH_UPDATED: ["批量绑定已更新。", "Batch bindings updated."],
+  LLM_BINDING_TARGET_NOT_FOUND: ["所选渠道与模型不匹配，请先同步模型。", "Channel and model do not match. Sync models first."],
+  LLM_CHANNEL_CREATE_FAILED: ["渠道创建失败。", "Could not create the channel."],
+  LLM_CHANNEL_UPDATE_FAILED: ["渠道更新失败。", "Could not update the channel."],
+  LLM_MODELS_SYNC_FAILED: ["模型同步失败。", "Could not sync models."],
+  LLM_MODEL_UPDATE_FAILED: ["模型设置更新失败。", "Could not update the model."],
+  LLM_QUOTA_POLICY_UNAVAILABLE: ["缺少调用预算策略。", "A usage budget policy is missing."],
+  LLM_QUOTA_EXCEEDED: ["调用额度已用尽。", "Token quota has been exceeded."],
+  PROVIDER_UNAVAILABLE: ["模型服务暂时不可用。", "The model provider is temporarily unavailable."],
+  RATE_LIMIT_BACKEND_UNAVAILABLE: ["服务暂时繁忙，请稍后再试。", "The service is busy. Try again shortly."],
+};
+
+const STATUS_LABELS: Record<string, [string, string]> = {
+  active: ["进行中", "Active"],
+  adopted: ["已采纳", "Adopted"],
+  archived: ["已归档", "Archived"],
+  billing_ready: ["可计费", "Billing ready"],
+  cancelled: ["已取消", "Cancelled"],
+  candidate: ["候选", "Candidate"],
+  canon: ["正史", "Canon"],
+  completed: ["已完成", "Completed"],
+  disabled: ["已停用", "Disabled"],
+  draft: ["草稿", "Draft"],
+  enabled: ["已启用", "Enabled"],
+  error: ["错误", "Error"],
+  exceeded: ["已超额", "Exceeded"],
+  expired: ["已过期", "Expired"],
+  failed: ["失败", "Failed"],
+  finalized: ["已结算", "Finalized"],
+  healthy: ["连接正常", "Healthy"],
+  idle: ["空闲", "Idle"],
+  pending: ["等待中", "Pending"],
+  pricing_unavailable: ["缺少价格", "Pricing unavailable"],
+  queued: ["排队中", "Queued"],
+  released: ["已释放", "Released"],
+  reserved: ["已预留", "Reserved"],
+  running: ["运行中", "Running"],
+  success: ["成功", "Success"],
+  unavailable: ["不可用", "Unavailable"],
+  unconfigured: ["未配置", "Unconfigured"],
+  unbound: ["未绑定", "Unbound"],
+};
+
+const MODULE_LABELS: Record<string, [string, string]> = {
+  anchor_point_summary: ["锚点摘要", "Anchor point summary"],
+  asset_ingestion: ["资产导入", "Asset ingestion"],
+  asset_search_embedding: ["资产检索向量", "Asset search embedding"],
+  character_agent_profile: ["角色档案", "Character profile"],
+  contextual_block_analysis: ["上下文文本分析", "Contextual block analysis"],
+  entity_resolution: ["实体消歧", "Entity resolution"],
+  graph_bond_generator: ["图谱关系生成", "Graph bond generator"],
+  local_block_facts: ["局部文本事实", "Local block facts"],
+  narrative_archives: ["叙事档案", "Narrative archives"],
+  novel_chapter_summarizer: ["章节摘要", "Chapter summarizer"],
+  parallel_world_config: ["世界线配置", "Worldline config"],
+  sequential_reading: ["顺序精读", "Sequential reading"],
+  story_ontology: ["故事本体", "Story ontology"],
+  style_extractor: ["风格提取", "Style extractor"],
+  worldline_agent_action: ["世界线角色行动", "Worldline agent action"],
+  worldline_agent_dialogue: ["世界线角色对话", "Worldline agent dialogue"],
+  worldline_agent_prepare: ["世界线角色准备", "Worldline agent preparation"],
+  worldline_character_proposal: ["世界线角色提案", "Worldline character proposal"],
+  worldline_director: ["世界线导演", "Worldline director"],
+  worldline_goal_evaluator: ["世界线目标评估", "Worldline goal evaluator"],
+  writer_book_planner: ["书籍计划", "Book planner"],
+  writer_composer: ["正文创作", "Writer composer"],
+  writer_dedup_extractor: ["重复风险提取", "Dedup extractor"],
+  writer_orchestrator: ["写作编排", "Writer orchestrator"],
+  writer_retrieval_planner: ["写作检索规划", "Retrieval planner"],
+  writer_reviewer: ["写作审校", "Writer reviewer"],
+};
+
+export function humanizeFailure(
+  locale: Locale,
+  code: string | null | undefined,
+  fallbackMessage?: string,
+): string {
+  const normalized = (code || "").trim().toUpperCase();
+  const mapped = FAILURE_MESSAGES[normalized];
+  if (mapped) {
+    return tx(locale, mapped[0], mapped[1]);
+  }
+  if (fallbackMessage && !looksLikeInternalCode(fallbackMessage)) {
+    return fallbackMessage;
+  }
+  return tx(locale, "操作未完成，请稍后重试。", "The action could not be completed. Try again shortly.");
+}
+
+export function statusLabel(locale: Locale, value: string | null | undefined): string {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized) {
+    return tx(locale, "—", "—");
+  }
+  const mapped = STATUS_LABELS[normalized];
+  if (mapped) {
+    return tx(locale, mapped[0], mapped[1]);
+  }
+  return humanizeToken(value || "");
+}
+
+export function moduleLabel(locale: Locale, moduleKey: string, fallback?: string): string {
+  const mapped = MODULE_LABELS[moduleKey];
+  if (mapped) {
+    return tx(locale, mapped[0], mapped[1]);
+  }
+  if (fallback && fallback !== moduleKey && !looksLikeInternalCode(fallback)) {
+    return fallback;
+  }
+  return humanizeToken(moduleKey);
+}
+
+export function shortId(value: string | null | undefined, visible = 8): string {
+  const text = (value || "").trim();
+  if (!text) {
+    return "—";
+  }
+  if (text.length <= visible + 2) {
+    return text;
+  }
+  return `${text.slice(0, visible)}…`;
+}
+
+export function providerHealthSummary(
+  locale: Locale,
+  input: {
+    status: string;
+    latency_ms?: number;
+    supports_tools?: boolean;
+    supports_json?: boolean;
+  },
+): string {
+  const status = statusLabel(locale, input.status);
+  const latency = typeof input.latency_ms === "number"
+    ? tx(locale, `约 ${Math.round(input.latency_ms)}ms`, `~${Math.round(input.latency_ms)}ms`)
+    : "";
+  const tools = input.supports_tools
+    ? tx(locale, "支持工具调用", "Tools supported")
+    : tx(locale, "不支持工具调用", "Tools unsupported");
+  const json = input.supports_json
+    ? tx(locale, "支持 JSON", "JSON supported")
+    : tx(locale, "不支持 JSON", "JSON unsupported");
+  return [status, latency, tools, json].filter(Boolean).join(" · ");
+}
+
+export function formatDiagnosticsPayload(parts: {
+  code?: string;
+  requestId?: string;
+  detail?: string;
+}): string {
+  return [
+    parts.code ? `code=${parts.code}` : "",
+    parts.requestId ? `request_id=${parts.requestId}` : "",
+    parts.detail ? `detail=${parts.detail}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function looksLikeInternalCode(value: string): boolean {
+  const text = value.trim();
+  if (!text) {
+    return false;
+  }
+  if (/^[A-Z][A-Z0-9_]{2,}$/.test(text)) {
+    return true;
+  }
+  if (/^[a-z]+(_[a-z0-9]+)+$/.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function humanizeToken(value: string): string {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}

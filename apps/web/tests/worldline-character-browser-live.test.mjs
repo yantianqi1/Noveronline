@@ -215,7 +215,7 @@ async function savePath(page, api, config, contextInput, sessionId, eventId) {
 }
 
 async function runCharacterJourney(page, api, config, contextInput, anchors) {
-  await page.getByRole("link", { name: "Enter Character Console" }).click();
+  await page.getByRole("link", { name: "Enter Characters" }).click();
   await page.waitForURL(/\/character-console/, { waitUntil: "domcontentloaded" });
   const create = page.getByRole("heading", { name: "Create interaction" }).locator("..");
   await create.getByLabel("Worldline session").selectOption(anchors.sessionId);

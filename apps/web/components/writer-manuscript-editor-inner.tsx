@@ -21,6 +21,14 @@ import { WriterSelectionToolbar, type SelectionAction } from "./writer-selection
 export type PendingRevision = {
   baseText: string;
   proposedText: string;
+  blockId?: string;
+  selectionText?: string;
+  proposedSelectionText?: string;
+  selectionStart?: number;
+  selectionEnd?: number;
+  expectedVersion?: number;
+  instruction?: string;
+  eventId?: string;
 };
 
 export type WriterManuscriptEditorProps = {
@@ -179,6 +187,8 @@ export default function WriterManuscriptEditorInner({
 
   const applyRevisionToEditor = useCallback(
     (nextText: string) => {
+      // Accept applies a full-block optimistic patch via the parent form's
+      // updateManuscriptBlock path — never draft adoption.
       editor?.commands.setContent(plainTextToDoc(nextText), { emitUpdate: false });
       syncText(nextText, true);
       setHunks([]);

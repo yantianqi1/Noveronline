@@ -1,6 +1,7 @@
 package manuscriptworkspace
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,6 +9,11 @@ import (
 
 	"mirofish-novel/apps/api/internal/writerplanning"
 )
+
+// ProposalStaler marks distillation proposals stale when manuscript evidence changes.
+type ProposalStaler interface {
+	StaleProposalsForBlock(ctx context.Context, tenantID, projectID, actorUserID, blockID string) error
+}
 
 type HandlerConfig struct {
 	Store           Store
@@ -19,6 +25,7 @@ type HandlerConfig struct {
 	Planning        writerplanning.Starter
 	Resolver        TrustedContextResolver
 	Authorizer      PermissionAuthorizer
+	ProposalStaler  ProposalStaler
 }
 
 type Handler struct {
@@ -131,6 +138,17 @@ func (h *Handler) routeBlocks(response http.ResponseWriter, request *http.Reques
 			blocks, err := h.config.Store.ListBlocks(request.Context(), scope, request.URL.Query().Get("include_deleted") == "true")
 			writeResult(response, map[string]any{"blocks": blocks}, err, http.StatusOK)
 			return true
+		case http.MethodPost:
+			var body createBlockBody
+			if !decodeBody(response, request, &body) {
+				return true
+			}
+			block, err := h.config.Store.CreateBlock(request.Context(), CreateBlockInput{
+				Scope: scope, ChapterID: body.ChapterID, SceneID: body.SceneID,
+				ContentText: body.ContentText, Tags: body.Tags,
+			})
+			writeResult(response, block, err, http.StatusCreated)
+			return true
 		default:
 			writeMethodNotAllowed(response)
 			return true
@@ -167,6 +185,9 @@ func (h *Handler) routeBlocks(response http.ResponseWriter, request *http.Reques
 				ContentText: body.ContentText, Status: body.Status, Tags: body.Tags,
 				ChapterID: body.ChapterID, SceneID: body.SceneID,
 			})
+			if err == nil && body.ContentText != nil {
+				h.staleProposals(request.Context(), scope, blockID)
+			}
 			writeResult(response, block, err, http.StatusOK)
 		case http.MethodDelete:
 			var body struct {
@@ -178,6 +199,9 @@ func (h *Handler) routeBlocks(response http.ResponseWriter, request *http.Reques
 			block, err := h.config.Store.DeleteBlock(request.Context(), DeleteBlockInput{
 				Scope: scope, BlockID: blockID, ExpectedVersion: body.ExpectedVersion,
 			})
+			if err == nil {
+				h.staleProposals(request.Context(), scope, blockID)
+			}
 			writeResult(response, block, err, http.StatusOK)
 		default:
 			writeMethodNotAllowed(response)
@@ -255,10 +279,27 @@ func (h *Handler) routeBlocks(response http.ResponseWriter, request *http.Reques
 		block, err := h.config.Store.RestoreVersion(request.Context(), RestoreBlockInput{
 			Scope: scope, BlockID: parts[1], VersionID: parts[3], ExpectedVersion: body.ExpectedVersion,
 		})
+		if err == nil {
+			h.staleProposals(request.Context(), scope, parts[1])
+		}
 		writeResult(response, block, err, http.StatusOK)
 		return true
 	}
 	return false
+}
+
+func (h *Handler) staleProposals(ctx context.Context, scope Scope, blockID string) {
+	if h == nil || h.config.ProposalStaler == nil || strings.TrimSpace(blockID) == "" {
+		return
+	}
+	_ = h.config.ProposalStaler.StaleProposalsForBlock(ctx, scope.TenantID, scope.ProjectID, scope.ActorUserID, blockID)
+}
+
+type createBlockBody struct {
+	ChapterID   string   `json:"chapter_id"`
+	SceneID     string   `json:"scene_id"`
+	ContentText string   `json:"content_text"`
+	Tags        []string `json:"tags"`
 }
 
 type updateBlockBody struct {

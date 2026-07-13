@@ -1157,6 +1157,7 @@ export type StoryGraphNodeRecord = {
   node_id: string;
   graph_id: string;
   project_id: string;
+  canonical_entity_id?: string;
   node_type: string;
   title: string;
   summary: string;
@@ -1265,6 +1266,8 @@ export type StartWriterRunInput = ApiContext & {
   projectId: string;
   mode: "draft" | "continue" | "outline" | "revise";
   instruction: string;
+  chapterId?: string;
+  sceneId?: string;
   options?: Record<string, unknown>;
   idempotencyKey?: string;
 };
@@ -1976,12 +1979,253 @@ export async function startWriterRun(input: StartWriterRunInput): Promise<Writer
     body: JSON.stringify({
       mode: input.mode,
       instruction: input.instruction,
+      chapter_id: input.chapterId ?? "",
+      scene_id: input.sceneId ?? "",
       options: input.options ?? {},
     }),
     cache: "no-store",
   });
 
   return decodeWriterRunResponse(response);
+}
+
+export type WriterThreadMessageSummary = {
+  ok: true;
+  message_id: string;
+  thread_id: string;
+  role: string;
+  // Wire JSON uses the body key; decoded client field is message_text (privacy contract).
+  message_text: string;
+  run_id?: string;
+  sequence?: number;
+  created_at?: string;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
+export type WriterThreadMessagesSummary = {
+  ok: true;
+  messages: Array<{
+    message_id?: string;
+    thread_id?: string;
+    role: string;
+    message_text: string;
+    run_id?: string;
+    sequence?: number;
+    created_at?: string;
+  }>;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
+export type WriterThreadSummary = {
+  ok: true;
+  thread_id: string;
+  project_id: string;
+  title?: string;
+  status: string;
+  updated_at?: string;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
+export type WriterThreadsListSummary = {
+  ok: true;
+  threads: Array<{
+    thread_id: string;
+    project_id: string;
+    title?: string;
+    status: string;
+    updated_at?: string;
+  }>;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
+export type WriterApprovalDecisionSummary = {
+  ok: true;
+  approval_id: string;
+  project_id: string;
+  run_id: string;
+  thread_id?: string;
+  status: string;
+  action: string;
+  summary: string;
+  consequence: string;
+  reversible: boolean;
+  created_at?: string;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
+export async function listWriterThreads(
+  input: ApiContext & { projectId: string },
+): Promise<WriterThreadsListSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/writer-threads`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    const payload = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      return decodeError(payload, response.status, "WRITER_THREAD_QUERY_FAILED");
+    }
+    const rawThreads = Array.isArray(payload.threads) ? payload.threads : [];
+    const threads = rawThreads
+      .map((item) => {
+        const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+        const threadId = typeof value.thread_id === "string" ? value.thread_id : "";
+        const projectId = typeof value.project_id === "string" ? value.project_id : "";
+        const status = typeof value.status === "string" ? value.status : "";
+        if (!threadId || !projectId || !status) {
+          return null;
+        }
+        return {
+          thread_id: threadId,
+          project_id: projectId,
+          title: typeof value.title === "string" ? value.title : undefined,
+          status,
+          updated_at: typeof value.updated_at === "string" ? value.updated_at : undefined,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    return { ok: true, threads };
+  } catch (error) {
+    return networkFailure(error, "WRITER_THREAD_QUERY_FAILED");
+  }
+}
+
+export async function ensureWriterThread(
+  input: ApiContext & { projectId: string; title?: string },
+): Promise<WriterThreadSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/writer-threads`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...contextHeaders(input),
+      },
+      body: JSON.stringify({ title: input.title ?? "Writer thread" }),
+      cache: "no-store",
+    });
+    const payload = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      return decodeError(payload, response.status, "WRITER_THREAD_QUERY_FAILED");
+    }
+    const threadId = requiredString(payload, "thread_id");
+    const projectId = requiredString(payload, "project_id");
+    const status = requiredString(payload, "status");
+    if (!threadId || !projectId || !status) {
+      return invalidApiResponse("writer thread response missing required fields");
+    }
+    return {
+      ok: true,
+      thread_id: threadId,
+      project_id: projectId,
+      title: typeof payload.title === "string" ? payload.title : undefined,
+      status,
+      updated_at: typeof payload.updated_at === "string" ? payload.updated_at : undefined,
+    };
+  } catch (error) {
+    return networkFailure(error, "WRITER_THREAD_QUERY_FAILED");
+  }
+}
+
+export async function listWriterThreadMessages(
+  input: ApiContext & { projectId: string; threadId: string },
+): Promise<WriterThreadMessagesSummary> {
+  try {
+    const response = await apiFetch(
+      `${apiBaseUrl()}/v1/projects/${input.projectId}/writer-threads/${input.threadId}/messages`,
+      {
+        headers: contextHeaders(input),
+        cache: "no-store",
+      },
+    );
+    const payload = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      return decodeError(payload, response.status, "WRITER_THREAD_QUERY_FAILED");
+    }
+    const rawMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const messages = rawMessages
+      .map((item) => {
+        const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+        const role = typeof value.role === "string" ? value.role : "";
+        const messageText = typeof value.body === "string" ? value.body : "";
+        if (!role || !messageText) {
+          return null;
+        }
+        return {
+          message_id: typeof value.message_id === "string" ? value.message_id : undefined,
+          thread_id: typeof value.thread_id === "string" ? value.thread_id : undefined,
+          role,
+          message_text: messageText,
+          run_id: typeof value.run_id === "string" ? value.run_id : undefined,
+          sequence: typeof value.sequence === "number" ? value.sequence : undefined,
+          created_at: typeof value.created_at === "string" ? value.created_at : undefined,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    return { ok: true, messages };
+  } catch (error) {
+    return networkFailure(error, "WRITER_THREAD_QUERY_FAILED");
+  }
+}
+
+export async function decideWriterApproval(
+  input: ApiContext & { projectId: string; approvalId: string; decision: "approve" | "reject" },
+): Promise<WriterApprovalDecisionSummary> {
+  try {
+    const response = await apiFetch(
+      `${apiBaseUrl()}/v1/projects/${input.projectId}/writer-approvals/${input.approvalId}/decision`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...contextHeaders(input),
+        },
+        body: JSON.stringify({ decision: input.decision }),
+        cache: "no-store",
+      },
+    );
+    const payload = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      return decodeError(payload, response.status, "WRITER_APPROVAL_MUTATION_FAILED");
+    }
+    const approvalId = requiredString(payload, "approval_id");
+    const projectId = requiredString(payload, "project_id");
+    const runId = requiredString(payload, "run_id");
+    const status = requiredString(payload, "status");
+    const action = requiredString(payload, "action");
+    if (!approvalId || !projectId || !runId || !status || !action) {
+      return invalidApiResponse("writer approval response missing required fields");
+    }
+    return {
+      ok: true,
+      approval_id: approvalId,
+      project_id: projectId,
+      run_id: runId,
+      thread_id: typeof payload.thread_id === "string" ? payload.thread_id : undefined,
+      status,
+      action,
+      summary: typeof payload.summary === "string" ? payload.summary : "",
+      consequence: typeof payload.consequence === "string" ? payload.consequence : "",
+      reversible: Boolean(payload.reversible),
+      created_at: typeof payload.created_at === "string" ? payload.created_at : undefined,
+    };
+  } catch (error) {
+    return networkFailure(error, "WRITER_APPROVAL_MUTATION_FAILED");
+  }
 }
 
 export async function getWriterRunSummary(input: ApiContext & { runId: string }) {
@@ -5833,10 +6077,13 @@ function decodeArchiveMemoryEventRecord(item: unknown): ArchiveMemoryEventRecord
 
 function decodeStoryGraphNodeRecord(item: unknown): StoryGraphNodeRecord {
   const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  const canonicalEntityId =
+    typeof value.canonical_entity_id === "string" ? value.canonical_entity_id.trim() : "";
   return {
     node_id: requiredString(value, "node_id"),
     graph_id: requiredString(value, "graph_id"),
     project_id: requiredString(value, "project_id"),
+    ...(canonicalEntityId ? { canonical_entity_id: canonicalEntityId } : {}),
     node_type: requiredString(value, "node_type"),
     title: requiredString(value, "title"),
     summary: requiredString(value, "summary"),

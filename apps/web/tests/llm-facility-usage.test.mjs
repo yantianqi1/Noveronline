@@ -10,8 +10,8 @@ test("LLM Facility exposes auditable usage scope without inventing quota data", 
 
   assert.match(shell, /tenantSlug=\{tenantSlug\}/);
   assert.match(shell, /projectId=\{projectId\}/);
-  assert.match(shell, /item\.module_key \|\| "-"/);
-  assert.match(shell, /item\.run_id \|\| "-"/);
+  assert.match(shell, /item\.module_key \? moduleLabel\(locale, item\.module_key, item\.module_key\) : "-"/);
+  assert.match(shell, /item\.run_id \? `\$\{item\.run_id\.slice\(0, 8\)}…` : "-"/);
   assert.match(shell, /data-usage-status=\{telemetryStatus\}/);
   assert.match(shell, /data-quota-status=\{quotaStatus\}/);
   assert.match(shell, /zero_truth/);

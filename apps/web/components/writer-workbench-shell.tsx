@@ -36,6 +36,7 @@ import { TechnicalDetailsDrawer } from "./technical-details-drawer";
 import { WorkspaceHeader } from "./workspace-header";
 import { WriterLiveDraft } from "./writer-live-draft";
 import { WriterCommandPalette, WriterCommandPaletteTrigger } from "./writer-command-palette";
+import { WriterMobileSwitch } from "./writer-mobile-switch";
 import { WriterWorkbenchProvider } from "./writer-workbench-context";
 
 type WriterWorkbenchShellProps = {
@@ -59,6 +60,8 @@ type WriterWorkbenchShellProps = {
   manuscriptExportStatus?: ActionStatus | null;
   writerControlStatus?: ActionStatus | null;
   selectedDraftId?: string;
+  selectedChapterId?: string;
+  selectedSceneId?: string;
   manuscriptExportArtifact?: WriterManuscriptExportArtifact | null;
   writerRunAction?: (formData: FormData) => Promise<void>;
   exportTraceAction?: (formData: FormData) => Promise<void>;
@@ -110,6 +113,8 @@ export function WriterWorkbenchShell({
   manuscriptExportStatus = null,
   writerControlStatus = null,
   selectedDraftId = "",
+  selectedChapterId = "",
+  selectedSceneId = "",
   manuscriptExportArtifact = null,
   writerRunAction,
   exportTraceAction,
@@ -184,10 +189,11 @@ export function WriterWorkbenchShell({
           </nav>
         }
         icon={<Bot size={22} strokeWidth={1.8} />}
-        title={<Bi zh="写作 Agent" en="Writer Agent" />}
+        title={<Bi zh="写作台" en="Writer" />}
       />
 
-      <div className="writer-agent-layout" data-layout="manuscript-primary" data-has-structure={structureNav ? "true" : "false"}>
+      <WriterMobileSwitch locale={locale} hasStructure={Boolean(structureNav)} />
+      <div className="writer-agent-layout" data-layout="manuscript-primary" data-has-structure={structureNav ? "true" : "false"} data-mobile-view="manuscript">
         {structureNav ? (
           <nav className="writer-structure-rail" aria-label={tx(locale, "创作结构导航", "Manuscript structure")}>
             {structureNav}
@@ -244,6 +250,8 @@ export function WriterWorkbenchShell({
             recoveredDraftId={recoveredDraftId}
             runActive={runActive}
             runSummary={runSummary}
+            selectedChapterId={selectedChapterId}
+            selectedSceneId={selectedSceneId}
             threadMessages={threadMessages}
             workflowEvents={workflowEvents}
             worldlineSavedPaths={worldlineSavedPaths}
@@ -293,6 +301,8 @@ function WriterAgentThread({
   recoveredDraftId,
   runActive,
   runSummary,
+  selectedChapterId,
+  selectedSceneId,
   threadMessages,
   workflowEvents,
   worldlineSavedPaths,
@@ -313,6 +323,8 @@ function WriterAgentThread({
   recoveredDraftId: string;
   runActive: boolean;
   runSummary: WriterRunSummary | null;
+  selectedChapterId: string;
+  selectedSceneId: string;
   threadMessages: { role: string; body: string; created_at?: string }[];
   workflowEvents: WriterRunEventsSummary | null;
   worldlineSavedPaths: WorldlineSavedPathsSummary;
@@ -396,6 +408,7 @@ function WriterAgentThread({
                   <DraftAdoptionPanel
                     action={adoptDraftAction}
                     adopted={draftIsAdopted}
+                    chapterId={selectedChapterId}
                     draftId={recoveredDraftId}
                     status={draftAdoptionStatus}
                   />
@@ -416,6 +429,8 @@ function WriterAgentThread({
         {writerRunStatus ? <StatusLine status={writerRunStatus} /> : null}
         {writerRunAction ? (
           <form action={writerRunAction} className="writer-agent-composer">
+            <input name="chapterId" type="hidden" value={selectedChapterId} />
+            <input name="sceneId" type="hidden" value={selectedSceneId} />
             <fieldset className="writer-mode-segmented">
               <legend className="sr-only"><Bi zh="写作模式" en="Writing mode" /></legend>
               {(["draft", "continue", "outline", "revise"] as const).map((mode, index) => (
@@ -665,11 +680,13 @@ function RecoveryFields({
 function DraftAdoptionPanel({
   action,
   adopted,
+  chapterId = "",
   draftId,
   status,
 }: {
   action?: (formData: FormData) => Promise<void>;
   adopted: boolean;
+  chapterId?: string;
   draftId: string;
   status: ActionStatus | null;
 }) {
@@ -687,6 +704,7 @@ function DraftAdoptionPanel({
       {!adopted && action ? (
         <form action={action} className="inline-action-form">
           <input name="draftId" type="hidden" value={draftId} />
+          {chapterId ? <input name="chapterId" type="hidden" value={chapterId} /> : null}
           <button type="submit">
             <FileCheck2 aria-hidden="true" size={16} />
             <Bi zh="采用为手稿" en="Adopt draft into manuscript" />

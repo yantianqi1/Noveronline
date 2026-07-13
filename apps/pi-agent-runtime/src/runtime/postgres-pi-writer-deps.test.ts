@@ -113,7 +113,18 @@ describe("createPostgresPiWriterDeps", () => {
       rule_evidence_id: "rule-1",
       rule_text: "Magic always has a cost.",
       category: "magic",
-      confidence: 0.9
+      confidence: 0.9,
+      source: "seed_evidence"
+    }]);
+    db.enqueue([{
+      rule_evidence_id: "asset-rule-1",
+      rule_text: "Rain always falls at the gate.",
+      category: "world_rule",
+      confidence: null,
+      source: "canon_asset",
+      lifecycle: "canon",
+      title: "Rain Gate rule",
+      summary: "Rain always falls at the gate."
     }]);
     db.enqueue([{
       entity_id: "entity-1",
@@ -121,7 +132,19 @@ describe("createPostgresPiWriterDeps", () => {
       entity_type: "character",
       importance: "primary",
       state_summary: "Hiding an injury.",
-      aliases: ["Captain Lin"]
+      aliases: ["Captain Lin"],
+      source: "entity"
+    }]);
+    db.enqueue([{
+      entity_id: "asset-char-1",
+      canonical_name: "Mara",
+      entity_type: "character",
+      importance: null,
+      state_summary: "Lead negotiator",
+      aliases: [],
+      source: "canon_asset",
+      lifecycle: "canon",
+      category: "cast"
     }]);
     const deps = createPostgresPiWriterDeps({
       db,
@@ -138,25 +161,52 @@ describe("createPostgresPiWriterDeps", () => {
     };
 
     await expect(deps.executeWriterTool!({ ...request, tool_name: "query_world_rules" })).resolves.toEqual({
-      rules: [{
-        rule_evidence_id: "rule-1",
-        rule_text: "Magic always has a cost.",
-        category: "magic",
-        confidence: 0.9
-      }]
+      rules: [
+        {
+          rule_evidence_id: "rule-1",
+          rule_text: "Magic always has a cost.",
+          category: "magic",
+          confidence: 0.9,
+          source: "seed_evidence"
+        },
+        {
+          rule_evidence_id: "asset-rule-1",
+          rule_text: "Rain always falls at the gate.",
+          category: "world_rule",
+          confidence: null,
+          source: "canon_asset",
+          lifecycle: "canon",
+          title: "Rain Gate rule",
+          summary: "Rain always falls at the gate."
+        }
+      ]
     });
     await expect(deps.executeWriterTool!({ ...request, tool_name: "query_character_profile" })).resolves.toEqual({
-      profiles: [{
-        entity_id: "entity-1",
-        canonical_name: "Lin",
-        entity_type: "character",
-        importance: "primary",
-        state_summary: "Hiding an injury.",
-        aliases: ["Captain Lin"]
-      }]
+      profiles: [
+        {
+          entity_id: "entity-1",
+          canonical_name: "Lin",
+          entity_type: "character",
+          importance: "primary",
+          state_summary: "Hiding an injury.",
+          aliases: ["Captain Lin"],
+          source: "entity"
+        },
+        {
+          entity_id: "asset-char-1",
+          canonical_name: "Mara",
+          entity_type: "character",
+          importance: null,
+          state_summary: "Lead negotiator",
+          aliases: [],
+          source: "canon_asset",
+          lifecycle: "canon",
+          category: "cast"
+        }
+      ]
     });
 
-    expect(db.queries).toHaveLength(2);
+    expect(db.queries).toHaveLength(4);
     for (const query of db.queries) {
       expect(query.context).toEqual({ tenant_id: "ten_1", project_id: "proj_1" });
       expect(query.values).toEqual(["ten_1", "proj_1"]);
@@ -165,8 +215,81 @@ describe("createPostgresPiWriterDeps", () => {
     }
     expect(db.queries[0]?.text).toContain("FROM world_rule_evidence");
     expect(db.queries[0]?.text).toContain("confidence::double precision AS confidence");
-    expect(db.queries[1]?.text).toContain("FROM entities");
-    expect(db.queries[1]?.text).toContain("entity_aliases");
+    expect(db.queries[1]?.text).toContain("FROM assets");
+    expect(db.queries[1]?.text).toContain("world_rule");
+    expect(db.queries[2]?.text).toContain("FROM entities");
+    expect(db.queries[2]?.text).toContain("entity_aliases");
+    expect(db.queries[3]?.text).toContain("FROM assets");
+    expect(db.queries[3]?.text).toContain("character");
+  });
+
+  it("requires explicit worldline path selection and scopes manuscript context to active chapter blocks", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{ chapter_id: "chapter-1", scene_id: "scene-1" }]);
+    db.enqueue([{
+      block_id: "block-1",
+      chapter_id: "chapter-1",
+      scene_id: "scene-1",
+      block_order: 1,
+      content_text: "Current scene prose.",
+      word_count: 3
+    }]);
+    db.enqueue([{
+      block_id: "block-2",
+      chapter_id: "chapter-1",
+      scene_id: "scene-0",
+      block_order: 0,
+      content_text: "Nearby chapter prose.",
+      word_count: 3
+    }]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const request = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [] as string[]
+    };
+
+    await expect(deps.executeWriterTool!({ ...request, tool_name: "query_worldline_paths" })).resolves.toEqual({
+      paths: [],
+      canon_status: "reference_only",
+      selection_required: true
+    });
+
+    await expect(deps.executeWriterTool!({ ...request, tool_name: "query_manuscript_context" })).resolves.toEqual({
+      target: { chapter_id: "chapter-1", scene_id: "scene-1" },
+      manuscript_blocks: [
+        {
+          block_id: "block-1",
+          chapter_id: "chapter-1",
+          scene_id: "scene-1",
+          block_order: 1,
+          content_text: "Current scene prose.",
+          word_count: 3
+        },
+        {
+          block_id: "block-2",
+          chapter_id: "chapter-1",
+          scene_id: "scene-0",
+          block_order: 0,
+          content_text: "Nearby chapter prose.",
+          word_count: 3
+        }
+      ]
+    });
+
+    expect(db.queries).toHaveLength(3);
+    expect(db.queries[0]?.text).toContain("FROM writer_runs");
+    expect(db.queries[1]?.text).toContain("status = 'active'");
+    expect(db.queries[1]?.text).toContain("scene_id = $3::uuid");
+    expect(db.queries[2]?.text).toContain("status = 'active'");
+    expect(db.queries[2]?.text).toContain("chapter_id = $3::uuid");
   });
 
   it("sets tenant and project context on DB queries that touch RLS-backed runtime tables", async () => {

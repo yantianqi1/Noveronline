@@ -14,6 +14,7 @@ import {
 import { Bi, StatusValue } from "./bilingual-text";
 import { ConfirmSubmitButton } from "./confirm-submit-button";
 import { SubmitButton } from "./submit-button";
+import type { PendingRevision } from "./writer-manuscript-editor";
 import { WriterArtifactTabs } from "./writer-artifact-tabs";
 import { WriterManuscriptPanelClient } from "./writer-manuscript-panel-client";
 
@@ -23,7 +24,7 @@ type Actions = {
   createScene: Action; updateScene: Action; deleteScene: Action; reorderScenes: Action;
   createOutline: Action; restoreOutline: Action; createBookPlan: Action; updateBookPlan: Action; deleteBookPlan: Action; generateBookPlan: Action;
   createPreset: Action; deletePreset: Action; createLexicon: Action; deleteLexicon: Action;
-  startReview: Action; updateReviewIssue: Action; updateBlock: Action; deleteBlock: Action; reorderBlocks: Action;
+  startReview: Action; updateReviewIssue: Action; createBlock: Action; updateBlock: Action; deleteBlock: Action; reorderBlocks: Action;
   moveBlock: Action; tagBlock: Action; restoreBlock: Action; startDedup: Action; decideDedup: Action; startCommand: Action;
   createExport: Action;
   startDistillation?: Action;
@@ -42,6 +43,8 @@ export type WriterProductWorkspaceProps = {
   selectedBlockId: string;
   selectedCommandId: string;
   actionStatus: { status: string; code: string } | null;
+  localDraft?: string | null;
+  pendingRevision?: PendingRevision | null;
   chapters: WriterWebResult<Chapter[]>;
   scenes: WriterWebResult<Scene[]>;
   chapterVersions: WriterWebResult<WritingVersion[]>;
@@ -176,7 +179,7 @@ function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
                         <input name="candidateAssetId" type="hidden" value={item.candidate_asset_id} />
                         <input name="decision" type="hidden" value="accept_update" />
                         <input name="targetAssetId" type="hidden" value={item.target_asset_id} />
-                        <input name="expectedTargetVersion" type="hidden" value="1" />
+                        <input name="expectedTargetVersion" type="hidden" value={String(item.expected_target_version ?? 1)} />
                         <input name="targetLifecycle" type="hidden" value="canon" />
                         <button type="submit"><Check size={14} /><Bi zh="合并到已有资产" en="Merge into existing" /></button>
                       </form>
@@ -335,7 +338,7 @@ function ChapterScenePanel({ compact = false, ...props }: WriterProductWorkspace
                       <form action={props.actions.updateScene} className="binding-form">
                         <input name="sceneId" type="hidden" value={scene.scene_id} /><input name="expectedVersion" type="hidden" value={scene.optimistic_version} />
                         <input name="title" defaultValue={scene.title} aria-label={`Scene title ${scene.title}`} />
-                        <textarea name="content" defaultValue={scene.private?.content_text ?? ""} placeholder={tx(locale, "场景正文", "Scene content")} rows={3} />
+                        <textarea name="outline" defaultValue={scene.private?.outline ?? ""} placeholder={tx(locale, "场景大纲", "Scene outline")} rows={2} />
                         <button type="submit"><Save size={14} /><Bi zh="保存场景" en="Save scene" /></button>
                       </form>
                       <DeleteForm action={props.actions.deleteScene} idName="sceneId" id={scene.scene_id} version={scene.optimistic_version} label={tx(locale, "归档场景", "Archive scene")} />
@@ -396,8 +399,15 @@ function ManuscriptPanel(props: WriterProductWorkspaceProps) {
             expectedVersion={selectedBlock.value.version}
             content={selectedBlock.value.content_text}
             status={selectedBlock.value.status}
+            chapterId={selectedBlock.value.chapter_id ?? props.selectedChapterId}
+            sceneId={selectedBlock.value.scene_id ?? props.selectedSceneId}
             updateBlockAction={props.actions.updateBlock}
+            createBlockAction={props.actions.createBlock}
             reviseAction={props.actions.reviseSelection}
+            pendingRevision={props.pendingRevision ?? null}
+            conflictLocalDraft={props.localDraft ?? null}
+            workspaceStatus={props.actionStatus?.status ?? null}
+            workspaceCode={props.actionStatus?.code ?? null}
           />
           {/* No-JS / pre-hydrate progressive enhancement: plain form still posts content + expectedVersion. */}
           <noscript>
@@ -436,8 +446,13 @@ function ManuscriptPanel(props: WriterProductWorkspaceProps) {
           </details>
         </div>
       ) : (
-        <p className="form-hint"><Bi zh="从下方选择正文块，或先完成写作任务并采用草稿。" en="Select a manuscript block below, or finish a writer run and adopt a draft." /></p>
+        <p className="form-hint"><Bi zh="创建空白正文块开始手写，或从下方选择已有块。也可采用 AI 草稿。" en="Create a blank manuscript block to write by hand, select an existing block, or adopt an AI draft." /></p>
       )}
+      <form action={props.actions.createBlock} className="binding-form">
+        <input name="chapterId" type="hidden" value={props.selectedChapterId} />
+        <input name="sceneId" type="hidden" value={props.selectedSceneId} />
+        <button data-tone="primary" type="submit"><Save size={14} /><Bi zh="新建正文块" en="New manuscript block" /></button>
+      </form>
       <h3><Bi zh="正文块" en="Blocks" /></h3>
       <ResultBoundary locale={locale} result={props.blocks} empty={tx(locale, "暂无正文块。", "No manuscript blocks.")} render={(items) => <div className="compact-action-list writer-block-list">
         {items.map((block, index) => {
@@ -512,10 +527,17 @@ function ResultBoundary<T>({ locale, result, empty, render }: { locale: Locale; 
 
 function isEmptyReviewList(value: unknown) { return typeof value === "object" && value !== null && "reviews" in value && Array.isArray((value as { reviews: unknown[] }).reviews) && (value as { reviews: unknown[] }).reviews.length === 0; }
 function ActionStatus({ value }: { value: { status: string; code: string } }) {
+  const isConflict = value.code === "OPTIMISTIC_CONFLICT";
   return (
-    <p className={`form-status ${value.status === "error" ? "error-box" : "success-box"}`} role="status">
+    <p
+      className={`form-status ${value.status === "error" ? "error-box" : "success-box"}`}
+      role="status"
+      data-workspace-code={value.code || undefined}
+    >
       {value.status === "error"
-        ? <Bi zh="操作未完成，请检查输入后重试。" en="The action was not completed. Check the input and try again." />
+        ? isConflict
+          ? <Bi zh="正文版本冲突：本地草稿已保留，请在下方比较后处理。" en="Manuscript version conflict: your local draft was kept. Resolve it in the compare panel below." />
+          : <Bi zh="操作未完成，请检查输入后重试。" en="The action was not completed. Check the input and try again." />
         : <Bi zh="操作已提交。" en="Action submitted." />}
     </p>
   );

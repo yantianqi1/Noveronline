@@ -138,16 +138,13 @@ export function WorldlineShell({
     <div className="worldline-root">
       <WorkspaceHeader
         className="worldline-header"
-        eyebrow={<Bi zh="世界线" en="Worldline" />}
+        description={<Bi zh="在当前世界中推演剧情。" en="Simulate story events in the current world." />}
         icon={<GitBranch size={22} strokeWidth={1.8} />}
         meta={(
           <>
-            <span className="status-pill"><Bi zh="当前世界" en="Current world" />: {activeSessionId ? <Bi zh="进行中" en="active" /> : <Bi zh="尚未开始" en="not started" />}</span>
+            <span className="status-pill">{activeSessionId ? <Bi zh="推演中" en="Active" /> : <Bi zh="尚未开始" en="Not started" />}</span>
             <span className="status-pill">
-              <Bi zh="时间线" en="Timeline" />: {timeline.ok ? timeline.items.length : tx(locale, "暂不可用", "unavailable")}
-            </span>
-            <span className="status-pill">
-              <Bi zh="候选事件" en="Candidates" />: {events.ok ? events.items.length : tx(locale, "暂不可用", "unavailable")}
+              {timeline.ok ? timeline.items.length : "—"} <Bi zh="条时间线" en="timeline" />
             </span>
           </>
         )}
@@ -171,6 +168,7 @@ export function WorldlineShell({
             <h2 id="start-session-heading"><Bi zh="开始推演" en="Start session" /></h2>
             <StatusLine worldlineSessionStatus={worldlineSessionStatus} />
             <form action={startWorldlineSessionAction} className="binding-form">
+              {preparation.ok ? <input type="hidden" name="prepareId" value={preparation.prepare_id} /> : null}
               <label htmlFor="worldline-session-goal"><Bi zh="目标" en="Goal" /></label>
               <textarea
                 id="worldline-session-goal"
@@ -252,6 +250,7 @@ export function WorldlineShell({
             <StepStatusLine worldlineStepStatus={worldlineStepStatus} />
             <form action={startWorldlineStepAction} className="binding-form worldline-toolbar-form">
               <input type="hidden" name="sessionId" value={activeSessionId} />
+              {preparation.ok ? <input type="hidden" name="prepareId" value={preparation.prepare_id} /> : null}
               <label htmlFor="worldline-step-mode"><Bi zh="模式" en="Mode" /></label>
               <select id="worldline-step-mode" name="stepMode" defaultValue="director" disabled={!activeSessionId}>
                 <option value="director">{tx(locale, "导演", "Director")}</option>
@@ -373,7 +372,7 @@ export function WorldlineShell({
                 className="overview-next-link"
                 href={characterConsoleHref(tenantSlug, projectId, preparation.prepare_id, activeSessionId)}
               >
-                <Bi zh="进入角色控制" en="Enter Character Console" />
+                <Bi zh="进入角色" en="Enter Characters" />
                 <ChevronRight aria-hidden="true" size={18} />
               </a>
             ) : null}
@@ -760,12 +759,15 @@ function TypedReferenceChoices({
             <span><strong>Asset</strong> {asset.title || asset.asset_id}</span>
           </label>
         ))}
-        {selectableEntities.map((entity) => (
+        {selectableEntities.map((entity) => {
+          const entityRef = graphEntitySelectionRef(entity);
+          return (
           <label className="checkbox-row" key={`agent-entity-${entity.node_id}`}>
-            <input name="agentRefs" type="checkbox" value={`entity:${entity.node_id}`} defaultChecked={selectedAgentRefs.includes(`entity:${entity.node_id}`)} />
+            <input name="agentRefs" type="checkbox" value={entityRef} defaultChecked={selectedAgentRefs.includes(entityRef) || selectedAgentRefs.includes(`entity:${entity.node_id}`)} />
             <span><strong><Bi zh="故事角色" en="Story entity" /></strong> {entity.title || <Bi zh="未命名节点" en="Untitled node" />}</span>
           </label>
-        ))}
+          );
+        })}
         {selectableAssets.length + selectableEntities.length === 0 ? (
           <p className="form-hint"><Bi zh="没有可用的真实 Asset 或 Entity；准备请求不会生成占位角色。" en="No real Asset or Entity is available; preparation will not create placeholder agents." /></p>
         ) : null}
@@ -778,12 +780,15 @@ function TypedReferenceChoices({
             <span><strong>Asset</strong> {asset.title || asset.asset_id}</span>
           </label>
         ))}
-        {selectableEntities.map((entity) => (
+        {selectableEntities.map((entity) => {
+          const entityRef = graphEntitySelectionRef(entity);
+          return (
           <label className="checkbox-row" key={`source-entity-${entity.node_id}`}>
-            <input name="sourceRefs" type="checkbox" value={`entity:${entity.node_id}`} defaultChecked={selectedSourceRefs.includes(`entity:${entity.node_id}`)} />
+            <input name="sourceRefs" type="checkbox" value={entityRef} defaultChecked={selectedSourceRefs.includes(entityRef) || selectedSourceRefs.includes(`entity:${entity.node_id}`)} />
             <span><strong><Bi zh="故事节点" en="Story entity" /></strong> {entity.title || <Bi zh="未命名节点" en="Untitled node" />}</span>
           </label>
-        ))}
+          );
+        })}
         {savedPaths.ok ? savedPaths.items.map((path) => (
           <label className="checkbox-row" key={`source-path-${path.path_id}`}>
             <input name="sourceRefs" type="checkbox" value={`saved_path:${path.path_id}`} defaultChecked={selectedSourceRefs.includes(`saved_path:${path.path_id}`)} />
@@ -903,6 +908,22 @@ function characterConsoleHref(
     query.set("anchor_session_id", anchorSessionId);
   }
   return `/${encodeURIComponent(tenantSlug)}/projects/${encodeURIComponent(projectId)}/character-console?${query.toString()}`;
+}
+
+function graphEntitySelectionRef(entity: {
+  node_id: string;
+  attributes?: Record<string, unknown>;
+  canonical_entity_id?: string;
+}): string {
+  const fromField =
+    typeof entity.canonical_entity_id === "string" ? entity.canonical_entity_id.trim() : "";
+  const fromAttributes =
+    entity.attributes && typeof entity.attributes.canonical_entity_id === "string"
+      ? entity.attributes.canonical_entity_id.trim()
+      : "";
+  // Prefer canonical entity id when the graph view exposes it; otherwise send node_id.
+  // Worker resolves story_graph_nodes.node_id -> entities.entity_id when needed.
+  return `entity:${fromField || fromAttributes || entity.node_id}`;
 }
 
 function SavedPathList({ savedPaths }: { savedPaths: WorldlineSavedPathsSummary }) {

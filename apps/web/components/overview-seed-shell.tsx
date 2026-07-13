@@ -107,20 +107,17 @@ export function OverviewSeedShell({
       <SeedRunAutoRefresh active={seedRunActive} />
       <WorkspaceHeader
         className="overview-header"
-        description={<Bi zh="从想法开始写作，或导入已有小说建立故事资料。" en="Start from an idea, or import an existing manuscript." />}
-        eyebrow={<Bi zh="项目总览" en="Project overview" />}
+        description={<Bi zh="从想法开始，或导入小说建立故事资料。" en="Start from an idea, or import a manuscript." />}
         icon={<LayoutDashboard size={22} strokeWidth={1.8} />}
         meta={(
           <>
             <span className="status-pill">
-              <Bi zh="项目状态：" en="Project status: " />
               {projectOverview.ok ? <StatusValue value={projectOverview.status} /> : <Bi zh="暂不可用" en="Unavailable" />}
             </span>
             <span className="status-pill">
-              <Bi zh="当前分析：" en="Current analysis: " />
               {projectOverview.ok && projectOverview.active_workflow_status
                 ? <StatusValue value={projectOverview.active_workflow_status} />
-                : <Bi zh="无" en="None" />}
+                : <Bi zh="无进行中分析" en="No active analysis" />}
             </span>
           </>
         )}
@@ -229,7 +226,7 @@ export function OverviewSeedShell({
                 />
               </section>
               <section className={seedRuns.ok ? "" : "error-box"} aria-labelledby="seed-runs-heading">
-                <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Seed runs" /></h3>
+                <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Analysis history" /></h3>
                 <SeedRunsTable locale={locale} projectId={projectId} seedRuns={seedRuns} tenantSlug={tenantSlug} />
               </section>
             </div>
@@ -239,8 +236,8 @@ export function OverviewSeedShell({
             <summary>
               <Activity aria-hidden="true" size={18} strokeWidth={1.8} />
               <span>
-                <strong><Bi zh="进度与活动详细信息" en="Progress and activity details" /></strong>
-                <small><Bi zh="查看完整就绪度、当前任务和事件记录" en="Review readiness, the current run, and event history" /></small>
+                <strong><Bi zh="进度与活动" en="Progress and activity" /></strong>
+                <small><Bi zh="就绪度、当前任务与事件" en="Readiness, current run, and events" /></small>
               </span>
               <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
             </summary>
@@ -254,11 +251,11 @@ export function OverviewSeedShell({
                 <ProjectReadinessPanel locale={locale} projectId={projectId} projectReadiness={projectReadiness} tenantSlug={tenantSlug} />
               </section>
               <section className={selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} aria-labelledby="seed-run-detail-heading">
-                <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Selected Seed run" /></h3>
+                <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Current analysis" /></h3>
                 <SeedRunDetail locale={locale} projectId={projectId} selectedRunId={selectedRunId} selectedSeedRun={selectedSeedRun} tenantSlug={tenantSlug} />
               </section>
               <section className={seedEvents && !seedEvents.ok ? "error-box" : ""} aria-labelledby="seed-events-heading">
-                <h3 id="seed-events-heading"><Bi zh="任务事件" en="Seed events" /></h3>
+                <h3 id="seed-events-heading"><Bi zh="任务事件" en="Analysis events" /></h3>
                 <SeedEvents locale={locale} projectId={projectId} seedEvents={seedEvents} selectedRunId={selectedRunId} tenantSlug={tenantSlug} />
               </section>
             </div>
@@ -277,7 +274,7 @@ export function OverviewSeedShell({
             </summary>
             <div className="overview-details-content">
               <section aria-labelledby="upload-and-start-seed-heading">
-                <h2 id="upload-and-start-seed-heading"><Bi zh="上传并开始种子分析" en="Upload and start Seed" /></h2>
+                <h2 id="upload-and-start-seed-heading"><Bi zh="上传并开始分析" en="Upload and start analysis" /></h2>
                 <OverviewSeedUploadForm
                   action={uploadAndStartSeedAction}
                   locale={locale}
@@ -383,14 +380,14 @@ function OverviewNextStep({
                 <input type="hidden" name="runId" value={selectedRunId} />
                 <button className="danger-action" disabled={!cancelSeedRunEnabled} type="submit">
                   <XCircle aria-hidden="true" size={18} />
-                  <Bi zh="取消任务" en="Cancel Seed run" />
+                  <Bi zh="取消分析" en="Cancel analysis" />
                 </button>
               </form>
               <form action={retrySeedRunAction}>
                 <input type="hidden" name="runId" value={selectedRunId} />
                 <button disabled={!retrySeedRunEnabled} type="submit">
                   <RotateCcw aria-hidden="true" size={18} />
-                  <Bi zh="重试任务" en="Retry Seed run" />
+                  <Bi zh="重试分析" en="Retry analysis" />
                 </button>
               </form>
               {completed ? (
@@ -450,7 +447,7 @@ function OverviewNextStep({
         <form action={startSeedRunAction} className="overview-run-actions">
           <input type="hidden" name="uploadId" value={preparedFile.upload_id} />
           <input type="hidden" name="mode" value="full" />
-          <SubmitButton idleLabel={<Bi zh="开始分析" en="Start Seed" />} pendingLabel={<Bi zh="启动中…" en="Starting…" />} />
+          <SubmitButton idleLabel={<Bi zh="开始分析" en="Start analysis" />} pendingLabel={<Bi zh="启动中…" en="Starting…" />} />
         </form>
       </>
     );
@@ -502,12 +499,6 @@ function EmptyProjectDualEntry({
       <p className="overview-next-copy">
         <strong><Bi zh="选择如何开始这个项目" en="Choose how to start this project" /></strong>
       </p>
-      <p className="form-hint">
-        <Bi
-          zh="不必先上传原文。你可以从一个想法进入写作台，或导入已有小说进行分析。"
-          en="You do not need to upload a manuscript first. Start from an idea in Writer, or import an existing novel."
-        />
-      </p>
       {bootstrapStatus ? <StatusLine status={bootstrapStatus} /> : null}
       <div className="overview-dual-entry-grid">
         <section className="overview-entry-card" aria-labelledby="idea-first-entry-heading">
@@ -515,8 +506,8 @@ function EmptyProjectDualEntry({
           <h3 id="idea-first-entry-heading"><Bi zh="从一个想法开始" en="Start from an idea" /></h3>
           <p className="form-hint">
             <Bi
-              zh="创建最小书籍计划、第一章和第一场景，然后进入 Writer。不调用 LLM，也不要求 Seed。"
-              en="Create a minimal book plan, chapter one, and scene one, then open Writer. No LLM call and no Seed required."
+              zh="创建最小书籍计划与首章，直接进入写作台。"
+              en="Create a minimal book plan and first chapter, then open Writer."
             />
           </p>
           <form action={bootstrapIdeaAction} className="binding-form overview-bootstrap-form">
@@ -560,8 +551,8 @@ function EmptyProjectDualEntry({
           <h3 id="upload-first-entry-heading"><Bi zh="上传已有文本" en="Upload existing text" /></h3>
           <p className="form-hint">
             <Bi
-              zh="上传 TXT、Markdown 或 PDF，运行 Seed 建立资产与图谱后再写作。"
-              en="Upload TXT, Markdown, or PDF, run Seed to build assets and graph, then write."
+              zh="上传 TXT / Markdown / PDF，分析后建立资产与图谱。"
+              en="Upload TXT, Markdown, or PDF to build assets and graph."
             />
           </p>
           {creationReadiness && projectOverview && !creationReadiness.ready ? (
@@ -706,7 +697,7 @@ function SourceFilesTable({
                   <form action={startSeedRunAction} className="inline-action-form">
                     <input type="hidden" name="uploadId" value={file.upload_id} />
                     <input type="hidden" name="mode" value="full" />
-                    <span><Bi zh="开始种子分析" en="Start Seed" /></span>
+                    <span><Bi zh="开始分析" en="Start analysis" /></span>
                     <button disabled={file.parse_status !== "uploaded"} type="submit">
                       <Bi zh="开始" en="Start" />
                     </button>
@@ -795,7 +786,7 @@ function OverviewPublicFailureNotice({
     <PublicErrorNotice
       action={(
         <a className="overview-next-link" href={notice.llmFacilityHref}>
-          <Bi zh="打开 LLM 设施" en="Open LLM Facility" />
+          <Bi zh="打开模型设置" en="Open model settings" />
           <ChevronRight aria-hidden="true" size={18} />
         </a>
       )}
@@ -814,44 +805,44 @@ function overviewFailureNotice(locale: Locale, code: string, tenantSlug: string,
     titleEn: "Action incomplete",
     messageZh: "这次操作没有完成，当前页面状态已保留。",
     messageEn: "This action did not finish. Your page state is kept.",
-    recoveryZh: "请检查输入后重试，或前往 LLM 设施完成模型与预算设置。",
-    recoveryEn: "Check your input and retry, or open LLM Facility to finish model and budget setup.",
+    recoveryZh: "请检查输入后重试，或前往模型设置完成配置。",
+    recoveryEn: "Check your input and retry, or open model settings to finish setup.",
     llmFacilityHref,
   };
 
   if (normalized === "LLM_QUOTA_POLICY_UNAVAILABLE") {
     return {
       ...defaults,
-      titleZh: "缺少 LLM 配额策略",
-      titleEn: "LLM quota policy missing",
-      messageZh: "创作服务需要配额策略才能预留调用额度；没有策略时任务会在中途失败。",
-      messageEn: "Creative workflows need a quota policy to reserve usage; without one, runs fail partway through.",
-      recoveryZh: "前往 LLM 设施配置配额策略，然后回到此处重试。",
-      recoveryEn: "Open LLM Facility to configure a quota policy, then return here and retry.",
+      titleZh: "缺少调用预算策略",
+      titleEn: "Usage budget policy missing",
+      messageZh: "创作服务需要预算策略才能预留调用额度；没有策略时任务会在中途失败。",
+      messageEn: "Creative workflows need a budget policy to reserve usage; without one, runs fail partway through.",
+      recoveryZh: "前往模型设置配置预算策略，然后回到此处重试。",
+      recoveryEn: "Open model settings to configure a budget policy, then return here and retry.",
     };
   }
 
   if (normalized === "LLM_MODULE_UNBOUND") {
     return {
       ...defaults,
-      titleZh: "模型模块未绑定",
-      titleEn: "Model module unbound",
-      messageZh: "当前任务所需的模型模块尚未绑定到可用通道。",
-      messageEn: "A required model module is not bound to an available channel for this task.",
-      recoveryZh: "在 LLM 设施中绑定缺失模块后重试。",
-      recoveryEn: "Bind the missing module in LLM Facility, then retry.",
+      titleZh: "模型能力未绑定",
+      titleEn: "Model capability unbound",
+      messageZh: "当前任务所需的模型能力尚未绑定到可用渠道。",
+      messageEn: "A required model capability is not bound to an available channel for this task.",
+      recoveryZh: "在模型设置中绑定缺失能力后重试。",
+      recoveryEn: "Bind the missing capability in model settings, then retry.",
     };
   }
 
   if (normalized.startsWith("LLM_QUOTA_")) {
     return {
       ...defaults,
-      titleZh: "LLM 配额限制",
-      titleEn: "LLM quota limit reached",
-      messageZh: "本次调用超出当前配额或预算限制，任务未能完成。",
-      messageEn: "This call exceeded the current quota or budget limit, so the task did not finish.",
-      recoveryZh: "在 LLM 设施中调整配额或预算后重试。",
-      recoveryEn: "Adjust quota or budget in LLM Facility, then retry.",
+      titleZh: "调用额度受限",
+      titleEn: "Usage limit reached",
+      messageZh: "本次调用超出当前预算限制，任务未能完成。",
+      messageEn: "This call exceeded the current budget limit, so the task did not finish.",
+      recoveryZh: "在模型设置中调整预算后重试。",
+      recoveryEn: "Adjust the budget in model settings, then retry.",
     };
   }
 
@@ -875,7 +866,7 @@ function ProjectHealthPanel({
   }
   const metrics = [
     ["source-files", "源文件", "Source files", projectOverview.source_file_count, FileText],
-    ["seed-runs", "分析任务", "Seed runs", projectOverview.seed_run_count, LayoutDashboard],
+    ["seed-runs", "分析任务", "Analysis runs", projectOverview.seed_run_count, LayoutDashboard],
     ["assets-ready", "就绪资产", "Assets ready", projectOverview.ready_asset_count, FolderOpen],
     ["entities-ready", "就绪实体", "Entities ready", projectOverview.ready_entity_count, UserRound],
     ["relationships-ready", "就绪关系", "Relationships ready", projectOverview.ready_relationship_count, Network],
@@ -1109,27 +1100,27 @@ function publicSeedFailureHint(locale: Locale, code: string) {
   if (code === "LLM_MODULE_CAPABILITY_MISSING") {
     return tx(
       locale,
-      "绑定模型不支持 JSON 能力，请在 LLM 设施为 sequential_reading 等模块绑定支持 JSON 的模型后重试。",
-      "The bound model lacks JSON capability. Bind a JSON-capable model for sequential_reading and retry.",
+      "绑定模型不支持结构化输出，请在模型设置中为顺序精读等能力换用支持 JSON 的模型后重试。",
+      "The bound model lacks JSON capability. Bind a JSON-capable model for sequential reading and retry.",
     );
   }
   if (code === "LLM_QUOTA_RESERVATION_UNAVAILABLE") {
     return tx(
       locale,
-      "模型已绑定，但配额预留失败：缺少 max_tokens 或模型 context_window。请在 LLM 设施为模块填写 max_tokens，并确保模型有上下文窗口/计价信息。",
-      "The model is bound, but quota reservation failed: max_tokens or model context_window is missing. Set max_tokens on the module binding and ensure the model has context window/pricing metadata.",
+      "模型已绑定，但预算预留失败：缺少输出上限或模型上下文窗口。请在模型设置中补全输出上限与上下文信息。",
+      "The model is bound, but quota reservation failed: set an output limit and ensure the model has context window metadata.",
     );
   }
   if (code === "LLM_MODULE_UNBOUND") {
-    return tx(locale, "核心 Seed 模块未绑定模型。", "A required Seed module is unbound.");
+    return tx(locale, "核心分析能力未绑定模型。", "A required analysis capability is unbound.");
   }
   if (code === "LLM_QUOTA_TOKENS_EXCEEDED" || code === "LLM_QUOTA_COST_EXCEEDED") {
-    return tx(locale, "本周期 LLM 配额已用尽，请提高配额或等待周期重置。", "LLM quota for this period is exhausted. Raise the limit or wait for reset.");
+    return tx(locale, "本周期调用额度已用尽，请提高额度或等待周期重置。", "Usage quota for this period is exhausted. Raise the limit or wait for reset.");
   }
   if (code === "LLM_QUOTA_CONCURRENCY_EXCEEDED") {
     return tx(locale, "并发调用已达上限，请稍后重试。", "Concurrent LLM calls hit the limit. Retry shortly.");
   }
-  return code;
+  return tx(locale, "分析未能完成，请稍后重试或检查模型设置。", "Analysis could not finish. Retry later or check model settings.");
 }
 
 function ProjectReadinessPanel({
@@ -1181,7 +1172,7 @@ function SeedRunsTable({
     return <OverviewPublicFailureNotice code={seedRuns.code} locale={locale} projectId={projectId} tenantSlug={tenantSlug} />;
   }
   if (seedRuns.items.length === 0) {
-    return <p className="form-hint"><Bi zh="项目中还没有种子任务。" en="No Seed runs have been queued for this project." /></p>;
+    return <p className="form-hint"><Bi zh="项目中还没有分析任务。" en="No analysis runs have been queued for this project." /></p>;
   }
   return (
     <div className="data-table-wrap">
@@ -1236,10 +1227,10 @@ function SeedRunDetail({
   tenantSlug: string;
 }) {
   if (!selectedRunId) {
-    return <p className="form-hint"><Bi zh="尚未选择种子任务。" en="No Seed run selected." /></p>;
+    return <p className="form-hint"><Bi zh="尚未选择分析任务。" en="No analysis run selected." /></p>;
   }
   if (!selectedSeedRun) {
-    return <p className="form-hint"><Bi zh="种子任务详情尚未加载。" en="Seed run detail has not been loaded." /></p>;
+    return <p className="form-hint"><Bi zh="分析任务详情尚未加载。" en="Analysis detail has not been loaded." /></p>;
   }
   if (!selectedSeedRun.ok) {
     return <OverviewPublicFailureNotice code={selectedSeedRun.code} locale={locale} projectId={projectId} tenantSlug={tenantSlug} />;
@@ -1276,16 +1267,16 @@ function SeedEvents({
   tenantSlug: string;
 }) {
   if (!selectedRunId) {
-    return <p className="form-hint"><Bi zh="选择或开始种子任务后查看事件。" en="Select or start a Seed run to inspect events." /></p>;
+    return <p className="form-hint"><Bi zh="选择或开始分析后查看事件。" en="Select or start analysis to inspect events." /></p>;
   }
   if (!seedEvents) {
-    return <p className="form-hint"><Bi zh="种子事件回放尚未加载。" en="Seed event replay has not been loaded." /></p>;
+    return <p className="form-hint"><Bi zh="事件回放尚未加载。" en="Event replay has not been loaded." /></p>;
   }
   if (!seedEvents.ok) {
     return <OverviewPublicFailureNotice code={seedEvents.code} locale={locale} projectId={projectId} tenantSlug={tenantSlug} />;
   }
   if (seedEvents.items.length === 0) {
-    return <p className="form-hint"><Bi zh="当前游标之后没有种子事件。" en="No Seed events after the current cursor." /></p>;
+    return <p className="form-hint"><Bi zh="当前之后没有新事件。" en="No events after the current cursor." /></p>;
   }
   return (
     <div className="trace-list">

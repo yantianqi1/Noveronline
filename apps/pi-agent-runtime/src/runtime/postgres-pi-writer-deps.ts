@@ -20,6 +20,8 @@ import type {
   ResolvedLLMModule,
   ResolveModuleBindingRequest,
   ReleaseLLMLeaseRequest,
+  AppendWriterThreadMessageRequest,
+  CreateWriterApprovalRequest,
   SaveDraftRevisionRequest,
   UpdateWriterRunStatusRequest
 } from "../activities/pi-writer-activities.js";
@@ -75,6 +77,8 @@ export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions)
     composeDraft: options.composeDraft,
     releaseLLMLease: async (request) => releaseLLMLease(options.db, request),
     saveDraftRevision: async (request) => saveDraftRevision(options.db, request),
+    appendWriterThreadMessage: async (request) => appendWriterThreadMessage(options.db, request),
+    createWriterApproval: async (request) => createWriterApproval(options.db, request),
     recordLLMActivity: async (request) => recordLLMActivity(options.db, request),
     recordUsageEvent: async (request) => recordUsageEvent(options.db, request),
     recordAgentTraceEvent: async (request) => recordAgentTraceEvent(options.db, request),
@@ -283,12 +287,56 @@ async function executeWriterTool(db: QueryExecutor, request: ExecuteWriterToolRe
       return { project: result.rows[0] ?? null };
     }
     case "query_chapter_scene": {
-      const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
+      const runResult = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT chapter_id::text, scene_id::text, mode
            FROM writer_runs
           WHERE tenant_id = $1 AND project_id = $2 AND run_id = $3 LIMIT 1`,
         [request.tenant_id, request.project_id, request.run_id]);
-      return { target: result.rows[0] ?? { chapter_id: request.chapter_id ?? null, scene_id: request.scene_id ?? null } };
+      const runTarget = runResult.rows[0] ?? {};
+      const chapterId = stringOrNull(runTarget.chapter_id) ?? request.chapter_id ?? null;
+      const sceneId = stringOrNull(runTarget.scene_id) ?? request.scene_id ?? null;
+      const mode = stringOrNull(runTarget.mode) ?? null;
+      let chapter: Record<string, unknown> | null = null;
+      let scene: Record<string, unknown> | null = null;
+      let neighborScenes: Record<string, unknown>[] = [];
+      if (chapterId) {
+        const chapterResult = await queryWithTenantContext<Record<string, unknown>>(db, request,
+          `SELECT chapter_id::text, title, status, chapter_order, brief, outline
+             FROM chapters
+            WHERE tenant_id = $1 AND project_id = $2 AND chapter_id = $3::uuid
+            LIMIT 1`,
+          [request.tenant_id, request.project_id, chapterId]);
+        chapter = chapterResult.rows[0] ?? null;
+      }
+      if (sceneId) {
+        const sceneResult = await queryWithTenantContext<Record<string, unknown>>(db, request,
+          `SELECT scene_id::text, chapter_id::text, title, status, scene_order, brief, outline, content_text
+             FROM scenes
+            WHERE tenant_id = $1 AND project_id = $2 AND scene_id = $3::uuid
+            LIMIT 1`,
+          [request.tenant_id, request.project_id, sceneId]);
+        scene = sceneResult.rows[0] ?? null;
+      }
+      if (chapterId) {
+        const neighbors = await queryWithTenantContext<Record<string, unknown>>(db, request,
+          `SELECT scene_id::text, title, scene_order, left(COALESCE(outline, brief, content_text, ''), 280) AS summary
+             FROM scenes
+            WHERE tenant_id = $1 AND project_id = $2 AND chapter_id = $3::uuid
+            ORDER BY scene_order ASC
+            LIMIT 12`,
+          [request.tenant_id, request.project_id, chapterId]);
+        neighborScenes = neighbors.rows;
+      }
+      return {
+        target: {
+          chapter_id: chapterId,
+          scene_id: sceneId,
+          mode
+        },
+        chapter,
+        scene,
+        neighbor_scenes: neighborScenes
+      };
     }
     case "query_assets": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
@@ -302,24 +350,38 @@ async function executeWriterTool(db: QueryExecutor, request: ExecuteWriterToolRe
       return { assets: result.rows };
     }
     case "query_world_rules": {
-      const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
-        `SELECT rule_evidence_id::text, rule_text, category, confidence::double precision AS confidence
+      const seedRules = await queryWithTenantContext<Record<string, unknown>>(db, request,
+        `SELECT rule_evidence_id::text AS rule_evidence_id, rule_text, category,
+                confidence::double precision AS confidence, 'seed_evidence' AS source
            FROM world_rule_evidence
           WHERE tenant_id = $1 AND project_id = $2
           ORDER BY created_at DESC
-          LIMIT 50`,
+          LIMIT 40`,
         [request.tenant_id, request.project_id]);
-      return { rules: result.rows };
+      const assetRules = await queryWithTenantContext<Record<string, unknown>>(db, request,
+        `SELECT asset_id::text AS rule_evidence_id, COALESCE(NULLIF(content_text, ''), summary, title) AS rule_text,
+                COALESCE(category, asset_type) AS category, NULL::double precision AS confidence,
+                'canon_asset' AS source, lifecycle, title, summary
+           FROM assets
+          WHERE tenant_id = $1 AND project_id = $2
+            AND enabled = TRUE
+            AND lifecycle IN ('seed', 'canon', 'material')
+            AND asset_type IN ('world_rule', 'worldview')
+          ORDER BY pinned DESC, updated_at DESC
+          LIMIT 40`,
+        [request.tenant_id, request.project_id]);
+      return { rules: [...seedRules.rows, ...assetRules.rows].slice(0, 50) };
     }
     case "query_character_profile": {
-      const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
+      const entityProfiles = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT entity.entity_id::text, entity.canonical_name, entity.entity_type,
                 entity.importance, entity.state_summary,
                 COALESCE(
                   jsonb_agg(alias.alias ORDER BY alias.alias)
                     FILTER (WHERE alias.alias_id IS NOT NULL),
                   '[]'::jsonb
-                ) AS aliases
+                ) AS aliases,
+                'entity' AS source
            FROM entities AS entity
            LEFT JOIN entity_aliases AS alias
              ON alias.tenant_id = entity.tenant_id
@@ -330,9 +392,21 @@ async function executeWriterTool(db: QueryExecutor, request: ExecuteWriterToolRe
           GROUP BY entity.entity_id, entity.canonical_name, entity.entity_type,
                    entity.importance, entity.state_summary, entity.updated_at
           ORDER BY entity.updated_at DESC
-          LIMIT 50`,
+          LIMIT 40`,
         [request.tenant_id, request.project_id]);
-      return { profiles: result.rows };
+      const assetProfiles = await queryWithTenantContext<Record<string, unknown>>(db, request,
+        `SELECT asset_id::text AS entity_id, title AS canonical_name, asset_type AS entity_type,
+                NULL::text AS importance, COALESCE(summary, left(COALESCE(content_text, ''), 400)) AS state_summary,
+                '[]'::jsonb AS aliases, 'canon_asset' AS source, lifecycle, category
+           FROM assets
+          WHERE tenant_id = $1 AND project_id = $2
+            AND enabled = TRUE
+            AND lifecycle IN ('seed', 'canon', 'material')
+            AND asset_type IN ('character', 'seed_character')
+          ORDER BY pinned DESC, updated_at DESC
+          LIMIT 40`,
+        [request.tenant_id, request.project_id]);
+      return { profiles: [...entityProfiles.rows, ...assetProfiles.rows].slice(0, 50) };
     }
     case "query_graph_neighbors": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
@@ -365,27 +439,144 @@ async function executeWriterTool(db: QueryExecutor, request: ExecuteWriterToolRe
       return { node: nodes[0] ?? null, nodes, neighbors: arrayValue(row.neighbors) };
     }
     case "query_worldline_paths": {
+      const pathIds = Array.isArray(request.worldline_path_ids) ? request.worldline_path_ids.filter(Boolean) : [];
+      if (pathIds.length === 0) {
+        return { paths: [], canon_status: "reference_only", selection_required: true };
+      }
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT path_id::text, title, summary, lifecycle, writer_instruction
            FROM worldline_saved_paths
           WHERE tenant_id = $1 AND project_id = $2
-            AND ($3::uuid[] = '{}'::uuid[] OR path_id = ANY($3::uuid[]))
+            AND path_id = ANY($3::uuid[])
           ORDER BY updated_at DESC LIMIT 20`,
-        [request.tenant_id, request.project_id, request.worldline_path_ids]);
+        [request.tenant_id, request.project_id, pathIds]);
       return { paths: result.rows, canon_status: "reference_only" };
     }
     case "query_manuscript_context": {
-      const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
-        `SELECT block_id::text, chapter_id::text, block_order, content_text, word_count
-           FROM manuscript_blocks
-          WHERE tenant_id = $1 AND project_id = $2
-          ORDER BY block_order DESC LIMIT 20`,
-        [request.tenant_id, request.project_id]);
-      return { manuscript_blocks: result.rows.reverse() };
+      return queryManuscriptContext(db, request);
     }
     case "save_draft_revision":
       throw new Error("TOOL_PERMISSION_DENIED: draft persistence is runtime-owned");
   }
+}
+
+const MANUSCRIPT_CONTEXT_LIMIT = 32;
+const MANUSCRIPT_NEARBY_LIMIT = 12;
+
+async function queryManuscriptContext(
+  db: QueryExecutor,
+  request: ExecuteWriterToolRequest
+): Promise<Record<string, unknown>> {
+  const runResult = await queryWithTenantContext<Record<string, unknown>>(
+    db,
+    request,
+    `SELECT chapter_id::text, scene_id::text
+       FROM writer_runs
+      WHERE tenant_id = $1 AND project_id = $2 AND run_id = $3
+      LIMIT 1`,
+    [request.tenant_id, request.project_id, request.run_id]
+  );
+  const runTarget = runResult.rows[0] ?? {};
+  const chapterId = stringOrNull(runTarget.chapter_id) ?? request.chapter_id ?? null;
+  const sceneId = stringOrNull(runTarget.scene_id) ?? request.scene_id ?? null;
+
+  if (sceneId) {
+    const sceneBlocks = await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT block_id::text, chapter_id::text, scene_id::text, block_order, content_text, word_count
+         FROM manuscript_blocks
+        WHERE tenant_id = $1 AND project_id = $2
+          AND status = 'active'
+          AND scene_id = $3::uuid
+        ORDER BY block_order ASC
+        LIMIT $4`,
+      [request.tenant_id, request.project_id, sceneId, MANUSCRIPT_CONTEXT_LIMIT]
+    );
+    if (sceneBlocks.rows.length > 0) {
+      const remaining = Math.max(0, MANUSCRIPT_CONTEXT_LIMIT - sceneBlocks.rows.length);
+      let nearby: Record<string, unknown>[] = [];
+      if (remaining > 0 && chapterId) {
+        const nearbyResult = await queryWithTenantContext<Record<string, unknown>>(
+          db,
+          request,
+          `SELECT block_id::text, chapter_id::text, scene_id::text, block_order, content_text, word_count
+             FROM manuscript_blocks
+            WHERE tenant_id = $1 AND project_id = $2
+              AND status = 'active'
+              AND chapter_id = $3::uuid
+              AND (scene_id IS DISTINCT FROM $4::uuid)
+            ORDER BY block_order ASC
+            LIMIT $5`,
+          [request.tenant_id, request.project_id, chapterId, sceneId, Math.min(remaining, MANUSCRIPT_NEARBY_LIMIT)]
+        );
+        nearby = nearbyResult.rows;
+      }
+      return {
+        target: { chapter_id: chapterId, scene_id: sceneId },
+        manuscript_blocks: [...sceneBlocks.rows, ...nearby]
+      };
+    }
+  }
+
+  if (chapterId) {
+    const chapterBlocks = await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT block_id::text, chapter_id::text, scene_id::text, block_order, content_text, word_count
+         FROM manuscript_blocks
+        WHERE tenant_id = $1 AND project_id = $2
+          AND status = 'active'
+          AND chapter_id = $3::uuid
+        ORDER BY block_order ASC
+        LIMIT $4`,
+      [request.tenant_id, request.project_id, chapterId, MANUSCRIPT_CONTEXT_LIMIT]
+    );
+    if (chapterBlocks.rows.length > 0) {
+      const remaining = Math.max(0, MANUSCRIPT_CONTEXT_LIMIT - chapterBlocks.rows.length);
+      let nearby: Record<string, unknown>[] = [];
+      if (remaining > 0) {
+        const nearbyResult = await queryWithTenantContext<Record<string, unknown>>(
+          db,
+          request,
+          `SELECT block_id::text, chapter_id::text, scene_id::text, block_order, content_text, word_count
+             FROM manuscript_blocks
+            WHERE tenant_id = $1 AND project_id = $2
+              AND status = 'active'
+              AND (chapter_id IS DISTINCT FROM $3::uuid)
+            ORDER BY
+              CASE
+                WHEN chapter_id IS NULL THEN 2
+                ELSE 1
+              END,
+              block_order ASC
+            LIMIT $4`,
+          [request.tenant_id, request.project_id, chapterId, Math.min(remaining, MANUSCRIPT_NEARBY_LIMIT)]
+        );
+        nearby = nearbyResult.rows;
+      }
+      return {
+        target: { chapter_id: chapterId, scene_id: sceneId },
+        manuscript_blocks: [...chapterBlocks.rows, ...nearby]
+      };
+    }
+  }
+
+  const fallback = await queryWithTenantContext<Record<string, unknown>>(
+    db,
+    request,
+    `SELECT block_id::text, chapter_id::text, scene_id::text, block_order, content_text, word_count
+       FROM manuscript_blocks
+      WHERE tenant_id = $1 AND project_id = $2
+        AND status = 'active'
+      ORDER BY block_order DESC
+      LIMIT $3`,
+    [request.tenant_id, request.project_id, MANUSCRIPT_CONTEXT_LIMIT]
+  );
+  return {
+    target: { chapter_id: chapterId, scene_id: sceneId },
+    manuscript_blocks: fallback.rows.reverse()
+  };
 }
 
 async function acquireLLMLease(db: QueryExecutor, request: AcquireLLMLeaseRequest, ttlSeconds: number): Promise<LLMLease> {
@@ -586,6 +777,97 @@ async function findCompletedWriterRun(
   };
 }
 
+async function appendWriterThreadMessage(db: QueryExecutor, request: AppendWriterThreadMessageRequest): Promise<void> {
+  const body = request.body.trim();
+  if (!body) {
+    return;
+  }
+  const metadata = request.metadata ?? {};
+  await execWithTenantContext(
+    db,
+    request,
+    `WITH ensured AS (
+       SELECT thread_id
+         FROM writer_threads
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND status = 'active'
+        ORDER BY updated_at DESC
+        LIMIT 1
+     ), created AS (
+       INSERT INTO writer_threads (tenant_id, project_id, title, status)
+       SELECT $1::uuid, $2::uuid, 'Writer thread', 'active'
+        WHERE NOT EXISTS (SELECT 1 FROM ensured)
+       RETURNING thread_id
+     ), thread AS (
+       SELECT thread_id FROM ensured
+       UNION ALL
+       SELECT thread_id FROM created
+       LIMIT 1
+     ), next_sequence AS (
+       SELECT COALESCE(MAX(m.sequence), 0) + 1 AS sequence
+         FROM writer_thread_messages m
+         JOIN thread ON thread.thread_id = m.thread_id
+        WHERE m.tenant_id = $1::uuid AND m.project_id = $2::uuid
+     )
+     INSERT INTO writer_thread_messages (
+       tenant_id, project_id, thread_id, role, body, run_id, sequence, metadata_jsonb
+     )
+     SELECT $1::uuid, $2::uuid, thread.thread_id, $3, $4, NULLIF($5, '')::uuid, next_sequence.sequence, $6::jsonb
+       FROM thread, next_sequence`,
+    [
+      request.tenant_id,
+      request.project_id,
+      request.role,
+      body,
+      request.run_id,
+      JSON.stringify(metadata)
+    ]
+  );
+  await execWithTenantContext(
+    db,
+    request,
+    `UPDATE writer_threads
+        SET updated_at = now()
+      WHERE tenant_id = $1::uuid
+        AND project_id = $2::uuid
+        AND status = 'active'`,
+    [request.tenant_id, request.project_id]
+  );
+}
+
+async function createWriterApproval(db: QueryExecutor, request: CreateWriterApprovalRequest): Promise<{ approval_id: string }> {
+  const result = await queryWithTenantContext<{ approval_id: string }>(
+    db,
+    request,
+    `WITH thread AS (
+       SELECT thread_id
+         FROM writer_threads
+        WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND status = 'active'
+        ORDER BY updated_at DESC
+        LIMIT 1
+     )
+     INSERT INTO writer_approvals (
+       tenant_id, project_id, run_id, thread_id, status, action, summary, consequence, reversible
+     )
+     SELECT $1::uuid, $2::uuid, $3::uuid, thread.thread_id, 'pending', $4, $5, COALESCE($6, ''), COALESCE($7, false)
+       FROM thread
+     RETURNING approval_id::text`,
+    [
+      request.tenant_id,
+      request.project_id,
+      request.run_id,
+      request.action,
+      request.summary,
+      request.consequence ?? "",
+      request.reversible ?? false
+    ]
+  );
+  const approvalId = result.rows[0]?.approval_id;
+  if (typeof approvalId !== "string" || approvalId.trim() === "") {
+    throw new Error("WRITER_APPROVAL_CREATE_FAILED: database did not return approval_id");
+  }
+  return { approval_id: approvalId };
+}
+
 async function saveDraftRevision(db: QueryExecutor, request: SaveDraftRevisionRequest): Promise<{ draft_id: string }> {
   const result = await queryWithTenantContext<{ draft_id: string }>(
     db,
@@ -593,7 +875,9 @@ async function saveDraftRevision(db: QueryExecutor, request: SaveDraftRevisionRe
     `WITH locked AS MATERIALIZED (
        SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))
      ), parent AS (
-       SELECT writer_runs.run_id
+       SELECT writer_runs.run_id,
+              COALESCE(NULLIF($4, '')::uuid, writer_runs.chapter_id) AS chapter_id,
+              COALESCE(NULLIF($5, '')::uuid, writer_runs.scene_id) AS scene_id
          FROM writer_runs, locked
         WHERE writer_runs.tenant_id = $1::uuid
           AND writer_runs.run_id = $2::uuid
@@ -629,7 +913,7 @@ async function saveDraftRevision(db: QueryExecutor, request: SaveDraftRevisionRe
          content_text, word_count, status
        )
        SELECT $1::uuid, parent.run_id, $3::uuid,
-              NULLIF($4, '')::uuid, NULLIF($5, '')::uuid,
+              parent.chapter_id, parent.scene_id,
               $6, $7, $8
        FROM parent
        WHERE NOT EXISTS (SELECT 1 FROM existing)
@@ -974,6 +1258,14 @@ function uuidOrNull(value: string): string | null {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
     ? value
     : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function requiredRowString(row: Record<string, unknown>, key: string): string {

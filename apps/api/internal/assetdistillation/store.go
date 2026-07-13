@@ -129,7 +129,80 @@ func (s *SQLStore) EnqueueFromSources(ctx context.Context, scope Scope, triggerK
 	return s.admitRequest(ctx, scope, triggerKind, sources, fingerprint, manifest)
 }
 
+// sqlQuerier is the subset of *sql.Tx used by in-transaction admission helpers.
+type sqlQuerier interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// EnqueueFromSourcesOn admits a distillation request on an already-open transaction
+// (tenant context must already be set). Used for same-TX post-adoption outbox inserts.
+func (s *SQLStore) EnqueueFromSourcesOn(ctx context.Context, q sqlQuerier, scope Scope, triggerKind string, sources []SourceBlock) (Admission, bool, error) {
+	if err := requireProjectScope(scope); err != nil {
+		return Admission{}, false, err
+	}
+	if q == nil {
+		return Admission{}, false, appError(CodeBackendUnconfigured, "transaction is required")
+	}
+	if len(sources) == 0 {
+		return Admission{}, false, appError(CodeValidationFailed, "distillation sources are required")
+	}
+	settings, err := loadSettingsOn(ctx, q, scope)
+	if err != nil {
+		return Admission{}, false, err
+	}
+	if !shouldAutoEnqueue(settings.TriggerMode, triggerKind) {
+		return Admission{}, false, nil
+	}
+	fingerprint, manifest, err := fingerprintSources(scope, triggerKind, sources, settings.EnabledAssetTypes, ExtractorContractV1)
+	if err != nil {
+		return Admission{}, false, err
+	}
+	return admitRequestOn(ctx, q, scope, triggerKind, sources, fingerprint, manifest)
+}
+
 func (s *SQLStore) admitRequest(ctx context.Context, scope Scope, triggerKind string, sources []SourceBlock, fingerprint, manifest string) (Admission, bool, error) {
+	var proposed Admission
+	var replay bool
+	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
+		result, wasReplay, admitErr := admitRequestOn(ctx, tx, scope, triggerKind, sources, fingerprint, manifest)
+		if admitErr != nil {
+			return admitErr
+		}
+		proposed = result
+		replay = wasReplay
+		return nil
+	})
+	if err != nil {
+		if _, ok := err.(*AppError); ok {
+			return Admission{}, false, err
+		}
+		return Admission{}, false, storeFailed(err)
+	}
+	return proposed, replay, nil
+}
+
+func loadSettingsOn(ctx context.Context, q sqlQuerier, scope Scope) (Settings, error) {
+	var out Settings
+	var typesCSV string
+	var updated time.Time
+	err := q.QueryRowContext(ctx, `SELECT project_id::text, trigger_mode,
+  COALESCE(array_to_string(enabled_asset_types, ','), ''), updated_at
+FROM project_asset_distillation_settings
+WHERE tenant_id=$1::uuid AND project_id=$2::uuid`, scope.TenantID, scope.ProjectID).Scan(
+		&out.ProjectID, &out.TriggerMode, &typesCSV, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Settings{ProjectID: scope.ProjectID, TriggerMode: "manual", EnabledAssetTypes: []string{}}, nil
+	}
+	if err != nil {
+		return Settings{}, err
+	}
+	out.EnabledAssetTypes = splitCSV(typesCSV)
+	out.UpdatedAt = updated.UTC().Format(time.RFC3339Nano)
+	return out, nil
+}
+
+func admitRequestOn(ctx context.Context, q sqlQuerier, scope Scope, triggerKind string, sources []SourceBlock, fingerprint, manifest string) (Admission, bool, error) {
 	proposed := Admission{
 		RunID:        uuid.NewString(),
 		RequestID:    uuid.NewString(),
@@ -140,28 +213,24 @@ func (s *SQLStore) admitRequest(ctx context.Context, scope Scope, triggerKind st
 		TriggerKind:  triggerKind,
 	}
 	temporalID := WorkflowType + "_" + proposed.RunID
-	var replay bool
-	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
-		// Fingerprint replay
-		var existingRun, existingReq, status string
-		err := tx.QueryRowContext(ctx, `SELECT run_id::text, request_id::text, 'queued'
+	var existingRun, existingReq, status string
+	err := q.QueryRowContext(ctx, `SELECT run_id::text, request_id::text, 'queued'
 FROM manuscript_asset_distillation_requests
 WHERE tenant_id=$1::uuid AND project_id=$2::uuid
   AND input_fingerprint=$3 AND extractor_contract_version=$4
 LIMIT 1`, scope.TenantID, scope.ProjectID, fingerprint, ExtractorContractV1).Scan(&existingRun, &existingReq, &status)
-		if err == nil {
-			proposed.RunID = existingRun
-			proposed.RequestID = existingReq
-			proposed.Status = status
-			replay = true
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if scope.RequestID != "" {
-			var hash string
-			err = tx.QueryRowContext(ctx, `SELECT workflow.run_id::text, req.request_id::text, workflow.status,
+	if err == nil {
+		proposed.RunID = existingRun
+		proposed.RequestID = existingReq
+		proposed.Status = status
+		return proposed, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Admission{}, false, err
+	}
+	if scope.RequestID != "" {
+		var hash string
+		err = q.QueryRowContext(ctx, `SELECT workflow.run_id::text, req.request_id::text, workflow.status,
   req.input_fingerprint
 FROM manuscript_asset_distillation_requests req
 JOIN workflow_runs workflow ON workflow.tenant_id=req.tenant_id AND workflow.run_id=req.run_id
@@ -173,49 +242,48 @@ WHERE req.tenant_id=$1::uuid AND req.project_id=$2::uuid
       AND ev.event_type='workflow.queued' AND ev.payload_jsonb->>'request_id'=$4
   )
 LIMIT 1`, scope.TenantID, scope.ProjectID, scope.ActorUserID, scope.RequestID).Scan(
-				&existingRun, &existingReq, &status, &hash)
-			if err == nil {
-				if hash != fingerprint {
-					return appError(CodeIdempotencyConflict, "request_id was already used for a different distillation request")
-				}
-				proposed.RunID, proposed.RequestID, proposed.Status = existingRun, existingReq, status
-				replay = true
-				return nil
+			&existingRun, &existingReq, &status, &hash)
+		if err == nil {
+			if hash != fingerprint {
+				return Admission{}, false, appError(CodeIdempotencyConflict, "request_id was already used for a different distillation request")
 			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
+			proposed.RunID, proposed.RequestID, proposed.Status = existingRun, existingReq, status
+			return proposed, true, nil
 		}
-		eventPayload, _ := json.Marshal(map[string]any{
-			"status": "queued", "module_key": ModuleKey, "request_id": scope.RequestID,
-			"payload_hash": fingerprint, "trigger_kind": triggerKind, "source_count": len(sources),
-		})
-		if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_runs(
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Admission{}, false, err
+		}
+	}
+	eventPayload, _ := json.Marshal(map[string]any{
+		"status": "queued", "module_key": ModuleKey, "request_id": scope.RequestID,
+		"payload_hash": fingerprint, "trigger_kind": triggerKind, "source_count": len(sources),
+	})
+	if _, err := q.ExecContext(ctx, `INSERT INTO workflow_runs(
   tenant_id, run_id, workflow_type, project_id, status, progress, message, started_by, temporal_workflow_id
 ) VALUES ($1::uuid,$2::uuid,$3,$4::uuid,'queued',0,'queued',NULLIF($5,'')::uuid,$6)`,
-			scope.TenantID, proposed.RunID, WorkflowType, scope.ProjectID, scope.ActorUserID, temporalID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_events(
+		scope.TenantID, proposed.RunID, WorkflowType, scope.ProjectID, scope.ActorUserID, temporalID); err != nil {
+		return Admission{}, false, err
+	}
+	if _, err := q.ExecContext(ctx, `INSERT INTO workflow_events(
   tenant_id, run_id, workflow_type, project_id, event_type, sequence, payload_jsonb
 ) VALUES ($1::uuid,$2::uuid,$3,$4::uuid,'workflow.queued',1,$5::jsonb)`,
-			scope.TenantID, proposed.RunID, WorkflowType, scope.ProjectID, string(eventPayload)); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO manuscript_asset_distillation_requests(
+		scope.TenantID, proposed.RunID, WorkflowType, scope.ProjectID, string(eventPayload)); err != nil {
+		return Admission{}, false, err
+	}
+	if _, err := q.ExecContext(ctx, `INSERT INTO manuscript_asset_distillation_requests(
   tenant_id, request_id, project_id, run_id, trigger_kind, source_manifest_jsonb,
   input_fingerprint, extractor_contract_version, dispatch_status, next_attempt_at, requested_by
 ) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6::jsonb,$7,$8,'pending',now(),NULLIF($9,'')::uuid)`,
-			scope.TenantID, proposed.RequestID, scope.ProjectID, proposed.RunID, triggerKind,
-			manifest, fingerprint, ExtractorContractV1, scope.ActorUserID); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return Admission{}, false, storeFailed(err)
+		scope.TenantID, proposed.RequestID, scope.ProjectID, proposed.RunID, triggerKind,
+		manifest, fingerprint, ExtractorContractV1, scope.ActorUserID); err != nil {
+		return Admission{}, false, err
 	}
-	return proposed, replay, nil
+	return proposed, false, nil
+}
+
+func contentSHA256(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *SQLStore) MarkDispatched(ctx context.Context, tenantID, requestID string) error {
@@ -248,7 +316,7 @@ func (s *SQLStore) ClaimPendingDispatch(ctx context.Context, limit int) ([]Outbo
   trigger_kind, attempt_count
 FROM claim_manuscript_asset_distillation_outbox($1)`, limit)
 	if err != nil {
-		return nil, nil
+		return nil, storeFailed(err)
 	}
 	defer rows.Close()
 	var items []OutboxItem
@@ -480,6 +548,10 @@ WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, scope.TenantID, candi
 			if err := writeAudit(ctx, tx, scope, "asset_proposal.accept_create", candidateID, map[string]any{"lifecycle": lifecycle}); err != nil {
 				return err
 			}
+			// CONN-003: transactionally project graph-canonical types into Graph source tables.
+			if err := projectAcceptedAssetToGraph(ctx, tx, scope, projectID, candidateID, candidateID); err != nil {
+				return err
+			}
 			result = DecisionResult{CandidateAssetID: candidateID, ReviewStatus: "accepted", AcceptedAssetID: candidateID}
 		case "accept_update":
 			target := strings.TrimSpace(input.TargetAssetID)
@@ -514,9 +586,13 @@ FOR UPDATE`, scope.TenantID, projectID, target).Scan(
 				return err
 			}
 			if currentVersion != expectedVersion {
-				_, _ = tx.ExecContext(ctx, `UPDATE asset_candidate_proposals SET review_status='conflict', updated_at=now()
-WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, scope.TenantID, candidateID)
-				return appError(CodeTargetConflict, "target asset version changed")
+				if _, err := tx.ExecContext(ctx, `UPDATE asset_candidate_proposals SET review_status='conflict', updated_at=now()
+WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, scope.TenantID, candidateID); err != nil {
+					return err
+				}
+				// Commit conflict status first; typed conflict is returned after withTenant succeeds.
+				result = DecisionResult{CandidateAssetID: candidateID, ReviewStatus: "conflict"}
+				return nil
 			}
 			// Snapshot current target at expected version number (catalog pattern).
 			if _, err := tx.ExecContext(ctx, `INSERT INTO asset_versions(
@@ -552,6 +628,10 @@ WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, scope.TenantID, candi
 			}); err != nil {
 				return err
 			}
+			// CONN-003: project merged target into Graph source tables in the same transaction.
+			if err := projectAcceptedAssetToGraph(ctx, tx, scope, projectID, candidateID, target); err != nil {
+				return err
+			}
 			result = DecisionResult{CandidateAssetID: candidateID, ReviewStatus: "accepted", AcceptedAssetID: target}
 		case "reject":
 			if _, err := tx.ExecContext(ctx, `UPDATE assets SET lifecycle='archived', enabled=false, updated_at=now()
@@ -578,6 +658,9 @@ WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, scope.TenantID, candi
 		}
 		return DecisionResult{}, storeFailed(err)
 	}
+	if result.ReviewStatus == "conflict" {
+		return result, appError(CodeTargetConflict, "target asset version changed")
+	}
 	return result, nil
 }
 
@@ -586,7 +669,12 @@ func (s *SQLStore) StaleProposalsForBlock(ctx context.Context, scope Scope, bloc
 		return err
 	}
 	return s.withTenant(ctx, scope, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE asset_candidate_proposals p
+		return staleProposalsForBlockTx(ctx, tx, scope, blockID)
+	})
+}
+
+func staleProposalsForBlockTx(ctx context.Context, tx *sql.Tx, scope Scope, blockID string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE asset_candidate_proposals p
 SET review_status='stale', updated_at=now()
 WHERE p.tenant_id=$1::uuid AND p.project_id=$2::uuid AND p.review_status IN ('pending','conflict','staging')
   AND EXISTS (
@@ -600,8 +688,70 @@ WHERE p.tenant_id=$1::uuid AND p.project_id=$2::uuid AND p.review_status IN ('pe
     WHERE e.tenant_id=p.tenant_id AND e.candidate_asset_id=p.candidate_asset_id
       AND b.status='active' AND b.version=e.block_version
   )`, scope.TenantID, scope.ProjectID, blockID)
+	return err
+}
+
+// ResolveActiveBlockSource loads a single active manuscript block as a distillation source.
+func (s *SQLStore) ResolveActiveBlockSource(ctx context.Context, scope Scope, blockID string) (SourceBlock, error) {
+	if err := requireProjectScope(scope); err != nil {
+		return SourceBlock{}, err
+	}
+	blockID = strings.TrimSpace(blockID)
+	if blockID == "" {
+		return SourceBlock{}, appError(CodeValidationFailed, "block_id is required")
+	}
+	var src SourceBlock
+	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `SELECT block_id::text, version, encode(digest(content_text, 'sha256'), 'hex'),
+  COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
+FROM manuscript_blocks
+WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND block_id=$3::uuid AND status='active'`,
+			scope.TenantID, scope.ProjectID, blockID).Scan(
+			&src.BlockID, &src.BlockVersion, &src.ContentSHA, &src.ChapterID, &src.SceneID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return appError(CodeNotFound, "active manuscript sources were not found")
+		}
 		return err
 	})
+	if err != nil {
+		if _, ok := err.(*AppError); ok {
+			return SourceBlock{}, err
+		}
+		if strings.Contains(err.Error(), "digest") || strings.Contains(err.Error(), "function") {
+			return s.resolveActiveBlockSourceAppHash(ctx, scope, blockID)
+		}
+		return SourceBlock{}, storeFailed(err)
+	}
+	return src, nil
+}
+
+func (s *SQLStore) resolveActiveBlockSourceAppHash(ctx context.Context, scope Scope, blockID string) (SourceBlock, error) {
+	var src SourceBlock
+	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
+		var content string
+		err := tx.QueryRowContext(ctx, `SELECT block_id::text, version, content_text,
+  COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
+FROM manuscript_blocks
+WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND block_id=$3::uuid AND status='active'`,
+			scope.TenantID, scope.ProjectID, blockID).Scan(
+			&src.BlockID, &src.BlockVersion, &content, &src.ChapterID, &src.SceneID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return appError(CodeNotFound, "active manuscript sources were not found")
+		}
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256([]byte(content))
+		src.ContentSHA = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		if _, ok := err.(*AppError); ok {
+			return SourceBlock{}, err
+		}
+		return SourceBlock{}, storeFailed(err)
+	}
+	return src, nil
 }
 
 func (s *SQLStore) LookupProposalProject(ctx context.Context, tenantID, candidateAssetID string) (string, error) {
@@ -648,8 +798,7 @@ func (s *SQLStore) resolveManualSources(ctx context.Context, input StartManualIn
 		query := `SELECT block_id::text, version, encode(digest(content_text, 'sha256'), 'hex'),
   COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
 FROM manuscript_blocks
-WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND status='active'
-  AND source_draft_id IS NOT NULL`
+WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND status='active'`
 		args := []any{input.Scope.TenantID, input.Scope.ProjectID}
 		if len(blockIDs) > 0 {
 			query += ` AND block_id::text = ANY($3::text[])`
@@ -693,7 +842,7 @@ WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND status='active'
 		return nil, storeFailed(err)
 	}
 	if len(sources) == 0 {
-		return nil, appError(CodeNotFound, "adopted manuscript sources were not found")
+		return nil, appError(CodeNotFound, "active manuscript sources were not found")
 	}
 	if len(blockIDs) > 0 && len(sources) != len(blockIDs) {
 		return nil, appError(CodeNotFound, "one or more manuscript blocks were not found")
@@ -710,7 +859,7 @@ func (s *SQLStore) resolveManualSourcesAppHash(ctx context.Context, input StartM
 	err := s.withTenant(ctx, input.Scope, func(tx *sql.Tx) error {
 		query := `SELECT block_id::text, version, content_text, COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
 FROM manuscript_blocks
-WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND status='active' AND source_draft_id IS NOT NULL`
+WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND status='active'`
 		args := []any{input.Scope.TenantID, input.Scope.ProjectID}
 		if len(blockIDs) > 0 {
 			query += ` AND block_id::text = ANY($3::text[])`
@@ -748,7 +897,7 @@ WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND status='active' AND source_
 		return nil, storeFailed(err)
 	}
 	if len(sources) == 0 {
-		return nil, appError(CodeNotFound, "adopted manuscript sources were not found")
+		return nil, appError(CodeNotFound, "active manuscript sources were not found")
 	}
 	return sources, nil
 }
@@ -828,7 +977,11 @@ func fingerprintSources(scope Scope, trigger string, sources []SourceBlock, enab
 		return "", "", appError(CodeValidationFailed, "fingerprint payload is invalid")
 	}
 	sum := sha256.Sum256(raw)
-	manifestMap := map[string]any{"schema_version": 1, "sources": sorted}
+	manifestMap := map[string]any{
+		"schema_version":      1,
+		"sources":             sorted,
+		"enabled_asset_types": typeArr,
+	}
 	manifest, err := json.Marshal(manifestMap)
 	if err != nil {
 		return "", "", appError(CodeValidationFailed, "source manifest is invalid")

@@ -74,6 +74,8 @@ type testStore struct {
 	Store
 	private     PrivateBlock
 	getCalls    int
+	createCalls int
+	createInput CreateBlockInput
 	updateCalls int
 	updateInput UpdateBlockInput
 }
@@ -83,10 +85,37 @@ func (s *testStore) GetPrivateBlock(context.Context, Scope, string) (PrivateBloc
 	return s.private, nil
 }
 
+func (s *testStore) CreateBlock(_ context.Context, input CreateBlockInput) (PrivateBlock, error) {
+	s.createCalls++
+	s.createInput = input
+	return s.private, nil
+}
+
 func (s *testStore) UpdateBlock(_ context.Context, input UpdateBlockInput) (PrivateBlock, error) {
 	s.updateCalls++
 	s.updateInput = input
 	return s.private, nil
+}
+
+func TestHandlerCreatesBlankManuscriptBlock(t *testing.T) {
+	resolver := &testResolver{scope: Scope{TenantID: "tenant-1", ActorUserID: "user-1", RequestID: "request-1"}}
+	authorizer := &testAuthorizer{}
+	store := &testStore{private: PrivateBlock{
+		BlockMetadata: BlockMetadata{BlockID: "block-new", ProjectID: "project-1", ChapterID: "chapter-1", Status: "active", Version: 1},
+		ContentText:   "",
+	}}
+	handler := NewHandler(HandlerConfig{Store: store, Resolver: resolver, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodPost,
+		"/v1/projects/project-1/manuscript-workspace/blocks",
+		strings.NewReader(`{"chapter_id":"chapter-1","scene_id":"scene-1","content_text":""}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || authorizer.permission != PermissionWrite || store.createCalls != 1 {
+		t.Fatalf("status=%d permission=%q creates=%d body=%s", response.Code, authorizer.permission, store.createCalls, response.Body.String())
+	}
+	if store.createInput.ChapterID != "chapter-1" || store.createInput.SceneID != "scene-1" {
+		t.Fatalf("create lost chapter/scene: %#v", store.createInput)
+	}
 }
 
 func TestHandlerAuthorizesBeforeDecodingOrStoreMutation(t *testing.T) {

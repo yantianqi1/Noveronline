@@ -80,12 +80,13 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
               <p className="login-intro">登录后继续整理你的故事世界，衔接上一次创作进度。</p>
 
               {query.login_status === "error" ? (
-                <div className="login-error" role="alert">
+                <div
+                  className="login-error"
+                  data-code={query.login_code || "PASSWORD_LOGIN_FAILED"}
+                  role="alert"
+                >
                   <strong>登录未成功</strong>
                   <p>请检查邮箱和密码，然后重新尝试。</p>
-                  <small>
-                    错误代码：<code>{query.login_code || "PASSWORD_LOGIN_FAILED"}</code>
-                  </small>
                 </div>
               ) : null}
 

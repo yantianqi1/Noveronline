@@ -134,6 +134,9 @@ export function updateReviewIssue(context: WriterWebContext, issueId: string, st
 
 export async function listManuscriptBlocks(context: WriterWebContext, includeDeleted = false) { const result = await requestDirect<{ blocks: ManuscriptBlock[] | null }>(context, manuscriptPath(context, `/blocks${includeDeleted ? "?include_deleted=true" : ""}`)); return result.ok ? success(asArray(result.value.blocks)) : result; }
 export function getPrivateBlock(context: WriterWebContext, id: string) { return id ? requestDirect<PrivateManuscriptBlock>(context, manuscriptPath(context, `/blocks/${encodeURIComponent(id)}`)) : success<PrivateManuscriptBlock | null>(null); }
+export function createManuscriptBlock(context: WriterWebContext, input: { chapter_id?: string; scene_id?: string; content_text?: string; tags?: string[] }) {
+  return requestDirect<PrivateManuscriptBlock>(context, manuscriptPath(context, "/blocks"), json("POST", input));
+}
 export function updateManuscriptBlock(context: WriterWebContext, id: string, input: Record<string, unknown>) { return requestDirect<PrivateManuscriptBlock>(context, manuscriptPath(context, `/blocks/${encodeURIComponent(id)}`), json("PATCH", input)); }
 export function deleteManuscriptBlock(context: WriterWebContext, id: string, version: number) { return requestDirect<ManuscriptBlock>(context, manuscriptPath(context, `/blocks/${encodeURIComponent(id)}`), json("DELETE", { expected_version: version })); }
 export function tagManuscriptBlock(context: WriterWebContext, id: string, version: number, tags: string[]) { return requestDirect<ManuscriptBlock>(context, manuscriptPath(context, `/blocks/${encodeURIComponent(id)}/tags`), json("PUT", { expected_version: version, tags })); }
@@ -167,6 +170,7 @@ export type AssetProposal = {
   asset_type: string;
   summary?: string;
   target_asset_id?: string;
+  expected_target_version?: number;
   evidence_count: number;
   created_at: string;
 };

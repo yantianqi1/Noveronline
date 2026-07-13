@@ -4,7 +4,8 @@ type WorkspaceHeaderProps = {
   actions?: ReactNode;
   className?: string;
   description?: ReactNode;
-  eyebrow: ReactNode;
+  /** Optional kicker; omit when it only repeats the title. */
+  eyebrow?: ReactNode;
   icon?: ReactNode;
   meta?: ReactNode;
   title: ReactNode;
@@ -14,6 +15,7 @@ type WorkspaceHeaderProps = {
  * Compact paper-style page header for creative workbenches.
  * Prefer one primary action; keep secondary stats as small meta chips.
  * Keep height tight (~72–96px content) — no marketing heroes.
+ * Description should be one short line; meta should stay to ~2 pills.
  */
 export function WorkspaceHeader({
   actions,
@@ -27,7 +29,7 @@ export function WorkspaceHeader({
   return (
     <header className={["workspace-header", "workspace-header-compact", className].filter(Boolean).join(" ")}>
       <div className="workspace-header-copy">
-        <p className="eyebrow">{eyebrow}</p>
+        {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
         <h1>
           {icon ? (
             <span className="page-title-icon" aria-hidden="true">

@@ -32,7 +32,7 @@ test("LLM quota admin renders resolution, all reservation states, reconciliation
   assert.match(shell, /actual_cost_micros \?\?/);
   assert.match(shell, /unavailable/);
   assert.match(shell, /billing_status/);
-  assert.match(shell, /provider_call_id/);
+  assert.match(shell, /Call ID|调用编号|shortId\(item\.provider_call_id/);
   assert.match(shell, /expectedVersion/);
 });
 

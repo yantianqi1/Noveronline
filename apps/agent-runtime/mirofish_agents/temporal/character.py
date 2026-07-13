@@ -193,6 +193,50 @@ class PostgresCharacterDialogueStore:
                     ),
                 )
                 replay = cursor.fetchone()
+                if replay is not None:
+                    connection.commit()
+                    return {
+                        "status": "completed",
+                        "replayed": True,
+                        "interaction_id": interaction_id,
+                        "turn_id": replay[0],
+                        "turn_order": replay[1],
+                    }
+
+                pov_agent_id = str(interaction[1] or "").strip()
+                worldline_session_id = str(interaction[2] or "").strip()
+                prepared_agent = _load_prepared_agent_profile(
+                    cursor,
+                    tenant_id=context.tenant_id,
+                    project_id=context.project_id,
+                    pov_agent_id=pov_agent_id,
+                )
+                character_name = ""
+                if prepared_agent:
+                    character_name = str(prepared_agent.get("display_name") or "").strip()
+                character_profiles = _load_character_profiles(
+                    cursor,
+                    tenant_id=context.tenant_id,
+                    project_id=context.project_id,
+                    character_name=character_name,
+                )
+                world_rules = _load_character_world_rules(
+                    cursor,
+                    tenant_id=context.tenant_id,
+                    project_id=context.project_id,
+                )
+                relationships = _load_character_relationships(
+                    cursor,
+                    tenant_id=context.tenant_id,
+                    project_id=context.project_id,
+                    character_name=character_name,
+                )
+                world_state = _load_character_world_state(
+                    cursor,
+                    tenant_id=context.tenant_id,
+                    project_id=context.project_id,
+                    worldline_session_id=worldline_session_id,
+                )
             connection.commit()
         except LLMFacilityError:
             _rollback(connection)
@@ -204,14 +248,6 @@ class PostgresCharacterDialogueStore:
             ) from exc
         finally:
             connection.close()
-        if replay is not None:
-            return {
-                "status": "completed",
-                "replayed": True,
-                "interaction_id": interaction_id,
-                "turn_id": replay[0],
-                "turn_order": replay[1],
-            }
         return {
             "interaction_id": interaction_id,
             "mode": interaction[0],
@@ -224,6 +260,11 @@ class PostgresCharacterDialogueStore:
             "interaction_summary": interaction[6],
             "history": [_turn_summary(row) for row in history],
             "user_turn": _turn_summary(user_turn),
+            "prepared_agent": prepared_agent,
+            "character_profiles": character_profiles,
+            "world_rules": world_rules,
+            "relationships": relationships,
+            "world_state": world_state,
         }
 
     def persist_result(
@@ -797,6 +838,11 @@ def _dialogue_messages(source: dict[str, Any]) -> list[dict[str, str]]:
             "interaction_summary",
             "history",
             "user_turn",
+            "prepared_agent",
+            "character_profiles",
+            "world_rules",
+            "relationships",
+            "world_state",
         )
     }
     return [
@@ -1048,6 +1094,278 @@ def _turn_summary(row: Any) -> dict[str, Any]:
         "actor_id": row[2],
         "turn_kind": row[3],
         "summary": row[4],
+    }
+
+
+def _load_prepared_agent_profile(
+    cursor: Any,
+    *,
+    tenant_id: str,
+    project_id: str,
+    pov_agent_id: str,
+) -> dict[str, Any] | None:
+    agent_id = _uuid_or_none(pov_agent_id)
+    if not agent_id:
+        return None
+    cursor.execute(
+        """SELECT agent_id::text, display_name, role, status, summary, prepare_id::text
+             FROM worldline_prepared_agents
+            WHERE tenant_id = %s AND project_id = %s AND agent_id = %s
+            LIMIT 1""",
+        (tenant_id, project_id, agent_id),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "agent_id": row[0],
+        "display_name": row[1],
+        "role": row[2],
+        "status": row[3],
+        "summary": row[4],
+        "prepare_id": row[5],
+    }
+
+
+def _load_character_profiles(
+    cursor: Any,
+    *,
+    tenant_id: str,
+    project_id: str,
+    character_name: str,
+) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    if character_name:
+        cursor.execute(
+            """SELECT entity_id::text, canonical_name, entity_type,
+                      COALESCE(importance, ''), COALESCE(state_summary, '')
+                 FROM entities
+                WHERE tenant_id = %s AND project_id = %s
+                  AND entity_type = 'character'
+                  AND (
+                    canonical_name = %s
+                    OR canonical_name ILIKE %s
+                  )
+                ORDER BY updated_at DESC
+                LIMIT 5""",
+            (tenant_id, project_id, character_name, f"%{character_name}%"),
+        )
+    else:
+        cursor.execute(
+            """SELECT entity_id::text, canonical_name, entity_type,
+                      COALESCE(importance, ''), COALESCE(state_summary, '')
+                 FROM entities
+                WHERE tenant_id = %s AND project_id = %s
+                  AND entity_type = 'character'
+                ORDER BY updated_at DESC
+                LIMIT 8""",
+            (tenant_id, project_id),
+        )
+    for row in cursor.fetchall():
+        profiles.append(
+            {
+                "entity_id": row[0],
+                "canonical_name": row[1],
+                "entity_type": row[2],
+                "importance": row[3],
+                "state_summary": row[4],
+                "source": "entity",
+            }
+        )
+    cursor.execute(
+        """SELECT asset_id::text, title, COALESCE(summary, left(COALESCE(content_text, ''), 400)),
+                  lifecycle, COALESCE(category, '')
+             FROM assets
+            WHERE tenant_id = %s AND project_id = %s
+              AND enabled = TRUE
+              AND lifecycle IN ('seed', 'canon', 'material')
+              AND asset_type IN ('character', 'seed_character')
+              AND (
+                %s = ''
+                OR title = %s
+                OR title ILIKE %s
+              )
+            ORDER BY pinned DESC, updated_at DESC
+            LIMIT 8""",
+        (
+            tenant_id,
+            project_id,
+            character_name,
+            character_name,
+            f"%{character_name}%" if character_name else "%",
+        ),
+    )
+    for row in cursor.fetchall():
+        profiles.append(
+            {
+                "asset_id": row[0],
+                "canonical_name": row[1],
+                "state_summary": row[2],
+                "lifecycle": row[3],
+                "category": row[4],
+                "source": "canon_asset",
+            }
+        )
+    return profiles[:12]
+
+
+def _load_character_world_rules(
+    cursor: Any,
+    *,
+    tenant_id: str,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    cursor.execute(
+        """SELECT rule_evidence_id::text, rule_text, COALESCE(category, ''),
+                  confidence::double precision
+             FROM world_rule_evidence
+            WHERE tenant_id = %s AND project_id = %s
+            ORDER BY created_at DESC
+            LIMIT 12""",
+        (tenant_id, project_id),
+    )
+    for row in cursor.fetchall():
+        rules.append(
+            {
+                "rule_id": row[0],
+                "rule_text": row[1],
+                "category": row[2],
+                "confidence": row[3],
+                "source": "seed_evidence",
+            }
+        )
+    cursor.execute(
+        """SELECT asset_id::text,
+                  COALESCE(NULLIF(content_text, ''), summary, title),
+                  COALESCE(category, asset_type),
+                  lifecycle
+             FROM assets
+            WHERE tenant_id = %s AND project_id = %s
+              AND enabled = TRUE
+              AND lifecycle IN ('seed', 'canon', 'material')
+              AND asset_type IN ('world_rule', 'worldview')
+            ORDER BY pinned DESC, updated_at DESC
+            LIMIT 12""",
+        (tenant_id, project_id),
+    )
+    for row in cursor.fetchall():
+        rules.append(
+            {
+                "rule_id": row[0],
+                "rule_text": row[1],
+                "category": row[2],
+                "lifecycle": row[3],
+                "source": "canon_asset",
+            }
+        )
+    return rules[:20]
+
+
+def _load_character_relationships(
+    cursor: Any,
+    *,
+    tenant_id: str,
+    project_id: str,
+    character_name: str,
+) -> list[dict[str, Any]]:
+    if character_name:
+        cursor.execute(
+            """SELECT relationship_id::text, source_entity_name, target_entity_name,
+                      relationship_type, COALESCE(summary, '')
+                 FROM relationships
+                WHERE tenant_id = %s AND project_id = %s
+                  AND (
+                    source_entity_name = %s
+                    OR target_entity_name = %s
+                    OR source_entity_name ILIKE %s
+                    OR target_entity_name ILIKE %s
+                  )
+                ORDER BY updated_at DESC
+                LIMIT 16""",
+            (
+                tenant_id,
+                project_id,
+                character_name,
+                character_name,
+                f"%{character_name}%",
+                f"%{character_name}%",
+            ),
+        )
+    else:
+        cursor.execute(
+            """SELECT relationship_id::text, source_entity_name, target_entity_name,
+                      relationship_type, COALESCE(summary, '')
+                 FROM relationships
+                WHERE tenant_id = %s AND project_id = %s
+                ORDER BY updated_at DESC
+                LIMIT 12""",
+            (tenant_id, project_id),
+        )
+    return [
+        {
+            "relationship_id": row[0],
+            "source_entity_name": row[1],
+            "target_entity_name": row[2],
+            "relationship_type": row[3],
+            "summary": row[4],
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def _load_character_world_state(
+    cursor: Any,
+    *,
+    tenant_id: str,
+    project_id: str,
+    worldline_session_id: str,
+) -> dict[str, Any]:
+    if not worldline_session_id:
+        return {}
+    session_id = _uuid_or_none(worldline_session_id)
+    if not session_id:
+        return {}
+    cursor.execute(
+        """SELECT session_id::text, status, lifecycle, goal_summary,
+                  COALESCE(anchor_path_id::text, '')
+             FROM worldline_sessions
+            WHERE tenant_id = %s AND project_id = %s AND session_id = %s
+            LIMIT 1""",
+        (tenant_id, project_id, session_id),
+    )
+    session = cursor.fetchone()
+    if session is None:
+        return {}
+    cursor.execute(
+        """SELECT event_id::text, title, summary, kind, status, COALESCE(step, 0)
+             FROM worldline_events
+            WHERE tenant_id = %s AND project_id = %s AND session_id = %s
+              AND status IN ('candidate', 'canon')
+            ORDER BY step DESC NULLS LAST, created_at DESC
+            LIMIT 10""",
+        (tenant_id, project_id, session_id),
+    )
+    events = [
+        {
+            "event_id": row[0],
+            "title": row[1],
+            "summary": row[2],
+            "kind": row[3],
+            "status": row[4],
+            "step": row[5],
+        }
+        for row in cursor.fetchall()
+    ]
+    return {
+        "session": {
+            "session_id": session[0],
+            "status": session[1],
+            "lifecycle": session[2],
+            "goal_summary": session[3],
+            "anchor_path_id": session[4],
+        },
+        "recent_events": events,
     }
 
 

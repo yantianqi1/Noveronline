@@ -400,17 +400,36 @@ class PostgresWorldlinePrepareScopeStore:
                     "category": _row_text(row, "category"),
                 }
         if by_kind["entity"]:
+            requested_entity_ids = list(by_kind["entity"])
+            # Web may send story_graph_nodes.node_id as entity:<node_id>; map to
+            # entities.entity_id via canonical_entity_id when available.
+            cursor.execute(
+                """SELECT node_id::text AS node_id, canonical_entity_id::text AS entity_id
+                     FROM story_graph_nodes
+                    WHERE tenant_id = %s AND project_id = %s
+                      AND node_id::text = ANY(%s)
+                      AND canonical_entity_id IS NOT NULL""",
+                (context.tenant_id, context.project_id, requested_entity_ids),
+            )
+            node_to_entity: dict[str, str] = {}
+            entity_lookup_ids: set[str] = set(requested_entity_ids)
+            for row in cursor.fetchall():
+                node_id = _row_text(row, "node_id")
+                entity_id = _row_text(row, "entity_id")
+                if node_id and entity_id:
+                    node_to_entity[node_id] = entity_id
+                    entity_lookup_ids.add(entity_id)
             cursor.execute(
                 """SELECT entity_id::text AS source_id, canonical_name, entity_type, COALESCE(state_summary, '') AS summary
                      FROM entities
                     WHERE tenant_id = %s AND project_id = %s
                       AND entity_id::text = ANY(%s)""",
-                (context.tenant_id, context.project_id, by_kind["entity"]),
+                (context.tenant_id, context.project_id, list(entity_lookup_ids)),
             )
+            entities_by_id: dict[str, dict[str, Any]] = {}
             for row in cursor.fetchall():
                 source_id = _row_text(row, "source_id")
-                resolved[f"entity:{source_id}"] = {
-                    "selection_ref": f"entity:{source_id}",
+                entities_by_id[source_id] = {
                     "source_kind": "entity",
                     "source_id": source_id,
                     "source_asset_id": None,
@@ -419,6 +438,48 @@ class PostgresWorldlinePrepareScopeStore:
                     "role": _row_text(row, "entity_type"),
                     "summary": _row_text(row, "summary"),
                 }
+            for requested_id in requested_entity_ids:
+                entity = entities_by_id.get(requested_id)
+                if entity is None:
+                    mapped_entity_id = node_to_entity.get(requested_id)
+                    if mapped_entity_id:
+                        entity = entities_by_id.get(mapped_entity_id)
+                if entity is None:
+                    continue
+                resolved[f"entity:{requested_id}"] = {
+                    **entity,
+                    "selection_ref": f"entity:{requested_id}",
+                    "source_id": entity["source_id"],
+                    "graph_node_id": requested_id if requested_id in node_to_entity else None,
+                }
+            # Also resolve any leftover graph nodes that lack a mapped entity by
+            # using the graph node public fields so selection_ref still works.
+            unresolved_node_ids = [
+                requested_id
+                for requested_id in requested_entity_ids
+                if f"entity:{requested_id}" not in resolved
+            ]
+            if unresolved_node_ids:
+                cursor.execute(
+                    """SELECT node_id::text AS source_id, title, COALESCE(summary, '') AS summary, node_type
+                         FROM story_graph_nodes
+                        WHERE tenant_id = %s AND project_id = %s
+                          AND node_id::text = ANY(%s)""",
+                    (context.tenant_id, context.project_id, unresolved_node_ids),
+                )
+                for row in cursor.fetchall():
+                    source_id = _row_text(row, "source_id")
+                    resolved[f"entity:{source_id}"] = {
+                        "selection_ref": f"entity:{source_id}",
+                        "source_kind": "entity",
+                        "source_id": source_id,
+                        "source_asset_id": None,
+                        "display_name": _row_text(row, "title"),
+                        "title": _row_text(row, "title"),
+                        "role": _row_text(row, "node_type"),
+                        "summary": _row_text(row, "summary"),
+                        "graph_node_id": source_id,
+                    }
         if by_kind["saved_path"]:
             cursor.execute(
                 """SELECT path_id::text AS source_id, title, summary, lifecycle

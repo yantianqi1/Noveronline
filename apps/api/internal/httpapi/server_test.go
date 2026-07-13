@@ -21838,7 +21838,11 @@ func (a *recordingTraceExportAuditor) RecordExport(ctx context.Context, input tr
 }
 
 func boundWriterComposerResolver() *llm.StaticResolver {
-	return llm.NewStaticResolver([]llm.ModuleResolution{writerComposerResolution()})
+	// Pi dual-stage admission prechecks both writer_orchestrator and writer_composer.
+	return llm.NewStaticResolver([]llm.ModuleResolution{
+		writerComposerResolution(),
+		writerOrchestratorResolution(),
+	})
 }
 
 func writerComposerResolution() llm.ModuleResolution {
@@ -21854,6 +21858,22 @@ func writerComposerResolution() llm.ModuleResolution {
 		SupportsTools: true,
 		SupportsJSON:  true,
 		Settings:      map[string]any{"temperature": 0.7},
+	}
+}
+
+func writerOrchestratorResolution() llm.ModuleResolution {
+	return llm.ModuleResolution{
+		TenantID:      "tenant-123",
+		ProjectID:     "project-123",
+		ModuleKey:     "writer_orchestrator",
+		ChannelID:     "channel-orchestrator",
+		ModelID:       "model-orchestrator",
+		Provider:      "openai-compatible",
+		BaseURL:       "https://llm.example.test/v1",
+		CredentialRef: "credref-orchestrator",
+		SupportsTools: true,
+		SupportsJSON:  true,
+		Settings:      map[string]any{"temperature": 0.2},
 	}
 }
 

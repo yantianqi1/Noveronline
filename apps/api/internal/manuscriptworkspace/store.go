@@ -64,6 +64,57 @@ func (s *SQLStore) GetPrivateBlock(ctx context.Context, scope Scope, blockID str
 	return block, nil
 }
 
+func (s *SQLStore) CreateBlock(ctx context.Context, input CreateBlockInput) (PrivateBlock, error) {
+	input.Scope = normalizeScope(input.Scope)
+	input.ChapterID = strings.TrimSpace(input.ChapterID)
+	input.SceneID = strings.TrimSpace(input.SceneID)
+	if err := validateScope(input.Scope, true); err != nil {
+		return PrivateBlock{}, err
+	}
+	tags, err := normalizeTags(input.Tags)
+	if err != nil {
+		return PrivateBlock{}, err
+	}
+	tx, err := s.begin(ctx, input.Scope)
+	if err != nil {
+		return PrivateBlock{}, mutationFailed()
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockProject(ctx, tx, input.Scope); err != nil {
+		return PrivateBlock{}, err
+	}
+	if err := validateLocation(ctx, tx, input.Scope, input.ChapterID, input.SceneID); err != nil {
+		return PrivateBlock{}, err
+	}
+	nextOrder, err := nextActiveBlockOrder(ctx, tx, input.Scope)
+	if err != nil {
+		return PrivateBlock{}, mutationFailed()
+	}
+	var created PrivateBlock
+	err = scanPrivateBlock(tx.QueryRowContext(ctx, `INSERT INTO manuscript_blocks (
+  tenant_id, project_id, chapter_id, scene_id, source_draft_id, source_writer_run_id,
+  block_order, content_text, word_count, version, status, tags, created_by, updated_by
+) VALUES (
+  $1::uuid, $2::uuid, NULLIF($3, '')::uuid, NULLIF($4, '')::uuid, NULL, NULL,
+  $5, $6, $7, 1, 'active', $8, $9::uuid, $9::uuid
+)
+RETURNING block_id::text, project_id::text, COALESCE(chapter_id::text, ''), COALESCE(scene_id::text, ''),
+  COALESCE(source_draft_id::text, ''), COALESCE(source_writer_run_id::text, ''), status, to_json(tags)::text,
+  block_order, word_count, version, created_at::text, updated_at::text, content_text`,
+		input.TenantID, input.ProjectID, input.ChapterID, input.SceneID, nextOrder,
+		input.ContentText, countWords(input.ContentText), tags, input.ActorUserID), &created)
+	if err != nil {
+		return PrivateBlock{}, mutationFailed()
+	}
+	if err := recordVersion(ctx, tx, input.Scope, created, "create", ""); err != nil {
+		return PrivateBlock{}, mutationFailed()
+	}
+	if err := tx.Commit(); err != nil {
+		return PrivateBlock{}, mutationFailed()
+	}
+	return created, nil
+}
+
 func (s *SQLStore) UpdateBlock(ctx context.Context, input UpdateBlockInput) (PrivateBlock, error) {
 	input.Scope = normalizeScope(input.Scope)
 	input.BlockID = strings.TrimSpace(input.BlockID)

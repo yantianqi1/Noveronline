@@ -97,13 +97,19 @@ test("writer page loads manuscript summaries alongside picker data", async () =>
 
   assert.match(page, /getProjectManuscript/);
   assert.match(page, /getProjectManuscriptExportManifest/);
-  assert.match(page, /const\s*\[\s*assets,\s*graphView,\s*worldlineSavedPaths,\s*manuscript,\s*manuscriptExportManifest\s*\]\s*=\s*await\s+Promise\.all/);
+  assert.match(page, /listWriterThreads/);
+  assert.match(page, /listWriterThreadMessages/);
+  assert.match(
+    page,
+    /const\s*\[\s*assets,\s*graphView,\s*worldlineSavedPaths,\s*manuscript,\s*manuscriptExportManifest,\s*writerThreads\s*\]\s*=\s*await\s+Promise\.all/,
+  );
   assert.match(page, /planningRun,\s*proposals,\s*distillationSettings\s*\]\s*=\s*await\s+Promise\.all/);
   assert.match(page, /<Suspense\s+fallback=\{<WriterProductWorkspaceLoading\s*\/>\}>/);
   assert.match(page, /getProjectManuscript\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
   assert.match(page, /getProjectManuscriptExportManifest\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
   assert.match(page, /manuscript=\{manuscript\}/);
   assert.match(page, /manuscriptExportManifest=\{manuscriptExportManifest\}/);
+  assert.match(page, /threadMessages=\{threadMessages\}/);
 });
 
 test("Writer shell renders metadata-only manuscript and export panels", async () => {
@@ -149,7 +155,7 @@ test("project navigation includes writer and LLM Facility routes with active pat
   assert.match(nav, /\/writer/);
   assert.match(nav, /\/llm-facility/);
   assert.match(nav, /Overview/);
-  assert.match(nav, /LLM Facility/);
+  assert.match(nav, /Model settings/);
   assert.match(nav, /aria-current/);
   assert.doesNotMatch(nav, /navigationBasePath/);
   assert.match(nav, /const activeTenants = currentUser\.ok \? currentUser\.active_tenants : \[\]/);
@@ -204,6 +210,17 @@ test("project chrome is content-sized and keeps route identifiers out of display
   assert.match(css, /\.app-sidebar\s*\{[^}]*height:\s*fit-content/s);
   assert.match(css, /\.app-sidebar\s*\{[^}]*max-height:\s*100dvh/s);
   assert.match(css, /\.sidebar-stack\s*\{[^}]*min-height:\s*0/s);
+  // Narrow viewports stack chrome in one column: sidebar must not pin to 100dvh
+  // or the main workbench is pushed below the fold and looks missing.
+  const polish = await fileText("app/workbench-polish.css");
+  assert.match(
+    polish,
+    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame\.app-frame-unified \.app-sidebar[\s\S]*?height:\s*100dvh/,
+  );
+  assert.match(
+    polish,
+    /@media \(max-width:\s*860px\)\s*\{[\s\S]*?\.app-frame\.app-frame-unified \.app-sidebar[\s\S]*?height:\s*auto/,
+  );
   assert.match(layout, /const\s+currentProject\s*=\s*currentUser\.ok/);
   assert.match(layout, /currentProject\?\.name/);
   assert.doesNotMatch(layout, /<span>\{tenantSlug\}<\/span>/);
@@ -1372,7 +1389,7 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /assertDisposableProject/);
   assert.match(browserLiveTest, /assertSafeLocalUrl/);
   assert.match(browserLiveTest, /setInputFiles/);
-  assert.match(browserLiveTest, /getByRole\("button",\s*\{\s*name:\s*\/Upload and start Seed\/i\s*\}\)/);
+  assert.match(browserLiveTest, /getByRole\("button",\s*\{\s*name:\s*\/Upload and start analysis\/i\s*\}\)/);
   assert.match(browserLiveTest, /getSeedRunSummary/);
   assert.match(browserLiveTest, /getSeedRunEvents/);
   assert.match(browserLiveTest, /fetchBrowserLivePublicJsonWithRawScan/);
@@ -1396,8 +1413,8 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
   assert.match(browserLiveTest, /Seed events/);
   assert.match(browserLiveTest, /assertRunControlIdentity/);
   assert.match(browserLiveTest, /openOperationalDetails/);
-  assert.match(browserLiveTest, /Cancel Seed run/);
-  assert.match(browserLiveTest, /Retry Seed run/);
+  assert.match(browserLiveTest, /Cancel analysis/);
+  assert.match(browserLiveTest, /Retry analysis/);
   assert.match(browserLiveTest, /seq 1/);
   assert.match(browserLiveTest, /afterEventId:\s*queuedEvent\.event_id/);
   assert.match(browserLiveTest, /assertSeedRunBrowserControlsReflectStatus/);
@@ -1467,7 +1484,7 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /ready_entity_count/);
   assert.match(shell, /ready_relationship_count/);
   assert.match(shell, /ready_world_rule_count/);
-  assert.match(shell, /Upload and start Seed/);
+  assert.match(shell, /Upload and start analysis/);
   assert.match(shell, /uploadAndStartSeedAction/);
   assert.match(shell, /OverviewSeedUploadForm/);
   const uploadForm = await fileText("components/overview-seed-upload-form.tsx");
@@ -1476,21 +1493,21 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(uploadForm, /name="mode"/);
   assert.match(uploadForm, /SOURCE_UPLOAD_MAX_BYTES\s*=\s*64\s*\*\s*1024\s*\*\s*1024/);
   assert.match(shell, /Complete upload/);
-  assert.match(shell, /Start Seed/);
+  assert.match(shell, /Start analysis/);
   assert.match(shell, /completeUploadAction/);
   assert.match(shell, /startSeedRunAction/);
   assert.match(shell, /type="hidden"\s+name="uploadId"\s+value=\{file\.upload_id\}/);
   assert.match(shell, /file\.parse_status !== "pending"/);
   assert.match(shell, /file\.parse_status !== "uploaded"/);
   assert.doesNotMatch(shell, /Admit source file|Upload object|Complete this upload|uploadSourceObjectAction|<label htmlFor=".*upload-id"|placeholder=".*upload/i);
-  assert.match(shell, /Seed runs/);
+  assert.match(shell, /Analysis history/);
   assert.match(shell, /Inspect/);
   assert.match(shell, /name="runId"/);
-  assert.match(shell, /Seed events/);
+  assert.match(shell, /Analysis events/);
   assert.match(shell, /cancelSeedRunAction/);
   assert.match(shell, /retrySeedRunAction/);
-  assert.match(shell, /Cancel Seed run/);
-  assert.match(shell, /Retry Seed run/);
+  assert.match(shell, /Cancel analysis/);
+  assert.match(shell, /Retry analysis/);
   assert.match(shell, /projectReadiness\.code/);
   assert.match(shell, /sourceFiles\.ok/);
   assert.match(shell, /seedRuns\.ok/);
@@ -1795,7 +1812,7 @@ test("Next app shell declares tenant/project Character Console route", async () 
   assert.match(legacyRoute, /devEntryRedirectPath\(\)/);
   assert.doesNotMatch(legacyRoute, /mock/i);
   assert.match(nav, /\/character-console/);
-  assert.match(nav, /Character Console/);
+  assert.match(nav, /Characters/);
 });
 
 test("Character Console route exposes create interaction metadata form and action", async () => {
@@ -2527,7 +2544,7 @@ test("writer shell renders typed tool result cards from completed writer events"
 test("LLM Facility shell is an operational settings console", async () => {
   const shell = await fileText("components/llm-facility-shell.tsx");
 
-  assert.match(shell, /LLM Facility/);
+  assert.match(shell, /Model settings/);
   assert.match(shell, /Workspace Settings/);
   assert.match(shell, /settingsSnapshot/);
   assert.match(shell, /Channels/);
@@ -2726,7 +2743,7 @@ test("Project Overview keeps operational detail collapsed by default", async () 
   assert.ok(((shell.match(/<details className="overview-details">/g) ?? []).length) >= 2);
   assert.doesNotMatch(shell, /<details className="overview-details" open/);
   assert.match(shell, /文件与分析记录/);
-  assert.match(shell, /详细信息/);
+  assert.match(shell, /进度与活动/);
   assert.match(shell, /<SeedRunOverview/);
   assert.match(shell, /className="overview-run-actions"/);
   assert.match(css, /\.overview-details\s*\{/);

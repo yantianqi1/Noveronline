@@ -48,6 +48,7 @@ type Config struct {
 	WriterReader                     workflows.WriterReader
 	WriterEventReader                workflows.WriterEventReader
 	WriterCanceller                  workflows.WriterCanceller
+	WriterThreadStore                workflows.WriterThreadStore
 	DraftAdoptionStore               workflows.DraftAdoptionStore
 	DraftReviewStore                 workflows.DraftReviewStore
 	DraftReviewOwnerLookup           workflows.DraftReviewOwnerLookup
@@ -179,6 +180,7 @@ type Server struct {
 	writerReader                     workflows.WriterReader
 	writerEventReader                workflows.WriterEventReader
 	writerCanceller                  workflows.WriterCanceller
+	writerThreadStore                workflows.WriterThreadStore
 	draftAdoptionStore               workflows.DraftAdoptionStore
 	draftReviewStore                 workflows.DraftReviewStore
 	draftReviewOwnerLookup           workflows.DraftReviewOwnerLookup
@@ -281,6 +283,8 @@ type errorEnvelope struct {
 type startWriterRunRequest struct {
 	Mode        string         `json:"mode"`
 	Instruction string         `json:"instruction"`
+	ChapterID   string         `json:"chapter_id"`
+	SceneID     string         `json:"scene_id"`
 	Options     map[string]any `json:"options"`
 }
 
@@ -789,6 +793,7 @@ func NewServer(config Config) *Server {
 	if writerCanceller == nil {
 		writerCanceller = workflows.NewDisabledWriterCanceller()
 	}
+	writerThreadStore := config.WriterThreadStore
 	draftAdoptionStore := config.DraftAdoptionStore
 	if draftAdoptionStore == nil {
 		draftAdoptionStore = workflows.NewDisabledDraftAdoptionStore()
@@ -1043,6 +1048,7 @@ func NewServer(config Config) *Server {
 		writerReader:                     reader,
 		writerEventReader:                writerEventReader,
 		writerCanceller:                  writerCanceller,
+		writerThreadStore:                writerThreadStore,
 		draftAdoptionStore:               draftAdoptionStore,
 		draftReviewStore:                 draftReviewStore,
 		draftReviewOwnerLookup:           config.DraftReviewOwnerLookup,
@@ -1528,6 +1534,11 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "worldline preparation create", method: http.MethodPost, match: matchProjectSuffixPath("worldlines/preparations")},
 	{name: "character interaction create", method: http.MethodPost, match: matchProjectSuffixPath("character-interactions")},
 	{name: "writer run start", method: http.MethodPost, match: matchProjectSuffixPath("writer-runs")},
+	{name: "writer threads list", method: http.MethodGet, match: matchProjectSuffixPath("writer-threads")},
+	{name: "writer thread ensure", method: http.MethodPost, match: matchProjectSuffixPath("writer-threads")},
+	{name: "writer thread messages", method: http.MethodGet, match: hasWriterThreadMessagesPathShape},
+	{name: "writer thread message append", method: http.MethodPost, match: hasWriterThreadMessagesPathShape},
+	{name: "writer approval decide", method: http.MethodPost, match: hasWriterApprovalDecisionPathShape},
 	{name: "hello agent start", method: http.MethodPost, match: matchProjectSuffixPath("agent-runtime/hello-runs")},
 	{name: "asset create", method: http.MethodPost, match: matchProjectSuffixPath("assets")},
 	{name: "asset ingestion start", method: http.MethodPost, match: matchProjectSuffixPath("asset-ingestions")},
@@ -1731,7 +1742,7 @@ func isManuscriptWorkspaceRoute(method string, path string) bool {
 	}
 	switch parts[4] {
 	case "blocks":
-		return (len(parts) == 5 && method == http.MethodGet) ||
+		return (len(parts) == 5 && (method == http.MethodGet || method == http.MethodPost)) ||
 			(len(parts) == 6 && parts[5] == "reorder" && method == http.MethodPost) ||
 			(len(parts) == 6 && (method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete)) ||
 			(len(parts) == 7 && parts[6] == "move" && method == http.MethodPost) ||
@@ -2045,6 +2056,16 @@ func isWriterRunCancelPath(path string) bool {
 	return writerRunCancelPathPart(path) != ""
 }
 
+func hasWriterThreadMessagesPathShape(path string) bool {
+	projectID, threadID := writerThreadMessagesPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(threadID)
+}
+
+func hasWriterApprovalDecisionPathShape(path string) bool {
+	projectID, approvalID := writerApprovalDecisionPathParts(path)
+	return isSinglePathSegment(projectID) && isSinglePathSegment(approvalID)
+}
+
 func isWorkflowRunCancelPath(path string) bool {
 	return workflowRunCancelPathPart(path) != ""
 }
@@ -2263,6 +2284,16 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleGetCharacterInteraction(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/writer-runs"):
 		s.handleStartWriterRun(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/writer-threads"):
+		s.handleListWriterThreads(response, request)
+	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/writer-threads"):
+		s.handleEnsureWriterThread(response, request)
+	case request.Method == http.MethodGet && hasWriterThreadMessagesPathShape(request.URL.Path):
+		s.handleListWriterThreadMessages(response, request)
+	case request.Method == http.MethodPost && hasWriterThreadMessagesPathShape(request.URL.Path):
+		s.handleAppendWriterThreadMessage(response, request)
+	case request.Method == http.MethodPost && hasWriterApprovalDecisionPathShape(request.URL.Path):
+		s.handleDecideWriterApproval(response, request)
 	case request.Method == http.MethodPost && isWriterRunCancelPath(request.URL.Path):
 		s.handleCancelWriterRun(response, request)
 	case request.Method == http.MethodPost && isDraftAdoptionPath(request.URL.Path):
@@ -3448,19 +3479,45 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid writer run payload", nil)
 		return
 	}
+	// CONN-016: Pi dual-stage always needs writer_orchestrator + writer_composer.
+	// Prefer explicit module_key as the primary resolution stored on the run, but
+	// fail closed if any required module binding is missing before Temporal admit.
 	moduleKey := moduleKeyFromOptions(payload.Options)
-	resolution, err := s.llmResolver.ResolveModuleBinding(request.Context(), llm.ResolveModuleInput{
-		TenantID:  tenantID,
-		ProjectID: projectID,
-		ModuleKey: moduleKey,
-	})
-	if err != nil {
-		writeLLMError(response, request, err)
-		return
+	requiredModules := requiredWriterRunModules(payload.Options)
+	var primaryResolution llm.ModuleResolution
+	for _, required := range requiredModules {
+		resolution, err := s.llmResolver.ResolveModuleBinding(request.Context(), llm.ResolveModuleInput{
+			TenantID:  tenantID,
+			ProjectID: projectID,
+			ModuleKey: required,
+		})
+		if err != nil {
+			writeLLMError(response, request, err)
+			return
+		}
+		if required == moduleKey || primaryResolution.ModuleKey == "" {
+			primaryResolution = resolution
+		}
 	}
 	options := sanitizeWorkflowOptions(payload.Options)
+	// Reject unknown review_after_write=true without a bound reviewer; when true, keep the flag
+	// so workers may start an independent writer_reviewer pass after prose is ready.
+	if reviewAfterWriteEnabled(options) {
+		if _, err := s.llmResolver.ResolveModuleBinding(request.Context(), llm.ResolveModuleInput{
+			TenantID:  tenantID,
+			ProjectID: projectID,
+			ModuleKey: "writer_reviewer",
+		}); err != nil {
+			writeLLMError(response, request, err)
+			return
+		}
+		options["review_after_write"] = true
+	} else {
+		delete(options, "review_after_write")
+	}
 	options["module_key"] = moduleKey
-	options["llm_resolution"] = workflowLLMResolution(resolution)
+	options["llm_resolution"] = workflowLLMResolution(primaryResolution)
+	options["required_module_keys"] = requiredModules
 	run, err := s.writerStarter.StartWriterRun(request.Context(), workflows.StartWriterRunInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
@@ -3468,6 +3525,8 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		RequestID:    requestID(request),
 		Mode:         strings.TrimSpace(payload.Mode),
 		Instruction:  strings.TrimSpace(payload.Instruction),
+		ChapterID:    strings.TrimSpace(payload.ChapterID),
+		SceneID:      strings.TrimSpace(payload.SceneID),
 		Options:      options,
 		WorkflowType: workflows.WriterWorkflowType,
 	})
@@ -3475,6 +3534,26 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		code := workflows.ErrorCode(err)
 		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
+	}
+	// Best-effort persistent thread append for the user instruction (CONN-009).
+	if s.writerThreadStore != nil && strings.TrimSpace(payload.Instruction) != "" {
+		if thread, ensureErr := s.writerThreadStore.EnsureThread(request.Context(), workflows.EnsureWriterThreadInput{
+			TenantID:  tenantID,
+			ProjectID: projectID,
+			ActorID:   s.actorUserID(request),
+			Title:     "Writer thread",
+		}); ensureErr == nil {
+			_, _ = s.writerThreadStore.AppendMessage(request.Context(), workflows.AppendWriterThreadMessageInput{
+				TenantID:  tenantID,
+				ProjectID: projectID,
+				ThreadID:  thread.ThreadID,
+				Role:      "user",
+				Body:      strings.TrimSpace(payload.Instruction),
+				RunID:     run.RunID,
+				ActorID:   s.actorUserID(request),
+				Metadata:  map[string]any{"mode": run.Mode},
+			})
+		}
 	}
 	writeJSON(response, http.StatusAccepted, startWriterRunResponse{
 		RunID:       run.RunID,
@@ -3484,6 +3563,200 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		Instruction: run.Instruction,
 		Status:      run.Status,
 	})
+}
+
+func (s *Server) handleListWriterThreads(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "writer-threads")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
+		return
+	}
+	if s.writerThreadStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WORKFLOW_BACKEND_UNCONFIGURED", "writer thread store is not configured", nil)
+		return
+	}
+	threads, err := s.writerThreadStore.ListThreads(request.Context(), workflows.ListWriterThreadsInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, writerThreadPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"threads": threads})
+}
+
+func (s *Server) handleEnsureWriterThread(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "writer-threads")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
+		return
+	}
+	if s.writerThreadStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WORKFLOW_BACKEND_UNCONFIGURED", "writer thread store is not configured", nil)
+		return
+	}
+	var payload struct {
+		Title string `json:"title"`
+	}
+	if request.Body != nil && request.ContentLength != 0 {
+		decoder := json.NewDecoder(request.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+			writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid writer thread payload", nil)
+			return
+		}
+	}
+	thread, err := s.writerThreadStore.EnsureThread(request.Context(), workflows.EnsureWriterThreadInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		ActorID:   s.actorUserID(request),
+		Title:     strings.TrimSpace(payload.Title),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, writerThreadPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, thread)
+}
+
+func (s *Server) handleListWriterThreadMessages(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID, threadID := writerThreadMessagesPathParts(request.URL.Path)
+	if projectID == "" || threadID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer thread messages route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
+		return
+	}
+	if s.writerThreadStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WORKFLOW_BACKEND_UNCONFIGURED", "writer thread store is not configured", nil)
+		return
+	}
+	messages, err := s.writerThreadStore.ListMessages(request.Context(), workflows.ListWriterThreadMessagesInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		ThreadID:  threadID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, writerThreadPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"messages": messages})
+}
+
+func (s *Server) handleAppendWriterThreadMessage(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID, threadID := writerThreadMessagesPathParts(request.URL.Path)
+	if projectID == "" || threadID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer thread messages route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
+		return
+	}
+	if s.writerThreadStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WORKFLOW_BACKEND_UNCONFIGURED", "writer thread store is not configured", nil)
+		return
+	}
+	var payload struct {
+		Role     string         `json:"role"`
+		Body     string         `json:"body"`
+		RunID    string         `json:"run_id"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid writer thread message payload", nil)
+		return
+	}
+	message, err := s.writerThreadStore.AppendMessage(request.Context(), workflows.AppendWriterThreadMessageInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		ThreadID:  threadID,
+		Role:      strings.TrimSpace(payload.Role),
+		Body:      strings.TrimSpace(payload.Body),
+		RunID:     strings.TrimSpace(payload.RunID),
+		ActorID:   s.actorUserID(request),
+		Metadata:  sanitizeWorkflowOptions(payload.Metadata),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, writerThreadPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusCreated, message)
+}
+
+func (s *Server) handleDecideWriterApproval(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID, approvalID := writerApprovalDecisionPathParts(request.URL.Path)
+	if projectID == "" || approvalID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer approval route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
+		return
+	}
+	if s.writerThreadStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WORKFLOW_BACKEND_UNCONFIGURED", "writer thread store is not configured", nil)
+		return
+	}
+	var payload struct {
+		Decision string `json:"decision"`
+	}
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid writer approval payload", nil)
+		return
+	}
+	approval, err := s.writerThreadStore.DecideApproval(request.Context(), workflows.DecideWriterApprovalInput{
+		TenantID:    tenantID,
+		ProjectID:   projectID,
+		ApprovalID:  approvalID,
+		Decision:    strings.TrimSpace(payload.Decision),
+		ActorUserID: s.actorUserID(request),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, writerThreadPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, approval)
 }
 
 func (s *Server) handleStartSeedRun(response http.ResponseWriter, request *http.Request) {
@@ -6933,6 +7206,8 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "draft adoption scene override is not supported", nil)
 		return
 	}
+	// CONN-004/005: durable outbox is inserted inside AdoptDraft's transaction via OutboxHook.
+	// Temporal dispatch is recovered by the outbox dispatcher after commit.
 	adoption, err := s.draftAdoptionStore.AdoptDraft(request.Context(), workflows.DraftAdoptionInput{
 		TenantID:    tenantID,
 		DraftID:     draftID,
@@ -6945,17 +7220,6 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 		code := workflows.ErrorCode(err)
 		writeError(response, request, statusForWorkflowError(err), code, publicDraftAdoptionErrorMessage(code), nil)
 		return
-	}
-	if s.distillationEnqueuer != nil && strings.TrimSpace(adoption.ProjectID) != "" && strings.TrimSpace(adoption.BlockID) != "" {
-		_ = s.distillationEnqueuer.EnqueueAfterAdoption(request.Context(), DistillationEnqueueInput{
-			TenantID:    tenantID,
-			ProjectID:   adoption.ProjectID,
-			ActorUserID: s.actorUserID(request),
-			RequestID:   requestID(request),
-			BlockID:     adoption.BlockID,
-			ChapterID:   adoption.ChapterID,
-			SceneID:     adoption.SceneID,
-		})
 	}
 	writeJSON(response, http.StatusAccepted, adoption)
 }
@@ -7312,6 +7576,32 @@ func projectIDFromPathWithSuffix(path string, expectedSuffix string) string {
 		return ""
 	}
 	return strings.TrimSpace(projectID)
+}
+
+func writerThreadMessagesPathParts(path string) (string, string) {
+	remainder := strings.TrimPrefix(path, "/v1/projects/")
+	projectID, suffix, ok := strings.Cut(remainder, "/writer-threads/")
+	if !ok {
+		return "", ""
+	}
+	threadID, tail, ok := strings.Cut(suffix, "/")
+	if !ok || tail != "messages" {
+		return "", ""
+	}
+	return strings.TrimSpace(projectID), strings.TrimSpace(threadID)
+}
+
+func writerApprovalDecisionPathParts(path string) (string, string) {
+	remainder := strings.TrimPrefix(path, "/v1/projects/")
+	projectID, suffix, ok := strings.Cut(remainder, "/writer-approvals/")
+	if !ok {
+		return "", ""
+	}
+	approvalID, tail, ok := strings.Cut(suffix, "/")
+	if !ok || tail != "decision" {
+		return "", ""
+	}
+	return strings.TrimSpace(projectID), strings.TrimSpace(approvalID)
 }
 
 func storyGraphPathParts(path string, kind string) (string, string) {
@@ -8324,6 +8614,52 @@ func moduleKeyFromOptions(options map[string]any) string {
 	return moduleKey
 }
 
+// requiredWriterRunModules returns LLM modules that must be bound before Pi dual-stage
+// writer admission. Pi always runs writer_orchestrator then writer_composer.
+func requiredWriterRunModules(options map[string]any) []string {
+	primary := moduleKeyFromOptions(options)
+	required := []string{"writer_orchestrator", "writer_composer"}
+	seen := map[string]struct{}{"writer_orchestrator": {}, "writer_composer": {}}
+	if _, ok := seen[primary]; !ok && primary != "" {
+		required = append(required, primary)
+	}
+	return required
+}
+
+func reviewAfterWriteEnabled(options map[string]any) bool {
+	if options == nil {
+		return false
+	}
+	switch value := options["review_after_write"].(type) {
+	case bool:
+		return value
+	case string:
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
+	case float64:
+		return value != 0
+	default:
+		return false
+	}
+}
+
+func writerThreadPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "invalid writer thread request"
+	case "NOT_FOUND", "WRITER_APPROVAL_NOT_FOUND":
+		return "writer thread resource not found"
+	case "WORKFLOW_BACKEND_UNCONFIGURED":
+		return "writer thread backend is not configured"
+	case "WRITER_THREAD_QUERY_FAILED", "WRITER_THREAD_MUTATION_FAILED":
+		return "writer thread request failed"
+	case "WRITER_APPROVAL_MUTATION_FAILED":
+		return "writer approval request failed"
+	default:
+		return "writer thread request failed"
+	}
+}
+
 func cloneOptions(options map[string]any) map[string]any {
 	clone := map[string]any{}
 	for key, value := range options {
@@ -8431,6 +8767,8 @@ func workflowPublicErrorMessage(code string) string {
 		return "workflow event cursor not found"
 	case "WORKFLOW_BACKEND_UNCONFIGURED":
 		return "workflow backend is not configured"
+	case "IDEMPOTENCY_CONFLICT":
+		return "request_id was already used with a different writer run request"
 	case "WORKFLOW_RETRY_BACKEND_UNCONFIGURED":
 		return "workflow retry backend is not configured"
 	case "WORKFLOW_RETRY_NOT_ALLOWED":
@@ -8571,6 +8909,8 @@ func statusForAppCode(code string) int {
 	case "EVENT_CURSOR_NOT_FOUND":
 		return http.StatusBadRequest
 	case "NOT_FOUND":
+		return http.StatusNotFound
+	case "WRITER_APPROVAL_NOT_FOUND":
 		return http.StatusNotFound
 	case "LLM_CHANNEL_NOT_FOUND":
 		return http.StatusNotFound
@@ -9011,6 +9351,11 @@ func requestID(request *http.Request) string {
 	if headerID := strings.TrimSpace(request.Header.Get("X-Request-Id")); headerID != "" {
 		if safeRequestID(headerID) {
 			return headerID
+		}
+	}
+	if idempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key")); idempotencyKey != "" {
+		if safeRequestID(idempotencyKey) {
+			return idempotencyKey
 		}
 	}
 	return newRequestID()

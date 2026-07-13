@@ -76,7 +76,7 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
       buffer: sourceBytes,
     });
     await page.locator("#seed-mode").selectOption("full");
-    await page.getByRole("button", { name: /Upload and start Seed/i }).click();
+    await page.getByRole("button", { name: /Upload and start analysis/i }).click();
     const uploadedRun = await waitForNewBrowserSeedRun(api, config, existingRunIds);
     const runId = uploadedRun.run_id;
     const selectedRunUrl = new URL(overviewUrl(config));
@@ -128,8 +128,8 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
 
     let retryControlRunId = runId;
     const earlySelectedRunPanel = recentAnalysisPanel(page);
-    const earlyCancelButton = earlySelectedRunPanel.getByRole("button", { name: /^Cancel Seed run$/ });
-    const earlyRetryButton = earlySelectedRunPanel.getByRole("button", { name: /^Retry Seed run$/ });
+    const earlyCancelButton = earlySelectedRunPanel.getByRole("button", { name: /^Cancel analysis$/ });
+    const earlyRetryButton = earlySelectedRunPanel.getByRole("button", { name: /^Retry analysis$/ });
     await assertRunControlIdentity(earlySelectedRunPanel, runId);
     await earlyCancelButton.waitFor();
     await earlyRetryButton.waitFor();
@@ -329,8 +329,8 @@ browserSeedUploadTest("Browser Overview upload form can upload, complete, and st
     await assertRunControlIdentity(retrySelectedRunPanel, retryControlRunId);
     await assertSeedRunBrowserControlsReflectStatus(page, retrySelectedRunPanel, "retryable selected run");
 
-    const cancelButton = retrySelectedRunPanel.getByRole("button", { name: /^Cancel Seed run$/ });
-    const retryButton = retrySelectedRunPanel.getByRole("button", { name: /^Retry Seed run$/ });
+    const cancelButton = retrySelectedRunPanel.getByRole("button", { name: /^Cancel analysis$/ });
+    const retryButton = retrySelectedRunPanel.getByRole("button", { name: /^Retry analysis$/ });
     await cancelButton.waitFor();
     await retryButton.waitFor();
 
@@ -591,12 +591,12 @@ async function assertSeedRunBrowserControlsReflectStatus(page, selectedRunPanel,
   const status = ((await statusValue.textContent()) ?? "").trim().toLowerCase();
   assert.notEqual(status, "", `${label} did not render a status`);
   assert.equal(
-    await selectedRunPanel.getByRole("button", { name: /^Cancel Seed run$/ }).isEnabled(),
+    await selectedRunPanel.getByRole("button", { name: /^Cancel analysis$/ }).isEnabled(),
     status === "queued" || status === "running",
     `${label} cancel control did not match status`,
   );
   assert.equal(
-    await selectedRunPanel.getByRole("button", { name: /^Retry Seed run$/ }).isEnabled(),
+    await selectedRunPanel.getByRole("button", { name: /^Retry analysis$/ }).isEnabled(),
     status === "failed" || status === "cancelled",
     `${label} retry control did not match status`,
   );

@@ -79,7 +79,7 @@ journeyTest("Author journey covers signup, upload, handoffs, adoption and TXT ex
     const runsBefore = await api.getProjectSeedRuns(contextInput);
     assert.equal(runsBefore.ok, true);
     const existingRunIds = new Set(runsBefore.items.map((run) => run.run_id));
-    await page.getByRole("button", { name: /Upload and start Seed/i }).click();
+    await page.getByRole("button", { name: /Upload and start analysis/i }).click();
     const uploadedRun = await waitUntil(
       () => api.getProjectSeedRuns(contextInput),
       (result) => result.ok && result.items.some((run) => !existingRunIds.has(run.run_id)),
@@ -137,7 +137,7 @@ journeyTest("Author journey covers signup, upload, handoffs, adoption and TXT ex
     assert.equal(preparation.status, "completed");
     journeyStage("worldline preparation completed");
 
-    await page.getByRole("link", { name: "Enter Character Console" }).click();
+    await page.getByRole("link", { name: "Enter Characters" }).click();
     await page.waitForURL(/\/character-console/, { waitUntil: "domcontentloaded" });
     journeyStage("character console opened from worldline");
 

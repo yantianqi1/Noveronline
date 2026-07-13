@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, useTransition, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition, type SyntheticEvent } from "react";
 import {
   BookOpenText,
   Boxes,
@@ -42,12 +42,12 @@ const creativeNavItems = [
   { label: "Assets", zh: "资产库", path: "/assets", icon: Boxes },
   { label: "Story Graph", zh: "故事图谱", path: "/graph", icon: Network },
   { label: "Worldline", zh: "世界线", path: "/worldline", icon: GitBranch },
-  { label: "Character Console", zh: "角色控制", path: "/character-console", icon: UsersRound },
+  { label: "Characters", zh: "角色", path: "/character-console", icon: UsersRound },
   { label: "Writer", zh: "写作台", path: "/writer", icon: PenLine },
 ];
 
 const settingsNavItems = [
-  { label: "LLM Facility", zh: "LLM 设施", path: "/llm-facility", icon: Cpu },
+  { label: "Model settings", zh: "模型设置", path: "/llm-facility", icon: Cpu },
 ];
 
 const navItems = [...creativeNavItems, ...settingsNavItems];
@@ -81,6 +81,8 @@ export function ProjectNav({
 }: ProjectNavProps) {
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const navToggleRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
   const [optimisticHref, setOptimisticHref] = useState<string | null>(null);
   const [currentUserSessions, setCurrentUserSessions] = useState<CurrentUserSessionsSummary>();
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -128,6 +130,38 @@ export function ProjectNav({
     window.localStorage.setItem("mirofish-sidebar-collapsed", String(collapsed));
     document.documentElement.dataset.sidebarCollapsed = collapsed ? "true" : "false";
   }
+
+  const closeNavigation = useCallback(() => {
+    setNavigationOpen(false);
+    navToggleRef.current?.focus();
+  }, []);
+
+  // Mobile drawer: lock page scroll (via the root element), close on Escape,
+  // and move focus into the panel while it is open. Desktop never opens this
+  // state because the trigger is hidden at that breakpoint.
+  useEffect(() => {
+    if (!navigationOpen) {
+      return;
+    }
+    const root = document.documentElement;
+    const previousOverflow = root.style.overflow;
+    root.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeNavigation();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    const firstFocusable = drawerRef.current?.querySelector<HTMLElement>(
+      'a, button, [tabindex]:not([tabindex="-1"])',
+    );
+    firstFocusable?.focus();
+    return () => {
+      root.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [navigationOpen, closeNavigation]);
 
   useEffect(() => {
     if (!isNavigationPending) {
@@ -205,10 +239,12 @@ export function ProjectNav({
             {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" size={19} /> : <PanelLeftClose aria-hidden="true" size={19} />}
           </button>
           <button
+            aria-controls="project-nav-drawer"
             aria-expanded={navigationOpen}
             aria-label={navigationOpen ? "关闭导航 / Close navigation" : "打开导航 / Open navigation"}
             className="mobile-nav-toggle"
             onClick={() => setNavigationOpen((open) => !open)}
+            ref={navToggleRef}
             title={navigationOpen ? "关闭导航 / Close navigation" : "打开导航 / Open navigation"}
             type="button"
           >
@@ -217,7 +253,21 @@ export function ProjectNav({
         </div>
       </div>
 
-      <div className="sidebar-drawer" data-open={navigationOpen ? "true" : "false"}>
+      <button
+        aria-hidden="true"
+        className="sidebar-nav-backdrop"
+        data-open={navigationOpen ? "true" : "false"}
+        onClick={closeNavigation}
+        tabIndex={-1}
+        type="button"
+      />
+
+      <div
+        className="sidebar-drawer"
+        data-open={navigationOpen ? "true" : "false"}
+        id="project-nav-drawer"
+        ref={drawerRef}
+      >
         <section className="sidebar-section sidebar-primary-nav" aria-label="Project sections / 项目导航">
           <div className="project-context">
             <span className="project-context-icon" aria-hidden="true">

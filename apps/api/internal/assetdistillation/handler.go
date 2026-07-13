@@ -17,22 +17,32 @@ type Authorizer interface {
 	Authorize(context.Context, auth.AuthorizeInput) error
 }
 
+// GraphRebuildStarter starts an incremental story_graph_build after accepted projection.
+type GraphRebuildStarter interface {
+	StartAfterAssetAccept(ctx context.Context, tenantID, projectID, actorUserID, requestID, acceptedAssetID string) error
+}
+
 type HandlerConfig struct {
-	Store      Store
-	Starter    Starter
-	Actors     ActorResolver
-	Authorizer Authorizer
+	Store        Store
+	Starter      Starter
+	Actors       ActorResolver
+	Authorizer   Authorizer
+	GraphRebuild GraphRebuildStarter
 }
 
 type Handler struct {
-	store      Store
-	starter    Starter
-	actors     ActorResolver
-	authorizer Authorizer
+	store        Store
+	starter      Starter
+	actors       ActorResolver
+	authorizer   Authorizer
+	graphRebuild GraphRebuildStarter
 }
 
 func NewHandler(config HandlerConfig) *Handler {
-	return &Handler{store: config.Store, starter: config.Starter, actors: config.Actors, authorizer: config.Authorizer}
+	return &Handler{
+		store: config.Store, starter: config.Starter, actors: config.Actors,
+		authorizer: config.Authorizer, graphRebuild: config.GraphRebuild,
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +269,24 @@ func (h *Handler) handleDecision(w http.ResponseWriter, r *http.Request, candida
 	if err != nil {
 		writeErr(w, r, err)
 		return
+	}
+	// CONN-003: after accepted projection, rebuild story_graph snapshots so Graph UI sees new nodes/edges.
+	if h.graphRebuild != nil && result.ReviewStatus == "accepted" && strings.TrimSpace(result.AcceptedAssetID) != "" {
+		rebuildErr := h.graphRebuild.StartAfterAssetAccept(
+			r.Context(), scope.TenantID, scope.ProjectID, scope.ActorUserID, scope.RequestID, result.AcceptedAssetID,
+		)
+		if rebuildErr != nil {
+			// Keep accept success; surface rebuild failure on the decision payload for operator visibility.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"candidate_asset_id":      result.CandidateAssetID,
+				"review_status":           result.ReviewStatus,
+				"accepted_asset_id":       result.AcceptedAssetID,
+				"replay":                  result.Replay,
+				"story_graph_rebuild_error": ErrorCode(rebuildErr),
+				"story_graph_rebuild_detail": "asset accepted but story graph rebuild failed to start",
+			})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }

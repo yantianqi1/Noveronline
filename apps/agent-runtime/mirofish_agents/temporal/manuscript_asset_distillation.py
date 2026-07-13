@@ -41,6 +41,13 @@ SUPPORTED_TYPES = {
     "plot_thread",
     "terminology",
 }
+# Token-aware long-chapter windowing (CONN-011 / W13).
+# Estimate ~4 characters per token; target windows of ~6-8k tokens.
+CHARS_PER_TOKEN = 4
+WINDOW_TOKEN_TARGET = 7000
+WINDOW_TOKEN_MAX = 8000
+WINDOW_CHAR_TARGET = WINDOW_TOKEN_TARGET * CHARS_PER_TOKEN
+WINDOW_CHAR_MAX = WINDOW_TOKEN_MAX * CHARS_PER_TOKEN
 
 
 def _ctx(payload: dict[str, Any]) -> AgentContext:
@@ -87,6 +94,11 @@ class PostgresManuscriptAssetDistillationStore:
                 sources = list(manifest.get("sources") or [])
                 if not sources:
                     raise LLMFacilityError("DISTILLATION_SOURCE_EMPTY", "distillation source manifest is empty")
+                settings_types = self._load_enabled_asset_types(cur, context=context)
+                manifest_types = manifest.get("enabled_asset_types")
+                enabled_asset_types = resolve_enabled_asset_types(
+                    manifest_types if isinstance(manifest_types, list) else settings_types
+                )
                 validated: list[dict[str, Any]] = []
                 for source in sources:
                     block_id = str(source["block_id"])
@@ -104,14 +116,12 @@ class PostgresManuscriptAssetDistillationStore:
                     block = cur.fetchone()
                     if block is None:
                         raise LLMFacilityError("DISTILLATION_SOURCE_NOT_FOUND", "manuscript block was not found")
-                    content, version, status, chapter_id, scene_id, source_draft = block
+                    content, version, status, chapter_id, scene_id, _source_draft = block
                     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
                     if status != "active" or int(version) != block_version or digest != content_sha:
                         self._complete_stale(cur, context, reason="source_version_drift")
                         conn.commit()
                         return {"stale": True, "source_count": len(sources), "candidate_count": 0}
-                    if not source_draft and trigger_kind != "manual":
-                        raise LLMFacilityError("DISTILLATION_SOURCE_NOT_ADOPTED", "automatic distillation requires adopted manuscript")
                     validated.append(
                         {
                             "block_id": block_id,
@@ -130,21 +140,54 @@ class PostgresManuscriptAssetDistillationStore:
                     "input_fingerprint": fingerprint,
                     "sources": validated,
                     "source_count": len(validated),
+                    "enabled_asset_types": enabled_asset_types,
                 }
 
-    def distill(self, *, context: AgentContext, validated: dict[str, Any], resolution: ModuleBindingResolution,
-                response: dict[str, Any]) -> dict[str, Any]:
-        candidates = validate_model_candidates(response, validated["sources"])
+    def _load_enabled_asset_types(self, cur: Any, *, context: AgentContext) -> list[str]:
+        cur.execute(
+            """
+            SELECT COALESCE(array_to_string(enabled_asset_types, ','), '')
+            FROM project_asset_distillation_settings
+            WHERE tenant_id=%s::uuid AND project_id=%s::uuid
+            """,
+            (context.tenant_id, context.project_id),
+        )
+        row = cur.fetchone()
+        if row is None or not row[0]:
+            return []
+        return [part.strip() for part in str(row[0]).split(",") if part.strip()]
+
+    def distill(
+        self,
+        *,
+        context: AgentContext,
+        validated: dict[str, Any],
+        resolution: ModuleBindingResolution,
+        response: dict[str, Any] | None = None,
+        candidates: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if candidates is None:
+            enabled = resolve_enabled_asset_types(validated.get("enabled_asset_types"))
+            candidates = validate_model_candidates(
+                response or {},
+                validated["sources"],
+                enabled_asset_types=enabled,
+            )
         with self._connect() as conn:
             set_postgres_tenant_context(conn, context=context)
             with conn.cursor() as cur:
                 # Load existing assets for identity resolution
                 cur.execute(
                     """
-                    SELECT asset_id::text, asset_type, title, COALESCE(summary,''), lifecycle, enabled
-                    FROM assets
-                    WHERE tenant_id=%s::uuid AND project_id=%s::uuid
-                      AND lifecycle IN ('seed','canon','material') AND enabled=TRUE
+                    SELECT a.asset_id::text, a.asset_type, a.title, COALESCE(a.summary,''), a.lifecycle, a.enabled,
+                           COALESCE((
+                             SELECT max(v.version_number) + 1
+                             FROM asset_versions v
+                             WHERE v.tenant_id=a.tenant_id AND v.project_id=a.project_id AND v.asset_id=a.asset_id
+                           ), 1) AS next_version
+                    FROM assets a
+                    WHERE a.tenant_id=%s::uuid AND a.project_id=%s::uuid
+                      AND a.lifecycle IN ('seed','canon','material') AND a.enabled=TRUE
                     """,
                     (context.tenant_id, context.project_id),
                 )
@@ -156,6 +199,7 @@ class PostgresManuscriptAssetDistillationStore:
                         "summary": r[3],
                         "lifecycle": r[4],
                         "enabled": r[5],
+                        "expected_target_version": int(r[6] or 1),
                     }
                     for r in cur.fetchall()
                 ]
@@ -271,18 +315,7 @@ class PostgresManuscriptAssetDistillationStore:
         with self._connect() as conn:
             set_postgres_tenant_context(conn, context=context)
             with conn.cursor() as cur:
-                # Promote staging create/update to pending; supersede older pending same identity
-                cur.execute(
-                    """
-                    UPDATE asset_candidate_proposals p
-                    SET review_status='pending', updated_at=now()
-                    FROM manuscript_asset_distillation_requests r
-                    WHERE p.tenant_id=r.tenant_id AND p.request_id=r.request_id
-                      AND r.tenant_id=%s::uuid AND r.project_id=%s::uuid AND r.run_id=%s::uuid
-                      AND p.review_status='staging'
-                    """,
-                    (context.tenant_id, context.project_id, context.run_id),
-                )
+                # Supersede older pending identities before promoting this run's staging batch.
                 cur.execute(
                     """
                     UPDATE asset_candidate_proposals older
@@ -295,9 +328,38 @@ class PostgresManuscriptAssetDistillationStore:
                       AND newer.tenant_id=older.tenant_id AND newer.project_id=older.project_id
                       AND newer.normalized_identity=older.normalized_identity
                       AND newer.candidate_asset_id<>older.candidate_asset_id
-                      AND newer.review_status='pending'
+                      AND newer.review_status='staging'
+                      AND r.run_id=%s::uuid
+                    """,
+                    (context.tenant_id, context.project_id, context.run_id),
+                )
+                # Deduplicate within this run: keep the newest staging row per identity.
+                cur.execute(
+                    """
+                    UPDATE asset_candidate_proposals older
+                    SET review_status='superseded', updated_at=now()
+                    FROM asset_candidate_proposals newer
+                    JOIN manuscript_asset_distillation_requests r
+                      ON r.tenant_id=newer.tenant_id AND r.request_id=newer.request_id
+                    WHERE older.tenant_id=%s::uuid AND older.project_id=%s::uuid
+                      AND older.review_status='staging'
+                      AND newer.tenant_id=older.tenant_id AND newer.project_id=older.project_id
+                      AND newer.normalized_identity=older.normalized_identity
+                      AND newer.candidate_asset_id<>older.candidate_asset_id
+                      AND newer.review_status='staging'
                       AND r.run_id=%s::uuid
                       AND older.created_at < newer.created_at
+                    """,
+                    (context.tenant_id, context.project_id, context.run_id),
+                )
+                cur.execute(
+                    """
+                    UPDATE asset_candidate_proposals p
+                    SET review_status='pending', updated_at=now()
+                    FROM manuscript_asset_distillation_requests r
+                    WHERE p.tenant_id=r.tenant_id AND p.request_id=r.request_id
+                      AND r.tenant_id=%s::uuid AND r.project_id=%s::uuid AND r.run_id=%s::uuid
+                      AND p.review_status='staging'
                     """,
                     (context.tenant_id, context.project_id, context.run_id),
                 )
@@ -413,24 +475,275 @@ def resolve_identity(candidate: dict[str, Any], existing: list[dict[str, Any]]) 
         if asset_identity == identity or asset["title"].strip().lower() == candidate["title"].strip().lower() and asset["asset_type"] == candidate["asset_type"]:
             hits.append(asset)
     if len(hits) == 1:
-        return {"operation": "update", "target_asset_id": hits[0]["asset_id"], "expected_target_version": 1}
+        return {
+            "operation": "update",
+            "target_asset_id": hits[0]["asset_id"],
+            "expected_target_version": int(hits[0].get("expected_target_version") or 1),
+        }
     if len(hits) > 1:
         return {"operation": "conflict"}
     return {"operation": "create"}
 
 
-def validate_model_candidates(response: dict[str, Any], sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def resolve_enabled_asset_types(raw: Any) -> list[str]:
+    """Empty list means full supported set (product: empty != disable all)."""
+    if raw is None:
+        return sorted(SUPPORTED_TYPES)
+    if not isinstance(raw, list):
+        return sorted(SUPPORTED_TYPES)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        asset_type = str(item or "").strip()
+        if not asset_type or asset_type not in SUPPORTED_TYPES or asset_type in seen:
+            continue
+        seen.add(asset_type)
+        cleaned.append(asset_type)
+    if not cleaned:
+        return sorted(SUPPORTED_TYPES)
+    return cleaned
+
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN)
+
+
+def _split_long_text(text: str, *, max_chars: int = WINDOW_CHAR_MAX) -> list[tuple[int, int, str]]:
+    """Split one block body into char spans that fit the window budget."""
+    if len(text) <= max_chars:
+        return [(0, len(text), text)]
+    spans: list[tuple[int, int, str]] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            # Prefer paragraph / sentence boundaries inside the last 25% of the window.
+            search_from = start + max(1, int(max_chars * 0.75))
+            boundary = -1
+            for sep in ("\n\n", "\n", "。", "！", "？", ". ", "! ", "? "):
+                idx = text.rfind(sep, search_from, end)
+                if idx >= search_from:
+                    boundary = max(boundary, idx + len(sep))
+            if boundary > start:
+                end = boundary
+        chunk = text[start:end]
+        if not chunk:
+            # Hard advance on pathological input to avoid infinite loop.
+            end = min(start + max_chars, n)
+            chunk = text[start:end]
+        spans.append((start, end, chunk))
+        start = end
+    return spans
+
+
+def build_source_windows(
+    sources: list[dict[str, Any]],
+    *,
+    target_chars: int = WINDOW_CHAR_TARGET,
+    max_chars: int = WINDOW_CHAR_MAX,
+) -> list[list[dict[str, Any]]]:
+    """
+    Token-aware sequential windows over source blocks.
+
+    Each window item is a source slice with:
+      - content_text: slice text sent to the model
+      - base_offset: char offset into the original block (for evidence remap)
+      - full content retained on the original source for validation against full text
+    """
+    if not sources:
+        return []
+    # Pre-split oversized single blocks so no unit exceeds max_chars.
+    units: list[dict[str, Any]] = []
+    for source in sources:
+        text = str(source.get("content_text") or "")
+        for start, end, chunk in _split_long_text(text, max_chars=max_chars):
+            units.append(
+                {
+                    "block_id": source["block_id"],
+                    "block_version": source["block_version"],
+                    "content_sha256": source["content_sha256"],
+                    "content_text": chunk,
+                    "base_offset": start,
+                    "chapter_id": source.get("chapter_id"),
+                    "scene_id": source.get("scene_id"),
+                    # Keep full original text for evidence validation against real offsets.
+                    "_full_content_text": text,
+                }
+            )
+
+    windows: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_chars = 0
+    for unit in units:
+        unit_chars = len(unit["content_text"])
+        # Overhead for block header in prompt.
+        header_overhead = 80
+        projected = current_chars + unit_chars + header_overhead
+        if current and projected > target_chars:
+            windows.append(current)
+            current = []
+            current_chars = 0
+        # A single unit may still exceed target but is always <= max_chars.
+        current.append(unit)
+        current_chars += unit_chars + header_overhead
+        if current_chars >= max_chars:
+            windows.append(current)
+            current = []
+            current_chars = 0
+    if current:
+        windows.append(current)
+    return windows
+
+
+def core_identity_key(asset_type: str, title: str) -> str:
+    """Stable cross-window merge key (type + title); hints are unioned, not part of the key."""
+    return normalize_identity(asset_type, title, [])
+
+
+def merge_candidates_by_identity(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge multi-window candidates that share a normalized type+title identity."""
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        identity = core_identity_key(candidate["asset_type"], candidate["title"])
+        existing = merged.get(identity)
+        if existing is None:
+            copy = {
+                **candidate,
+                "identity_hints": list(candidate.get("identity_hints") or []),
+                "tags": list(candidate.get("tags") or []),
+                "payload": dict(candidate.get("payload") or {}),
+                "evidence": list(candidate.get("evidence") or []),
+            }
+            merged[identity] = copy
+            order.append(identity)
+            continue
+        # Prefer longer non-empty summary; keep highest confidence; union hints/tags/evidence.
+        new_summary = str(candidate.get("summary") or "")
+        if len(new_summary) > len(str(existing.get("summary") or "")):
+            existing["summary"] = new_summary
+        conf_a = existing.get("confidence")
+        conf_b = candidate.get("confidence")
+        if conf_b is not None and (conf_a is None or float(conf_b) > float(conf_a)):
+            existing["confidence"] = conf_b
+        hints = list(existing.get("identity_hints") or [])
+        for hint in candidate.get("identity_hints") or []:
+            if hint not in hints:
+                hints.append(hint)
+        existing["identity_hints"] = hints
+        tags = list(existing.get("tags") or [])
+        for tag in candidate.get("tags") or []:
+            if tag not in tags:
+                tags.append(tag)
+        existing["tags"] = tags
+        payload = dict(existing.get("payload") or {})
+        payload.update(dict(candidate.get("payload") or {}))
+        existing["payload"] = payload
+        evidence = list(existing.get("evidence") or [])
+        seen_ev = {
+            (
+                e.get("block_id"),
+                e.get("start_offset"),
+                e.get("end_offset"),
+                e.get("quote"),
+            )
+            for e in evidence
+        }
+        for ev in candidate.get("evidence") or []:
+            key = (ev.get("block_id"), ev.get("start_offset"), ev.get("end_offset"), ev.get("quote"))
+            if key in seen_ev:
+                continue
+            seen_ev.add(key)
+            evidence.append(ev)
+        existing["evidence"] = evidence
+    return [merged[key] for key in order]
+
+
+def _evidence_units_for_block(sources: list[dict[str, Any]], block_id: str) -> list[dict[str, Any]]:
+    """Return source units for a block; window slices keep base_offset + full text."""
+    units = [s for s in sources if str(s.get("block_id")) == block_id]
+    return units
+
+
+def _validate_evidence_quote(
+    *,
+    units: list[dict[str, Any]],
+    quote: str,
+    start: int,
+    end: int,
+    remap_window_offsets: bool,
+) -> dict[str, Any] | None:
+    if not units:
+        return None
+    # Prefer validating against the unit whose local slice matches offsets/quote.
+    for unit in units:
+        full_text = str(unit.get("_full_content_text") or unit.get("content_text") or "")
+        slice_text = str(unit.get("content_text") or "")
+        base = int(unit.get("base_offset") or 0) if remap_window_offsets else 0
+        # Local / absolute exact span match on the text the model saw.
+        check_text = slice_text if remap_window_offsets else full_text
+        if start >= 0 and end > start and end <= len(check_text) and check_text[start:end] == quote:
+            abs_start = start + base if remap_window_offsets else start
+            abs_end = end + base if remap_window_offsets else end
+            if full_text[abs_start:abs_end] == quote:
+                return {
+                    "block_id": str(unit["block_id"]),
+                    "block_version": unit["block_version"],
+                    "content_sha256": unit["content_sha256"],
+                    "start_offset": abs_start,
+                    "end_offset": abs_end,
+                    "quote": quote,
+                }
+        # Unique quote within the unit the model saw (window) or full block.
+        if quote and check_text.count(quote) == 1:
+            idx = check_text.index(quote)
+            abs_start = idx + base if remap_window_offsets else idx
+            abs_end = abs_start + len(quote)
+            if full_text[abs_start:abs_end] == quote:
+                return {
+                    "block_id": str(unit["block_id"]),
+                    "block_version": unit["block_version"],
+                    "content_sha256": unit["content_sha256"],
+                    "start_offset": abs_start,
+                    "end_offset": abs_end,
+                    "quote": quote,
+                }
+    # Final fallback: unique quote on full block text (absolute offsets).
+    full_text = str(units[0].get("_full_content_text") or units[0].get("content_text") or "")
+    if quote and full_text.count(quote) == 1:
+        idx = full_text.index(quote)
+        return {
+            "block_id": str(units[0]["block_id"]),
+            "block_version": units[0]["block_version"],
+            "content_sha256": units[0]["content_sha256"],
+            "start_offset": idx,
+            "end_offset": idx + len(quote),
+            "quote": quote,
+        }
+    return None
+
+
+def validate_model_candidates(
+    response: dict[str, Any],
+    sources: list[dict[str, Any]],
+    *,
+    enabled_asset_types: list[str] | None = None,
+    remap_window_offsets: bool = False,
+) -> list[dict[str, Any]]:
     items = response.get("candidates")
     if not isinstance(items, list):
         raise LLMFacilityError("DISTILLATION_OUTPUT_INVALID", "distiller output candidates must be a list")
-    by_block = {s["block_id"]: s for s in sources}
+    allowed = set(resolve_enabled_asset_types(enabled_asset_types))
     out: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         asset_type = str(item.get("asset_type") or "").strip()
         title = str(item.get("title") or "").strip()
-        if asset_type not in SUPPORTED_TYPES or not title:
+        if asset_type not in SUPPORTED_TYPES or asset_type not in allowed or not title:
             continue
         evidence_in = item.get("evidence") or []
         if not isinstance(evidence_in, list):
@@ -440,8 +753,8 @@ def validate_model_candidates(response: dict[str, Any], sources: list[dict[str, 
             if not isinstance(ev, dict):
                 continue
             block_id = str(ev.get("block_id") or "")
-            source = by_block.get(block_id)
-            if source is None:
+            units = _evidence_units_for_block(sources, block_id)
+            if not units:
                 continue
             quote = str(ev.get("quote") or "")
             try:
@@ -449,32 +762,15 @@ def validate_model_candidates(response: dict[str, Any], sources: list[dict[str, 
                 end = int(ev.get("end_offset"))
             except (TypeError, ValueError):
                 start, end = -1, -1
-            text = source["content_text"]
-            if start >= 0 and end > start and end <= len(text) and text[start:end] == quote:
-                valid_evidence.append(
-                    {
-                        "block_id": block_id,
-                        "block_version": source["block_version"],
-                        "content_sha256": source["content_sha256"],
-                        "start_offset": start,
-                        "end_offset": end,
-                        "quote": quote,
-                    }
-                )
-                continue
-            # exact unique quote lookup fallback
-            if quote and text.count(quote) == 1:
-                idx = text.index(quote)
-                valid_evidence.append(
-                    {
-                        "block_id": block_id,
-                        "block_version": source["block_version"],
-                        "content_sha256": source["content_sha256"],
-                        "start_offset": idx,
-                        "end_offset": idx + len(quote),
-                        "quote": quote,
-                    }
-                )
+            resolved = _validate_evidence_quote(
+                units=units,
+                quote=quote,
+                start=start,
+                end=end,
+                remap_window_offsets=remap_window_offsets,
+            )
+            if resolved is not None:
+                valid_evidence.append(resolved)
         if not valid_evidence:
             continue
         conf = item.get("confidence")
@@ -499,22 +795,33 @@ def validate_model_candidates(response: dict[str, Any], sources: list[dict[str, 
     return out
 
 
-def _messages(sources: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _messages(
+    sources: list[dict[str, Any]],
+    *,
+    enabled_asset_types: list[str] | None = None,
+) -> list[dict[str, str]]:
+    allowed = resolve_enabled_asset_types(enabled_asset_types)
     parts = []
     for source in sources:
-        parts.append(
-            f"[block_id={source['block_id']} version={source['block_version']}]\n{source['content_text']}"
-        )
+        header = f"[block_id={source['block_id']} version={source['block_version']}"
+        base = source.get("base_offset")
+        if base is not None and int(base) > 0:
+            header += f" base_offset={int(base)}"
+        header += f"]\n{source['content_text']}"
+        parts.append(header)
     body = "\n\n".join(parts)
     return [
         {
             "role": "system",
             "content": (
-                "You extract structured story assets from adopted manuscript text. "
+                "You extract structured story assets from active manuscript text. "
                 "Return JSON object {\"candidates\":[...]}. Each candidate needs asset_type, title, summary, "
                 "identity_hints, confidence, and evidence with block_id, start_offset, end_offset, quote. "
                 "Evidence quote must be an exact substring of the provided block text. "
-                f"Supported asset_type values: {', '.join(sorted(SUPPORTED_TYPES))}."
+                "start_offset/end_offset are relative to the provided block text segment only "
+                "(not the full original chapter when base_offset is present). "
+                f"Only extract these asset_type values: {', '.join(allowed)}. "
+                "Do not invent asset types outside this list."
             ),
         },
         {"role": "user", "content": body},
@@ -547,15 +854,43 @@ class LLMFacilityManuscriptAssetDistiller:
             api_key = self._credential_provider.resolve_api_key(
                 context=context, credential_ref=resolution.credential_ref
             )
-            response = self._chat_client.complete_json(
-                context=context,
-                resolution=resolution,
-                api_key=api_key,
-                messages=_messages(validated["sources"]),
+            enabled = resolve_enabled_asset_types(validated.get("enabled_asset_types"))
+            validated = {**validated, "enabled_asset_types": enabled}
+            windows = build_source_windows(validated["sources"])
+            aggregated: list[dict[str, Any]] = []
+            for window in windows:
+                response = self._chat_client.complete_json(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    messages=_messages(window, enabled_asset_types=enabled),
+                )
+                window_candidates = validate_model_candidates(
+                    response,
+                    window,
+                    enabled_asset_types=enabled,
+                    remap_window_offsets=True,
+                )
+                aggregated.extend(window_candidates)
+            merged = merge_candidates_by_identity(aggregated)
+            # Final pass: re-validate evidence against full source text and filter types.
+            merged = validate_model_candidates(
+                {"candidates": merged},
+                validated["sources"],
+                enabled_asset_types=enabled,
+                remap_window_offsets=False,
             )
             distilled = self._store.distill(
-                context=context, validated=validated, resolution=resolution, response=response
+                context=context,
+                validated=validated,
+                resolution=resolution,
+                candidates=merged,
             )
+            distilled = {
+                **distilled,
+                "window_count": len(windows),
+                "enabled_asset_types": enabled,
+            }
             return self._store.finalize(context=context, result=distilled, resolution=resolution)
         except Exception as exc:
             code, message = _stable_error(exc)

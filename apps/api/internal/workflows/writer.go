@@ -25,6 +25,8 @@ type StartWriterRunInput struct {
 	RequestID    string
 	Mode         string
 	Instruction  string
+	ChapterID    string
+	SceneID      string
 	Options      map[string]any
 	WorkflowType string
 }
@@ -223,11 +225,40 @@ type ManuscriptReader interface {
 }
 
 type WriterAdmissionStore interface {
-	AdmitWriterRun(context.Context, WriterAdmissionInput) error
+	// AdmitWriterRun persists a new writer run or replays an existing one for the same
+	// tenant/project/request_id. The bool is true when an existing admission was replayed.
+	AdmitWriterRun(context.Context, WriterAdmissionInput) (WriterRun, bool, error)
+	// CompensateWriterRunStart marks a queued admission as failed after Temporal start fails.
+	CompensateWriterRunStart(context.Context, WriterCompensationInput) error
+}
+
+type WriterCompensationInput struct {
+	TenantID    string
+	ProjectID   string
+	RunID       string
+	ActorUserID string
+	RequestID   string
+	TraceID     string
 }
 
 type WriterCancellationStore interface {
 	CancelWriterRun(context.Context, WriterCancellationInput) error
+}
+
+// FailClosedWriterStarter rejects real writer starts when Temporal is not configured.
+// Used when DATABASE_URL is set but TEMPORAL_ADDRESS is missing (unless explicitly
+// overridden with ALLOW_LOCAL_WRITER_STARTER=1).
+type FailClosedWriterStarter struct{}
+
+func NewFailClosedWriterStarter() *FailClosedWriterStarter {
+	return &FailClosedWriterStarter{}
+}
+
+func (s *FailClosedWriterStarter) StartWriterRun(_ context.Context, _ StartWriterRunInput) (WriterRun, error) {
+	return WriterRun{}, &AppError{
+		Code:    "WORKFLOW_BACKEND_UNCONFIGURED",
+		Message: "Temporal workflow backend is not configured for writer_run",
+	}
 }
 
 type WriterStore interface {
@@ -525,21 +556,26 @@ func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartW
 		}
 	}
 	traceID := traceIDForRun(runID)
-	payload := map[string]any{
-		"tenant_id":     input.TenantID,
-		"project_id":    input.ProjectID,
-		"run_id":        runID,
-		"workflow_type": input.WorkflowType,
-		"requested_by":  strings.TrimSpace(input.ActorUserID),
-		"request_id":    strings.TrimSpace(input.RequestID),
-		"trace_id":      traceID,
-		"mode":          input.Mode,
-		"instruction":   input.Instruction,
-		"options":       input.Options,
+	chapterID := strings.TrimSpace(input.ChapterID)
+	sceneID := strings.TrimSpace(input.SceneID)
+	if chapterID == "" {
+		chapterID = stringOption(input.Options, "chapter_id", "target_chapter_id")
+	}
+	if sceneID == "" {
+		sceneID = stringOption(input.Options, "scene_id", "target_scene_id")
 	}
 	temporalWorkflowID := "writer_run_" + runID
+	run := WriterRun{
+		RunID:       runID,
+		TraceID:     traceID,
+		TenantID:    input.TenantID,
+		ProjectID:   input.ProjectID,
+		Mode:        strings.TrimSpace(input.Mode),
+		Instruction: strings.TrimSpace(input.Instruction),
+		Status:      "queued",
+	}
 	if s.admissionStore != nil {
-		err = s.admissionStore.AdmitWriterRun(ctx, WriterAdmissionInput{
+		admitted, replayed, admitErr := s.admissionStore.AdmitWriterRun(ctx, WriterAdmissionInput{
 			TenantID:           input.TenantID,
 			ProjectID:          input.ProjectID,
 			RunID:              runID,
@@ -552,14 +588,47 @@ func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartW
 			Status:             "queued",
 			ModuleKey:          moduleKeyFromWriterOptions(input.Options),
 			Instruction:        input.Instruction,
+			ChapterID:          chapterID,
+			SceneID:            sceneID,
 			Options:            input.Options,
 		})
-		if err != nil {
+		if admitErr != nil {
+			if code := ErrorCode(admitErr); code == "IDEMPOTENCY_CONFLICT" || code == "VALIDATION_FAILED" {
+				return WriterRun{}, admitErr
+			}
 			return WriterRun{}, &AppError{
 				Code:    "WORKFLOW_ADMISSION_FAILED",
-				Message: fmt.Sprintf("failed to persist writer_run admission: %v", err),
+				Message: "failed to persist writer_run admission",
 			}
 		}
+		if replayed {
+			s.mu.Lock()
+			s.runs[admitted.RunID] = admitted
+			s.mu.Unlock()
+			return admitted, nil
+		}
+		run = admitted
+		if strings.TrimSpace(run.RunID) == "" {
+			run.RunID = runID
+		}
+		if strings.TrimSpace(run.TraceID) == "" {
+			run.TraceID = traceIDForRun(run.RunID)
+		}
+		temporalWorkflowID = "writer_run_" + run.RunID
+	}
+	payload := map[string]any{
+		"tenant_id":     input.TenantID,
+		"project_id":    input.ProjectID,
+		"run_id":        run.RunID,
+		"workflow_type": input.WorkflowType,
+		"requested_by":  strings.TrimSpace(input.ActorUserID),
+		"request_id":    strings.TrimSpace(input.RequestID),
+		"trace_id":      run.TraceID,
+		"mode":          input.Mode,
+		"instruction":   input.Instruction,
+		"chapter_id":    chapterID,
+		"scene_id":      sceneID,
+		"options":       input.Options,
 	}
 	_, err = s.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                       temporalWorkflowID,
@@ -568,22 +637,30 @@ func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartW
 		WorkflowRunTimeout:       6 * time.Hour,
 	}, PiWriterWorkflowName, payload)
 	if err != nil {
+		if s.admissionStore != nil {
+			compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if compensateErr := s.admissionStore.CompensateWriterRunStart(compensationCtx, WriterCompensationInput{
+				TenantID:    input.TenantID,
+				ProjectID:   input.ProjectID,
+				RunID:       run.RunID,
+				ActorUserID: strings.TrimSpace(input.ActorUserID),
+				RequestID:   strings.TrimSpace(input.RequestID),
+				TraceID:     run.TraceID,
+			}); compensateErr != nil {
+				return WriterRun{}, &AppError{
+					Code:    "WORKFLOW_FAILED",
+					Message: "failed to start writer_run workflow and compensation failed",
+				}
+			}
+		}
 		return WriterRun{}, &AppError{
 			Code:    "WORKFLOW_FAILED",
-			Message: fmt.Sprintf("failed to start writer_run workflow: %v", err),
+			Message: "failed to start writer_run workflow",
 		}
 	}
-	run := WriterRun{
-		RunID:       runID,
-		TraceID:     traceID,
-		TenantID:    input.TenantID,
-		ProjectID:   input.ProjectID,
-		Mode:        strings.TrimSpace(input.Mode),
-		Instruction: strings.TrimSpace(input.Instruction),
-		Status:      "queued",
-	}
 	s.mu.Lock()
-	s.runs[runID] = run
+	s.runs[run.RunID] = run
 	s.mu.Unlock()
 	return run, nil
 }
@@ -692,4 +769,24 @@ func newRunID() (string, error) {
 
 func traceIDForRun(runID string) string {
 	return "trace_" + strings.TrimPrefix(strings.TrimSpace(runID), "run_")
+}
+
+func stringOption(options map[string]any, keys ...string) string {
+	if options == nil {
+		return ""
+	}
+	for _, key := range keys {
+		value, ok := options[key]
+		if !ok {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
+		if trimmed := strings.TrimSpace(text); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

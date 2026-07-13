@@ -162,15 +162,15 @@ export function LLMFacilityShell({
     <div className="llm-facility-root">
       <WorkspaceHeader
         className="llm-facility-header"
-        eyebrow={<Bi zh="LLM 设施" en="LLM Facility" />}
+        description={<Bi zh="为项目各创作能力绑定渠道与模型。" en="Bind channels and models for each creative capability." />}
         icon={<Cpu size={22} strokeWidth={1.8} />}
         meta={(
           <>
-            <span className="status-pill"><Bi zh="项目绑定" en="Project bindings" />: {projectBindingCount}/{moduleCount || "—"}</span>
-            <span className="status-pill"><Bi zh="当前模块" en="Current module" />: {moduleLabel(locale, moduleKey, moduleKey)} · {statusLabel}</span>
+            <span className="status-pill"><Bi zh="已绑定" en="Bound" />: {projectBindingCount}/{moduleCount || "—"}</span>
+            <span className="status-pill">{moduleLabel(locale, moduleKey, moduleKey)} · {statusLabel}</span>
           </>
         )}
-        title={<Bi zh="LLM 设施" en="LLM Facility" />}
+        title={<Bi zh="模型设置" en="Model settings" />}
       />
 
       <div className="workbench-grid llm-facility-workbench">
@@ -180,7 +180,6 @@ export function LLMFacilityShell({
           aria-labelledby="module-binding-heading"
           data-surface="author"
         >
-          <p className="eyebrow"><Bi zh="模块绑定" en="Module binding" /></p>
           <h2 id="module-binding-heading"><Bi zh="配置项目模型" en="Configure project models" /></h2>
           {modules.ok && channels.ok ? (
             <LLMModuleBindingsPanel
@@ -296,8 +295,8 @@ export function LLMFacilityShell({
           <h2 id="models-heading"><Bi zh="渠道模型" en="Channel models" /></h2>
           <p className="form-hint">
             <Bi
-              zh="同步通常只带入模型 ID。配额预留需要 context_window 或绑定 max_tokens；可在此补齐上下文窗口、JSON/工具能力与计价。"
-              en="Sync usually imports model IDs only. Quota reservation needs context_window or binding max_tokens; set context window, JSON/tool capability, and pricing here."
+              zh="同步后请补齐上下文窗口与输出上限，便于配额预留。"
+              en="After sync, set context window and output limits for quota reservation."
             />
           </p>
           {modelStatus ? (
@@ -327,8 +326,8 @@ export function LLMFacilityShell({
             <h2 id="llm-author-only-heading"><Bi zh="模块绑定说明" en="Module binding guide" /></h2>
             <p className="form-hint">
               <Bi
-                zh="渠道、配额与调用记录仅工作区管理员可见。绑定修改需要工作区 owner/admin 权限。"
-                en="Channels, quotas, and call logs are visible to workspace admins only. Binding changes require workspace owner/admin."
+                zh="渠道与用量仅管理员可见；修改绑定需要工作区管理员权限。"
+                en="Channels and usage are admin-only; binding changes need workspace admin."
               />
             </p>
           </section>
@@ -691,7 +690,7 @@ function QuotaPolicyManagement({
       </form>
 
       {!policies.ok ? (
-        <p role="alert"><Bi zh="配额策略加载失败" en="Unable to load quota policies" /> ({policies.code}) <FailureText /></p>
+        <p role="alert"><Bi zh="配额策略加载失败" en="Unable to load quota policies" /> <FailureText /></p>
       ) : policies.items.length === 0 ? (
         <p><Bi zh="尚未配置配额策略，生产调用将关闭失败。" en="No quota policy is configured; production calls fail closed." /></p>
       ) : (
@@ -730,7 +729,7 @@ function quotaScopeLabel(locale: Locale, policy: LLMQuotaPolicyRecord) {
 
 function BillingUsageTable({ summary, locale }: { summary: LLMBillingUsageSummary; locale: Locale }) {
   if (!summary.ok) {
-    return <p role="alert"><Bi zh="计费汇总加载失败" en="Unable to load billing summary" /> ({summary.code}) <FailureText /></p>;
+    return <p role="alert"><Bi zh="计费汇总加载失败" en="Unable to load billing summary" /> <FailureText /></p>;
   }
   if (summary.items.length === 0) {
     return <p><Bi zh="尚无可汇总的成功调用。" en="No successful calls are available for aggregation." /></p>;
@@ -749,8 +748,8 @@ function BillingUsageTable({ summary, locale }: { summary: LLMBillingUsageSummar
         </tr></thead>
         <tbody>{summary.items.map((item) => (
           <tr key={`${item.project_id}-${item.module_key}-${item.model_id}`}>
-            <td>{item.project_id || "-"}</td>
-            <td>{item.module_key || "-"}</td>
+            <td title={item.project_id || ""}>{item.project_id ? `${item.project_id.slice(0, 8)}…` : "-"}</td>
+            <td title={item.module_key || ""}>{item.module_key ? moduleLabel(locale, item.module_key, item.module_key) : "-"}</td>
             <td>{item.model_id || "-"}</td>
             <td>{item.provider_calls}</td>
             <td>{item.tokens}</td>
@@ -773,7 +772,7 @@ function ModuleCatalogTable({ modules, locale }: { modules: LLMModulesSummary; l
   if (!modules.ok) {
     return (
       <p>
-        <Bi zh="模块加载失败" en="Unable to load modules" /> ({modules.code}) <FailureText />
+        <Bi zh="模块加载失败" en="Unable to load modules" /> <FailureText />
       </p>
     );
   }
@@ -796,8 +795,8 @@ function ModuleCatalogTable({ modules, locale }: { modules: LLMModulesSummary; l
           {modules.items.map((item) => (
             <tr key={item.module_key}>
               <td>{scopeLabel(locale, item.group)}</td>
-              <td>{item.module_key}</td>
-              <td>{moduleLabel(locale, item.module_key, item.label)}</td>
+              <td title={item.module_key}>{moduleLabel(locale, item.module_key, item.label)}</td>
+              <td>{item.label && item.label !== item.module_key ? item.label : "—"}</td>
             </tr>
           ))}
         </tbody>
@@ -818,7 +817,7 @@ function ChannelsTable({
   if (!channels.ok) {
     return (
       <p>
-        <Bi zh="渠道加载失败" en="Unable to load channels" /> ({channels.code}) <FailureText />
+        <Bi zh="渠道加载失败" en="Unable to load channels" /> <FailureText />
       </p>
     );
   }
@@ -871,7 +870,7 @@ function ModelsTable({
   if (!models.ok) {
     return (
       <p>
-        <Bi zh="模型加载失败" en="Unable to load models" /> ({models.code}) <FailureText />
+        <Bi zh="模型加载失败" en="Unable to load models" /> <FailureText />
       </p>
     );
   }
@@ -981,7 +980,7 @@ function ModuleBindingsTable({ bindings, locale }: { bindings: LLMModuleBindings
   if (!bindings.ok) {
     return (
       <p>
-        <Bi zh="绑定加载失败" en="Unable to load bindings" /> ({bindings.code}) <FailureText />
+        <Bi zh="绑定加载失败" en="Unable to load bindings" /> <FailureText />
       </p>
     );
   }
@@ -999,13 +998,13 @@ function ModuleBindingsTable({ bindings, locale }: { bindings: LLMModuleBindings
             <th><Bi zh="范围" en="Scope" /></th>
             <th><Bi zh="渠道" en="Channel" /></th>
             <th><Bi zh="模型" en="Model" /></th>
-            <th><Bi zh="max_tokens" en="max_tokens" /></th>
+            <th><Bi zh="输出上限" en="Output limit" /></th>
           </tr>
         </thead>
         <tbody>
           {bindings.items.map((item) => (
             <tr key={`${item.scope}-${item.module_key}`}>
-              <td>{item.module_key}</td>
+              <td title={item.module_key}>{moduleLabel(locale, item.module_key, item.module_key)}</td>
               <td>{scopeLabel(locale, item.scope)}</td>
               <td>{item.channel_name || item.channel_id}</td>
               <td>{item.model_id}</td>
@@ -1030,7 +1029,7 @@ function TenantSettingsSummary({ settingsSnapshot, locale }: { settingsSnapshot:
   if (!settingsSnapshot.ok) {
     return (
       <p>
-        <Bi zh="设置加载失败" en="Unable to load settings" /> ({settingsSnapshot.code}) <FailureText />
+        <Bi zh="设置加载失败" en="Unable to load settings" /> <FailureText />
       </p>
     );
   }
@@ -1055,7 +1054,7 @@ function TenantSettingsSummary({ settingsSnapshot, locale }: { settingsSnapshot:
                 <th><Bi zh="模块" en="Module" /></th>
                 <th><Bi zh="渠道" en="Channel" /></th>
                 <th><Bi zh="模型" en="Model" /></th>
-                <th><Bi zh="max_tokens" en="max_tokens" /></th>
+                <th><Bi zh="输出上限" en="Output limit" /></th>
               </tr>
             </thead>
             <tbody>
@@ -1087,7 +1086,7 @@ function ActivityTable({
   if (!activity.ok) {
     return (
       <p>
-        <Bi zh="调用记录加载失败" en="Unable to load activity" /> ({activity.code}) <FailureText />
+        <Bi zh="调用记录加载失败" en="Unable to load activity" /> <FailureText />
       </p>
     );
   }
@@ -1113,8 +1112,8 @@ function ActivityTable({
           {activity.items.map((item) => (
             <tr key={item.activity_id}>
               <td>{statusLabel(locale, item.status)}</td>
-              <td>{item.module_key}</td>
-              <td>{item.run_id || "-"}</td>
+              <td title={item.module_key}>{moduleLabel(locale, item.module_key, item.module_key)}</td>
+              <td title={item.run_id || ""}>{item.run_id ? `${item.run_id.slice(0, 8)}…` : "-"}</td>
               <td>{activityTokenDisplay(
                 locale,
                 item.prompt_tokens,
@@ -1167,7 +1166,7 @@ function UsageTable({
           locale={locale}
         />
         <p role="alert">
-          {usageFailureLabel(locale, usage.code)} ({usage.code}) <FailureText />
+          {usageFailureLabel(locale, usage.code)} <FailureText />
         </p>
       </div>
     );
@@ -1209,8 +1208,8 @@ function UsageTable({
                   <td>{usageTypeLabel(locale, item.usage_type)}</td>
                   <td>{item.quantity}</td>
                   <td>{unitLabel(locale, item.unit)}</td>
-                  <td>{item.module_key || "-"}</td>
-                  <td>{item.run_id || "-"}</td>
+                  <td title={item.module_key || ""}>{item.module_key ? moduleLabel(locale, item.module_key, item.module_key) : "-"}</td>
+                  <td title={item.run_id || ""}>{item.run_id ? `${item.run_id.slice(0, 8)}…` : "-"}</td>
                 </tr>
               ))}
             </tbody>
@@ -1249,8 +1248,8 @@ function UsageScope({
         </span>
       </div>
       <p className="trace-meta">
-        <Bi zh="工作区" en="Workspace" /> {tenantSlug} / <Bi zh="项目" en="Project" /> {projectId} /{" "}
-        <Bi zh="模块" en="Module" /> {moduleKey} / <Bi zh="任务" en="Run" /> {runId || tx(locale, "全部", "all")}
+        <Bi zh="模块" en="Module" /> {moduleLabel(locale, moduleKey, moduleKey)}
+        {runId ? <> / <Bi zh="任务" en="Run" /> {runId.slice(0, 8)}…</> : null}
       </p>
     </>
   );
@@ -1302,9 +1301,9 @@ function usageFailureLabel(locale: Locale, code: string) {
 
 function usageStatusLabel(locale: Locale, status: "recorded" | "unavailable" | "zero_truth") {
   const labels = {
-    recorded: ["已记录", "recorded"],
-    unavailable: ["不可用", "unavailable"],
-    zero_truth: ["真实为零", "zero truth"],
+    recorded: ["已记录", "Recorded"],
+    unavailable: ["不可用", "Unavailable"],
+    zero_truth: ["暂无用量", "No usage yet"],
   } as const;
   return tx(locale, labels[status][0], labels[status][1]);
 }
@@ -1335,7 +1334,10 @@ function activityTokenDisplay(
 
 function safeActivityErrorCode(error: Record<string, unknown> | null) {
   const code = typeof error?.code === "string" ? error.code : "";
-  return SAFE_ACTIVITY_ERROR_CODES.has(code) ? code : "";
+  if (!SAFE_ACTIVITY_ERROR_CODES.has(code)) {
+    return "";
+  }
+  return ACTIVITY_ERROR_LABELS[code] || "调用失败";
 }
 
 const SAFE_ACTIVITY_ERROR_CODES = new Set([
@@ -1355,10 +1357,27 @@ const SAFE_ACTIVITY_ERROR_CODES = new Set([
   "LLM_TELEMETRY_WRITE_FAILED",
 ]);
 
+const ACTIVITY_ERROR_LABELS: Record<string, string> = {
+  LLM_CONCURRENCY_ACQUIRE_FAILED: "并发占用失败",
+  LLM_CONCURRENCY_LEASE_EXPIRED: "并发租约过期",
+  LLM_CONCURRENCY_LIMITED: "并发已达上限",
+  LLM_CONCURRENCY_RELEASE_FAILED: "并发释放失败",
+  LLM_MODULE_UNBOUND: "能力未绑定",
+  LLM_PROVIDER_ERROR: "模型服务错误",
+  LLM_PROVIDER_RATE_LIMITED: "模型限流",
+  LLM_PROVIDER_UNAVAILABLE: "模型服务不可用",
+  LLM_QUOTA_EXCEEDED: "额度已用尽",
+  LLM_QUOTA_TOKENS_EXCEEDED: "Token 额度已用尽",
+  LLM_QUOTA_COST_EXCEEDED: "成本额度已用尽",
+  LLM_QUOTA_CONCURRENCY_EXCEEDED: "并发额度已用尽",
+  LLM_QUOTA_USAGE_UNAVAILABLE: "用量不可用",
+  LLM_TELEMETRY_WRITE_FAILED: "用量写入失败",
+};
+
 function scopeLabel(locale: Locale, value: string) {
   const labels: Record<string, [string, string]> = {
     "Archive / Assets": ["档案 / 资产", "Archive / Assets"],
-    "Seed / Graph": ["种子分析 / 图谱", "Seed / Graph"],
+    "Seed / Graph": ["导入分析 / 图谱", "Import / Graph"],
     Worldline: ["世界线", "Worldline"],
     Writer: ["写作", "Writer"],
     project: ["项目", "Project"],

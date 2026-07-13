@@ -140,7 +140,12 @@ func main() {
 	registrationService := authDependencies.registrationService
 	authSessionStore := authDependencies.sessionStore
 
+	// CONN-017: when DATABASE_URL is configured, do not silently accept writer starts
+	// against an in-memory LocalWriterStarter unless ALLOW_LOCAL_WRITER_STARTER=1.
 	writerStarter := workflows.WriterStarter(workflows.NewLocalWriterStarter())
+	if strings.TrimSpace(databaseURL) != "" && !parseBoolEnv(os.Getenv("ALLOW_LOCAL_WRITER_STARTER")) {
+		writerStarter = workflows.NewFailClosedWriterStarter()
+	}
 	writerCanceller := workflows.WriterCanceller(workflows.NewDisabledWriterCanceller())
 	helloStarter := workflows.AgentHelloStarter(workflows.NewDisabledHelloAgentStarter())
 	seedStarter := workflows.SeedRunStarter(workflows.NewDisabledSeedRunStarter())
@@ -157,6 +162,17 @@ func main() {
 		defer func() {
 			if err := closeWriterAdmission(); err != nil {
 				log.Printf("close writer admission store: %v", err)
+			}
+		}()
+	}
+	writerThreadStore, closeWriterThreads, err := newWriterThreadStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure writer thread store: %v", err)
+	}
+	if closeWriterThreads != nil {
+		defer func() {
+			if err := closeWriterThreads(); err != nil {
+				log.Printf("close writer thread store: %v", err)
 			}
 		}()
 	}
@@ -893,6 +909,8 @@ func main() {
 			}
 		}()
 	}
+	// Shared proxy so manuscript mutations can stale proposals once distillation store is ready.
+	proposalStalerProxy := &proposalStalerBridge{}
 	manuscriptWorkspaceHandler, manuscriptExportHandler, closeManuscriptWorkspaceHandler, err := newManuscriptWorkspaceHandlers(
 		databaseURL,
 		os.Getenv("MANUSCRIPT_ARTIFACT_ROOT"),
@@ -900,6 +918,7 @@ func main() {
 		writerStarter,
 		manuscriptArtifactExporter,
 		writerPlanningStarter,
+		proposalStalerProxy,
 	)
 	if err != nil {
 		log.Fatalf("configure manuscript workspace handlers: %v", err)
@@ -927,6 +946,7 @@ func main() {
 		databaseURL,
 		os.Getenv("WRITER_PLANNING_TASK_QUEUE"),
 		centralAuthorizer,
+		storyGraphBuildStarter,
 	)
 	if err != nil {
 		log.Fatalf("configure asset distillation handler: %v", err)
@@ -943,6 +963,10 @@ func main() {
 	if assetDistillationBundle != nil {
 		assetDistillationHandler = assetDistillationBundle
 		distillationEnqueuer = assetDistillationBundle
+		// CONN-004/005: same-TX adoption outbox via DraftAdoptionOutboxHook.
+		attachDraftAdoptionOutbox(draftAdoptionStore, assetDistillationBundle)
+		// CONN-005: manuscript content changes mark evidence-bound proposals stale.
+		proposalStalerProxy.impl = assetDistillationBundle
 	}
 	metricsRegistry := observability.NewRegistry()
 	platformRateLimiter, closePlatformRateLimiter, err := newPlatformRateLimiter(
@@ -1034,6 +1058,7 @@ func main() {
 		WriterReader:                     writerReader,
 		WriterEventReader:                writerEventReader,
 		WriterCanceller:                  writerCanceller,
+		WriterThreadStore:                writerThreadStore,
 		DraftAdoptionStore:               draftAdoptionStore,
 		DraftReviewStore:                 draftReviewStore,
 		DraftReviewOwnerLookup:           draftReviewRuntimeStore,
@@ -1299,6 +1324,7 @@ func newAssetDistillationHandler(
 	databaseURL string,
 	taskQueue string,
 	authorizer auth.Authorizer,
+	storyGraphBuildStarter workflows.StoryGraphBuildStarter,
 ) (*assetDistillationBundle, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil
@@ -1313,16 +1339,62 @@ func newAssetDistillationHandler(
 		starter = assetdistillation.NewTemporalStarter(temporalClient, store, taskQueue)
 		go runAssetDistillationDispatcher(assetdistillation.NewDispatcher(store, starter))
 	}
+	bundle := &assetDistillationBundle{
+		store: store, enqueuer: assetdistillation.NewEnqueuer(store, starter),
+		graphRebuild: storyGraphRebuildAdapter{starter: storyGraphBuildStarter},
+	}
 	handler := assetdistillation.NewHandler(assetdistillation.HandlerConfig{
 		Store: store, Starter: starter, Actors: mountedActorResolver{},
-		Authorizer: authorizer,
+		Authorizer: authorizer, GraphRebuild: bundle.graphRebuild,
 	})
-	return &assetDistillationBundle{handler: handler, enqueuer: assetdistillation.NewEnqueuer(store, starter)}, db.Close, nil
+	bundle.handler = handler
+	return bundle, db.Close, nil
 }
 
 type assetDistillationBundle struct {
-	handler  http.Handler
-	enqueuer *assetdistillation.Enqueuer
+	handler      http.Handler
+	store        *assetdistillation.SQLStore
+	enqueuer     *assetdistillation.Enqueuer
+	graphRebuild assetdistillation.GraphRebuildStarter
+}
+
+type proposalStalerBridge struct {
+	impl manuscriptworkspace.ProposalStaler
+}
+
+func (p *proposalStalerBridge) StaleProposalsForBlock(ctx context.Context, tenantID, projectID, actorUserID, blockID string) error {
+	if p == nil || p.impl == nil {
+		return nil
+	}
+	return p.impl.StaleProposalsForBlock(ctx, tenantID, projectID, actorUserID, blockID)
+}
+
+type storyGraphRebuildAdapter struct {
+	starter workflows.StoryGraphBuildStarter
+}
+
+func (a storyGraphRebuildAdapter) StartAfterAssetAccept(ctx context.Context, tenantID, projectID, actorUserID, requestID, acceptedAssetID string) error {
+	if a.starter == nil {
+		return nil
+	}
+	reqID := strings.TrimSpace(requestID)
+	if reqID == "" {
+		reqID = "asset_accept_" + strings.TrimSpace(acceptedAssetID)
+	} else {
+		reqID = reqID + "_graph_" + strings.TrimSpace(acceptedAssetID)
+	}
+	_, err := a.starter.StartStoryGraphBuild(ctx, workflows.StartStoryGraphBuildInput{
+		TenantID:    tenantID,
+		ProjectID:   projectID,
+		ActorUserID: actorUserID,
+		RequestID:   reqID,
+		Mode:        "full",
+		Options: map[string]any{
+			"trigger":           "asset_accept",
+			"accepted_asset_id": acceptedAssetID,
+		},
+	})
+	return err
 }
 
 func (b *assetDistillationBundle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1343,6 +1415,24 @@ func (b *assetDistillationBundle) EnqueueAfterAdoption(ctx context.Context, inpu
 	})
 }
 
+// EnqueueAfterAdoptionInTx satisfies workflows.DraftAdoptionOutboxHook.
+func (b *assetDistillationBundle) EnqueueAfterAdoptionInTx(ctx context.Context, rows workflows.DraftAdoptionSQLRows, input workflows.DraftAdoptionInput, result workflows.DraftAdoptionResult) error {
+	if b == nil || b.enqueuer == nil {
+		return nil
+	}
+	return b.enqueuer.EnqueueAfterAdoptionInTx(ctx, rows, input, result)
+}
+
+// StaleProposalsForBlock satisfies manuscriptworkspace.ProposalStaler.
+func (b *assetDistillationBundle) StaleProposalsForBlock(ctx context.Context, tenantID, projectID, actorUserID, blockID string) error {
+	if b == nil || b.store == nil {
+		return nil
+	}
+	return b.store.StaleProposalsForBlock(ctx, assetdistillation.Scope{
+		TenantID: tenantID, ProjectID: projectID, ActorUserID: actorUserID,
+	}, blockID)
+}
+
 func runAssetDistillationDispatcher(dispatcher *assetdistillation.Dispatcher) {
 	if dispatcher == nil {
 		return
@@ -1351,8 +1441,11 @@ func runAssetDistillationDispatcher(dispatcher *assetdistillation.Dispatcher) {
 	defer ticker.Stop()
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_, _ = dispatcher.Tick(ctx, 20)
+		started, err := dispatcher.Tick(ctx, 20)
 		cancel()
+		if err != nil {
+			log.Printf("asset distillation dispatcher tick failed: started=%d err=%v", started, err)
+		}
 	}
 }
 
@@ -1380,6 +1473,7 @@ func newManuscriptWorkspaceHandlers(
 	writerStarter workflows.WriterStarter,
 	exporter workflows.ManuscriptArtifactExporter,
 	planning writerplanning.Starter,
+	proposalStaler manuscriptworkspace.ProposalStaler,
 ) (http.Handler, http.Handler, func() error, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, nil, nil, nil
@@ -1402,6 +1496,7 @@ func newManuscriptWorkspaceHandlers(
 		Store: store, Commands: commands, CommandReader: store, Exports: store,
 		ExportGenerator: generator, Dedup: store, Resolver: manuscriptContextResolver{db: db},
 		Authorizer: manuscriptAuthorizer{base: authorizer}, Planning: planning,
+		ProposalStaler: proposalStaler,
 	})
 	downloadHandler := manuscriptexport.NewHandler(manuscriptexport.Config{
 		Exporter: exporter, States: store, Artifacts: artifactStore,
@@ -1795,7 +1890,19 @@ func newWriterAdmissionStore(databaseURL string) (workflows.WriterAdmissionStore
 	}
 	return workflows.NewSQLWriterAdmissionStore(workflows.SQLWriterAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
+		DB:     db,
 	}), db.Close, nil
+}
+
+func newWriterThreadStore(databaseURL string) (workflows.WriterThreadStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewSQLWriterThreadStore(db), db.Close, nil
 }
 
 func newDraftAdoptionStore(databaseURL string) (workflows.DraftAdoptionStore, func() error, error) {
@@ -1806,9 +1913,16 @@ func newDraftAdoptionStore(databaseURL string) (workflows.DraftAdoptionStore, fu
 	if err != nil {
 		return nil, nil, err
 	}
+	// Outbox hook is attached after asset distillation store is available (see wireDraftAdoptionOutbox).
 	return workflows.NewSQLDraftAdoptionStore(workflows.SQLDraftAdoptionStoreConfig{
 		Queryer: workflows.NewSQLDBWriterDraftAdoptionQueryer(db),
 	}), db.Close, nil
+}
+
+func attachDraftAdoptionOutbox(store workflows.DraftAdoptionStore, hook workflows.DraftAdoptionOutboxHook) {
+	if sqlStore, ok := store.(*workflows.SQLDraftAdoptionStore); ok && hook != nil {
+		sqlStore.SetOutboxHook(hook)
+	}
 }
 
 func newDraftReviewStore(databaseURL string) (workflows.DraftReviewStore, func() error, error) {

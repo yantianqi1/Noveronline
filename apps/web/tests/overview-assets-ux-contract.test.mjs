@@ -40,7 +40,7 @@ test("Overview prioritizes the current next step and folds secondary activity", 
   assert.ok(nextPanelIndex >= 0 && nextPanelIndex < metricsPanelIndex);
   assert.match(shell, /<OverviewNextStep/);
   assert.match(shell, /Files and analysis history/);
-  assert.match(shell, /Progress and activity details/);
+  assert.match(shell, /Progress and activity/);
   assert.match(shell, /overview-upload-disclosure/);
   assert.doesNotMatch(shell, /<dd>\{selectedSeedRun\.run_id\}<\/dd>/);
   assert.doesNotMatch(shell, /<dd>\{projectReadiness\.run_id\}<\/dd>/);
@@ -59,7 +59,7 @@ test("Overview empty project exposes dual idea-first and upload entries", async 
   assert.match(shell, /从一个想法开始|Start from an idea/);
   assert.match(shell, /上传已有文本|Upload existing text/);
   assert.match(shell, /bootstrapIdeaAction/);
-  assert.match(shell, /不必先上传原文|do not need to upload a manuscript first/i);
+  assert.match(shell, /从一个想法开始|Start from an idea|创建最小书籍计划|Create a minimal book plan/i);
   assert.doesNotMatch(shell, /必须先上传|must upload before writing/i);
   assert.match(page, /bootstrapIdeaAction/);
   assert.match(page, /createBookPlan/);

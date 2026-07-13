@@ -79,7 +79,7 @@ export function OverviewSeedUploadForm({
           <option value="resume">{tx(locale, "继续分析", "Continue analysis")}</option>
         </select>
         <SubmitButton
-          idleLabel={<><Upload aria-hidden="true" size={18} /><Bi zh="上传并开始分析" en="Upload and start Seed" /></>}
+          idleLabel={<><Upload aria-hidden="true" size={18} /><Bi zh="上传并开始分析" en="Upload and start analysis" /></>}
           pendingLabel={<Bi zh="上传中…" en="Uploading…" />}
         />
       </form>

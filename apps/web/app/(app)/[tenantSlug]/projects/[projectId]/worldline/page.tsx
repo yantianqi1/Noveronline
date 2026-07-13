@@ -154,11 +154,20 @@ export default async function WorldlinePage({
   async function startWorldlineSessionAction(formData: FormData) {
     "use server";
 
+    const prepareId = stringFromFormData(formData, "prepareId") || selectedPrepareId;
     const result = await startWorldlineSession({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       goal: stringFromFormData(formData, "goal"),
       anchorPathId: stringFromFormData(formData, "anchorPathId"),
+      options: prepareId
+        ? {
+            prepare_id: prepareId,
+            source: "worldline_shell",
+          }
+        : {
+            source: "worldline_shell",
+          },
     });
 
     const nextQuery = new URLSearchParams();
@@ -186,12 +195,14 @@ export default async function WorldlinePage({
       redirect(worldlineRoute(tenantSlug, projectId, nextQuery));
     }
 
+    const prepareId = stringFromFormData(formData, "prepareId") || selectedPrepareId;
     const result = await startWorldlineStep({
       ...(await webApiContext({ tenantId: tenantSlug })),
       sessionId,
       mode: stringFromFormData(formData, "stepMode") || "director",
       options: {
         source: "worldline_shell",
+        ...(prepareId ? { prepare_id: prepareId } : {}),
       },
     });
 

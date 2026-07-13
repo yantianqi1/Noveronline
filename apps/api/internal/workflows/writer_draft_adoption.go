@@ -7,11 +7,13 @@ import (
 )
 
 type SQLDraftAdoptionStoreConfig struct {
-	Queryer DraftAdoptionSQLQueryer
+	Queryer    DraftAdoptionSQLQueryer
+	OutboxHook DraftAdoptionOutboxHook
 }
 
 type SQLDraftAdoptionStore struct {
-	queryer DraftAdoptionSQLQueryer
+	queryer    DraftAdoptionSQLQueryer
+	outboxHook DraftAdoptionOutboxHook
 }
 
 type DraftAdoptionSQLRows interface {
@@ -21,10 +23,19 @@ type DraftAdoptionSQLRows interface {
 	Err() error
 	Commit() error
 	Rollback() error
+	// ExecContext runs SQL on the same open adoption transaction (before Commit).
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	// QueryRowContext runs a single-row query on the same open adoption transaction.
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 type DraftAdoptionSQLQueryer interface {
 	QueryDraftAdoptionContext(context.Context, string, string, ...any) (DraftAdoptionSQLRows, error)
+}
+
+// DraftAdoptionOutboxHook inserts durable post-adoption work inside the adoption transaction.
+type DraftAdoptionOutboxHook interface {
+	EnqueueAfterAdoptionInTx(context.Context, DraftAdoptionSQLRows, DraftAdoptionInput, DraftAdoptionResult) error
 }
 
 type sqlDBWriterDraftAdoptionQueryer struct {
@@ -104,6 +115,20 @@ func (r *draftAdoptionTenantRows) Rollback() error {
 	return rollbackErr
 }
 
+func (r *draftAdoptionTenantRows) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if r == nil || r.tx == nil {
+		return nil, draftAdoptionWriteFailed()
+	}
+	return r.tx.ExecContext(ctx, query, args...)
+}
+
+func (r *draftAdoptionTenantRows) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if r == nil || r.tx == nil {
+		return nil
+	}
+	return r.tx.QueryRowContext(ctx, query, args...)
+}
+
 type sqlDraftAdoptionRows struct {
 	rows *sql.Rows
 }
@@ -132,8 +157,23 @@ func (r sqlDraftAdoptionRows) Rollback() error {
 	return nil
 }
 
+func (r sqlDraftAdoptionRows) ExecContext(context.Context, string, ...any) (sql.Result, error) {
+	return nil, nil
+}
+
+func (r sqlDraftAdoptionRows) QueryRowContext(context.Context, string, ...any) *sql.Row {
+	return nil
+}
+
 func NewSQLDraftAdoptionStore(config SQLDraftAdoptionStoreConfig) *SQLDraftAdoptionStore {
-	return &SQLDraftAdoptionStore{queryer: config.Queryer}
+	return &SQLDraftAdoptionStore{queryer: config.Queryer, outboxHook: config.OutboxHook}
+}
+
+func (s *SQLDraftAdoptionStore) SetOutboxHook(hook DraftAdoptionOutboxHook) {
+	if s == nil {
+		return
+	}
+	s.outboxHook = hook
 }
 
 func (s *SQLDraftAdoptionStore) AdoptDraft(ctx context.Context, input DraftAdoptionInput) (DraftAdoptionResult, error) {
@@ -198,6 +238,13 @@ func (s *SQLDraftAdoptionStore) AdoptDraft(ctx context.Context, input DraftAdopt
 	}
 	if err := rows.Err(); err != nil {
 		return DraftAdoptionResult{}, draftAdoptionWriteFailed()
+	}
+	// CONN-004/005: durable distillation outbox must share the adoption transaction so
+	// "adopted but enqueue failed" cannot leave manuscript without a recoverable request.
+	if s.outboxHook != nil && strings.TrimSpace(result.BlockID) != "" {
+		if err := s.outboxHook.EnqueueAfterAdoptionInTx(ctx, rows, input, result); err != nil {
+			return DraftAdoptionResult{}, err
+		}
 	}
 	if err := rows.Commit(); err != nil {
 		return DraftAdoptionResult{}, draftAdoptionWriteFailed()

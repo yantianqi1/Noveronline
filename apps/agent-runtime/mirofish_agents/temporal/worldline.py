@@ -227,6 +227,11 @@ class LLMFacilityWorldlineStepRunner:
                 session_id=session_id,
                 source_refs=source_refs,
             )
+            session_context = self._load_session_context(
+                context=context,
+                session_id=session_id,
+                options=runtime_options,
+            )
             resolution = self._binding_resolver.resolve_module_binding(
                 context=context,
                 module_key=WORLDLINE_STEP_MODULE_KEY,
@@ -248,6 +253,7 @@ class LLMFacilityWorldlineStepRunner:
                     mode=mode,
                     options=runtime_options,
                     source_summaries=source_summaries,
+                    session_context=session_context,
                 ),
             )
             usage = _llm_usage_from_response(response_json)
@@ -364,6 +370,35 @@ class LLMFacilityWorldlineStepRunner:
                 "worldline source_refs did not resolve to public summaries",
             )
         return summaries
+
+    def _load_session_context(
+        self,
+        *,
+        context: AgentContext,
+        session_id: str,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        loader = self._source_loader
+        if loader is None or not hasattr(loader, "load_session_context"):
+            return {}
+        prepare_id = _optional_text(options.get("prepare_id"))
+        try:
+            loaded = loader.load_session_context(
+                context=context,
+                session_id=session_id,
+                prepare_id=prepare_id or None,
+            )
+        except LLMFacilityError:
+            raise
+        except Exception as exc:
+            raise LLMFacilityError(
+                "WORLDLINE_SOURCE_LOAD_FAILED",
+                "worldline session context load failed",
+            ) from exc
+        if not isinstance(loaded, dict):
+            return {}
+        sanitized = _sanitize_worldline_value(loaded)
+        return sanitized if isinstance(sanitized, dict) else {}
 
 
 class PostgresWorldlineCandidateEventWriter:
@@ -751,6 +786,89 @@ class PostgresWorldlineSourceLoader:
         finally:
             connection.close()
         return summaries
+
+    def load_session_context(
+        self,
+        *,
+        context: AgentContext,
+        session_id: str,
+        prepare_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not context.project_id:
+            raise LLMFacilityError("VALIDATION_FAILED", "project_id is required to load worldline session context")
+        normalized_session_id = _required_text(session_id, "session_id")
+        connection = self._connect()
+        try:
+            set_postgres_tenant_context(connection, context=context)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT session_id::text, status, lifecycle, goal_summary,
+                              COALESCE(anchor_path_id::text, '') AS anchor_path_id
+                         FROM worldline_sessions
+                        WHERE tenant_id = %s AND project_id = %s AND session_id = %s
+                        LIMIT 1""",
+                    (context.tenant_id, context.project_id, normalized_session_id),
+                )
+                session_row = cursor.fetchone()
+                if session_row is None:
+                    raise LLMFacilityError("NOT_FOUND", "worldline session was not found")
+                cursor.execute(
+                    """SELECT event_id::text, title, summary, kind, status, step
+                         FROM worldline_events
+                        WHERE tenant_id = %s AND project_id = %s AND session_id = %s
+                          AND status IN ('candidate', 'canon')
+                        ORDER BY step DESC NULLS LAST, created_at DESC
+                        LIMIT 12""",
+                    (context.tenant_id, context.project_id, normalized_session_id),
+                )
+                recent_events = _public_source_summaries(cursor.fetchall())
+                prepared_agents: list[dict[str, Any]] = []
+                goal_from_prepare = ""
+                resolved_prepare_id = _optional_text(prepare_id)
+                if resolved_prepare_id:
+                    cursor.execute(
+                        """SELECT prepare_id::text, goal_summary, status, lifecycle
+                             FROM worldline_preparations
+                            WHERE tenant_id = %s AND project_id = %s AND prepare_id = %s
+                            LIMIT 1""",
+                        (context.tenant_id, context.project_id, resolved_prepare_id),
+                    )
+                    preparation = cursor.fetchone()
+                    if preparation is not None:
+                        goal_from_prepare = _optional_text(_row_value(preparation, "goal_summary", 1))
+                        cursor.execute(
+                            """SELECT agent_id::text, display_name, role, status, summary
+                                 FROM worldline_prepared_agents
+                                WHERE tenant_id = %s AND project_id = %s AND prepare_id = %s
+                                  AND status = 'ready'
+                                ORDER BY updated_at DESC
+                                LIMIT 24""",
+                            (context.tenant_id, context.project_id, resolved_prepare_id),
+                        )
+                        prepared_agents = _public_source_summaries(cursor.fetchall())
+            connection.commit()
+        except LLMFacilityError:
+            _rollback_quietly(connection)
+            raise
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise LLMFacilityError("WORLDLINE_SOURCE_LOAD_FAILED", "worldline session context load failed") from exc
+        finally:
+            connection.close()
+        session_goal = _optional_text(_row_value(session_row, "goal_summary", 3))
+        return {
+            "session": {
+                "session_id": _optional_text(_row_value(session_row, "session_id", 0)),
+                "status": _optional_text(_row_value(session_row, "status", 1)),
+                "lifecycle": _optional_text(_row_value(session_row, "lifecycle", 2)),
+                "goal_summary": session_goal,
+                "anchor_path_id": _optional_text(_row_value(session_row, "anchor_path_id", 4)),
+            },
+            "prepare_id": resolved_prepare_id or "",
+            "preparation_goal_summary": goal_from_prepare,
+            "prepared_agents": prepared_agents,
+            "recent_events": recent_events,
+        }
 
 
 class PostgresLLMTelemetryWriter:
@@ -1984,6 +2102,7 @@ def _worldline_step_messages(
     mode: str,
     options: dict[str, Any],
     source_summaries: list[dict[str, Any]] | None = None,
+    session_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     public_options = _sanitize_worldline_value(options)
     user_payload: dict[str, Any] = {
@@ -1997,6 +2116,8 @@ def _worldline_step_messages(
     }
     if source_summaries:
         user_payload["source_summaries"] = _sanitize_worldline_value(source_summaries)
+    if session_context:
+        user_payload["session_context"] = _sanitize_worldline_value(session_context)
     return [
         {
             "role": "system",

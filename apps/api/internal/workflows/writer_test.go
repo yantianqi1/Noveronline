@@ -816,6 +816,73 @@ func TestTemporalWriterStarterDoesNotStartWorkflowWhenAdmissionFails(t *testing.
 	}
 }
 
+func TestTemporalWriterStarterReplaysExistingAdmissionWithoutStartingWorkflow(t *testing.T) {
+	temporalClient := &recordingWriterTemporalClient{}
+	existing := WriterRun{
+		RunID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", TraceID: traceIDForRun("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		TenantID: "tenant-1", ProjectID: "project-1", Mode: "draft", Instruction: "写一段正文", Status: "queued",
+	}
+	starter := NewTemporalWriterStarter(TemporalWriterConfig{
+		Client:    temporalClient,
+		TaskQueue: WriterTaskQueue,
+		AdmissionStore: &recordingWriterAdmissionStore{
+			replay:    true,
+			replayRun: existing,
+		},
+	})
+
+	run, err := starter.StartWriterRun(context.Background(), StartWriterRunInput{
+		TenantID: "tenant-1", ProjectID: "project-1", RequestID: "req-replay",
+		Mode: "draft", Instruction: "写一段正文",
+		Options: map[string]any{"module_key": "writer_composer"},
+	})
+	if err != nil {
+		t.Fatalf("replay writer run: %v", err)
+	}
+	if run.RunID != existing.RunID || run.TraceID != existing.TraceID {
+		t.Fatalf("expected replayed run, got %#v", run)
+	}
+	if temporalClient.started {
+		t.Fatal("Temporal workflow should not start on request_id replay")
+	}
+}
+
+func TestTemporalWriterStarterCompensatesWhenTemporalStartFails(t *testing.T) {
+	temporalClient := &recordingWriterTemporalClient{err: errors.New("temporal unavailable")}
+	admissionStore := &recordingWriterAdmissionStore{}
+	starter := NewTemporalWriterStarter(TemporalWriterConfig{
+		Client: temporalClient, TaskQueue: WriterTaskQueue, AdmissionStore: admissionStore,
+	})
+
+	_, err := starter.StartWriterRun(context.Background(), StartWriterRunInput{
+		TenantID: "tenant-1", ProjectID: "project-1", ActorUserID: "user-1", RequestID: "req-1",
+		Mode: "draft", Instruction: "写一段正文",
+		Options: map[string]any{"module_key": "writer_composer"},
+	})
+	if code := ErrorCode(err); code != "WORKFLOW_FAILED" {
+		t.Fatalf("expected workflow failed, got %s (%v)", code, err)
+	}
+	if !admissionStore.compensateCalled {
+		t.Fatal("expected compensation after Temporal start failure")
+	}
+	if admissionStore.compensateInput.TenantID != "tenant-1" || admissionStore.compensateInput.RequestID != "req-1" {
+		t.Fatalf("compensation lost context: %#v", admissionStore.compensateInput)
+	}
+	if admissionStore.compensateInput.RunID == "" || admissionStore.compensateInput.RunID != admissionStore.input.RunID {
+		t.Fatalf("compensation should target admitted run: compensate=%#v admit=%#v", admissionStore.compensateInput, admissionStore.input)
+	}
+}
+
+func TestFailClosedWriterStarterRejectsStarts(t *testing.T) {
+	starter := NewFailClosedWriterStarter()
+	_, err := starter.StartWriterRun(context.Background(), StartWriterRunInput{
+		TenantID: "tenant-1", ProjectID: "project-1", Mode: "draft", Instruction: "写一段正文",
+	})
+	if code := ErrorCode(err); code != "WORKFLOW_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected backend unconfigured, got %s (%v)", code, err)
+	}
+}
+
 func TestTemporalWriterStarterCancelsTemporalWorkflowAndPersistsCancelledState(t *testing.T) {
 	temporalClient := &recordingWriterTemporalClient{completionErr: temporal.NewCanceledError()}
 	cancellationStore := &recordingWriterCancellationStore{temporalWaited: func() bool { return temporalClient.waited }}
@@ -1006,7 +1073,7 @@ func TestSQLWriterAdmissionStorePersistsWorkflowAndWriterRowsWithoutCredentialRe
 	execer := &recordingWriterAdmissionExecer{}
 	store := NewSQLWriterAdmissionStore(SQLWriterAdmissionStoreConfig{Execer: execer})
 
-	err := store.AdmitWriterRun(context.Background(), WriterAdmissionInput{
+	_, _, err := store.AdmitWriterRun(context.Background(), WriterAdmissionInput{
 		TenantID:           "11111111-1111-4111-8111-111111111111",
 		ProjectID:          "22222222-2222-4222-8222-222222222222",
 		RunID:              "33333333-3333-4333-8333-333333333333",
@@ -1071,7 +1138,7 @@ func TestSQLWriterAdmissionStoreUsesTenantContextForAdmissionWrites(t *testing.T
 	execer := &recordingTenantWriterAdmissionExecer{}
 	store := NewSQLWriterAdmissionStore(SQLWriterAdmissionStoreConfig{Execer: execer})
 
-	err := store.AdmitWriterRun(context.Background(), WriterAdmissionInput{
+	_, _, err := store.AdmitWriterRun(context.Background(), WriterAdmissionInput{
 		TenantID:           "11111111-1111-4111-8111-111111111111",
 		ProjectID:          "22222222-2222-4222-8222-222222222222",
 		RunID:              "33333333-3333-4333-8333-333333333333",
@@ -1539,19 +1606,52 @@ func (r *fakeWriterEventRows) Rollback() error {
 	return nil
 }
 
+func (r *fakeWriterEventRows) ExecContext(context.Context, string, ...any) (sql.Result, error) {
+	return nil, nil
+}
+
+func (r *fakeWriterEventRows) QueryRowContext(context.Context, string, ...any) *sql.Row {
+	return nil
+}
+
 type recordingWriterAdmissionStore struct {
 	input                        WriterAdmissionInput
 	err                          error
 	temporalStarted              func() bool
 	temporalWasStartedWhenCalled bool
+	replay                       bool
+	replayRun                    WriterRun
+	compensateCalled             bool
+	compensateInput              WriterCompensationInput
+	compensateErr                error
 }
 
-func (s *recordingWriterAdmissionStore) AdmitWriterRun(_ context.Context, input WriterAdmissionInput) error {
+func (s *recordingWriterAdmissionStore) AdmitWriterRun(_ context.Context, input WriterAdmissionInput) (WriterRun, bool, error) {
 	s.input = input
 	if s.temporalStarted != nil {
 		s.temporalWasStartedWhenCalled = s.temporalStarted()
 	}
-	return s.err
+	if s.err != nil {
+		return WriterRun{}, false, s.err
+	}
+	if s.replay {
+		return s.replayRun, true, nil
+	}
+	return WriterRun{
+		RunID:       input.RunID,
+		TraceID:     input.TraceID,
+		TenantID:    input.TenantID,
+		ProjectID:   input.ProjectID,
+		Mode:        input.Mode,
+		Instruction: input.Instruction,
+		Status:      "queued",
+	}, false, nil
+}
+
+func (s *recordingWriterAdmissionStore) CompensateWriterRunStart(_ context.Context, input WriterCompensationInput) error {
+	s.compensateCalled = true
+	s.compensateInput = input
+	return s.compensateErr
 }
 
 type recordingWriterCancellationStore struct {

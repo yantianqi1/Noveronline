@@ -28,11 +28,11 @@ const STAGES: Record<string, { label: ReactNode; activity: ReactNode }> = {
     activity: <Bi zh="当前世界时间线" en="Current-world timeline" />,
   },
   "character-console": {
-    label: <Bi zh="角色控制" en="Character Console" />,
+    label: <Bi zh="角色" en="Characters" />,
     activity: <Bi zh="角色互动与回合" en="Character turns" />,
   },
   characters: {
-    label: <Bi zh="角色控制" en="Character Console" />,
+    label: <Bi zh="角色" en="Characters" />,
     activity: <Bi zh="角色互动与回合" en="Character turns" />,
   },
   writer: {
@@ -40,12 +40,12 @@ const STAGES: Record<string, { label: ReactNode; activity: ReactNode }> = {
     activity: <Bi zh="手稿正文与审校" en="Prose and review" />,
   },
   "llm-facility": {
-    label: <Bi zh="LLM 设施" en="LLM Facility" />,
-    activity: <Bi zh="模块绑定与渠道" en="Module bindings" />,
+    label: <Bi zh="模型设置" en="Model settings" />,
+    activity: <Bi zh="能力绑定与渠道" en="Capability bindings" />,
   },
   llm: {
-    label: <Bi zh="LLM 设施" en="LLM Facility" />,
-    activity: <Bi zh="模块绑定与渠道" en="Module bindings" />,
+    label: <Bi zh="模型设置" en="Model settings" />,
+    activity: <Bi zh="能力绑定与渠道" en="Capability bindings" />,
   },
   members: {
     label: <Bi zh="成员" en="Members" />,

@@ -76,7 +76,7 @@ test("Worldline and Character journey surfaces wire explicit adoption, auto evol
   assert.match(worldlineShell, /name="agentRefs"/);
   assert.match(worldlineShell, /name="sourceRefs"/);
   assert.match(worldlineShell, /Refresh preparation and roster/);
-  assert.match(worldlineShell, /Enter Character Console/);
+  assert.match(worldlineShell, /Enter Characters/);
   assert.match(worldlineShell, /character-console\?/);
   assert.match(worldlineShell, /prepare_id/);
   assert.match(worldlinePage, /prepare_id/);

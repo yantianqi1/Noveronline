@@ -337,12 +337,33 @@ export interface PiWriterRunActivityDeps {
   composeDraft(request: ComposeDraftRequest): Promise<ComposeDraftResult>;
   releaseLLMLease(request: ReleaseLLMLeaseRequest): Promise<void>;
   saveDraftRevision(request: SaveDraftRevisionRequest): Promise<SaveDraftRevisionResult>;
+  appendWriterThreadMessage?(request: AppendWriterThreadMessageRequest): Promise<void>;
+  createWriterApproval?(request: CreateWriterApprovalRequest): Promise<{ approval_id: string }>;
   recordLLMActivity(request: RecordLLMActivityRequest): Promise<void>;
   recordUsageEvent(request: RecordUsageEventRequest): Promise<void>;
   recordAgentTraceEvent(request: RecordAgentTraceEventRequest): Promise<void>;
   recordWorkflowEvent(request: RecordWorkflowEventRequest): Promise<void>;
   updateWriterRunStatus(request: UpdateWriterRunStatusRequest): Promise<void>;
   findCompletedWriterRun?(request: FindCompletedWriterRunRequest): Promise<CompletedWriterRunReplay | undefined>;
+}
+
+export interface AppendWriterThreadMessageRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  role: "user" | "agent" | "system" | "approval";
+  body: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CreateWriterApprovalRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  action: string;
+  summary: string;
+  consequence?: string;
+  reversible?: boolean;
 }
 
 export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps> = {}) {
@@ -548,6 +569,24 @@ export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps>
         artifact_type: "writer_draft",
         status: "candidate"
       }, "completed"));
+      if (activityDeps.appendWriterThreadMessage) {
+        try {
+          await activityDeps.appendWriterThreadMessage({
+            tenant_id: input.tenant_id,
+            project_id: input.project_id,
+            run_id: input.run_id,
+            role: "agent",
+            body: draft.content,
+            metadata: {
+              draft_id: saved.draft_id,
+              mode: input.mode,
+              status: "candidate"
+            }
+          });
+        } catch {
+          // Thread persistence must not fail the writer run after draft is saved.
+        }
+      }
       await runPiWriterStep("Pi writer workflow event recording failed", () => recordWorkflow("writer.run.completed", {
         draft_id: saved.draft_id,
         status: "completed"
@@ -982,6 +1021,25 @@ async function runDualStagePiWriterActivity(
       status: "candidate",
       source_metadata: sourceMetadata
     }, "summary", "completed");
+    // CONN-009: durable agent message for persistent Writer threads (best-effort).
+    if (deps.appendWriterThreadMessage) {
+      try {
+        await deps.appendWriterThreadMessage({
+          tenant_id: input.tenant_id,
+          project_id: input.project_id,
+          run_id: input.run_id,
+          role: "agent",
+          body: draft.content,
+          metadata: {
+            draft_id: saved.draft_id,
+            mode: input.mode,
+            status: "candidate"
+          }
+        });
+      } catch {
+        // Thread persistence must not fail the writer run after draft is saved.
+      }
+    }
     await recordWorkflow("writer.run.completed", { draft_id: saved.draft_id, status: "completed" }, "run:completed");
     await deps.updateWriterRunStatus({
       tenant_id: input.tenant_id,
@@ -1041,14 +1099,14 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
   if (toolName === "query_world_rules") {
     return {
       items: recordArray(source.rules).map((item) => pickFields(item, [
-        "rule_evidence_id", "category", "confidence"
+        "rule_evidence_id", "category", "confidence", "source", "lifecycle", "title"
       ]))
     };
   }
   if (toolName === "query_character_profile") {
     return {
       items: recordArray(source.profiles).map((item) => pickFields(item, [
-        "entity_id", "canonical_name", "entity_type", "importance", "state_summary"
+        "entity_id", "canonical_name", "entity_type", "importance", "state_summary", "source", "lifecycle", "category"
       ]))
     };
   }
@@ -1059,7 +1117,11 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
     };
   }
   if (toolName === "query_worldline_paths") {
-    return { items: recordArray(source.paths).map((item) => pickFields(item, ["path_id", "title", "summary", "lifecycle", "writer_instruction", "selected_event_ids"])) };
+    return {
+      items: recordArray(source.paths).map((item) => pickFields(item, ["path_id", "title", "summary", "lifecycle", "writer_instruction", "selected_event_ids"])),
+      ...(source.selection_required === true ? { selection_required: true } : {}),
+      ...(typeof source.canon_status === "string" ? { canon_status: source.canon_status } : {})
+    };
   }
   if (toolName === "query_chapter_scene") {
     return { target: pickFields(objectRecord(source.target), ["chapter_id", "scene_id", "mode"]) };

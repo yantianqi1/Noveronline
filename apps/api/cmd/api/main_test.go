@@ -521,7 +521,7 @@ func TestNewWorkspaceHandlersRequireDatabaseAndExplicitArtifactRoot(t *testing.T
 	if err != nil || writerHandler != nil || closeWriter != nil {
 		t.Fatalf("expected disabled writer workspace without database: handler=%T close=%v err=%v", writerHandler, closeWriter != nil, err)
 	}
-	manuscriptHandler, downloadHandler, closeManuscript, err := newManuscriptWorkspaceHandlers("", "", authorizer, nil, nil, nil)
+	manuscriptHandler, downloadHandler, closeManuscript, err := newManuscriptWorkspaceHandlers("", "", authorizer, nil, nil, nil, nil)
 	if err != nil || manuscriptHandler != nil || downloadHandler != nil || closeManuscript != nil {
 		t.Fatalf("expected disabled manuscript workspace without database: workspace=%T download=%T close=%v err=%v", manuscriptHandler, downloadHandler, closeManuscript != nil, err)
 	}
@@ -533,10 +533,10 @@ func TestNewWorkspaceHandlersRequireDatabaseAndExplicitArtifactRoot(t *testing.T
 	}
 	defer func() { _ = closeWriter() }()
 
-	if _, _, _, err = newManuscriptWorkspaceHandlers(databaseURL, "", authorizer, nil, nil, nil); err == nil {
+	if _, _, _, err = newManuscriptWorkspaceHandlers(databaseURL, "", authorizer, nil, nil, nil, nil); err == nil {
 		t.Fatal("expected manuscript workspace to reject an empty artifact root")
 	}
-	manuscriptHandler, downloadHandler, closeManuscript, err = newManuscriptWorkspaceHandlers(databaseURL, t.TempDir(), authorizer, nil, nil, nil)
+	manuscriptHandler, downloadHandler, closeManuscript, err = newManuscriptWorkspaceHandlers(databaseURL, t.TempDir(), authorizer, nil, nil, nil, nil)
 	if err != nil || manuscriptHandler == nil || downloadHandler == nil || closeManuscript == nil {
 		t.Fatalf("expected configured manuscript workspace: workspace=%T download=%T close=%v err=%v", manuscriptHandler, downloadHandler, closeManuscript != nil, err)
 	}

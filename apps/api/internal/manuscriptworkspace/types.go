@@ -80,6 +80,14 @@ type PrivateBlockVersion struct {
 	ContentText string `json:"content_text"`
 }
 
+type CreateBlockInput struct {
+	Scope
+	ChapterID   string
+	SceneID     string
+	ContentText string
+	Tags        []string
+}
+
 type UpdateBlockInput struct {
 	Scope
 	BlockID         string
@@ -133,6 +141,7 @@ type RestoreBlockInput struct {
 type Store interface {
 	ListBlocks(context.Context, Scope, bool) ([]BlockMetadata, error)
 	GetPrivateBlock(context.Context, Scope, string) (PrivateBlock, error)
+	CreateBlock(context.Context, CreateBlockInput) (PrivateBlock, error)
 	UpdateBlock(context.Context, UpdateBlockInput) (PrivateBlock, error)
 	TagBlock(context.Context, TagBlockInput) (BlockMetadata, error)
 	DeleteBlock(context.Context, DeleteBlockInput) (BlockMetadata, error)

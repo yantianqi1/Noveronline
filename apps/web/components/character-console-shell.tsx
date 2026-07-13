@@ -126,17 +126,17 @@ export function CharacterConsoleShell({
     <div className="character-console-root">
       <WorkspaceHeader
         className="character-console-header"
-        eyebrow={<Bi zh="角色控制" en="Character Console" />}
+        description={<Bi zh="与角色互动并采纳提案。" en="Talk with characters and adopt proposals." />}
         icon={<UsersRound size={22} strokeWidth={1.8} />}
         meta={(
           <>
             <span className="status-pill">{interactionCount} <Bi zh="次互动" en="interactions" /></span>
             <span className="status-pill">
-              <Bi zh="世界线推演" en="Sessions" />: {worldlineSessions.ok ? worldlineSessions.items.length : tx(locale, "暂不可用", "unavailable")}
+              {worldlineSessions.ok ? worldlineSessions.items.length : "—"} <Bi zh="次推演" en="sessions" />
             </span>
           </>
         )}
-        title={<Bi zh="角色控制台" en="Character Console" />}
+        title={<Bi zh="角色" en="Characters" />}
       />
 
       <div className="workbench-grid character-console-workbench">

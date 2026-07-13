@@ -125,12 +125,12 @@ export function AssetLibraryShell({
     <div className="overview-root asset-library-root">
       <WorkspaceHeader
         className="asset-library-header"
-        eyebrow={<Bi zh="资产" en="Assets" />}
+        description={<Bi zh="浏览角色、设定与素材。" en="Browse characters, lore, and materials." />}
         icon={<Boxes size={22} strokeWidth={1.8} />}
         meta={(
           <>
-            <span className="status-pill"><Bi zh="资产" en="Assets" />: {assets.ok ? assets.items.length : tx(locale, "暂不可用", "unavailable")}</span>
-            <span className="status-pill"><Bi zh="当前结果" en="Current results" />: {searchResults?.ok ? searchResults.items.length : assets.ok ? assets.items.length : 0}</span>
+            <span className="status-pill">{assets.ok ? assets.items.length : "—"} <Bi zh="项资产" en="assets" /></span>
+            <span className="status-pill"><Bi zh="当前" en="Showing" /> {searchResults?.ok ? searchResults.items.length : assets.ok ? assets.items.length : 0}</span>
           </>
         )}
         title={<Bi zh="资产库" en="Asset Library" />}

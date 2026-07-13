@@ -63,17 +63,20 @@
   }
 }
 
-.app-frame.app-frame-unified .app-sidebar,
-.app-frame.app-frame-unified .sidebar-stack {
-  height: 100dvh;
-}
-
 .app-frame.app-frame-unified .sidebar-drawer {
   min-height: 0;
-  flex: 1;
 }
 
 @media (min-width: 861px) {
+  .app-frame.app-frame-unified .app-sidebar,
+  .app-frame.app-frame-unified .sidebar-stack {
+    height: 100dvh;
+  }
+
+  .app-frame.app-frame-unified .sidebar-drawer {
+    flex: 1;
+  }
+
   .app-frame.app-frame-unified .sidebar-stack,
   .app-frame.app-frame-unified .sidebar-drawer {
     display: flex;
@@ -82,6 +85,20 @@
 
   .app-frame.app-frame-unified .sidebar-account-menu {
     margin-top: auto;
+  }
+}
+
+@media (max-width: 860px) {
+  /* Single-column chrome: never pin the sidebar to full viewport height,
+     or the main workbench is pushed below the fold and looks "gone". */
+  .app-frame.app-frame-unified .app-sidebar,
+  .app-frame.app-frame-unified .sidebar-stack {
+    height: auto;
+    max-height: none;
+  }
+
+  .app-frame.app-frame-unified .sidebar-drawer {
+    flex: none;
   }
 }
 
@@ -327,7 +344,8 @@
   display: grid;
   height: calc(100dvh - var(--workspace-header-height) - 58px);
   min-height: 560px;
-  grid-template-columns: minmax(520px, 1.62fr) minmax(340px, 0.82fr);
+  /* minmax(0, …) keeps columns from forcing horizontal overflow that clips away. */
+  grid-template-columns: minmax(0, 1.62fr) minmax(0, 0.82fr);
   overflow: hidden;
   border-top: 1px solid rgba(65, 57, 47, 0.18);
   background: #eeebe4;
@@ -335,7 +353,7 @@
 
 /* True three-region studio: structure navigator | manuscript canvas | agent dock. */
 .writer-agent-layout[data-has-structure="true"] {
-  grid-template-columns: minmax(228px, 264px) minmax(440px, 1.55fr) minmax(330px, 0.82fr);
+  grid-template-columns: minmax(0, 264px) minmax(0, 1.55fr) minmax(0, 0.82fr);
 }
 
 .writer-structure-rail,
@@ -343,6 +361,11 @@
 .writer-agent-dock {
   min-width: 0;
   min-height: 0;
+}
+
+/* Segmented region switch is a mobile-only affordance. */
+.writer-mobile-switch {
+  display: none;
 }
 
 .writer-structure-rail {
@@ -1505,11 +1528,11 @@
 
 @media (max-width: 1180px) {
   .writer-agent-layout {
-    grid-template-columns: minmax(440px, 1.55fr) minmax(300px, 0.85fr);
+    grid-template-columns: minmax(0, 1.55fr) minmax(0, 0.85fr);
   }
 
   .writer-agent-layout[data-has-structure="true"] {
-    grid-template-columns: minmax(204px, 236px) minmax(380px, 1.5fr) minmax(300px, 0.82fr);
+    grid-template-columns: minmax(0, 236px) minmax(0, 1.5fr) minmax(0, 0.82fr);
   }
 
   .writer-artifact-tab span {
@@ -1518,34 +1541,121 @@
 }
 
 @media (max-width: 960px) {
+  /* Manuscript-primary collapses to one focused region at a time, switched via
+     the segmented control, instead of a long triple-stacked scroll. A definite
+     height keeps each region's internal scroll (thread, tabpanel) working. */
   .writer-agent-layout,
   .writer-agent-layout[data-has-structure="true"] {
-    height: auto;
-    min-height: 0;
-    grid-template-columns: minmax(0, 1fr);
-    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 152px);
+    min-height: 420px;
+    grid-template-columns: none;
+    overflow: hidden;
   }
 
-  .writer-structure-rail {
+  .writer-structure-rail,
+  .writer-artifact-canvas,
+  .writer-agent-dock {
+    flex: 1 1 auto;
+    min-height: 0;
+    border: 0;
+    animation: writer-region-fade var(--motion-standard) var(--ease-natural);
+  }
+
+  /* Only the region selected by data-mobile-view stays visible. */
+  .writer-agent-layout[data-mobile-view="structure"] .writer-artifact-canvas,
+  .writer-agent-layout[data-mobile-view="structure"] .writer-agent-dock,
+  .writer-agent-layout[data-mobile-view="manuscript"] .writer-structure-rail,
+  .writer-agent-layout[data-mobile-view="manuscript"] .writer-agent-dock,
+  .writer-agent-layout[data-mobile-view="agent"] .writer-structure-rail,
+  .writer-agent-layout[data-mobile-view="agent"] .writer-artifact-canvas {
     display: none;
   }
 
-  .writer-artifact-canvas {
-    min-height: calc(100dvh - var(--workspace-header-height) - 58px);
-    border-bottom: 1px solid rgba(65, 57, 47, 0.2);
+  .writer-mobile-switch {
+    display: grid;
+    position: sticky;
+    top: 0;
+    z-index: 7;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: 4px;
+    border-bottom: 1px solid rgba(65, 57, 47, 0.18);
+    background: rgba(250, 248, 243, 0.94);
+    box-shadow: 0 6px 18px rgba(43, 39, 34, 0.07);
+    padding: 6px 8px;
+    backdrop-filter: blur(8px);
   }
 
-  .writer-agent-thread {
-    min-height: inherit;
+  .writer-mobile-switch-tab {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-height: 48px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: #6c675d;
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    font-weight: 620;
+    cursor: pointer;
+    transition:
+      background-color var(--motion-fast) var(--ease-natural),
+      color var(--motion-fast) var(--ease-natural),
+      transform var(--motion-fast) var(--ease-natural);
   }
 
-  .writer-thread-scroll {
-    min-height: 360px;
+  .writer-mobile-switch-tab:active {
+    transform: scale(0.96);
   }
 
+  .writer-mobile-switch-tab[data-active="true"] {
+    background: rgba(139, 47, 39, 0.09);
+    color: #8b2f27;
+    box-shadow: inset 0 -2px 0 #8b2f27;
+  }
+
+  .writer-mobile-switch-tab:focus-visible {
+    outline: 2px solid #8b2f27;
+    outline-offset: -2px;
+  }
+}
+
+/* Short / landscape viewports: never force a min-height taller than the screen,
+   which would push the composer and tabs off the bottom. Regions fall back to
+   their internal scroll and the page scrolls naturally. */
+@media (max-height: 620px) {
+  .writer-agent-layout,
+  .writer-agent-layout[data-has-structure="true"] {
+    min-height: 0;
+  }
+}
+
+@media (max-height: 620px) and (max-width: 960px) {
+  .writer-agent-layout,
+  .writer-agent-layout[data-has-structure="true"] {
+    height: calc(100dvh - 116px);
+  }
+}
+
+@keyframes writer-region-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .writer-structure-rail,
+  .writer-artifact-canvas,
   .writer-agent-dock {
-    min-height: 720px;
-    border-left: 0;
+    animation: none;
+  }
+
+  .writer-mobile-switch-tab {
+    transition: none;
   }
 }
 
@@ -2021,6 +2131,60 @@ textarea[data-pe-source="true"].writer-prose-textarea-mirror {
 
 .writer-selection-custom input {
   min-height: 36px;
+}
+
+.writer-conflict-compare {
+  border: 1px solid rgba(148, 72, 48, 0.28);
+  border-radius: 12px;
+  background: #fbf4ee;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.writer-conflict-compare-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.writer-conflict-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.writer-conflict-column {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(65, 57, 47, 0.12);
+  background: #fffdf8;
+}
+
+.writer-conflict-column[data-side="local"] {
+  border-color: rgba(148, 72, 48, 0.22);
+  background: #fff8f2;
+}
+
+.writer-conflict-body {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: #2f2a24;
+}
+
+.writer-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .writer-revision-diff {

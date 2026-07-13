@@ -14,7 +14,7 @@ test("author journey live harness and browser test cover full handoff contract",
   ]);
   assert.match(harness, /submitServerAction/);
   assert.match(harness, /COMPLETE_JOURNEY/);
-  assert.match(live, /Enter Character Console/);
+  assert.match(live, /Enter Characters/);
   assert.match(live, /View in Writer/);
   assert.match(live, /Adopt draft into manuscript/);
   assert.match(live, /Generate TXT artifact/);

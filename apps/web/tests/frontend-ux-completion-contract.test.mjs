@@ -175,9 +175,13 @@ test("Wave A polish: author LLM bindings panel hides infrastructure fields", asy
   assert.match(shell, /LLMModuleBindingsPanel/);
   assert.match(panel, /llm-bindings-panel/);
   assert.match(panel, /batchBindModuleAction/);
+  assert.match(panel, /llm-bindings-accordion/);
+  assert.match(panel, /应用到所选|Apply to selected/);
   assert.doesNotMatch(panel, /base_url/);
   assert.doesNotMatch(panel, /supports_tools/);
   assert.doesNotMatch(panel, /effective\?\.channel_id/);
+  assert.doesNotMatch(panel, /max_tokens=/);
+  assert.doesNotMatch(panel, />module_key</);
 });
 
 test("Wave A polish: writer draft panel hides raw draft id", async () => {

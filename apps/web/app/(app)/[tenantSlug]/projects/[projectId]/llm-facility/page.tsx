@@ -40,6 +40,7 @@ import {
 import { currentRequestLocale } from "../../../../../../lib/request-locale";
 import { currentRequestSessionCookie } from "../../../../../../lib/request-session";
 import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
+import { humanizeFailure, moduleLabel as sharedModuleLabel } from "../../../../../../lib/user-facing-copy";
 import { workspacePathForProject } from "../../../../../../lib/workspace-route";
 import { redirect } from "next/navigation";
 
@@ -161,10 +162,10 @@ export default async function LLMFacilityPage({
         ? tx(
             locale,
             maxTokensLabel
-              ? `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}，max_tokens=${maxTokensLabel}`
+              ? `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}，输出上限 ${maxTokensLabel}`
               : `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}`,
             maxTokensLabel
-              ? `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}, max_tokens=${maxTokensLabel}`
+              ? `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}, output limit ${maxTokensLabel}`
               : `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}`,
           )
         : bindingFailureMessage(locale, result.code, result.message),
@@ -177,12 +178,15 @@ export default async function LLMFacilityPage({
 
     const nextChannelId = stringFromFormData(formData, "channelId");
     const nextModelId = stringFromFormData(formData, "modelId");
+    const scope = stringFromFormData(formData, "scope") || "all";
     const context = await webApiContext({ tenantId: tenantSlug, projectId });
     const [modulesResult, existingBindings] = await Promise.all([
       getLLMModules(context),
       getLLMModuleBindings(context),
     ]);
-    const moduleItems = modulesResult.ok ? modulesResult.items : [];
+    const allModules = modulesResult.ok ? modulesResult.items : [];
+    const requestedKeys = stringListFromFormData(formData, "moduleKeys");
+    const targetModules = resolveBatchTargetModules(allModules, scope, requestedKeys);
     const projectSettingsByModule = new Map(
       existingBindings.ok
         ? existingBindings.items
@@ -194,8 +198,22 @@ export default async function LLMFacilityPage({
     let lastError = "";
     let lastCode = "LLM_BINDING_UPDATE_FAILED";
     let appliedMaxTokens = "";
+    const failedLabels: string[] = [];
 
-    for (const module of moduleItems) {
+    if (targetModules.length === 0) {
+      const nextQuery = new URLSearchParams({
+        bindingStatus: "error",
+        bindingCode: "VALIDATION_FAILED",
+        bindingMessage: tx(
+          locale,
+          "没有可应用的模块，请先选择模块、展开分组或改为全部。",
+          "No modules to update. Select modules, expand a group, or apply to all.",
+        ),
+      });
+      redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+    }
+
+    for (const module of targetModules) {
       const settings = moduleBindingSettingsFromForm(
         formData,
         projectSettingsByModule.get(module.module_key),
@@ -217,10 +235,14 @@ export default async function LLMFacilityPage({
       } else {
         lastCode = result.code;
         lastError = result.message;
+        if (failedLabels.length < 3) {
+          failedLabels.push(moduleLabel(locale, module.module_key, module.label));
+        }
       }
     }
 
-    const total = moduleItems.length;
+    const total = targetModules.length;
+    const scopeLabelText = batchScopeLabel(locale, scope);
     const nextQuery = new URLSearchParams({
       bindingStatus: successCount === total ? "success" : "error",
       bindingCode: successCount === total ? "LLM_BINDING_BATCH_UPDATED" : lastCode,
@@ -228,16 +250,16 @@ export default async function LLMFacilityPage({
         ? tx(
             locale,
             appliedMaxTokens
-              ? `已将 ${successCount} 个模块绑定至同一模型，max_tokens=${appliedMaxTokens}`
-              : `已将 ${successCount} 个模块绑定至同一模型`,
+              ? `已对${scopeLabelText} ${successCount} 个能力绑定同一模型，输出上限 ${appliedMaxTokens}`
+              : `已对${scopeLabelText} ${successCount} 个能力绑定同一模型`,
             appliedMaxTokens
-              ? `Bound ${successCount} modules to the same model, max_tokens=${appliedMaxTokens}`
-              : `Bound ${successCount} modules to the same model`,
+              ? `Bound ${successCount} capabilities (${scopeLabelText}) to the same model, output limit ${appliedMaxTokens}`
+              : `Bound ${successCount} capabilities (${scopeLabelText}) to the same model`,
           )
         : tx(
             locale,
-            `批量绑定部分失败：${successCount}/${total} 成功。${bindingFailureMessage(locale, lastCode, lastError)}`,
-            `Batch bind partially failed: ${successCount}/${total} succeeded. ${bindingFailureMessage(locale, lastCode, lastError)}`,
+            `批量绑定未全部成功：${successCount}/${total}。${failedLabels.length ? `失败项：${failedLabels.join("、")}${failedLabels.length < total - successCount ? "…" : ""}。` : ""}${bindingFailureMessage(locale, lastCode, lastError)}`,
+            `Batch bind incomplete: ${successCount}/${total}. ${failedLabels.length ? `Failed: ${failedLabels.join(", ")}${failedLabels.length < total - successCount ? "…" : ""}. ` : ""}${bindingFailureMessage(locale, lastCode, lastError)}`,
           ),
     });
     redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
@@ -246,20 +268,49 @@ export default async function LLMFacilityPage({
   async function clearBindingAction(formData: FormData) {
     "use server";
 
-    const nextModuleKey = stringFromFormData(formData, "moduleKey") || DEFAULT_LLM_MODULE_KEY;
-    const result = await deleteLLMModuleBinding({
-      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
-      projectId,
-      moduleKey: nextModuleKey,
-    });
+    const requestedKeys = stringListFromFormData(formData, "moduleKeys");
+    const singleKey = stringFromFormData(formData, "moduleKey");
+    const moduleKeys = requestedKeys.length > 0
+      ? requestedKeys
+      : [singleKey || DEFAULT_LLM_MODULE_KEY];
+    const context = await webApiContext({ tenantId: tenantSlug, projectId });
+    let successCount = 0;
+    let lastCode = "LLM_BINDING_CLEAR_FAILED";
+    let lastError = "";
+    let lastModuleKey = moduleKeys[0] || DEFAULT_LLM_MODULE_KEY;
+
+    for (const nextModuleKey of moduleKeys) {
+      lastModuleKey = nextModuleKey;
+      const result = await deleteLLMModuleBinding({
+        ...context,
+        projectId,
+        moduleKey: nextModuleKey,
+      });
+      if (result.ok) {
+        successCount += 1;
+      } else {
+        lastCode = result.code;
+        lastError = result.message;
+      }
+    }
+
+    const total = moduleKeys.length;
     const nextQuery = new URLSearchParams({
       channel: channelQueryValue(selectedChannelId),
-      module: llmModuleSegment(nextModuleKey),
-      bindingStatus: result.ok ? "success" : "error",
-      bindingCode: result.ok ? "LLM_BINDING_CLEARED" : result.code,
-      bindingMessage: result.ok
-        ? tx(locale, "已恢复项目默认绑定", "Project default restored")
-        : bindingFailureMessage(locale, result.code, result.message),
+      module: llmModuleSegment(lastModuleKey),
+      bindingStatus: successCount === total ? "success" : "error",
+      bindingCode: successCount === total ? "LLM_BINDING_CLEARED" : lastCode,
+      bindingMessage: successCount === total
+        ? total > 1
+          ? tx(locale, `已恢复 ${successCount} 项项目默认绑定`, `Restored ${successCount} project defaults`)
+          : tx(locale, "已恢复项目默认绑定", "Project default restored")
+        : total > 1
+          ? tx(
+              locale,
+              `恢复默认未全部成功：${successCount}/${total}。${bindingFailureMessage(locale, lastCode, lastError)}`,
+              `Restore defaults incomplete: ${successCount}/${total}. ${bindingFailureMessage(locale, lastCode, lastError)}`,
+            )
+          : bindingFailureMessage(locale, lastCode, lastError),
     });
     redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
   }
@@ -549,7 +600,7 @@ async function loadChannelModels(
 
 function bindingFailureMessage(locale: Awaited<ReturnType<typeof currentRequestLocale>>, code: string, fallback: string) {
   if (code === "AUTH_ACCESS_DENIED") {
-    return tx(locale, "无权修改绑定，需要工作区 owner/admin 权限。", "Binding changes require workspace owner/admin access.");
+    return tx(locale, "无权修改绑定，需要工作区管理员权限。", "Binding changes require workspace admin access.");
   }
   if (code === "LLM_BINDING_TARGET_NOT_FOUND") {
     return tx(locale, "所选渠道与模型不匹配，请确认该渠道已同步此模型。", "The selected channel and model do not match. Sync models for that channel first.");
@@ -557,23 +608,40 @@ function bindingFailureMessage(locale: Awaited<ReturnType<typeof currentRequestL
   if (code === "VALIDATION_FAILED") {
     return tx(locale, "绑定参数无效，请重新选择渠道和模型。", "Invalid binding parameters. Re-select the channel and model.");
   }
-  return fallback;
+  return humanizeFailure(locale, code, fallback);
 }
 
 function moduleLabel(locale: Awaited<ReturnType<typeof currentRequestLocale>>, moduleKey: string, fallback = moduleKey) {
-  const labels: Record<string, [string, string]> = {
-    writer_composer: ["正文创作", "Writer Composer"],
-    writer_reviewer: ["写作审校", "Writer Reviewer"],
-    sequential_reading: ["顺序精读", "Sequential Reading"],
-    anchor_point_summary: ["锚点摘要", "Anchor Point Summary"],
-    narrative_archives: ["叙事档案", "Narrative Archives"],
-    asset_ingestion: ["资产导入", "Asset Ingestion"],
-    style_extractor: ["风格提取", "Style Extractor"],
-    graph_bond_generator: ["图谱关系生成", "Graph Bond Generator"],
-    worldline_director: ["世界线导演", "Worldline Director"],
-  };
-  const label = labels[moduleKey];
-  return label ? tx(locale, label[0], label[1]) : fallback;
+  return sharedModuleLabel(locale, moduleKey, fallback);
+}
+
+function batchScopeLabel(locale: Awaited<ReturnType<typeof currentRequestLocale>>, scope: string) {
+  if (scope === "selected") return tx(locale, "所选", "selected");
+  if (scope === "group") return tx(locale, "本组", "this group");
+  return tx(locale, "全部", "all");
+}
+
+function stringListFromFormData(formData: FormData, key: string) {
+  return formData
+    .getAll(key)
+    .flatMap((value) => (typeof value === "string" ? value.split(",") : []))
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function resolveBatchTargetModules(
+  modules: Array<{ module_key: string; label: string }>,
+  scope: string,
+  requestedKeys: string[],
+) {
+  if (scope === "all" && requestedKeys.length === 0) {
+    return modules;
+  }
+  if (requestedKeys.length === 0) {
+    return [];
+  }
+  const keySet = new Set(requestedKeys);
+  return modules.filter((module) => keySet.has(module.module_key));
 }
 
 function searchParamsFromRecord(query: Record<string, string | undefined>) {

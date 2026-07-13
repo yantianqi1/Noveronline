@@ -36,10 +36,9 @@ export function SignupForm({ action }: SignupFormProps) {
   return (
     <form action={formAction} className="login-form signup-form">
       {state.message ? (
-        <div className="login-error signup-error" role="alert">
+        <div className="login-error signup-error" role="alert" data-code={state.code || undefined}>
           <strong>注册未完成</strong>
           <p>{state.message}</p>
-          {state.code && state.code !== "VALIDATION_FAILED" ? <small>错误代码：{state.code}</small> : null}
         </div>
       ) : null}
 

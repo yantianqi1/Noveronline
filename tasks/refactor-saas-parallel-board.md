@@ -30,7 +30,7 @@
 | P6-003-A | `verified_current` | `019f4cad-4146-7a50-b20c-252b5f26d7b8` | dedup/book planning producer、Facility、candidate/draft 边界、中央挂载与 browser 认证通过；shared writer contract 与 world-rule/character-profile tools 已补证 |
 | P5-005-B | `verified_current` | `019f4cad-15a2-76e1-a6c1-7e49b2f3511c` | Seed trace/retry 与 Knowledge/Simulation full/live/browser 通过 |
 | P8-002-C | `verified_current` | `019f4cac-fde5-71d1-b71f-090a037551af` | model-sync/retirement/Legacy/Ops/Security/matrix reviewer 通过 |
-| Z-028 | `in_progress` | current | Z0–Z6 主实现 + app-role disposable live（empty project + settings/admission/proposals）已绿；下一 gate 为 Temporal provider E2E 与 browser journey（Z7 全认证） |
+| Z-028 | `in_progress` | current | Z0–Z6 + doc 33 P0/P1 已 `connected`；release hardening 补齐 same-TX outbox、StaleProposals 接线、accept→story_graph_build、Pi agent thread 持久化、draft chapter COALESCE；下一 gate 仍为 Temporal provider E2E + desktop/mobile browser（Z7） |
 
 ## 当前证据
 
