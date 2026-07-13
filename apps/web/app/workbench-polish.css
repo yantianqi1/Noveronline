@@ -323,10 +323,6 @@
 }
 
 /* Writer Agent: conversation first, manuscript as a live artifact. */
-.app-frame.app-frame-unified:has(.writer-root) {
-  --workspace-header-height: 96px;
-}
-
 .writer-agent-layout {
   display: grid;
   height: calc(100dvh - var(--workspace-header-height) - 58px);
@@ -1717,6 +1713,10 @@
   --workspace-header-height: 124px;
 }
 
+.app-frame.app-frame-unified:has(.writer-root) {
+  --workspace-header-height: 96px;
+}
+
 @media (min-width: 861px) {
   :is(
     .overview-header,
@@ -1770,6 +1770,24 @@
     .llm-facility-header
   ).workspace-header-compact .status-row {
     gap: 8px;
+  }
+
+  .writer-header.workspace-header-compact .workspace-header-actions {
+    align-self: center;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+}
+
+@media (min-width: 861px) and (max-width: 1199px) {
+  .app-frame.app-frame-unified:has(.writer-root) {
+    --workspace-header-height: 112px;
+  }
+
+  .writer-header.workspace-header-compact .workspace-header-actions {
+    max-width: 62%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 }
 

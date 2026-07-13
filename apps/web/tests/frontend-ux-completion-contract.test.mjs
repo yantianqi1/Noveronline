@@ -204,6 +204,7 @@ test("Wave A polish: product errors avoid raw error codes", async () => {
 test("Writer is manuscript-primary with a persistent Agent dock", async () => {
   const product = await source("components/writer-product-workspace.tsx");
   const shell = await source("components/writer-workbench-shell.tsx");
+  const polish = await source("app/workbench-polish.css");
   assert.match(product, /WriterArtifactTabs/);
   assert.match(product, /manuscript={/);
   assert.match(product, /structure={/);
@@ -242,6 +243,15 @@ test("Writer is manuscript-primary with a persistent Agent dock", async () => {
   assert.match(shell, /writer-breadcrumb/);
   assert.match(shell, /WriterRunStateChip/);
   assert.match(shell, /writer-sync-chip/);
+  const headerStart = shell.indexOf("<WorkspaceHeader");
+  const headerEnd = shell.indexOf("\n      />", headerStart);
+  const header = shell.slice(headerStart, headerEnd);
+  const actionsIndex = header.indexOf("actions={");
+  const runStateIndex = header.indexOf("<WriterRunStateChip");
+  const syncIndex = header.indexOf("writer-sync-chip");
+  assert.ok(actionsIndex >= 0 && runStateIndex > actionsIndex && syncIndex > runStateIndex);
+  assert.doesNotMatch(header, /meta=\{<WriterRunStateChip/);
+  assert.match(polish, /\.app-frame\.app-frame-unified:has\(\.writer-root\)\s*\{\s*--workspace-header-height:\s*96px;/s);
   // Manuscript canvas is the dominant primary; the Agent dock is persistent but secondary.
   const productIndex = shell.indexOf("{productWorkspace}");
   const threadIndex = shell.indexOf("<WriterAgentThread");

@@ -143,6 +143,7 @@ export function WriterWorkbenchShell({
       <WorkspaceHeader
         actions={
           <>
+            <WriterRunStateChip active={runActive} isError={runSummary?.ok === false} label={statusLabel} locale={locale} />
             <span className="writer-sync-chip" title={tx(locale, "所有更改在提交时即时保存到服务器", "All changes are saved to the server on submit")}>
               <Check aria-hidden="true" size={14} />
               <Bi zh="已同步" en="Synced" />
@@ -183,7 +184,6 @@ export function WriterWorkbenchShell({
           </nav>
         }
         icon={<Bot size={22} strokeWidth={1.8} />}
-        meta={<WriterRunStateChip active={runActive} isError={runSummary?.ok === false} label={statusLabel} locale={locale} />}
         title={<Bi zh="写作 Agent" en="Writer Agent" />}
       />
 
