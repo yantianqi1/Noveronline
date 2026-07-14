@@ -7581,21 +7581,22 @@ dd {
 
 @media (max-width: 860px) {
   .overview-loading-root .workspace-loading {
-    min-height: 760px;
+    min-height: 0;
   }
 
   .overview-loading-header {
-    height: 270px;
-    padding: 28px 18px 24px;
+    height: auto;
+    min-height: 0;
+    padding: 16px 14px 12px;
   }
 
   .overview-loading-title {
-    width: 70%;
-    height: 50px;
+    width: 55%;
+    height: 28px;
   }
 
   .overview-loading-copy {
-    width: 90%;
+    width: 80%;
   }
 
   .overview-loading-metrics {
@@ -7604,20 +7605,20 @@ dd {
     gap: 8px;
     background: transparent;
     box-shadow: none;
-    padding: 18px;
+    padding: 12px 14px;
   }
 
   .overview-loading-metric {
     width: 100%;
-    height: 98px;
+    height: 72px;
     border: 1px solid rgba(64, 87, 113, .15);
     background: rgba(255, 255, 255, .55);
   }
 
   .overview-loading-progress {
-    min-height: 180px;
-    margin: 0 18px 18px;
-    padding: 28px 20px;
+    min-height: 120px;
+    margin: 0 14px 14px;
+    padding: 16px 14px;
   }
 }
 

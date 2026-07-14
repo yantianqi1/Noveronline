@@ -492,7 +492,13 @@
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 0 0 28px !important;
+  padding: 0 0 28px;
+}
+
+@media (min-width: 861px) {
+  .app-frame.app-frame-unified:has(.character-console-root) .app-main {
+    padding: 0 0 28px !important;
+  }
 }
 
 .app-frame.app-frame-unified:has(.character-console-root) .character-console-root {
@@ -3392,14 +3398,6 @@
     padding: 0 4px;
   }
 
-  .writer-artifact-tab {
-    min-height: 36px !important;
-    flex-direction: row;
-    gap: 4px;
-    padding: 4px 2px !important;
-    font-size: 0.72rem;
-  }
-
   .writer-artifact-meta-content,
   .writer-diagnostics-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -3491,6 +3489,15 @@
 
   .worldline-simulate-toolbar .worldline-toolbar-form button {
     grid-column: 1;
+  }
+
+  /* Full phone band (≤860): short single-row artifact tabs. */
+  .writer-artifact-tab {
+    min-height: 36px !important;
+    flex-direction: row;
+    gap: 4px;
+    padding: 4px 2px !important;
+    font-size: 0.72rem;
   }
 }
 

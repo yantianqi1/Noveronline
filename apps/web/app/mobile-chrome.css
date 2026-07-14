@@ -1460,9 +1460,39 @@
     overflow: visible !important;
   }
 
-  /* Graph explore: inspector flows instead of stealing half the viewport. */
-  .story-graph-root .inspector-panel {
+  /* Graph / character explore: inspector flows instead of half-viewport sandwich. */
+  .story-graph-root .inspector-panel,
+  .character-console-root .inspector-panel {
     max-height: none;
+    overflow: visible;
+  }
+
+  /* Suppress leftover hero decorations under compact materials headers. */
+  .asset-library-header::before,
+  .asset-library-header::after,
+  .story-graph-header::before,
+  .story-graph-header::after,
+  .worldline-header::before,
+  .worldline-header::after,
+  .llm-facility-header::before,
+  .llm-facility-header::after {
+    display: none !important;
+  }
+
+  /* Asset browse: no forced 620px table width on phone. */
+  .asset-browse-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .asset-browse-table {
+    min-width: 0 !important;
+    width: 100%;
+  }
+
+  .asset-browse-table th,
+  .asset-browse-table td {
+    white-space: normal;
   }
 
   /* Immersive writer: one stage pad only — inner thread/composer stay tight. */

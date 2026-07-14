@@ -343,14 +343,10 @@ test("phone density: compact materials headers, short artifact tabs, no aside cl
     /aside\.asset-library-aside[\s\S]*?max-height:\s*none\s*!important/s,
   );
 
-  // Writer artifact tabs stay one short row on phone.
+  // Writer artifact tabs stay one short row on full phone band (≤860).
   assert.match(
     polish,
-    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-artifact-tab\s*\{[\s\S]*?min-height:\s*36px\s*!important/s,
-  );
-  assert.doesNotMatch(
-    polish,
-    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-artifact-tab\s*\{[\s\S]*?min-height:\s*52px/s,
+    /@media \(max-width:\s*860px\)\s*\{[\s\S]*?\.writer-artifact-tab\s*\{[\s\S]*?min-height:\s*36px\s*!important/s,
   );
 
   // Writer home fills flex parent instead of a second 100dvh calc.
@@ -361,5 +357,21 @@ test("phone density: compact materials headers, short artifact tabs, no aside cl
   assert.doesNotMatch(
     polish,
     /\.writer-root\[data-home="true"\]\s*\{[^}]*100dvh/,
+  );
+
+  // Character console: desktop-only !important pad; phone inherits mobile-chrome.
+  assert.match(
+    polish,
+    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame\.app-frame-unified:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?padding:\s*0\s+0\s+28px\s*!important/s,
+  );
+  assert.match(
+    polish,
+    /\.app-frame\.app-frame-unified:has\(\.character-console-root\)\s+\.app-main\s*\{\s*width:\s*100%;\s*max-width:\s*none;\s*margin:\s*0;\s*padding:\s*0\s+0\s+28px;\s*\}/s,
+  );
+
+  // Character + graph inspectors must not clamp to 52dvh on phone.
+  assert.match(
+    chrome,
+    /\.character-console-root\s+\.inspector-panel\s*\{[\s\S]*?max-height:\s*none/s,
   );
 });
