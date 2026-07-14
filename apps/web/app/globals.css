@@ -2095,9 +2095,10 @@
 }
 
 .app-frame:has(.character-console-root) .app-main {
-  width: 100%;
-  max-width: none;
-  padding: 18px 0 0;
+  width: min(100%, 1040px);
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 12px 16px 28px;
 }
 
 .character-console-root {
@@ -2108,10 +2109,10 @@
 
 .character-console-header {
   position: relative;
-  min-height: 128px;
+  min-height: 0;
   overflow: hidden;
   border: 0 !important;
-  padding: 10px 30px 22px !important;
+  padding: 8px 20px 14px !important;
 }
 
 .character-console-header::before {
@@ -2152,12 +2153,12 @@
 }
 
 .character-console-header h1 {
-  margin: 7px 0 13px !important;
+  margin: 4px 0 8px !important;
   color: #f5efe6;
   font-family: "Songti SC", "STSong", "SimSun", Georgia, serif;
-  font-size: 2.6rem;
+  font-size: clamp(1.55rem, 2.4vw, 1.95rem);
   font-weight: 500;
-  line-height: 1.08;
+  line-height: 1.12;
 }
 
 .character-console-header .page-title-icon {
@@ -2194,7 +2195,7 @@
 }
 
 .character-console-workbench {
-  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.28fr) minmax(220px, 0.78fr);
   gap: 0;
   align-items: stretch;
   margin-top: 0;
@@ -2249,7 +2250,7 @@
   background: transparent;
   box-shadow: none;
   color: inherit;
-  padding: 24px 30px 28px;
+  padding: 16px 18px 18px;
   transform: none;
 }
 
@@ -2264,10 +2265,10 @@
 }
 
 .character-console-workbench .panel h2 {
-  margin: 5px 0 14px;
+  margin: 4px 0 10px;
   color: inherit;
   font-family: "Songti SC", "STSong", "SimSun", Georgia, serif;
-  font-size: 1.55rem;
+  font-size: 1.22rem;
   font-weight: 500;
 }
 
@@ -2283,7 +2284,7 @@
 
 .character-console-workbench .character-create-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 28px;
+  column-gap: 16px;
 }
 
 .character-form-field {
@@ -2365,7 +2366,7 @@
 }
 
 .character-console-workbench .workspace-mode-switcher {
-  margin: 4px 30px 6px;
+  margin: 4px 18px 6px;
   border-color: rgba(167, 135, 82, 0.32);
   background:
     linear-gradient(180deg, rgba(86, 67, 44, 0.05), transparent 48%),
@@ -2465,16 +2466,18 @@
 
 @media (max-width: 640px) {
   .app-frame:has(.character-console-root) .app-main {
-    padding-top: 8px;
+    width: 100%;
+    max-width: none;
+    padding: 8px 12px 20px;
   }
 
   .character-console-header {
-    min-height: 132px;
-    padding: 12px 18px 20px !important;
+    min-height: 0;
+    padding: 8px 14px 12px !important;
   }
 
   .character-console-header h1 {
-    font-size: 2.25rem;
+    font-size: 1.55rem;
   }
 
   .character-console-header .status-row {
@@ -2493,11 +2496,15 @@
   }
 
   .character-console-workbench .panel {
-    padding: 22px 18px 26px;
+    padding: 14px 14px 16px;
   }
 
   .character-console-workbench .character-create-form {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .character-console-workbench .workspace-mode-switcher {
+    margin: 4px 14px 6px;
   }
 }
 
@@ -4482,15 +4489,18 @@ header {
   min-width: 0;
 }
 
-.overview-analysis-results > .panel {
+.overview-analysis-results > .overview-details {
   margin: 0;
+}
+
+.overview-analysis-results .overview-details-content > section {
+  display: grid;
+  gap: 10px;
 }
 
 .overview-analysis-workspace,
 .overview-analysis-candidates {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
+  min-width: 0;
 }
 
 .overview-analysis-results .overview-analysis-workspace,
@@ -6031,9 +6041,10 @@ dd {
   }
 
   .app-frame:has(.character-console-root) .app-main {
-    width: 100%;
-    max-width: none;
-    padding: 0;
+    width: min(100%, 1040px);
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 10px 16px 24px;
   }
 
   :is(
@@ -7032,7 +7043,8 @@ dd {
     padding: 10px 12px;
   }
 
-  .overview-root .overview-details {
+  /* Scope overview rail chrome away from the asset filter disclosure trigger. */
+  .overview-root .overview-details:not(.asset-filter-disclosure) {
     border: 0;
     border-bottom: 1px solid rgba(80, 70, 54, .21);
     border-radius: 0;
@@ -7040,17 +7052,17 @@ dd {
     box-shadow: none;
   }
 
-  .overview-root .overview-details > summary {
+  .overview-root .overview-details:not(.asset-filter-disclosure) > summary {
     min-height: 64px;
     border-radius: 0;
     padding: 13px 48px;
   }
 
-  .overview-root .overview-details > summary > svg:first-child {
+  .overview-root .overview-details:not(.asset-filter-disclosure) > summary > svg:first-child {
     color: #2e302e;
   }
 
-  .overview-root .overview-details > summary strong {
+  .overview-root .overview-details:not(.asset-filter-disclosure) > summary strong {
     font-family: "Songti SC", "SimSun", serif;
     font-size: 1rem;
   }
@@ -7814,9 +7826,14 @@ dd {
 .asset-search-form {
   display: block;
   margin-top: 12px;
+  /* Open filter panel overlays results; do not clip against form bounds. */
+  overflow: visible;
+  position: relative;
+  z-index: 5;
 }
 
 .asset-search-form.binding-form {
+  display: block;
   grid-template-columns: none;
 }
 
@@ -7845,8 +7862,10 @@ dd {
 }
 
 .asset-library-grid .compact-filter-bar {
+  /* Anchor for the open filter panel so it spans the search row, not the narrow trigger. */
   position: relative;
-  z-index: 4;
+  z-index: 6;
+  overflow: visible;
 }
 
 .asset-library-grid .compact-filter-row {
@@ -7862,6 +7881,9 @@ dd {
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
+  /* Keep actions from becoming the absolute containing block for the panel. */
+  position: static;
+  overflow: visible;
 }
 
 .asset-library-grid .asset-search-submit {
@@ -7873,10 +7895,11 @@ dd {
 
 /* Compact filter trigger + overlay panel (no page-length vertical dump). */
 .asset-filter-disclosure {
-  position: relative;
+  /* static: open panel positions against .compact-filter-bar, full toolbar width. */
+  position: static;
   flex: 0 0 auto;
   border-color: rgba(104, 88, 65, .22);
-  background: rgba(255, 253, 248, .9);
+  background: #fffcf7;
   box-shadow: none;
 }
 
@@ -7900,18 +7923,33 @@ dd {
 .asset-filter-disclosure > .asset-filter-content {
   position: absolute;
   top: calc(100% + 8px);
+  left: 0;
   right: 0;
-  z-index: 40;
-  width: min(640px, calc(100vw - 48px));
-  max-height: min(52vh, 360px);
-  overflow: auto;
-  border: 1px solid rgba(104, 88, 65, .22);
+  z-index: 50;
+  width: auto;
+  max-width: none;
+  max-height: min(70vh, 520px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid rgba(104, 88, 65, .28);
   border-radius: var(--radius-panel);
-  background: rgba(252, 249, 243, .98);
-  box-shadow: 0 16px 36px rgba(42, 34, 24, .18);
+  /* Solid surface so list rows never bleed through the open panel. */
+  background: #fcf9f3;
+  box-shadow: 0 18px 40px rgba(42, 34, 24, .2);
+  isolation: isolate;
+}
+
+.asset-filter-disclosure > .asset-filter-content.overview-details-content {
+  border-top: 0;
+  display: block;
+  min-width: 0;
 }
 
 .asset-filter-disclosure > .asset-filter-content > section {
+  display: grid;
+  gap: 0;
+  min-width: 0;
   padding: 14px 16px 16px;
 }
 
@@ -7936,7 +7974,42 @@ dd {
 .asset-filter-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px 12px;
+  gap: 12px 14px;
+  min-width: 0;
+}
+
+/* Match mode + capability hint sit on their own full-width row. */
+.asset-filter-fields > .asset-filter-field-span {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.asset-filter-fields > .asset-search-field,
+.asset-filter-fields > .asset-filter-field-span > .asset-search-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+
+.asset-filter-fields > .asset-search-field select,
+.asset-filter-fields > .asset-search-field input,
+.asset-filter-fields > .asset-filter-field-span select,
+.asset-filter-fields > .asset-filter-field-span input {
+  width: 100%;
+  max-width: 100%;
+  /* Opaque controls — translucent glass lets list rows bleed through the overlay. */
+  background: #fffdf8;
+  background-color: #fffdf8;
+}
+
+.asset-filter-fields > .asset-search-field .form-hint,
+.asset-filter-fields > .asset-filter-field-span .form-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  line-height: 1.35;
 }
 
 .asset-filter-fields .asset-search-field label {
@@ -7990,6 +8063,360 @@ dd {
 
 .asset-browse-list {
   margin-top: 0;
+}
+
+/* Grouped browse list: type sections instead of one flat 100-row table. */
+.asset-type-groups {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.asset-type-group {
+  min-width: 0;
+  border: 1px solid rgba(104, 88, 65, .16);
+  border-radius: 10px;
+  background: rgba(255, 252, 246, .72);
+}
+
+.asset-type-group-summary {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 12px;
+  color: var(--text-secondary);
+}
+
+.asset-type-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.asset-type-group-title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.asset-type-group-title strong {
+  color: var(--foreground);
+  font-family: "Songti SC", "SimSun", Georgia, serif;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.asset-type-group-count {
+  display: inline-flex;
+  min-width: 1.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(143, 33, 27, .08);
+  color: var(--primary-pressed);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px;
+}
+
+.asset-type-group-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid rgba(104, 88, 65, .12);
+  padding: 0;
+  list-style: none;
+}
+
+.asset-type-group-list > li + li {
+  border-top: 1px solid rgba(104, 88, 65, .08);
+}
+
+.asset-row-button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  padding: 10px 12px;
+  transition: background-color var(--motion-fast) var(--ease-natural);
+}
+
+.asset-row-button:hover,
+.asset-row-button:focus-visible {
+  background: rgba(143, 33, 27, .05);
+  outline: none;
+}
+
+.asset-row-main {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.asset-row-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-row-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 10px;
+}
+
+.asset-search-title-button {
+  display: inline;
+  width: auto;
+  grid-template-columns: none;
+  padding: 0;
+  text-align: left;
+}
+
+.asset-search-title-button:hover,
+.asset-search-title-button:focus-visible {
+  background: transparent;
+  text-decoration: underline;
+}
+
+/* In-page asset preview dialog (list data; no catalog page hop). */
+.asset-preview-dialog {
+  width: min(100% - 24px, 560px);
+  max-height: min(86vh, 720px);
+  margin: auto;
+  border: 1px solid rgba(104, 88, 65, .28);
+  border-radius: var(--radius-panel);
+  background: #fcf9f3;
+  box-shadow: 0 22px 48px rgba(42, 34, 24, .24);
+  color: var(--foreground);
+  padding: 0;
+  overflow: hidden;
+}
+
+.asset-preview-dialog::backdrop {
+  background: rgba(23, 26, 27, 0.42);
+}
+
+.asset-preview-dialog-panel {
+  display: flex;
+  max-height: min(86vh, 720px);
+  flex-direction: column;
+  min-height: 0;
+}
+
+.asset-preview-dialog-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid rgba(104, 88, 65, .14);
+  padding: 14px 16px 12px;
+}
+
+.asset-preview-dialog-heading {
+  min-width: 0;
+}
+
+.asset-preview-dialog-heading .eyebrow {
+  margin: 0 0 4px;
+}
+
+.asset-preview-dialog-heading h2 {
+  margin: 0;
+  font-family: "Songti SC", "SimSun", Georgia, serif;
+  font-size: 1.28rem;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.asset-preview-dialog-heading .form-hint {
+  margin: 6px 0 0;
+}
+
+.asset-preview-close {
+  flex: 0 0 auto;
+  min-height: 36px;
+  gap: 6px;
+}
+
+.asset-preview-dialog-body {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px 16px 18px;
+}
+
+.asset-preview-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.asset-preview-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin: 0;
+}
+
+.asset-preview-meta > div {
+  min-width: 0;
+}
+
+.asset-preview-meta dt {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  margin: 0 0 3px;
+}
+
+.asset-preview-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.asset-preview-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.asset-preview-section h3 {
+  margin: 0 0 6px;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.asset-preview-summary {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.asset-preview-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.asset-preview-payload {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid rgba(104, 88, 65, .14);
+  border-radius: 8px;
+  background: rgba(255, 253, 248, .92);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.asset-preview-fields {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.asset-preview-fields > div {
+  display: grid;
+  gap: 2px;
+}
+
+.asset-preview-fields dt {
+  color: var(--text-muted, #7a6d58);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.asset-preview-fields dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.asset-preview-prose {
+  max-height: 280px;
+  overflow: auto;
+}
+
+.asset-preview-raw {
+  border: 1px solid rgba(104, 88, 65, .12);
+  border-radius: 8px;
+  background: rgba(252, 249, 243, .9);
+  padding: 8px 12px;
+}
+
+.asset-preview-raw > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  font-weight: 600;
+  list-style: none;
+}
+
+.asset-preview-raw > summary::-webkit-details-marker {
+  display: none;
+}
+
+.asset-preview-raw[open] > summary {
+  margin-bottom: 8px;
+}
+
+.asset-preview-raw .asset-preview-payload {
+  margin-top: 0;
+}
+
+.asset-preview-ops-hint {
+  margin: 0;
+  padding-top: 4px;
+  border-top: 1px solid rgba(104, 88, 65, .12);
+}
+
+.asset-preview-ops-link {
+  color: var(--primary-pressed);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .asset-row-button {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .asset-row-meta {
+    justify-content: flex-start;
+  }
+
+  .asset-preview-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* Inspector contents stay stacked in the right column. */
@@ -8183,7 +8610,7 @@ dd {
     left: 0;
     right: 0;
     width: auto;
-    max-height: min(58vh, 420px);
+    max-height: min(70vh, 520px);
   }
 
   .asset-filter-fields {
@@ -8191,11 +8618,17 @@ dd {
   }
 
   .asset-library-grid .compact-filter-actions {
+    position: static;
     width: 100%;
   }
 
   .asset-library-grid .compact-filter-actions > * {
     flex: 1 1 auto;
+  }
+
+  /* Trigger stays a control; open panel still anchors to the full filter bar. */
+  .asset-filter-disclosure {
+    position: static;
   }
 }
 
@@ -8240,11 +8673,20 @@ dd {
   text-decoration: none;
 }
 
-.asset-title-link:hover,
-.asset-title-link:focus-visible {
+a.asset-title-link:hover,
+a.asset-title-link:focus-visible {
   color: var(--accent-primary);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+button.asset-title-link.asset-row-button {
+  text-decoration: none;
+}
+
+button.asset-title-link.asset-row-button:hover strong,
+button.asset-title-link.asset-row-button:focus-visible strong {
+  color: var(--accent-primary);
 }
 
 .asset-browse-table tbody tr.asset-row-link:hover {
@@ -9163,9 +9605,10 @@ button.asset-workspace-close:hover {
   }
 
   .app-frame:has(.character-console-root) .app-main {
-    width: 100%;
-    max-width: none;
-    padding: 0;
+    width: min(100%, 1040px);
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 10px 16px 24px;
   }
 
   :is(

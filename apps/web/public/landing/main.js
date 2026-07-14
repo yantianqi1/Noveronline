@@ -116,9 +116,20 @@
   if (useSpatialDeck) {
     document.documentElement.classList.add("landing-spatial");
   }
-  const SNAP_DURATION = useSpatialDeck ? 820 : 480;
-  const SPATIAL_DURATION = reducedMotion ? 0 : 820;
-  const SPATIAL_SCRUB_PX = Math.max(160, Math.min(280, (window.innerHeight || 640) * 0.32));
+  const SNAP_DURATION = useSpatialDeck ? 640 : 480;
+  /** 全行程切幕时长：略短更「跟手」，曲线用 ease 保证不跳 */
+  const SPATIAL_DURATION = reducedMotion ? 0 : 520;
+  let spatialScrubPx = Math.max(140, Math.min(240, (window.innerHeight || 640) * 0.28));
+  /** 缓存视口高度，避免每帧读 layout */
+  let spatialVh = window.innerHeight || 640;
+  /** 当前过渡对，便于只清理这两个节点 */
+  let spatialSourceEl = null;
+  let spatialTargetEl = null;
+
+  function refreshSpatialMetrics() {
+    spatialVh = window.innerHeight || 640;
+    spatialScrubPx = Math.max(140, Math.min(240, spatialVh * 0.28));
+  }
 
   scenes.forEach((scene) => {
     scene.querySelectorAll("[data-reveal]").forEach((el, i) => {
@@ -529,12 +540,28 @@
     };
   }
 
-  function initVideoStacks() {
-    document.querySelectorAll(".scene-video-stack[data-video-src]").forEach((stack) => {
-      if (videoStacks.has(stack)) return;
-      const controller = createSeamlessStack(stack);
-      if (controller) videoStacks.set(stack, controller);
-    });
+  function ensureVideoStack(stack) {
+    if (!stack) return null;
+    let controller = videoStacks.get(stack);
+    if (controller) return controller;
+    controller = createSeamlessStack(stack);
+    if (controller) videoStacks.set(stack, controller);
+    return controller;
+  }
+
+  /**
+   * 视频栈懒创建：手机端只建当前±1，避免 6 幕 × 双路 = 12 个 video 同时占解码/内存。
+   * 桌面仍可全量预建（滚动路径需要）。
+   */
+  function initVideoStacks({ eagerAll = !useSpatialDeck } = {}) {
+    if (eagerAll) {
+      document.querySelectorAll(".scene-video-stack[data-video-src]").forEach((stack) => {
+        ensureVideoStack(stack);
+      });
+      return;
+    }
+    // 手机：只建首幕，邻幕在 warm 时再建
+    ensureVideoStack(stackForScene(0));
   }
 
   function pauseAllVideos() {
@@ -547,24 +574,32 @@
   }
 
   function warmNeighborVideos(index) {
-    // 预热当前 ±1 幕，滚动落点时能马上起播
-    [index - 1, index, index + 1].forEach((i) => {
+    // 只预热当前 + 下一幕（优先前进方向），控制同时解码路数
+    const neighbors = useSpatialDeck
+      ? [index, index + 1, index - 1]
+      : [index - 1, index, index + 1];
+    neighbors.forEach((i) => {
       if (i < 0 || i >= total) return;
       const stack = stackForScene(i);
-      if (!stack) return;
-      videoStacks.get(stack)?.warm();
+      ensureVideoStack(stack)?.warm();
     });
   }
 
   function playSceneVideo(index) {
     const stack = stackForScene(index);
-    videoStacks.forEach((controller, key) => {
-      if (key !== stack) controller.pause({ keepFrame: true });
+    const controller = ensureVideoStack(stack);
+    videoStacks.forEach((ctrl, key) => {
+      if (key !== stack) ctrl.pause({ keepFrame: true });
     });
     activeStack = stack;
-    warmNeighborVideos(index);
-    if (!stack) return;
-    const controller = videoStacks.get(stack);
+    // 延后邻幕 warm，避免与起播抢同一帧
+    if (useSpatialDeck) {
+      window.setTimeout(() => {
+        if (current === index && !snapLocked) warmNeighborVideos(index);
+      }, 120);
+    } else {
+      warmNeighborVideos(index);
+    }
     if (!controller) return;
     controller.play();
   }
@@ -573,10 +608,10 @@
     if (sliding) {
       // 保留已解码的最后一帧，只暂停解码；切幕时调用 load() 会造成主线程尖峰和黑闪。
       if (activeStack) {
-        const controller = videoStacks.get(activeStack);
-        controller?.pause({ keepFrame: true });
+        videoStacks.get(activeStack)?.pause({ keepFrame: true });
       }
-      warmNeighborVideos(index);
+      // 滑动中只 ensure 目标栈，不 warm 全邻域
+      ensureVideoStack(stackForScene(index));
       return;
     }
     playSceneVideo(index);
@@ -838,7 +873,8 @@
     metricsFrame = 0;
     if (useSpatialDeck) {
       // 立体 deck 为固定叠层，不再依赖文档 scroll offset
-      sceneMetrics = scenes.map(() => ({ top: 0, height: window.innerHeight || 1 }));
+      refreshSpatialMetrics();
+      sceneMetrics = scenes.map(() => ({ top: 0, height: spatialVh || 1 }));
       return;
     }
     sceneMetrics = scenes.map((scene) => ({
@@ -896,141 +932,88 @@
   }
 
   function clearSpatialPaint() {
-    scenes.forEach((scene) => {
+    const pair = [spatialSourceEl, spatialTargetEl];
+    spatialSourceEl = null;
+    spatialTargetEl = null;
+    // 优先只清过渡对；兜底扫一遍去掉残留 class（极少路径）
+    const nodes = pair[0] || pair[1] ? pair.filter(Boolean) : scenes;
+    nodes.forEach((scene) => {
+      if (!scene) return;
       scene.classList.remove("is-spatial-source", "is-spatial-target", "is-spatial-scrubbing");
-      scene.style.removeProperty("transform");
-      scene.style.removeProperty("opacity");
-      scene.style.removeProperty("z-index");
-      scene.style.removeProperty("filter");
-      scene.style.removeProperty("box-shadow");
-      scene.style.removeProperty("transform-origin");
-      scene.style.removeProperty("clip-path");
+      scene.style.transform = "";
+      scene.style.opacity = "";
+      scene.style.zIndex = "";
+      scene.style.willChange = "";
+      scene.style.transformOrigin = "";
     });
   }
 
-  /** 丝滑缓动：前段略加速离场，后段柔和落位（近似 smoothstep + 过冲回收） */
+  /**
+   * 单一缓动。禁止 animate 与 paint 叠两层 ease。
+   * 使用纯多项式，避免 Math.pow 在热路径上的额外开销（影响可忽略，但更可预测）。
+   */
   function spatialEase(t) {
-    const x = Math.max(0, Math.min(1, t));
-    if (x < 0.62) {
-      const local = x / 0.62;
-      return 0.86 * (1 - Math.pow(1 - local, 2.85));
-    }
-    const local = (x - 0.62) / 0.38;
-    // 末端轻微 settle，避免硬停
-    const settle = 1 - Math.pow(1 - local, 2.4);
-    return 0.86 + 0.14 * settle;
+    const x = t < 0 ? 0 : t > 1 ? 1 : t;
+    // easeOutCubic
+    const inv = 1 - x;
+    return 1 - inv * inv * inv;
   }
 
   /**
-   * 立体切幕插值。
-   * dir > 0：去下一幕 — 旧幕往深处消失，新幕自上方映射映入
-   * dir < 0：回上一幕 — 旧幕沉入深处，上一幕自下方映回
-   * @param {number} rawT 0→1
-   * @param {{ scrubbing?: boolean }} [opts]
+   * 切幕插值：只写 transform + opacity（GPU 友好）。
+   * 去掉 rotateX / filter / box-shadow —— 带 video 的大层上 3D 旋转是掉帧主因。
+   * 景深感用 scale + translateY + 轻微 translateZ 表达。
    */
-  function paintSpatialFrame(source, target, dir, rawT, opts = {}) {
-    const t = Math.max(0, Math.min(1, rawT));
-    // 跟手拖拽时用近似线性，动画结算时用丝滑缓动
-    const e = opts.scrubbing ? t * (0.92 + t * 0.08) : spatialEase(t);
-
-    source.classList.add("is-spatial-source");
-    target.classList.add("is-spatial-target");
-    source.classList.remove("is-spatial-target");
-    target.classList.remove("is-spatial-source");
-    if (opts.scrubbing) {
-      source.classList.add("is-spatial-scrubbing");
-      target.classList.add("is-spatial-scrubbing");
-    } else {
-      source.classList.remove("is-spatial-scrubbing");
-      target.classList.remove("is-spatial-scrubbing");
-    }
-
-    // 跟手时弱化 blur，避免 iOS 合成层掉帧；结算动画保留完整景深
-    const blurScale = opts.scrubbing ? 0.35 : 1;
+  function paintSpatialFrame(source, target, dir, e) {
+    const p = e < 0 ? 0 : e > 1 ? 1 : e;
+    const vh = spatialVh;
+    const s = source.style;
+    const t = target.style;
 
     if (dir > 0) {
-      // ── 旧幕：向画面深处消失（缩小 + 后移 + 微暗 + 轻微模糊）──
-      const sy = e * 6;
-      const sz = -e * 480;
-      const ss = 1 - e * 0.32;
-      const srx = e * 9;
-      const so = 1 - e * 0.92;
-      const sBlur = e * 10 * blurScale;
-      const sBright = 1 - e * 0.42;
-      source.style.transformOrigin = "50% 55%";
-      source.style.transform = `translate3d(0, ${sy}%, ${sz}px) scale(${ss}) rotateX(${srx}deg)`;
-      source.style.opacity = String(Math.max(0, so));
-      source.style.filter =
-        sBlur < 0.2
-          ? `brightness(${sBright}) saturate(${1 - e * 0.35})`
-          : `brightness(${sBright}) saturate(${1 - e * 0.35}) blur(${sBlur}px)`;
-      source.style.zIndex = "2";
-      source.style.boxShadow = opts.scrubbing
-        ? "none"
-        : `0 ${8 + e * 28}px ${36 + e * 90}px rgba(8,6,4,${0.12 + e * 0.38})`;
+      // 旧幕：缩小 + 微下沉 + 淡出（往「深处」）
+      const sy = p * vh * 0.035;
+      const ss = 1 - p * 0.14;
+      const so = 1 - p * 0.9;
+      s.transform = `translate3d(0,${sy | 0}px,0) scale(${ss})`;
+      s.opacity = so < 0.02 ? "0" : String((so * 1000 | 0) / 1000);
 
-      // ── 新幕：自上方「映射」进来（俯冲落位 + 轻微透视展开）──
-      // 起势：在上方、略放大、顶边更近镜头；落位：铺满屏幕
-      const ty = -(1 - e) * 112;
-      const tz = (1 - e) * 160 - e * 8;
-      const ts = 1.08 - e * 0.08;
-      const trx = (1 - e) * 22;
-      const to = Math.min(1, 0.12 + e * 0.92);
-      const tBlur = (1 - e) * 6 * blurScale;
-      target.style.transformOrigin = "50% 0%";
-      target.style.transform = `translate3d(0, ${ty}%, ${tz}px) scale(${ts}) rotateX(${trx}deg)`;
-      target.style.opacity = String(to);
-      target.style.filter =
-        e > 0.92 || tBlur < 0.2
-          ? e > 0.92
-            ? "none"
-            : `brightness(${0.88 + e * 0.12})`
-          : `brightness(${0.88 + e * 0.12}) blur(${tBlur}px)`;
-      target.style.zIndex = "6";
-      target.style.boxShadow = opts.scrubbing
-        ? "none"
-        : `0 ${18 - e * 14}px ${48 + (1 - e) * 70}px rgba(8,6,4,${0.22 * (1 - e)})`;
+      // 新幕：自上方映入
+      const ty = -(1 - p) * vh * 0.88;
+      const ts = 0.97 + p * 0.03;
+      const to = 0.15 + p * 0.85;
+      t.transform = `translate3d(0,${ty | 0}px,0) scale(${ts})`;
+      t.opacity = String((to * 1000 | 0) / 1000);
     } else {
-      // ── 旧幕：同样沉入深处（方向镜像，微上抬）──
-      const sy = -e * 5;
-      const sz = -e * 460;
-      const ss = 1 - e * 0.3;
-      const srx = -e * 8;
-      const so = 1 - e * 0.9;
-      const sBlur = e * 9 * blurScale;
-      source.style.transformOrigin = "50% 45%";
-      source.style.transform = `translate3d(0, ${sy}%, ${sz}px) scale(${ss}) rotateX(${srx}deg)`;
-      source.style.opacity = String(Math.max(0, so));
-      source.style.filter =
-        sBlur < 0.2
-          ? `brightness(${1 - e * 0.4}) saturate(${1 - e * 0.3})`
-          : `brightness(${1 - e * 0.4}) saturate(${1 - e * 0.3}) blur(${sBlur}px)`;
-      source.style.zIndex = "2";
-      source.style.boxShadow = opts.scrubbing
-        ? "none"
-        : `0 ${-6 - e * 24}px ${32 + e * 80}px rgba(8,6,4,${0.12 + e * 0.34})`;
+      const sy = -p * vh * 0.035;
+      const ss = 1 - p * 0.12;
+      const so = 1 - p * 0.9;
+      s.transform = `translate3d(0,${sy | 0}px,0) scale(${ss})`;
+      s.opacity = so < 0.02 ? "0" : String((so * 1000 | 0) / 1000);
 
-      // ── 上一幕：自下方映射映回 ──
-      const ty = (1 - e) * 110;
-      const tz = (1 - e) * 140 - e * 6;
-      const ts = 1.06 - e * 0.06;
-      const trx = (1 - e) * -18;
-      const to = Math.min(1, 0.12 + e * 0.92);
-      const tBlur = (1 - e) * 5 * blurScale;
-      target.style.transformOrigin = "50% 100%";
-      target.style.transform = `translate3d(0, ${ty}%, ${tz}px) scale(${ts}) rotateX(${trx}deg)`;
-      target.style.opacity = String(to);
-      target.style.filter =
-        e > 0.92 || tBlur < 0.2
-          ? e > 0.92
-            ? "none"
-            : `brightness(${0.88 + e * 0.12})`
-          : `brightness(${0.88 + e * 0.12}) blur(${tBlur}px)`;
-      target.style.zIndex = "6";
-      target.style.boxShadow = opts.scrubbing
-        ? "none"
-        : `0 ${-14 + e * 12}px ${44 + (1 - e) * 64}px rgba(8,6,4,${0.2 * (1 - e)})`;
+      const ty = (1 - p) * vh * 0.88;
+      const ts = 0.97 + p * 0.03;
+      const to = 0.15 + p * 0.85;
+      t.transform = `translate3d(0,${ty | 0}px,0) scale(${ts})`;
+      t.opacity = String((to * 1000 | 0) / 1000);
     }
+  }
+
+  /** 开始一对幕的过渡：类名 / will-change / z-index 只打一次 */
+  function armSpatialPair(source, target, dir) {
+    spatialSourceEl = source;
+    spatialTargetEl = target;
+    source.classList.add("is-spatial-source");
+    source.classList.remove("is-spatial-target");
+    target.classList.add("is-spatial-target", "is-active");
+    target.classList.remove("is-spatial-source");
+    target.removeAttribute("data-far");
+    source.style.willChange = "transform, opacity";
+    target.style.willChange = "transform, opacity";
+    source.style.zIndex = "2";
+    target.style.zIndex = "6";
+    source.style.transformOrigin = "50% 50%";
+    target.style.transformOrigin = dir > 0 ? "50% 0%" : "50% 100%";
   }
 
   function finishSlide() {
@@ -1138,23 +1121,71 @@
     if (!useSpatialDeck) {
       window.scrollTo({ top: sceneMetric(index).top, behavior: "auto" });
     }
-    clearSpatialPaint();
+
+    // 动画最后一帧已接近 identity；立刻落位并解锁，避免连滑时卡一拍
     setActiveScene(index, { force: true });
     scenes[index]?.classList.add("is-settled");
-    // 触发内容级联入场：先卸 is-settled 再 rAF 加回亦可，这里直接依赖 is-active
-    syncSceneMedia(index, { sliding: false });
+    clearSpatialPaint();
+    document.documentElement.classList.remove("is-snap-animating", "is-scrolling");
     snapLocked = false;
     snapTarget = -1;
-    document.documentElement.classList.remove("is-snap-animating");
-    finishSlide();
+    locked = false;
+    scenes.forEach((scene) => scene.classList.remove("is-snap-source", "is-snap-target"));
+
+    // 视频起播延后一帧，不和切幕最后几帧抢解码
+    requestAnimationFrame(() => {
+      if (current === index && !snapLocked) {
+        syncSceneMedia(index, { sliding: false });
+      }
+    });
+  }
+
+  function cancelSpatialToCurrent(source, target, dir, fromProgress) {
+    // 弹回当前幕：同样用单层 ease，终点再清
+    const start = Math.max(0, Math.min(1, fromProgress));
+    const duration = reducedMotion ? 0 : Math.max(180, Math.round(SPATIAL_DURATION * (0.4 + start * 0.5)));
+    snapLocked = true;
+    snapTarget = current;
+    locked = true;
+    document.documentElement.classList.add("is-snap-animating");
+
+    if (duration <= 0 || start < 0.01) {
+      clearSpatialPaint();
+      setActiveScene(current, { force: true });
+      scenes[current]?.classList.add("is-settled");
+      syncSceneMedia(current, { sliding: false });
+      snapLocked = false;
+      snapTarget = -1;
+      document.documentElement.classList.remove("is-snap-animating", "is-scrolling");
+      locked = false;
+      return;
+    }
+
+    let startedAt = 0;
+    const step = (now) => {
+      if (!startedAt) startedAt = now;
+      const u = Math.min(1, (now - startedAt) / duration);
+      const progress = start * (1 - spatialEase(u));
+      paintSpatialFrame(source, target, dir, progress);
+      if (u < 1) {
+        snapFrame = requestAnimationFrame(step);
+        return;
+      }
+      clearSpatialPaint();
+      setActiveScene(current, { force: true });
+      scenes[current]?.classList.add("is-settled");
+      syncSceneMedia(current, { sliding: false });
+      snapLocked = false;
+      snapTarget = -1;
+      document.documentElement.classList.remove("is-snap-animating", "is-scrolling");
+      locked = false;
+    };
+    snapFrame = requestAnimationFrame(step);
   }
 
   /**
-   * 从当前进度插值到 0 或 1 并完成切幕 / 取消。
-   * @param {number} index 目标幕
-   * @param {number} fromProgress 当前 0→1 进度
-   * @param {boolean} commit true=完成到目标，false=弹回当前
-   * @param {number} dir
+   * 从当前进度插值到 1（提交）或 0（取消）。
+   * 注意：fromProgress 是「视觉进度」0→1，与 paint 公式一致；只在时间轴上做一次 ease。
    */
   function animateSpatialProgress(index, fromProgress, commit, dir) {
     stopSnapFrame();
@@ -1168,62 +1199,46 @@
       return false;
     }
 
+    armSpatialPair(source, target, dir);
+
+    if (!commit) {
+      cancelSpatialToCurrent(source, target, dir, fromProgress);
+      return true;
+    }
+
     const start = Math.max(0, Math.min(1, fromProgress));
-    const end = commit ? 1 : 0;
-    const distance = end - start;
-    // 剩余路程越短，时长越短，最低 220ms 保持「丝滑」感
+    const remain = 1 - start;
+    // 剩余路程越短时长越短；带一点速度下限保证顺滑
     const duration = reducedMotion
       ? 0
-      : Math.max(220, Math.round(SPATIAL_DURATION * (0.35 + Math.abs(distance) * 0.65)));
+      : Math.max(200, Math.round(SPATIAL_DURATION * (0.28 + remain * 0.72)));
 
     snapLocked = true;
-    snapTarget = commit ? index : current;
+    snapTarget = index;
     locked = true;
     document.documentElement.classList.add("is-snap-animating");
     paintSpatialFrame(source, target, dir, start);
 
-    if (duration <= 0 || Math.abs(distance) < 0.008) {
-      if (commit) completeSnap(index);
-      else {
-        clearSpatialPaint();
-        setActiveScene(current, { force: true });
-        scenes[current]?.classList.add("is-settled");
-        syncSceneMedia(current, { sliding: false });
-        snapLocked = false;
-        snapTarget = -1;
-        document.documentElement.classList.remove("is-snap-animating");
-        finishSlide();
-      }
+    if (duration <= 0 || remain < 0.01) {
+      completeSnap(index);
       return true;
     }
 
     let startedAt = 0;
     const step = (now) => {
       if (!startedAt) startedAt = now;
-      const elapsed = now - startedAt;
-      const u = Math.min(1, elapsed / duration);
-      // 结算用 ease-out cubic
-      const easeOut = 1 - Math.pow(1 - u, 2.6);
-      const progress = start + distance * easeOut;
+      const u = Math.min(1, (now - startedAt) / duration);
+      // 单层 ease：视觉进度 = start + remain * ease(u)
+      const progress = start + remain * spatialEase(u);
       paintSpatialFrame(source, target, dir, progress);
 
       if (u < 1) {
         snapFrame = requestAnimationFrame(step);
         return;
       }
-
-      if (commit) {
-        completeSnap(index);
-      } else {
-        clearSpatialPaint();
-        setActiveScene(current, { force: true });
-        scenes[current]?.classList.add("is-settled");
-        syncSceneMedia(current, { sliding: false });
-        snapLocked = false;
-        snapTarget = -1;
-        document.documentElement.classList.remove("is-snap-animating");
-        finishSlide();
-      }
+      // 落到精确 1，再 complete（避免 0.999 与 identity 差一帧）
+      paintSpatialFrame(source, target, dir, 1);
+      completeSnap(index);
     };
 
     snapFrame = requestAnimationFrame(step);
@@ -1249,13 +1264,10 @@
     locked = true;
     resetSpotlight();
     markSnapScenes(index);
-    source.classList.add("is-spatial-source");
-    target.classList.add("is-spatial-target");
-    // 预亮目标幕，保证视频/内容在过渡中可见
-    target.classList.add("is-active");
-    target.removeAttribute("data-far");
-    syncSceneMedia(index, { sliding: true });
+    armSpatialPair(source, target, dir);
+    // 过渡中只暖机，不立刻 play，减少解码卡顿
     warmNeighborVideos(index);
+    syncSceneMedia(index, { sliding: true });
     document.documentElement.classList.add("is-snap-animating");
 
     if (reducedMotion || SPATIAL_DURATION <= 0) {
@@ -1355,6 +1367,9 @@
     let scrubProgress = 0;
     let lastTouchY = 0;
     let lastTouchT = 0;
+    let velocityY = 0;
+    let scrubPaintFrame = 0;
+    let pendingScrubProgress = 0;
     let wheelGateUntil = 0;
 
     const endScrubSession = () => {
@@ -1363,6 +1378,28 @@
       scrubDir = 0;
       scrubIndex = -1;
       scrubProgress = 0;
+      pendingScrubProgress = 0;
+      if (scrubPaintFrame) {
+        cancelAnimationFrame(scrubPaintFrame);
+        scrubPaintFrame = 0;
+      }
+    };
+
+    const flushScrubPaint = () => {
+      scrubPaintFrame = 0;
+      if (!scrubbing) return;
+      const source = scenes[current];
+      const target = scenes[scrubIndex];
+      if (!source || !target) return;
+      scrubProgress = pendingScrubProgress;
+      // 跟手：直接线性进度，与结算公式同一套 paint，松手不跳
+      paintSpatialFrame(source, target, scrubDir, Math.min(1, scrubProgress));
+    };
+
+    const queueScrubPaint = (progress) => {
+      pendingScrubProgress = progress;
+      if (scrubPaintFrame) return;
+      scrubPaintFrame = requestAnimationFrame(flushScrubPaint);
     };
 
     const beginScrub = (dir) => {
@@ -1376,23 +1413,24 @@
       scrubDir = dir;
       scrubIndex = index;
       scrubProgress = 0;
+      pendingScrubProgress = 0;
       locked = true;
       resetSpotlight();
       markSnapScenes(index);
-      source.classList.add("is-spatial-source");
-      target.classList.add("is-spatial-target", "is-active");
-      target.removeAttribute("data-far");
+      armSpatialPair(source, target, dir);
+      // 先 ensure 目标栈并暂停解码；邻幕 warm 延后一帧，避免首帧跟手卡顿
       syncSceneMedia(index, { sliding: true });
-      warmNeighborVideos(index);
       document.documentElement.classList.add("is-snap-animating", "is-scrolling");
-      paintSpatialFrame(source, target, dir, 0, { scrubbing: true });
+      paintSpatialFrame(source, target, dir, 0);
+      window.setTimeout(() => {
+        if (scrubbing && scrubIndex === index) warmNeighborVideos(index);
+      }, 0);
       return true;
     };
 
     const onTouchStart = (event) => {
       if (!ready || snapLocked || event.touches.length !== 1) return;
       if (isInteractiveTarget(event.target)) return;
-      // 清掉边界橡皮筋残留
       const active = scenes[current];
       if (active && !active.classList.contains("is-spatial-source")) {
         active.style.removeProperty("transform");
@@ -1403,6 +1441,8 @@
       scrubDir = 0;
       scrubIndex = -1;
       scrubProgress = 0;
+      pendingScrubProgress = 0;
+      velocityY = 0;
       touchStartY = event.touches[0].clientY;
       touchStartX = event.touches[0].clientX;
       touchStartT = performance.now();
@@ -1416,62 +1456,71 @@
       const touch = event.touches[0];
       if (!touch) return;
 
+      const now = performance.now();
       const dy = touch.clientY - touchStartY;
       const dx = touch.clientX - touchStartX;
+      const frameDt = Math.max(8, now - lastTouchT);
+      // 低通滤波速度，减少松手瞬间误判
+      const instantVy = (touch.clientY - lastTouchY) / frameDt;
+      velocityY = velocityY * 0.65 + instantVy * 0.35;
       lastTouchY = touch.clientY;
-      lastTouchT = performance.now();
+      lastTouchT = now;
 
-      // 横向主导则放弃
       if (!scrubbing && Math.abs(dx) > Math.abs(dy) * 1.2 && Math.abs(dx) > 28) {
         tracking = false;
         return;
       }
 
-      // 手指上滑 (dy < 0) → 下一幕；手指下滑 → 上一幕
       const intentDir = dy < 0 ? 1 : -1;
       if (!scrubbing) {
-        if (Math.abs(dy) < 10) return;
-        // 边界：第一幕不能再上滑回退、最后一幕不能再前进时给一点橡皮筋
+        if (Math.abs(dy) < 8) return;
         if ((intentDir > 0 && current >= total - 1) || (intentDir < 0 && current <= 0)) {
-          const rubber = Math.min(1, Math.abs(dy) / (SPATIAL_SCRUB_PX * 1.6));
+          // 边界橡皮筋也走 rAF，避免 touchmove 高频写 style
+          const rubber = Math.min(1, Math.abs(dy) / (spatialScrubPx * 1.8));
           const scene = scenes[current];
           if (scene) {
-            const pull = intentDir > 0 ? rubber * 4 : -rubber * 4;
-            const depth = -rubber * 40;
-            scene.style.transform = `translate3d(0, ${pull}%, ${depth}px) scale(${1 - rubber * 0.03})`;
-            scene.style.opacity = String(1 - rubber * 0.08);
+            pendingScrubProgress = rubber;
+            if (!scrubPaintFrame) {
+              scrubPaintFrame = requestAnimationFrame(() => {
+                scrubPaintFrame = 0;
+                const r = pendingScrubProgress;
+                const pull = (intentDir > 0 ? 1 : -1) * r * spatialVh * 0.03;
+                scene.style.transform = `translate3d(0,${pull.toFixed(2)}px,0) scale(${(1 - r * 0.025).toFixed(4)})`;
+                scene.style.opacity = String((1 - r * 0.06).toFixed(3));
+              });
+            }
           }
           return;
         }
         if (!beginScrub(intentDir)) return;
       }
 
-      // 跟手进度：用与起始方向一致的位移
       const signed = scrubDir > 0 ? -dy : dy;
-      const raw = Math.max(0, Math.min(1.05, signed / SPATIAL_SCRUB_PX));
-      // 轻微过冲阻尼
-      scrubProgress = raw > 1 ? 1 + (raw - 1) * 0.18 : raw;
-      const source = scenes[current];
-      const target = scenes[scrubIndex];
-      if (source && target) {
-        paintSpatialFrame(source, target, scrubDir, Math.min(1, scrubProgress), { scrubbing: true });
-      }
+      let raw = signed / spatialScrubPx;
+      // 过冲阻尼，避免拉过头后猛弹
+      if (raw < 0) raw = raw * 0.22;
+      else if (raw > 1) raw = 1 + (raw - 1) * 0.12;
+      queueScrubPaint(Math.max(0, Math.min(1.08, raw)));
     };
 
     const onTouchEnd = (event) => {
       if (!tracking && !scrubbing) return;
+
+      // 先刷掉最后一帧跟手 paint，避免用过期 progress 结算
+      if (scrubPaintFrame) {
+        cancelAnimationFrame(scrubPaintFrame);
+        scrubPaintFrame = 0;
+        flushScrubPaint();
+      }
 
       const touch = event.changedTouches[0];
       const endY = touch ? touch.clientY : lastTouchY;
       const dy = endY - touchStartY;
       const dx = (touch ? touch.clientX : touchStartX) - touchStartX;
       const dt = Math.max(16, performance.now() - touchStartT);
-      const recentDt = Math.max(16, performance.now() - lastTouchT);
-      const vy = (endY - lastTouchY) / recentDt;
       const overallVy = dy / dt;
 
       if (!scrubbing) {
-        // 边界橡皮筋复位
         const scene = scenes[current];
         if (scene) {
           scene.style.removeProperty("transform");
@@ -1481,20 +1530,20 @@
 
         if (snapLocked || !ready) return;
         if (Math.abs(dx) > Math.abs(dy) * 1.25 && Math.abs(dx) > 36) return;
-        const distanceOk = Math.abs(dy) > 48;
-        const flingOk = Math.abs(overallVy) > 0.42;
+        const distanceOk = Math.abs(dy) > 40;
+        const flingOk = Math.abs(overallVy) > 0.35 || Math.abs(velocityY) > 0.45;
         if (!distanceOk && !flingOk) return;
-        if (dy < 0 || overallVy < -0.42) goTo(current + 1);
+        if (dy < 0 || overallVy < -0.35 || velocityY < -0.45) goTo(current + 1);
         else goTo(current - 1);
         return;
       }
 
-      // 结算跟手：进度/速度阈值决定提交或回弹
-      const progress = scrubProgress;
+      const progress = Math.min(1, Math.max(0, scrubProgress));
       const flingCommit =
-        (scrubDir > 0 && (overallVy < -0.45 || vy < -0.55)) ||
-        (scrubDir < 0 && (overallVy > 0.45 || vy > 0.55));
-      const commit = progress >= 0.28 || flingCommit;
+        (scrubDir > 0 && (overallVy < -0.32 || velocityY < -0.4)) ||
+        (scrubDir < 0 && (overallVy > 0.32 || velocityY > 0.4));
+      // 阈值略低，跟手到一半就倾向提交，减少「拖很远还弹回」的挫败感
+      const commit = progress >= 0.22 || flingCommit;
       const index = scrubIndex;
       const dir = scrubDir;
       endScrubSession();
@@ -1511,6 +1560,10 @@
     };
 
     const onTouchCancel = () => {
+      if (scrubPaintFrame) {
+        cancelAnimationFrame(scrubPaintFrame);
+        scrubPaintFrame = 0;
+      }
       if (scrubbing && scrubIndex >= 0) {
         const index = scrubIndex;
         const dir = scrubDir;
@@ -1536,10 +1589,9 @@
         return;
       }
       const dy = event.deltaY;
-      if (Math.abs(dy) < 10) return;
+      if (Math.abs(dy) < 8) return;
       if (event.cancelable) event.preventDefault();
-      wheelGateUntil = performance.now() + SPATIAL_DURATION + 140;
-      // 滚轮向下 → 下一幕（内容向下推进）
+      wheelGateUntil = performance.now() + SPATIAL_DURATION + 80;
       if (dy > 0) goTo(current + 1);
       else goTo(current - 1);
     };

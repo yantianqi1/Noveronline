@@ -72,7 +72,8 @@ html.landing-active:is(.is-snap-animating, .is-scrolling) .ink-ring,
 html.landing-active:is(.is-snap-animating, .is-scrolling) .floating-seal,
 html.landing-active:is(.is-snap-animating, .is-scrolling) .finale-bloom,
 html.landing-active:is(.is-snap-animating, .is-scrolling) .finale-motes span,
-html.landing-active:is(.is-snap-animating, .is-scrolling) .scroll-arrow {
+html.landing-active:is(.is-snap-animating, .is-scrolling) .scroll-arrow,
+html.landing-active:is(.is-snap-animating, .is-scrolling) .decor-layer {
   animation-play-state: paused !important;
 }
 
@@ -2384,7 +2385,15 @@ body.landing-active[data-theme="ink"] .floating-seal {
     pointer-events: none;
     z-index: 2;
     background-repeat: no-repeat;
+    /* 避免常驻 will-change 占合成层；动画帧内浏览器会自行提升 */
+  }
+
+  html.landing-mobile-assets .scene.is-active .decor-layer {
     will-change: opacity, transform;
+  }
+
+  html.landing-mobile-assets .scene:not(.is-active) .decor-layer {
+    will-change: auto;
   }
 
   /* 序章：金色星图叠在书页/云气上，screen 混合更亮 */
@@ -3462,8 +3471,9 @@ html.landing-spatial .track {
   height: 100%;
   width: 100%;
   overflow: hidden;
-  perspective: 1680px;
-  perspective-origin: 50% 36%;
+  /* 透视略弱，位移更线性，少「突然甩近」的感觉 */
+  perspective: 1400px;
+  perspective-origin: 50% 42%;
   transform-style: preserve-3d;
 }
 
@@ -3479,13 +3489,13 @@ html.landing-spatial .scene {
   transform-style: preserve-3d;
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
-  contain: layout paint style;
+  /* 不用 contain:style，避免 iOS 上切换合成层时闪一帧 */
+  contain: layout paint;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
   z-index: 1;
-  /* 静态态用 GPU 友好默认值；跟手/动画帧由 JS 写入 transform */
-  transform: translate3d(0, 0, 0) scale(1) rotateX(0deg);
+  transform: translate3d(0, 0, 0) scale(1);
   transition: none;
   will-change: auto;
 }
@@ -3505,12 +3515,11 @@ html.landing-spatial .scene:not(.is-active):not(.is-spatial-source):not(.is-spat
   z-index: 0;
 }
 
-/* 过渡中双幕可见；transform/opacity/filter 由 JS 每帧写入 */
+/* 过渡中双幕可见；只动 transform/opacity（GPU 友好） */
 html.landing-spatial .scene.is-spatial-source,
 html.landing-spatial .scene.is-spatial-target {
   visibility: visible;
   pointer-events: none;
-  will-change: transform, opacity, filter;
 }
 
 html.landing-spatial .scene.is-spatial-source {
@@ -3521,46 +3530,43 @@ html.landing-spatial .scene.is-spatial-target {
   z-index: 6;
 }
 
-/* 切幕时关闭内容层自带位移，避免和立体 deck 打架 */
+/* 切幕时冻结内容层动画，避免与 deck 抢同一帧 */
 html.landing-spatial .scene.is-spatial-source .scene-inner,
 html.landing-spatial .scene.is-spatial-target .scene-inner,
 html.landing-spatial .scene.is-spatial-source .reveal,
-html.landing-spatial .scene.is-spatial-target .reveal {
+html.landing-spatial .scene.is-spatial-target .reveal,
+html.landing-spatial.is-snap-animating .scene-inner,
+html.landing-spatial.is-snap-animating .reveal,
+html.landing-spatial.is-snap-animating .scene-media,
+html.landing-spatial.is-snap-animating .decor-layer {
   opacity: 1 !important;
   transform: none !important;
   transition: none !important;
+  animation: none !important;
 }
 
-/* 进入完成后内容级联 reveal：落位后再轻微上浮 */
+/* 进入完成后内容级联 reveal：更轻、更短，减少「落位后再跳一下」 */
 html.landing-spatial .scene.is-active:not(.is-spatial-source):not(.is-spatial-target) .reveal {
   transition:
-    opacity 0.48s var(--ease-out),
-    transform 0.58s cubic-bezier(0.16, 1, 0.3, 1);
-  transition-delay: calc(var(--reveal-i, 0) * 48ms + 70ms);
+    opacity 0.32s ease-out,
+    transform 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: calc(var(--reveal-i, 0) * 28ms + 40ms);
 }
 
 html.landing-spatial .scene.is-active:not(.is-spatial-source):not(.is-spatial-target) .scene-inner {
   transition:
-    opacity 0.42s var(--ease-out),
-    transform 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+    opacity 0.28s ease-out,
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* 媒体层：旧幕微缩进深，新幕轻微放大呼吸 */
+/* 媒体层：过渡中禁止 CSS transform，避免与父级 3D 叠乘抖动 */
 html.landing-spatial .scene.is-spatial-source .scene-media,
 html.landing-spatial .scene.is-spatial-target .scene-media {
-  transform-origin: 50% 42%;
-  transition: transform 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+  transform: none !important;
+  transition: none !important;
 }
 
-html.landing-spatial.is-snap-animating .scene.is-spatial-source .scene-media {
-  transform: scale(1.08) translateZ(-24px);
-}
-
-html.landing-spatial.is-snap-animating .scene.is-spatial-target .scene-media {
-  transform: scale(1.03) translateZ(0);
-}
-
-/* 过渡暗角 + 顶部高光：强化「从上方映射」的舞台感 */
+/* 暗角改瞬时，避免 opacity transition 与切幕不同步造成闪一下 */
 html.landing-spatial .track::before {
   content: "";
   position: absolute;
@@ -3568,19 +3574,16 @@ html.landing-spatial .track::before {
   z-index: 20;
   pointer-events: none;
   opacity: 0;
-  background:
-    radial-gradient(ellipse 95% 72% at 50% 46%, transparent 36%, rgba(10, 8, 6, 0.34) 100%),
-    linear-gradient(to bottom, rgba(255, 248, 236, 0.1) 0%, transparent 18%);
-  transition: opacity 0.32s var(--ease-out);
+  background: radial-gradient(
+    ellipse 96% 74% at 50% 48%,
+    transparent 42%,
+    rgba(10, 8, 6, 0.22) 100%
+  );
+  transition: none;
 }
 
 html.landing-spatial.is-snap-animating .track::before {
   opacity: 1;
-}
-
-/* 跟手拖拽时略降滤镜成本：减少 shadow 抖动感 */
-html.landing-spatial .scene.is-spatial-scrubbing {
-  box-shadow: none !important;
 }
 
 /* 进度点在空间切幕时给一点弹性反馈 */

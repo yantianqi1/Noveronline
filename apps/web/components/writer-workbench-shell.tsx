@@ -12,10 +12,10 @@ import {
   PenLine,
   RefreshCcw,
   RotateCw,
-  Send,
   Sparkles,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { Suspense } from "react";
 
 import { type Locale, tx } from "../lib/locale";
 import type {
@@ -36,8 +36,11 @@ import { TechnicalDetailsDrawer } from "./technical-details-drawer";
 import { WorkspaceHeader } from "./workspace-header";
 import { WriterLiveDraft } from "./writer-live-draft";
 import { WriterCommandPalette, WriterCommandPaletteTrigger } from "./writer-command-palette";
+import { WriterComposerInput } from "./writer-composer-input";
 import { WriterComposerKeyboard } from "./writer-composer-keyboard";
 import { WriterMobileSwitch } from "./writer-mobile-switch";
+import { writerModeLabel } from "./writer-mode-picker";
+import { WriterTransientToast } from "./writer-transient-toast";
 import { WriterWorkbenchProvider } from "./writer-workbench-context";
 
 type WriterWorkbenchShellProps = {
@@ -422,43 +425,26 @@ function WriterAgentThread({
           <div className="writer-agent-empty">
             <span><Sparkles aria-hidden="true" size={24} /></span>
             <h2><Bi zh="从下一段开始" en="Begin with the next passage" /></h2>
-            <p><Bi zh="把这一刻写清楚。" en="Make this moment precise." /></p>
+            <p>
+              <Bi
+                zh="输入指令后由 Pi Writer Agent 生成候选稿；采用后才会进入左侧正式手稿。需已绑定「正文创作」模型且 worker 在线。"
+                en="Send an instruction so Pi Writer can draft a candidate. Adopt it into the left manuscript. Requires a Writer composer binding and a running worker."
+              />
+            </p>
           </div>
         ) : null}
       </div>
 
       <div className="writer-composer-dock">
-        {writerRunStatus ? <StatusLine status={writerRunStatus} /> : null}
+        <Suspense fallback={null}>
+          <WriterTransientToast locale={locale} status={writerRunStatus} />
+        </Suspense>
         {writerRunAction ? (
           <form action={writerRunAction} className="writer-agent-composer">
             <input name="chapterId" type="hidden" value={selectedChapterId} />
             <input name="sceneId" type="hidden" value={selectedSceneId} />
-            <fieldset className="writer-mode-segmented">
-              <legend className="sr-only"><Bi zh="写作模式" en="Writing mode" /></legend>
-              {(["draft", "continue", "outline", "revise"] as const).map((mode, index) => (
-                <label key={mode}>
-                  <input defaultChecked={index === 0} name="mode" type="radio" value={mode} />
-                  <span>{writerModeLabel(locale, mode)}</span>
-                </label>
-              ))}
-            </fieldset>
             <label className="sr-only" htmlFor="writer-instruction"><Bi zh="写作指令" en="Instruction" /></label>
-            <div className="writer-composer-input-row">
-              <textarea
-                id="writer-instruction"
-                name="instruction"
-                placeholder={tx(locale, "写下下一段要发生什么……", "What should happen next?")}
-                required
-                rows={3}
-              />
-              <SubmitButton
-                aria-label={tx(locale, "开始写作", "Start writer run")}
-                className="writer-send-button"
-                idleLabel={<><Send aria-hidden="true" size={18} /><span className="sr-only"><Bi zh="开始写作" en="Start writer run" /></span></>}
-                pendingLabel={<><LoaderCircle aria-hidden="true" className="is-spinning" size={18} /><span className="sr-only"><Bi zh="启动中" en="Starting" /></span></>}
-                title={tx(locale, "开始写作", "Start writer run")}
-              />
-            </div>
+            <WriterComposerInput locale={locale} />
             <ContextPickers assets={assets} graphView={graphView} locale={locale} worldlineSavedPaths={worldlineSavedPaths} />
           </form>
         ) : (
@@ -570,13 +556,6 @@ function writerStageLabel(locale: Locale, run: Extract<WriterRunSummary, { ok: t
     tx(locale, "正在起草正文", "Drafting prose"),
     tx(locale, "正在保存候选稿", "Saving candidate"),
   ][stage];
-}
-
-function writerModeLabel(locale: Locale, mode: string) {
-  if (mode === "continue") return tx(locale, "续写", "Continue");
-  if (mode === "outline") return tx(locale, "大纲", "Outline");
-  if (mode === "revise") return tx(locale, "修订", "Revise");
-  return tx(locale, "起草", "Draft");
 }
 
 function isActiveWriterStatus(status: string) {

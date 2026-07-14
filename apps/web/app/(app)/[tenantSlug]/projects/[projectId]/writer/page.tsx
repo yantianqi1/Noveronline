@@ -24,6 +24,7 @@ import {
 import { tx } from "../../../../../../lib/locale";
 import { currentRequestLocale } from "../../../../../../lib/request-locale";
 import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
+import { humanizeFailure } from "../../../../../../lib/user-facing-copy";
 import {
   createBookPlan, createChapter, createManuscriptBlock, createOutline, createScene, createWorkspaceExport, decideAssetProposal, decideDedupPattern,
   deleteBookPlan, deleteChapter, deleteLexicon, deleteManuscriptBlock, deletePreset, deleteScene,
@@ -210,8 +211,8 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       writerRunStatus: result.ok ? "success" : "error",
       writerRunCode: result.ok ? "WRITER_RUN_QUEUED" : result.code,
       writerRunMessage: result.ok
-        ? tx(locale, "写作任务已加入队列", "Writer run queued")
-        : result.message,
+        ? tx(locale, "写作任务已加入队列，等待 Pi Writer 执行", "Writer run queued for Pi Writer")
+        : humanizeFailure(locale, result.code, result.message),
     });
     if (result.ok) {
       nextQuery.set("runId", result.run_id);
@@ -384,11 +385,31 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     "use server";
     const contentText =
       rawStringFromFormData(formData, "contentText") || rawStringFromFormData(formData, "content") || "";
-    const result = await createManuscriptBlock(await writerWorkspaceContext(tenantSlug, projectId), {
-      chapter_id: stringFromFormData(formData, "chapterId"),
-      scene_id: stringFromFormData(formData, "sceneId"),
+    // Prefer explicit form chapter/scene; empty means unattached free block (API allows this).
+    let chapterId = stringFromFormData(formData, "chapterId");
+    let sceneId = stringFromFormData(formData, "sceneId");
+    // Stale selection (deleted chapter/scene) must not block creating a blank block.
+    if (sceneId && !chapterId) {
+      sceneId = "";
+    }
+    const context = await writerWorkspaceContext(tenantSlug, projectId);
+    let result = await createManuscriptBlock(context, {
+      chapter_id: chapterId,
+      scene_id: sceneId,
       content_text: contentText,
     });
+    // If chapter/scene no longer exist, fall back to an unattached blank block once.
+    if (
+      !result.ok &&
+      (chapterId || sceneId) &&
+      (result.code === "NOT_FOUND" || result.code === "HTTP_404" || result.code === "VALIDATION_FAILED")
+    ) {
+      result = await createManuscriptBlock(context, {
+        chapter_id: "",
+        scene_id: "",
+        content_text: contentText,
+      });
+    }
     workspaceRedirect(result, tenantSlug, projectId, query, {
       blockId: result.ok ? result.value.block_id : "",
       // Clear conflict draft after save-as-new succeeds.

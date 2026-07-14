@@ -162,6 +162,23 @@ type AnalysisCandidateReader interface {
 	ListAnalysisCandidates(context.Context, ListAnalysisCandidatesInput) ([]AnalysisCandidate, error)
 }
 
+// ImportAnalysisAssetsInput projects completed Pi analysis candidates into the asset library.
+type ImportAnalysisAssetsInput struct {
+	TenantID  string
+	ProjectID string
+	RunID     string
+}
+
+type ImportAnalysisAssetsResult struct {
+	ImportedCount int `json:"imported_count"`
+	SkippedCount  int `json:"skipped_count"`
+}
+
+// AnalysisAssetImporter auto-imports analysis candidates into assets for author-friendly flow.
+type AnalysisAssetImporter interface {
+	EnsureAnalysisAssetsImported(context.Context, ImportAnalysisAssetsInput) (ImportAnalysisAssetsResult, error)
+}
+
 type AnalysisAdmissionInput struct {
 	TenantID           string
 	ProjectID          string
@@ -440,6 +457,16 @@ func NewDisabledAnalysisCandidateReader() *DisabledAnalysisCandidateReader {
 
 func (r *DisabledAnalysisCandidateReader) ListAnalysisCandidates(context.Context, ListAnalysisCandidatesInput) ([]AnalysisCandidate, error) {
 	return nil, &AppError{Code: "WORKFLOW_BACKEND_UNCONFIGURED", Message: "analysis candidate reader is not configured"}
+}
+
+type DisabledAnalysisAssetImporter struct{}
+
+func NewDisabledAnalysisAssetImporter() *DisabledAnalysisAssetImporter {
+	return &DisabledAnalysisAssetImporter{}
+}
+
+func (i *DisabledAnalysisAssetImporter) EnsureAnalysisAssetsImported(context.Context, ImportAnalysisAssetsInput) (ImportAnalysisAssetsResult, error) {
+	return ImportAnalysisAssetsResult{}, nil
 }
 
 type TemporalAnalysisConfig struct {

@@ -426,7 +426,7 @@ func main() {
 			}
 		}()
 	}
-	analysisRunReader, analysisEventReader, analysisWorkspaceReader, analysisCandidateReader, closeAnalysisReaders, err := newAnalysisReaders(databaseURL)
+	analysisRunReader, analysisEventReader, analysisWorkspaceReader, analysisCandidateReader, analysisAssetImporter, closeAnalysisReaders, err := newAnalysisReaders(databaseURL)
 	if err != nil {
 		log.Fatalf("configure analysis readers: %v", err)
 	}
@@ -1115,6 +1115,7 @@ func main() {
 		AnalysisCanceller:                analysisCanceller,
 		AnalysisWorkspaceReader:          analysisWorkspaceReader,
 		AnalysisCandidateReader:          analysisCandidateReader,
+		AnalysisAssetImporter:            analysisAssetImporter,
 		ProjectOverviewReader:            projectOverviewReader,
 		ProjectReadinessReader:           projectReadinessReader,
 		AgentHelloStarter:                helloStarter,
@@ -2038,6 +2039,7 @@ func newAnalysisReaders(databaseURL string) (
 	workflows.AnalysisEventReader,
 	workflows.AnalysisWorkspaceReader,
 	workflows.AnalysisCandidateReader,
+	workflows.AnalysisAssetImporter,
 	func() error,
 	error,
 ) {
@@ -2046,18 +2048,20 @@ func newAnalysisReaders(databaseURL string) (
 			workflows.NewDisabledAnalysisEventReader(),
 			workflows.NewDisabledAnalysisWorkspaceReader(),
 			workflows.NewDisabledAnalysisCandidateReader(),
+			workflows.NewDisabledAnalysisAssetImporter(),
 			nil,
 			nil
 	}
 	db, err := openAppDatabase(databaseURL)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	queryer := workflows.NewSQLDBWriterEventQueryer(db)
 	return workflows.NewSQLAnalysisRunReader(workflows.SQLAnalysisRunReaderConfig{Queryer: queryer}),
 		workflows.NewSQLAnalysisEventReader(workflows.SQLAnalysisEventReaderConfig{Queryer: queryer}),
 		workflows.NewSQLAnalysisWorkspaceReader(workflows.SQLAnalysisWorkspaceReaderConfig{Queryer: queryer}),
 		workflows.NewSQLAnalysisCandidateReader(workflows.SQLAnalysisCandidateReaderConfig{Queryer: queryer}),
+		workflows.NewSQLAnalysisAssetImporter(db),
 		db.Close,
 		nil
 }

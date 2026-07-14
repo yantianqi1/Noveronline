@@ -3142,6 +3142,22 @@ export async function getProjectAssets(
   }
 }
 
+/** Single-asset read via the library surface (not asset-catalog). */
+export async function getAsset(
+  input: ApiContext & { assetId: string },
+): Promise<AssetSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/assets/${encodeURIComponent(input.assetId)}`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+
+    return await decodeAssetResponse(response, "ASSET_QUERY_FAILED");
+  } catch (error) {
+    return networkFailure(error, "ASSET_QUERY_FAILED");
+  }
+}
+
 export async function getWorldlineSavedPaths(
   input: ApiContext & { projectId: string },
 ): Promise<WorldlineSavedPathsSummary> {

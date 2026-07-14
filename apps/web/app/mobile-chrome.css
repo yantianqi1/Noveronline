@@ -529,11 +529,16 @@
     backdrop-filter: blur(10px) saturate(1.04);
     -webkit-backdrop-filter: blur(10px) saturate(1.04);
     box-shadow: none;
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
     transition:
       background var(--mobile-motion) var(--mobile-ease),
       border-color var(--mobile-motion) var(--mobile-ease),
       box-shadow var(--mobile-motion) var(--mobile-ease),
-      backdrop-filter var(--mobile-motion) var(--mobile-ease);
+      backdrop-filter var(--mobile-motion) var(--mobile-ease),
+      transform 240ms var(--mobile-ease-soft),
+      opacity 240ms var(--mobile-ease);
   }
 
   .app-frame.app-frame-unified[data-mobile-scroll="elevated"] .mobile-topbar,
@@ -544,6 +549,14 @@
     backdrop-filter: blur(18px) saturate(1.08);
     -webkit-backdrop-filter: blur(18px) saturate(1.08);
     box-shadow: var(--mobile-shadow-elevated);
+  }
+
+  /* Idle fold: top bar slides away; scroll/touch re-shows via data-mobile-chrome. */
+  .app-frame.app-frame-unified[data-mobile-chrome="folded"] .mobile-topbar,
+  html[data-mobile-chrome="folded"] .mobile-topbar {
+    transform: translateY(calc(-100% - 4px));
+    opacity: 0;
+    pointer-events: none;
   }
 
   .mobile-topbar-switcher {
@@ -683,23 +696,36 @@
     box-shadow:
       0 16px 40px rgba(37, 30, 22, 0.14),
       0 1px 0 rgba(255, 252, 246, 0.85) inset;
-  }
-
-  /*
-   * Writer used to hide the global tab bar (immersive). That removed the only
-   * bottom switch chrome on phones and made the page feel "stuck" in 创作.
-   * Keep the floating dock visible; reclaim height via layout calc instead.
-   */
-  .app-frame.app-frame-unified[data-mobile-immersive="true"] .mobile-tabbar,
-  .app-frame.app-frame-unified:not([data-mobile-immersive="true"]) .mobile-tabbar {
     transform: translateY(0) scale(1);
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
     transition:
-      transform var(--mobile-motion) var(--mobile-ease-soft),
-      opacity var(--mobile-motion) var(--mobile-ease),
+      transform 240ms var(--mobile-ease-soft),
+      opacity 240ms var(--mobile-ease),
       visibility 0s;
+  }
+
+  /* Idle fold: tab dock slides under the fold; scroll re-shows. */
+  .app-frame.app-frame-unified[data-mobile-chrome="folded"] .mobile-tabbar,
+  html[data-mobile-chrome="folded"] .mobile-tabbar {
+    transform: translateY(calc(100% + 18px));
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+      transform 240ms var(--mobile-ease-soft),
+      opacity 240ms var(--mobile-ease),
+      visibility 0s linear 240ms;
+  }
+
+  /* When chrome is folded, reclaim reserved padding for content. */
+  .app-frame.app-frame-unified[data-mobile-chrome="folded"] {
+    --mobile-main-pad-bottom: calc(12px + var(--mobile-safe-bottom));
+  }
+
+  .app-frame.app-frame-unified[data-mobile-chrome="folded"] .app-main {
+    padding-top: calc(10px + var(--mobile-safe-top));
   }
 
   .mobile-tabbar-item {
@@ -930,31 +956,110 @@
     white-space: nowrap;
   }
 
-  /* Writer: leave room for fixed top bar + floating bottom tab dock + region switch. */
+  /* Writer phone: kill dead chrome so the conversation + composer own the stage.
+     - No desktop status header
+     - No extra main-stage padding (that was the blank band under the top bar)
+     - No MiroFish Writer identity strip / marketing empty state
+     - Flex-fill remaining viewport instead of a short fixed height calc */
   .app-frame.app-frame-unified[data-mobile-immersive="true"] {
-    --mobile-main-pad-bottom: calc(var(--mobile-tabbar-height) + var(--mobile-safe-bottom) + 28px);
+    --mobile-main-pad-bottom: calc(var(--mobile-tabbar-height) + var(--mobile-safe-bottom) + 10px);
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .app-main {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+    padding-top: calc(var(--mobile-topbar-height) + var(--mobile-safe-top) + 4px);
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  /* Immersive alone keeps topbar clearance; when chrome folds, reclaim the band
+     so 结构/手稿/Agent pin under the safe area (no empty mountain-height gap). */
+  .app-frame.app-frame-unified[data-mobile-immersive="true"][data-mobile-chrome="folded"] .app-main {
+    padding-top: calc(6px + var(--mobile-safe-top));
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .workspace-route-content {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    animation: none;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-root {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    gap: 0;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-header {
+    display: none !important;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-mobile-switch {
+    position: sticky;
+    top: var(--mobile-safe-top);
+    z-index: 2;
+    flex: 0 0 auto;
+    margin: 0 0 4px;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"][data-mobile-chrome="folded"] .writer-mobile-switch {
+    margin-bottom: 2px;
   }
 
   .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-layout,
   .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-layout[data-has-structure="true"] {
-    height: calc(
-      100dvh
-      - var(--mobile-topbar-height)
-      - var(--mobile-safe-top)
-      - var(--mobile-tabbar-height)
-      - var(--mobile-safe-bottom)
-      - 132px
-    );
+    flex: 1 1 auto;
+    height: auto !important;
+    min-height: 0 !important;
   }
 
-  /* Region switch sticks under the phone top bar, not under the viewport edge. */
-  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-mobile-switch {
-    top: calc(var(--mobile-topbar-height) + var(--mobile-safe-top));
-    z-index: calc(var(--mobile-chrome-z) - 1);
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-dock,
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-artifact-canvas,
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-structure-rail {
+    min-height: 0;
   }
 
+  /* Identity strip ("MiroFish Writer / 等待指令") is noise on phone; keep cancel only. */
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-toolbar .writer-agent-identity {
+    display: none;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-toolbar:not(:has(form)),
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-toolbar:not(:has(button)) {
+    display: none;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-toolbar:has(button) {
+    min-height: 0;
+    justify-content: flex-end;
+    padding: 4px 8px;
+    border-bottom: 0;
+    background: transparent;
+  }
+
+  /* Empty marketing block must not consume the conversation column. */
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-agent-empty {
+    display: none !important;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-thread-scroll {
+    padding: 8px 4px 10px;
+  }
+
+  /* Keyboard inset owns bottom clearance; do not double-stack safe-bottom here
+     (main already reserves tabbar/safe via --mobile-main-pad-bottom). */
   .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-composer-dock {
-    padding-bottom: calc(10px + var(--mobile-safe-bottom));
+    padding: 4px 4px calc(4px + var(--writer-keyboard-inset, 0px));
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-context-disclosure {
+    display: none;
   }
 
   /* Secondary workbench pages: keep forms thumb-friendly */

@@ -1377,6 +1377,71 @@
   margin: 0 auto 10px;
 }
 
+/* Light auto-dismiss toast (admission feedback). */
+.writer-transient-toast {
+  display: flex;
+  max-width: 760px;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(46, 105, 68, 0.22);
+  border-radius: 10px;
+  background: rgba(232, 244, 236, 0.96);
+  box-shadow: 0 8px 20px rgba(43, 39, 34, 0.08);
+  color: #2e6944;
+  font-size: 0.84rem;
+  animation: writer-toast-in 180ms var(--ease-natural, ease);
+}
+
+.writer-transient-toast[data-tone="error"] {
+  border-color: rgba(139, 47, 39, 0.28);
+  background: rgba(252, 236, 233, 0.96);
+  color: #8b2f27;
+}
+
+.writer-transient-toast p {
+  flex: 1 1 auto;
+  margin: 0;
+  min-width: 0;
+}
+
+.writer-transient-toast-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.writer-transient-toast-dismiss {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.72;
+}
+
+.writer-transient-toast-dismiss:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+@keyframes writer-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .writer-agent-composer {
   display: grid;
   max-width: 760px;
@@ -1387,7 +1452,7 @@
 .writer-mode-segmented {
   display: inline-grid;
   width: max-content;
-  grid-template-columns: repeat(3, minmax(62px, auto));
+  grid-template-columns: repeat(4, minmax(62px, auto));
   gap: 2px;
   margin: 0;
   border: 1px solid rgba(65, 57, 47, 0.16);
@@ -1428,16 +1493,105 @@
   box-shadow: 0 0 0 3px rgba(139, 47, 39, 0.16);
 }
 
-.writer-composer-input-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
-  align-items: end;
-  gap: 8px;
-  border: 1px solid rgba(65, 57, 47, 0.24);
+/* Compact mode chip inside the composer input row. */
+.writer-mode-picker {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: end;
+  z-index: 30;
+  width: max-content;
+  max-width: 7.5rem;
+}
+
+.writer-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 32px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid rgba(65, 57, 47, 0.16);
+  border-radius: 999px;
+  background: #ece8df;
+  color: #4d4a43;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.writer-mode-chip:hover,
+.writer-mode-picker[data-open="true"] .writer-mode-chip {
+  border-color: rgba(139, 47, 39, 0.35);
+  color: #8b2f27;
+  background: rgba(139, 47, 39, 0.06);
+}
+
+.writer-mode-chip:focus-visible {
+  outline: 2px solid #8b2f27;
+  outline-offset: 1px;
+}
+
+/* Div menu (not ul) so UA list markers cannot break the composer grid. */
+.writer-mode-menu {
+  position: absolute !important;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: grid !important;
+  width: max-content;
+  min-width: 6.5rem;
+  max-width: min(12rem, 70vw);
+  margin: 0 !important;
+  padding: 4px !important;
+  list-style: none !important;
+  border: 1px solid rgba(65, 57, 47, 0.16);
+  border-radius: 10px;
+  background: #fffdf8;
+  box-shadow: 0 12px 28px rgba(43, 39, 34, 0.14);
+}
+
+.writer-mode-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+  margin: 0;
+  padding: 6px 10px;
+  border: 0;
   border-radius: 7px;
+  background: transparent;
+  color: #3d3a34;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 560;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.writer-mode-menu-item[data-active="true"] {
+  background: rgba(139, 47, 39, 0.09);
+  color: #8b2f27;
+  font-weight: 650;
+}
+
+.writer-mode-menu-item:hover {
+  background: rgba(65, 57, 47, 0.06);
+}
+
+.writer-composer-input-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 36px;
+  align-items: end;
+  gap: 6px;
+  border: 1px solid rgba(65, 57, 47, 0.24);
+  border-radius: 10px;
   background: #fffdf8;
   box-shadow: 0 7px 22px rgba(43, 39, 34, 0.07);
-  padding: 8px;
+  padding: 6px;
+  overflow: visible;
 }
 
 .writer-composer-input-row:focus-within {
@@ -1445,27 +1599,91 @@
   box-shadow: 0 0 0 3px rgba(139, 47, 39, 0.11), 0 8px 24px rgba(43, 39, 34, 0.07);
 }
 
+.writer-manuscript-empty {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 14px 16px;
+  border: 1px dashed rgba(65, 57, 47, 0.22);
+  border-radius: 10px;
+  background: rgba(251, 248, 241, 0.72);
+}
+
+.writer-manuscript-empty .form-hint {
+  margin: 0;
+}
+
+.writer-create-block-form {
+  gap: 8px;
+}
+
+.writer-create-block-form .form-hint {
+  margin: 0;
+}
+
 .writer-composer-input-row textarea {
-  min-height: 60px !important;
-  max-height: 164px;
-  resize: vertical;
+  min-height: 40px !important;
+  max-height: 140px;
+  resize: none;
   border: 0 !important;
   background: transparent !important;
   box-shadow: none !important;
   font-family: var(--font-serif);
   font-size: 1rem;
-  line-height: 1.65;
+  line-height: 1.5;
   padding: 6px 8px;
+  field-sizing: content;
 }
 
+/* Gray send "arrow car": transparent circle, fades in when there is text. */
+.writer-send-button.submit-button,
 .writer-send-button {
   display: grid !important;
-  width: 44px;
-  height: 44px;
-  min-height: 44px !important;
+  width: 36px;
+  height: 36px;
+  min-height: 36px !important;
+  min-width: 36px;
   place-items: center;
-  border-radius: 6px !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: #9a9084 !important;
   padding: 0 !important;
+  opacity: 0.28 !important;
+  pointer-events: none;
+  transition:
+    opacity 200ms var(--ease-natural, ease),
+    color 200ms var(--ease-natural, ease),
+    background-color 200ms var(--ease-natural, ease),
+    transform 160ms var(--ease-natural, ease);
+}
+
+.writer-composer-input-row[data-can-send="true"] .writer-send-button,
+.writer-send-button[data-can-send="true"] {
+  opacity: 1 !important;
+  pointer-events: auto;
+  color: #6b645a !important;
+  cursor: pointer;
+}
+
+.writer-composer-input-row[data-can-send="true"] .writer-send-button:hover:not(:disabled),
+.writer-send-button[data-can-send="true"]:hover:not(:disabled) {
+  background: rgba(65, 57, 47, 0.08) !important;
+  color: #4a453c !important;
+}
+
+.writer-composer-input-row[data-can-send="true"] .writer-send-button:disabled,
+.writer-composer-input-row[data-can-send="true"] .writer-send-button[aria-busy="true"],
+.writer-send-button[data-can-send="true"]:disabled,
+.writer-send-button[data-can-send="true"][aria-busy="true"] {
+  opacity: 0.72 !important;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.writer-send-button:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .writer-agent-composer .writer-context-disclosure {
@@ -1766,7 +1984,8 @@
   .writer-agent-layout[data-has-structure="true"] {
     display: flex;
     flex-direction: column;
-    height: calc(100dvh - 152px);
+    /* Header chrome is hidden on phone; only the region switch remains above. */
+    height: calc(100dvh - 72px);
     min-height: 420px;
     grid-template-columns: none;
     overflow: hidden;
@@ -1793,35 +2012,33 @@
 
   .writer-mobile-switch {
     display: grid;
-    position: sticky;
-    /* Under mobile top bar when present; desktop hides this control. */
-    top: 0;
+    position: relative;
     z-index: 12;
     grid-auto-flow: column;
     grid-auto-columns: 1fr;
-    gap: 4px;
-    border: 1px solid rgba(65, 57, 47, 0.14);
-    border-radius: 16px;
+    gap: 2px;
+    border: 1px solid rgba(65, 57, 47, 0.12);
+    border-radius: 12px;
     background: rgba(250, 248, 243, 0.96);
-    box-shadow: 0 8px 22px rgba(43, 39, 34, 0.08);
-    margin: 0 0 10px;
-    padding: 6px 8px;
+    box-shadow: 0 4px 14px rgba(43, 39, 34, 0.06);
+    margin: 0 0 6px;
+    padding: 3px;
     backdrop-filter: blur(10px);
   }
 
   .writer-mobile-switch-tab {
     display: inline-flex;
-    flex-direction: column;
+    flex-direction: row;
     align-items: center;
     justify-content: center;
-    gap: 3px;
-    min-height: 48px;
+    gap: 5px;
+    min-height: 36px;
     border: 1px solid transparent;
     border-radius: 9px;
     background: transparent;
     color: #6c675d;
     font-family: var(--font-sans);
-    font-size: 0.72rem;
+    font-size: 0.78rem;
     font-weight: 620;
     cursor: pointer;
     transition:
@@ -1859,7 +2076,7 @@
 @media (max-height: 620px) and (max-width: 960px) {
   .writer-agent-layout,
   .writer-agent-layout[data-has-structure="true"] {
-    height: calc(100dvh - 116px);
+    height: calc(100dvh - 56px);
   }
 }
 
@@ -1881,10 +2098,47 @@
 }
 
 @media (max-width: 640px) {
-  .writer-agent-toolbar,
+  /* Phone: drop the desktop status header (状态 / 已同步 / 命令 / 技术详情).
+     Mobile top bar + region switch already provide navigation chrome. */
+  .writer-header {
+    display: none !important;
+  }
+
+  .writer-root {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .writer-agent-layout,
+  .writer-agent-layout[data-has-structure="true"] {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+
+  /* Identity chrome is redundant with the region switch on phone. */
+  .writer-agent-toolbar .writer-agent-identity {
+    display: none;
+  }
+
+  .writer-agent-toolbar:not(:has(button)) {
+    display: none;
+  }
+
+  .writer-agent-toolbar:has(button) {
+    min-height: 0;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 0;
+    background: transparent;
+  }
+
   .writer-artifact-heading {
-    min-height: 62px;
-    padding: 10px 14px;
+    min-height: 0;
+    gap: 8px;
+    padding: 8px 10px;
   }
 
   .writer-agent-toolbar .inline-action-form button {
@@ -1900,7 +2154,12 @@
   }
 
   .writer-thread-scroll {
-    padding: 22px 14px 28px;
+    padding: 8px 8px 12px;
+  }
+
+  /* Marketing empty state steals the conversation column — hide on phone. */
+  .writer-agent-empty {
+    display: none !important;
   }
 
   .writer-message-user {
@@ -1926,7 +2185,7 @@
   }
 
   .writer-composer-dock {
-    padding: 10px 12px calc(12px + var(--writer-keyboard-inset, 0px));
+    padding: 4px 6px calc(4px + var(--writer-keyboard-inset, 0px));
     transition: padding-bottom var(--motion-fast) var(--ease-natural);
   }
 
@@ -1934,9 +2193,46 @@
     box-shadow: 0 -10px 28px rgba(43, 39, 34, 0.12);
   }
 
-  .writer-mode-segmented {
-    width: 100%;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .writer-agent-composer {
+    gap: 4px;
+  }
+
+  .writer-composer-input-row {
+    grid-template-columns: auto minmax(0, 1fr) 36px;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 5px;
+  }
+
+  .writer-mode-chip {
+    min-height: 28px;
+    padding: 2px 7px;
+    font-size: 0.68rem;
+  }
+
+  .writer-composer-input-row textarea {
+    min-height: 36px !important;
+    max-height: 96px;
+    padding: 6px 4px;
+    font-size: 0.94rem;
+    line-height: 1.45;
+  }
+
+  .writer-send-button {
+    width: 34px;
+    height: 34px;
+    min-height: 34px !important;
+    min-width: 34px;
+  }
+
+  .writer-context-disclosure {
+    display: none;
+  }
+
+  .writer-transient-toast {
+    margin-bottom: 6px;
+    padding: 7px 9px;
+    font-size: 0.8rem;
   }
 
   .writer-artifact-tablist {
@@ -2681,10 +2977,6 @@ button.writer-approval-approve {
 }
 
 @media (max-width: 640px) {
-  .writer-mode-segmented {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .writer-manuscript-paper {
     padding: 18px 16px 28px;
   }
@@ -2844,9 +3136,13 @@ button.writer-approval-approve {
     grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
   }
 
-  .worldline-workbench,
-  .character-console-workbench {
+  .worldline-workbench {
     grid-template-columns: minmax(0, 1fr) minmax(260px, 300px) !important;
+  }
+
+  /* Character console is already capped (~1040px); keep a compact dual column. */
+  .character-console-workbench {
+    grid-template-columns: minmax(0, 1.2fr) minmax(200px, 0.72fr) !important;
   }
 
   .workbench-grid.llm-facility-workbench {

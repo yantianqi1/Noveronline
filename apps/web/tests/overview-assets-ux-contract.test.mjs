@@ -11,6 +11,7 @@ async function source(relativePath) {
 
 test("Asset Library uses one compact search surface and one advanced filter disclosure", async () => {
   const shell = await source("components/asset-library-shell.tsx");
+  const css = await source("app/globals.css");
   const formStart = shell.indexOf('<form action={searchAction}');
   const formEnd = shell.indexOf("</form>", formStart);
   const searchForm = shell.slice(formStart, formEnd);
@@ -27,9 +28,44 @@ test("Asset Library uses one compact search surface and one advanced filter disc
   assert.match(shell, /InspectorPanel/);
   assert.doesNotMatch(shell, /data-search-document-id|data-search-mode|formatScore|searchRanking/);
   assert.doesNotMatch(shell, /<span className="form-hint">\{asset\.asset_id\}<\/span>/);
-  assert.match(shell, /asset-title-link/);
-  assert.match(shell, /assetDetailHref/);
+  assert.match(shell, /AssetBrowseClient/);
+  assert.match(searchForm, /asset-filter-field-span/);
   assert.doesNotMatch(shell.slice(shell.indexOf('id="asset-search-query"'), shell.indexOf('id="asset-search-query"') + 280), /\brequired\b/);
+
+  // Open filter panel must span the toolbar (bar is the containing block), not the narrow trigger.
+  assert.match(css, /\.asset-library-grid \.compact-filter-bar\s*\{[^}]*position:\s*relative/s);
+  assert.match(css, /\.asset-filter-disclosure\s*\{[^}]*position:\s*static/s);
+  assert.match(css, /\.asset-filter-disclosure > \.asset-filter-content\s*\{[^}]*left:\s*0/s);
+  assert.match(css, /\.asset-filter-disclosure > \.asset-filter-content\s*\{[^}]*right:\s*0/s);
+  assert.match(css, /\.asset-filter-fields\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(css, /\.asset-filter-fields > \.asset-filter-field-span\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/s);
+  assert.match(css, /background(?:-color)?:\s*#fffdf8/);
+  assert.match(css, /\.overview-root \.overview-details:not\(\.asset-filter-disclosure\)/);
+  assert.match(css, /\.asset-type-groups\s*\{/);
+  assert.match(css, /\.asset-preview-dialog\s*\{/);
+});
+
+test("Asset Library opens in-page preview instead of catalog detail navigation", async () => {
+  const shell = await source("components/asset-library-shell.tsx");
+  const browse = await source("components/asset-browse-client.tsx");
+  const preview = await source("components/asset-preview-dialog.tsx");
+  const api = await source("lib/api.ts");
+
+  assert.match(shell, /AssetBrowseClient/);
+  assert.doesNotMatch(shell, /assetDetailHref/);
+  assert.match(browse, /asset-type-groups/);
+  assert.match(browse, /AssetPreviewDialog/);
+  assert.match(browse, /assetRecordToPreview|searchItemToPreview/);
+  assert.match(browse, /asset-title-link/);
+  assert.match(preview, /asset-preview-dialog/);
+  assert.match(preview, /showModal/);
+  assert.match(preview, /displayAssetTitle|structureAssetBody/);
+  assert.match(preview, /asset-preview-structured|asset-preview-raw|原始结构/);
+  assert.match(api, /export async function getAsset\b/);
+  assert.match(api, /\/v1\/assets\/\$\{encodeURIComponent\(input\.assetId\)\}/);
+  const display = await source("lib/asset-display.ts");
+  assert.match(display, /export function displayAssetTitle/);
+  assert.match(display, /export function structureAssetBody/);
 });
 
 test("Overview prioritizes the current next step and folds secondary activity", async () => {

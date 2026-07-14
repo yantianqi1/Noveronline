@@ -69,6 +69,7 @@ type Config struct {
 	AnalysisCanceller                workflows.AnalysisCanceller
 	AnalysisWorkspaceReader          workflows.AnalysisWorkspaceReader
 	AnalysisCandidateReader          workflows.AnalysisCandidateReader
+	AnalysisAssetImporter            workflows.AnalysisAssetImporter
 	ProjectOverviewReader            projectoverview.Reader
 	ProjectReadinessReader           projectreadiness.Reader
 	AgentHelloStarter                workflows.AgentHelloStarter
@@ -208,6 +209,7 @@ type Server struct {
 	analysisCanceller                workflows.AnalysisCanceller
 	analysisWorkspaceReader          workflows.AnalysisWorkspaceReader
 	analysisCandidateReader          workflows.AnalysisCandidateReader
+	analysisAssetImporter            workflows.AnalysisAssetImporter
 	projectOverviewReader            projectoverview.Reader
 	projectReadinessReader           projectreadiness.Reader
 	agentHelloStarter                workflows.AgentHelloStarter
@@ -889,6 +891,10 @@ func NewServer(config Config) *Server {
 	if analysisCandidateReader == nil {
 		analysisCandidateReader = workflows.NewDisabledAnalysisCandidateReader()
 	}
+	analysisAssetImporter := config.AnalysisAssetImporter
+	if analysisAssetImporter == nil {
+		analysisAssetImporter = workflows.NewDisabledAnalysisAssetImporter()
+	}
 	projectReadinessReader := config.ProjectReadinessReader
 	if projectReadinessReader == nil {
 		projectReadinessReader = projectreadiness.NewDisabledReader()
@@ -1123,6 +1129,7 @@ func NewServer(config Config) *Server {
 		analysisCanceller:                analysisCanceller,
 		analysisWorkspaceReader:          analysisWorkspaceReader,
 		analysisCandidateReader:          analysisCandidateReader,
+		analysisAssetImporter:            analysisAssetImporter,
 		projectOverviewReader:            projectOverviewReader,
 		projectReadinessReader:           projectReadinessReader,
 		agentHelloStarter:                helloStarter,
@@ -2223,6 +2230,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListAnalysisWorkspaceFiles(response, request)
 	case request.Method == http.MethodGet && isAnalysisCandidatesPath(request.URL.Path):
 		s.handleListAnalysisCandidates(response, request)
+	case request.Method == http.MethodPost && isAnalysisAssetsImportPath(request.URL.Path):
+		s.handleImportAnalysisAssets(response, request)
 	case request.Method == http.MethodGet && isAnalysisRunDetailPath(request.URL.Path):
 		s.handleGetAnalysisRun(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/readiness"):

@@ -89,7 +89,7 @@ export function OverviewSeedProgressWall({
   const previewStages = stageStates.slice(0, 2);
 
   const titleNode = completed
-    ? <Bi zh="审阅下方拆解结果" en="Review the analysis results below" />
+    ? <Bi zh="拆解完成，已自动入库" en="Analysis complete — auto-imported" />
     : interrupted
       ? <Bi zh="继续中断的分析" en="Continue the interrupted analysis" />
       : <Bi zh="故事分析正在推进" en="Story analysis is in progress" />;
@@ -97,8 +97,8 @@ export function OverviewSeedProgressWall({
   const summaryHint = completed
     ? (
       <Bi
-        zh="拆解结果在下方「分析候选」里。它们还不是正典资产，审阅后再采纳入库。"
-        en="Results are in Analysis candidates below. They are not canon until you review and accept them."
+        zh="拆解完成后会自动写入素材库。下方可预览结果，完整条目请到资产库查看。"
+        en="Results are auto-imported into the library. Preview them below, or open Assets for the full set."
       />
     )
     : interrupted

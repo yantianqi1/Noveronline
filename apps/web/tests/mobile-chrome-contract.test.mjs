@@ -25,11 +25,24 @@ test("mobile chrome stylesheet and root import are present", async () => {
   assert.match(css, /@media \(max-width:\s*860px\)/);
   assert.match(css, /data-mobile-immersive="true"/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  // Writer must keep the global bottom tab dock visible (no hide-on-immersive).
+  // Idle fold hides chrome; immersive alone must not permanently kill the tab dock.
+  assert.match(css, /data-mobile-chrome="folded"/);
   assert.doesNotMatch(
     css,
     /\.app-frame\.app-frame-unified\[data-mobile-immersive="true"\]\s*\.mobile-tabbar\s*\{[^}]*visibility:\s*hidden/s,
   );
+});
+
+test("mobile scroll chrome folds idle top/tab and re-shows on scroll", async () => {
+  const scroll = await fileText("components/mobile-scroll-chrome.tsx");
+  const css = await fileText("app/mobile-chrome.css");
+
+  assert.match(scroll, /data-mobile-chrome/);
+  assert.match(scroll, /folded|shown/);
+  assert.match(scroll, /writer-thread-scroll/);
+  assert.match(scroll, /IDLE_FOLD_MS|1500/);
+  assert.match(css, /\[data-mobile-chrome="folded"\]\s*\.mobile-topbar/);
+  assert.match(css, /\[data-mobile-chrome="folded"\]\s*\.mobile-tabbar/);
 });
 
 test("project layout mounts mobile top bar and tab bar alongside desktop nav", async () => {
@@ -92,6 +105,95 @@ test("writer mobile defaults to agent conversation surface", async () => {
   assert.match(keyboard, /--writer-keyboard-inset/);
 });
 
+test("writer mobile hides status header and reclaims writing canvas height", async () => {
+  const polish = await fileText("app/workbench-polish.css");
+  const chrome = await fileText("app/mobile-chrome.css");
+  const shell = await fileText("components/writer-workbench-shell.tsx");
+  const composerInput = await fileText("components/writer-composer-input.tsx");
+  const timeline = await fileText("components/writer-activity-timeline.tsx");
+  const toast = await fileText("components/writer-transient-toast.tsx");
+  const mode = await fileText("components/writer-mode-picker.tsx");
+
+  // Phone must not show the desktop status strip (状态 / 已同步 / 命令 / 技术详情).
+  assert.match(
+    polish,
+    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-header\s*\{[\s\S]*?display:\s*none\s*!important/s,
+  );
+  assert.match(
+    chrome,
+    /\[data-mobile-immersive="true"\]\s*\.writer-header\s*\{[\s\S]*?display:\s*none\s*!important/s,
+  );
+  // Identity strip + marketing empty state must not steal conversation height.
+  assert.match(
+    polish,
+    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-agent-toolbar\s+\.writer-agent-identity\s*\{[\s\S]*?display:\s*none/s,
+  );
+  assert.match(
+    polish,
+    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-agent-empty\s*\{[\s\S]*?display:\s*none\s*!important/s,
+  );
+  assert.match(
+    chrome,
+    /\[data-mobile-immersive="true"\]\s*\.writer-agent-empty\s*\{[\s\S]*?display:\s*none\s*!important/s,
+  );
+  // Fill remaining viewport via flex — no short fixed-height calc that left a blank band.
+  assert.match(
+    chrome,
+    /\[data-mobile-immersive="true"\]\s*\.writer-root\s*\{[\s\S]*?flex:\s*1\s+1\s+auto/s,
+  );
+  assert.match(
+    chrome,
+    /\[data-mobile-immersive="true"\]\s*\.writer-agent-layout[\s\S]*?height:\s*auto\s*!important/s,
+  );
+  assert.doesNotMatch(
+    chrome,
+    /\[data-mobile-immersive="true"\]\s*\.writer-agent-layout[\s\S]*?-\s*132px/s,
+  );
+
+  // Folded immersive must reclaim topbar padding so 结构/手稿/Agent pin under safe area.
+  assert.match(
+    chrome,
+    /\[data-mobile-immersive="true"\]\[data-mobile-chrome="folded"\]\s*\.app-main\s*\{[\s\S]*?padding-top:\s*calc\(6px\s*\+\s*var\(--mobile-safe-top\)\)/s,
+  );
+
+  // Admission feedback is a light toast, not a permanent form-status strip.
+  assert.match(shell, /WriterTransientToast/);
+  assert.match(toast, /HOLD_MS|3200/);
+  assert.match(toast, /router\.replace/);
+  assert.match(toast, /writerRunStatus/);
+  assert.doesNotMatch(shell, /writer-composer-dock[\s\S]*StatusLine status=\{writerRunStatus\}/s);
+
+  // Mode is a compact chip inside the input row (not a full-width 4-tab bar).
+  assert.match(shell, /WriterComposerInput/);
+  assert.match(composerInput, /WriterModePicker/);
+  assert.match(mode, /writer-mode-chip/);
+  assert.match(mode, /draft.*continue.*outline.*revise/s);
+  // Div menu avoids UA list markers bloating the composer (no ul/li bullets).
+  assert.match(mode, /className="writer-mode-menu"/);
+  assert.doesNotMatch(mode, /<ul[\s\S]*writer-mode-menu/);
+  assert.match(polish, /\.writer-mode-chip/);
+  assert.match(polish, /\.writer-mode-menu\s*\{[\s\S]*position:\s*absolute\s*!important/s);
+  assert.match(polish, /Div menu \(not ul\)/);
+
+  // Compact single-row composer + gray send that fades in when text is present.
+  assert.match(composerInput, /rows=\{1\}/);
+  assert.match(composerInput, /写一段要发生什么/);
+  assert.match(composerInput, /data-can-send/);
+  assert.match(composerInput, /disabled=\{!canSend\}/);
+  assert.match(polish, /\.writer-send-button\s*\{[\s\S]*?opacity:\s*0\.28/s);
+  assert.match(
+    polish,
+    /\[data-can-send="true"\]\s*\.writer-send-button|writer-send-button\[data-can-send="true"\]/,
+  );
+  assert.match(polish, /opacity:\s*1/);
+  assert.doesNotMatch(composerInput, /rows=\{3\}/);
+
+  // Run lifecycle is one reconciled row (started never stays spinning after fail).
+  assert.match(timeline, /RUN_LIFECYCLE_ID|writer-run-lifecycle/);
+  assert.match(timeline, /写作任务失败/);
+  assert.match(timeline, /error_code|message/);
+});
+
 test("workspace route aliases include materials and me", async () => {
   const route = await fileText("lib/workspace-route.ts");
   assert.match(route, /materials:\s*"materials"/);
@@ -146,6 +248,33 @@ test("workbench mid-band rails collapse near 960 not 980-1100 scatter", async ()
   assert.match(globals, /@media \(max-width:\s*960px\)\s*\{[\s\S]*?\.worldline-workbench/s);
   assert.match(globals, /@media \(max-width:\s*960px\)\s*\{[\s\S]*?\.character-console-workbench/s);
   assert.match(globals, /@media \(max-width:\s*960px\)\s*\{[\s\S]*?llm-facility-workbench/s);
+});
+
+test("character console content stays compact instead of full-bleed desktop width", async () => {
+  const globals = await fileText("app/globals.css");
+  const polish = await fileText("app/workbench-polish.css");
+
+  assert.match(
+    globals,
+    /\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?max-width:\s*1040px/s,
+  );
+  assert.match(
+    globals,
+    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?max-width:\s*1040px/s,
+  );
+  assert.match(
+    globals,
+    /\.character-console-workbench\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1\.28fr\)\s+minmax\(220px,\s*0\.78fr\)/s,
+  );
+  assert.match(
+    polish,
+    /\.character-console-workbench\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1\.2fr\)\s+minmax\(200px,\s*0\.72fr\)/s,
+  );
+  // Desktop geometry contract must not re-open full-bleed width.
+  assert.doesNotMatch(
+    globals,
+    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[^}]*max-width:\s*none/s,
+  );
 });
 
 test("materials and me hubs use 2x2 grid on tablet widths", async () => {

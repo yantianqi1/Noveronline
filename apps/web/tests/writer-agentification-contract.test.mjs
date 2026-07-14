@@ -59,10 +59,15 @@ test("Phase 4: activity timeline + context chips + thread helpers", async () => 
   const shell = await source("components/writer-workbench-shell.tsx");
   assert.match(timeline, /writer-activity-timeline/);
   assert.match(timeline, /activityItemsFromEvents/);
+  // One run lifecycle row: started is updated by failed/completed (no dual spinner+fail).
+  assert.match(timeline, /writer-run-lifecycle|RUN_LIFECYCLE_ID/);
+  assert.match(timeline, /writer\.run\.failed/);
   assert.match(chip, /writer-context-chip/);
   assert.match(chip, /assets|graph|worldline/);
   assert.match(thread, /sortThreadMessages/);
   assert.match(shell, /threadMessages|data-thread-persistent/);
+  assert.match(shell, /WriterComposerInput|WriterTransientToast/);
+  assert.match(shell, /Pi Writer/);
 });
 
 test("Phase 5: SSE client + approval card + held-open stream route", async () => {

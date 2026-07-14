@@ -46,6 +46,8 @@ Git history 负责保存历史。当前工作树不再保留中途 handoff、追
 - `24-current-development-progress.md`：截至当前 worktree 的 SaaS 重构总进度、完成定义审计、验证新鲜度、关键风险和下一步队列；当前接手状态以此文档为第二入口。
 - `29-seed-sse-live-progress-experience.md`：小说上传、真实 SSE 实时分析进度、动效、断线恢复和验收标准的设计提案；不代表当前实现已完成。
 - `31-overview-progress-visual-motion-design.md`：Overview 分析进度画布的视觉与动效升级设计（阶段播报、数字缓动、阶段轨道、终态编排）；P1 运行在现有轮询上，P2 对接文档 29 的 SSE。
+- `34-author-friendly-experience-plan.md`：面向产品负责人的作者友好优化说明，只描述作者可见变化、实施顺序和人工验收问题。
+- `35-author-friendly-implementation-plan.md`：与文档 34 逐项对应的 Agent 实施蓝图，包含安全边界、代码入口、测试 Gate 和最终完成定义。
 
 ## 总体决策
 

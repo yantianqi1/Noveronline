@@ -132,8 +132,10 @@ export interface PiAnalysisDeps {
     tenant_id: string;
     project_id: string;
     run_id: string;
+    replace_run?: boolean;
+    import_to_assets?: boolean;
     candidates: Array<{ candidate_type: string; name: string; payload: Record<string, unknown>; workspace_path?: string }>;
-  }): Promise<{ candidate_count: number }>;
+  }): Promise<{ candidate_count: number; asset_count?: number }>;
   preprocessSource?(input: AnalysisRunInput & {
     source_object_key?: string;
     source_filename?: string;
@@ -306,12 +308,19 @@ export function createPiAnalysisRunActivity(deps: PiAnalysisDeps = {}) {
       const candidates = await finalizeCandidates(deps, input, files);
       await record("analysis.candidates.saved", {
         candidate_count: candidates.candidate_count,
+        asset_count: candidates.asset_count ?? candidates.candidate_count,
         file_count: files.length
       }, "candidates:saved");
+      await record("analysis.assets.imported", {
+        candidate_count: candidates.candidate_count,
+        asset_count: candidates.asset_count ?? candidates.candidate_count,
+        status: "completed"
+      }, "assets:imported");
       await record("analysis.stage.completed", {
         stage: "candidates",
         status: "completed",
-        candidate_count: candidates.candidate_count
+        candidate_count: candidates.candidate_count,
+        asset_count: candidates.asset_count ?? candidates.candidate_count
       }, "stage:candidates:completed");
       await record("analysis.stage.started", {
         stage: "finalize",
@@ -320,6 +329,7 @@ export function createPiAnalysisRunActivity(deps: PiAnalysisDeps = {}) {
       await record("analysis.run.completed", {
         status: "completed",
         candidate_count: candidates.candidate_count,
+        asset_count: candidates.asset_count ?? candidates.candidate_count,
         file_count: files.length
       }, "run:completed");
       await record("analysis.stage.completed", {
@@ -333,6 +343,7 @@ export function createPiAnalysisRunActivity(deps: PiAnalysisDeps = {}) {
         status: "completed",
         result: {
           candidate_count: candidates.candidate_count,
+          asset_count: candidates.asset_count ?? candidates.candidate_count,
           file_count: files.length
         }
       });
@@ -616,7 +627,7 @@ async function finalizeCandidates(
   deps: PiAnalysisDeps,
   input: AnalysisRunInput,
   files: WorkspaceFileRecord[]
-): Promise<{ candidate_count: number }> {
+): Promise<{ candidate_count: number; asset_count?: number }> {
   const candidates: Array<{
     candidate_type: string;
     name: string;
@@ -656,6 +667,8 @@ async function finalizeCandidates(
       tenant_id: input.tenant_id,
       project_id: input.project_id,
       run_id: input.run_id,
+      replace_run: true,
+      import_to_assets: true,
       candidates
     });
   }

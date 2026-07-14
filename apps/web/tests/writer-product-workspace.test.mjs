@@ -73,6 +73,24 @@ test("writer empty project bootstrap does not require upload or seed", async () 
   assert.doesNotMatch(workspace, /必须先上传|must upload before/i);
 });
 
+test("writer manuscript empty state explains blocks and create falls back on stale chapter", async () => {
+  const [workspace, page, copy] = await Promise.all([
+    source("components/writer-product-workspace.tsx"),
+    source("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx"),
+    source("lib/user-facing-copy.ts"),
+  ]);
+  assert.match(workspace, /data-manuscript-empty/);
+  assert.match(workspace, /正式手稿正文|durable manuscript prose/);
+  assert.match(workspace, /可独立保存|saveable prose unit/);
+  assert.match(workspace, /humanizeFailure/);
+  assert.match(page, /createBlockAction/);
+  assert.match(page, /NOT_FOUND|HTTP_404/);
+  assert.match(page, /chapter_id:\s*""/);
+  assert.match(page, /humanizeFailure/);
+  assert.match(copy, /MODULE_BINDING_MISSING|LLM_MODULE_BINDING_MISSING|MODULE_NOT_BOUND/);
+  assert.match(copy, /WRITER_WORKSPACE_UNAVAILABLE/);
+});
+
 test("writer product workspace exposes manuscript asset proposal review rail", async () => {
   const [workspace, page, client] = await Promise.all([
     source("components/writer-product-workspace.tsx"),

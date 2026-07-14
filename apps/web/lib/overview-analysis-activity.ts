@@ -33,7 +33,7 @@ export function analysisStageLabel(locale: Locale, stage: string) {
     preprocess: ["读取并分段原文", "Read and segment source"],
     analysis_planner: ["Pi 规划任务", "Pi planner"],
     analysis_worker: ["Pi 执行拆解", "Pi worker"],
-    candidates: ["整理候选结果", "Collect candidates"],
+    candidates: ["整理并入库", "Collect and import"],
     finalize: ["收尾", "Finalize"],
   };
   const pair = labels[stage];
@@ -70,6 +70,7 @@ export function analysisStageFromEvent(event: {
     return stage || null;
   }
   if (event.event_type === "analysis.candidates.saved") return "candidates";
+  if (event.event_type === "analysis.assets.imported") return "candidates";
   if (event.event_type === "analysis.run.completed") return "finalize";
   if (event.event_type === "analysis.run.failed") return "finalize";
   if (event.event_type.startsWith("analysis.tool.")) {
@@ -230,7 +231,20 @@ export function analysisActivityLineFromEvent(
     return {
       id: event.event_id || `candidates-${event.sequence}`,
       tone: "done",
-      message: tx(locale, `已整理 ${count} 项候选`, `Saved ${count} candidates`),
+      message: tx(locale, `已整理 ${count} 项拆解结果`, `Saved ${count} analysis results`),
+      timeLabel: timeLabel || null,
+    };
+  }
+  if (event.event_type === "analysis.assets.imported") {
+    const count = typeof event.payload?.asset_count === "number"
+      ? event.payload.asset_count
+      : typeof event.payload?.candidate_count === "number"
+        ? event.payload.candidate_count
+        : 0;
+    return {
+      id: event.event_id || `assets-imported-${event.sequence}`,
+      tone: "done",
+      message: tx(locale, `已自动入库 ${count} 项素材`, `Auto-imported ${count} materials into Assets`),
       timeLabel: timeLabel || null,
     };
   }
@@ -238,7 +252,7 @@ export function analysisActivityLineFromEvent(
     return {
       id: event.event_id || `completed-${event.sequence}`,
       tone: "done",
-      message: tx(locale, "Pi 分析完成", "Pi analysis completed"),
+      message: tx(locale, "Pi 分析完成，素材已入库", "Pi analysis completed; materials imported"),
       timeLabel: timeLabel || null,
     };
   }

@@ -186,13 +186,18 @@ test("content boundary covers product workspace id dumps", async () => {
   assert.doesNotMatch(product, /error_code \? <small>/);
 });
 
-test("Wave A polish: Assets rows link to detail and search is optional", async () => {
+test("Wave A polish: Assets open in-page preview and search is optional", async () => {
   const shell = await source("components/asset-library-shell.tsx");
+  const browse = await source("components/asset-browse-client.tsx");
+  const preview = await source("components/asset-preview-dialog.tsx");
   const ops = await source("components/asset-operation-workspace.tsx");
   const queryInput = shell.slice(shell.indexOf('id="asset-search-query"'), shell.indexOf('id="asset-search-query"') + 320);
-  assert.match(shell, /assetDetailHref/);
-  assert.match(shell, /asset-title-link/);
-  assert.match(shell, /\/assets\/\$\{encodeURIComponent\(assetId\)\}/);
+  assert.match(shell, /AssetBrowseClient/);
+  assert.match(browse, /asset-title-link/);
+  assert.match(browse, /AssetPreviewDialog/);
+  assert.match(preview, /asset-preview-dialog/);
+  assert.match(preview, /displayAssetTitle|structureAssetBody|asset-preview-raw/);
+  assert.doesNotMatch(shell, /assetDetailHref/);
   assert.doesNotMatch(queryInput, /\brequired\b/);
   assert.match(ops, /primaryId/);
   assert.match(ops, /moreLabel|asset-command-more/);

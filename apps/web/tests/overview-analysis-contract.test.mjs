@@ -64,9 +64,17 @@ test("overview surfaces analysis results on the main path and hides tool spam", 
   assert.match(activity, /return null;/);
   assert.match(live, /关键进度|Key progress/);
   assert.match(live, /lines\.slice\(0, 12\)/);
-  assert.match(candidates, /拆解结果（分析候选）|Analysis results \(candidates\)/);
-  assert.match(wall, /查看拆解结果|View analysis results/);
+  assert.match(candidates, /拆解结果（已自动入库）|Analysis results \(auto-imported\)/);
+  assert.match(candidates, /自动写入素材库|auto-imported into the library/);
+  assert.match(candidates, /<details className="overview-details overview-analysis-candidates"/);
+  assert.match(candidates, /overview-details-chevron/);
+  const workspace = await fileText("components/overview-analysis-workspace-panel.tsx");
+  assert.match(workspace, /<details className="overview-details overview-analysis-workspace"/);
+  assert.match(workspace, /overview-details-chevron/);
+  assert.match(wall, /拆解完成，已自动入库|Analysis complete/);
   assert.match(wall, /#analysis-candidates-heading/);
+  assert.match(activity, /analysis\.assets\.imported/);
+  assert.match(activity, /已自动入库|Auto-imported/);
 });
 
 test("analysis API client exposes workspace and candidates endpoints", async () => {

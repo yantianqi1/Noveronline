@@ -11,6 +11,7 @@ import {
   manuscriptCommandLabel,
   planningRunLabel,
 } from "../lib/writer-command-labels";
+import { humanizeFailure } from "../lib/user-facing-copy";
 import { Bi, StatusValue } from "./bilingual-text";
 import { ConfirmSubmitButton } from "./confirm-submit-button";
 import { SubmitButton } from "./submit-button";
@@ -70,7 +71,7 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
   const isEmptyStructure = props.chapters.ok && props.chapters.value.length === 0;
   return (
     <div className="writer-product-modules writer-artifact-workspace">
-      {props.actionStatus ? <ActionStatus value={props.actionStatus} /> : null}
+      {props.actionStatus ? <ActionStatus locale={props.locale} value={props.actionStatus} /> : null}
       <WriterArtifactTabs
         locale={props.locale}
         manuscript={
@@ -446,12 +447,31 @@ function ManuscriptPanel(props: WriterProductWorkspaceProps) {
           </details>
         </div>
       ) : (
-        <p className="form-hint"><Bi zh="创建空白正文块开始手写，或从下方选择已有块。也可采用 AI 草稿。" en="Create a blank manuscript block to write by hand, select an existing block, or adopt an AI draft." /></p>
+        <div className="writer-manuscript-empty" data-manuscript-empty="true">
+          <p className="form-hint">
+            <Bi
+              zh="这里放的是正式手稿正文，不是聊天。你可以新建空白正文块自己写，或在右侧让 Writer Agent 起草后「采用」进手稿。"
+              en="This is durable manuscript prose, not chat. Create a blank block to write by hand, or ask Writer Agent on the right and adopt a draft."
+            />
+          </p>
+          <p className="form-hint">
+            <Bi
+              zh="正文块 = 一段可独立保存、排序、审校的正文单元（常见是一节/一场/一段），不是「一张剧情卡片」。"
+              en="A manuscript block is a saveable prose unit (often a scene or passage), not a storyboard card."
+            />
+          </p>
+        </div>
       )}
-      <form action={props.actions.createBlock} className="binding-form">
+      <form action={props.actions.createBlock} className="binding-form writer-create-block-form">
         <input name="chapterId" type="hidden" value={props.selectedChapterId} />
         <input name="sceneId" type="hidden" value={props.selectedSceneId} />
-        <button data-tone="primary" type="submit"><Save size={14} /><Bi zh="新建正文块" en="New manuscript block" /></button>
+        <button data-tone="primary" type="submit"><Save size={14} /><Bi zh="新建空白正文块" en="New blank manuscript block" /></button>
+        <p className="form-hint">
+          <Bi
+            zh="新建后会出现可编辑的正文区。若附带章节/场景无效，会自动创建为未归属块。"
+            en="After create, an editable prose area appears. Invalid chapter/scene links are ignored so a free block can still be created."
+          />
+        </p>
       </form>
       <h3><Bi zh="正文块" en="Blocks" /></h3>
       <ResultBoundary locale={locale} result={props.blocks} empty={tx(locale, "暂无正文块。", "No manuscript blocks.")} render={(items) => <div className="compact-action-list writer-block-list">
@@ -526,19 +546,18 @@ function ResultBoundary<T>({ locale, result, empty, render }: { locale: Locale; 
 }
 
 function isEmptyReviewList(value: unknown) { return typeof value === "object" && value !== null && "reviews" in value && Array.isArray((value as { reviews: unknown[] }).reviews) && (value as { reviews: unknown[] }).reviews.length === 0; }
-function ActionStatus({ value }: { value: { status: string; code: string } }) {
+function ActionStatus({ locale, value }: { locale: Locale; value: { status: string; code: string } }) {
   const isConflict = value.code === "OPTIMISTIC_CONFLICT";
+  const errorText = isConflict
+    ? tx(locale, "正文版本冲突：本地草稿已保留，请在下方比较后处理。", "Manuscript version conflict: your local draft was kept. Resolve it in the compare panel below.")
+    : humanizeFailure(locale, value.code);
   return (
     <p
       className={`form-status ${value.status === "error" ? "error-box" : "success-box"}`}
       role="status"
       data-workspace-code={value.code || undefined}
     >
-      {value.status === "error"
-        ? isConflict
-          ? <Bi zh="正文版本冲突：本地草稿已保留，请在下方比较后处理。" en="Manuscript version conflict: your local draft was kept. Resolve it in the compare panel below." />
-          : <Bi zh="操作未完成，请检查输入后重试。" en="The action was not completed. Check the input and try again." />
-        : <Bi zh="操作已提交。" en="Action submitted." />}
+      {value.status === "error" ? errorText : <Bi zh="操作已提交。" en="Action submitted." />}
     </p>
   );
 }

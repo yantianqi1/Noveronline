@@ -2569,11 +2569,13 @@ test("writer page loads redacted trace events when a run exposes trace_id", asyn
 
 test("writer shell is an operational workbench, not a marketing page", async () => {
   const shell = await fileText("components/writer-workbench-shell.tsx");
+  const composerInput = await fileText("components/writer-composer-input.tsx");
 
   assert.match(shell, /Writer Agent/);
   assert.match(shell, /WriterAgentThread/);
   assert.match(shell, /writer-agent-layout/);
   assert.match(shell, /writer-agent-composer/);
+  assert.match(shell, /WriterComposerInput/);
   assert.match(shell, /WriterLiveDraft/);
   assert.match(shell, /initialEvents=/);
   assert.match(shell, /Writer Events/);
@@ -2582,7 +2584,9 @@ test("writer shell is an operational workbench, not a marketing page", async () 
   assert.match(shell, /Export redacted trace/);
   assert.match(shell, /exportTraceAction/);
   assert.match(shell, /traceExportStatus/);
-  assert.match(shell, /Start writer run/);
+  assert.match(composerInput, /Start writer run/);
+  assert.match(composerInput, /name="instruction"/);
+  assert.match(composerInput, /data-can-send/);
   assert.match(shell, /Add story context/);
   assert.match(shell, /Project assets/);
   assert.match(shell, /Graph nodes/);
@@ -2597,7 +2601,6 @@ test("writer shell is an operational workbench, not a marketing page", async () 
   assert.match(shell, /name="worldlinePathIds"/);
   assert.match(shell, /path\.path_id/);
   assert.match(shell, /selected_event_ids/);
-  assert.match(shell, /name="instruction"/);
   assert.match(shell, /name="traceId"/);
   assert.match(shell, /redaction_level/);
   assert.match(shell, /event_type/);

@@ -18,6 +18,12 @@ import type {
   QueryExecutor
 } from "./postgres-pi-writer-deps.js";
 import type { ObjectStore } from "./object-store.js";
+import {
+  composeAnalysisAssetTitle,
+  mapAnalysisCandidateToAsset,
+  normalizeAnalysisCandidateType,
+} from "./analysis-asset-mapping.js";
+import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
 
 const ANALYSIS_WORKFLOW_TYPE = "analysis_run";
 const MAX_WORKSPACE_TEXT_BYTES = 512 * 1024;
@@ -40,7 +46,11 @@ export function createPostgresPiAnalysisDeps(options: PostgresPiAnalysisDepsOpti
     listSourceSegments: async (input) => listSourceSegments(db, input),
     readSourceSegment: async (input) => readSourceSegment(db, input),
     executeAnalysisTool: async (request) => executeAnalysisTool(db, request),
-    saveAnalysisCandidates: async (input) => saveAnalysisCandidates(db, input),
+    saveAnalysisCandidates: async (input) => saveAnalysisCandidates(db, {
+      ...input,
+      replace_run: input.replace_run ?? true,
+      import_to_assets: input.import_to_assets ?? true
+    }),
     preprocessSource: async (input) => preprocessSource(db, input, options.objectStore),
     recordWorkflowEvent: async (request) => recordWorkflowEvent(db, request),
     updateAnalysisRunStatus: async (request) => updateAnalysisRunStatus(db, request),
@@ -403,6 +413,10 @@ async function executeAnalysisTool(
         tenant_id: request.tenant_id,
         project_id: request.project_id,
         run_id: request.run_id,
+        // Mid-run tool saves stay in analysis_candidates only.
+        // Finalize replaces the run set and imports into assets once.
+        replace_run: false,
+        import_to_assets: false,
         candidates: candidates.map((item) => ({
           candidate_type: String(item.candidate_type ?? "note_summary"),
           name: String(item.name ?? ""),
@@ -424,6 +438,8 @@ async function saveAnalysisCandidates(
     tenant_id: string;
     project_id: string;
     run_id: string;
+    replace_run?: boolean;
+    import_to_assets?: boolean;
     candidates: Array<{
       candidate_type: string;
       name: string;
@@ -431,28 +447,91 @@ async function saveAnalysisCandidates(
       workspace_path?: string;
     }>;
   }
-): Promise<{ candidate_count: number }> {
-  let count = 0;
-  for (const candidate of input.candidates) {
+): Promise<{ candidate_count: number; asset_count?: number }> {
+  const importToAssets = input.import_to_assets !== false;
+  if (input.replace_run) {
     await queryWithTenant(db, input, `
+DELETE FROM analysis_candidates
+ WHERE tenant_id = $1::uuid
+   AND project_id = $2::uuid
+   AND run_id = $3::uuid`,
+    [input.tenant_id, input.project_id, input.run_id]);
+    // Drop previous auto-imports for this run so finalize is idempotent.
+    await queryWithTenant(db, input, `
+DELETE FROM assets
+ WHERE tenant_id = $1::uuid
+   AND project_id = $2::uuid
+   AND source_kind = 'pi_analysis'
+   AND source_ref LIKE $3 || ':%'`,
+    [input.tenant_id, input.project_id, input.run_id]);
+  }
+
+  let count = 0;
+  let assetCount = 0;
+  for (const candidate of input.candidates) {
+    const candidateType = normalizeAnalysisCandidateType(candidate.candidate_type);
+    const payload = candidate.payload ?? {};
+    const title = composeAnalysisAssetTitle(candidateType, candidate.name ?? "", payload);
+    const insert = await queryWithTenant<{ candidate_id: string }>(db, input, `
 INSERT INTO analysis_candidates (
   tenant_id, project_id, run_id, candidate_type, name, payload_jsonb, status, workspace_path
 ) VALUES (
-  $1::uuid, $2::uuid, $3::uuid, $4, $5, $6::jsonb, 'candidate', $7
-)`,
+  $1::uuid, $2::uuid, $3::uuid, $4, $5, $6::jsonb, $7, $8
+)
+RETURNING candidate_id::text AS candidate_id`,
     [
       input.tenant_id,
       input.project_id,
       input.run_id,
-      candidate.candidate_type,
-      candidate.name,
-      JSON.stringify(candidate.payload ?? {}),
+      candidateType,
+      title,
+      JSON.stringify(payload),
+      importToAssets ? "accepted" : "candidate",
       candidate.workspace_path ?? null
     ]);
+    const candidateId = insert.rows[0]?.candidate_id;
     count += 1;
+    if (!importToAssets || !candidateId) continue;
+
+    const mapped = mapAnalysisCandidateToAsset(candidateType, title, payload, candidate.workspace_path);
+    const sourceRef = `${input.run_id}:${candidateId}`;
+    await queryWithTenant(db, input, `
+INSERT INTO assets (
+  tenant_id, project_id, scope, asset_type, category, lifecycle,
+  title, summary, content_text, payload_jsonb, tags_jsonb,
+  source_kind, source_ref, enabled, pinned, created_by
+) VALUES (
+  $1::uuid, $2::uuid, 'project', $3, $4, 'material',
+  $5, $6, $7, $8::jsonb, $9::jsonb,
+  'pi_analysis', $10, true, false, NULL
+)
+ON CONFLICT (tenant_id, project_id, source_kind, source_ref, asset_type, title)
+DO UPDATE SET
+  category = EXCLUDED.category,
+  lifecycle = 'material',
+  summary = EXCLUDED.summary,
+  content_text = EXCLUDED.content_text,
+  payload_jsonb = EXCLUDED.payload_jsonb,
+  tags_jsonb = EXCLUDED.tags_jsonb,
+  enabled = true,
+  updated_at = now()`,
+    [
+      input.tenant_id,
+      input.project_id,
+      mapped.asset_type,
+      mapped.category,
+      mapped.title,
+      mapped.summary,
+      mapped.content_text,
+      JSON.stringify(mapped.payload),
+      JSON.stringify(mapped.tags),
+      sourceRef
+    ]);
+    assetCount += 1;
   }
-  return { candidate_count: count };
+  return { candidate_count: count, asset_count: assetCount };
 }
+
 
 async function preprocessSource(
   db: QueryExecutor,

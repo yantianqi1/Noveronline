@@ -586,6 +586,14 @@ func (s *Server) handleListAnalysisCandidates(response http.ResponseWriter, requ
 	if !s.authorizeProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
+	// Author-friendly backfill: completed runs auto-import candidates into assets.
+	if strings.EqualFold(strings.TrimSpace(run.Status), "completed") {
+		_, _ = s.analysisAssetImporter.EnsureAnalysisAssetsImported(request.Context(), workflows.ImportAnalysisAssetsInput{
+			TenantID:  tenantID,
+			ProjectID: run.ProjectID,
+			RunID:     runID,
+		})
+	}
 	items, err := s.analysisCandidateReader.ListAnalysisCandidates(request.Context(), workflows.ListAnalysisCandidatesInput{
 		TenantID:  tenantID,
 		ProjectID: run.ProjectID,
@@ -614,6 +622,60 @@ func (s *Server) handleListAnalysisCandidates(response http.ResponseWriter, requ
 	writeJSON(response, http.StatusOK, listResponse[analysisCandidateResponse]{Items: responseItems})
 }
 
+type importAnalysisAssetsResponse struct {
+	RunID         string `json:"run_id"`
+	ProjectID     string `json:"project_id"`
+	ImportedCount int    `json:"imported_count"`
+	SkippedCount  int    `json:"skipped_count"`
+	Status        string `json:"status"`
+}
+
+func (s *Server) handleImportAnalysisAssets(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	runID := analysisRunIDFromAssetsImportPath(request.URL.Path)
+	if runID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "analysis assets import route not found", nil)
+		return
+	}
+	run, err := s.analysisRunReader.GetAnalysisRun(request.Context(), workflows.GetAnalysisRunInput{
+		TenantID: tenantID,
+		RunID:    runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, run.ProjectID, auth.PermissionCreativeWrite) {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(run.Status), "completed") {
+		writeError(response, request, http.StatusConflict, "ANALYSIS_RUN_NOT_COMPLETED", "analysis run must be completed before asset import", nil)
+		return
+	}
+	result, err := s.analysisAssetImporter.EnsureAnalysisAssetsImported(request.Context(), workflows.ImportAnalysisAssetsInput{
+		TenantID:  tenantID,
+		ProjectID: run.ProjectID,
+		RunID:     runID,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, importAnalysisAssetsResponse{
+		RunID:         runID,
+		ProjectID:     run.ProjectID,
+		ImportedCount: result.ImportedCount,
+		SkippedCount:  result.SkippedCount,
+		Status:        "completed",
+	})
+}
+
 func isAnalysisRunDetailPath(path string) bool {
 	return analysisRunIDFromDetailPath(path) != ""
 }
@@ -622,9 +684,26 @@ func isAnalysisCandidatesPath(path string) bool {
 	return analysisRunIDFromCandidatesPath(path) != ""
 }
 
+func isAnalysisAssetsImportPath(path string) bool {
+	return analysisRunIDFromAssetsImportPath(path) != ""
+}
+
 func analysisRunIDFromCandidatesPath(path string) string {
 	const prefix = "/v1/analysis-runs/"
 	const suffix = "/candidates"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	runID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if runID == "" || strings.Contains(runID, "/") {
+		return ""
+	}
+	return runID
+}
+
+func analysisRunIDFromAssetsImportPath(path string) string {
+	const prefix = "/v1/analysis-runs/"
+	const suffix = "/import-assets"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 		return ""
 	}

@@ -70,16 +70,80 @@ export function WriterActivityTimeline({ locale, items }: WriterActivityTimeline
   );
 }
 
+const RUN_LIFECYCLE_ID = "writer-run-lifecycle";
+
+/**
+ * Build a compact activity list. Run lifecycle is one reconciled row
+ * (started → completed/failed/cancelled) so the started spinner never
+ * stays forever next to a terminal status.
+ *
+ * Routine tool started/completed pairs collapse into a single completed
+ * row; only high-signal kinds stay expanded by default.
+ */
 export function activityItemsFromEvents(locale: Locale, events: readonly WriterRunEvent[]): ActivityItem[] {
   const items: ActivityItem[] = [];
+  let runLifecycle: ActivityItem | null = null;
+  let runModeDetail: string | undefined;
+  const openTools = new Map<string, number>();
+
   for (const event of events) {
     if (event.event_type === "writer.token") {
       continue;
     }
     const payload = event.payload ?? {};
+
+    if (event.event_type === "writer.run.started") {
+      runModeDetail = stringField(payload, "mode") || undefined;
+      runLifecycle = {
+        id: RUN_LIFECYCLE_ID,
+        kind: "status",
+        status: "running",
+        title: tx(locale, "写作任务进行中", "Writer run in progress"),
+        detail: runModeDetail,
+        at: event.created_at,
+      };
+      continue;
+    }
+    if (event.event_type === "writer.run.completed") {
+      runLifecycle = {
+        id: RUN_LIFECYCLE_ID,
+        kind: "status",
+        status: "completed",
+        title: tx(locale, "写作任务完成", "Writer run completed"),
+        detail: runModeDetail,
+        at: event.created_at,
+      };
+      continue;
+    }
+    if (event.event_type === "writer.run.failed") {
+      const message = stringField(payload, "message") || stringField(payload, "error");
+      const code = stringField(payload, "error_code") || stringField(payload, "code");
+      const fromPayload = [message, code].filter(Boolean).join(" · ");
+      runLifecycle = {
+        id: RUN_LIFECYCLE_ID,
+        kind: "status",
+        status: "failed",
+        title: tx(locale, "写作任务失败", "Writer run failed"),
+        detail: fromPayload || runModeDetail,
+        at: event.created_at,
+      };
+      continue;
+    }
+    if (event.event_type === "writer.run.cancelled") {
+      runLifecycle = {
+        id: RUN_LIFECYCLE_ID,
+        kind: "status",
+        status: "failed",
+        title: tx(locale, "写作任务已取消", "Writer run cancelled"),
+        detail: runModeDetail,
+        at: event.created_at,
+      };
+      continue;
+    }
+
     if (event.event_type === "writer.tool.started") {
       const toolName = stringField(payload, "tool_name") || "tool";
-      items.push({
+      const item: ActivityItem = {
         id: event.event_id,
         kind: isRetrieveTool(toolName) ? "retrieve" : "tool",
         status: "running",
@@ -87,13 +151,16 @@ export function activityItemsFromEvents(locale: Locale, events: readonly WriterR
         detail: toolName,
         at: event.created_at,
         chips: chipsFromToolPayload(toolName, payload),
-      });
+      };
+      openTools.set(toolName, items.length);
+      items.push(item);
       continue;
     }
     if (event.event_type === "writer.tool.completed") {
       const toolName = stringField(payload, "tool_name") || "tool";
       const isError = payload.is_error === true;
-      items.push({
+      const openIndex = openTools.get(toolName);
+      const completed: ActivityItem = {
         id: event.event_id,
         kind: isRetrieveTool(toolName) ? "retrieve" : "tool",
         status: isError ? "failed" : "completed",
@@ -101,7 +168,13 @@ export function activityItemsFromEvents(locale: Locale, events: readonly WriterR
         detail: toolName,
         at: event.created_at,
         chips: chipsFromToolPayload(toolName, payload),
-      });
+      };
+      if (openIndex !== undefined && items[openIndex]?.status === "running") {
+        items[openIndex] = { ...completed, id: items[openIndex].id };
+        openTools.delete(toolName);
+      } else {
+        items.push(completed);
+      }
       continue;
     }
     if (event.event_type === "writer.draft.saved") {
@@ -148,50 +221,24 @@ export function activityItemsFromEvents(locale: Locale, events: readonly WriterR
             : tx(locale, "审批已拒绝", "Approval rejected"),
         at: event.created_at,
       });
-      continue;
-    }
-    if (event.event_type === "writer.run.started") {
-      items.push({
-        id: event.event_id,
-        kind: "status",
-        status: "running",
-        title: tx(locale, "写作任务开始", "Writer run started"),
-        detail: stringField(payload, "mode") || undefined,
-        at: event.created_at,
-      });
-      continue;
-    }
-    if (event.event_type === "writer.run.completed") {
-      items.push({
-        id: event.event_id,
-        kind: "status",
-        status: "completed",
-        title: tx(locale, "写作任务完成", "Writer run completed"),
-        at: event.created_at,
-      });
-      continue;
-    }
-    if (event.event_type === "writer.run.failed") {
-      items.push({
-        id: event.event_id,
-        kind: "status",
-        status: "failed",
-        title: tx(locale, "写作任务失败", "Writer run failed"),
-        at: event.created_at,
-      });
-      continue;
-    }
-    if (event.event_type === "writer.run.cancelled") {
-      items.push({
-        id: event.event_id,
-        kind: "status",
-        status: "failed",
-        title: tx(locale, "写作任务已取消", "Writer run cancelled"),
-        at: event.created_at,
-      });
     }
   }
-  return items;
+
+  // High-signal first: run lifecycle, then non-tool rows, then tools (compact).
+  const highSignal = items.filter((item) => item.kind !== "tool" && item.kind !== "retrieve");
+  const toolRows = items.filter((item) => item.kind === "tool" || item.kind === "retrieve");
+  // Drop successful tool noise when a terminal run exists; keep failures + running.
+  const toolsVisible =
+    runLifecycle && runLifecycle.status !== "running"
+      ? toolRows.filter((item) => item.status === "failed" || item.status === "running")
+      : toolRows.filter((item) => item.status !== "completed" || toolRows.length <= 2);
+
+  const ordered: ActivityItem[] = [];
+  if (runLifecycle) {
+    ordered.push(runLifecycle);
+  }
+  ordered.push(...highSignal, ...toolsVisible);
+  return ordered;
 }
 
 function ActivityIcon({ kind, status }: { kind: ActivityItem["kind"]; status: ActivityItem["status"] }) {

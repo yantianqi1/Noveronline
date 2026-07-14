@@ -11,11 +11,10 @@ import type {
   WorkflowRunSummary,
 } from "../lib/api";
 import { type Locale, tx } from "../lib/locale";
+import { AssetBrowseClient } from "./asset-browse-client";
 import { AssetOperationWorkspace, type AssetOperationItem } from "./asset-operation-workspace";
 import { CompactFilterBar } from "./compact-filter-bar";
-import { EmptyState } from "./empty-state";
 import { InspectorPanel } from "./inspector-panel";
-import { ListRow } from "./list-row";
 import { WorkspaceHeader } from "./workspace-header";
 
 type AssetLibraryShellProps = {
@@ -190,14 +189,16 @@ export function AssetLibraryShell({
                           <p className="form-hint"><Bi zh="按类型、状态、来源或标签缩小范围" en="Narrow by type, status, source, or tag" /></p>
                         </div>
                         <div className="asset-filter-fields">
-                          <SearchModeSelect
-                            capabilities={searchCapabilities}
-                            defaultValue={searchMode}
-                            id="asset-search-mode"
-                            locale={locale}
-                            name="mode"
-                            tenantSlug={tenantSlug}
-                          />
+                          <div className="asset-filter-field-span">
+                            <SearchModeSelect
+                              capabilities={searchCapabilities}
+                              defaultValue={searchMode}
+                              id="asset-search-mode"
+                              locale={locale}
+                              name="mode"
+                              tenantSlug={tenantSlug}
+                            />
+                          </div>
                           <FacetSelect
                             id="asset-search-type"
                             label={tx(locale, "资产类型", "Asset type")}
@@ -277,15 +278,7 @@ export function AssetLibraryShell({
               />
             </form>
             <div className="asset-results-region">
-              {searchResults === null
-                ? <AssetList assets={assets} locale={locale} projectId={projectId} tenantSlug={tenantSlug} />
-                : <SearchResults
-                    clearHref={assetSearchHref(tenantSlug, projectId, "")}
-                    locale={locale}
-                    projectId={projectId}
-                    searchResults={searchResults}
-                    tenantSlug={tenantSlug}
-                  />}
+              <AssetBrowseClient assets={assets} locale={locale} searchResults={searchResults} />
             </div>
           </section>
 
@@ -504,146 +497,6 @@ function StatusLine({ status, code: _code, message: _message }: { status: string
       {status === "success" ? <Bi zh="操作已完成。" en="Action completed." /> : <FailureText />}
     </p>
   );
-}
-
-function AssetList({
-  assets,
-  locale,
-  projectId,
-  tenantSlug,
-}: {
-  assets: AssetListSummary;
-  locale: Locale;
-  projectId: string;
-  tenantSlug: string;
-}) {
-  if (!assets.ok) {
-    return <PublicFailureNotice code={assets.code} />;
-  }
-  if (assets.items.length === 0) {
-    return (
-      <EmptyState
-        action={(
-          <a data-tone="primary" href="#asset-operations">
-            <Bi zh="+ 创建资产" en="+ Create asset" />
-          </a>
-        )}
-        className="asset-library-empty"
-        description={<Bi zh="创建资产或导入素材后会出现在这里。世界规则、角色与风格都会出现在此列表。" en="Created or ingested materials will appear here—rules, characters, and style." />}
-        title={<Bi zh="项目资产" en="Project assets" />}
-      />
-    );
-  }
-  return (
-    <div className="data-table-wrap asset-browse-table-wrap">
-      <table className="data-table asset-browse-table">
-        <thead>
-          <tr>
-            <th scope="col"><Bi zh="标题" en="Title" /></th>
-            <th scope="col"><Bi zh="类型" en="Type" /></th>
-            <th scope="col"><Bi zh="状态" en="Status" /></th>
-            <th scope="col"><Bi zh="来源" en="Source" /></th>
-            <th scope="col"><Bi zh="更新时间" en="Updated" /></th>
-          </tr>
-        </thead>
-        <tbody>
-          {assets.items.map((asset) => (
-            <tr className="asset-row-link" key={asset.asset_id}>
-              <td>
-                <a className="asset-title-link" href={assetDetailHref(tenantSlug, projectId, asset.asset_id)}>
-                  <strong>{asset.title || <Bi zh="未命名资产" en="Untitled asset" />}</strong>
-                </a>
-                {asset.pinned ? <span className="asset-pin-flag" title={tx(locale, "已置顶", "Pinned")}>★</span> : null}
-              </td>
-              <td><span className="asset-type-chip">{assetValueLabel(locale, asset.asset_type)}</span></td>
-              <td><span className={`asset-lifecycle-chip is-${asset.lifecycle}`}>{assetLifecycleLabel(locale, asset.lifecycle)}</span></td>
-              <td className="asset-cell-muted">{assetValueLabel(locale, asset.source_kind)}</td>
-              <td className="asset-cell-muted">{formatAuthorTimestamp(locale, asset.updated_at)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function SearchResults({
-  clearHref,
-  searchResults,
-  locale,
-  projectId,
-  tenantSlug,
-}: {
-  clearHref: string;
-  searchResults: AssetSearchSummary | null;
-  locale: Locale;
-  projectId: string;
-  tenantSlug: string;
-}) {
-  if (searchResults === null) {
-    return <p className="form-hint"><Bi zh="输入关键词搜索资产，或留空浏览全部。" en="Search by keyword, or leave empty to browse." /></p>;
-  }
-  if (!searchResults.ok) {
-    return <PublicFailureNotice code={searchResults.code} />;
-  }
-  if (searchResults.items.length === 0) {
-    return (
-      <div className="asset-search-empty">
-        <p className="form-hint"><Bi zh="未找到匹配资产，请调整关键词或清除筛选。" en="No matching assets. Adjust the wording or clear the filters." /></p>
-        <a className="asset-clear-filters" href={clearHref}><Bi zh="清除搜索和筛选" en="Clear search and filters" /></a>
-      </div>
-    );
-  }
-  return (
-    <div className="trace-list asset-search-results" style={{ marginTop: 12 }}>
-      {searchResults.items.map((item) => {
-        const detailId = assetIdFromSearchItem(item);
-        const title = (
-          <strong>{item.title}</strong>
-        );
-        return (
-          <article className="trace-event asset-search-card" key={item.search_document_id}>
-            <div className="trace-event-header">
-              {detailId ? (
-                <a className="asset-title-link" href={assetDetailHref(tenantSlug, projectId, detailId)}>
-                  {title}
-                </a>
-              ) : title}
-              <span className="trace-redaction">{assetValueLabel(locale, item.entity_type || item.source)}</span>
-            </div>
-            {item.tags.length > 0 ? <p className="trace-meta"><Bi zh="标签" en="Tags" />: {item.tags.join(", ")}</p> : null}
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function assetDetailHref(tenantSlug: string, projectId: string, assetId: string) {
-  return `/${encodeURIComponent(tenantSlug)}/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}`;
-}
-
-function assetIdFromSearchItem(item: { source_ref: string; payload: Record<string, unknown> }) {
-  const fromPayload = item.payload?.asset_id;
-  if (typeof fromPayload === "string" && fromPayload.trim()) {
-    return fromPayload.trim();
-  }
-  const ref = item.source_ref?.trim() ?? "";
-  return ref || "";
-}
-
-function formatAuthorTimestamp(locale: Locale, value: string) {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "—";
-  }
-  return new Intl.DateTimeFormat(locale === "zh-CN" ? "zh-CN" : "en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
 }
 
 function ArchiveMemoryPanel({
