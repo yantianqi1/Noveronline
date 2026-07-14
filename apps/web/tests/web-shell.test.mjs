@@ -2963,21 +2963,23 @@ test("Paper-ink design tokens and bookish app shell stay explicit", async () => 
 
 test("module headers use one Lucide icon language", async () => {
   // Character console and the conversation-first writer workbench are headerless
-  // (content aligns to command bar); nav still uses UsersRound.
+  // (content aligns to command bar); Overview uses a compact foundation metrics bar.
+  // Nav still uses UsersRound.
   const shellPaths = [
-    "components/overview-seed-shell.tsx",
     "components/asset-library-shell.tsx",
     "components/story-graph-shell.tsx",
     "components/worldline-shell.tsx",
     "components/llm-facility-shell.tsx",
   ];
   const shells = (await Promise.all(shellPaths.map((path) => fileText(path)))).join("\n");
+  const overview = await fileText("components/overview-seed-shell.tsx");
   const nav = await fileText("components/project-nav.tsx");
   const characterShell = await fileText("components/character-console-shell.tsx");
 
-  // WorkspaceHeader owns page-title-icon for Overview/Assets; other shells still inline it.
+  // WorkspaceHeader owns page-title-icon for Assets and other titled shells.
   assert.ok((shells.match(/page-title-icon|icon=\{</g) ?? []).length >= shellPaths.length);
-  assert.match(shells, /LayoutDashboard/);
+  assert.match(overview, /overview-foundation-bar/);
+  assert.match(overview, /LayoutDashboard/);
   assert.match(shells, /Boxes/);
   assert.match(shells, /Network/);
   assert.match(shells, /GitBranch/);

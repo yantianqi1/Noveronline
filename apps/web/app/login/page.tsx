@@ -1,4 +1,4 @@
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Feather } from "lucide-react";
 import { cookies, headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -55,6 +55,16 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 
   return (
     <main className="auth-shell login-main login-page">
+      <div className="login-atmosphere" aria-hidden="true">
+        <span className="login-atmosphere-mountains" />
+        <span className="login-atmosphere-book" />
+        <span className="login-atmosphere-constellation" />
+        <span className="login-atmosphere-sun" />
+      </div>
+      <span className="login-seal" aria-hidden="true">
+        执笔
+      </span>
+
       <header className="auth-topbar">
         <Link className="auth-brand" href="/">
           <span className="auth-brand-mark" aria-hidden="true">
@@ -65,9 +75,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             <small>长篇小说创作平台</small>
           </span>
         </Link>
-        <Link className="auth-ghost-link" href="/">
+        <Link className="auth-ghost-link" href="/" aria-label="返回首页">
           <ArrowLeft aria-hidden="true" size={17} strokeWidth={1.8} />
-          返回首页
+          <span className="auth-ghost-link-label">返回首页</span>
         </Link>
       </header>
 
@@ -75,7 +85,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         <section className="login-workspace" aria-labelledby="login-heading">
           <div className="login-form-panel">
             <div className="login-copy">
-              <p className="login-kicker">创作工作台</p>
+              <p className="login-kicker">
+                <Feather aria-hidden="true" className="login-kicker-icon" size={16} strokeWidth={1.8} />
+                创作工作台
+              </p>
               <h1 id="login-heading">欢迎回来</h1>
               <p className="login-intro">登录后继续整理你的故事世界，衔接上一次创作进度。</p>
 

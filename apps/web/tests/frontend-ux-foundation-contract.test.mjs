@@ -46,16 +46,17 @@ test("global app shell uses paper navigation and compact context bar", async () 
   assert.match(layout, /className="skip-link"/);
 });
 
-test("Assets and Overview adopt WorkspaceHeader foundation", async () => {
+test("Assets keep WorkspaceHeader; Overview uses foundation metrics bar", async () => {
   const assets = await source("components/asset-library-shell.tsx");
   const overview = await source("components/overview-seed-shell.tsx");
 
   assert.match(assets, /WorkspaceHeader/);
   assert.match(assets, /from "\.\/workspace-header"/);
-  assert.match(overview, /WorkspaceHeader/);
-  assert.match(overview, /from "\.\/workspace-header"/);
   assert.match(assets, /page-title-icon|icon=\{/);
-  assert.match(overview, /page-title-icon|icon=\{/);
+  assert.match(overview, /overview-foundation-bar/);
+  assert.match(overview, /data-layout="foundation-bar"/);
+  assert.doesNotMatch(overview, /WorkspaceHeader/);
+  assert.doesNotMatch(overview, /from "\.\/workspace-header"/);
 });
 
 test("SubmitButton disables while pending and exposes busy state", async () => {

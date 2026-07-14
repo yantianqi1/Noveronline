@@ -52,7 +52,6 @@ import { OverviewSeedUploadForm } from "./overview-seed-upload-form";
 import { OverviewActivityLogLive } from "./overview-activity-log-live";
 import { SeedRunAutoRefresh } from "./seed-run-auto-refresh";
 import { SubmitButton } from "./submit-button";
-import { WorkspaceHeader } from "./workspace-header";
 
 type ActionStatus = {
   status: string;
@@ -123,7 +122,6 @@ export function OverviewSeedShell({
     && !selectedRunId;
   // LLM readiness gates Seed/AI analysis, not idea-first structure bootstrap.
   const showCreationReadinessPanel = !creationReadiness.ready;
-  const foldHealthPanel = isEmptyProject || !creationReadiness.ready;
   const seedRunActive = Boolean(
     selectedSeedRun
     && selectedSeedRun.ok
@@ -131,13 +129,25 @@ export function OverviewSeedShell({
   );
 
   return (
-    <div className="overview-root">
+    <div className="overview-root" data-layout="foundation-bar">
       <SeedRunAutoRefresh active={seedRunActive} />
-      <WorkspaceHeader
-        className="overview-header"
-        icon={<LayoutDashboard size={22} strokeWidth={1.8} />}
-        title={<Bi zh="项目总览" en="Project Overview" />}
-      />
+      <section
+        className={`overview-foundation-bar ${projectOverview.ok ? "" : "error-box"}`}
+        aria-labelledby="project-health-heading"
+        data-density="compact"
+      >
+        <div className="overview-foundation-bar-label">
+          <LayoutDashboard aria-hidden="true" size={15} strokeWidth={1.8} />
+          <h2 id="project-health-heading"><Bi zh="故事基础" en="Story foundation" /></h2>
+        </div>
+        <ProjectHealthPanel
+          compact
+          locale={locale}
+          projectId={projectId}
+          projectOverview={projectOverview}
+          tenantSlug={tenantSlug}
+        />
+      </section>
 
       <div className="workbench-grid">
         <main>
@@ -196,17 +206,6 @@ export function OverviewSeedShell({
               />
             </section>
           ) : null}
-
-          {!foldHealthPanel ? (
-          <section
-            className={`panel overview-health-panel ${projectOverview.ok ? "" : "error-box"}`}
-            aria-labelledby="project-health-heading"
-          >
-            <p className="eyebrow"><Bi zh="创作基础" en="Project Health" /></p>
-            <h2 id="project-health-heading"><Bi zh="故事基础" en="Story foundation" /></h2>
-            <ProjectHealthPanel locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
-          </section>
-          ) : null}
         </main>
 
         <aside className="overview-rail">
@@ -227,22 +226,6 @@ export function OverviewSeedShell({
           </section>
 
           <div className="overview-secondary-stack">
-            {foldHealthPanel ? (
-            <details className="overview-details">
-              <summary>
-                <LayoutDashboard aria-hidden="true" size={18} strokeWidth={1.8} />
-                <span>
-                  <strong><Bi zh="故事基础" en="Story foundation" /></strong>
-                  <small><Bi zh={isEmptyProject ? "开始创作后查看指标" : "就绪后查看指标"} en={isEmptyProject ? "Metrics appear after you start writing" : "Available after readiness"} /></small>
-                </span>
-                <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-              </summary>
-              <div className="overview-details-content">
-                <ProjectHealthPanel locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
-              </div>
-            </details>
-            ) : null}
-
             <details className="overview-details">
               <summary>
                 <FileText aria-hidden="true" size={18} strokeWidth={1.8} />
@@ -895,11 +878,13 @@ function overviewFailureNotice(locale: Locale, code: string, tenantSlug: string,
 }
 
 function ProjectHealthPanel({
+  compact = false,
   locale,
   projectId,
   projectOverview,
   tenantSlug,
 }: {
+  compact?: boolean;
   locale: Locale;
   projectId: string;
   projectOverview: ProjectOverviewSummary;
@@ -917,13 +902,17 @@ function ProjectHealthPanel({
     ["world-rules-ready", "就绪世界规则", "World rules ready", projectOverview.ready_world_rule_count, Globe2],
   ] as const;
   return (
-    <div className="overview-metric-grid" aria-label={tx(locale, "项目核心统计", "Core project counts")}>
+    <div
+      className="overview-metric-grid"
+      data-density={compact ? "compact" : "default"}
+      aria-label={tx(locale, "项目核心统计", "Core project counts")}
+    >
       {metrics.map(([key, zh, en, value, Icon]) => {
         return (
           <div className="overview-metric" key={key}>
             <strong>{value}</strong>
             <span><Bi zh={zh} en={en} /></span>
-            <Icon aria-hidden="true" size={24} strokeWidth={1.35} />
+            {compact ? null : <Icon aria-hidden="true" size={24} strokeWidth={1.35} />}
           </div>
         );
       })}

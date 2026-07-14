@@ -3543,6 +3543,75 @@ header {
   gap: 8px;
 }
 
+.overview-foundation-bar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px 20px;
+  padding: 8px 24px;
+  border-bottom: 1px solid rgba(120, 104, 84, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 252, 246, 0.96), rgba(248, 243, 234, 0.9));
+}
+
+.overview-foundation-bar-label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: #5a4338;
+}
+
+.overview-foundation-bar-label h2 {
+  margin: 0;
+  color: #2a2420;
+  font-family: "Songti SC", "SimSun", Georgia, serif;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.overview-foundation-bar-label svg {
+  color: #8d201c;
+  flex: 0 0 auto;
+}
+
+.overview-foundation-bar .overview-metric-grid[data-density="compact"] {
+  flex: 1 1 auto;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+  min-width: 0;
+}
+
+.overview-foundation-bar .overview-metric-grid[data-density="compact"] .overview-metric {
+  min-height: 0;
+  align-content: center;
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  border-left: 1px solid rgba(120, 104, 84, 0.12);
+  background: transparent;
+  padding: 2px 10px;
+}
+
+.overview-foundation-bar .overview-metric-grid[data-density="compact"] .overview-metric:first-child {
+  border-left: 0;
+}
+
+.overview-foundation-bar .overview-metric-grid[data-density="compact"] .overview-metric strong {
+  font-size: 0.98rem;
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.overview-foundation-bar .overview-metric-grid[data-density="compact"] .overview-metric span {
+  font-size: 0.68rem;
+  line-height: 1.25;
+}
+
 .overview-metric {
   display: grid;
   min-width: 0;
@@ -6735,6 +6804,11 @@ dd {
     /* Clip only horizontal bleed from decorative layers; keep vertical content scrollable. */
     overflow-x: hidden;
     overflow-y: visible;
+  }
+
+  .overview-root[data-layout="foundation-bar"]::before,
+  .overview-root[data-layout="foundation-bar"]::after {
+    display: none;
   }
 
   .overview-root::before {
