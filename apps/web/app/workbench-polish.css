@@ -3124,7 +3124,8 @@
   }
 
   .writer-root[data-home="true"] {
-    min-height: calc(100dvh - var(--mobile-main-pad-bottom, 72px) - var(--mobile-safe-top, 0px));
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   .writer-home-state {
@@ -3392,10 +3393,11 @@
   }
 
   .writer-artifact-tab {
-    min-height: 52px !important;
-    flex-direction: column;
-    gap: 3px;
-    padding: 5px 2px !important;
+    min-height: 36px !important;
+    flex-direction: row;
+    gap: 4px;
+    padding: 4px 2px !important;
+    font-size: 0.72rem;
   }
 
   .writer-artifact-meta-content,
