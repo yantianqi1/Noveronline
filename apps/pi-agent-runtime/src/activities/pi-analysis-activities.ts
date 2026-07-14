@@ -8,6 +8,7 @@ import {
   type AnalysisToolName
 } from "../contracts/analysis-run.js";
 import { validateAnalysisWorkflowPayload } from "../contracts/analysis-worker-spec.js";
+import { extractAnalysisCandidatesFromWorkspaceFiles } from "../runtime/analysis-candidate-extract.js";
 
 export interface PiAnalysisActivityResult {
   tenant_id: string;
@@ -633,40 +634,7 @@ async function finalizeCandidates(
   input: AnalysisRunInput,
   files: WorkspaceFileRecord[]
 ): Promise<{ candidate_count: number; asset_count?: number }> {
-  const candidates: Array<{
-    candidate_type: string;
-    name: string;
-    payload: Record<string, unknown>;
-    workspace_path?: string;
-  }> = [];
-  for (const file of files) {
-    if (!file.path.startsWith("30-candidates/") || !file.content_text) continue;
-    try {
-      const parsed = JSON.parse(file.content_text) as { items?: Array<Record<string, unknown>> };
-      const items = Array.isArray(parsed.items) ? parsed.items : [];
-      const type = file.path.includes("characters")
-        ? "character"
-        : file.path.includes("relationships")
-          ? "relationship"
-          : file.path.includes("world_rules")
-            ? "world_rule"
-            : file.path.includes("plot_threads")
-              ? "plot_thread"
-              : file.path.includes("ontology")
-                ? "ontology"
-                : "note_summary";
-      for (const item of items) {
-        candidates.push({
-          candidate_type: type,
-          name: String(item.name ?? item.title ?? type),
-          payload: item,
-          workspace_path: file.path
-        });
-      }
-    } catch {
-      // ignore invalid candidate JSON
-    }
-  }
+  const candidates = extractAnalysisCandidatesFromWorkspaceFiles(files);
   if (deps.saveAnalysisCandidates) {
     return deps.saveAnalysisCandidates({
       tenant_id: input.tenant_id,
