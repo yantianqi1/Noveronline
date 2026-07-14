@@ -308,3 +308,58 @@ test("materials and me hubs use 2x2 grid on tablet widths", async () => {
     /@media \(max-width:\s*860px\)\s*\{[\s\S]*?\.mobile-hub\s+\.mobile-paper-stack\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
   );
 });
+
+test("phone density: compact materials headers, short artifact tabs, no aside clamp", async () => {
+  const chrome = await fileText("app/mobile-chrome.css");
+  const polish = await fileText("app/workbench-polish.css");
+
+  // Hub bottom reserve is tight (+14), not a loose +28 band.
+  assert.match(
+    chrome,
+    /--mobile-main-pad-bottom:\s*calc\(var\(--mobile-tabbar-height\)\s*\+\s*var\(--mobile-safe-bottom\)\s*\+\s*14px\)/,
+  );
+
+  // Materials deep pages shrink WorkspaceHeader under the mobile topbar.
+  assert.match(
+    chrome,
+    /\.asset-library-header,\s*\n\s*\.story-graph-header,\s*\n\s*\.worldline-header[\s\S]*?min-height:\s*0\s*!important/s,
+  );
+
+  // Graph/worldline mode switcher becomes a short segmented bar on phone.
+  assert.match(
+    chrome,
+    /\.story-graph-root\s+\.workspace-mode-switcher[\s\S]*?--mode-facet-h:\s*36px/s,
+  );
+
+  // Expanded seed wall must not keep a preview retry control.
+  assert.match(
+    chrome,
+    /\.overview-status-stage\[data-expanded="true"\]\s+\.overview-status-wall-preview-action\s*\{[\s\S]*?display:\s*none/s,
+  );
+
+  // Asset aside must not clamp to 52dvh on phone (avoids dual-scroll sandwich).
+  assert.match(
+    chrome,
+    /aside\.asset-library-aside[\s\S]*?max-height:\s*none\s*!important/s,
+  );
+
+  // Writer artifact tabs stay one short row on phone.
+  assert.match(
+    polish,
+    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-artifact-tab\s*\{[\s\S]*?min-height:\s*36px\s*!important/s,
+  );
+  assert.doesNotMatch(
+    polish,
+    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-artifact-tab\s*\{[\s\S]*?min-height:\s*52px/s,
+  );
+
+  // Writer home fills flex parent instead of a second 100dvh calc.
+  assert.match(
+    polish,
+    /\.writer-root\[data-home="true"\]\s*\{[\s\S]*?flex:\s*1\s+1\s+auto/s,
+  );
+  assert.doesNotMatch(
+    polish,
+    /\.writer-root\[data-home="true"\]\s*\{[^}]*100dvh/,
+  );
+});
