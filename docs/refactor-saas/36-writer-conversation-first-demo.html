@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>写作台 · 对话优先重构演示 — MiroFish Writer</title>
+<style>
+  :root {
+    --paper: #f3eee4;
+    --paper-deep: #ece5d6;
+    --card: #faf7f0;
+    --ink: #171a1b;
+    --ink-soft: #4d4a43;
+    --ink-faint: #8b867a;
+    --red: #8f2f27;
+    --red-soft: #a8433a;
+    --gold: #b18a4e;
+    --gold-soft: rgba(177, 138, 78, 0.18);
+    --line: rgba(23, 26, 27, 0.12);
+    --line-strong: rgba(23, 26, 27, 0.22);
+    --shadow: 0 2px 10px rgba(23, 26, 27, 0.06), 0 12px 32px rgba(23, 26, 27, 0.07);
+    --radius: 14px;
+    --serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
+    --sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 500px at 15% -10%, rgba(177, 138, 78, 0.10), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(143, 47, 39, 0.06), transparent 55%),
+      var(--paper);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  button { font-family: inherit; cursor: pointer; }
+
+  /* ============ 顶栏 ============ */
+  .topbar {
+    height: 52px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(243, 238, 228, 0.85);
+    backdrop-filter: blur(8px);
+    position: relative; z-index: 30;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .brand .logo {
+    width: 26px; height: 26px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--red), #b0503f);
+    color: #f7ead9; display: grid; place-items: center;
+    font-family: var(--serif); font-size: 15px; font-weight: 700;
+  }
+  .brand .book { color: var(--ink-soft); }
+  .brand strong { font-weight: 600; }
+  .topbar-actions { display: flex; align-items: center; gap: 8px; }
+  .chip-btn {
+    border: 1px solid var(--line); background: var(--card);
+    border-radius: 9px; padding: 5px 10px; font-size: 12.5px; color: var(--ink-soft);
+    transition: all .15s;
+  }
+  .chip-btn:hover { border-color: var(--line-strong); color: var(--ink); }
+  .seg { display: none; }
+
+  /* ============ 起点态 ============ */
+  #home {
+    height: calc(100vh - 52px);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; gap: 26px;
+    transition: opacity .35s ease, transform .35s ease;
+  }
+  body.in-task #home { display: none; }
+  #home .hero { text-align: center; }
+  #home .hero h1 {
+    font-family: var(--serif); font-size: clamp(22px, 3.2vw, 32px);
+    font-weight: 600; letter-spacing: 0.02em;
+  }
+  #home .hero p { margin-top: 10px; color: var(--ink-faint); font-size: 14px; }
+
+  .composer-card {
+    width: min(680px, 94vw);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    box-shadow: var(--shadow);
+    padding: 14px 14px 10px;
+    transition: box-shadow .2s, border-color .2s;
+  }
+  .composer-card:focus-within { border-color: rgba(143, 47, 39, 0.45); box-shadow: 0 2px 10px rgba(143,47,39,.08), 0 14px 38px rgba(23,26,27,.10); }
+  .composer-card textarea {
+    width: 100%; border: none; outline: none; resize: none;
+    background: transparent; font-family: inherit;
+    font-size: 15.5px; line-height: 1.65; color: var(--ink);
+    min-height: 58px; max-height: 180px;
+  }
+  .composer-card textarea::placeholder { color: var(--ink-faint); }
+  .composer-toolbar { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .composer-left { display: flex; gap: 6px; }
+  .tiny-chip {
+    border: 1px dashed var(--line-strong); background: transparent;
+    border-radius: 8px; padding: 4px 9px; font-size: 12px; color: var(--ink-faint);
+  }
+  .tiny-chip:hover { color: var(--ink-soft); border-color: var(--ink-faint); }
+  .send-btn {
+    display: flex; align-items: center; gap: 7px;
+    background: var(--red); color: #f7ead9; border: none;
+    border-radius: 11px; padding: 9px 18px; font-size: 14px; font-weight: 500;
+    transition: background .15s, transform .1s;
+  }
+  .send-btn:hover { background: var(--red-soft); }
+  .send-btn:active { transform: scale(.97); }
+  .send-btn:disabled { opacity: .45; cursor: default; }
+
+  .examples { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; max-width: 680px; }
+  .example-pill {
+    border: 1px solid var(--line); background: rgba(250, 247, 240, 0.7);
+    border-radius: 999px; padding: 8px 16px; font-size: 13px; color: var(--ink-soft);
+    transition: all .15s;
+  }
+  .example-pill:hover { border-color: var(--gold); color: var(--ink); background: var(--card); }
+
+  .recents { width: min(680px, 94vw); }
+  .recents h3 { font-size: 12.5px; color: var(--ink-faint); font-weight: 500; margin-bottom: 10px; letter-spacing: .08em; }
+  .recent-row { display: flex; gap: 12px; }
+  .recent-card {
+    flex: 1; text-align: left;
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 13px 15px; transition: all .15s;
+  }
+  .recent-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow); }
+  .recent-card .rc-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .recent-card .rc-meta { font-size: 12px; color: var(--ink-faint); margin-top: 5px; }
+  .rc-ico { font-size: 14px; }
+
+  /* ============ 任务态布局 ============ */
+  #app { display: none; height: calc(100vh - 52px); }
+  body.in-task #app { display: grid; grid-template-columns: 380px 1fr; animation: fadeIn .35s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ---- 左：对话流 ---- */
+  .convo {
+    display: flex; flex-direction: column; min-height: 0;
+    border-right: 1px solid var(--line);
+    background: rgba(236, 229, 214, 0.45);
+  }
+  .convo-head {
+    padding: 12px 16px 10px; font-size: 12.5px; color: var(--ink-faint);
+    display: flex; justify-content: space-between; align-items: center;
+    letter-spacing: .06em;
+  }
+  .convo-head button { border: none; background: none; color: var(--ink-faint); font-size: 12px; }
+  .convo-head button:hover { color: var(--red); }
+  .thread { flex: 1; overflow-y: auto; padding: 4px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+
+  .msg { max-width: 92%; animation: msgIn .3s ease; }
+  @keyframes msgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .msg.user { align-self: flex-end; }
+  .msg.user .bubble {
+    background: var(--ink); color: #f2efe8;
+    border-radius: 14px 14px 4px 14px;
+    padding: 10px 14px; font-size: 13.5px; line-height: 1.6;
+  }
+  .msg.agent .who { font-size: 11.5px; color: var(--ink-faint); margin-bottom: 5px; display: flex; align-items: center; gap: 6px; }
+  .msg.agent .who .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); }
+  .msg.agent .bubble {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 4px 14px 14px 14px;
+    padding: 11px 14px; font-size: 13.5px; line-height: 1.65;
+  }
+  .bubble .link-btn {
+    border: none; background: none; color: var(--red); font-size: 13px;
+    text-decoration: underline; text-underline-offset: 3px; padding: 0;
+  }
+
+  /* ---- 任务状态行 ---- */
+  .status-line {
+    align-self: stretch;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+    animation: msgIn .3s ease;
+  }
+  .status-main {
+    width: 100%; display: flex; align-items: center; gap: 10px;
+    padding: 10px 13px; border: none; background: none; text-align: left;
+    font-size: 13px; color: var(--ink-soft);
+  }
+  .status-main .st-ico { width: 18px; text-align: center; flex-shrink: 0; }
+  .status-main .st-text { flex: 1; }
+  .status-main .st-text strong { color: var(--ink); font-weight: 600; }
+  .status-main .chev { color: var(--ink-faint); font-size: 11px; transition: transform .2s; }
+  .status-line.open .chev { transform: rotate(90deg); }
+  .spinner {
+    display: inline-block; width: 13px; height: 13px;
+    border: 2px solid var(--gold-soft); border-top-color: var(--gold);
+    border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status-steps {
+    display: none; border-top: 1px dashed var(--line);
+    padding: 8px 13px 10px; background: rgba(236,229,214,.35);
+  }
+  .status-line.open .status-steps { display: block; }
+  .step { display: flex; align-items: center; gap: 9px; padding: 5px 0; font-size: 12.5px; color: var(--ink-soft); }
+  .step .s-ico { width: 16px; text-align: center; font-size: 11px; }
+  .step.done .s-ico { color: #4a7a4e; }
+  .step.doing .s-ico { color: var(--gold); }
+  .step.pending { opacity: .45; }
+  .tech-link { margin-top: 6px; }
+  .tech-link button {
+    border: none; background: none; font-size: 11.5px; color: var(--ink-faint);
+    text-decoration: underline; text-underline-offset: 3px; padding: 0;
+  }
+  .tech-link button:hover { color: var(--ink-soft); }
+
+  /* ---- 左栏底部 composer ---- */
+  .convo-composer { padding: 10px 14px 14px; }
+  .convo-composer .composer-card { width: 100%; padding: 10px 12px 8px; border-radius: 14px; box-shadow: none; }
+  .convo-composer textarea { min-height: 24px; font-size: 14px; }
+  .convo-composer .send-btn { padding: 7px 14px; font-size: 13px; }
+
+  /* ---- 右：产物画布 ---- */
+  .canvas { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .canvas-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 22px; border-bottom: 1px solid var(--line);
+    background: rgba(250, 247, 240, 0.6);
+  }
+  .chapter-switch { position: relative; }
+  .chapter-btn {
+    display: flex; align-items: center; gap: 8px;
+    border: none; background: none; font-size: 14.5px; font-weight: 600;
+    font-family: var(--serif); color: var(--ink); padding: 6px 8px; border-radius: 9px;
+  }
+  .chapter-btn:hover { background: var(--gold-soft); }
+  .chapter-btn .caret { font-size: 10px; color: var(--ink-faint); }
+  .chapter-menu {
+    display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+    width: 240px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; box-shadow: var(--shadow); padding: 6px; font-size: 13px;
+  }
+  .chapter-menu.open { display: block; animation: msgIn .18s ease; }
+  .chapter-menu .cm-item {
+    width: 100%; display: flex; justify-content: space-between; align-items: center;
+    border: none; background: none; text-align: left;
+    padding: 9px 11px; border-radius: 8px; font-size: 13px; color: var(--ink-soft);
+  }
+  .chapter-menu .cm-item:hover { background: var(--gold-soft); color: var(--ink); }
+  .chapter-menu .cm-item.current { color: var(--ink); font-weight: 600; }
+  .chapter-menu .cm-item.current::after { content: "✓"; color: var(--gold); }
+  .chapter-menu .cm-new { border-top: 1px dashed var(--line); margin-top: 5px; padding-top: 9px; color: var(--red); }
+  .canvas-meta { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-faint); }
+  .save-chip { display: none; align-items: center; gap: 5px; color: #4a7a4e; }
+  body.adopted .save-chip { display: flex; }
+
+  .canvas-body { flex: 1; overflow-y: auto; padding: 34px 0 110px; }
+  .sheet {
+    width: min(720px, calc(100% - 64px)); margin: 0 auto;
+    background: var(--card);
+    border: 1.5px dashed rgba(177, 138, 78, 0.75);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    padding: 46px 54px 56px;
+    position: relative;
+    transition: border-color .5s, border-style .5s;
+    display: none;
+  }
+  body.streaming .sheet, body.drafted .sheet, body.adopted .sheet { display: block; }
+  body.adopted .sheet { border: 1px solid var(--line); }
+  .sheet-badge {
+    position: absolute; top: -11px; left: 34px;
+    background: var(--gold); color: #fff;
+    font-size: 11.5px; padding: 3px 12px; border-radius: 999px; letter-spacing: .12em;
+    transition: background .4s;
+  }
+  body.adopted .sheet-badge { background: #4a7a4e; }
+  .sheet h2 {
+    font-family: var(--serif); font-size: 21px; font-weight: 600;
+    margin-bottom: 24px; letter-spacing: .04em;
+  }
+  .prose {
+    font-family: var(--serif); font-size: 16.5px; line-height: 2.05;
+    color: #24211c; letter-spacing: .015em; outline: none;
+  }
+  .prose p { text-indent: 2em; margin-bottom: 4px; min-height: 1em; }
+  .cursor {
+    display: inline-block; width: 2px; height: 1.1em; vertical-align: -0.15em;
+    background: var(--red); animation: blink .9s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .canvas-empty {
+    height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; color: var(--ink-faint); font-size: 13.5px;
+  }
+  body.streaming .canvas-empty, body.drafted .canvas-empty, body.adopted .canvas-empty { display: none; }
+  .canvas-empty .ce-ico { font-size: 30px; opacity: .5; }
+
+  /* ---- 画布操作条 ---- */
+  .action-bar {
+    position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    display: flex; gap: 8px; align-items: center;
+    background: rgba(250, 247, 240, 0.92); backdrop-filter: blur(10px);
+    border: 1px solid var(--line); border-radius: 14px;
+    padding: 8px; box-shadow: var(--shadow);
+    opacity: 0; pointer-events: none; transition: all .3s ease;
+  }
+  body.drafted .action-bar { opacity: 1; pointer-events: auto; transform: translateX(-50%); }
+  body.adopted .action-bar { opacity: 0; pointer-events: none; }
+  .ab-primary {
+    background: var(--red); color: #f7ead9; border: none;
+    border-radius: 9px; padding: 9px 18px; font-size: 13.5px; font-weight: 500;
+  }
+  .ab-primary:hover { background: var(--red-soft); }
+  .ab-ghost {
+    background: none; border: 1px solid transparent; color: var(--ink-soft);
+    border-radius: 9px; padding: 9px 13px; font-size: 13.5px;
+  }
+  .ab-ghost:hover { border-color: var(--line); background: var(--paper-deep); }
+  .canvas-wrap { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+  /* ---- 选区浮条 ---- */
+  .sel-pop {
+    position: fixed; z-index: 60; display: none;
+    background: var(--ink); color: #f2efe8; border-radius: 10px;
+    padding: 7px 13px; font-size: 12.5px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.25);
+  }
+  .sel-pop::after {
+    content: ""; position: absolute; left: 50%; top: 100%; transform: translateX(-50%);
+    border: 6px solid transparent; border-top-color: var(--ink);
+  }
+  .sel-pop button { background: none; border: none; color: inherit; font-size: 12.5px; }
+
+  /* ---- 弹出菜单 & toast ---- */
+  .more-menu {
+    display: none; position: absolute; right: 18px; top: 46px; z-index: 50;
+    width: 190px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; box-shadow: var(--shadow); padding: 6px;
+  }
+  .more-menu.open { display: block; animation: msgIn .18s ease; }
+  .more-menu button {
+    width: 100%; text-align: left; border: none; background: none;
+    padding: 9px 11px; border-radius: 8px; font-size: 13px; color: var(--ink-soft);
+  }
+  .more-menu button:hover { background: var(--gold-soft); color: var(--ink); }
+  .more-menu .divider { border-top: 1px dashed var(--line); margin: 5px 0; }
+  .toast {
+    position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%) translateY(80px);
+    background: var(--ink); color: #f2efe8; font-size: 13px;
+    padding: 10px 20px; border-radius: 999px; z-index: 100;
+    transition: transform .3s ease; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+  }
+  .toast.show { transform: translateX(-50%); }
+
+  /* ============ 移动端 ============ */
+  @media (max-width: 960px) {
+    body.in-task #app { grid-template-columns: 1fr; }
+    .seg {
+      display: flex; background: var(--paper-deep); border-radius: 10px; padding: 3px;
+    }
+    body:not(.in-task) .seg { display: none; }
+    .seg button {
+      border: none; background: none; padding: 5px 14px; border-radius: 8px;
+      font-size: 12.5px; color: var(--ink-faint); position: relative;
+    }
+    .seg button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .seg button .badge {
+      position: absolute; top: 2px; right: 4px; width: 7px; height: 7px;
+      border-radius: 50%; background: var(--red); display: none;
+    }
+    .seg button .badge.show { display: block; }
+    body[data-mview="convo"] .canvas { display: none; }
+    body[data-mview="canvas"] .convo { display: none; }
+    .convo { border-right: none; }
+    .sheet { width: calc(100% - 28px); padding: 34px 24px 44px; }
+    .canvas-head { padding: 8px 14px; }
+    .brand .book { display: none; }
+    #home .hero h1 { font-size: 21px; }
+    .recent-row { flex-direction: column; }
+    .action-bar { width: calc(100% - 24px); justify-content: center; bottom: 14px; }
+  }
+</style>
+</head>
+<body data-mview="convo">
+
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">墨</span>
+      <strong>MiroFish Writer</strong>
+      <span class="book">· 《雨夜来信》</span>
+    </div>
+    <div class="seg" id="seg">
+      <button class="on" data-v="convo" onclick="setMView('convo')">对话</button>
+      <button data-v="canvas" onclick="setMView('canvas')">产物<span class="badge" id="canvasBadge"></span></button>
+    </div>
+    <div class="topbar-actions">
+      <button class="chip-btn" onclick="toast('命令面板：跳章节 / 审校 / 导出 / 章节管理（演示占位）')">⌘K</button>
+      <button class="chip-btn" onclick="toggleMore(event)">⋯</button>
+    </div>
+    <div class="more-menu" id="moreMenu">
+      <button onclick="toast('技术详情抽屉：事件回放 / 工具结果 / Trace 导出（管理员可见）')">技术详情</button>
+      <button onclick="toast('章节管理面板（演示占位）')">章节管理</button>
+      <div class="divider"></div>
+      <button onclick="toast('已生成导出文件：雨夜来信.txt')">导出全书正文</button>
+    </div>
+  </header>
+
+  <!-- ============ 起点态 ============ -->
+  <section id="home">
+    <div class="hero">
+      <h1>把你想写的告诉我，剩下的交给写作助手。</h1>
+      <p>它会查阅你的设定、人物与前文，为你起草正文——采用之前，不会动你的手稿。</p>
+    </div>
+
+    <div class="composer-card">
+      <textarea id="homeInput" rows="2" placeholder="例如：帮我写第一章的开场，主角在雨夜收到一封没有署名的信……"></textarea>
+      <div class="composer-toolbar">
+        <div class="composer-left">
+          <button class="tiny-chip" onclick="toast('引用资料：@人物 @设定 @章节（按需，Agent 默认自主检索）')">@ 引用资料</button>
+        </div>
+        <button class="send-btn" onclick="startFromHome()">开始写作 ➤</button>
+      </div>
+    </div>
+
+    <div class="examples">
+      <button class="example-pill" onclick="fillExample('帮我写第一章的开场，主角在雨夜收到一封没有署名的信，气氛压抑，带一点悬疑。')">✍️ 写一个新故事的开场</button>
+      <button class="example-pill" onclick="fillExample('给这本书列一个 20 章的大纲，主线是主角追查十年前的一桩旧案。')">📑 给这本书列一个大纲</button>
+      <button class="example-pill" onclick="fillExample('接着上次的第三章往下写，保持现在的节奏。')">➡️ 续写上次的章节</button>
+      <button class="example-pill" onclick="fillExample('帮我审一遍第三章，重点看人物动机是否连贯。')">🔍 审校已有正文</button>
+    </div>
+
+    <div class="recents">
+      <h3>最近</h3>
+      <div class="recent-row">
+        <button class="recent-card" onclick="toast('打开：第三章手稿（演示占位）')">
+          <div class="rc-title"><span class="rc-ico">📄</span>第三章 · 手稿</div>
+          <div class="rc-meta">昨天 · 3,412 字</div>
+        </button>
+        <button class="recent-card" onclick="toast('打开：全书大纲（演示占位）')">
+          <div class="rc-title"><span class="rc-ico">🗂️</span>全书大纲</div>
+          <div class="rc-meta">3 天前 · 20 章</div>
+        </button>
+        <button class="recent-card" onclick="toast('打开：审校报告（演示占位）')">
+          <div class="rc-title"><span class="rc-ico">✅</span>第二章审校报告</div>
+          <div class="rc-meta">5 天前 · 6 条建议</div>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 任务态 ============ -->
+  <section id="app">
+    <!-- 左：对话流 -->
+    <aside class="convo">
+      <div class="convo-head">
+        <span>对 话</span>
+        <button onclick="resetDemo()">＋ 新任务</button>
+      </div>
+      <div class="thread" id="thread"></div>
+      <div class="convo-composer">
+        <div class="composer-card">
+          <textarea id="taskInput" rows="1" placeholder="继续输入，或让我修改右侧内容…"></textarea>
+          <div class="composer-toolbar">
+            <div class="composer-left">
+              <button class="tiny-chip" onclick="toast('引用资料：@人物 @设定 @章节')">@</button>
+            </div>
+            <button class="send-btn" id="taskSend" onclick="sendFollowUp()">➤</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 右：产物画布 -->
+    <main class="canvas">
+      <div class="canvas-head">
+        <div class="chapter-switch">
+          <button class="chapter-btn" onclick="toggleChapters(event)">
+            《雨夜来信》 › 第一章 <span class="caret">▾</span>
+          </button>
+          <div class="chapter-menu" id="chapterMenu">
+            <button class="cm-item current">第一章 · 雨夜来信</button>
+            <button class="cm-item" onclick="toast('切换到第二章（演示占位）')">第二章 · 旧书店</button>
+            <button class="cm-item" onclick="toast('切换到第三章（演示占位）')">第三章 · 十年之约</button>
+            <button class="cm-item cm-new" onclick="toast('新建章节（演示占位）')">＋ 新建章节</button>
+          </div>
+        </div>
+        <div class="canvas-meta">
+          <span id="wordCount">0 字</span>
+          <span class="save-chip">✓ 已保存</span>
+        </div>
+      </div>
+
+      <div class="canvas-wrap">
+        <div class="canvas-body">
+          <div class="canvas-empty">
+            <span class="ce-ico">✦</span>
+            <span>产物会出现在这里</span>
+          </div>
+          <article class="sheet" id="sheet">
+            <span class="sheet-badge" id="sheetBadge">候 选 稿</span>
+            <h2>第一章 · 雨夜来信</h2>
+            <div class="prose" id="prose"></div>
+          </article>
+        </div>
+
+        <div class="action-bar" id="actionBar">
+          <button class="ab-primary" onclick="adoptDraft()">✓ 采用为手稿</button>
+          <button class="ab-ghost" onclick="continueRevise()">继续修改</button>
+          <button class="ab-ghost" onclick="copyDraft()">复制</button>
+          <button class="ab-ghost" onclick="toast('候选稿已丢弃（演示占位）')">丢弃</button>
+        </div>
+      </div>
+    </main>
+  </section>
+
+  <div class="sel-pop" id="selPop"><button onclick="reviseSelection()">✦ 请 Agent 修改这段</button></div>
+  <div class="toast" id="toastEl"></div>
+
+<script>
+/* ================= 演示数据 ================= */
+const DRAFT_PARAS = [
+  "雨点砸在铁皮屋檐上，像谁在急促地敲门。",
+  "陈默放下手里的钢笔，抬头看向窗外。巷口的路灯在雨幕里晕出一圈昏黄，一个穿黑色雨衣的身影正站在灯下，一动不动地望着他的窗户。",
+  "信是十分钟前从门缝里塞进来的。没有邮戳，没有署名，信纸被雨水洇湿了一角，上面只有一行字——",
+  "「他们知道你还留着那本书。」",
+  "陈默的指尖有些发凉。那本书……他已经十年没有对任何人提起过。连搬了三次家，它都被封在同一只樟木箱底，和母亲的遗物放在一起。",
+  "楼下传来木质楼梯被踩响的声音。一步，一步，不疾不徐。",
+  "他吹熄了台灯。"
+];
+const STEPS = [
+  { label: "查看本书设定", delay: 900 },
+  { label: "核对人物关系", delay: 1700 },
+  { label: "查看前文", delay: 2500 },
+  { label: "起草正文", delay: 3200 }
+];
+
+let statusEl = null, stepEls = [], streamed = 0, totalChars = 0, running = false;
+
+/* ================= 起点态 → 任务态 ================= */
+function fillExample(text) {
+  const el = document.getElementById("homeInput");
+  el.value = text;
+  el.focus();
+}
+function startFromHome() {
+  if (running) return;
+  const el = document.getElementById("homeInput");
+  const text = el.value.trim() || "帮我写第一章的开场，主角在雨夜收到一封没有署名的信，气氛压抑，带一点悬疑。";
+  document.body.classList.add("in-task");
+  addUserMsg(text);
+  runTask();
+}
+function sendFollowUp() {
+  const el = document.getElementById("taskInput");
+  const text = el.value.trim();
+  if (!text || running) return;
+  el.value = "";
+  addUserMsg(text);
+  runFollowUpTask(text);
+}
+
+/* ================= 对话流 ================= */
+function addUserMsg(text) {
+  const thread = document.getElementById("thread");
+  const div = document.createElement("div");
+  div.className = "msg user";
+  div.innerHTML = `<div class="bubble"></div>`;
+  div.querySelector(".bubble").textContent = text;
+  thread.appendChild(div);
+  scrollThread();
+}
+function addAgentMsg(html) {
+  const thread = document.getElementById("thread");
+  const div = document.createElement("div");
+  div.className = "msg agent";
+  div.innerHTML = `<div class="who"><span class="dot"></span>MiroFish Writer</div><div class="bubble">${html}</div>`;
+  thread.appendChild(div);
+  scrollThread();
+}
+function addStatusLine() {
+  const thread = document.getElementById("thread");
+  const div = document.createElement("div");
+  div.className = "status-line";
+  div.innerHTML = `
+    <button class="status-main" onclick="this.parentElement.classList.toggle('open')">
+      <span class="st-ico"><span class="spinner"></span></span>
+      <span class="st-text">正在分析需求</span>
+      <span class="chev">▶</span>
+    </button>
+    <div class="status-steps">
+      ${STEPS.map(s => `<div class="step pending"><span class="s-ico">○</span>${s.label}</div>`).join("")}
+      <div class="tech-link"><button onclick="event.stopPropagation();toast('技术详情：工具参数 / 事件回放 / Trace（管理员可见）')">查看技术详情</button></div>
+    </div>`;
+  thread.appendChild(div);
+  statusEl = div;
+  stepEls = Array.from(div.querySelectorAll(".step"));
+  scrollThread();
+}
+function setStatus(icoHTML, textHTML) {
+  statusEl.querySelector(".st-ico").innerHTML = icoHTML;
+  statusEl.querySelector(".st-text").innerHTML = textHTML;
+}
+function markStep(i, state) {
+  const el = stepEls[i];
+  if (!el) return;
+  el.className = "step " + state;
+  el.querySelector(".s-ico").textContent = state === "done" ? "✓" : state === "doing" ? "●" : "○";
+}
+function scrollThread() {
+  const t = document.getElementById("thread");
+  requestAnimationFrame(() => { t.scrollTop = t.scrollHeight; });
+}
+
+/* ================= 任务执行模拟 ================= */
+function runTask() {
+  running = true;
+  document.body.classList.remove("drafted", "adopted");
+  addStatusLine();
+
+  // 阶段 1：分析需求 → 查阅资料
+  setTimeout(() => {
+    setStatus(`<span class="spinner"></span>`, `正在查阅资料 · 已完成 <strong>0</strong> 项`);
+    markStep(0, "doing");
+  }, 700);
+  STEPS.slice(0, 3).forEach((s, i) => {
+    setTimeout(() => {
+      markStep(i, "done");
+      if (i < 2) markStep(i + 1, "doing");
+      setStatus(`<span class="spinner"></span>`, `正在查阅资料 · 已完成 <strong>${i + 1}</strong> 项`);
+    }, s.delay + 700);
+  });
+
+  // 阶段 2：起草正文（流式）
+  setTimeout(() => {
+    markStep(3, "doing");
+    document.body.classList.add("streaming");
+    if (isMobile()) document.getElementById("canvasBadge").classList.add("show");
+    streamDraft();
+  }, STEPS[3].delay + 500);
+}
+
+function streamDraft() {
+  const prose = document.getElementById("prose");
+  prose.innerHTML = "";
+  streamed = 0;
+  totalChars = DRAFT_PARAS.join("").length;
+  let p = 0, c = 0;
+  let curP = document.createElement("p");
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+  prose.appendChild(curP);
+  curP.appendChild(cursor);
+
+  const timer = setInterval(() => {
+    if (p >= DRAFT_PARAS.length) {
+      clearInterval(timer);
+      cursor.remove();
+      finishDraft();
+      return;
+    }
+    const para = DRAFT_PARAS[p];
+    curP.insertBefore(document.createTextNode(para[c]), cursor);
+    streamed++; c++;
+    if (streamed % 12 === 0 || c >= para.length) {
+      setStatus(`<span class="spinner"></span>`, `正在起草正文 · <strong>${streamed}</strong> 字`);
+      document.getElementById("wordCount").textContent = streamed + " 字";
+    }
+    if (c >= para.length) {
+      p++; c = 0;
+      if (p < DRAFT_PARAS.length) {
+        curP = document.createElement("p");
+        prose.appendChild(curP);
+        curP.appendChild(cursor);
+      }
+    }
+  }, 28);
+}
+
+function finishDraft() {
+  running = false;
+  markStep(3, "done");
+  setStatus("✅", `已完成 · 生成候选稿 <strong>${totalChars}</strong> 字`);
+  document.getElementById("wordCount").textContent = totalChars + " 字";
+  document.body.classList.remove("streaming");
+  document.body.classList.add("drafted");
+  addAgentMsg(`开场初稿已写好（${totalChars} 字），在右侧画布里。你可以直接采用，或告诉我怎么改。 <button class="link-btn" onclick="setMView('canvas')">查看候选稿 →</button>`);
+}
+
+/* 追问任务：简化为快速一轮 */
+function runFollowUpTask(text) {
+  running = true;
+  addStatusLine();
+  setTimeout(() => { setStatus(`<span class="spinner"></span>`, "正在查看前文"); markStep(2, "doing"); }, 500);
+  setTimeout(() => {
+    markStep(2, "done"); markStep(3, "done");
+    setStatus("✅", "已完成 · 修改建议已准备好");
+    running = false;
+    addAgentMsg(`我按「${text.length > 18 ? text.slice(0, 18) + "…" : text}」调整了表达。修改以内联对比的形式标在正文里，由你决定是否接受——在这个演示里就不真正改动正文了。`);
+  }, 2200);
+}
+
+/* ================= 画布操作 ================= */
+function adoptDraft() {
+  document.body.classList.remove("drafted");
+  document.body.classList.add("adopted");
+  document.getElementById("sheetBadge").textContent = "正 式 手 稿";
+  const prose = document.getElementById("prose");
+  prose.contentEditable = "true";
+  addAgentMsg("已并入第一章正式手稿 ✓ 现在可以直接在画布里编辑；选中任意文字，可以让我针对性修改。");
+  toast("候选稿已采用为正式手稿");
+}
+function continueRevise() {
+  const el = document.getElementById("taskInput");
+  el.placeholder = "告诉我怎么改，例如：气氛再压抑一点，结尾留个钩子…";
+  el.focus();
+  if (isMobile()) setMView("convo");
+}
+function copyDraft() {
+  const text = Array.from(document.querySelectorAll("#prose p")).map(p => p.textContent).join("\n");
+  navigator.clipboard?.writeText(text);
+  toast("正文已复制到剪贴板");
+}
+
+/* ================= 选区浮条 ================= */
+document.addEventListener("mouseup", () => {
+  const pop = document.getElementById("selPop");
+  const sel = window.getSelection();
+  if (!document.body.classList.contains("adopted") || !sel || sel.isCollapsed || !sel.toString().trim()) {
+    pop.style.display = "none";
+    return;
+  }
+  const anchor = sel.anchorNode && document.getElementById("prose").contains(sel.anchorNode);
+  if (!anchor) { pop.style.display = "none"; return; }
+  const rect = sel.getRangeAt(0).getBoundingClientRect();
+  pop.style.display = "block";
+  pop.style.left = Math.max(10, rect.left + rect.width / 2 - pop.offsetWidth / 2) + "px";
+  pop.style.top = (rect.top - pop.offsetHeight - 10) + "px";
+});
+function reviseSelection() {
+  const sel = window.getSelection().toString().trim();
+  document.getElementById("selPop").style.display = "none";
+  const el = document.getElementById("taskInput");
+  el.value = `修改这段：「${sel.length > 24 ? sel.slice(0, 24) + "…" : sel}」——`;
+  el.focus();
+  if (isMobile()) setMView("convo");
+}
+
+/* ================= 菜单 / 移动端 / 杂项 ================= */
+function toggleChapters(e) {
+  e.stopPropagation();
+  document.getElementById("chapterMenu").classList.toggle("open");
+}
+function toggleMore(e) {
+  e.stopPropagation();
+  document.getElementById("moreMenu").classList.toggle("open");
+}
+document.addEventListener("click", () => {
+  document.getElementById("chapterMenu").classList.remove("open");
+  document.getElementById("moreMenu").classList.remove("open");
+});
+function isMobile() { return window.innerWidth <= 960; }
+function setMView(v) {
+  document.body.dataset.mview = v;
+  document.querySelectorAll("#seg button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+  if (v === "canvas") document.getElementById("canvasBadge").classList.remove("show");
+}
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById("toastEl");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+}
+function resetDemo() {
+  if (running) return;
+  document.body.classList.remove("in-task", "streaming", "drafted", "adopted");
+  document.getElementById("thread").innerHTML = "";
+  document.getElementById("prose").innerHTML = "";
+  document.getElementById("prose").contentEditable = "false";
+  document.getElementById("sheetBadge").textContent = "候 选 稿";
+  document.getElementById("wordCount").textContent = "0 字";
+  document.getElementById("homeInput").value = "";
+  setMView("convo");
+}
+/* 回车发送 */
+document.getElementById("homeInput").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); startFromHome(); }
+});
+document.getElementById("taskInput").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFollowUp(); }
+});
+</script>
+</body>
+</html>

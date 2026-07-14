@@ -124,7 +124,7 @@ test("Wave 5: Writer privacy and diagnostics drawer", async () => {
   const shell = await source("components/writer-workbench-shell.tsx");
   const product = await source("components/writer-product-workspace.tsx");
   assert.match(shell, /TechnicalDetailsDrawer/);
-  assert.match(shell, /SubmitButton/);
+  assert.match(shell, /writer-canvas-tools/);
   assert.match(shell, /Recovered stream/);
   assert.match(shell, /name="after_event_id"/);
   assert.doesNotMatch(shell, /<Bi zh="任务" en="Run" \/> <strong>\{runSummary\.run_id\}<\/strong>/);
@@ -245,35 +245,37 @@ test("Wave A polish: product errors avoid raw error codes", async () => {
   assert.doesNotMatch(css, /15,\s*108,\s*189/);
 });
 
-test("Writer is manuscript-primary with a persistent Agent dock", async () => {
+test("Writer is conversation-first with a persistent Agent dock and canvas", async () => {
   const product = await source("components/writer-product-workspace.tsx");
   const shell = await source("components/writer-workbench-shell.tsx");
   const polish = await source("app/workbench-polish.css");
   assert.match(product, /WriterArtifactTabs/);
+  assert.match(product, /hideChrome/);
+  assert.match(product, /WriterChapterSwitcher/);
   assert.match(product, /manuscript={/);
   assert.match(product, /structure={/);
   assert.match(product, /review={/);
   assert.match(product, /studio={/);
   assert.match(shell, /writer-agent-layout/);
-  assert.match(shell, /data-layout="manuscript-primary"/);
+  assert.match(shell, /data-layout="conversation-first"|data-layout="manuscript-primary"/);
   assert.match(shell, /writer-artifact-canvas/);
   assert.match(shell, /writer-agent-dock/);
-  assert.match(shell, /writer-structure-rail/);
-  assert.match(shell, /structureNav/);
-  assert.match(shell, /data-has-structure/);
+  assert.match(shell, /data-has-structure="false"/);
+  assert.doesNotMatch(shell, /writer-structure-rail/);
   assert.match(shell, /WriterAgentThread/);
-  assert.match(shell, /writer-agent-composer/);
-  assert.match(shell, /WriterLiveDraft/);
+  assert.match(shell, /WriterCandidateSheet/);
+  const agentThread = await source("components/writer-agent-thread.tsx");
+  assert.match(agentThread, /writer-agent-composer|WriterAgentComposer/);
+  assert.match(agentThread, /WriterLiveDraft/);
   const liveDraft = await source("components/writer-live-draft.tsx");
-  assert.match(liveDraft, /writerDraftText|connectWriterEventStream/);
-  assert.match(liveDraft, /connectWriterEventStream|mergeWriterEvents/);
-  assert.match(liveDraft, /after_event_id|connectWriterEventStream/);
-  // Persistent left-rail structure navigator (true three-region), progressive-enhancement GET forms.
+  assert.match(liveDraft, /writerDraftText|connectWriterEventStream|useWriterRunStream/);
+  // Chapter switcher replaces the left rail for everyday nav; structure nav component retained for reuse.
+  const chapterSwitcher = await source("components/writer-chapter-switcher.tsx");
+  assert.match(chapterSwitcher, /WriterChapterSwitcher/);
+  assert.match(chapterSwitcher, /method="get"/);
   const structureNav = await source("components/writer-structure-nav.tsx");
   assert.match(structureNav, /WriterStructureNav/);
-  assert.match(structureNav, /writer-structure-nav/);
-  assert.match(structureNav, /method="get"/);
-  // ⌘K command palette drives the canvas tabs via shared workbench context.
+  // ⌘K command palette drives the canvas panels via shared workbench context.
   assert.match(shell, /WriterCommandPalette/);
   assert.match(shell, /WriterWorkbenchProvider/);
   const palette = await source("components/writer-command-palette.tsx");
@@ -283,23 +285,28 @@ test("Writer is manuscript-primary with a persistent Agent dock", async () => {
   assert.match(workbenchContext, /metaKey|ctrlKey/);
   const artifactTabs = await source("components/writer-artifact-tabs.tsx");
   assert.match(artifactTabs, /useWriterWorkbench/);
-  // Top bar: breadcrumb + run-state chip + sync indicator.
-  assert.match(shell, /writer-breadcrumb/);
-  assert.match(shell, /WriterRunStateChip/);
-  assert.match(shell, /writer-sync-chip/);
-  const headerStart = shell.indexOf("<WorkspaceHeader");
-  const headerEnd = shell.indexOf("\n      />", headerStart);
-  const header = shell.slice(headerStart, headerEnd);
-  const actionsIndex = header.indexOf("actions={");
-  const runStateIndex = header.indexOf("<WriterRunStateChip");
-  const syncIndex = header.indexOf("writer-sync-chip");
-  assert.ok(actionsIndex >= 0 && runStateIndex > actionsIndex && syncIndex > runStateIndex);
-  assert.doesNotMatch(header, /meta=\{<WriterRunStateChip/);
-  assert.match(polish, /\.app-frame\.app-frame-unified:has\(\.writer-root\)\s*\{\s*--workspace-header-height:\s*96px;/s);
+  // No page header strip: commands + technical details live in the canvas tools rail.
+  assert.doesNotMatch(shell, /WorkspaceHeader|writer-breadcrumb|WriterRunStateChip|writer-sync-chip|writer-header/);
+  assert.match(shell, /writer-canvas-tools/);
+  assert.match(shell, /WriterCommandPaletteTrigger/);
+  assert.match(shell, /TechnicalDetailsDrawer/);
+  const toolsStart = shell.indexOf('className="writer-canvas-tools"');
+  const toolsEnd = shell.indexOf("</aside>", toolsStart);
+  const tools = shell.slice(toolsStart, toolsEnd);
+  assert.ok(tools.includes("WriterCommandPaletteTrigger"));
+  assert.ok(tools.includes("TechnicalDetailsDrawer"));
+  assert.ok(tools.indexOf("WriterCommandPaletteTrigger") < tools.indexOf("TechnicalDetailsDrawer"));
+  assert.match(polish, /\.writer-canvas-tools/);
+  assert.match(polish, /\.writer-canvas-stage/);
+  assert.match(polish, /\.app-frame\.app-frame-unified:has\(\.writer-root\)\s*\{\s*--workspace-header-height:\s*0px;/s);
   // Manuscript canvas is the dominant primary; the Agent dock is persistent but secondary.
   const productIndex = shell.indexOf("{productWorkspace}");
   const threadIndex = shell.indexOf("<WriterAgentThread");
   assert.ok(productIndex >= 0 && threadIndex > productIndex);
+  // Tools rail sits left of the manuscript stage inside the artifact canvas.
+  const canvasToolsIndex = shell.indexOf("writer-canvas-tools");
+  const canvasStageIndex = shell.indexOf("writer-canvas-stage");
+  assert.ok(canvasToolsIndex >= 0 && canvasStageIndex > canvasToolsIndex);
   for (const retiredClass of ["writer-studio-grid", "writer-workbench-prose-first", "writer-composer-disclosure", "writer-agent-rail"]) {
     assert.doesNotMatch(`${product}\n${shell}`, new RegExp(retiredClass));
   }

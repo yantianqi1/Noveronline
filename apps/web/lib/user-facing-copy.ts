@@ -50,10 +50,16 @@ const FAILURE_MESSAGES: Record<string, [string, string]> = {
   WORKFLOW_FAILED: ["写作任务未能启动，请检查 Writer 模型绑定与服务状态。", "Could not start the writer run. Check Writer model bindings and service status."],
   WORKFLOW_START_FAILED: ["写作任务未能启动，请稍后重试。", "Could not start the writer run. Try again shortly."],
   TEMPORAL_UNAVAILABLE: ["写作队列服务暂不可用，请稍后重试。", "The writer queue is temporarily unavailable. Try again shortly."],
-  PI_WRITER_UNAVAILABLE: ["Pi Writer 运行时暂不可用，请确认 worker 已启动。", "Pi Writer runtime is unavailable. Confirm the worker is running."],
+  PI_WRITER_UNAVAILABLE: ["写作助手暂时不可用，请稍后重试。", "The writing assistant is temporarily unavailable. Try again shortly."],
   MODULE_BINDING_MISSING: ["尚未绑定「正文创作」模型，请先到模型设施完成绑定。", "Writer composer is unbound. Bind a model in LLM facility first."],
   LLM_MODULE_BINDING_MISSING: ["尚未绑定「正文创作」模型，请先到模型设施完成绑定。", "Writer composer is unbound. Bind a model in LLM facility first."],
   MODULE_NOT_BOUND: ["尚未绑定「正文创作」模型，请先到模型设施完成绑定。", "Writer composer is unbound. Bind a model in LLM facility first."],
+  LLM_MODULE_UNBOUND: ["写作相关模型未绑定，请到模型设施绑定「写作编排」与「正文创作」。", "Writer modules are unbound. Bind Writer orchestrator and composer in LLM facility."],
+  LLM_MODEL_TOOLS_UNSUPPORTED: [
+    "「写作编排」绑定的模型不支持工具调用。请到模型设施为 writer_orchestrator 更换支持 tools 的对话模型（如 DeepSeek Chat / GPT），或重新同步模型后重试。",
+    "The Writer orchestrator model does not support tool calling. In LLM facility, bind writer_orchestrator to a chat model with tools (e.g. DeepSeek Chat / GPT), or re-sync models.",
+  ],
+  LLM_PROVIDER_ERROR: ["模型服务返回错误，请检查渠道与模型绑定后重试。", "The model provider returned an error. Check channel and model bindings, then retry."],
   WRITER_RUN_FAILED: ["写作任务失败，请查看活动时间线后重试。", "Writer run failed. Check the activity timeline and retry."],
   WRITER_WORKSPACE_UNAVAILABLE: ["手稿工作区服务暂不可用。", "Manuscript workspace is temporarily unavailable."],
   WRITER_WORKSPACE_INVALID_RESPONSE: ["手稿工作区返回异常，请刷新后重试。", "Manuscript workspace returned an unexpected response. Refresh and retry."],
@@ -138,10 +144,64 @@ export function humanizeFailure(
   if (mapped) {
     return tx(locale, mapped[0], mapped[1]);
   }
-  if (fallbackMessage && !looksLikeInternalCode(fallbackMessage)) {
-    return fallbackMessage;
+  const fromMessage = inferFailureCodeFromMessage(fallbackMessage);
+  if (fromMessage) {
+    const inferred = FAILURE_MESSAGES[fromMessage];
+    if (inferred) {
+      return tx(locale, inferred[0], inferred[1]);
+    }
+  }
+  if (fallbackMessage && !looksLikeInternalCode(fallbackMessage) && !looksLikeProviderDiagnostic(fallbackMessage)) {
+    return scrubInternalRuntimeBranding(fallbackMessage);
   }
   return tx(locale, "操作未完成，请稍后重试。", "The action could not be completed. Try again shortly.");
+}
+
+/**
+ * Strip internal runtime vendor names (e.g. Pi) from author-visible copy.
+ * Error codes / package paths may still mention them; UI strings must not.
+ */
+export function scrubInternalRuntimeBranding(message: string): string {
+  return message
+    .replace(/\bPi\s+Writer\b/gi, "写作助手")
+    .replace(/\bPi\s+[Aa]gent\b/g, "智能助手")
+    .replace(/\bPi\s+analysis\b/gi, "analysis")
+    .replace(/\bPi\s+worker\b/gi, "analysis service")
+    .replace(/\bPi\s+智能体/g, "智能助手")
+    .replace(/\bPi\s+分析/g, "分析")
+    .replace(/\bPi\s+拆解/g, "拆解")
+    .replace(/\bPi\s+规划/g, "规划")
+    .replace(/\bPi\s+执行/g, "执行")
+    .replace(/\bPi\s+Writer\b/g, "写作助手")
+    .trim();
+}
+
+/** Map common provider/runtime diagnostics into stable failure codes. */
+function inferFailureCodeFromMessage(message: string | null | undefined): string | null {
+  if (!message) {
+    return null;
+  }
+  const lower = message.toLowerCase();
+  if (lower.includes("must support tools") || lower.includes("support tools")) {
+    return "LLM_MODEL_TOOLS_UNSUPPORTED";
+  }
+  if (lower.includes("module is not bound") || lower.includes("llm_module_unbound")) {
+    return "LLM_MODULE_UNBOUND";
+  }
+  if (lower.includes("pi writer") || lower.includes("pi-agent-runtime") || lower.includes("pi writer unavailable")) {
+    return "PI_WRITER_UNAVAILABLE";
+  }
+  return null;
+}
+
+function looksLikeProviderDiagnostic(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("binding must") ||
+    lower.includes("llm_provider") ||
+    lower.includes("writer_orchestrator") ||
+    lower.includes(" · ")
+  );
 }
 
 export function statusLabel(locale: Locale, value: string | null | undefined): string {

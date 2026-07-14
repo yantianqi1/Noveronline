@@ -15,10 +15,11 @@ import {
   getProjectAssets,
   getStoryGraphView,
   getWorldlineSavedPaths,
-  getWriterRunEvents,
+  getAllWriterRunEvents,
   getWriterRunSummary,
   listWriterThreadMessages,
   listWriterThreads,
+  adoptWriterDraft,
   startWriterRun,
 } from "../../../../../../lib/api";
 import { tx } from "../../../../../../lib/locale";
@@ -105,7 +106,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       })
     : null;
   const workflowEvents = runSummary !== null && runSummary.ok === true
-    ? await getWriterRunEvents({
+    ? await getAllWriterRunEvents({
         ...apiContext,
         runId: runSummary.run_id,
         afterEventId: afterEventId,
@@ -166,10 +167,17 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
           role: message.role,
           body: message.message_text,
           created_at: message.created_at,
+          run_id: message.run_id,
         }))
       : [];
 
-  async function startWriterRunAction(formData: FormData) {
+  async function startWriterRunAction(formData: FormData): Promise<{
+    ok: boolean;
+    code: string;
+    message: string;
+    runId?: string;
+    traceId?: string;
+  }> {
     "use server";
 
     const selectedAssetIds = stringListFromFormData(formData, "selectedAssetIds");
@@ -179,12 +187,11 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     const mode = writerModeFromFormData(formData);
     const revise = reviseOptionsFromFormData(formData);
     if (mode === "revise" && !revise) {
-      const nextQuery = new URLSearchParams({
-        writerRunStatus: "error",
-        writerRunCode: "VALIDATION_FAILED",
-        writerRunMessage: tx(locale, "修订需要选区。", "Revise requires a selection."),
-      });
-      redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
+      return {
+        ok: false,
+        code: "VALIDATION_FAILED",
+        message: tx(locale, "修订需要选区。", "Revise requires a selection."),
+      };
     }
     const chapterId = stringFromFormData(formData, "chapterId") || query.chapterId || "";
     const sceneId = stringFromFormData(formData, "sceneId") || query.sceneId || "";
@@ -207,20 +214,20 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
         ...(revise ? { revise } : {}),
       },
     });
-    const nextQuery = new URLSearchParams({
-      writerRunStatus: result.ok ? "success" : "error",
-      writerRunCode: result.ok ? "WRITER_RUN_QUEUED" : result.code,
-      writerRunMessage: result.ok
-        ? tx(locale, "写作任务已加入队列，等待 Pi Writer 执行", "Writer run queued for Pi Writer")
-        : humanizeFailure(locale, result.code, result.message),
-    });
     if (result.ok) {
-      nextQuery.set("runId", result.run_id);
-      nextQuery.set("traceId", result.trace_id);
-    } else if (query.runId) {
-      nextQuery.set("runId", query.runId);
+      return {
+        ok: true,
+        code: "WRITER_RUN_QUEUED",
+        message: "",
+        runId: result.run_id,
+        traceId: result.trace_id,
+      };
     }
-    redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
+    return {
+      ok: false,
+      code: result.code,
+      message: humanizeFailure(locale, result.code, result.message),
+    };
   }
 
   async function reviseSelectionAction(formData: FormData) {
@@ -230,7 +237,23 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     if (!stringFromFormData(formData, "instruction")) {
       formData.set("instruction", tx(locale, "修订选中段落。", "Revise the selection."));
     }
-    await startWriterRunAction(formData);
+    // Product workspace may still expect void; surface result via soft URL only on success path.
+    const result = await startWriterRunAction(formData);
+    if (result.ok && result.runId) {
+      const nextQuery = new URLSearchParams({
+        runId: result.runId,
+        ...(result.traceId ? { traceId: result.traceId } : {}),
+      });
+      redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
+    }
+    if (!result.ok) {
+      const nextQuery = new URLSearchParams({
+        writerRunStatus: "error",
+        writerRunCode: result.code,
+        writerRunMessage: result.message,
+      });
+      redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
+    }
   }
 
   async function exportTraceAction(formData: FormData) {
@@ -267,41 +290,41 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
   }
 
-  async function adoptDraftAction(formData: FormData) {
+  async function adoptDraftAction(formData: FormData): Promise<{
+    ok: boolean;
+    code: string;
+    message: string;
+    blockId?: string;
+  }> {
     "use server";
 
     const draftId = stringFromFormData(formData, "draftId");
-    const context = await webApiContext({ tenantId: tenantSlug, projectId });
-    let ok = false;
-    let code = "DRAFT_ADOPTION_FAILED";
-    if (draftId) {
-      try {
-        const chapterId = stringFromFormData(formData, "chapterId") || query.chapterId || "";
-        const response = await fetch(
-          `${process.env.MIROFISH_API_BASE_URL ?? "http://127.0.0.1:3888"}/v1/drafts/${encodeURIComponent(draftId)}/adoptions`,
-          {
-            method: "POST",
-            headers: writerActionHeaders(context),
-            body: JSON.stringify(chapterId ? { chapter_id: chapterId } : {}),
-            cache: "no-store",
-          },
-        );
-        ok = response.ok;
-        if (!ok) {
-          const payload = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
-          const responseCode = payload?.error?.code;
-          if (typeof responseCode === "string" && /^[A-Z][A-Z0-9_]+$/.test(responseCode)) code = responseCode;
-        }
-      } catch {
-        code = "DRAFT_ADOPTION_FAILED";
-      }
-    } else {
-      code = "VALIDATION_FAILED";
+    if (!draftId) {
+      return {
+        ok: false,
+        code: "VALIDATION_FAILED",
+        message: tx(locale, "缺少候选稿。", "Candidate draft is required."),
+      };
     }
-    const nextQuery = writerSelectionQuery(query, draftId);
-    nextQuery.set("draftAdoptionStatus", ok ? "success" : "error");
-    nextQuery.set("draftAdoptionCode", ok ? "DRAFT_ADOPTED" : code);
-    redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
+    const chapterId = stringFromFormData(formData, "chapterId") || query.chapterId || "";
+    const result = await adoptWriterDraft({
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
+      draftId,
+      ...(chapterId ? { chapterId } : {}),
+    });
+    if (result.ok) {
+      return {
+        ok: true,
+        code: "DRAFT_ADOPTED",
+        message: "",
+        blockId: result.block_id,
+      };
+    }
+    return {
+      ok: false,
+      code: result.code,
+      message: humanizeFailure(locale, result.code, result.message),
+    };
   }
 
   async function cancelWriterRunAction(formData: FormData) {
@@ -363,7 +386,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
 
   async function createChapterAction(formData: FormData) {
     "use server";
-    const result = await createChapter(await writerWorkspaceContext(tenantSlug, projectId), { title: stringFromFormData(formData, "title"), status: "draft" });
+    const result = await createChapter(await writerWorkspaceContext(tenantSlug, projectId), { title: stringFromFormData(formData, "title"), status: "planned" });
     workspaceRedirect(result, tenantSlug, projectId, query, result.ok ? { chapterId: result.value.chapter_id } : {});
   }
   async function updateChapterAction(formData: FormData) {
@@ -377,7 +400,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
   async function createSceneAction(formData: FormData) {
     "use server";
     const chapterId = stringFromFormData(formData, "chapterId");
-    const result = await createScene(await writerWorkspaceContext(tenantSlug, projectId), chapterId, { title: stringFromFormData(formData, "title"), status: "draft" });
+    const result = await createScene(await writerWorkspaceContext(tenantSlug, projectId), chapterId, { title: stringFromFormData(formData, "title"), status: "planned" });
     workspaceRedirect(result, tenantSlug, projectId, query, { chapterId, sceneId: result.ok ? result.value.scene_id : "" });
   }
   async function updateSceneAction(formData: FormData) { "use server"; const sceneId = stringFromFormData(formData, "sceneId"); workspaceRedirect(await updateScene(await writerWorkspaceContext(tenantSlug, projectId), sceneId, { expected_version: numberFromFormData(formData, "expectedVersion"), title: stringFromFormData(formData, "title"), outline: stringFromFormData(formData, "outline") }), tenantSlug, projectId, query, { sceneId }); }
@@ -648,7 +671,7 @@ type WriterProductWorkspaceDataProps = Pick<
   | "tenantSlug"
 > & {
   selectedPlanningRunId: string;
-  workflowEvents: Awaited<ReturnType<typeof getWriterRunEvents>> | null;
+  workflowEvents: Awaited<ReturnType<typeof getAllWriterRunEvents>> | null;
   workspaceContext: WriterWebContext;
 };
 
@@ -831,7 +854,7 @@ function reviseOptionsFromFormData(formData: FormData) {
   };
 }
 
-function draftIdFromWriterEvents(selectedDraftId: string, events: Awaited<ReturnType<typeof getWriterRunEvents>> | null) {
+function draftIdFromWriterEvents(selectedDraftId: string, events: Awaited<ReturnType<typeof getAllWriterRunEvents>> | null) {
   if (selectedDraftId) return selectedDraftId;
   if (!events?.ok) return "";
   for (let index = events.items.length - 1; index >= 0; index -= 1) {

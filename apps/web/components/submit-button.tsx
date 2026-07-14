@@ -7,6 +7,8 @@ type SubmitButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   idleLabel: ReactNode;
   pendingLabel?: ReactNode;
   tone?: "primary" | "secondary" | "danger";
+  /** Client-owned submit flows that do not use form action status. */
+  forcePending?: boolean;
 };
 
 /**
@@ -20,10 +22,11 @@ export function SubmitButton({
   pendingLabel,
   tone = "primary",
   type = "submit",
+  forcePending = false,
   ...rest
 }: SubmitButtonProps) {
   const { pending } = useFormStatus();
-  const busy = pending;
+  const busy = pending || forcePending;
   const label = busy ? (pendingLabel ?? idleLabel) : idleLabel;
 
   return (

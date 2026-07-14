@@ -1253,9 +1253,10 @@ func TestSQLDraftAdoptionStoreReturnsExistingAdoptionWithoutCreatingAnotherBlock
 	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
 
 	result, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
-		TenantID:  "11111111-1111-4111-8111-111111111111",
-		DraftID:   "33333333-3333-4333-8333-333333333333",
-		RequestID: "retry-request",
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+		RequestID:   "retry-request",
 	})
 	if err != nil {
 		t.Fatalf("retry explicit adoption: %v", err)
@@ -1269,13 +1270,61 @@ func TestSQLDraftAdoptionStoreReturnsExistingAdoptionWithoutCreatingAnotherBlock
 	}
 }
 
+func TestSQLDraftAdoptionStoreClosesRowsBeforeOutboxHook(t *testing.T) {
+	rows := &fakeWriterEventRows{values: [][]any{{
+		"33333333-3333-4333-8333-333333333333",
+		"55555555-5555-4555-8555-555555555555",
+		"22222222-2222-4222-8222-222222222222",
+		"adopted",
+		nil,
+		nil,
+		1,
+	}}}
+	hook := &recordingDraftAdoptionOutboxHook{}
+	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{
+		Queryer:    &recordingDraftAdoptionQueryer{rows: rows},
+		OutboxHook: hook,
+	})
+
+	if _, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
+	}); err != nil {
+		t.Fatalf("adopt draft: %v", err)
+	}
+	if !hook.called {
+		t.Fatal("expected outbox hook to run")
+	}
+	if !hook.rowsClosedAtCall {
+		t.Fatal("outbox hook must run after adoption rows are closed")
+	}
+	if !rows.committed {
+		t.Fatal("expected adoption transaction to commit")
+	}
+}
+
+type recordingDraftAdoptionOutboxHook struct {
+	called           bool
+	rowsClosedAtCall bool
+}
+
+func (h *recordingDraftAdoptionOutboxHook) EnqueueAfterAdoptionInTx(_ context.Context, rows DraftAdoptionSQLRows, _ DraftAdoptionInput, _ DraftAdoptionResult) error {
+	h.called = true
+	if fake, ok := rows.(*fakeWriterEventRows); ok {
+		h.rowsClosedAtCall = fake.closed
+	}
+	return nil
+}
+
 func TestSQLDraftAdoptionStoreFailsClosedForMissingCandidateDraft(t *testing.T) {
 	queryer := &recordingDraftAdoptionQueryer{rows: &fakeWriterEventRows{}}
 	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
 
 	_, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
-		TenantID: "11111111-1111-4111-8111-111111111111",
-		DraftID:  "33333333-3333-4333-8333-333333333333",
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
 	})
 
 	if code := ErrorCode(err); code != "NOT_FOUND" {
@@ -1303,8 +1352,9 @@ func TestSQLDraftAdoptionStoreUsesTenantContextForAdoptionWrites(t *testing.T) {
 	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
 
 	_, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
-		TenantID: "11111111-1111-4111-8111-111111111111",
-		DraftID:  "33333333-3333-4333-8333-333333333333",
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
 	})
 
 	if err != nil {
@@ -1324,8 +1374,9 @@ func TestSQLDraftAdoptionStoreRollsBackWhenReturningRowCannotScan(t *testing.T) 
 	store := NewSQLDraftAdoptionStore(SQLDraftAdoptionStoreConfig{Queryer: queryer})
 
 	_, err := store.AdoptDraft(context.Background(), DraftAdoptionInput{
-		TenantID: "11111111-1111-4111-8111-111111111111",
-		DraftID:  "33333333-3333-4333-8333-333333333333",
+		TenantID:    "11111111-1111-4111-8111-111111111111",
+		DraftID:     "33333333-3333-4333-8333-333333333333",
+		ActorUserID: "44444444-4444-4444-8444-444444444444",
 	})
 
 	if code := ErrorCode(err); code != "DRAFT_ADOPTION_WRITE_FAILED" {
@@ -1544,6 +1595,7 @@ type fakeWriterEventRows struct {
 	err        error
 	scanErr    error
 	closeErr   error
+	closed     bool
 	committed  bool
 	rolledBack bool
 }
@@ -1589,6 +1641,7 @@ func (r *fakeWriterEventRows) Scan(dest ...any) error {
 }
 
 func (r *fakeWriterEventRows) Close() error {
+	r.closed = true
 	return r.closeErr
 }
 

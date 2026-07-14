@@ -1,15 +1,17 @@
 "use client";
 
-import { LoaderCircle, Sparkles, Wifi, WifiOff } from "lucide-react";
+import { LoaderCircle, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { WriterRunEvent } from "../lib/api";
 import { type Locale, tx } from "../lib/locale";
 import { writerDraftText, writerStreamReachedTerminal } from "../lib/writer-event-store";
-import { connectWriterEventStream, type WriterStreamTransport } from "../lib/writer-sse-client";
-import { activityItemsFromEvents, WriterActivityTimeline } from "./writer-activity-timeline";
+import { connectWriterEventStream } from "../lib/writer-sse-client";
+import { Bi } from "./bilingual-text";
 import { WriterApprovalCard, type WriterApproval } from "./writer-approval-card";
+import { useWriterRunStream } from "./writer-run-stream";
+import { WriterTaskStatusLine } from "./writer-task-status-line";
 
 type ConnectionState = "streaming" | "reconnecting" | "interrupted" | "idle";
 
@@ -22,15 +24,14 @@ type WriterLiveDraftProps = {
   initialEvents: WriterRunEvent[];
   intervalMs?: number;
   decideApprovalAction?: (formData: FormData) => Promise<void>;
+  /** When true, prose lives on the canvas sheet — dock only shows status + summary. */
+  proseOnCanvas?: boolean;
 };
 
 /**
- * Incremental writer draft renderer with SSE-first transport and poll fallback.
- *
- * Replaces whole-page polling: while a run is active this streams events after the
- * current cursor, merges them into a normalized set, and renders the draft from
- * selectors. On a terminal event it asks the server once for an authoritative
- * snapshot (`router.refresh()`), then stops.
+ * Dock-side run narrative: collapsed status line, approvals, and (optionally) a
+ * short summary pointing at the canvas candidate. Prefer the shared
+ * WriterRunStreamProvider when mounted to avoid a second SSE subscription.
  */
 export function WriterLiveDraft({
   active,
@@ -41,32 +42,36 @@ export function WriterLiveDraft({
   initialEvents,
   intervalMs = 900,
   decideApprovalAction,
+  proseOnCanvas = true,
 }: WriterLiveDraftProps) {
+  const shared = useWriterRunStream();
+  const useShared = shared !== null && shared.runId === runId;
+
   const router = useRouter();
-  const [events, setEvents] = useState<WriterRunEvent[]>(initialEvents);
-  const [connection, setConnection] = useState<ConnectionState>(active ? "streaming" : "idle");
-  const [transport, setTransport] = useState<WriterStreamTransport>("idle");
+  const [localEvents, setLocalEvents] = useState<WriterRunEvent[]>(initialEvents);
+  const [localConnection, setLocalConnection] = useState<ConnectionState>(active ? "streaming" : "idle");
   const refreshedRef = useRef(false);
 
   useEffect(() => {
-    setEvents(initialEvents);
+    if (useShared) return;
+    setLocalEvents(initialEvents);
     refreshedRef.current = false;
-  }, [initialEvents, runId]);
+  }, [initialEvents, runId, useShared]);
 
   useEffect(() => {
+    if (useShared) return;
     if (!active || !runId) {
-      setConnection("idle");
-      setTransport("idle");
+      setLocalConnection("idle");
       return;
     }
-    if (writerStreamReachedTerminal(events) && !refreshedRef.current) {
+    if (writerStreamReachedTerminal(localEvents) && !refreshedRef.current) {
       refreshedRef.current = true;
       router.refresh();
-      setConnection("idle");
+      setLocalConnection("idle");
       return;
     }
-    if (writerStreamReachedTerminal(events)) {
-      setConnection("idle");
+    if (writerStreamReachedTerminal(localEvents)) {
+      setLocalConnection("idle");
       return;
     }
 
@@ -74,14 +79,11 @@ export function WriterLiveDraft({
       tenantSlug,
       projectId,
       runId,
-      initialEvents: events,
+      initialEvents: localEvents,
       pollIntervalMs: intervalMs,
       handlers: {
-        onEvents: (merged) => setEvents(merged),
-        onConnection: (state, nextTransport) => {
-          setConnection(state);
-          setTransport(nextTransport);
-        },
+        onEvents: (merged) => setLocalEvents(merged),
+        onConnection: (state) => setLocalConnection(state),
         onTerminal: () => {
           if (!refreshedRef.current) {
             refreshedRef.current = true;
@@ -91,18 +93,19 @@ export function WriterLiveDraft({
       },
     });
     return () => session.close();
-    // Intentionally re-subscribe when run identity / active flips; events identity is internal.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, runId, tenantSlug, projectId, intervalMs, router]);
+  }, [useShared, active, runId, tenantSlug, projectId, intervalMs, router]);
 
+  const events = useShared ? shared.events : localEvents;
+  const connection = useShared ? shared.connection : localConnection;
+  const streamActive = useShared ? shared.active : active && !writerStreamReachedTerminal(events);
   const draftText = writerDraftText(events);
-  const activityItems = useMemo(() => activityItemsFromEvents(locale, events), [events, locale]);
+  const charCount = [...draftText].length;
   const approvals = useMemo(() => approvalsFromEvents(events), [events]);
 
   return (
     <>
-      <ConnectionBanner connection={connection} locale={locale} transport={transport} />
-      <WriterActivityTimeline locale={locale} items={activityItems} />
+      <WriterTaskStatusLine connection={connection} events={events} locale={locale} />
       {approvals.map((approval) => (
         <WriterApprovalCard
           key={approval.approvalId}
@@ -111,19 +114,44 @@ export function WriterLiveDraft({
           decideAction={decideApprovalAction}
         />
       ))}
-      {draftText ? (
+      {proseOnCanvas ? (
+        <div className="writer-result-summary">
+          {draftText ? (
+            <p>
+              <Bi
+                zh={`候选稿已写好（${charCount} 字），见左侧画布。`}
+                en={`Candidate draft ready (${charCount} characters) — see the canvas.`}
+              />
+            </p>
+          ) : streamActive ? (
+            <p className="writer-agent-working" data-active="true">
+              <LoaderCircle aria-hidden="true" className="is-spinning" size={17} />
+              <span>
+                <Bi zh="产物正在左侧画布生成…" en="The artifact is forming on the canvas…" />
+              </span>
+            </p>
+          ) : (
+            <p className="writer-agent-working" data-active="false">
+              <Sparkles aria-hidden="true" size={17} />
+              <span>
+                <Bi zh="候选正文尚未生成。" en="No candidate prose was generated." />
+              </span>
+            </p>
+          )}
+        </div>
+      ) : draftText ? (
         <div className="writer-agent-draft">
           <p>{draftText}</p>
         </div>
       ) : (
-        <div className="writer-agent-working" data-active={active ? "true" : "false"}>
-          {active ? (
+        <div className="writer-agent-working" data-active={streamActive ? "true" : "false"}>
+          {streamActive ? (
             <LoaderCircle aria-hidden="true" className="is-spinning" size={17} />
           ) : (
             <Sparkles aria-hidden="true" size={17} />
           )}
           <span>
-            {active
+            {streamActive
               ? tx(locale, "Writer 正在组织这一段……", "Writer is shaping this passage...")
               : tx(locale, "候选正文尚未生成。", "No candidate prose was generated.")}
           </span>
@@ -160,39 +188,9 @@ function approvalsFromEvents(events: readonly WriterRunEvent[]): WriterApproval[
   return pending;
 }
 
-function stringField(payload: Record<string, unknown> | undefined, key: string) {
+function stringField(payload: Record<string, unknown> | undefined, key: string): string {
   const value = payload?.[key];
   return typeof value === "string" ? value : "";
-}
-
-function ConnectionBanner({
-  connection,
-  locale,
-  transport,
-}: {
-  connection: ConnectionState;
-  locale: Locale;
-  transport: WriterStreamTransport;
-}) {
-  if (connection === "streaming" || connection === "idle") {
-    return null;
-  }
-  const interrupted = connection === "interrupted";
-  return (
-    <div
-      className="writer-connection-banner"
-      data-state={connection}
-      data-transport={transport}
-      role={interrupted ? "alert" : "status"}
-    >
-      {interrupted ? <WifiOff aria-hidden="true" size={15} /> : <Wifi aria-hidden="true" size={15} />}
-      <span>
-        {interrupted
-          ? tx(locale, "实时更新已中断。", "Live updates were interrupted.")
-          : tx(locale, "正在重新连接实时更新……", "Reconnecting to live updates...")}
-      </span>
-    </div>
-  );
 }
 
 function connectionAnnouncement(connection: ConnectionState, locale: Locale) {

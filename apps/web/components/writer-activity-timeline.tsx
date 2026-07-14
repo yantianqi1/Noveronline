@@ -11,7 +11,9 @@ import {
 } from "lucide-react";
 
 import type { WriterRunEvent } from "../lib/api";
+import { authorToolLabel } from "../lib/author-copy";
 import { type Locale, tx } from "../lib/locale";
+import { humanizeFailure } from "../lib/user-facing-copy";
 import { Bi } from "./bilingual-text";
 import { WriterContextChip, type ContextChipKind } from "./writer-context-chip";
 
@@ -118,13 +120,12 @@ export function activityItemsFromEvents(locale: Locale, events: readonly WriterR
     if (event.event_type === "writer.run.failed") {
       const message = stringField(payload, "message") || stringField(payload, "error");
       const code = stringField(payload, "error_code") || stringField(payload, "code");
-      const fromPayload = [message, code].filter(Boolean).join(" · ");
       runLifecycle = {
         id: RUN_LIFECYCLE_ID,
         kind: "status",
         status: "failed",
         title: tx(locale, "写作任务失败", "Writer run failed"),
-        detail: fromPayload || runModeDetail,
+        detail: humanizeFailure(locale, code, message || undefined) || runModeDetail,
         at: event.created_at,
       };
       continue;
@@ -147,10 +148,9 @@ export function activityItemsFromEvents(locale: Locale, events: readonly WriterR
         id: event.event_id,
         kind: isRetrieveTool(toolName) ? "retrieve" : "tool",
         status: "running",
-        title: toolStartedTitle(locale, toolName),
-        detail: toolName,
+        title: authorToolLabel(locale, toolName),
         at: event.created_at,
-        chips: chipsFromToolPayload(toolName, payload),
+        chips: chipsFromToolPayload(locale, toolName, payload),
       };
       openTools.set(toolName, items.length);
       items.push(item);
@@ -160,14 +160,14 @@ export function activityItemsFromEvents(locale: Locale, events: readonly WriterR
       const toolName = stringField(payload, "tool_name") || "tool";
       const isError = payload.is_error === true;
       const openIndex = openTools.get(toolName);
+      const label = authorToolLabel(locale, toolName);
       const completed: ActivityItem = {
         id: event.event_id,
         kind: isRetrieveTool(toolName) ? "retrieve" : "tool",
         status: isError ? "failed" : "completed",
-        title: toolCompletedTitle(locale, toolName, isError),
-        detail: toolName,
+        title: isError ? tx(locale, `${label}未完成`, `${label} did not finish`) : label,
         at: event.created_at,
-        chips: chipsFromToolPayload(toolName, payload),
+        chips: chipsFromToolPayload(locale, toolName, payload),
       };
       if (openIndex !== undefined && items[openIndex]?.status === "running") {
         items[openIndex] = { ...completed, id: items[openIndex].id };
@@ -255,16 +255,7 @@ function isRetrieveTool(name: string) {
   return name.startsWith("query_");
 }
 
-function toolStartedTitle(locale: Locale, toolName: string) {
-  return tx(locale, `正在调用 ${toolName}`, `Calling ${toolName}`);
-}
-
-function toolCompletedTitle(locale: Locale, toolName: string, isError: boolean) {
-  if (isError) return tx(locale, `${toolName} 失败`, `${toolName} failed`);
-  return tx(locale, `已完成 ${toolName}`, `Completed ${toolName}`);
-}
-
-function chipsFromToolPayload(toolName: string, payload: Record<string, unknown>) {
+function chipsFromToolPayload(locale: Locale, toolName: string, payload: Record<string, unknown>) {
   const chips: { kind: ContextChipKind; label: string; id?: string }[] = [];
   const kind = toolKind(toolName);
   const count =
@@ -274,7 +265,7 @@ function chipsFromToolPayload(toolName: string, payload: Record<string, unknown>
   if (kind && count !== null) {
     chips.push({ kind, label: `${count}`, id: toolName });
   } else if (kind) {
-    chips.push({ kind, label: toolName.replace(/^query_/, ""), id: toolName });
+    chips.push({ kind, label: authorToolLabel(locale, toolName), id: toolName });
   }
   return chips;
 }

@@ -25,6 +25,7 @@ import type {
   SaveDraftRevisionRequest,
   UpdateWriterRunStatusRequest
 } from "../activities/pi-writer-activities.js";
+import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
 import { createPostgresQuotaStore } from "../llm/quota/postgres-quota-store.js";
 
 export interface QueryExecutor {
@@ -264,15 +265,23 @@ async function resolveModuleBinding(db: QueryExecutor, request: ResolveModuleBin
   }
   const row = result.rows[0];
   if (!row) throw new Error(`LLM_MODULE_UNBOUND: ${request.module_key} module is not bound`);
+  const modelId = requiredRowString(row, "model_id");
+  // Catalog often keeps supports_* = false after sync; OR inference so chat models
+  // are not rejected before any provider call (align with Go/Python resolvers).
+  const caps = effectiveModelCapabilities(
+    modelId,
+    row.supports_json === true,
+    row.supports_tools === true,
+  );
   return {
     module_key: request.module_key,
     channel_id: requiredRowString(row, "channel_id"),
-    model_id: requiredRowString(row, "model_id"),
+    model_id: modelId,
     provider: requiredRowString(row, "provider"),
     base_url: requiredRowString(row, "base_url"),
     credential_ref: requiredRowString(row, "credential_ref"),
-    supports_tools: row.supports_tools === true,
-    supports_json: row.supports_json === true,
+    supports_tools: caps.supports_tools,
+    supports_json: caps.supports_json,
     settings: objectValue(row.settings_jsonb)
   };
 }

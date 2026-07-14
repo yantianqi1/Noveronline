@@ -397,21 +397,26 @@ async function bootstrapWorkspace(
     source_filename: optionalString(rawPayload.source_filename)
   };
   const taskPack = [
-    "# Analysis Task Pack",
+    "# 分析任务包",
     "",
-    `Mode: ${input.mode}`,
+    `模式：${input.mode}`,
     "",
-    "## Instruction",
+    "## 语言要求",
+    "- 计划、笔记、候选摘要/描述/规则正文、复盘一律使用简体中文。",
+    "- JSON 字段名保持英文；专有名词与原文引用保持原样。",
+    "- 内容须详细，不得把原文丰富设定压缩成一句英文空话。",
+    "",
+    "## 作者指令",
     input.instruction,
     "",
-    "## Hints",
+    "## 提示",
     "```json",
     JSON.stringify(hints, null, 2),
     "```",
     "",
-    "## Required outputs",
+    "## 必交产出",
     "- 00-plan/todo.json",
-    "- 20-notes/sequential/*.md",
+    "- 20-notes/sequential/*.md（中文精读笔记）",
     "- 30-candidates/characters.json",
     "- 30-candidates/relationships.json",
     "- 30-candidates/world_rules.json",
@@ -419,11 +424,11 @@ async function bootstrapWorkspace(
   ].join("\n");
   const todo = {
     items: [
-      { id: "plan", title: "Write analysis plan", status: "pending" },
-      { id: "read", title: "Read source segments", status: "pending" },
-      { id: "notes", title: "Write sequential notes", status: "pending" },
-      { id: "candidates", title: "Extract candidates", status: "pending" },
-      { id: "review", title: "Write review summary", status: "pending" }
+      { id: "plan", title: "撰写分析计划", status: "pending" },
+      { id: "read", title: "阅读源文分段", status: "pending" },
+      { id: "notes", title: "写顺序精读笔记", status: "pending" },
+      { id: "candidates", title: "抽取候选资产", status: "pending" },
+      { id: "review", title: "撰写复盘摘要", status: "pending" }
     ]
   };
   await deps.writeWorkspaceFile?.({

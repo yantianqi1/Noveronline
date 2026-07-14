@@ -510,82 +510,98 @@ function EmptyProjectDualEntry({
   projectOverview?: ProjectOverviewSummary;
   tenantSlug: string;
 }) {
+  const writerHref = projectSectionHref(tenantSlug, projectId, "writer");
   return (
-    <div className="overview-dual-entry" data-empty-project-entry="true">
+    <div className="overview-dual-entry overview-dual-entry-slim" data-empty-project-entry="true">
       <p className="overview-next-copy">
-        <strong><Bi zh="选择如何开始这个项目" en="Choose how to start this project" /></strong>
+        <strong><Bi zh="开始创作" en="Start creating" /></strong>
+      </p>
+      <p className="form-hint">
+        <Bi
+          zh="在写作台告诉助手你想写什么；也可以先上传已有文本做分析。"
+          en="Tell the assistant what you want in Writer, or upload existing text to analyze."
+        />
       </p>
       {bootstrapStatus ? <StatusLine status={bootstrapStatus} /> : null}
-      <div className="overview-dual-entry-grid">
-        <section className="overview-entry-card" aria-labelledby="idea-first-entry-heading">
-          <p className="eyebrow"><Bi zh="入口 A" en="Entry A" /></p>
-          <h3 id="idea-first-entry-heading"><Bi zh="从一个想法开始" en="Start from an idea" /></h3>
-          <p className="form-hint">
-            <Bi
-              zh="创建最小书籍计划与首章，直接进入写作台。"
-              en="Create a minimal book plan and first chapter, then open Writer."
-            />
-          </p>
-          <form action={bootstrapIdeaAction} className="binding-form overview-bootstrap-form">
-            <label htmlFor="bootstrap-premise"><Bi zh="故事前提" en="Story premise" /></label>
-            <textarea
-              id="bootstrap-premise"
-              name="premise"
-              required
-              rows={3}
-              placeholder={tx(locale, "用一两句话写下故事核心。", "Describe the core idea in one or two sentences.")}
-            />
-            <label htmlFor="bootstrap-title"><Bi zh="计划名称（可选）" en="Plan title (optional)" /></label>
-            <input
-              id="bootstrap-title"
-              name="title"
-              placeholder={tx(locale, "默认使用前提前缀", "Defaults from the premise")}
-            />
-            <label htmlFor="bootstrap-chapter"><Bi zh="第一章标题（可选）" en="Chapter 1 title (optional)" /></label>
-            <input
-              id="bootstrap-chapter"
-              name="chapterTitle"
-              placeholder={tx(locale, "第一章", "Chapter 1")}
-            />
-            <SubmitButton
-              idleLabel={(
-                <>
-                  <Feather aria-hidden="true" size={16} />
-                  <Bi zh="建立并进入写作台" en="Create and open Writer" />
-                </>
-              )}
-              pendingLabel={<Bi zh="创建中…" en="Creating…" />}
-            />
-          </form>
-          <a className="overview-next-link" href={projectSectionHref(tenantSlug, projectId, "writer")}>
-            <Bi zh="直接打开空写作台" en="Open empty Writer" />
-            <ChevronRight aria-hidden="true" size={18} />
-          </a>
-        </section>
-        <section className="overview-entry-card" aria-labelledby="upload-first-entry-heading">
-          <p className="eyebrow"><Bi zh="入口 B" en="Entry B" /></p>
-          <h3 id="upload-first-entry-heading"><Bi zh="上传已有文本" en="Upload existing text" /></h3>
-          <p className="form-hint">
-            <Bi
-              zh="上传 TXT / Markdown / PDF，分析后建立资产与图谱。"
-              en="Upload TXT, Markdown, or PDF to build assets and graph."
-            />
-          </p>
-          {creationReadiness && projectOverview && !creationReadiness.ready ? (
-            <CreationReadinessPanel
-              creationReadiness={creationReadiness}
-              locale={locale}
-              projectOverview={projectOverview}
-            />
-          ) : (
-            <a className="overview-next-link" href="#upload-and-start-seed-heading">
-              <Upload aria-hidden="true" size={16} />
-              <Bi zh="选择文件并开始分析" en="Choose a file and start analysis" />
-              <ChevronRight aria-hidden="true" size={18} />
-            </a>
-          )}
-        </section>
+      <div className="overview-slim-primary">
+        <a className="overview-primary-writer-link" href={writerHref}>
+          <Feather aria-hidden="true" size={18} />
+          <span>
+            <strong><Bi zh="打开写作台" en="Open Writer" /></strong>
+            <small><Bi zh="对话优先 · 立刻开始" en="Conversation-first · start now" /></small>
+          </span>
+          <ChevronRight aria-hidden="true" size={18} />
+        </a>
       </div>
+      <details className="overview-slim-more">
+        <summary><Bi zh="更多开始方式" en="More ways to start" /></summary>
+        <div className="overview-dual-entry-grid">
+          <section className="overview-entry-card" aria-labelledby="idea-first-entry-heading">
+            <p className="eyebrow"><Bi zh="可选" en="Optional" /></p>
+            <h3 id="idea-first-entry-heading"><Bi zh="从一个想法建立首章" en="Bootstrap from an idea" /></h3>
+            <p className="form-hint">
+              <Bi
+                zh="创建最小书籍计划与首章，再进入写作台。"
+                en="Create a minimal book plan and first chapter, then open Writer."
+              />
+            </p>
+            <form action={bootstrapIdeaAction} className="binding-form overview-bootstrap-form">
+              <label htmlFor="bootstrap-premise"><Bi zh="故事前提" en="Story premise" /></label>
+              <textarea
+                id="bootstrap-premise"
+                name="premise"
+                required
+                rows={3}
+                placeholder={tx(locale, "用一两句话写下故事核心。", "Describe the core idea in one or two sentences.")}
+              />
+              <label htmlFor="bootstrap-title"><Bi zh="计划名称（可选）" en="Plan title (optional)" /></label>
+              <input
+                id="bootstrap-title"
+                name="title"
+                placeholder={tx(locale, "默认使用前提前缀", "Defaults from the premise")}
+              />
+              <label htmlFor="bootstrap-chapter"><Bi zh="第一章标题（可选）" en="Chapter 1 title (optional)" /></label>
+              <input
+                id="bootstrap-chapter"
+                name="chapterTitle"
+                placeholder={tx(locale, "第一章", "Chapter 1")}
+              />
+              <SubmitButton
+                idleLabel={(
+                  <>
+                    <Feather aria-hidden="true" size={16} />
+                    <Bi zh="建立并进入写作台" en="Create and open Writer" />
+                  </>
+                )}
+                pendingLabel={<Bi zh="创建中…" en="Creating…" />}
+              />
+            </form>
+          </section>
+          <section className="overview-entry-card" aria-labelledby="upload-first-entry-heading">
+            <p className="eyebrow"><Bi zh="可选" en="Optional" /></p>
+            <h3 id="upload-first-entry-heading"><Bi zh="上传已有文本" en="Upload existing text" /></h3>
+            <p className="form-hint">
+              <Bi
+                zh="上传 TXT / Markdown / PDF，分析后建立资产与图谱。"
+                en="Upload TXT, Markdown, or PDF to build assets and graph."
+              />
+            </p>
+            {creationReadiness && projectOverview && !creationReadiness.ready ? (
+              <CreationReadinessPanel
+                creationReadiness={creationReadiness}
+                locale={locale}
+                projectOverview={projectOverview}
+              />
+            ) : (
+              <a className="overview-next-link" href="#upload-and-start-seed-heading">
+                <Upload aria-hidden="true" size={16} />
+                <Bi zh="选择文件并开始分析" en="Choose a file and start analysis" />
+                <ChevronRight aria-hidden="true" size={18} />
+              </a>
+            )}
+          </section>
+        </div>
+      </details>
     </div>
   );
 }
@@ -1565,7 +1581,7 @@ function workflowTypeLabel(locale: Locale, workflowType: string) {
     asset_ingestion: ["素材导入", "Material import"],
     asset_reindex: ["资产搜索刷新", "Asset search refresh"],
     seed_pipeline: ["故事分析", "Story analysis"],
-    analysis_run: ["Pi 分析", "Pi analysis"],
+    analysis_run: ["智能分析", "Analysis"],
     story_graph: ["故事图谱", "Story graph"],
     story_graph_build: ["故事图谱构建", "Story graph build"],
     worldline: ["世界线推演", "Worldline simulation"],

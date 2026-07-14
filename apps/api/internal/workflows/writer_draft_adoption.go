@@ -182,6 +182,9 @@ func (s *SQLDraftAdoptionStore) AdoptDraft(ctx context.Context, input DraftAdopt
 	if tenantID == "" || draftID == "" {
 		return DraftAdoptionResult{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and draft_id are required"}
 	}
+	if strings.TrimSpace(input.ActorUserID) == "" {
+		return DraftAdoptionResult{}, &AppError{Code: "UNAUTHENTICATED", Message: "actor user is required for draft adoption"}
+	}
 	if input.BlockOrder < 0 {
 		return DraftAdoptionResult{}, &AppError{Code: "VALIDATION_FAILED", Message: "block_order must be non-negative"}
 	}
@@ -237,6 +240,11 @@ func (s *SQLDraftAdoptionStore) AdoptDraft(ctx context.Context, input DraftAdopt
 		result.SceneID = sceneID.String
 	}
 	if err := rows.Err(); err != nil {
+		return DraftAdoptionResult{}, draftAdoptionWriteFailed()
+	}
+	// Close the adoption result set before outbox follow-up queries on the same
+	// transaction. Leaving rows open makes pgx report "driver: bad connection".
+	if err := rows.Close(); err != nil {
 		return DraftAdoptionResult{}, draftAdoptionWriteFailed()
 	}
 	// CONN-004/005: durable distillation outbox must share the adoption transaction so

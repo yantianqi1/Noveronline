@@ -17,6 +17,7 @@ import { ConfirmSubmitButton } from "./confirm-submit-button";
 import { SubmitButton } from "./submit-button";
 import type { PendingRevision } from "./writer-manuscript-editor";
 import { WriterArtifactTabs } from "./writer-artifact-tabs";
+import { WriterChapterSwitcher } from "./writer-chapter-switcher";
 import { WriterManuscriptPanelClient } from "./writer-manuscript-panel-client";
 
 type Action = (formData: FormData) => Promise<void>;
@@ -69,33 +70,60 @@ export type WriterProductWorkspaceProps = {
 
 export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
   const isEmptyStructure = props.chapters.ok && props.chapters.value.length === 0;
+  const blockCount = props.blocks.ok ? props.blocks.value.length : 0;
+  const wordCount = props.blocks.ok
+    ? props.blocks.value.reduce((sum, block) => sum + (block.word_count ?? 0), 0)
+    : 0;
   return (
-    <div className="writer-product-modules writer-artifact-workspace">
-      {props.actionStatus ? <ActionStatus locale={props.locale} value={props.actionStatus} /> : null}
-      <WriterArtifactTabs
-        locale={props.locale}
-        manuscript={
-          <ManuscriptPanel {...props} />
-        }
-        structure={
-          <div className="writer-artifact-stack">
-            {isEmptyStructure ? <EmptyWriterBootstrap props={props} /> : null}
-            <ChapterScenePanel {...props} />
-          </div>
-        }
-        review={
-          <div className="writer-artifact-stack">
-            <ReviewerPanel {...props} />
-            <ProposalReviewPanel {...props} />
-          </div>
-        }
-        studio={
-          <div className="writer-artifact-stack writer-studio-tools">
-            <PlanningPanel {...props} />
-            <CommandDedupExportPanel {...props} />
-          </div>
-        }
-      />
+    <div className="writer-product-modules writer-artifact-workspace" data-nav="conversation-first">
+      <header className="writer-canvas-head">
+        <WriterChapterSwitcher
+          chapters={props.chapters}
+          locale={props.locale}
+          projectId={props.projectId}
+          scenes={props.scenes}
+          selectedChapterId={props.selectedChapterId}
+          selectedDraftId={props.selectedDraftId}
+          selectedSceneId={props.selectedSceneId}
+          tenantSlug={props.tenantSlug}
+        />
+        <div className="writer-canvas-meta">
+          <span>
+            {wordCount} <Bi zh="字" en="words" />
+          </span>
+          <span>
+            {blockCount} <Bi zh="段" en="blocks" />
+          </span>
+        </div>
+      </header>
+      <div className="writer-canvas-body">
+        {props.actionStatus ? <ActionStatus locale={props.locale} value={props.actionStatus} /> : null}
+        <WriterArtifactTabs
+          hideChrome
+          locale={props.locale}
+          manuscript={
+            <ManuscriptPanel {...props} />
+          }
+          structure={
+            <div className="writer-artifact-stack">
+              {isEmptyStructure ? <EmptyWriterBootstrap props={props} /> : null}
+              <ChapterScenePanel {...props} />
+            </div>
+          }
+          review={
+            <div className="writer-artifact-stack">
+              <ReviewerPanel {...props} />
+              <ProposalReviewPanel {...props} />
+            </div>
+          }
+          studio={
+            <div className="writer-artifact-stack writer-studio-tools">
+              <PlanningPanel {...props} />
+              <CommandDedupExportPanel {...props} />
+            </div>
+          }
+        />
+      </div>
     </div>
   );
 }
@@ -387,11 +415,51 @@ function PlanningPanel(props: WriterProductWorkspaceProps) {
 
 function ManuscriptPanel(props: WriterProductWorkspaceProps) {
   const { locale, selectedBlock } = props;
+  const hasBlocks = props.blocks.ok && props.blocks.value.length > 0;
+  const hasSelectedBlock = selectedBlock.ok && selectedBlock.value;
+
+  // Conversation-first empty canvas: quiet placeholder (doc 36 demo), not a long-form admin empty state.
+  if (!hasSelectedBlock && !hasBlocks) {
+    return (
+      <section
+        aria-labelledby="manuscript-workspace-heading"
+        className="writer-prose-panel writer-canvas-empty-panel"
+        data-manuscript-empty="true"
+      >
+        <h2 className="sr-only" id="manuscript-workspace-heading">
+          <Bi zh="手稿正文" en="Manuscript prose" />
+        </h2>
+        <div className="writer-canvas-empty">
+          <span aria-hidden="true" className="writer-canvas-empty-ico">
+            ✦
+          </span>
+          <p>
+            <Bi zh="产物会出现在这里" en="Artifacts will appear here" />
+          </p>
+          <p className="form-hint">
+            <Bi
+              zh="在右侧对话里起草，或新建空白正文自己写。"
+              en="Draft in the conversation on the right, or create a blank block to write by hand."
+            />
+          </p>
+          <form action={props.actions.createBlock} className="writer-create-block-form">
+            <input name="chapterId" type="hidden" value={props.selectedChapterId} />
+            <input name="sceneId" type="hidden" value={props.selectedSceneId} />
+            <button type="submit">
+              <Save size={14} />
+              <Bi zh="新建空白正文块" en="New blank manuscript block" />
+            </button>
+          </form>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="panel writer-prose-panel" aria-labelledby="manuscript-workspace-heading">
       <p className="eyebrow"><Bi zh="正文" en="Manuscript" /></p>
       <h2 id="manuscript-workspace-heading"><Bi zh="手稿正文" en="Manuscript prose" /></h2>
-      {selectedBlock.ok && selectedBlock.value ? (
+      {hasSelectedBlock && selectedBlock.value ? (
         <div className="writer-prose-editor compact-action-list">
           {/* TipTap editor hydrates client-side; hidden textarea name="content" remains the form source (PE). */}
           <WriterManuscriptPanelClient
@@ -450,14 +518,8 @@ function ManuscriptPanel(props: WriterProductWorkspaceProps) {
         <div className="writer-manuscript-empty" data-manuscript-empty="true">
           <p className="form-hint">
             <Bi
-              zh="这里放的是正式手稿正文，不是聊天。你可以新建空白正文块自己写，或在右侧让 Writer Agent 起草后「采用」进手稿。"
-              en="This is durable manuscript prose, not chat. Create a blank block to write by hand, or ask Writer Agent on the right and adopt a draft."
-            />
-          </p>
-          <p className="form-hint">
-            <Bi
-              zh="正文块 = 一段可独立保存、排序、审校的正文单元（常见是一节/一场/一段），不是「一张剧情卡片」。"
-              en="A manuscript block is a saveable prose unit (often a scene or passage), not a storyboard card."
+              zh="选择左侧正文块继续编辑，或新建空白正文块。"
+              en="Select a manuscript block to keep editing, or create a blank block."
             />
           </p>
         </div>
@@ -466,30 +528,28 @@ function ManuscriptPanel(props: WriterProductWorkspaceProps) {
         <input name="chapterId" type="hidden" value={props.selectedChapterId} />
         <input name="sceneId" type="hidden" value={props.selectedSceneId} />
         <button data-tone="primary" type="submit"><Save size={14} /><Bi zh="新建空白正文块" en="New blank manuscript block" /></button>
-        <p className="form-hint">
-          <Bi
-            zh="新建后会出现可编辑的正文区。若附带章节/场景无效，会自动创建为未归属块。"
-            en="After create, an editable prose area appears. Invalid chapter/scene links are ignored so a free block can still be created."
-          />
-        </p>
       </form>
-      <h3><Bi zh="正文块" en="Blocks" /></h3>
-      <ResultBoundary locale={locale} result={props.blocks} empty={tx(locale, "暂无正文块。", "No manuscript blocks.")} render={(items) => <div className="compact-action-list writer-block-list">
-        {items.map((block, index) => {
-          const orderedBlockItems = items.map((item) => `${item.block_id}:${item.version}`);
-          return (
-            <article className={`tool-result-item ${props.selectedBlockId === block.block_id ? "is-selected" : ""}`} key={block.block_id}>
-              <div className="inline-controls">
-                <BlockNavigateForm props={props} blockId={block.block_id} label={<strong>#{block.block_order}</strong>} />
-                <ReorderButton action={props.actions.reorderBlocks} ariaLabel={tx(locale, "上移正文块", "Move block up")} direction={-1} disabled={index <= 0} orderedBlockItems={reorderedIds(orderedBlockItems, index, -1)} />
-                <ReorderButton action={props.actions.reorderBlocks} ariaLabel={tx(locale, "下移正文块", "Move block down")} direction={1} disabled={index >= items.length - 1} orderedBlockItems={reorderedIds(orderedBlockItems, index, 1)} />
-              </div>
-              <span><StatusValue value={block.status} /> · {block.word_count} <Bi zh="字" en="words" /></span>
-              <small>{block.tags.join(", ") || tx(locale, "无标签", "no tags")}</small>
-            </article>
-          );
-        })}
-      </div>} />
+      {hasBlocks ? (
+        <>
+          <h3><Bi zh="正文块" en="Blocks" /></h3>
+          <ResultBoundary locale={locale} result={props.blocks} empty={tx(locale, "暂无正文块。", "No manuscript blocks.")} render={(items) => <div className="compact-action-list writer-block-list">
+            {items.map((block, index) => {
+              const orderedBlockItems = items.map((item) => `${item.block_id}:${item.version}`);
+              return (
+                <article className={`tool-result-item ${props.selectedBlockId === block.block_id ? "is-selected" : ""}`} key={block.block_id}>
+                  <div className="inline-controls">
+                    <BlockNavigateForm props={props} blockId={block.block_id} label={<strong>#{block.block_order}</strong>} />
+                    <ReorderButton action={props.actions.reorderBlocks} ariaLabel={tx(locale, "上移正文块", "Move block up")} direction={-1} disabled={index <= 0} orderedBlockItems={reorderedIds(orderedBlockItems, index, -1)} />
+                    <ReorderButton action={props.actions.reorderBlocks} ariaLabel={tx(locale, "下移正文块", "Move block down")} direction={1} disabled={index >= items.length - 1} orderedBlockItems={reorderedIds(orderedBlockItems, index, 1)} />
+                  </div>
+                  <span><StatusValue value={block.status} /> · {block.word_count} <Bi zh="字" en="words" /></span>
+                  <small>{block.tags.join(", ") || tx(locale, "无标签", "no tags")}</small>
+                </article>
+              );
+            })}
+          </div>} />
+        </>
+      ) : null}
     </section>
   );
 }

@@ -92,14 +92,19 @@ test("materials and me hub routes exist", async () => {
   assert.match(meHub, /mobile-profile-avatar/);
 });
 
-test("writer mobile defaults to agent conversation surface", async () => {
+test("writer mobile defaults to conversation surface (two-pane)", async () => {
   const switchSource = await fileText("components/writer-mobile-switch.tsx");
   const shell = await fileText("components/writer-workbench-shell.tsx");
   const keyboard = await fileText("components/writer-composer-keyboard.tsx");
+  const context = await fileText("components/writer-workbench-context.tsx");
 
-  assert.match(switchSource, /return "agent"/);
-  assert.match(switchSource, /useState<WriterMobileView>\("agent"\)/);
-  assert.match(shell, /data-mobile-view="agent"/);
+  assert.match(switchSource, /conversation/);
+  assert.match(switchSource, /artifact/);
+  assert.match(switchSource, /touchstart|touchend/);
+  assert.match(switchSource, /writer-mobile-switch-badge/);
+  assert.match(context, /revealArtifact/);
+  assert.match(context, /setMobileView/);
+  assert.match(shell, /data-mobile-view="conversation"/);
   assert.match(shell, /WriterComposerKeyboard/);
   assert.match(keyboard, /visualViewport/);
   assert.match(keyboard, /--writer-keyboard-inset/);
@@ -109,19 +114,20 @@ test("writer mobile hides status header and reclaims writing canvas height", asy
   const polish = await fileText("app/workbench-polish.css");
   const chrome = await fileText("app/mobile-chrome.css");
   const shell = await fileText("components/writer-workbench-shell.tsx");
+  const agentThreadSource = await fileText("components/writer-agent-thread.tsx");
   const composerInput = await fileText("components/writer-composer-input.tsx");
   const timeline = await fileText("components/writer-activity-timeline.tsx");
   const toast = await fileText("components/writer-transient-toast.tsx");
   const mode = await fileText("components/writer-mode-picker.tsx");
 
-  // Phone must not show the desktop status strip (状态 / 已同步 / 命令 / 技术详情).
+  // Phone must not show the desktop tools rail (命令 / 技术详情).
   assert.match(
     polish,
-    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-header\s*\{[\s\S]*?display:\s*none\s*!important/s,
+    /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.writer-canvas-tools\s*\{[\s\S]*?display:\s*none\s*!important/s,
   );
   assert.match(
     chrome,
-    /\[data-mobile-immersive="true"\]\s*\.writer-header\s*\{[\s\S]*?display:\s*none\s*!important/s,
+    /\[data-mobile-immersive="true"\]\s*\.writer-canvas-tools\s*\{[\s\S]*?display:\s*none\s*!important/s,
   );
   // Identity strip + marketing empty state must not steal conversation height.
   assert.match(
@@ -157,14 +163,16 @@ test("writer mobile hides status header and reclaims writing canvas height", asy
   );
 
   // Admission feedback is a light toast, not a permanent form-status strip.
-  assert.match(shell, /WriterTransientToast/);
+  // Soft history clean only — no second Next.js navigation flash.
+  assert.match(agentThreadSource, /WriterTransientToast/);
   assert.match(toast, /HOLD_MS|3200/);
-  assert.match(toast, /router\.replace/);
+  assert.match(toast, /history\.replaceState/);
+  assert.doesNotMatch(toast, /import \{[^}]*useRouter/);
   assert.match(toast, /writerRunStatus/);
-  assert.doesNotMatch(shell, /writer-composer-dock[\s\S]*StatusLine status=\{writerRunStatus\}/s);
+  assert.doesNotMatch(agentThreadSource, /writer-composer-dock[\s\S]*StatusLine status=\{writerRunStatus\}/s);
 
   // Mode is a compact chip inside the input row (not a full-width 4-tab bar).
-  assert.match(shell, /WriterComposerInput/);
+  assert.match(agentThreadSource, /WriterAgentComposer|WriterComposerInput/);
   assert.match(composerInput, /WriterModePicker/);
   assert.match(mode, /writer-mode-chip/);
   assert.match(mode, /draft.*continue.*outline.*revise/s);
@@ -179,7 +187,9 @@ test("writer mobile hides status header and reclaims writing canvas height", asy
   assert.match(composerInput, /rows=\{1\}/);
   assert.match(composerInput, /写一段要发生什么/);
   assert.match(composerInput, /data-can-send/);
-  assert.match(composerInput, /disabled=\{!canSend\}/);
+  assert.match(composerInput, /disabled=\{!canSend \|\| blocked\}|disabled=\{!canSend \|\| forcePending\}|disabled=\{!canSend\}/);
+  assert.match(composerInput, /sendLocked/);
+  assert.match(composerInput, /writer-composer-lock-hint|lockHint/);
   assert.match(polish, /\.writer-send-button\s*\{[\s\S]*?opacity:\s*0\.28/s);
   assert.match(
     polish,
@@ -250,17 +260,24 @@ test("workbench mid-band rails collapse near 960 not 980-1100 scatter", async ()
   assert.match(globals, /@media \(max-width:\s*960px\)\s*\{[\s\S]*?llm-facility-workbench/s);
 });
 
-test("character console content stays compact instead of full-bleed desktop width", async () => {
+test("character console workbench aligns flush under command bar without hero header", async () => {
   const globals = await fileText("app/globals.css");
   const polish = await fileText("app/workbench-polish.css");
+  const shell = await fileText("components/character-console-shell.tsx");
 
+  // Headerless: content card is the page frame, flush to the top chrome.
+  assert.doesNotMatch(shell, /WorkspaceHeader|character-console-header|与角色互动|次互动|次推演/);
   assert.match(
     globals,
-    /\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?max-width:\s*1040px/s,
+    /\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?max-width:\s*none/s,
   );
   assert.match(
     globals,
-    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?max-width:\s*1040px/s,
+    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[\s\S]*?max-width:\s*none/s,
+  );
+  assert.match(
+    globals,
+    /\.character-console-workbench\s*\{[\s\S]*?border-top:\s*0/s,
   );
   assert.match(
     globals,
@@ -270,10 +287,9 @@ test("character console content stays compact instead of full-bleed desktop widt
     polish,
     /\.character-console-workbench\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1\.2fr\)\s+minmax\(200px,\s*0\.72fr\)/s,
   );
-  // Desktop geometry contract must not re-open full-bleed width.
-  assert.doesNotMatch(
-    globals,
-    /@media \(min-width:\s*861px\)\s*\{[\s\S]*?\.app-frame:has\(\.character-console-root\)\s+\.app-main\s*\{[^}]*max-width:\s*none/s,
+  assert.match(
+    polish,
+    /\.app-frame\.app-frame-unified:has\(\.character-console-root\)\s+\.character-console-workbench\s*\{[\s\S]*?border-top:\s*0/s,
   );
 });
 

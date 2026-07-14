@@ -80,8 +80,8 @@ test("writer manuscript empty state explains blocks and create falls back on sta
     source("lib/user-facing-copy.ts"),
   ]);
   assert.match(workspace, /data-manuscript-empty/);
-  assert.match(workspace, /正式手稿正文|durable manuscript prose/);
-  assert.match(workspace, /可独立保存|saveable prose unit/);
+  assert.match(workspace, /产物会出现在这里|Artifacts will appear here/);
+  assert.match(workspace, /新建空白正文块|New blank manuscript block/);
   assert.match(workspace, /humanizeFailure/);
   assert.match(page, /createBlockAction/);
   assert.match(page, /NOT_FOUND|HTTP_404/);
@@ -111,13 +111,30 @@ test("writer artifact views are mutually exclusive and the obsolete long-page la
     source("app/workbench-polish.css"),
   ]);
   assert.match(workspace, /WriterArtifactTabs/);
+  assert.match(workspace, /hideChrome/);
+  assert.match(workspace, /WriterChapterSwitcher/);
   assert.match(tabs, /role="tablist"/);
   assert.match(tabs, /role="tab"/);
   assert.match(tabs, /role="tabpanel"/);
+  assert.match(tabs, /hideChrome/);
   assert.match(tabs, /aria-selected=\{selected\}/);
   assert.match(tabs, /hidden=\{activeTab !== tab\.id\}/);
   assert.match(polish, /\.writer-agent-layout/);
   assert.match(polish, /\.writer-artifact-tabpanel\[hidden\]/);
+  assert.match(polish, /data-mobile-view="conversation"|conversation.*artifact/);
+  // Canvas is tools-rail + stage grid; the stage stays column-flex so
+  // display:contents head/body + candidate + meta share space without a dead band.
+  assert.match(polish, /\.writer-artifact-workspace\s*\{[^}]*display:\s*contents/s);
+  assert.match(polish, /\.writer-artifact-canvas\s*\{[^}]*display:\s*grid/s);
+  assert.match(polish, /\.writer-canvas-stage\s*\{[^}]*display:\s*flex/s);
+  assert.doesNotMatch(
+    polish,
+    /\.writer-artifact-canvas\s*\{[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/s,
+  );
+  assert.match(
+    polish,
+    /\.app-frame\.app-frame-unified:has\(\.writer-root\)\s+\.writer-agent-layout[\s\S]*?flex:\s*1\s+1\s+auto/s,
+  );
   for (const retiredClass of ["writer-studio-grid", "writer-workbench-prose-first", "writer-composer-disclosure", "writer-agent-rail"]) {
     const pattern = new RegExp(retiredClass);
     assert.doesNotMatch(`${workspace}\n${tabs}\n${polish}`, pattern);

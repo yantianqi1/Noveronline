@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 export type WriterArtifactTab = "manuscript" | "structure" | "review" | "studio";
+export type WriterMobileView = "conversation" | "artifact";
 
 type WriterWorkbenchContextValue = {
   activeTab: WriterArtifactTab;
@@ -11,17 +12,80 @@ type WriterWorkbenchContextValue = {
   setPaletteOpen: (open: boolean) => void;
   openPalette: () => void;
   closePalette: () => void;
+  mobileView: WriterMobileView;
+  setMobileView: (view: WriterMobileView) => void;
+  /** Soft pulse on the artifact tab when a new candidate is ready. */
+  artifactBadge: boolean;
+  clearArtifactBadge: () => void;
+  /** Switch to artifact pane on phone and optionally show a badge. */
+  revealArtifact: (options?: { badge?: boolean }) => void;
 };
 
 const WriterWorkbenchContext = createContext<WriterWorkbenchContextValue | null>(null);
 
-// Shared client state for the manuscript-primary studio: which artifact tab is active
-// and whether the command palette is open. Lets the ⌘K palette drive the canvas tabs.
+const WRITER_MOBILE_VIEW_KEY = "mirofish-writer-mobile-view";
+
+function migrateStoredView(raw: string | null): WriterMobileView {
+  if (raw === "conversation" || raw === "agent") return "conversation";
+  if (raw === "artifact" || raw === "manuscript" || raw === "structure") return "artifact";
+  return "conversation";
+}
+
+function readStoredMobileView(): WriterMobileView {
+  if (typeof window === "undefined") return "conversation";
+  try {
+    return migrateStoredView(window.localStorage.getItem(WRITER_MOBILE_VIEW_KEY));
+  } catch {
+    return "conversation";
+  }
+}
+
+/**
+ * Shared client state for conversation-first Writer: canvas panels, ⌘K palette,
+ * and the phone conversation|artifact pane (doc 36 W4/W5).
+ */
 export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
   const [activeTab, setActiveTab] = useState<WriterArtifactTab>("manuscript");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [mobileView, setMobileViewState] = useState<WriterMobileView>("conversation");
+  const [artifactBadge, setArtifactBadge] = useState(false);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const clearArtifactBadge = useCallback(() => setArtifactBadge(false), []);
+
+  useEffect(() => {
+    setMobileViewState(readStoredMobileView());
+  }, []);
+
+  const setMobileView = useCallback((view: WriterMobileView) => {
+    setMobileViewState(view);
+    if (view === "artifact") {
+      setArtifactBadge(false);
+    }
+    try {
+      window.localStorage.setItem(WRITER_MOBILE_VIEW_KEY, view);
+    } catch {
+      // ignore storage failures
+    }
+  }, []);
+
+  const revealArtifact = useCallback(
+    (options?: { badge?: boolean }) => {
+      const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 960px)").matches;
+      if (narrow) {
+        setMobileViewState("artifact");
+        try {
+          window.localStorage.setItem(WRITER_MOBILE_VIEW_KEY, "artifact");
+        } catch {
+          // ignore
+        }
+      }
+      if (options?.badge !== false) {
+        setArtifactBadge(true);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -35,8 +99,30 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<WriterWorkbenchContextValue>(
-    () => ({ activeTab, setActiveTab, paletteOpen, setPaletteOpen, openPalette, closePalette }),
-    [activeTab, paletteOpen, openPalette, closePalette],
+    () => ({
+      activeTab,
+      setActiveTab,
+      paletteOpen,
+      setPaletteOpen,
+      openPalette,
+      closePalette,
+      mobileView,
+      setMobileView,
+      artifactBadge,
+      clearArtifactBadge,
+      revealArtifact,
+    }),
+    [
+      activeTab,
+      paletteOpen,
+      openPalette,
+      closePalette,
+      mobileView,
+      setMobileView,
+      artifactBadge,
+      clearArtifactBadge,
+      revealArtifact,
+    ],
   );
 
   return <WriterWorkbenchContext.Provider value={value}>{children}</WriterWorkbenchContext.Provider>;

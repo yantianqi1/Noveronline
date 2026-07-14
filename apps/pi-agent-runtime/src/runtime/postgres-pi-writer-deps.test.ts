@@ -476,6 +476,68 @@ describe("createPostgresPiWriterDeps", () => {
     expect(db.queries[0]?.values).toEqual(["ten_1", "proj_1", "writer_composer"]);
   });
 
+  it("ORs catalog supports_tools=false with chat-model inference", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{
+      module_key: "writer_orchestrator",
+      channel_id: "channel-1",
+      model_id: "deepseek-v4-flash",
+      provider: "openai-compatible",
+      base_url: "https://llm.example/v1",
+      credential_ref: "channel-1",
+      supports_tools: false,
+      supports_json: false,
+      settings_jsonb: {}
+    }]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "unused",
+      composeDraft: async () => ({ content: "unused" })
+    });
+
+    await expect(deps.resolveModuleBinding!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      module_key: "writer_orchestrator"
+    })).resolves.toMatchObject({
+      model_id: "deepseek-v4-flash",
+      supports_tools: true,
+      supports_json: true
+    });
+  });
+
+  it("keeps tools unsupported for reasoning-only catalog rows", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{
+      module_key: "writer_orchestrator",
+      channel_id: "channel-1",
+      model_id: "deepseek-reasoner",
+      provider: "openai-compatible",
+      base_url: "https://llm.example/v1",
+      credential_ref: "channel-1",
+      supports_tools: false,
+      supports_json: false,
+      settings_jsonb: {}
+    }]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "unused",
+      composeDraft: async () => ({ content: "unused" })
+    });
+
+    await expect(deps.resolveModuleBinding!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      module_key: "writer_orchestrator"
+    })).resolves.toMatchObject({
+      model_id: "deepseek-reasoner",
+      supports_tools: false,
+      supports_json: false
+    });
+  });
+
   it("fails explicitly when the credential reference is unavailable", async () => {
     const db = new RecordingDb();
     const deps = createPostgresPiWriterDeps({

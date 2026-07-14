@@ -79,9 +79,14 @@ export function AssetPreviewDialog({ asset, locale, onClose, open }: AssetPrevie
   const structured = structureAssetBody(asset);
   const rawJson = formatRawPayloadJson(structured.rawPayload);
   const updated = formatAuthorTimestamp(locale, asset.updated_at ?? "");
-  const summaryText = asset.summary?.trim() && !isBoringSummary(asset.summary, displayTitle)
-    ? asset.summary.trim()
+  const summaryText = structured.summaryDistinct
+    && !isBoringSummary(structured.summaryDistinct, displayTitle)
+    ? structured.summaryDistinct
     : "";
+  const bodyText = structured.prose
+    || (asset.summary?.trim() && !isBoringSummary(asset.summary, displayTitle) && !summaryText
+      ? asset.summary.trim()
+      : "");
 
   return (
     <dialog
@@ -204,16 +209,16 @@ export function AssetPreviewDialog({ asset, locale, onClose, open }: AssetPrevie
             </section>
           ) : null}
 
-          {structured.prose ? (
+          {bodyText ? (
             <section className="asset-preview-section" aria-labelledby={`${titleId}-body`}>
               <h3 id={`${titleId}-body`}><Bi zh="正文" en="Body" /></h3>
               <p className="asset-preview-summary asset-preview-prose" data-testid="asset-preview-prose">
-                {structured.prose}
+                {bodyText}
               </p>
             </section>
           ) : null}
 
-          {!summaryText && structured.fields.length === 0 && !structured.prose ? (
+          {!summaryText && structured.fields.length === 0 && !bodyText ? (
             <section className="asset-preview-section">
               <p className="asset-preview-summary">
                 <Bi zh="暂无可读正文。可展开下方原始结构查看完整字段。" en="No readable body yet. Expand raw structure below for full fields." />
@@ -223,8 +228,13 @@ export function AssetPreviewDialog({ asset, locale, onClose, open }: AssetPrevie
 
           {rawJson ? (
             <details className="asset-preview-raw" data-testid="asset-preview-raw">
-              <summary>
-                <Bi zh="原始结构（高级）" en="Raw structure (advanced)" />
+              <summary className="asset-preview-raw-summary">
+                <span className="asset-preview-raw-label">
+                  <Bi zh="原始结构" en="Raw structure" />
+                </span>
+                <span className="asset-preview-raw-hint">
+                  <Bi zh="可点开 · 默认收起" en="Tap to expand · collapsed by default" />
+                </span>
               </summary>
               <pre className="asset-preview-payload">{rawJson}</pre>
             </details>

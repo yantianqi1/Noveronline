@@ -123,15 +123,21 @@ SELECT module_key, channel_id::text AS channel_id, model_id,
       code: "LLM_MODULE_UNBOUND"
     });
   }
+  const modelId = String(row.model_id);
+  const caps = effectiveModelCapabilities(
+    modelId,
+    row.supports_json === true,
+    row.supports_tools === true,
+  );
   return {
     module_key: request.module_key,
     channel_id: String(row.channel_id),
-    model_id: String(row.model_id),
+    model_id: modelId,
     provider: String(row.provider),
     base_url: String(row.base_url),
     credential_ref: String(row.credential_ref),
-    supports_tools: row.supports_tools === true,
-    supports_json: row.supports_json === true,
+    supports_tools: caps.supports_tools,
+    supports_json: caps.supports_json,
     settings: typeof row.settings_jsonb === "object" && row.settings_jsonb
       ? row.settings_jsonb as Record<string, unknown>
       : {}

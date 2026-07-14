@@ -64,8 +64,8 @@ export function MaterialsHub({
         <h1><Bi zh="故事资料" en="Story materials" /></h1>
         <p>
           <Bi
-            zh="在这里整理资产、图谱、世界线与角色。进入任一模块继续深度编辑。Pi 拆解完成后会自动写入素材库，可直接在资产库查看与编辑。"
-            en="Organize assets, graph, worldline, and characters. Open a module to continue. Pi analysis results are auto-imported into the library when a run finishes."
+            zh="在这里整理资产、图谱、世界线与角色。进入任一模块继续深度编辑。智能拆解完成后会自动写入素材库，可直接在资产库查看与编辑。"
+            en="Organize assets, graph, worldline, and characters. Open a module to continue. Analysis results are auto-imported into the library when a run finishes."
           />
         </p>
       </header>

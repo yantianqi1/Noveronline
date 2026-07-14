@@ -52,6 +52,9 @@ backend/logs/
 # Active Next.js frontend build
 apps/web/.next-dev/
 
+# Local Playwright browser install links
+.playwright-browsers/
+
 # Local Go build output
 /apps/api/api
 
@@ -61,6 +64,9 @@ apps/web/.next-dev/
 /可供参考项目/
 /humble-dancing-willow.md
 *.zip
+
+# 手机端首页设计稿与生成素材源目录（已同步到 apps/web/public/landing/assets/mobile）
+/首页-手机端/
 
 # 误放在根的数据库文件（正确位置是 backend/data/）
 /data/

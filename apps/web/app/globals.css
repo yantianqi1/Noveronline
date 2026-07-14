@@ -2079,7 +2079,7 @@
   --character-ink: #17191a;
   --character-red: #8d1f1b;
   --character-gold: #a78752;
-  gap: 14px;
+  gap: 0;
   background: linear-gradient(rgba(12, 14, 15, 0.96), rgba(12, 14, 15, 0.96)),
     repeating-linear-gradient(128deg, transparent 0 10px, rgba(167, 135, 82, 0.12) 10px 11px);
 }
@@ -2095,44 +2095,18 @@
 }
 
 .app-frame:has(.character-console-root) .app-main {
-  width: min(100%, 1040px);
-  max-width: 1040px;
-  margin: 0 auto;
-  padding: 12px 16px 28px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0 0 28px;
 }
 
 .character-console-root {
-  min-height: calc(100dvh - 30px);
+  min-height: calc(100dvh - 52px);
   color: #eee8df;
   font-family: "Noto Sans SC", "Microsoft YaHei UI", system-ui, sans-serif;
 }
 
-.character-console-header {
-  position: relative;
-  min-height: 0;
-  overflow: hidden;
-  border: 0 !important;
-  padding: 8px 20px 14px !important;
-}
-
-.character-console-header::before {
-  position: absolute;
-  right: 3%;
-  bottom: -105px;
-  width: 360px;
-  height: 360px;
-  border: 1px solid rgba(167, 135, 82, 0.13);
-  border-radius: 50%;
-  box-shadow: 0 0 0 45px rgba(167, 135, 82, 0.035), 0 0 0 92px rgba(167, 135, 82, 0.02);
-  content: "";
-  pointer-events: none;
-}
-
-.character-console-header::after {
-  display: none;
-}
-
-.character-console-header .eyebrow,
 .character-console-workbench .eyebrow {
   color: var(--character-gold);
   font-family: "Songti SC", "STSong", "SimSun", serif;
@@ -2141,7 +2115,6 @@
   text-transform: none;
 }
 
-.character-console-header .eyebrow::before,
 .character-console-workbench .eyebrow::before {
   display: inline-block;
   width: 2px;
@@ -2152,44 +2125,6 @@
   vertical-align: -2px;
 }
 
-.character-console-header h1 {
-  margin: 4px 0 8px !important;
-  color: #f5efe6;
-  font-family: "Songti SC", "STSong", "SimSun", Georgia, serif;
-  font-size: clamp(1.55rem, 2.4vw, 1.95rem);
-  font-weight: 500;
-  line-height: 1.12;
-}
-
-.character-console-header .page-title-icon {
-  display: none;
-}
-
-.character-console-header .status-row {
-  gap: 0;
-}
-
-.character-console-header .status-pill {
-  position: relative;
-  min-height: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #eee8df;
-  font-family: "Songti SC", "STSong", "SimSun", serif;
-  font-size: 0.9rem;
-  font-variant-numeric: tabular-nums;
-  padding: 0 24px 0 0;
-}
-
-.character-console-header .status-pill + .status-pill::after {
-  position: absolute;
-  left: -14px;
-  color: var(--character-gold);
-  content: "|";
-}
-
-.character-console-header .status-pill::before,
 .character-console-workbench .status-pill::before {
   display: none;
 }
@@ -2200,7 +2135,8 @@
   align-items: stretch;
   margin-top: 0;
   border: 1px solid rgba(167, 135, 82, 0.48);
-  border-radius: 7px 0 0 0;
+  border-top: 0;
+  border-radius: 0;
   overflow-x: hidden;
 }
 
@@ -2468,25 +2404,7 @@
   .app-frame:has(.character-console-root) .app-main {
     width: 100%;
     max-width: none;
-    padding: 8px 12px 20px;
-  }
-
-  .character-console-header {
-    min-height: 0;
-    padding: 8px 14px 12px !important;
-  }
-
-  .character-console-header h1 {
-    font-size: 1.55rem;
-  }
-
-  .character-console-header .status-row {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .character-console-header .status-pill {
-    white-space: normal;
+    padding: 0 12px 20px;
   }
 
   .character-console-workbench {
@@ -4866,6 +4784,65 @@ header {
   gap: 14px;
 }
 
+.overview-dual-entry-slim .overview-slim-primary {
+  display: grid;
+}
+
+.overview-primary-writer-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 14px 16px;
+  border: 1px solid rgba(143, 47, 39, 0.28);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(143, 47, 39, 0.08), rgba(177, 138, 78, 0.1));
+  color: inherit;
+  text-decoration: none;
+}
+
+.overview-primary-writer-link span {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+}
+
+.overview-primary-writer-link strong {
+  font-size: 1.05rem;
+}
+
+.overview-primary-writer-link small {
+  color: var(--ink-soft, #6b665c);
+  font-size: 0.82rem;
+}
+
+.overview-primary-writer-link:hover {
+  border-color: rgba(143, 47, 39, 0.45);
+  box-shadow: 0 8px 22px rgba(23, 26, 27, 0.08);
+}
+
+.overview-slim-more {
+  border: 1px dashed var(--border-highlight);
+  border-radius: 14px;
+  padding: 8px 12px 12px;
+}
+
+.overview-slim-more > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.9rem;
+  color: var(--ink-soft, #6b665c);
+  padding: 8px 0;
+}
+
+.overview-slim-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.overview-slim-more[open] > summary {
+  margin-bottom: 10px;
+}
+
 .overview-dual-entry-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6041,10 +6018,10 @@ dd {
   }
 
   .app-frame:has(.character-console-root) .app-main {
-    width: min(100%, 1040px);
-    max-width: 1040px;
-    margin: 0 auto;
-    padding: 10px 16px 24px;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0 0 24px;
   }
 
   :is(
@@ -6052,7 +6029,6 @@ dd {
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ) {
@@ -6068,7 +6044,6 @@ dd {
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ) .eyebrow {
@@ -6081,7 +6056,6 @@ dd {
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ) h1 {
@@ -8365,23 +8339,65 @@ dd {
   overflow: auto;
 }
 
+/* Soft fold cue — not a stiff button; default closed via <details>. */
 .asset-preview-raw {
-  border: 1px solid rgba(104, 88, 65, .12);
-  border-radius: 8px;
-  background: rgba(252, 249, 243, .9);
-  padding: 8px 12px;
+  margin: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(90deg, rgba(139, 47, 39, 0.05), transparent 42%),
+    repeating-linear-gradient(
+      -12deg,
+      transparent,
+      transparent 7px,
+      rgba(104, 88, 65, 0.03) 7px,
+      rgba(104, 88, 65, 0.03) 8px
+    );
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid rgba(139, 47, 39, 0.18);
 }
 
-.asset-preview-raw > summary {
+.asset-preview-raw > summary,
+.asset-preview-raw-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
   cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 0.84rem;
-  font-weight: 600;
+  color: var(--text-muted, #7a6d58);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   list-style: none;
+  user-select: none;
 }
 
 .asset-preview-raw > summary::-webkit-details-marker {
   display: none;
+}
+
+.asset-preview-raw-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.asset-preview-raw-label::before {
+  content: "▸ ";
+  display: inline-block;
+  color: rgba(139, 47, 39, 0.55);
+  font-size: 0.72rem;
+  transition: transform 160ms ease;
+}
+
+.asset-preview-raw[open] .asset-preview-raw-label::before {
+  content: "▾ ";
+}
+
+.asset-preview-raw-hint {
+  color: var(--text-muted, #9a8f7c);
+  font-size: 0.72rem;
+  font-weight: 500;
+  opacity: 0.92;
 }
 
 .asset-preview-raw[open] > summary {
@@ -8390,6 +8406,8 @@ dd {
 
 .asset-preview-raw .asset-preview-payload {
   margin-top: 0;
+  border-style: dashed;
+  background: rgba(255, 253, 248, 0.72);
 }
 
 .asset-preview-ops-hint {
@@ -9605,10 +9623,10 @@ button.asset-workspace-close:hover {
   }
 
   .app-frame:has(.character-console-root) .app-main {
-    width: min(100%, 1040px);
-    max-width: 1040px;
-    margin: 0 auto;
-    padding: 10px 16px 24px;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0 0 24px;
   }
 
   :is(
@@ -9616,7 +9634,6 @@ button.asset-workspace-close:hover {
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ) {
@@ -9632,7 +9649,6 @@ button.asset-workspace-close:hover {
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ) .eyebrow {
@@ -9645,7 +9661,6 @@ button.asset-workspace-close:hover {
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ) h1 {

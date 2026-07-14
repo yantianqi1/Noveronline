@@ -127,6 +127,9 @@ describe("createWorkerActivityBundle", () => {
     db.enqueue([]);
     db.enqueue([]);
     db.enqueue([]);
+    // Persist author/assistant thread turns after a successful compose.
+    db.enqueue([]);
+    db.enqueue([]);
     db.enqueue([{ inserted: "1" }]);
     db.enqueue([{ writer_updated: "1", workflow_updated: "1" }]);
     const calls: string[] = [];
@@ -184,6 +187,8 @@ describe("createWorkerActivityBundle", () => {
       expect.stringContaining("INSERT INTO agent_trace_events"),
       expect.stringContaining("INSERT INTO agent_traces"),
       expect.stringContaining("INSERT INTO agent_trace_events"),
+      expect.stringContaining("FROM writer_threads"),
+      expect.stringContaining("UPDATE writer_threads"),
       expect.stringContaining("INSERT INTO workflow_events"),
       expect.stringContaining("UPDATE writer_runs")
     ]);

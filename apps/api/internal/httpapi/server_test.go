@@ -19127,6 +19127,48 @@ func TestStartWriterRunRejectsMissingLLMModuleBinding(t *testing.T) {
 	}
 }
 
+func TestStartWriterRunRejectsOrchestratorWithoutTools(t *testing.T) {
+	// Effective tools=false on writer_orchestrator must fail closed before Temporal admit.
+	resolver := llm.NewStaticResolver([]llm.ModuleResolution{
+		writerComposerResolution(),
+		{
+			TenantID:      "tenant-123",
+			ProjectID:     "project-123",
+			ModuleKey:     "writer_orchestrator",
+			ChannelID:     "channel-orchestrator",
+			ModelID:       "deepseek-reasoner",
+			Provider:      "openai-compatible",
+			BaseURL:       "https://llm.example.test/v1",
+			CredentialRef: "credref-orchestrator",
+			SupportsTools: false,
+			SupportsJSON:  false,
+		},
+	})
+	starter := &recordingStarter{}
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: starter, LLMResolver: resolver})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{"mode":"draft","instruction":"写开篇"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-Request-Id", "req_tools_unsupported")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusUnprocessableEntity, response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "LLM_MODEL_TOOLS_UNSUPPORTED" {
+		t.Fatalf("unexpected error body: %#v", body)
+	}
+	if starter.input.ProjectID != "" || starter.input.Instruction != "" {
+		t.Fatalf("starter must not be called when orchestrator lacks tools, got %#v", starter.input)
+	}
+}
+
 func TestResolveLLMModuleBindingReturnsSanitizedResolution(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, LLMResolver: boundWriterComposerResolver()})

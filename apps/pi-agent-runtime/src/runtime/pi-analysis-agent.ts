@@ -175,30 +175,41 @@ function toolDescription(name: AnalysisToolName): string {
 }
 
 function systemPrompt(request: AnalysisStageRequest): string {
+  const languageRules = [
+    "Language (mandatory):",
+    "- Write ALL author-facing text in Simplified Chinese (简体中文): plan docs, notes, review summary, candidate titles, summaries, descriptions, rule_text, and free-form fields.",
+    "- Keep JSON field names / schema keys in English (e.g. name, summary, rule_text, items).",
+    "- Preserve original proper names, book titles, and quoted source lines exactly as they appear; do not translate names into English unless the source already uses English.",
+    "- Do not produce English-only candidate bodies. If the source is Chinese, extracted content must be Chinese and detailed enough that no important setting is dropped."
+  ].join("\n");
+
   if (request.module_key === "analysis_planner") {
     return [
-      "You are the MiroFish novel analysis planner.",
+      "You are the MiroFish novel analysis planner for long-form Chinese fiction.",
+      languageRules,
       "Inspect the uploaded source via tools, then write a concrete task pack and todo list into the workspace.",
       "Required writes:",
-      "- 00-plan/task-pack.md with ordered analysis tasks",
-      "- 00-plan/todo.json with items status pending/in_progress/done",
+      "- 00-plan/task-pack.md with ordered analysis tasks (Chinese headings and bullets)",
+      "- 00-plan/todo.json with items status pending/in_progress/done (item titles in Chinese)",
       "Do not invent source text. Use tools. Keep outputs novel-domain specific.",
-      "When finished, reply with a short summary of the plan."
+      "When finished, reply with a short Chinese summary of the plan."
     ].join("\n");
   }
   return [
-    "You are the MiroFish novel analysis worker.",
+    "You are the MiroFish novel analysis worker for long-form Chinese fiction.",
+    languageRules,
     "Follow 00-plan/task-pack.md and process source segments with tools.",
     "Required writes:",
-    "- 20-notes/sequential/<index>.md notes for each processed segment",
-    "- 30-candidates/characters.json as {\"items\":[...]}",
-    "- 30-candidates/relationships.json as {\"items\":[...]}",
-    "- 30-candidates/world_rules.json as {\"items\":[...]}",
-    "- 90-review/summary.md review summary",
+    "- 20-notes/sequential/<index>.md detailed Chinese notes for each processed segment (events, characters, rules, foreshadowing; do not collapse into a one-line gloss)",
+    "- 30-candidates/characters.json as {\"items\":[...]} with Chinese name/summary/description fields; capture identity, personality, appearance, relationships when present",
+    "- 30-candidates/relationships.json as {\"items\":[...]} with Chinese relation labels and descriptions",
+    "- 30-candidates/world_rules.json as {\"items\":[...]} with Chinese title/summary/rule_text; each rule must be specific and complete (powers, constraints, costs, exceptions) — never a single vague English sentence when the source has more detail",
+    "- 90-review/summary.md Chinese review summarizing coverage and gaps",
     "Update 00-plan/todo.json as you progress.",
     "Candidates are non-canon proposals, not adopted assets.",
     "Do not invent evidence outside the source segments you read.",
-    "When finished, reply with a short summary of what you extracted."
+    "Prefer richer Chinese detail over short English paraphrases; omit only true duplicates, not content.",
+    "When finished, reply with a short Chinese summary of what you extracted."
   ].join("\n");
 }
 

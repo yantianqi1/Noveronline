@@ -2312,6 +2312,63 @@ export async function decideWriterApproval(
   }
 }
 
+export type DraftAdoptionSummary = {
+  ok: true;
+  draft_id: string;
+  block_id: string;
+  project_id: string;
+  status: string;
+  chapter_id?: string;
+  scene_id?: string;
+  block_order?: number;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
+export async function adoptWriterDraft(
+  input: ApiContext & { draftId: string; chapterId?: string; blockOrder?: number },
+): Promise<DraftAdoptionSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/drafts/${encodeURIComponent(input.draftId)}/adoptions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...contextHeaders(input),
+      },
+      body: JSON.stringify({
+        ...(input.chapterId ? { chapter_id: input.chapterId } : {}),
+        ...(typeof input.blockOrder === "number" ? { block_order: input.blockOrder } : {}),
+      }),
+      cache: "no-store",
+    });
+    const payload = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      return decodeError(payload, response.status, "DRAFT_ADOPTION_FAILED");
+    }
+    const draftId = requiredString(payload, "draft_id");
+    const blockId = requiredString(payload, "block_id");
+    const projectId = requiredString(payload, "project_id");
+    const status = requiredString(payload, "status");
+    if (!draftId || !blockId || !projectId || !status) {
+      return invalidApiResponse("draft adoption response missing required fields");
+    }
+    return {
+      ok: true,
+      draft_id: draftId,
+      block_id: blockId,
+      project_id: projectId,
+      status,
+      chapter_id: typeof payload.chapter_id === "string" ? payload.chapter_id : undefined,
+      scene_id: typeof payload.scene_id === "string" ? payload.scene_id : undefined,
+      block_order: typeof payload.block_order === "number" ? payload.block_order : undefined,
+    };
+  } catch (error) {
+    return networkFailure(error, "DRAFT_ADOPTION_FAILED");
+  }
+}
+
 export async function getWriterRunSummary(input: ApiContext & { runId: string }) {
   const response = await apiFetch(`${apiBaseUrl()}/v1/writer-runs/${input.runId}`, {
     headers: contextHeaders(input),
@@ -2338,6 +2395,44 @@ export async function getWriterRunEvents(
   } catch (error) {
     return networkFailure(error, "WRITER_EVENTS_QUERY_FAILED");
   }
+}
+
+const WRITER_TERMINAL_EVENT_TYPES = new Set([
+  "writer.run.completed",
+  "writer.run.failed",
+  "writer.run.cancelled",
+]);
+
+/**
+ * The events endpoint is paginated (server page size ~100), while a single run can
+ * emit hundreds of token events. Follow the cursor until the terminal event or the
+ * final page so server-rendered views see the whole run, not just the first page.
+ */
+export async function getAllWriterRunEvents(
+  input: ApiContext & { runId: string; afterEventId?: string },
+): Promise<WriterRunEventsSummary> {
+  const collected: WriterRunEvent[] = [];
+  let cursor = input.afterEventId ?? "";
+  for (;;) {
+    const page = await getWriterRunEvents({ ...input, afterEventId: cursor });
+    if (!page.ok) {
+      // Keep whatever we already have; surface the failure only if nothing loaded.
+      if (collected.length === 0) return page;
+      break;
+    }
+    if (page.items.length === 0) break;
+    collected.push(...page.items);
+    const last = page.items[page.items.length - 1];
+    if (WRITER_TERMINAL_EVENT_TYPES.has(last.event_type)) break;
+    if (!last.event_id || last.event_id === cursor) break;
+    cursor = last.event_id;
+  }
+  return {
+    ok: true,
+    run_id: input.runId,
+    after_event_id: input.afterEventId ?? "",
+    items: collected,
+  };
 }
 
 export async function getProjectManuscript(

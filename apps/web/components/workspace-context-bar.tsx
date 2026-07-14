@@ -10,7 +10,7 @@ type WorkspaceContextBarProps = {
   projectName: ReactNode;
 };
 
-const STAGES: Record<string, { label: ReactNode; activity: ReactNode }> = {
+const STAGES: Record<string, { label: ReactNode; activity: ReactNode | null }> = {
   overview: {
     label: <Bi zh="项目总览" en="Overview" />,
     activity: <Bi zh="下一步与分析进度" en="Next step and analysis" />,
@@ -37,11 +37,11 @@ const STAGES: Record<string, { label: ReactNode; activity: ReactNode }> = {
   },
   "character-console": {
     label: <Bi zh="角色" en="Characters" />,
-    activity: <Bi zh="角色互动与回合" en="Character turns" />,
+    activity: null,
   },
   characters: {
     label: <Bi zh="角色" en="Characters" />,
-    activity: <Bi zh="角色互动与回合" en="Character turns" />,
+    activity: null,
   },
   writer: {
     label: <Bi zh="写作台" en="Writer" />,
@@ -81,10 +81,12 @@ export function WorkspaceContextBar({ projectName }: WorkspaceContextBarProps) {
         <ChevronRight aria-hidden="true" size={14} />
         <span className="app-stage-label">{stage.label}</span>
       </div>
-      <span className="app-command-label">
-        <span className="app-activity-dot" aria-hidden="true" />
-        {stage.activity}
-      </span>
+      {stage.activity ? (
+        <span className="app-command-label">
+          <span className="app-activity-dot" aria-hidden="true" />
+          {stage.activity}
+        </span>
+      ) : null}
     </div>
   );
 }

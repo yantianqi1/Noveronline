@@ -1,4 +1,4 @@
-import { Check, ChevronRight, UsersRound } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import type {
@@ -17,7 +17,6 @@ import type {
 import { tx, type Locale } from "../lib/locale";
 import { InspectorPanel } from "./inspector-panel";
 import { SubmitButton } from "./submit-button";
-import { WorkspaceHeader } from "./workspace-header";
 import { WorkspaceModeSwitcher } from "./workspace-mode-switcher";
 
 type CharacterConsoleShellProps = {
@@ -102,7 +101,6 @@ export function CharacterConsoleShell({
   worldlineEvents,
   worldlineSessions,
 }: CharacterConsoleShellProps) {
-  const interactionCount = interactions.ok ? interactions.items.length : 0;
   const latestInteractionId = interactions.ok && interactions.items.length > 0
     ? interactions.items[0].interaction_id
     : "";
@@ -124,21 +122,6 @@ export function CharacterConsoleShell({
 
   return (
     <div className="character-console-root">
-      <WorkspaceHeader
-        className="character-console-header"
-        description={<Bi zh="与角色互动并采纳提案。" en="Talk with characters and adopt proposals." />}
-        icon={<UsersRound size={22} strokeWidth={1.8} />}
-        meta={(
-          <>
-            <span className="status-pill">{interactionCount} <Bi zh="次互动" en="interactions" /></span>
-            <span className="status-pill">
-              {worldlineSessions.ok ? worldlineSessions.items.length : "—"} <Bi zh="次推演" en="sessions" />
-            </span>
-          </>
-        )}
-        title={<Bi zh="角色" en="Characters" />}
-      />
-
       <div className="workbench-grid character-console-workbench">
         <main>
           <section className="panel" aria-labelledby="character-preparation-heading">

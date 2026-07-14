@@ -91,8 +91,8 @@ export function OverviewAnalysisWorkspacePanel({
         <section>
           <p className="form-hint">
             <Bi
-              zh="Pi 智能体写入的项目分析文件夹（计划 / 源切片 / 笔记 / 候选）。拆解结果会自动写入素材库，可直接在资产库使用。"
-              en="Project analysis folder written by the Pi agent (plan / source slices / notes / candidates). Results are auto-imported into the asset library."
+              zh="智能分析写入的项目文件夹（计划 / 源切片 / 笔记 / 候选）。拆解结果会自动写入素材库，可直接在资产库使用。"
+              en="Project analysis folder (plan / source slices / notes / candidates). Results are auto-imported into the asset library."
             />
           </p>
           {files.length === 0 ? (

@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, CircleAlert, X } from "lucide-react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type Locale, tx } from "../lib/locale";
@@ -22,17 +22,20 @@ type WriterTransientToastProps = {
 /**
  * Light auto-dismiss toast for writer admission feedback.
  * Replaces the permanent "操作已提交" strip above the composer.
- * Strips writerRunStatus* query params after show so refresh stays clean.
+ * Strips writerRunStatus* query params via history.replaceState so we never
+ * trigger a second RSC navigation (the double flash after server redirect).
  */
 export function WriterTransientToast({ locale, status }: WriterTransientToastProps) {
-  const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [toast, setToast] = useState<{ tone: ToastTone; text: string } | null>(null);
   const shownKeyRef = useRef<string>("");
 
   const clearStatusQuery = useCallback(() => {
-    const next = new URLSearchParams(searchParams.toString());
+    if (typeof window === "undefined") {
+      return;
+    }
+    const next = new URLSearchParams(window.location.search);
     let changed = false;
     for (const key of STATUS_KEYS) {
       if (next.has(key)) {
@@ -44,8 +47,10 @@ export function WriterTransientToast({ locale, status }: WriterTransientToastPro
       return;
     }
     const qs = next.toString();
-    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [pathname, router, searchParams]);
+    const href = qs ? `${pathname}?${qs}` : pathname;
+    // Soft URL clean only — avoid a second Next.js navigation flash.
+    window.history.replaceState(window.history.state, "", href);
+  }, [pathname]);
 
   const queryStatus = searchParams.get("writerRunStatus");
   const queryMessage = searchParams.get("writerRunMessage");
@@ -61,7 +66,7 @@ export function WriterTransientToast({ locale, status }: WriterTransientToastPro
     const rawMessage = queryMessage || status?.message || "";
     const message =
       toneRaw === "success"
-        ? rawMessage || tx(locale, "写作任务已加入队列，等待 Pi Writer 执行", "Writer run queued for Pi Writer")
+        ? rawMessage || tx(locale, "已开始处理", "Started")
         : humanizeFailure(locale, code, rawMessage || undefined);
     const key = `${toneRaw}:${code}:${message}`;
     if (shownKeyRef.current === key) {
@@ -113,7 +118,7 @@ export function WriterTransientToast({ locale, status }: WriterTransientToastPro
 
 /** Fallback copy helper for non-client call sites. */
 export function writerAdmissionSuccessCopy(locale: Locale) {
-  return tx(locale, "写作任务已加入队列", "Writer run queued");
+  return tx(locale, "已开始处理", "Started");
 }
 
 export function WriterTransientToastFallback() {

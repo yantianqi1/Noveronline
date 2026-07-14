@@ -3576,6 +3576,8 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 	// CONN-016: Pi dual-stage always needs writer_orchestrator + writer_composer.
 	// Prefer explicit module_key as the primary resolution stored on the run, but
 	// fail closed if any required module binding is missing before Temporal admit.
+	// Also reject orchestrator bindings that still lack effective tool support so
+	// authors do not queue a run that fails immediately in the Pi worker.
 	moduleKey := moduleKeyFromOptions(payload.Options)
 	requiredModules := requiredWriterRunModules(payload.Options)
 	var primaryResolution llm.ModuleResolution
@@ -3587,6 +3589,17 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		})
 		if err != nil {
 			writeLLMError(response, request, err)
+			return
+		}
+		if required == "writer_orchestrator" && !resolution.SupportsTools {
+			writeError(
+				response,
+				request,
+				http.StatusUnprocessableEntity,
+				"LLM_MODEL_TOOLS_UNSUPPORTED",
+				"writer_orchestrator binding must support tools",
+				nil,
+			)
 			return
 		}
 		if required == moduleKey || primaryResolution.ModuleKey == "" {
@@ -6812,6 +6825,8 @@ func llmPublicErrorMessage(code string) string {
 		return "LLM model sync status update failed"
 	case "LLM_MODULE_UNBOUND":
 		return "LLM module is not bound"
+	case "LLM_MODEL_TOOLS_UNSUPPORTED":
+		return "writer_orchestrator binding must support tools"
 	case "LLM_QUOTA_BACKEND_FAILED":
 		return "LLM quota backend failed"
 	case "LLM_BILLING_USAGE_QUERY_FAILED":
@@ -8888,6 +8903,8 @@ func publicDraftAdoptionErrorMessage(code string) string {
 		return "candidate draft not found"
 	case "VALIDATION_FAILED":
 		return "invalid draft adoption request"
+	case "UNAUTHENTICATED":
+		return "sign in is required to adopt a draft"
 	default:
 		return "draft adoption failed"
 	}
@@ -9012,6 +9029,8 @@ func statusForAppCode(code string) int {
 		return http.StatusNotFound
 	case "LLM_BINDING_NOT_FOUND":
 		return http.StatusNotFound
+	case "LLM_MODEL_TOOLS_UNSUPPORTED":
+		return http.StatusUnprocessableEntity
 	case "UNAUTHENTICATED":
 		return http.StatusUnauthorized
 	case "TRACE_ACCESS_DENIED":
@@ -9314,6 +9333,9 @@ func writeWriterEventsSSEHeldOpen(
 
 	status := strings.TrimSpace(initialStatus)
 	if !isActiveWriterRunStatus(status) {
+		// Reads are paginated; a finished run may still have pages beyond the
+		// initial batch. Drain them so the client receives the terminal event.
+		drainWriterEventsSSE(request, response, flusher, eventReader, tenantID, runID, cursor)
 		return
 	}
 
@@ -9365,6 +9387,9 @@ func writeWriterEventsSSEHeldOpen(
 				if run, err := runReader.GetWriterRun(request.Context(), workflows.GetWriterRunInput{TenantID: tenantID, RunID: runID}); err == nil {
 					status = run.Status
 					if !isActiveWriterRunStatus(status) {
+						// The run reached a terminal status between pages; flush any
+						// remaining event pages (including the terminal event) first.
+						drainWriterEventsSSE(request, response, flusher, eventReader, tenantID, runID, cursor)
 						return
 					}
 				}
@@ -9374,6 +9399,54 @@ func writeWriterEventsSSEHeldOpen(
 			if flusher != nil {
 				flusher.Flush()
 			}
+		}
+	}
+}
+
+// drainWriterEventsSSE pages through stored writer events from cursor onward and
+// writes every page to the stream, stopping at a terminal event, an empty page,
+// or client disconnect. Used when the run is already terminal so the paginated
+// reader (default page size 100) does not strand events past the first page.
+func drainWriterEventsSSE(
+	request *http.Request,
+	response http.ResponseWriter,
+	flusher http.Flusher,
+	eventReader workflows.WriterEventReader,
+	tenantID string,
+	runID string,
+	cursor string,
+) {
+	if eventReader == nil {
+		return
+	}
+	for {
+		if request.Context().Err() != nil {
+			return
+		}
+		next, err := eventReader.ListWriterEvents(request.Context(), workflows.ListWriterEventsInput{
+			TenantID:     tenantID,
+			RunID:        runID,
+			AfterEventID: cursor,
+		})
+		if err != nil || len(next) == 0 {
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+		next = sanitizeWriterEvents(next)
+		for _, event := range next {
+			writeWriterEventSSEFrame(response, event)
+			cursor = event.EventID
+			if isTerminalWriterEventType(event.EventType) {
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 }

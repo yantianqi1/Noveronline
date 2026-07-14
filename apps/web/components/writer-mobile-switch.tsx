@@ -1,57 +1,33 @@
 "use client";
 
-import { Bot, ListTree, PenLine } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Bot, PenLine } from "lucide-react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 
 import { type Locale, tx } from "../lib/locale";
-
-type WriterMobileView = "structure" | "manuscript" | "agent";
+import { useWriterWorkbench, type WriterMobileView } from "./writer-workbench-context";
 
 type WriterMobileSwitchProps = {
   locale: Locale;
-  hasStructure: boolean;
+  /** Kept for call-site compatibility; structure rail is retired in doc 36 W4. */
+  hasStructure?: boolean;
 };
 
 /**
- * Mobile-only region switch for the manuscript-primary writer layout.
- *
- * The three regions (`writer-structure-rail`, `writer-artifact-canvas`,
- * `writer-agent-dock`) are server-rendered in the shell. On desktop this
- * control is hidden and the CSS grid shows every region, so the established
- * layout is untouched. On narrow screens it drives `data-mobile-view` on the
- * sibling `.writer-agent-layout`, and the CSS shows only the selected region —
- * turning a long triple-stacked scroll into focused, switchable panes.
+ * Mobile two-pane switch (doc 36 W5): conversation | artifact.
+ * Supports horizontal swipe on the writer layout and a badge when a candidate is ready.
  */
-const WRITER_MOBILE_VIEW_KEY = "mirofish-writer-mobile-view";
-
-function readStoredMobileView(hasStructure: boolean): WriterMobileView {
-  if (typeof window === "undefined") {
-    return "agent";
-  }
-  try {
-    const stored = window.localStorage.getItem(WRITER_MOBILE_VIEW_KEY);
-    if (stored === "agent" || stored === "manuscript") {
-      return stored;
-    }
-    if (stored === "structure" && hasStructure) {
-      return "structure";
-    }
-  } catch {
-    // ignore storage failures
-  }
-  // Phone-first default: open on the Agent conversation surface.
-  return "agent";
-}
-
-export function WriterMobileSwitch({ locale, hasStructure }: WriterMobileSwitchProps) {
-  const [view, setView] = useState<WriterMobileView>("agent");
+export function WriterMobileSwitch({ locale }: WriterMobileSwitchProps) {
+  const workbench = useWriterWorkbench();
+  const view = workbench?.mobileView ?? "conversation";
+  const setView = workbench?.setMobileView;
+  const artifactBadge = workbench?.artifactBadge === true;
+  const clearArtifactBadge = workbench?.clearArtifactBadge;
   const navRef = useRef<HTMLElement>(null);
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
 
   const layoutElement = useCallback(() => {
     const nav = navRef.current;
-    if (!nav) {
-      return null;
-    }
+    if (!nav) return null;
     let sibling = nav.nextElementSibling;
     while (sibling && !sibling.classList.contains("writer-agent-layout")) {
       sibling = sibling.nextElementSibling;
@@ -60,44 +36,77 @@ export function WriterMobileSwitch({ locale, hasStructure }: WriterMobileSwitchP
   }, []);
 
   useEffect(() => {
-    setView(readStoredMobileView(hasStructure));
-  }, [hasStructure]);
-
-  useEffect(() => {
     const layout = layoutElement();
     if (layout) {
       layout.dataset.mobileView = view;
     }
-    try {
-      window.localStorage.setItem(WRITER_MOBILE_VIEW_KEY, view);
-    } catch {
-      // ignore storage failures
-    }
   }, [view, layoutElement]);
 
-  const views: { id: WriterMobileView; label: string; icon: ReactNode; show: boolean }[] = [
-    { id: "structure", label: tx(locale, "结构", "Structure"), icon: <ListTree aria-hidden="true" size={17} />, show: hasStructure },
-    { id: "manuscript", label: tx(locale, "手稿", "Manuscript"), icon: <PenLine aria-hidden="true" size={17} />, show: true },
-    { id: "agent", label: tx(locale, "写作 Agent", "Agent"), icon: <Bot aria-hidden="true" size={17} />, show: true },
+  useEffect(() => {
+    const layout = layoutElement();
+    if (!layout || !setView) return;
+
+    const onTouchStart = (event: Event) => {
+      const touchEvent = event as globalThis.TouchEvent;
+      const touch = touchEvent.changedTouches[0];
+      if (!touch) return;
+      touchStart.current = { x: touch.clientX, y: touch.clientY };
+    };
+
+    const onTouchEnd = (event: Event) => {
+      const start = touchStart.current;
+      touchStart.current = null;
+      const touchEvent = event as globalThis.TouchEvent;
+      const touch = touchEvent.changedTouches[0];
+      if (!start || !touch) return;
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+      if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+      if (dx < 0) {
+        setView("artifact");
+        clearArtifactBadge?.();
+      } else {
+        setView("conversation");
+      }
+    };
+
+    layout.addEventListener("touchstart", onTouchStart, { passive: true });
+    layout.addEventListener("touchend", onTouchEnd, { passive: true });
+    return () => {
+      layout.removeEventListener("touchstart", onTouchStart);
+      layout.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [layoutElement, setView, clearArtifactBadge]);
+
+  const views: { id: WriterMobileView; label: string; icon: ReactNode; badge?: boolean }[] = [
+    { id: "conversation", label: tx(locale, "对话", "Chat"), icon: <Bot aria-hidden="true" size={17} /> },
+    {
+      id: "artifact",
+      label: tx(locale, "产物", "Canvas"),
+      icon: <PenLine aria-hidden="true" size={17} />,
+      badge: artifactBadge,
+    },
   ];
 
   return (
     <nav className="writer-mobile-switch" aria-label={tx(locale, "切换写作区域", "Switch writer region")} ref={navRef}>
-      {views
-        .filter((entry) => entry.show)
-        .map((entry) => (
-          <button
-            aria-pressed={view === entry.id}
-            className="writer-mobile-switch-tab"
-            data-active={view === entry.id ? "true" : "false"}
-            key={entry.id}
-            onClick={() => setView(entry.id)}
-            type="button"
-          >
-            {entry.icon}
-            <span>{entry.label}</span>
-          </button>
-        ))}
+      {views.map((entry) => (
+        <button
+          aria-pressed={view === entry.id}
+          className="writer-mobile-switch-tab"
+          data-active={view === entry.id ? "true" : "false"}
+          key={entry.id}
+          onClick={() => {
+            setView?.(entry.id);
+            if (entry.id === "artifact") clearArtifactBadge?.();
+          }}
+          type="button"
+        >
+          {entry.icon}
+          <span>{entry.label}</span>
+          {entry.badge ? <span aria-hidden="true" className="writer-mobile-switch-badge" /> : null}
+        </button>
+      ))}
     </nav>
   );
 }

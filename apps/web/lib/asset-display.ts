@@ -33,6 +33,8 @@ export type StructuredField = {
 export type StructuredAssetBody = {
   fields: StructuredField[];
   prose: string;
+  /** Non-empty only when summary is not a duplicate of prose. */
+  summaryDistinct: string;
   rawPayload: Record<string, unknown> | null;
 };
 
@@ -229,15 +231,44 @@ export function structureAssetBody(input: {
   if (prose && isTypeKeyTitle(prose)) {
     prose = "";
   }
-  if (summary && !isTypeKeyTitle(summary) && prose === summary) {
-    // keep prose; summary section may also show it — fine for notes
+
+  // Drop structured field rows that merely echo the prose (e.g. world_rule rule_text).
+  if (prose) {
+    const proseNorm = normalizeDisplayText(prose);
+    for (let i = fields.length - 1; i >= 0; i -= 1) {
+      if (normalizeDisplayText(fields[i].value) === proseNorm) {
+        fields.splice(i, 1);
+      }
+    }
   }
 
   return {
     fields,
     prose: prose.length > 4000 ? `${prose.slice(0, 4000)}…` : prose,
+    /** Distinct short summary for the preview header; empty when it equals body. */
+    summaryDistinct: distinctSummary(summary, prose),
     rawPayload: payload && Object.keys(payload).length > 0 ? payload : null,
   };
+}
+
+function normalizeDisplayText(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Keep a summary only when it adds information beyond the body prose.
+ * Analysis imports often copy the same English/Chinese paragraph into both fields.
+ */
+export function distinctSummary(summary: string, prose: string): string {
+  const s = String(summary ?? "").trim();
+  if (!s || isTypeKeyTitle(s)) return "";
+  const p = String(prose ?? "").trim();
+  if (!p) return s;
+  if (normalizeDisplayText(s) === normalizeDisplayText(p)) return "";
+  // Summary that is only a truncated prefix of the body is still redundant.
+  if (p.startsWith(s) && p.length > s.length) return "";
+  if (s.startsWith(p) && s.length <= p.length + 8) return "";
+  return s;
 }
 
 export function formatRawPayloadJson(payload: Record<string, unknown> | null | undefined): string {

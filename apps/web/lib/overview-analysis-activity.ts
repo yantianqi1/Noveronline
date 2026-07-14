@@ -1,6 +1,7 @@
 import { formatBeijingTime } from "./beijing-time";
 import { type Locale, tx } from "./locale";
 import type { WorkflowRunEvent } from "./api";
+import { scrubInternalRuntimeBranding } from "./user-facing-copy";
 
 export type OverviewActivityLogLine = {
   id: string;
@@ -31,8 +32,8 @@ export function analysisStageLabel(locale: Locale, stage: string) {
   const labels: Record<string, [string, string]> = {
     bootstrap: ["准备分析工作区", "Prepare analysis workspace"],
     preprocess: ["读取并分段原文", "Read and segment source"],
-    analysis_planner: ["Pi 规划任务", "Pi planner"],
-    analysis_worker: ["Pi 执行拆解", "Pi worker"],
+    analysis_planner: ["规划分析任务", "Plan analysis tasks"],
+    analysis_worker: ["执行文本拆解", "Run text analysis"],
     candidates: ["整理并入库", "Collect and import"],
     finalize: ["收尾", "Finalize"],
   };
@@ -108,8 +109,8 @@ export function publicAnalysisFailureHint(locale: Locale, code: string) {
   if (code === "ANALYSIS_RUNTIME_UNCONFIGURED") {
     return tx(
       locale,
-      "分析运行时未正确接入 Pi 智能体。请重建 analysis worker 后重试。",
-      "Analysis runtime is not wired to the Pi agent. Rebuild the analysis worker and retry.",
+      "分析服务暂不可用，请稍后重试。",
+      "The analysis service is temporarily unavailable. Try again shortly.",
     );
   }
   if (code === "SOURCE_TEXT_UNAVAILABLE" || code === "SOURCE_SEGMENTS_EMPTY") {
@@ -122,8 +123,8 @@ export function publicAnalysisFailureHint(locale: Locale, code: string) {
   if (code === "SOURCE_FORMAT_UNSUPPORTED") {
     return tx(
       locale,
-      "当前 Pi 分析仅支持纯文本/Markdown 上传。",
-      "Pi analysis currently supports plain text/Markdown uploads only.",
+      "当前分析仅支持纯文本/Markdown 上传。",
+      "Analysis currently supports plain text/Markdown uploads only.",
     );
   }
   if (code === "OBJECT_STORAGE_UNCONFIGURED" || code === "OBJECT_STORAGE_READ_FAILED") {
@@ -143,8 +144,8 @@ export function publicAnalysisFailureHint(locale: Locale, code: string) {
   if (code === "ANALYSIS_ARTIFACTS_INCOMPLETE") {
     return tx(
       locale,
-      "Pi 分析未产出完整工作区结果，请重试。",
-      "Pi analysis did not produce complete workspace artifacts. Retry the run.",
+      "分析未产出完整结果，请重试。",
+      "Analysis did not produce complete results. Please retry.",
     );
   }
   return "";
@@ -157,7 +158,9 @@ export function analysisActivityLineFromEvent(
   const timeLabel = formatBeijingTime(locale, event.created_at);
   const stage = analysisStageFromEvent(event);
   const stageLabel = stage ? analysisStageLabel(locale, stage) : "";
-  const payloadMessage = typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+  const payloadMessage = typeof event.payload?.message === "string"
+    ? scrubInternalRuntimeBranding(event.payload.message.trim())
+    : "";
   const path = typeof event.payload?.path === "string" ? event.payload.path : "";
 
   if (event.event_type === "workflow.queued") {
@@ -172,7 +175,7 @@ export function analysisActivityLineFromEvent(
     return {
       id: event.event_id || `started-${event.sequence}`,
       tone: "running",
-      message: tx(locale, "Pi 分析已开始", "Pi analysis started"),
+      message: tx(locale, "分析已开始", "Analysis started"),
       timeLabel: timeLabel || null,
     };
   }
@@ -252,7 +255,7 @@ export function analysisActivityLineFromEvent(
     return {
       id: event.event_id || `completed-${event.sequence}`,
       tone: "done",
-      message: tx(locale, "Pi 分析完成，素材已入库", "Pi analysis completed; materials imported"),
+      message: tx(locale, "分析完成，素材已入库", "Analysis completed; materials imported"),
       timeLabel: timeLabel || null,
     };
   }
@@ -262,7 +265,7 @@ export function analysisActivityLineFromEvent(
     return {
       id: event.event_id || `failed-${event.sequence}`,
       tone: "failed",
-      message: payloadMessage || hint || tx(locale, "Pi 分析失败", "Pi analysis failed"),
+      message: payloadMessage || hint || tx(locale, "分析失败", "Analysis failed"),
       timeLabel: timeLabel || null,
     };
   }

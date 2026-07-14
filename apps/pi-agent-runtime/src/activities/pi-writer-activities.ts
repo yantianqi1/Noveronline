@@ -849,7 +849,10 @@ async function runDualStagePiWriterActivity(
 
     const orchestrator = await resolveRequiredModule(deps, input, "writer_orchestrator");
     if (!orchestrator.supports_tools) {
-      throw runtimeFailure("LLM_PROVIDER_ERROR", "writer_orchestrator binding must support tools");
+      throw runtimeFailure(
+        "LLM_MODEL_TOOLS_UNSUPPORTED",
+        "writer_orchestrator binding must support tools",
+      );
     }
     const orchestratorCall = await executeLLMStage(
       deps,

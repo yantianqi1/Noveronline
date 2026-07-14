@@ -21,7 +21,35 @@ test("overview header does not show project status / active analysis pills", asy
   assert.match(live, /实时 SSE|Live SSE/);
 });
 
-test("overview primary path starts Pi analysis runs instead of seed_pipeline", async () => {
+test("author-facing UI copy never names the Pi runtime vendor", async () => {
+  const files = [
+    "lib/user-facing-copy.ts",
+    "lib/overview-analysis-activity.ts",
+    "lib/author-copy.ts",
+    "components/overview-analysis-workspace-panel.tsx",
+    "components/overview-seed-shell.tsx",
+    "components/materials-hub.tsx",
+    "components/writer-agent-thread.tsx",
+    "components/writer-home-state.tsx",
+  ];
+  for (const relative of files) {
+    let text = await fileText(relative);
+    // Scrub helper may mention vendor tokens in regex patterns; those are not UI copy.
+    text = text.replace(/export function scrubInternalRuntimeBranding[\s\S]*?\n\}/, "");
+    text = text.replace(/function inferFailureCodeFromMessage[\s\S]*?\n\}/, "");
+    assert.doesNotMatch(
+      text,
+      /["'`][^"'`]{0,80}\bPi\s+(Writer|agent|analysis|planner|worker|智能体|分析|拆解|规划|执行)/i,
+      `${relative} must not expose Pi vendor branding in UI strings`,
+    );
+  }
+  const copy = await fileText("lib/user-facing-copy.ts");
+  assert.match(copy, /scrubInternalRuntimeBranding/);
+  assert.match(copy, /写作助手暂时不可用/);
+  assert.doesNotMatch(copy, /PI_WRITER_UNAVAILABLE:\s*\[["']Pi /);
+});
+
+test("overview primary path starts analysis runs instead of seed_pipeline", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
   const form = await fileText("components/overview-seed-upload-form.tsx");
   const shell = await fileText("components/overview-seed-shell.tsx");

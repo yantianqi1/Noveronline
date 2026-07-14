@@ -97,10 +97,12 @@ test("Overview empty project exposes dual idea-first and upload entries", async 
   ]);
 
   assert.match(shell, /EmptyProjectDualEntry|data-empty-project-entry/);
-  assert.match(shell, /从一个想法开始|Start from an idea/);
+  assert.match(shell, /打开写作台|Open Writer/);
+  assert.match(shell, /从一个想法建立首章|Bootstrap from an idea|从一个想法开始|Start from an idea/);
   assert.match(shell, /上传已有文本|Upload existing text/);
   assert.match(shell, /bootstrapIdeaAction/);
-  assert.match(shell, /从一个想法开始|Start from an idea|创建最小书籍计划|Create a minimal book plan/i);
+  assert.match(shell, /overview-dual-entry-slim|overview-primary-writer-link/);
+  assert.match(shell, /创建一个?最小书籍计划|Create a minimal book plan|建立并进入写作台/i);
   assert.doesNotMatch(shell, /必须先上传|must upload before writing/i);
   assert.match(page, /bootstrapIdeaAction/);
   assert.match(page, /createBookPlan/);

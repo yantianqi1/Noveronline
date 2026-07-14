@@ -304,8 +304,7 @@ export function WriterManuscriptPanelClient({
             onChange={(event) => setStatusValue(event.target.value)}
           >
             <option value="active">{tx(locale, "进行中", "Active")}</option>
-            <option value="draft">{tx(locale, "草稿", "Draft")}</option>
-            <option value="archived">{tx(locale, "已归档", "Archived")}</option>
+            <option value="deleted">{tx(locale, "已删除", "Deleted")}</option>
           </select>
           <button data-tone="primary" type="submit">
             <Save size={14} />

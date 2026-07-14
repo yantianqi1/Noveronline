@@ -35,6 +35,7 @@ export function connectWriterEventStream(options: {
   let cursor = latestWriterCursor(events);
   let failureStreak = 0;
   let pollTimer: number | null = null;
+  let reconnectTimer: number | null = null;
   let eventSource: EventSource | null = null;
   let transport: WriterStreamTransport = "idle";
 
@@ -129,12 +130,19 @@ export function connectWriterEventStream(options: {
       if (closed) return;
       failureStreak += 1;
       handlers.onConnection(failureStreak >= 3 ? "interrupted" : "reconnecting", "sse");
-      // Fall back to polling after sustained SSE failure.
+      // Never let EventSource auto-reconnect: its URL keeps the connect-time
+      // after_event_id, so the server would replay the same batch forever.
+      // Reconnect manually with the advanced cursor; poll after repeated failure.
+      eventSource?.close();
+      eventSource = null;
       if (failureStreak >= 2) {
-        eventSource?.close();
-        eventSource = null;
         startPolling();
+        return;
       }
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        startSSE();
+      }, 800);
     };
   };
 
@@ -143,6 +151,10 @@ export function connectWriterEventStream(options: {
     if (pollTimer !== null) {
       window.clearInterval(pollTimer);
       pollTimer = null;
+    }
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
     }
     eventSource?.close();
     eventSource = null;

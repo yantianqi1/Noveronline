@@ -1,21 +1,14 @@
 import {
   Activity,
-  Bot,
-  Check,
   ChevronDown,
-  ChevronRight,
   CircleStop,
   Download,
   FileCheck2,
-  LoaderCircle,
   Paperclip,
-  PenLine,
   RefreshCcw,
   RotateCw,
-  Sparkles,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { Suspense } from "react";
 
 import { type Locale, tx } from "../lib/locale";
 import type {
@@ -31,16 +24,15 @@ import type {
 } from "../lib/api";
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import { PublicErrorNotice } from "./public-error-notice";
-import { SubmitButton } from "./submit-button";
 import { TechnicalDetailsDrawer } from "./technical-details-drawer";
-import { WorkspaceHeader } from "./workspace-header";
-import { WriterLiveDraft } from "./writer-live-draft";
+import { WriterCandidateSheet, type DraftAdoptionActionResult } from "./writer-candidate-sheet";
 import { WriterCommandPalette, WriterCommandPaletteTrigger } from "./writer-command-palette";
-import { WriterComposerInput } from "./writer-composer-input";
+import { type WriterRunActionResult } from "./writer-agent-composer";
+import { WriterAgentThread } from "./writer-agent-thread";
 import { WriterComposerKeyboard } from "./writer-composer-keyboard";
+import { WriterHomeState } from "./writer-home-state";
 import { WriterMobileSwitch } from "./writer-mobile-switch";
-import { writerModeLabel } from "./writer-mode-picker";
-import { WriterTransientToast } from "./writer-transient-toast";
+import { WriterHomeOrTask, WriterRunSessionProvider } from "./writer-run-session";
 import { WriterWorkbenchProvider } from "./writer-workbench-context";
 
 type WriterWorkbenchShellProps = {
@@ -67,9 +59,9 @@ type WriterWorkbenchShellProps = {
   selectedChapterId?: string;
   selectedSceneId?: string;
   manuscriptExportArtifact?: WriterManuscriptExportArtifact | null;
-  writerRunAction?: (formData: FormData) => Promise<void>;
+  writerRunAction?: (formData: FormData) => Promise<WriterRunActionResult>;
   exportTraceAction?: (formData: FormData) => Promise<void>;
-  adoptDraftAction?: (formData: FormData) => Promise<void>;
+  adoptDraftAction?: (formData: FormData) => Promise<DraftAdoptionActionResult>;
   exportManuscriptAction?: (formData: FormData) => Promise<void>;
   cancelWriterRunAction?: (formData: FormData) => Promise<void>;
   decideApprovalAction?: (formData: FormData) => Promise<void>;
@@ -113,7 +105,7 @@ export function WriterWorkbenchShell({
   selectedTraceId,
   writerRunStatus,
   traceExportStatus,
-  draftAdoptionStatus = null,
+  draftAdoptionStatus: _draftAdoptionStatus = null,
   manuscriptExportStatus = null,
   writerControlStatus = null,
   selectedDraftId = "",
@@ -127,15 +119,9 @@ export function WriterWorkbenchShell({
   cancelWriterRunAction,
   decideApprovalAction,
   productWorkspace,
-  structureNav,
+  structureNav: _structureNav,
   threadMessages = [],
 }: WriterWorkbenchShellProps) {
-  const statusLabel =
-    runSummary?.ok === true
-      ? runSummary.status
-      : runSummary?.ok === false
-        ? tx(locale, "错误", "error")
-        : tx(locale, "空闲", "idle");
   const traceId = runSummary?.ok === true ? runSummary.trace_id : "";
   const replayRunId = runSummary?.ok === true ? runSummary.run_id : selectedRunId;
   const replayTraceId = selectedTraceId || traceId;
@@ -145,313 +131,173 @@ export function WriterWorkbenchShell({
     : false;
   const latestRecoveredEvent = latestWriterEvent(workflowEvents);
   const runActive = runSummary?.ok === true && isActiveWriterStatus(runSummary.status);
+  const showHomeState =
+    Boolean(writerRunAction) &&
+    runSummary?.ok !== true &&
+    threadMessages.length === 0 &&
+    !recoveredDraftId;
 
   return (
-    <div className="writer-root">
+    <div className="writer-root" data-home={showHomeState ? "true" : "false"}>
       <WriterWorkbenchProvider>
       <WriterComposerKeyboard />
-      <WorkspaceHeader
-        actions={
-          <>
-            <WriterRunStateChip active={runActive} isError={runSummary?.ok === false} label={statusLabel} locale={locale} />
-            <span className="writer-sync-chip" title={tx(locale, "所有更改在提交时即时保存到服务器", "All changes are saved to the server on submit")}>
-              <Check aria-hidden="true" size={14} />
-              <Bi zh="已同步" en="Synced" />
-            </span>
-            <WriterCommandPaletteTrigger locale={locale} />
-            <TechnicalDetailsDrawer
-              description={<Bi zh="恢复、回放与支持信息" en="Recovery, replay, and support information" />}
-              label={<><Activity aria-hidden="true" size={16} /><Bi zh="技术详情" en="Technical details" /></>}
-            >
-            <WriterDiagnostics
-              afterEventId={afterEventId}
-              draftId={recoveredDraftId}
-              exportTraceAction={exportTraceAction}
-              latestEvent={latestRecoveredEvent}
-              locale={locale}
-              replayRunId={replayRunId}
-              replayTraceId={replayTraceId}
-              runSummary={runSummary}
-              selectedRunId={selectedRunId}
-              selectedTraceId={selectedTraceId}
-              tenantSlug={tenantSlug}
-              projectId={projectId}
-              traceEvents={traceEvents}
-              traceExportStatus={traceExportStatus}
-              workflowEvents={workflowEvents}
-            />
-          </TechnicalDetailsDrawer>
-          </>
-        }
-        className="writer-header"
-        eyebrow={
-          <nav className="writer-breadcrumb" aria-label={tx(locale, "面包屑导航", "Breadcrumb")}>
-            <a className="writer-breadcrumb-link" href={`/${tenantSlug}/projects/${projectId}/overview`}>
-              <Bi zh="项目总览" en="Project overview" />
-            </a>
-            <ChevronRight aria-hidden="true" size={13} />
-            <span aria-current="page"><Bi zh="写作 Agent" en="Writer Agent" /></span>
-          </nav>
-        }
-        icon={<Bot size={22} strokeWidth={1.8} />}
-        title={<Bi zh="写作台" en="Writer" />}
-      />
 
-      <WriterMobileSwitch locale={locale} hasStructure={Boolean(structureNav)} />
-      <div className="writer-agent-layout" data-layout="manuscript-primary" data-has-structure={structureNav ? "true" : "false"} data-mobile-view="agent">
-        {structureNav ? (
-          <nav className="writer-structure-rail" aria-label={tx(locale, "创作结构导航", "Manuscript structure")}>
-            {structureNav}
-          </nav>
-        ) : null}
-        <main className="writer-artifact-canvas" aria-label={tx(locale, "稿件工作区", "Manuscript workspace")}>
-          <div className="writer-artifact-heading">
-            <div>
-              <p className="eyebrow"><Bi zh="当前作品" en="Current work" /></p>
-              <h2><Bi zh="稿件与创作结构" en="Manuscript and structure" /></h2>
-            </div>
-            <span>{manuscript.ok ? manuscript.blocks.length : 0} <Bi zh="段" en="blocks" /></span>
-          </div>
-          {productWorkspace}
-          <details className="writer-artifact-meta">
-            <summary>
-              <span><FileCheck2 aria-hidden="true" size={16} /><Bi zh="稿件状态与导出" en="Manuscript status and export" /></span>
-              <ChevronDown aria-hidden="true" size={16} />
-            </summary>
-            <div className="writer-artifact-meta-content">
-              <section className={manuscript.ok ? "" : "error-box"} aria-labelledby="manuscript-metadata-heading">
-                <h3 id="manuscript-metadata-heading"><Bi zh="手稿元数据" en="Manuscript metadata" /></h3>
-                <ManuscriptMetadataPanel locale={locale} manuscript={manuscript} />
-              </section>
-              <section
-                className={manuscriptExportManifest.ok && manuscriptExportStatus?.status !== "error" ? "" : "error-box"}
-                aria-labelledby="manuscript-export-heading"
+      <WriterRunSessionProvider
+        initialEvents={workflowEvents?.ok === true ? workflowEvents.items : []}
+        projectId={projectId}
+        serverActive={runActive}
+        serverRunId={runSummary?.ok === true ? runSummary.run_id : selectedRunId}
+        tenantSlug={tenantSlug}
+      >
+        <WriterHomeOrTask
+          showHomeInitially={Boolean(showHomeState && writerRunAction)}
+          home={
+            writerRunAction ? (
+              <WriterHomeState
+                contextPickers={
+                  <ContextPickers
+                    assets={assets}
+                    graphView={graphView}
+                    locale={locale}
+                    worldlineSavedPaths={worldlineSavedPaths}
+                  />
+                }
+                locale={locale}
+                recentItems={recentItemsFromManuscript(locale, tenantSlug, projectId, manuscript)}
+                selectedChapterId={selectedChapterId}
+                selectedSceneId={selectedSceneId}
+                writerRunAction={writerRunAction}
+              />
+            ) : null
+          }
+          task={
+            <>
+              <WriterMobileSwitch locale={locale} />
+              <div
+                className="writer-agent-layout"
+                data-layout="conversation-first"
+                data-has-structure="false"
+                data-mobile-view="conversation"
               >
-                <h3 id="manuscript-export-heading"><Bi zh="导出正文" en="Export manuscript" /></h3>
-                <ManuscriptExportManifestPanel
-                  artifact={manuscriptExportArtifact}
-                  exportAction={exportManuscriptAction}
-                  locale={locale}
-                  manifest={manuscriptExportManifest}
-                  status={manuscriptExportStatus}
-                />
-              </section>
-            </div>
-          </details>
-        </main>
+                <main className="writer-artifact-canvas" aria-label={tx(locale, "稿件工作区", "Manuscript workspace")}>
+                  <aside className="writer-canvas-tools" aria-label={tx(locale, "写作工具", "Writer tools")}>
+                    <WriterCommandPaletteTrigger locale={locale} />
+                    <TechnicalDetailsDrawer
+                      description={<Bi zh="恢复、回放与支持信息" en="Recovery, replay, and support information" />}
+                      label={<><Activity aria-hidden="true" size={16} /><Bi zh="技术详情" en="Technical details" /></>}
+                    >
+                      <WriterDiagnostics
+                        afterEventId={afterEventId}
+                        draftId={recoveredDraftId}
+                        exportTraceAction={exportTraceAction}
+                        latestEvent={latestRecoveredEvent}
+                        locale={locale}
+                        replayRunId={replayRunId}
+                        replayTraceId={replayTraceId}
+                        runSummary={runSummary}
+                        selectedRunId={selectedRunId}
+                        selectedTraceId={selectedTraceId}
+                        tenantSlug={tenantSlug}
+                        projectId={projectId}
+                        traceEvents={traceEvents}
+                        traceExportStatus={traceExportStatus}
+                        workflowEvents={workflowEvents}
+                      />
+                    </TechnicalDetailsDrawer>
+                  </aside>
+                  <div className="writer-canvas-stage">
+                    <WriterCandidateSheet
+                      adoptDraftAction={adoptDraftAction}
+                      adopted={draftIsAdopted}
+                      chapterId={selectedChapterId}
+                      draftId={recoveredDraftId}
+                      initialEvents={workflowEvents?.ok === true ? workflowEvents.items : []}
+                      locale={locale}
+                    />
+                    {productWorkspace}
+                    <details className="writer-artifact-meta">
+                      <summary>
+                        <span>
+                          <FileCheck2 aria-hidden="true" size={16} />
+                          <Bi zh="稿件状态与导出" en="Manuscript status and export" />
+                        </span>
+                        <ChevronDown aria-hidden="true" size={16} />
+                      </summary>
+                      <div className="writer-artifact-meta-content">
+                        <section className={manuscript.ok ? "" : "error-box"} aria-labelledby="manuscript-metadata-heading">
+                          <h3 id="manuscript-metadata-heading">
+                            <Bi zh="手稿元数据" en="Manuscript metadata" />
+                          </h3>
+                          <ManuscriptMetadataPanel locale={locale} manuscript={manuscript} />
+                        </section>
+                        <section
+                          className={
+                            manuscriptExportManifest.ok && manuscriptExportStatus?.status !== "error"
+                              ? ""
+                              : "error-box"
+                          }
+                          aria-labelledby="manuscript-export-heading"
+                        >
+                          <h3 id="manuscript-export-heading">
+                            <Bi zh="导出正文" en="Export manuscript" />
+                          </h3>
+                          <ManuscriptExportManifestPanel
+                            artifact={manuscriptExportArtifact}
+                            exportAction={exportManuscriptAction}
+                            locale={locale}
+                            manifest={manuscriptExportManifest}
+                            status={manuscriptExportStatus}
+                          />
+                        </section>
+                      </div>
+                    </details>
+                  </div>
+                </main>
 
-        <aside className="writer-agent-dock" aria-label={tx(locale, "写作 Agent", "Writer Agent")}>
-          <WriterAgentThread
-            adoptDraftAction={adoptDraftAction}
-            assets={assets}
-            cancelWriterRunAction={cancelWriterRunAction}
-            decideApprovalAction={decideApprovalAction}
-            draftAdoptionStatus={draftAdoptionStatus}
-            draftIsAdopted={draftIsAdopted}
-            graphView={graphView}
-            locale={locale}
-            projectId={projectId}
-            tenantSlug={tenantSlug}
-            recoveredDraftId={recoveredDraftId}
-            runActive={runActive}
-            runSummary={runSummary}
-            selectedChapterId={selectedChapterId}
-            selectedSceneId={selectedSceneId}
-            threadMessages={threadMessages}
-            workflowEvents={workflowEvents}
-            worldlineSavedPaths={worldlineSavedPaths}
-            writerControlStatus={writerControlStatus}
-            writerRunAction={writerRunAction}
-            writerRunStatus={writerRunStatus}
-          />
-        </aside>
-      </div>
+                <aside className="writer-agent-dock" aria-label={tx(locale, "写作 Agent", "Writer Agent")}>
+                  <WriterAgentThread
+                    contextPickers={
+                      <ContextPickers
+                        assets={assets}
+                        graphView={graphView}
+                        locale={locale}
+                        worldlineSavedPaths={worldlineSavedPaths}
+                      />
+                    }
+                    decideApprovalAction={decideApprovalAction}
+                    draftIsAdopted={draftIsAdopted}
+                    locale={locale}
+                    projectId={projectId}
+                    recoveredDraftId={recoveredDraftId}
+                    runActive={runActive}
+                    runControl={
+                      runSummary?.ok === true ? (
+                        <WriterRunControl
+                          action={cancelWriterRunAction}
+                          runId={runSummary.run_id}
+                          runStatus={runSummary.status}
+                          status={writerControlStatus}
+                        />
+                      ) : null
+                    }
+                    runSummary={runSummary}
+                    selectedChapterId={selectedChapterId}
+                    selectedSceneId={selectedSceneId}
+                    tenantSlug={tenantSlug}
+                    threadMessages={threadMessages}
+                    workflowEvents={workflowEvents}
+                    writerRunAction={writerRunAction}
+                    writerRunStatus={writerRunStatus}
+                  />
+                </aside>
+              </div>
+            </>
+          }
+        />
+      </WriterRunSessionProvider>
       <WriterCommandPalette locale={locale} />
       </WriterWorkbenchProvider>
     </div>
-  );
-}
-
-function WriterRunStateChip({
-  active,
-  isError,
-  label,
-  locale,
-}: {
-  active: boolean;
-  isError: boolean;
-  label: string;
-  locale: Locale;
-}) {
-  const state = isError ? "error" : active ? "active" : "idle";
-  return (
-    <span className="writer-run-state-chip" data-state={state} title={tx(locale, "写作运行状态", "Writer run state")}>
-      <span aria-hidden="true" className="writer-run-state-dot" />
-      <span className="writer-run-state-label"><Bi zh="状态：" en="Status: " />{label}</span>
-    </span>
-  );
-}
-
-function WriterAgentThread({
-  adoptDraftAction,
-  assets,
-  cancelWriterRunAction,
-  decideApprovalAction,
-  draftAdoptionStatus,
-  draftIsAdopted,
-  graphView,
-  locale,
-  projectId,
-  tenantSlug,
-  recoveredDraftId,
-  runActive,
-  runSummary,
-  selectedChapterId,
-  selectedSceneId,
-  threadMessages,
-  workflowEvents,
-  worldlineSavedPaths,
-  writerControlStatus,
-  writerRunAction,
-  writerRunStatus,
-}: {
-  adoptDraftAction?: (formData: FormData) => Promise<void>;
-  assets: AssetListSummary;
-  cancelWriterRunAction?: (formData: FormData) => Promise<void>;
-  decideApprovalAction?: (formData: FormData) => Promise<void>;
-  draftAdoptionStatus: ActionStatus | null;
-  draftIsAdopted: boolean;
-  graphView: StoryGraphViewSummary;
-  locale: Locale;
-  projectId: string;
-  tenantSlug: string;
-  recoveredDraftId: string;
-  runActive: boolean;
-  runSummary: WriterRunSummary | null;
-  selectedChapterId: string;
-  selectedSceneId: string;
-  threadMessages: { role: string; body: string; created_at?: string }[];
-  workflowEvents: WriterRunEventsSummary | null;
-  worldlineSavedPaths: WorldlineSavedPathsSummary;
-  writerControlStatus: ActionStatus | null;
-  writerRunAction?: (formData: FormData) => Promise<void>;
-  writerRunStatus: ActionStatus | null;
-}) {
-  const run = runSummary?.ok === true ? runSummary : null;
-  const hasPersistentThread = threadMessages.length > 0;
-  return (
-    <section className="writer-agent-thread" aria-labelledby="writer-agent-thread-heading" data-thread-persistent={hasPersistentThread ? "true" : "false"}>
-      <header className="writer-agent-toolbar">
-        <div className="writer-agent-identity">
-          <span className="writer-agent-avatar"><Bot aria-hidden="true" size={19} /></span>
-          <div>
-            <h2 id="writer-agent-thread-heading">MiroFish Writer</h2>
-            <small>{writerStageLabel(locale, run, workflowEvents)}</small>
-          </div>
-        </div>
-        {run ? (
-          <WriterRunControl
-            action={cancelWriterRunAction}
-            runId={run.run_id}
-            runStatus={run.status}
-            status={writerControlStatus}
-          />
-        ) : null}
-      </header>
-
-      <div className="writer-thread-scroll">
-        {hasPersistentThread
-          ? threadMessages.map((message, index) => (
-              <article
-                className={`writer-message writer-message-${message.role === "user" ? "user" : "agent"}`}
-                key={`thread-${index}-${message.created_at ?? ""}`}
-                data-thread-message="true"
-              >
-                <div className="writer-message-meta">
-                  <span>
-                    {message.role === "user" ? <PenLine aria-hidden="true" size={15} /> : <Sparkles aria-hidden="true" size={15} />}
-                    {message.role === "user" ? <Bi zh="你" en="You" /> : "MiroFish Writer"}
-                  </span>
-                </div>
-                <p>{message.body}</p>
-              </article>
-            ))
-          : null}
-        {runSummary?.ok === false ? (
-          <PublicErrorNotice message={<FailureText />} title={<Bi zh="写作会话暂不可用" en="Writer session unavailable" />} />
-        ) : run ? (
-          <>
-            {!hasPersistentThread ? (
-              <article className="writer-message writer-message-user">
-                <div className="writer-message-meta">
-                  <span><PenLine aria-hidden="true" size={15} /><Bi zh="你" en="You" /></span>
-                  <small>{writerModeLabel(locale, run.mode)}</small>
-                </div>
-                <p>{run.instruction}</p>
-              </article>
-            ) : null}
-            <article className="writer-message writer-message-agent">
-              <div className="writer-message-meta">
-                <span><Sparkles aria-hidden="true" size={15} />MiroFish Writer</span>
-                <small><StatusValue value={run.status} /></small>
-              </div>
-              <WriterLiveDraft
-                active={runActive}
-                decideApprovalAction={decideApprovalAction}
-                initialEvents={workflowEvents?.ok === true ? workflowEvents.items : []}
-                locale={locale}
-                projectId={projectId}
-                runId={run.run_id}
-                tenantSlug={tenantSlug}
-              />
-              {recoveredDraftId ? (
-                <div className="writer-candidate-actions">
-                  <div>
-                    <strong><Bi zh="候选稿" en="Candidate draft" /></strong>
-                    <small>{draftIsAdopted ? <Bi zh="已进入手稿" en="Adopted into manuscript" /> : <Bi zh="等待你的决定" en="Waiting for your decision" />}</small>
-                  </div>
-                  <DraftAdoptionPanel
-                    action={adoptDraftAction}
-                    adopted={draftIsAdopted}
-                    chapterId={selectedChapterId}
-                    draftId={recoveredDraftId}
-                    status={draftAdoptionStatus}
-                  />
-                </div>
-              ) : null}
-            </article>
-          </>
-        ) : !hasPersistentThread ? (
-          <div className="writer-agent-empty">
-            <span><Sparkles aria-hidden="true" size={24} /></span>
-            <h2><Bi zh="从下一段开始" en="Begin with the next passage" /></h2>
-            <p>
-              <Bi
-                zh="输入指令后由 Pi Writer Agent 生成候选稿；采用后才会进入左侧正式手稿。需已绑定「正文创作」模型且 worker 在线。"
-                en="Send an instruction so Pi Writer can draft a candidate. Adopt it into the left manuscript. Requires a Writer composer binding and a running worker."
-              />
-            </p>
-          </div>
-        ) : null}
-      </div>
-
-      <div className="writer-composer-dock">
-        <Suspense fallback={null}>
-          <WriterTransientToast locale={locale} status={writerRunStatus} />
-        </Suspense>
-        {writerRunAction ? (
-          <form action={writerRunAction} className="writer-agent-composer">
-            <input name="chapterId" type="hidden" value={selectedChapterId} />
-            <input name="sceneId" type="hidden" value={selectedSceneId} />
-            <label className="sr-only" htmlFor="writer-instruction"><Bi zh="写作指令" en="Instruction" /></label>
-            <WriterComposerInput locale={locale} />
-            <ContextPickers assets={assets} graphView={graphView} locale={locale} worldlineSavedPaths={worldlineSavedPaths} />
-          </form>
-        ) : (
-          <p className="form-hint"><Bi zh="当前无法开始写作任务。" en="Writer runs are currently unavailable." /></p>
-        )}
-      </div>
-    </section>
   );
 }
 
@@ -533,33 +379,26 @@ function WriterDiagnostics({
   );
 }
 
-function writerProgressStage(workflowEvents: WriterRunEventsSummary | null) {
-  if (workflowEvents?.ok !== true) {
-    return 0;
-  }
-  const eventTypes = new Set(workflowEvents.items.map((event) => event.event_type));
-  if (eventTypes.has("writer.draft.saved") || eventTypes.has("writer.run.completed")) return 3;
-  if (eventTypes.has("writer.token")) return 2;
-  if (eventTypes.has("writer.tool.started") || eventTypes.has("writer.tool.completed")) return 1;
-  return 0;
-}
-
-function writerStageLabel(locale: Locale, run: Extract<WriterRunSummary, { ok: true }> | null, workflowEvents: WriterRunEventsSummary | null) {
-  if (!run) return tx(locale, "等待指令", "Ready for direction");
-  if (run.status === "completed") return tx(locale, "候选稿已完成", "Candidate complete");
-  if (run.status === "failed") return tx(locale, "本次写作未完成", "Run did not complete");
-  if (run.status === "cancelled") return tx(locale, "本次写作已取消", "Run cancelled");
-  const stage = writerProgressStage(workflowEvents);
-  return [
-    tx(locale, "正在理解任务", "Understanding the task"),
-    tx(locale, "正在检索创作上下文", "Retrieving story context"),
-    tx(locale, "正在起草正文", "Drafting prose"),
-    tx(locale, "正在保存候选稿", "Saving candidate"),
-  ][stage];
-}
-
 function isActiveWriterStatus(status: string) {
   return status === "queued" || status === "running";
+}
+
+function recentItemsFromManuscript(
+  locale: Locale,
+  tenantSlug: string,
+  projectId: string,
+  manuscript: ProjectManuscriptSummary,
+) {
+  if (!manuscript.ok || manuscript.blocks.length === 0) {
+    return [];
+  }
+  const href = `/${tenantSlug}/projects/${projectId}/writer`;
+  return manuscript.blocks.slice(0, 3).map((block, index) => ({
+    href: `${href}?blockId=${encodeURIComponent(block.block_id)}`,
+    title: tx(locale, `正文块 ${index + 1}`, `Manuscript block ${index + 1}`),
+    meta: tx(locale, `${block.word_count} 字`, `${block.word_count} words`),
+    kind: "manuscript" as const,
+  }));
 }
 
 function WriterRunControl({

@@ -2548,7 +2548,7 @@ test("writer page loads redacted trace events when a run exposes trace_id", asyn
 
   assert.match(page, /getAgentTraceEvents/);
   assert.match(page, /exportAgentTrace/);
-  assert.match(page, /getWriterRunEvents/);
+  assert.match(page, /getAllWriterRunEvents/);
   assert.match(page, /startWriterRun/);
   assert.match(page, /getProjectAssets/);
   assert.match(page, /getStoryGraphView/);
@@ -2564,7 +2564,7 @@ test("writer page loads redacted trace events when a run exposes trace_id", asyn
   assert.match(page, /exportTraceAction/);
   assert.match(page, /includeFull:\s*false/);
   assert.match(page, /runSummary\.ok\s*===\s*true\s*\?\s*runSummary\.trace_id/);
-  assert.match(page, /runSummary\.ok\s*===\s*true\s*\?\s*await getWriterRunEvents/);
+  assert.match(page, /runSummary\.ok\s*===\s*true\s*\?\s*await getAllWriterRunEvents/);
 });
 
 test("writer shell is an operational workbench, not a marketing page", async () => {
@@ -2574,10 +2574,10 @@ test("writer shell is an operational workbench, not a marketing page", async () 
   assert.match(shell, /Writer Agent/);
   assert.match(shell, /WriterAgentThread/);
   assert.match(shell, /writer-agent-layout/);
-  assert.match(shell, /writer-agent-composer/);
-  assert.match(shell, /WriterComposerInput/);
-  assert.match(shell, /WriterLiveDraft/);
-  assert.match(shell, /initialEvents=/);
+  const agentThread = await fileText("components/writer-agent-thread.tsx");
+  assert.match(agentThread, /writer-agent-composer|WriterAgentComposer/);
+  assert.match(agentThread, /WriterLiveDraft/);
+  assert.match(agentThread, /initialEvents=/);
   assert.match(shell, /Writer Events/);
   assert.match(shell, /workflowEvents/);
   assert.match(shell, /Trace/);
@@ -2958,16 +2958,18 @@ test("Paper-ink design tokens and bookish app shell stay explicit", async () => 
 });
 
 test("module headers use one Lucide icon language", async () => {
+  // Character console is headerless (content card aligns to command bar); nav still uses UsersRound.
   const shellPaths = [
     "components/overview-seed-shell.tsx",
     "components/asset-library-shell.tsx",
     "components/story-graph-shell.tsx",
     "components/worldline-shell.tsx",
-    "components/character-console-shell.tsx",
     "components/writer-workbench-shell.tsx",
     "components/llm-facility-shell.tsx",
   ];
   const shells = (await Promise.all(shellPaths.map((path) => fileText(path)))).join("\n");
+  const nav = await fileText("components/project-nav.tsx");
+  const characterShell = await fileText("components/character-console-shell.tsx");
 
   // WorkspaceHeader owns page-title-icon for Overview/Assets; other shells still inline it.
   assert.ok((shells.match(/page-title-icon|icon=\{</g) ?? []).length >= shellPaths.length);
@@ -2975,7 +2977,8 @@ test("module headers use one Lucide icon language", async () => {
   assert.match(shells, /Boxes/);
   assert.match(shells, /Network/);
   assert.match(shells, /GitBranch/);
-  assert.match(shells, /UsersRound/);
+  assert.match(nav, /UsersRound/);
+  assert.doesNotMatch(characterShell, /WorkspaceHeader|UsersRound|与角色互动|次互动|次推演/);
   assert.match(shells, /PenLine/);
   assert.match(shells, /Cpu/);
 });

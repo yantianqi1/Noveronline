@@ -11,7 +11,6 @@
 .worldline-header.workspace-header-compact,
 .story-graph-header.workspace-header-compact,
 .llm-facility-header.workspace-header-compact,
-.character-console-header.workspace-header-compact,
 .asset-library-header.workspace-header-compact {
   min-height: 0 !important;
   padding: 18px 24px 14px !important;
@@ -22,8 +21,7 @@
 .writer-header.workspace-header-compact h1,
 .worldline-header.workspace-header-compact h1,
 .story-graph-header.workspace-header-compact h1,
-.llm-facility-header.workspace-header-compact h1,
-.character-console-header.workspace-header-compact h1 {
+.llm-facility-header.workspace-header-compact h1 {
   margin: 4px 0 8px !important;
   font-size: clamp(1.45rem, 2.2vw, 1.9rem) !important;
   line-height: 1.2 !important;
@@ -450,6 +448,27 @@
   box-shadow: none;
 }
 
+/* Character workbench is the page frame: flush under command bar, no floating hero card. */
+.app-frame.app-frame-unified:has(.character-console-root) {
+  gap: 0;
+}
+
+.app-frame.app-frame-unified:has(.character-console-root) .app-main {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0 0 28px !important;
+}
+
+.app-frame.app-frame-unified:has(.character-console-root) .character-console-root {
+  min-height: calc(100dvh - 52px);
+}
+
+.app-frame.app-frame-unified:has(.character-console-root) .character-console-workbench {
+  border-top: 0;
+  border-radius: 0;
+}
+
 .app-stage-label {
   color: var(--text-secondary);
   font-size: 0.86rem;
@@ -560,8 +579,10 @@
 /* Writer Agent: conversation first, manuscript as a live artifact. */
 .writer-agent-layout {
   display: grid;
+  /* Prefer flex-fill from the writer-root column (below). The calc is a
+     fallback when the shell is not height-constrained. */
   height: calc(100dvh - var(--workspace-header-height) - 58px);
-  min-height: 560px;
+  min-height: 0;
   /* minmax(0, …) keeps columns from forcing horizontal overflow that clips away. */
   grid-template-columns: minmax(0, 1.62fr) minmax(0, 0.82fr);
   overflow: hidden;
@@ -730,7 +751,82 @@
 }
 
 .writer-artifact-canvas {
-  background: #f6f4ef;
+  /* Tools rail + stage: stage stays column-flex so chapter head / manuscript /
+     candidate / meta keep the scroll model that avoids a dead empty band. */
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  background: #fbf8f1;
+}
+
+.writer-canvas-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  align-self: stretch;
+  padding: 12px 10px;
+  border-right: 1px solid rgba(65, 57, 47, 0.16);
+  background: #f0ebe3;
+}
+
+.writer-canvas-tools .writer-command-palette-trigger,
+.writer-canvas-tools .technical-details-trigger {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.writer-canvas-tools .technical-details-drawer {
+  border: 0;
+  background: transparent;
+}
+
+.writer-canvas-tools .technical-details-trigger {
+  display: inline-flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  border-color: rgba(65, 57, 47, 0.2);
+  background: rgba(255, 253, 248, 0.48);
+  box-shadow: none;
+  color: #4d514d;
+  padding: 8px 11px;
+}
+
+.writer-canvas-tools .technical-details-trigger > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.writer-canvas-tools .technical-details-trigger > small {
+  display: none;
+}
+
+.writer-canvas-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.writer-canvas-stage > .writer-candidate-sheet {
+  order: 2;
+  flex: 0 0 auto;
+  /* Long candidate prose scrolls in place; body below keeps the remaining space. */
+  min-height: 0;
+  max-height: min(42vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.writer-canvas-stage > .writer-artifact-meta {
+  order: 4;
+  flex: 0 0 auto;
 }
 
 .writer-agent-dock {
@@ -933,44 +1029,6 @@
   }
 }
 
-.writer-sync-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 11px;
-  border-radius: 8px;
-  color: #2e6944;
-  font-size: 0.78rem;
-}
-
-.writer-header .technical-details-drawer {
-  border: 0;
-  background: transparent;
-}
-
-.writer-header .technical-details-trigger {
-  display: inline-flex;
-  width: auto;
-  min-height: 40px;
-  align-items: center;
-  justify-items: initial;
-  gap: 7px;
-  border-color: rgba(65, 57, 47, 0.2);
-  background: rgba(255, 253, 248, 0.48);
-  box-shadow: none;
-  color: #4d514d;
-  padding: 8px 11px;
-}
-
-.writer-header .technical-details-trigger > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.writer-header .technical-details-trigger > small {
-  display: none;
-}
 
 .writer-agent-thread {
   display: grid;
@@ -1066,24 +1124,28 @@
 }
 
 .writer-message + .writer-message {
-  margin-top: 24px;
+  margin-top: 14px;
 }
 
+/* Mainstream chat bubble: compact, right-aligned, no role header. */
 .writer-message-user {
-  width: min(78%, 620px);
+  width: fit-content;
+  max-width: min(85%, 540px);
+  margin-left: auto;
   margin-right: 0;
-  border: 1px solid rgba(65, 57, 47, 0.16);
-  border-radius: 7px 7px 2px 7px;
-  background: #e9e4da;
-  padding: 13px 15px;
+  border: 0;
+  border-radius: 14px 14px 4px 14px;
+  background: #e7e1d5;
+  padding: 9px 14px;
 }
 
 .writer-message-user p {
-  margin: 7px 0 0;
+  margin: 0;
   color: #282b29;
   font-size: 0.94rem;
-  line-height: 1.65;
+  line-height: 1.6;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .writer-message-agent {
@@ -1271,6 +1333,639 @@
   background: rgba(143, 33, 27, 0.08);
 }
 
+/* Collapsed task status line (conversation-first IA, doc 36 W1) */
+.writer-task-status {
+  margin: 0 0 12px;
+  border: 1px solid rgba(41, 39, 34, 0.12);
+  border-radius: 12px;
+  background: #faf8f3;
+  overflow: hidden;
+}
+
+.writer-task-status-main {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  background: none;
+  padding: 10px 12px;
+  text-align: left;
+  font: inherit;
+  color: #3d3a34;
+  cursor: pointer;
+}
+
+.writer-task-status-main:hover {
+  background: rgba(177, 138, 78, 0.08);
+}
+
+.writer-task-status-main[data-state="active"] {
+  color: #5a4a2a;
+}
+
+.writer-task-status-main[data-state="done"] {
+  color: #3d5a40;
+}
+
+.writer-task-status-main[data-state="error"] {
+  color: #8f211b;
+}
+
+.writer-task-status-ico {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 18px;
+}
+
+.writer-task-status-text {
+  flex: 1;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.writer-task-status-chev {
+  flex: 0 0 auto;
+  color: #8b867a;
+  transition: transform 0.18s ease;
+}
+
+.writer-task-status[data-open="true"] .writer-task-status-chev {
+  transform: rotate(90deg);
+}
+
+.writer-task-status-steps {
+  border-top: 1px dashed rgba(41, 39, 34, 0.12);
+  padding: 8px 12px 10px;
+  background: rgba(236, 229, 214, 0.35);
+}
+
+.writer-task-status-steps ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.writer-task-status-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: #4d4a43;
+}
+
+.writer-task-status-steps li[data-status="pending"] {
+  opacity: 0.55;
+}
+
+.writer-task-step-ico {
+  width: 16px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.writer-task-step-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #b0aa9c;
+}
+
+.writer-task-status-tech {
+  margin-top: 8px;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  color: #8b867a;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.writer-task-status-tech:hover {
+  color: #4d4a43;
+}
+
+/* Canvas-primary candidate sheet (doc 36 W2) */
+.writer-candidate-sheet {
+  position: relative;
+  margin: 0 0 18px;
+  border: 1.5px dashed rgba(177, 138, 78, 0.75);
+  border-radius: 8px;
+  background: #faf8f3;
+  box-shadow: 0 10px 28px rgba(41, 39, 34, 0.06);
+  padding: clamp(28px, 4vw, 40px) clamp(22px, 4vw, 48px) 22px;
+}
+
+.writer-candidate-sheet[data-adopted="true"] {
+  border: 1px solid rgba(41, 39, 34, 0.14);
+}
+
+.writer-candidate-badge {
+  position: absolute;
+  top: -11px;
+  left: 28px;
+}
+
+/* Inside the scrolling canvas variant, a -11px badge would be clipped by
+   overflow; keep it pinned within the scroll area instead. */
+.writer-canvas-stage > .writer-candidate-sheet .writer-candidate-badge {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: inline-block;
+  margin: -14px 0 10px;
+  left: auto;
+}
+
+.writer-candidate-badge {
+  background: #b18a4e;
+  color: #fff;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  padding: 3px 12px;
+  border-radius: 999px;
+}
+
+.writer-candidate-sheet[data-adopted="true"] .writer-candidate-badge {
+  background: #4a7a4e;
+}
+
+.writer-candidate-prose {
+  font-family: var(--font-serif, "Noto Serif SC", "Songti SC", serif);
+  font-size: 1.05rem;
+  line-height: 2.05;
+  color: #24211c;
+  letter-spacing: 0.015em;
+}
+
+.writer-candidate-prose p {
+  text-indent: 2em;
+  margin: 0 0 0.35em;
+}
+
+.writer-candidate-placeholder {
+  text-indent: 0 !important;
+  color: #8b867a;
+  font-style: italic;
+}
+
+.writer-candidate-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: #8f2f27;
+  animation: writer-cursor-blink 0.9s steps(1) infinite;
+}
+
+@keyframes writer-cursor-blink {
+  50% { opacity: 0; }
+}
+
+.writer-candidate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(41, 39, 34, 0.12);
+  font-size: 0.8rem;
+  color: #8b867a;
+}
+
+.writer-candidate-saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #4a7a4e;
+}
+
+.writer-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.writer-candidate-action-form {
+  display: inline-flex;
+}
+
+.writer-candidate-adopt {
+  min-height: 44px;
+}
+
+.writer-candidate-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: none;
+  color: #4d4a43;
+  font: inherit;
+  font-size: 0.86rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.writer-candidate-secondary:hover {
+  border-color: rgba(41, 39, 34, 0.14);
+  background: rgba(236, 229, 214, 0.55);
+}
+
+.writer-candidate-discard-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.writer-result-summary {
+  margin: 0 0 10px;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: #4d4a43;
+}
+
+.writer-result-summary a,
+.writer-result-summary-link {
+  color: #8f2f27;
+  text-underline-offset: 3px;
+}
+
+.writer-result-summary-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Conversation-first home state (doc 36 W3) */
+.writer-home-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  min-height: calc(100vh - 160px);
+  padding: 28px 18px 48px;
+}
+
+.writer-home-hero {
+  text-align: center;
+  max-width: 42rem;
+}
+
+.writer-home-hero h1 {
+  font-family: var(--font-serif, "Noto Serif SC", "Songti SC", serif);
+  font-size: clamp(1.35rem, 2.8vw, 1.9rem);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.45;
+  color: #171a1b;
+}
+
+.writer-home-hero p {
+  margin-top: 10px;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: #8b867a;
+}
+
+.writer-home-composer {
+  width: min(680px, 94vw);
+  border: 1px solid rgba(41, 39, 34, 0.12);
+  border-radius: 18px;
+  background: #faf8f3;
+  box-shadow: 0 2px 10px rgba(23, 26, 27, 0.06), 0 12px 32px rgba(23, 26, 27, 0.07);
+  padding: 14px;
+}
+
+.writer-home-composer:focus-within {
+  border-color: rgba(143, 47, 39, 0.4);
+}
+
+.writer-home-pending-thread {
+  display: grid;
+  gap: 12px;
+  width: min(680px, 94vw);
+  padding: 4px 2px 0;
+}
+
+.writer-home-pending-thread .writer-agent-working {
+  margin: 0;
+}
+
+.writer-home-state[data-submitting="true"] .writer-home-hero {
+  opacity: 0.72;
+}
+
+.writer-home-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  max-width: 680px;
+}
+
+.writer-home-example {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(41, 39, 34, 0.12);
+  border-radius: 999px;
+  background: rgba(250, 247, 240, 0.75);
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 0.84rem;
+  color: #4d4a43;
+  cursor: pointer;
+}
+
+.writer-home-example:hover {
+  border-color: rgba(177, 138, 78, 0.55);
+  color: #171a1b;
+  background: #faf8f3;
+}
+
+.writer-home-recents {
+  width: min(680px, 94vw);
+}
+
+.writer-home-recents h2 {
+  margin: 0 0 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: #8b867a;
+}
+
+.writer-home-recent-row {
+  display: flex;
+  gap: 12px;
+}
+
+.writer-home-recent-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid rgba(41, 39, 34, 0.12);
+  border-radius: 14px;
+  background: #faf8f3;
+  padding: 13px 15px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.writer-home-recent-card:hover {
+  border-color: rgba(41, 39, 34, 0.22);
+  box-shadow: 0 8px 20px rgba(23, 26, 27, 0.06);
+}
+
+.writer-home-recent-card strong {
+  font-size: 0.88rem;
+}
+
+.writer-home-recent-card span {
+  font-size: 0.78rem;
+  color: #8b867a;
+}
+
+/* Chapter switcher (doc 36 W4) */
+.writer-canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.writer-canvas-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0;
+  min-height: 48px;
+  padding: 10px 22px;
+  border-bottom: 1px solid rgba(41, 39, 34, 0.14);
+  background: rgba(250, 247, 240, 0.88);
+}
+
+.writer-canvas-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: #8b867a;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.writer-canvas-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.writer-canvas-empty-panel {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 48px 24px 80px;
+}
+
+/* A visible candidate sheet already fills the canvas — the "artifacts will
+   appear here" placeholder below it is redundant noise, so hide it. */
+.writer-canvas-stage:has(.writer-candidate-sheet) .writer-canvas-empty-panel {
+  display: none;
+}
+
+.writer-canvas-empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  max-width: 28rem;
+  text-align: center;
+  color: #8b867a;
+}
+
+.writer-canvas-empty-ico {
+  font-size: 1.25rem;
+  color: rgba(177, 138, 78, 0.85);
+}
+
+.writer-canvas-empty p {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.writer-canvas-empty .form-hint {
+  margin: 0;
+}
+
+.writer-canvas-empty .writer-create-block-form {
+  margin-top: 8px;
+}
+
+.writer-canvas-empty .writer-create-block-form button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  border: 1px solid rgba(41, 39, 34, 0.16);
+  border-radius: 10px;
+  background: #faf8f3;
+  padding: 8px 14px;
+  color: #4d4a43;
+  font: inherit;
+  cursor: pointer;
+}
+
+.writer-chapter-switcher {
+  position: relative;
+  min-width: 0;
+}
+
+.writer-chapter-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, 70vw);
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  padding: 6px 8px;
+  font: inherit;
+  font-family: var(--font-serif, Georgia, "Songti SC", serif);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #171a1b;
+  cursor: pointer;
+}
+
+.writer-chapter-switcher-trigger:hover {
+  background: rgba(177, 138, 78, 0.1);
+}
+
+.writer-chapter-switcher-label {
+  max-width: min(420px, 58vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writer-chapter-switcher-caret {
+  color: #8b867a;
+  flex: 0 0 auto;
+}
+
+.writer-chapter-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: min(320px, 86vw);
+  border: 1px solid rgba(41, 39, 34, 0.14);
+  border-radius: 12px;
+  background: #faf8f3;
+  box-shadow: 0 12px 32px rgba(23, 26, 27, 0.12);
+  padding: 8px;
+}
+
+.writer-chapter-switcher-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.writer-chapter-switcher-item {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  padding: 9px 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 0.86rem;
+  color: #4d4a43;
+  cursor: pointer;
+}
+
+.writer-chapter-switcher-item strong {
+  font-weight: 600;
+  color: #171a1b;
+}
+
+.writer-chapter-switcher-item:hover,
+.writer-chapter-switcher-item[data-active="true"] {
+  background: rgba(177, 138, 78, 0.12);
+}
+
+.writer-chapter-switcher-item.is-scene {
+  padding-left: 28px;
+  font-size: 0.82rem;
+}
+
+.writer-chapter-switcher-scenes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.writer-chapter-switcher-manage {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  border: none;
+  border-top: 1px dashed rgba(41, 39, 34, 0.14);
+  border-radius: 0 0 8px 8px;
+  background: none;
+  padding: 10px;
+  font: inherit;
+  font-size: 0.84rem;
+  color: #8f2f27;
+  cursor: pointer;
+}
+
+.writer-artifact-tabs[data-chrome="hidden"] .writer-artifact-tablist {
+  display: none;
+}
+
+.writer-agent-layout[data-layout="conversation-first"] {
+  grid-template-columns: 1.62fr 0.82fr;
+}
+
+@media (max-width: 720px) {
+  .writer-home-recent-row {
+    flex-direction: column;
+  }
+}
+
 .writer-agent-draft p {
   max-width: 68ch;
   margin: 0 auto;
@@ -1362,13 +2057,15 @@
   font-family: var(--font-serif);
 }
 
+/* Flat dock: the input frame itself is the only visible container, so the
+   composer does not read as a floating capsule on top of another panel. */
 .writer-composer-dock {
   position: relative;
   z-index: 4;
-  border-top: 1px solid rgba(65, 57, 47, 0.18);
-  background: rgba(250, 248, 243, 0.97);
-  box-shadow: 0 -10px 26px rgba(43, 39, 34, 0.05);
-  padding: 12px clamp(16px, 3vw, 30px) 14px;
+  border-top: 1px solid rgba(65, 57, 47, 0.1);
+  background: transparent;
+  box-shadow: none;
+  padding: 10px clamp(12px, 2vw, 20px) 12px;
 }
 
 .writer-composer-dock > .form-status,
@@ -1449,6 +2146,34 @@
   margin: 0 auto;
 }
 
+.writer-composer-inline-error,
+.writer-composer-inline-success {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.writer-composer-inline-error {
+  border: 1px solid rgba(160, 48, 40, 0.28);
+  background: rgba(255, 236, 232, 0.95);
+  color: #7a241c;
+}
+
+.writer-composer-inline-success {
+  border: 1px solid rgba(48, 120, 72, 0.24);
+  background: rgba(232, 248, 236, 0.95);
+  color: #1f5c36;
+}
+
+.writer-composer-lock-hint {
+  margin: 2px 4px 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: #8b867a;
+}
+
 .writer-mode-segmented {
   display: inline-grid;
   width: max-content;
@@ -1503,29 +2228,29 @@
   max-width: 7.5rem;
 }
 
+/* Quiet text control in the tool row, not a capsule. */
 .writer-mode-chip {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  min-height: 32px;
+  min-height: 30px;
   max-width: 100%;
   padding: 4px 8px;
-  border: 1px solid rgba(65, 57, 47, 0.16);
-  border-radius: 999px;
-  background: #ece8df;
-  color: #4d4a43;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #6b645a;
   font-family: var(--font-sans);
-  font-size: 0.72rem;
-  font-weight: 650;
+  font-size: 0.78rem;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .writer-mode-chip:hover,
 .writer-mode-picker[data-open="true"] .writer-mode-chip {
-  border-color: rgba(139, 47, 39, 0.35);
   color: #8b2f27;
-  background: rgba(139, 47, 39, 0.06);
+  background: rgba(139, 47, 39, 0.07);
 }
 
 .writer-mode-chip:focus-visible {
@@ -1580,23 +2305,31 @@
   background: rgba(65, 57, 47, 0.06);
 }
 
+/* Single-frame composer: textarea on top, quiet tool row underneath. */
 .writer-composer-input-row {
   position: relative;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 36px;
-  align-items: end;
-  gap: 6px;
-  border: 1px solid rgba(65, 57, 47, 0.24);
-  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  border: 1px solid rgba(65, 57, 47, 0.22);
+  border-radius: 14px;
   background: #fffdf8;
-  box-shadow: 0 7px 22px rgba(43, 39, 34, 0.07);
-  padding: 6px;
+  box-shadow: none;
+  padding: 8px 8px 6px;
   overflow: visible;
 }
 
 .writer-composer-input-row:focus-within {
-  border-color: #8b2f27;
-  box-shadow: 0 0 0 3px rgba(139, 47, 39, 0.11), 0 8px 24px rgba(43, 39, 34, 0.07);
+  border-color: rgba(139, 47, 39, 0.55);
+  box-shadow: 0 0 0 3px rgba(139, 47, 39, 0.09);
+}
+
+.writer-composer-toolrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .writer-manuscript-empty {
@@ -1659,18 +2392,20 @@
     transform 160ms var(--ease-natural, ease);
 }
 
+/* Filled send circle once there is text (mainstream agent composer look). */
 .writer-composer-input-row[data-can-send="true"] .writer-send-button,
 .writer-send-button[data-can-send="true"] {
   opacity: 1 !important;
   pointer-events: auto;
-  color: #6b645a !important;
+  background: #8b2f27 !important;
+  color: #fffaf2 !important;
   cursor: pointer;
 }
 
 .writer-composer-input-row[data-can-send="true"] .writer-send-button:hover:not(:disabled),
 .writer-send-button[data-can-send="true"]:hover:not(:disabled) {
-  background: rgba(65, 57, 47, 0.08) !important;
-  color: #4a453c !important;
+  background: #721a15 !important;
+  color: #fffaf2 !important;
 }
 
 .writer-composer-input-row[data-can-send="true"] .writer-send-button:disabled,
@@ -1721,13 +2456,6 @@
   background: #f6f2ea;
 }
 
-.writer-artifact-canvas {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  overflow: hidden;
-  background: #fbf8f1;
-}
-
 .writer-artifact-heading .eyebrow {
   margin: 0 0 3px;
   color: #8b2f27;
@@ -1742,7 +2470,26 @@
 }
 
 .writer-artifact-workspace {
-  overflow: hidden;
+  display: contents;
+}
+
+.writer-artifact-workspace > .writer-canvas-head {
+  order: 1;
+  flex: 0 0 auto;
+}
+
+.writer-artifact-workspace > .writer-canvas-body {
+  order: 3;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.writer-artifact-workspace > .writer-canvas-body > .writer-artifact-tabs {
+  height: auto;
+  flex: 1 1 auto;
 }
 
 .writer-artifact-workspace > .form-status {
@@ -2000,13 +2747,17 @@
     animation: writer-region-fade var(--motion-standard) var(--ease-natural);
   }
 
-  /* Only the region selected by data-mobile-view stays visible. */
-  .writer-agent-layout[data-mobile-view="structure"] .writer-artifact-canvas,
-  .writer-agent-layout[data-mobile-view="structure"] .writer-agent-dock,
-  .writer-agent-layout[data-mobile-view="manuscript"] .writer-structure-rail,
-  .writer-agent-layout[data-mobile-view="manuscript"] .writer-agent-dock,
+  /* Only the region selected by data-mobile-view stays visible (doc 36 W5). */
+  .writer-agent-layout[data-mobile-view="conversation"] .writer-artifact-canvas,
+  .writer-agent-layout[data-mobile-view="conversation"] .writer-structure-rail,
+  .writer-agent-layout[data-mobile-view="artifact"] .writer-agent-dock,
+  .writer-agent-layout[data-mobile-view="artifact"] .writer-structure-rail,
+  /* Legacy stored values still hide correctly until migrated. */
+  .writer-agent-layout[data-mobile-view="agent"] .writer-artifact-canvas,
   .writer-agent-layout[data-mobile-view="agent"] .writer-structure-rail,
-  .writer-agent-layout[data-mobile-view="agent"] .writer-artifact-canvas {
+  .writer-agent-layout[data-mobile-view="manuscript"] .writer-agent-dock,
+  .writer-agent-layout[data-mobile-view="manuscript"] .writer-structure-rail,
+  .writer-agent-layout[data-mobile-view="structure"] .writer-agent-dock {
     display: none;
   }
 
@@ -2098,10 +2849,14 @@
 }
 
 @media (max-width: 640px) {
-  /* Phone: drop the desktop status header (状态 / 已同步 / 命令 / 技术详情).
+  /* Phone: drop the desktop tools rail (命令 / 技术详情).
      Mobile top bar + region switch already provide navigation chrome. */
-  .writer-header {
+  .writer-canvas-tools {
     display: none !important;
+  }
+
+  .writer-artifact-canvas {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .writer-root {
@@ -2110,11 +2865,133 @@
     min-height: 0;
   }
 
+  .writer-root[data-home="true"] {
+    min-height: calc(100dvh - var(--mobile-main-pad-bottom, 72px) - var(--mobile-safe-top, 0px));
+  }
+
+  .writer-home-state {
+    justify-content: flex-start;
+    gap: 18px;
+    min-height: 0;
+    padding: 18px 14px calc(24px + var(--writer-keyboard-inset, 0px));
+  }
+
+  .writer-home-hero h1 {
+    font-size: 1.28rem;
+    line-height: 1.4;
+  }
+
+  .writer-home-hero p {
+    font-size: 0.86rem;
+  }
+
+  .writer-home-composer {
+    width: 100%;
+    border-radius: 16px;
+    padding: 12px;
+    position: sticky;
+    bottom: calc(8px + var(--writer-keyboard-inset, 0px));
+    z-index: 4;
+  }
+
+  .writer-home-examples {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .writer-home-example {
+    justify-content: flex-start;
+    min-height: 44px;
+    border-radius: 12px;
+  }
+
+  .writer-home-recents,
+  .writer-home-recent-row {
+    width: 100%;
+  }
+
+  .writer-home-recent-row {
+    flex-direction: column;
+  }
+
   .writer-agent-layout,
-  .writer-agent-layout[data-has-structure="true"] {
+  .writer-agent-layout[data-has-structure="true"],
+  .writer-agent-layout[data-layout="conversation-first"] {
     flex: 1 1 auto;
     height: auto;
     min-height: 0;
+    grid-template-columns: none;
+    touch-action: pan-y;
+  }
+
+  .writer-canvas-head {
+    padding: 8px 12px;
+    gap: 10px;
+  }
+
+  .writer-canvas-toolbar {
+    margin: 0 0 10px;
+  }
+
+  .writer-chapter-switcher {
+    flex: 1 1 auto;
+  }
+
+  .writer-chapter-switcher-trigger {
+    width: 100%;
+    max-width: none;
+    min-height: 44px;
+    justify-content: space-between;
+    padding: 8px 10px;
+  }
+
+  .writer-chapter-switcher-label {
+    max-width: none;
+    flex: 1;
+  }
+
+  .writer-canvas-meta {
+    display: none;
+  }
+
+  .writer-canvas-empty-panel {
+    padding: 36px 16px 72px;
+  }
+
+  .writer-task-status-main {
+    min-height: 44px;
+  }
+
+  .writer-candidate-sheet {
+    margin: 0 0 14px;
+    padding: 34px 16px 18px;
+  }
+
+  .writer-candidate-prose {
+    font-size: 1.02rem;
+    line-height: 1.95;
+  }
+
+  .writer-mobile-switch-tab {
+    position: relative;
+  }
+
+  .writer-mobile-switch-badge {
+    position: absolute;
+    top: 6px;
+    right: 14px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #8f2f27;
+    box-shadow: 0 0 0 2px rgba(250, 247, 240, 0.95);
+  }
+
+  .writer-result-summary-link {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
   }
 
   /* Identity chrome is redundant with the region switch on phone. */
@@ -2176,8 +3053,27 @@
   }
 
   .writer-candidate-actions {
+    position: sticky;
+    bottom: calc(10px + var(--writer-keyboard-inset, 0px));
+    z-index: 3;
     align-items: stretch;
     flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+    padding: 10px;
+    border: 1px solid rgba(41, 39, 34, 0.12);
+    border-radius: 14px;
+    background: rgba(250, 247, 240, 0.94);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 24px rgba(23, 26, 27, 0.1);
+  }
+
+  .writer-candidate-action-form,
+  .writer-candidate-adopt,
+  .writer-candidate-secondary {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
   }
 
   .writer-candidate-actions button {
@@ -2198,16 +3094,14 @@
   }
 
   .writer-composer-input-row {
-    grid-template-columns: auto minmax(0, 1fr) 36px;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 5px;
+    gap: 2px;
+    padding: 6px 6px 4px;
   }
 
   .writer-mode-chip {
     min-height: 28px;
     padding: 2px 7px;
-    font-size: 0.68rem;
+    font-size: 0.72rem;
   }
 
   .writer-composer-input-row textarea {
@@ -2346,7 +3240,66 @@
 }
 
 .app-frame.app-frame-unified:has(.writer-root) {
-  --workspace-header-height: 96px;
+  --workspace-header-height: 0px;
+}
+
+/* Desktop writer: lock the shell to the viewport and let the agent layout
+   consume leftover height so the page does not scroll into empty paper. */
+@media (min-width: 861px) {
+  .app-frame.app-frame-unified:has(.writer-root) {
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .app-main-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    max-height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .app-main {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .app-main > .workspace-route-stage,
+  .app-frame.app-frame-unified:has(.writer-root) .app-main > .workspace-route-stage > .workspace-route-content {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .writer-root {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .writer-header {
+    flex: 0 0 auto;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .writer-root[data-home="true"] {
+    overflow: auto;
+  }
+
+  .app-frame.app-frame-unified:has(.writer-root) .writer-agent-layout,
+  .app-frame.app-frame-unified:has(.writer-root) .writer-agent-layout[data-has-structure="true"] {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
 }
 
 @media (min-width: 861px) {
@@ -2355,7 +3308,6 @@
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ).workspace-header-compact {
@@ -2369,7 +3321,6 @@
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ).workspace-header-compact h1 {
@@ -2383,7 +3334,6 @@
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ).workspace-header-compact .workspace-header-description {
@@ -2397,7 +3347,6 @@
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ).workspace-header-compact .status-row {
@@ -2433,7 +3382,6 @@
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ).workspace-header-compact {
@@ -2447,7 +3395,6 @@
     .asset-library-header,
     .story-graph-header,
     .worldline-header,
-    .character-console-header,
     .writer-header,
     .llm-facility-header
   ).workspace-header-compact h1 {

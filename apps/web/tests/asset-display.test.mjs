@@ -62,13 +62,44 @@ test("asset-display source exports displayAssetTitle and structureAssetBody", as
 test("preview dialog uses structured sections not primary JSON dump", async () => {
   const preview = await source("components/asset-preview-dialog.tsx");
   const browse = await source("components/asset-browse-client.tsx");
+  const css = await source("app/globals.css");
   assert.match(preview, /displayAssetTitle/);
   assert.match(preview, /structureAssetBody/);
+  assert.match(preview, /summaryDistinct|structured\.summaryDistinct/);
   assert.match(preview, /asset-preview-structured|data-testid="asset-preview-structured"/);
   assert.match(preview, /asset-preview-raw|原始结构/);
+  assert.match(preview, /可点开|collapsed by default/);
   assert.match(preview, /formatRawPayloadJson/);
   assert.doesNotMatch(preview, /formatPayloadPreview/);
   assert.match(browse, /displayAssetTitle/);
+  // Soft fold cue, not a stiff button chrome.
+  assert.match(css, /asset-preview-raw-hint/);
+  assert.match(css, /asset-preview-raw-label/);
+  assert.match(css, /repeating-linear-gradient/);
+});
+
+test("asset-display source defines distinctSummary for duplicate summary/body", async () => {
+  const src = await source("lib/asset-display.ts");
+  assert.match(src, /export function distinctSummary/);
+  assert.match(src, /summaryDistinct/);
+  assert.match(src, /normalizeDisplayText/);
+  // Pure logic mirrored here so node:test does not need TS loader.
+  function normalizeDisplayText(value) {
+    return value.trim().replace(/\s+/g, " ");
+  }
+  function distinctSummary(summary, prose) {
+    const s = String(summary ?? "").trim();
+    if (!s || isTypeKeyTitle(s)) return "";
+    const p = String(prose ?? "").trim();
+    if (!p) return s;
+    if (normalizeDisplayText(s) === normalizeDisplayText(p)) return "";
+    if (p.startsWith(s) && p.length > s.length) return "";
+    if (s.startsWith(p) && s.length <= p.length + 8) return "";
+    return s;
+  }
+  const same = "A cold, chaotic energy that enters Chen Ji from dead bodies.";
+  assert.equal(distinctSummary(same, same), "");
+  assert.equal(distinctSummary("短摘要", same), "短摘要");
 });
 
 test("display title composes relationship when stored title is type key", () => {

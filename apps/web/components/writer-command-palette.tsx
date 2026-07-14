@@ -60,10 +60,10 @@ export function WriterCommandPalette({ locale }: { locale: Locale }) {
     const agent = tx(locale, "Agent", "Agent");
     return [
       { id: "tab-manuscript", label: tx(locale, "打开稿件正文", "Open manuscript"), group: nav, keywords: "manuscript prose 稿件 正文", icon: BookOpenText, run: gotoTab("manuscript") },
-      { id: "tab-structure", label: tx(locale, "打开章节结构", "Open structure"), group: nav, keywords: "structure chapters scenes 章节 场景 结构", icon: ListTree, run: gotoTab("structure") },
+      { id: "tab-structure", label: tx(locale, "章节管理", "Chapter management"), group: nav, keywords: "structure chapters scenes 章节 场景 结构 管理", icon: ListTree, run: gotoTab("structure") },
       { id: "tab-review", label: tx(locale, "打开审校", "Open review"), group: nav, keywords: "review reviewer proposals 审校 候选", icon: ShieldCheck, run: gotoTab("review") },
-      { id: "tab-studio", label: tx(locale, "打开工作室", "Open studio"), group: nav, keywords: "studio planning commands dedup export 工作室 规划 命令 去重 导出", icon: SlidersHorizontal, run: gotoTab("studio") },
-      { id: "focus-agent", label: tx(locale, "聚焦 Agent 对话框", "Focus Agent composer"), group: agent, keywords: "agent chat composer write 对话 写作 输入", icon: MessageSquare, run: focusComposer },
+      { id: "tab-studio", label: tx(locale, "打开工作室工具", "Open studio tools"), group: nav, keywords: "studio planning commands dedup export 工作室 规划 命令 去重 导出", icon: SlidersHorizontal, run: gotoTab("studio") },
+      { id: "focus-agent", label: tx(locale, "聚焦对话输入", "Focus conversation composer"), group: agent, keywords: "agent chat composer write 对话 写作 输入", icon: MessageSquare, run: focusComposer },
     ];
   }, [close, locale, setActiveTab]);
 

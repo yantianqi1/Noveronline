@@ -996,8 +996,12 @@
     gap: 0;
   }
 
-  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-header {
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-canvas-tools {
     display: none !important;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-artifact-canvas {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-mobile-switch {
@@ -1060,6 +1064,19 @@
 
   .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-context-disclosure {
     display: none;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-home-state {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-candidate-actions {
+    bottom: calc(8px + var(--writer-keyboard-inset, 0px));
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-mobile-switch-badge {
+    display: block;
   }
 
   /* Secondary workbench pages: keep forms thumb-friendly */

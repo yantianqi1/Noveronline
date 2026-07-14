@@ -14,6 +14,8 @@ type WriterArtifactTabsProps = {
   structure: ReactNode;
   review: ReactNode;
   studio: ReactNode;
+  /** Hide the tab chrome; panels stay for ⌘K / setActiveTab (doc 36 W4). */
+  hideChrome?: boolean;
 };
 
 const tabIcons = {
@@ -30,6 +32,7 @@ export function WriterArtifactTabs(props: WriterArtifactTabsProps) {
   const activeTab = workbench ? workbench.activeTab : localTab;
   const setActiveTab = workbench ? workbench.setActiveTab : setLocalTab;
   const groupId = useId();
+  const hideChrome = props.hideChrome === true;
   const tabs: Array<{ id: ArtifactTab; label: string; content: ReactNode }> = [
     { id: "manuscript", label: props.locale === "zh-CN" ? "稿件" : "Manuscript", content: props.manuscript },
     { id: "structure", label: props.locale === "zh-CN" ? "章节" : "Structure", content: props.structure },
@@ -38,8 +41,13 @@ export function WriterArtifactTabs(props: WriterArtifactTabsProps) {
   ];
 
   return (
-    <div className="writer-artifact-tabs">
-      <div aria-label={props.locale === "zh-CN" ? "稿件视图" : "Artifact views"} className="writer-artifact-tablist" role="tablist">
+    <div className="writer-artifact-tabs" data-chrome={hideChrome ? "hidden" : "visible"}>
+      <div
+        aria-label={props.locale === "zh-CN" ? "稿件视图" : "Artifact views"}
+        className="writer-artifact-tablist"
+        hidden={hideChrome}
+        role="tablist"
+      >
         {tabs.map((tab) => {
           const Icon = tabIcons[tab.id];
           const selected = activeTab === tab.id;
