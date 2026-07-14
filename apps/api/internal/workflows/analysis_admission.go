@@ -184,7 +184,7 @@ func (s *SQLAnalysisAdmissionStore) insertAdmission(ctx context.Context, input A
     AND project_id = $2::uuid
     AND upload_id = $10::uuid
     AND ($11 = '' OR file_id = $11::uuid)
-    AND parse_status = 'uploaded'
+    AND parse_status IN ('uploaded', 'failed', 'cancelled', 'parsed', 'parsing')
   RETURNING upload_id, file_id
 ),
 workflow_insert AS (
@@ -286,7 +286,7 @@ WITH source_update AS (
     AND project_id = $2::uuid
     AND upload_id = $3::uuid
     AND ($4 = '' OR file_id = $4::uuid)
-    AND parse_status = 'uploaded'
+    AND parse_status IN ('uploaded', 'failed', 'cancelled', 'parsed', 'parsing')
   RETURNING upload_id, file_id
 ),
 workflow_insert AS (
@@ -456,7 +456,20 @@ analysis_update AS (
       updated_at = now()
   WHERE tenant_id = $1::uuid
     AND run_id = $2::uuid
-  RETURNING run_id
+  RETURNING run_id, project_id, upload_id, source_file_id
+),
+source_release AS (
+  UPDATE source_files
+  SET parse_status = 'uploaded',
+      updated_at = now()
+  WHERE tenant_id = $1::uuid
+    AND project_id IN (SELECT project_id FROM analysis_update)
+    AND parse_status = 'parsing'
+    AND (
+      upload_id IN (SELECT upload_id FROM analysis_update WHERE upload_id IS NOT NULL)
+      OR file_id IN (SELECT source_file_id FROM analysis_update WHERE source_file_id IS NOT NULL)
+    )
+  RETURNING file_id
 )
 INSERT INTO workflow_events (
   tenant_id, run_id, workflow_type, project_id, event_type, sequence, payload_jsonb

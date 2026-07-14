@@ -411,20 +411,55 @@ export default async function OverviewPage({
   async function retrySeedRunAction(formData: FormData) {
     "use server";
 
-    // Retry is not a separate Temporal path yet for analysis runs: restart requires a new upload start.
-    // Surface a clear control message instead of calling the retired seed retry route.
     const runId = stringFromFormData(formData, "runId");
-    const status = {
-      status: "error",
-      code: "ANALYSIS_RETRY_USE_NEW_RUN",
-      message: tx(
-        locale,
-        "分析任务请重新上传或从已上传文件再次启动分析。",
-        "Start a new analysis run from the uploaded source instead of seed retry.",
-      ),
-      runId,
-    };
-    redirect(overviewRoute({
+    const prior = runId
+      ? await getAnalysisRunSummary({
+          ...(await webApiContext({ tenantId: tenantSlug, projectId })),
+          runId,
+        })
+      : null;
+    const uploadId = prior && prior.ok && prior.upload_id ? prior.upload_id : "";
+    if (!uploadId) {
+      const status = {
+        status: "error",
+        code: "ANALYSIS_RETRY_SOURCE_MISSING",
+        message: tx(
+          locale,
+          "无法从上次任务找到上传文件。请从右侧「导入小说」重新上传后开始分析。",
+          "Could not find the previous upload. Re-import the manuscript from the Import panel, then start analysis.",
+        ),
+        runId,
+      };
+      return redirect(overviewRoute({
+        tenantSlug,
+        projectId,
+        sourceStatus: query.sourceStatus ?? "",
+        sourceCode: query.sourceCode ?? "",
+        sourceMessage: query.sourceMessage ?? "",
+        seedStatus: status.status,
+        seedCode: status.code,
+        seedMessage: status.message,
+        runId: status.runId || runId || query.runId || "",
+        afterEventId: query.after_event_id ?? query.afterEventId ?? "",
+      }));
+    }
+
+    const result = await startAnalysisRun({
+      ...(await webApiContext({ tenantId: tenantSlug, projectId })),
+      projectId,
+      uploadId,
+      mode: prior && prior.ok && prior.mode ? prior.mode : "full",
+      instruction:
+        prior && prior.ok && prior.instruction
+          ? prior.instruction
+          : "Analyze the uploaded novel into structured story knowledge.",
+      hints: {},
+      options: {
+        module_key: "analysis_planner",
+      },
+    });
+    const status = seedRunActionStatus(result, locale);
+    return redirect(overviewRoute({
       tenantSlug,
       projectId,
       sourceStatus: query.sourceStatus ?? "",

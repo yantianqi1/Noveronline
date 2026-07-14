@@ -104,7 +104,11 @@ export function publicAnalysisFailureHint(locale: Locale, code: string) {
     );
   }
   if (code === "LLM_MODULE_UNBOUND") {
-    return tx(locale, "核心分析能力未绑定模型。", "A required analysis capability is unbound.");
+    return tx(
+      locale,
+      "分析所需模型尚未绑定。若已连接写作模型，请点「重试」自动补齐；或到模型设置绑定「分析规划 / 分析执行」。",
+      "Analysis modules are unbound. Retry to inherit from your writing model, or bind Analysis Planner/Worker in model settings.",
+    );
   }
   if (code === "ANALYSIS_RUNTIME_UNCONFIGURED") {
     return tx(
@@ -146,6 +150,13 @@ export function publicAnalysisFailureHint(locale: Locale, code: string) {
       locale,
       "分析未产出完整结果，请重试。",
       "Analysis did not produce complete results. Please retry.",
+    );
+  }
+  if (code === "TOOL_PERMISSION_DENIED") {
+    return tx(
+      locale,
+      "分析收尾写入权限不足（已修复）。请直接点「重试」完成入库。",
+      "Analysis finish lacked write permission (now fixed). Retry to complete import.",
     );
   }
   return "";
@@ -198,25 +209,37 @@ export function analysisActivityLineFromEvent(
   if (event.event_type === "analysis.stage.failed" && stageLabel) {
     const errorCode = typeof event.payload?.error_code === "string" ? event.payload.error_code : "";
     const hint = errorCode ? publicAnalysisFailureHint(locale, errorCode) : "";
+    const scrubbed = /could not determine data type of parameter|parse_param|42P08|permission denied for table/i.test(payloadMessage)
+      ? ""
+      : payloadMessage;
     return {
       id: event.event_id || `stage-fail-${event.sequence}`,
       tone: "failed",
-      message: payloadMessage
+      message: scrubbed
         || (hint
           ? tx(locale, `${stageLabel}失败：${hint}`, `${stageLabel} failed: ${hint}`)
           : tx(locale, `${stageLabel}失败`, `${stageLabel} failed`)),
       timeLabel: timeLabel || null,
     };
   }
-  // Author-facing log keeps stage milestones only. Tool call chatter and every
-  // workspace write are internal agent telemetry — they flood the UI and hide results.
   if (event.event_type === "analysis.tool.started" || event.event_type === "analysis.tool.completed") {
-    return null;
+    const toolName = typeof event.payload?.tool_name === "string" && event.payload.tool_name.trim()
+      ? event.payload.tool_name.trim()
+      : "tool";
+    const isError = event.payload?.is_error === true;
+    const started = event.event_type === "analysis.tool.started";
+    return {
+      id: event.event_id || `tool-${event.sequence}`,
+      tone: started ? "running" : isError ? "failed" : "done",
+      message: `tool_${toolName}`,
+      timeLabel: timeLabel || null,
+    };
   }
   if (event.event_type === "analysis.file.written") {
-    // Surface only high-signal artifacts (plan / candidates / review), not every note slice.
+    // Plan / notes / candidates / review are the author-visible decomposition trail.
     if (
       path.startsWith("00-plan/")
+      || path.startsWith("20-notes/")
       || path.startsWith("30-candidates/")
       || path.startsWith("90-review/")
     ) {
@@ -262,10 +285,14 @@ export function analysisActivityLineFromEvent(
   if (event.event_type === "analysis.run.failed") {
     const errorCode = typeof event.payload?.error_code === "string" ? event.payload.error_code : "";
     const hint = errorCode ? publicAnalysisFailureHint(locale, errorCode) : "";
+    const raw = payloadMessage;
+    const scrubbed = /could not determine data type of parameter|parse_param|42P08|permission denied for table/i.test(raw)
+      ? ""
+      : raw;
     return {
       id: event.event_id || `failed-${event.sequence}`,
       tone: "failed",
-      message: payloadMessage || hint || tx(locale, "分析失败", "Analysis failed"),
+      message: scrubbed || hint || tx(locale, "分析失败", "Analysis failed"),
       timeLabel: timeLabel || null,
     };
   }
@@ -275,7 +302,7 @@ export function analysisActivityLineFromEvent(
 export function analysisActivityLogFromEvents(
   locale: Locale,
   events: readonly WorkflowRunEvent[],
-  limit = 16,
+  limit = 36,
 ): OverviewActivityLogLine[] {
   const lines: OverviewActivityLogLine[] = [];
   for (const event of events) {

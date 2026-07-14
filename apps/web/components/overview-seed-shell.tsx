@@ -388,6 +388,13 @@ function OverviewNextStep({
           completed={completed}
           displayProgress={displayProgress}
           failureHint={failureHint}
+          failureRecoveryHref={
+            selectedSeedRun.error_code === "LLM_MODULE_UNBOUND"
+              || selectedSeedRun.error_code === "LLM_MODULE_CAPABILITY_MISSING"
+              || selectedSeedRun.error_code === "LLM_CREDENTIAL_UNCONFIGURED"
+              ? llmFacilityProjectHref(tenantSlug, projectId)
+              : ""
+          }
           interrupted={interrupted}
           retrySeedRunAction={retrySeedRunAction}
           retrySeedRunEnabled={retrySeedRunEnabled}
@@ -641,10 +648,12 @@ export function seedRunActionStatus(
   locale: Locale,
 ): ActionStatus & { runId: string } {
   if (!result.ok) {
+    const hint = publicAnalysisFailureHint(locale, result.code);
     return {
       status: "error",
       code: result.code,
-      message: tx(locale, "分析任务未开始，请检查文件和模型配置。", "The analysis did not start. Check the file and model configuration."),
+      message: hint
+        || tx(locale, "分析任务未开始，请检查文件和模型配置。", "The analysis did not start. Check the file and model configuration."),
       runId: "",
     };
   }
@@ -860,12 +869,12 @@ function overviewFailureNotice(locale: Locale, code: string, tenantSlug: string,
   if (normalized === "LLM_MODULE_UNBOUND") {
     return {
       ...defaults,
-      titleZh: "模型能力未绑定",
-      titleEn: "Model capability unbound",
-      messageZh: "当前任务所需的模型能力尚未绑定到可用渠道。",
-      messageEn: "A required model capability is not bound to an available channel for this task.",
-      recoveryZh: "在模型设置中绑定缺失能力后重试。",
-      recoveryEn: "Bind the missing capability in model settings, then retry.",
+      titleZh: "分析模型未就绪",
+      titleEn: "Analysis model not ready",
+      messageZh: "拆解小说需要「分析规划」与「分析执行」模型绑定。若已连接写作助手，重试时会自动补齐。",
+      messageEn: "Novel analysis needs Analysis Planner and Worker bindings. If a writing model is already connected, retry will inherit it.",
+      recoveryZh: "打开模型设置完成绑定，或直接点「重试任务」。",
+      recoveryEn: "Open model settings to bind, or tap Retry analysis.",
     };
   }
 
@@ -1109,14 +1118,36 @@ function analysisDisplayProgress(
   run: Extract<WorkflowRunSummary, { ok: true }>,
   events: WorkflowRunEventsSummary | null,
 ): number {
-  if (run.status === "completed" || run.status === "failed") {
+  if (run.status === "completed") {
     return 100;
+  }
+  if (run.status === "failed" || run.status === "cancelled") {
+    // Keep a real stage-based ceiling for interrupted runs; do not jump to 100
+    // just because finalize failed, and do not invent near-complete progress.
+    let interrupted = Math.max(run.progress ?? 0, 5);
+    if (events?.ok) {
+      for (const event of events.items) {
+        const stage = analysisStageFromEvent(event);
+        if (!stage || !(stage in ANALYSIS_STAGE_PROGRESS)) continue;
+        if (stage === "finalize") continue;
+        const base = ANALYSIS_STAGE_PROGRESS[stage] ?? 0;
+        const done = event.event_type.endsWith(".completed")
+          || event.event_type === "analysis.candidates.saved"
+          || event.payload?.status === "completed";
+        interrupted = Math.max(interrupted, done ? base : Math.max(0, base - 8));
+      }
+    }
+    return Math.min(interrupted, 95);
   }
   let fromEvents = 0;
   if (events?.ok) {
     for (const event of events.items) {
       const stage = analysisStageFromEvent(event);
       if (!stage || !(stage in ANALYSIS_STAGE_PROGRESS)) continue;
+      // Ignore terminal finalize noise while the run is still active/queued —
+      // a failed finalize event previously inflated progress to 92%.
+      if (stage === "finalize" && run.status !== "completed") continue;
+      if (event.event_type.endsWith(".failed") || event.payload?.status === "failed") continue;
       const base = ANALYSIS_STAGE_PROGRESS[stage] ?? 0;
       const done = event.event_type.endsWith(".completed")
         || event.event_type === "analysis.candidates.saved"
@@ -1536,11 +1567,35 @@ function StatusLine({ status }: { status: ActionStatus | null }) {
   if (!status) {
     return null;
   }
-  const className = status.status === "success" ? "form-status success-box" : "form-status error-box";
+  const isSuccess = status.status === "success";
+  const className = isSuccess
+    ? "form-status success-box overview-action-status"
+    : "form-status error-box overview-action-status";
   return (
-    <p className={className} role={status.status === "success" ? "status" : "alert"}>
-      {status.status === "success" ? <Bi zh="操作已完成。" en="Action completed." /> : <Bi zh="操作未完成，请检查输入或稍后重试。" en="The action could not be completed. Check the input or try again." />}
-    </p>
+    <div
+      className={className}
+      data-tone={isSuccess ? "success" : "danger"}
+      role={isSuccess ? "status" : "alert"}
+    >
+      {isSuccess ? (
+        <p>{status.message || <Bi zh="操作已完成。" en="Action completed." />}</p>
+      ) : (
+        <>
+          <p>
+            <strong><Bi zh="未能完成" en="Could not finish" /></strong>
+            {" "}
+            {status.message || <Bi zh="请检查输入或稍后重试。" en="Check the input or try again." />}
+          </p>
+          {status.code === "LLM_MODULE_UNBOUND"
+            || status.code === "LLM_MODULE_CAPABILITY_MISSING"
+            || status.code === "LLM_CREDENTIAL_UNCONFIGURED" ? (
+            <p className="overview-action-status-hint">
+              <Bi zh="可到模型设置检查通道与绑定，或直接重试分析。" en="Check model settings, or retry analysis." />
+            </p>
+          ) : null}
+        </>
+      )}
+    </div>
   );
 }
 

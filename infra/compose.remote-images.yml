@@ -13,6 +13,7 @@ services:
 
   api:
     image: ${MIROFISH_API_IMAGE:?MIROFISH_API_IMAGE is required}
+    ports: !reset []
     volumes: !override
       - ${MIROFISH_DATA_ROOT:?MIROFISH_DATA_ROOT is required}/manuscript-artifacts:/var/lib/mirofish/manuscript-artifacts
 

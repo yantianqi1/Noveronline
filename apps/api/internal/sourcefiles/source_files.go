@@ -692,8 +692,13 @@ LIMIT 1`
 		}
 		return ValidatedSourceFile{}, sourceFileQueryFailed()
 	}
-	if strings.TrimSpace(metadata.ParseStatus) != "uploaded" {
-		return ValidatedSourceFile{}, &AppError{Code: "SOURCE_FILE_NOT_UPLOADED", Message: "source file upload must be completed before seed run"}
+	status := strings.TrimSpace(metadata.ParseStatus)
+	switch status {
+	case "uploaded", "failed", "cancelled", "parsed", "parsing":
+		// Allow restart after a failed/cancelled analysis left the file in
+		// parsing/failed, or after a completed parse when the author re-runs.
+	default:
+		return ValidatedSourceFile{}, &AppError{Code: "SOURCE_FILE_NOT_UPLOADED", Message: "source file upload must be completed before analysis run"}
 	}
 	return metadata, nil
 }

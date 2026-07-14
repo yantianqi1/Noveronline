@@ -676,7 +676,7 @@ func (s *TemporalAnalysisStarter) CancelAnalysisRun(ctx context.Context, input C
 	return AnalysisRunCancellation{RunID: strings.TrimSpace(input.RunID), Status: "cancelled"}, nil
 }
 
-func moduleKeyFromAnalysisOptions(options map[string]any) string {
+func ModuleKeyFromAnalysisOptions(options map[string]any) string {
 	if options == nil {
 		return "analysis_planner"
 	}
@@ -684,6 +684,10 @@ func moduleKeyFromAnalysisOptions(options map[string]any) string {
 		return strings.TrimSpace(value)
 	}
 	return "analysis_planner"
+}
+
+func moduleKeyFromAnalysisOptions(options map[string]any) string {
+	return ModuleKeyFromAnalysisOptions(options)
 }
 
 func sanitizeAnalysisHints(hints map[string]any) map[string]any {

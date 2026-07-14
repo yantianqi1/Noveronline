@@ -701,13 +701,21 @@ function optionalString(value: unknown): string | undefined {
 
 function errorCode(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") {
-    return (error as { code: string }).code;
+    const pgOrAppCode = (error as { code: string }).code;
+    if (pgOrAppCode === "42P08" || pgOrAppCode.startsWith("LLM_") || pgOrAppCode.startsWith("ANALYSIS_") || pgOrAppCode.startsWith("SOURCE_") || pgOrAppCode.startsWith("OBJECT_") || pgOrAppCode.startsWith("TOOL_")) {
+      if (pgOrAppCode === "42P08") return "ANALYSIS_RUNTIME_UNCONFIGURED";
+      return pgOrAppCode;
+    }
   }
   const message = errorMessage(error);
+  if (/could not determine data type of parameter/i.test(message)) {
+    return "ANALYSIS_RUNTIME_UNCONFIGURED";
+  }
   if (message.includes("ANALYSIS_RUNTIME_UNCONFIGURED") || message.includes("UNCONFIGURED")) {
     return message.includes("LLM_CREDENTIAL") ? "LLM_CREDENTIAL_UNCONFIGURED" : "ANALYSIS_RUNTIME_UNCONFIGURED";
   }
   if (message.includes("LLM_MODULE_UNBOUND")) return "LLM_MODULE_UNBOUND";
+  if (message.includes("LLM_MODULE_CAPABILITY_MISSING")) return "LLM_MODULE_CAPABILITY_MISSING";
   if (message.includes("provider") || message.includes("LLM_PROVIDER")) return "LLM_PROVIDER_ERROR";
   if (message.includes("permission")) return "TOOL_PERMISSION_DENIED";
   if (message.includes("OBJECT_STORAGE")) return "OBJECT_STORAGE_READ_FAILED";
@@ -715,7 +723,17 @@ function errorCode(error: unknown): string {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    if (/could not determine data type of parameter/i.test(message)) {
+      return "ANALYSIS_RUNTIME_UNCONFIGURED: analysis status update failed";
+    }
+    // Never leak raw Postgres/driver internals into author-facing workflow events.
+    if (/^error:\s/i.test(message) || /\b42P\d{2}\b/.test(message) || /parse_param\.c/i.test(message)) {
+      return "ANALYSIS_RUNTIME_UNCONFIGURED: analysis runtime persistence failed";
+    }
+    return message;
+  }
   return "analysis run failed";
 }
 

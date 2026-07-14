@@ -1598,7 +1598,8 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /<FailureText \/>/);
   assert.doesNotMatch(shell, /object key/i);
   assert.doesNotMatch(shell, /presigned/i);
-  assert.doesNotMatch(shell, /raw text|prompt|credential|draft_text|manuscript_text/i);
+  assert.doesNotMatch(shell, /raw text|prompt|draft_text|manuscript_text/i);
+  assert.doesNotMatch(shell, /encrypted_api_key|credential_ref/i);
   assert.doesNotMatch(shell, /readiness report body/i);
   assert.doesNotMatch(shell, /mock/i);
 });
@@ -1638,9 +1639,12 @@ test("Overview Seed controls are status-gated and retry resets successful event 
 
   assert.match(cancelAction, /afterEventId:\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
   assert.match(cancelAction, /cancelAnalysisRun/);
-  assert.match(retryAction, /ANALYSIS_RETRY_USE_NEW_RUN/);
+  assert.match(retryAction, /startAnalysisRun/);
+  assert.match(retryAction, /uploadId/);
+  assert.match(retryAction, /ANALYSIS_RETRY_SOURCE_MISSING/);
   assert.match(retryAction, /afterEventId:\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
   assert.doesNotMatch(retryAction, /retrySeedRun\(/);
+  assert.doesNotMatch(retryAction, /ANALYSIS_RETRY_USE_NEW_RUN/);
   assert.doesNotMatch(`${shell}\n${wall}\n${retryAction}\n${cancelAction}`, /raw_body|content_text|draft_text|manuscript_text|provider_response|credential_ref|encrypted_api_key|api_key|object_key/i);
 });
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mirofish-novel/apps/api/internal/auth"
+	"mirofish-novel/apps/api/internal/llm"
 	"mirofish-novel/apps/api/internal/sourcefiles"
 	"mirofish-novel/apps/api/internal/workflows"
 )
@@ -115,6 +116,21 @@ func (s *Server) handleStartAnalysisRun(response http.ResponseWriter, request *h
 		writeSourceFileError(response, request, sourcefiles.NewAppError("SOURCE_FILE_BACKEND_UNCONFIGURED", "source file backend is not configured"))
 		return
 	}
+	// Fail closed (and auto-ensure from an existing chat binding when possible)
+	// before Temporal admit so authors never queue a run that dies at planner.
+	actorUserID := s.actorUserID(request)
+	primaryResolution, err := llm.EnsureAnalysisModuleBindings(
+		request.Context(),
+		s.llmResolver,
+		s.llmBindingStore,
+		tenantID,
+		projectID,
+		actorUserID,
+	)
+	if err != nil {
+		writeLLMError(response, request, err)
+		return
+	}
 	validated, err := s.sourceFileStore.ValidateSourceFile(request.Context(), sourcefiles.ValidateInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
@@ -124,11 +140,15 @@ func (s *Server) handleStartAnalysisRun(response http.ResponseWriter, request *h
 		writeSourceFileError(response, request, err)
 		return
 	}
+	options := sanitizeWorkflowOptions(payload.Options)
+	options["module_key"] = workflows.ModuleKeyFromAnalysisOptions(options)
+	options["llm_resolution"] = workflowLLMResolution(primaryResolution)
+	options["required_module_keys"] = append([]string(nil), llm.AnalysisRequiredModules...)
 	run, err := s.analysisStarter.StartAnalysisRun(request.Context(), workflows.StartAnalysisRunInput{
 		TenantID:        tenantID,
 		ProjectID:       projectID,
 		UploadID:        strings.TrimSpace(payload.UploadID),
-		ActorUserID:     s.actorUserID(request),
+		ActorUserID:     actorUserID,
 		RequestID:       requestID(request),
 		SourceFileID:    validated.FileID,
 		SourceObjectKey: validated.ObjectKey,
@@ -139,7 +159,7 @@ func (s *Server) handleStartAnalysisRun(response http.ResponseWriter, request *h
 		Mode:            strings.TrimSpace(payload.Mode),
 		Instruction:     strings.TrimSpace(payload.Instruction),
 		Hints:           sanitizeWorkflowOptions(payload.Hints),
-		Options:         sanitizeWorkflowOptions(payload.Options),
+		Options:         options,
 	})
 	if err != nil {
 		code := workflows.ErrorCode(err)

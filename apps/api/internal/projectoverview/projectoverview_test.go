@@ -121,7 +121,10 @@ func TestSQLReaderGetsProjectOverviewWithTenantContextAndPublicColumns(t *testin
 		!strings.Contains(queryer.query, "JOIN llm_models") ||
 		!strings.Contains(queryer.query, "c.enabled = TRUE") ||
 		!strings.Contains(queryer.query, "required_llm_modules") ||
+		!strings.Contains(queryer.query, "analysis_planner") ||
+		!strings.Contains(queryer.query, "analysis_worker") ||
 		!strings.Contains(queryer.query, "writer_composer") ||
+		!strings.Contains(queryer.query, "writer_orchestrator") ||
 		!strings.Contains(queryer.query, "llm_model_sync_health") ||
 		!strings.Contains(queryer.query, "llm_quota_policy_counts") ||
 		!strings.Contains(queryer.query, "llm_quota_policies") ||

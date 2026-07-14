@@ -272,6 +272,8 @@ migration_marker_present() {
 	        WHERE relname IN ('analysis_runs','analysis_workspace_files','analysis_candidates')
 	          AND relrowsecurity AND relforcerowsecurity
 	      )" ;;
+	    0021_*) marker="
+	      has_table_privilege('mirofish_app', 'analysis_candidates', 'DELETE')" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]

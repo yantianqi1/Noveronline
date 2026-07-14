@@ -94,7 +94,7 @@ export function OverviewActivityLogLive({
             : null;
 
   // Cap the author-facing list even if upstream sent a large buffer.
-  const visibleLines = lines.slice(0, 12);
+  const visibleLines = lines.slice(0, 24);
 
   if (visibleLines.length === 0) {
     if (!isActive) return null;
@@ -129,8 +129,8 @@ export function OverviewActivityLogLive({
       {lines.length > visibleLines.length ? (
         <p className="form-hint overview-activity-log-more">
           <Bi
-            zh="仅显示关键节点；完整工具轨迹不向作者展示。"
-            en="Key milestones only; full tool traces are hidden from authors."
+            zh="仅显示最近进度；更早的工具与产出已折叠。"
+            en="Showing recent progress; earlier tool and artifact lines are folded."
           />
         </p>
       ) : null}

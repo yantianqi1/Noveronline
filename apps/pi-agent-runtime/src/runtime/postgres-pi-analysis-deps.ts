@@ -117,7 +117,24 @@ SELECT module_key, channel_id::text AS channel_id, model_id,
   ) ranked_bindings
  ORDER BY binding_rank
  LIMIT 1`, [request.tenant_id, request.project_id, request.module_key]);
-  const row = result.rows[0];
+  type BindingRow = {
+    module_key?: unknown;
+    channel_id?: unknown;
+    model_id?: unknown;
+    provider?: unknown;
+    base_url?: unknown;
+    credential_ref?: unknown;
+    supports_tools?: unknown;
+    supports_json?: unknown;
+    settings_jsonb?: unknown;
+  };
+  let row: BindingRow | undefined = result.rows[0] as BindingRow | undefined;
+  // Compatibility: if analysis modules were never batch-bound, reuse an existing
+  // chat-capable donor binding (writer/sequential/etc.) for this resolve only.
+  // Go admission also persists real analysis bindings when possible.
+  if (!row) {
+    row = await resolveAnalysisDonorBinding(db, request);
+  }
   if (!row) {
     throw Object.assign(new Error(`LLM_MODULE_UNBOUND: ${request.module_key} module is not bound`), {
       code: "LLM_MODULE_UNBOUND"
@@ -129,6 +146,12 @@ SELECT module_key, channel_id::text AS channel_id, model_id,
     row.supports_json === true,
     row.supports_tools === true,
   );
+  if (!caps.supports_tools || !caps.supports_json) {
+    throw Object.assign(
+      new Error(`LLM_MODULE_CAPABILITY_MISSING: ${request.module_key} binding must support tools and JSON`),
+      { code: "LLM_MODULE_CAPABILITY_MISSING" }
+    );
+  }
   return {
     module_key: request.module_key,
     channel_id: String(row.channel_id),
@@ -142,6 +165,86 @@ SELECT module_key, channel_id::text AS channel_id, model_id,
       ? row.settings_jsonb as Record<string, unknown>
       : {}
   };
+}
+
+const ANALYSIS_DONOR_KEYS = [
+  "analysis_planner",
+  "analysis_worker",
+  "writer_orchestrator",
+  "writer_composer",
+  "sequential_reading",
+  "story_ontology",
+  "contextual_block_analysis",
+  "writer_reviewer",
+  "worldline_director"
+] as const;
+
+async function resolveAnalysisDonorBinding(
+  db: QueryExecutor,
+  request: ResolveAnalysisModuleRequest
+): Promise<{
+  module_key?: unknown;
+  channel_id?: unknown;
+  model_id?: unknown;
+  provider?: unknown;
+  base_url?: unknown;
+  credential_ref?: unknown;
+  supports_tools?: unknown;
+  supports_json?: unknown;
+  settings_jsonb?: unknown;
+} | undefined> {
+  const result = await queryWithTenant(db, request, `
+SELECT module_key, channel_id::text AS channel_id, model_id,
+       provider, base_url, channel_id::text AS credential_ref,
+       supports_tools, supports_json, settings_jsonb, binding_rank, preference_rank
+  FROM (
+    SELECT b.module_key, b.channel_id, b.model_id,
+           c.provider, c.base_url,
+           COALESCE(m.supports_tools, false) AS supports_tools,
+           COALESCE(m.supports_json, false) AS supports_json,
+           b.settings_jsonb,
+           CASE WHEN b.project_id = $2 THEN 0 ELSE 1 END AS binding_rank,
+           CASE b.module_key
+             WHEN 'analysis_planner' THEN 0
+             WHEN 'analysis_worker' THEN 1
+             WHEN 'writer_orchestrator' THEN 2
+             WHEN 'writer_composer' THEN 3
+             WHEN 'sequential_reading' THEN 4
+             WHEN 'story_ontology' THEN 5
+             WHEN 'contextual_block_analysis' THEN 6
+             WHEN 'writer_reviewer' THEN 7
+             WHEN 'worldline_director' THEN 8
+             ELSE 50
+           END AS preference_rank
+      FROM llm_module_bindings b
+      JOIN llm_channels c
+        ON c.channel_id = b.channel_id
+       AND c.enabled = TRUE
+       AND (c.tenant_id = b.tenant_id OR c.tenant_id IS NULL)
+      JOIN llm_models m
+        ON m.channel_id = b.channel_id
+       AND m.model_id = b.model_id
+       AND (m.tenant_id = b.tenant_id OR m.tenant_id IS NULL)
+       AND m.enabled = TRUE
+     WHERE b.tenant_id = $1
+       AND (b.project_id = $2 OR b.project_id IS NULL)
+       AND b.module_key = ANY($3::text[])
+  ) ranked_bindings
+ ORDER BY preference_rank, binding_rank
+ LIMIT 1`, [request.tenant_id, request.project_id, [...ANALYSIS_DONOR_KEYS]]);
+  return result.rows[0] as
+    | {
+      module_key?: unknown;
+      channel_id?: unknown;
+      model_id?: unknown;
+      provider?: unknown;
+      base_url?: unknown;
+      credential_ref?: unknown;
+      supports_tools?: unknown;
+      supports_json?: unknown;
+      settings_jsonb?: unknown;
+    }
+    | undefined;
 }
 
 async function resolveCredential(
@@ -853,6 +956,14 @@ async function updateAnalysisRunStatus(
     result?: Record<string, unknown>;
   }
 ): Promise<void> {
+  // Terminal statuses must release the source file so authors can retry without
+  // re-uploading. Failed/cancelled -> uploaded; completed -> parsed.
+  const releaseParseStatus =
+    request.status === "completed"
+      ? "parsed"
+      : request.status === "failed" || request.status === "cancelled"
+        ? "uploaded"
+        : null;
   await queryWithTenant(db, request, `
 WITH analysis_update AS (
   UPDATE analysis_runs
@@ -865,19 +976,42 @@ WITH analysis_update AS (
      AND project_id = $2::uuid
      AND run_id = $3::uuid
      AND NOT (status = 'cancelled' AND $4 <> 'cancelled')
-  RETURNING workflow_run_id
+  RETURNING workflow_run_id, upload_id, source_file_id
+),
+workflow_update AS (
+  UPDATE workflow_runs
+     SET status = $4,
+         progress = CASE
+           WHEN $4 = 'completed' THEN 100
+           WHEN $4 = 'failed' THEN GREATEST(progress, 5)
+           WHEN $4 = 'running' THEN GREATEST(progress, 5)
+           ELSE progress
+         END,
+         message = $4,
+         error_code = $5,
+         error_message = $6,
+         result_jsonb = CASE WHEN $7::text IS NULL THEN result_jsonb ELSE $7::jsonb END,
+         updated_at = now()
+   WHERE tenant_id = $1::uuid
+     AND project_id = $2::uuid
+     AND run_id IN (SELECT workflow_run_id FROM analysis_update WHERE workflow_run_id IS NOT NULL)
+  RETURNING run_id
+),
+source_release AS (
+  UPDATE source_files
+     SET parse_status = $8::text,
+         updated_at = now()
+   WHERE $8::text IS NOT NULL
+     AND tenant_id = $1::uuid
+     AND project_id = $2::uuid
+     AND parse_status = 'parsing'
+     AND (
+       upload_id IN (SELECT upload_id FROM analysis_update WHERE upload_id IS NOT NULL)
+       OR file_id IN (SELECT source_file_id FROM analysis_update WHERE source_file_id IS NOT NULL)
+     )
+  RETURNING file_id
 )
-UPDATE workflow_runs
-   SET status = $4,
-       progress = CASE WHEN $4 = 'completed' THEN 100 WHEN $4 = 'failed' THEN 100 WHEN $4 = 'running' THEN 10 ELSE progress END,
-       message = $4,
-       error_code = $5,
-       error_message = $6,
-       result_jsonb = CASE WHEN $7::text IS NULL THEN result_jsonb ELSE $7::jsonb END,
-       updated_at = now()
- WHERE tenant_id = $1::uuid
-   AND project_id = $2::uuid
-   AND run_id IN (SELECT workflow_run_id FROM analysis_update WHERE workflow_run_id IS NOT NULL)`,
+SELECT 1 FROM workflow_update`,
   [
     request.tenant_id,
     request.project_id,
@@ -885,7 +1019,8 @@ UPDATE workflow_runs
     request.status,
     request.error_code ?? null,
     request.error_message ?? null,
-    request.result ? JSON.stringify(request.result) : null
+    request.result ? JSON.stringify(request.result) : null,
+    releaseParseStatus
   ]);
 }
 

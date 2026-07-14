@@ -76,7 +76,7 @@ export function OverviewAnalysisWorkspacePanel({
       : tx(locale, `${files.length} 个文件`, `${files.length} files`);
 
   return (
-    <details className="overview-details overview-analysis-workspace" open={files.length > 0 || undefined}>
+    <details className="overview-details overview-analysis-workspace">
       <summary>
         <FolderOpen aria-hidden="true" size={18} strokeWidth={1.8} />
         <span>

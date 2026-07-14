@@ -61,7 +61,7 @@ export function OverviewAnalysisCandidatesPanel({
       : tx(locale, `已入库 ${items.length} 项`, `${items.length} items imported`);
 
   return (
-    <details className="overview-details overview-analysis-candidates" open>
+    <details className="overview-details overview-analysis-candidates">
       <summary>
         <Library aria-hidden="true" size={18} strokeWidth={1.8} />
         <span>

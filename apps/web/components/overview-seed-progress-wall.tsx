@@ -40,6 +40,7 @@ type OverviewSeedProgressWallProps = {
   completed: boolean;
   displayProgress: number;
   failureHint: string | null;
+  failureRecoveryHref?: string;
   interrupted: boolean;
   retrySeedRunAction: (formData: FormData) => Promise<void>;
   retrySeedRunEnabled: boolean;
@@ -61,6 +62,7 @@ export function OverviewSeedProgressWall({
   completed,
   displayProgress,
   failureHint,
+  failureRecoveryHref = "",
   interrupted,
   retrySeedRunAction,
   retrySeedRunEnabled,
@@ -254,9 +256,28 @@ export function OverviewSeedProgressWall({
                     <Bi zh={`进度 ${displayProgress}%`} en={`Progress ${displayProgress}%`} />
                   </p>
                   {isFailed && failureHint ? (
-                    <p className="overview-status-failure-line">
-                      <Bi zh={failureHint} en={failureHint} />
-                    </p>
+                    <div className="overview-status-failure-banner" data-animated="true">
+                      <p className="overview-status-failure-line">
+                        <Bi zh={failureHint} en={failureHint} />
+                      </p>
+                      <div className="overview-status-failure-actions">
+                        {retrySeedRunEnabled ? (
+                          <form action={retrySeedRunAction}>
+                            <input type="hidden" name="runId" value={selectedRunId} />
+                            <button className="overview-soft-action" type="submit">
+                              <RotateCcw aria-hidden="true" size={14} />
+                              <Bi zh="立即重试" en="Retry now" />
+                            </button>
+                          </form>
+                        ) : null}
+                        {failureRecoveryHref ? (
+                          <a className="overview-next-link" href={failureRecoveryHref}>
+                            <Bi zh="打开模型设置" en="Open model settings" />
+                            <ChevronRight aria-hidden="true" size={16} />
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
                   ) : null}
                 </div>
                 <div className="overview-run-actions overview-run-actions-soft">

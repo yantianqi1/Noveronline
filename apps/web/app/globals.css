@@ -4128,6 +4128,60 @@ header {
   max-width: 52ch;
 }
 
+.overview-status-failure-banner {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(161, 38, 28, 0.22);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(255, 246, 243, 0.95), rgba(255, 250, 247, 0.88));
+  animation: overview-card-enter 420ms var(--ease-natural) both;
+}
+
+.overview-status-failure-banner .overview-status-failure-line {
+  margin: 0;
+  max-width: none;
+  font-size: 0.9rem;
+}
+
+.overview-status-failure-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.overview-action-status {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  animation: overview-card-enter 360ms var(--ease-natural) both;
+}
+
+.overview-action-status p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.overview-action-status-hint {
+  color: #6d655b;
+  font-size: 0.86rem;
+}
+
+.overview-dropzone[data-dragging="true"] .overview-dropzone-icon {
+  transform: scale(1.06);
+  transition: transform 180ms var(--ease-natural);
+}
+
+.overview-status-stage[data-run-state="running"] .overview-status-wall-preview-meta .status-pill,
+.overview-status-stage[data-run-state="queued"] .overview-status-wall-preview-meta .status-pill {
+  animation: overview-dot-breathe 1.8s var(--ease-natural) infinite;
+}
+
 .overview-status-card[data-density="compact"] .overview-run-actions-soft {
   gap: 6px;
 }

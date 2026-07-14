@@ -310,14 +310,12 @@ llm_bound_module_counts AS (
 ),
 required_llm_modules(module_key) AS (
   VALUES
+    ('analysis_planner'),
+    ('analysis_worker'),
+    ('writer_orchestrator'),
     ('writer_composer'),
     ('writer_reviewer'),
-    ('sequential_reading'),
-    ('anchor_point_summary'),
-    ('narrative_archives'),
     ('asset_ingestion'),
-    ('style_extractor'),
-    ('graph_bond_generator'),
     ('worldline_director')
 ),
 llm_missing_core_module_counts AS (

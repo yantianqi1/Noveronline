@@ -49,26 +49,24 @@ test("author-facing UI copy never names the Pi runtime vendor", async () => {
   assert.doesNotMatch(copy, /PI_WRITER_UNAVAILABLE:\s*\[["']Pi /);
 });
 
-test("overview primary path starts analysis runs instead of seed_pipeline", async () => {
-  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
-  const form = await fileText("components/overview-seed-upload-form.tsx");
+test("overview analysis failure surfaces actionable binding recovery", async () => {
+  const activity = await fileText("lib/overview-analysis-activity.ts");
   const shell = await fileText("components/overview-seed-shell.tsx");
+  const wall = await fileText("components/overview-seed-progress-wall.tsx");
+  const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
 
+  assert.match(activity, /分析所需模型尚未绑定|Analysis modules are unbound/);
+  assert.match(shell, /分析模型未就绪|Analysis model not ready/);
+  assert.match(shell, /failureRecoveryHref/);
+  assert.match(shell, /overview-action-status/);
+  assert.match(wall, /overview-status-failure-banner/);
+  assert.match(wall, /立即重试|Retry now/);
+  assert.match(wall, /打开模型设置|Open model settings/);
   assert.match(page, /startAnalysisRun/);
-  assert.match(page, /getProjectAnalysisRuns/);
-  assert.match(page, /listAnalysisWorkspaceFiles/);
-  assert.match(page, /listAnalysisCandidates/);
-  assert.doesNotMatch(page, /startSeedRun\(/);
-  assert.doesNotMatch(page, /getProjectSeedRuns/);
-  assert.match(form, /analysis-hints/);
-  assert.match(form, /上传并开始分析|Upload and start analysis/);
-  assert.doesNotMatch(form, /支持 TXT、Markdown 和 PDF/);
-  assert.match(shell, /OverviewAnalysisWorkspacePanel/);
-  assert.match(shell, /OverviewAnalysisCandidatesPanel/);
-  assert.match(shell, /analysis_run/);
+  assert.match(page, /ANALYSIS_RETRY_SOURCE_MISSING/);
 });
 
-test("overview surfaces analysis results on the main path and hides tool spam", async () => {
+test("overview surfaces analysis results with tool_ progress lines", async () => {
   const shell = await fileText("components/overview-seed-shell.tsx");
   const activity = await fileText("lib/overview-analysis-activity.ts");
   const live = await fileText("components/overview-activity-log-live.tsx");
@@ -80,24 +78,31 @@ test("overview surfaces analysis results on the main path and hides tool spam", 
   assert.match(shell, /项目诊断（可选）|Project diagnostics \(optional\)/);
   assert.doesNotMatch(shell, /function SeedEvents/);
   assert.doesNotMatch(shell, /Progress and activity/);
-  assert.match(activity, /Author-facing log keeps stage milestones only/);
   assert.match(activity, /analysis\.tool\.started/);
   assert.match(activity, /analysis\.tool\.completed/);
-  assert.ok(
-    activity.includes('if (event.event_type === "analysis.tool.started" || event.event_type === "analysis.tool.completed")')
-      && activity.includes("return null;"),
-    "tool events must be dropped from author activity lines",
+  assert.match(activity, /message: `tool_\$\{toolName\}`/);
+  assert.doesNotMatch(
+    activity.slice(
+      activity.indexOf('if (event.event_type === "analysis.tool.started"'),
+      activity.indexOf("if (event.event_type === \"analysis.file.written\")"),
+    ),
+    /return null;/,
   );
-  assert.match(activity, /20-notes\//);
-  assert.match(activity, /return null;/);
+  assert.match(activity, /path\.startsWith\("20-notes\/"\)/);
   assert.match(live, /关键进度|Key progress/);
-  assert.match(live, /lines\.slice\(0, 12\)/);
+  assert.match(live, /lines\.slice\(0, 24\)/);
+  assert.doesNotMatch(live, /完整工具轨迹不向作者展示|full tool traces are hidden/);
   assert.match(candidates, /拆解结果（已自动入库）|Analysis results \(auto-imported\)/);
   assert.match(candidates, /自动写入素材库|auto-imported into the library/);
   assert.match(candidates, /<details className="overview-details overview-analysis-candidates"/);
+  assert.doesNotMatch(candidates, /overview-analysis-candidates"[^>]*\sopen/);
   assert.match(candidates, /overview-details-chevron/);
   const workspace = await fileText("components/overview-analysis-workspace-panel.tsx");
   assert.match(workspace, /<details className="overview-details overview-analysis-workspace"/);
+  assert.doesNotMatch(
+    workspace.replace(/error-box" open/g, 'error-box"'),
+    /overview-analysis-workspace"[^>]*\sopen/,
+  );
   assert.match(workspace, /overview-details-chevron/);
   assert.match(wall, /拆解完成，已自动入库|Analysis complete/);
   assert.match(wall, /#analysis-candidates-heading/);
