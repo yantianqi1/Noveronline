@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"mirofish-novel/apps/api/internal/llm"
 )
 
 type HealthAudit struct {
@@ -204,12 +206,19 @@ func (r *SQLHealthRecorder) RecordHealth(ctx context.Context, audit HealthAudit)
 	return nil
 }
 
+// ModelCapabilityUpgrader monotonically upgrades catalog capability flags after
+// a successful connectivity check so Models UI stops showing FALSE defaults.
+type ModelCapabilityUpgrader interface {
+	UpgradeModelCapabilities(ctx context.Context, tenantID, channelID, modelID string, supportsJSON, supportsTools bool) error
+}
+
 type HealthService struct {
-	resolver HealthCredentialResolver
-	executor HealthExecutor
-	recorder HealthRecorder
-	metrics  HealthMetrics
-	now      func() time.Time
+	resolver         HealthCredentialResolver
+	executor         HealthExecutor
+	recorder         HealthRecorder
+	metrics          HealthMetrics
+	capabilityStore  ModelCapabilityUpgrader
+	now              func() time.Time
 }
 
 func NewHealthService(resolver HealthCredentialResolver, executor HealthExecutor, recorder HealthRecorder) *HealthService {
@@ -219,6 +228,13 @@ func NewHealthService(resolver HealthCredentialResolver, executor HealthExecutor
 func (s *HealthService) WithMetrics(metrics HealthMetrics) *HealthService {
 	if s != nil {
 		s.metrics = metrics
+	}
+	return s
+}
+
+func (s *HealthService) WithCapabilityStore(store ModelCapabilityUpgrader) *HealthService {
+	if s != nil {
+		s.capabilityStore = store
 	}
 	return s
 }
@@ -258,9 +274,12 @@ func (s *HealthService) Check(ctx context.Context, tenantID, actorID, projectID,
 		ExternalProviderOptIn: target.ExternalProviderOptIn, ProviderCallID: requestID, Body: body,
 	})
 	checkedAt := s.currentTime()
+	// Prefer effective capabilities (catalog OR inference). Connectivity success
+	// never means "tools/JSON unsupported" for official DeepSeek chat models.
+	caps := llm.EffectiveModelCapabilities(modelID, target.SupportsJSON, target.SupportsTools)
 	result := HealthResult{ChannelID: channelID, ModelID: modelID, Status: "healthy", StatusCode: execution.StatusCode,
-		LatencyMS: checkedAt.Sub(started).Milliseconds(), SupportsTools: target.SupportsTools,
-		SupportsJSON: target.SupportsJSON, CheckedAt: checkedAt}
+		LatencyMS: checkedAt.Sub(started).Milliseconds(), SupportsTools: caps.SupportsTools,
+		SupportsJSON: caps.SupportsJSON, CheckedAt: checkedAt}
 	if err != nil {
 		result.Status = "unhealthy"
 		result.StatusCode = 0
@@ -275,10 +294,26 @@ func (s *HealthService) Check(ctx context.Context, tenantID, actorID, projectID,
 		return HealthResult{}, &AppError{Code: "LLM_PROVIDER_HEALTH_FAILED", Message: "LLM provider health check failed"}
 	}
 	s.setProviderHealth(channelID, true)
+	// Monotonic catalog upgrade so Models UI and seed gates stop reading FALSE.
+	_ = s.upgradeCatalogCapabilities(ctx, tenantID, channelID, modelID, caps)
 	if err := s.record(ctx, tenantID, actorID, requestID, result); err != nil {
 		return HealthResult{}, &AppError{Code: "LLM_PROVIDER_HEALTH_AUDIT_FAILED", Message: "LLM provider health audit failed"}
 	}
 	return result, nil
+}
+
+func (s *HealthService) upgradeCatalogCapabilities(
+	ctx context.Context,
+	tenantID, channelID, modelID string,
+	caps llm.InferredModelCapabilities,
+) error {
+	if s == nil || s.capabilityStore == nil {
+		return nil
+	}
+	if !caps.SupportsJSON && !caps.SupportsTools {
+		return nil
+	}
+	return s.capabilityStore.UpgradeModelCapabilities(ctx, tenantID, channelID, modelID, caps.SupportsJSON, caps.SupportsTools)
 }
 
 func (s *HealthService) setProviderHealth(channelID string, healthy bool) {

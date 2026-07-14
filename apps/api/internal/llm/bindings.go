@@ -218,6 +218,11 @@ LIMIT 1`
 	}
 	resolution.CredentialRef = resolution.ChannelID
 	resolution.Settings = decodeSettingsJSON(settingsJSON)
+	// Catalog rows often keep supports_json=false after model sync. OR in
+	// documented chat-model defaults so Seed/Writer do not hard-fail before call.
+	caps := inferModelCapabilities(resolution.ModelID)
+	resolution.SupportsJSON = resolution.SupportsJSON || caps.SupportsJSON
+	resolution.SupportsTools = resolution.SupportsTools || caps.SupportsTools
 	return resolution, nil
 }
 

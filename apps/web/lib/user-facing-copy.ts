@@ -25,7 +25,26 @@ const FAILURE_MESSAGES: Record<string, [string, string]> = {
   LLM_MODELS_SYNC_FAILED: ["模型同步失败。", "Could not sync models."],
   LLM_MODEL_UPDATE_FAILED: ["模型设置更新失败。", "Could not update the model."],
   LLM_QUOTA_POLICY_UNAVAILABLE: ["缺少调用预算策略。", "A usage budget policy is missing."],
+  LLM_QUOTA_RESERVATION_UNAVAILABLE: [
+    "模型额度暂时不可用，请检查模型设置中的输出上限与上下文窗口后重试。",
+    "Model quota reservation is unavailable. Check output limits and context window in model settings, then retry.",
+  ],
+  LLM_QUOTA_RESERVATION_CLOSED: [
+    "上次额度预留已关闭，请重试。若仍失败，检查模型通道是否可用。",
+    "The previous quota reservation closed. Retry, or check that the model channel is available.",
+  ],
   LLM_QUOTA_EXCEEDED: ["调用额度已用尽。", "Token quota has been exceeded."],
+  LLM_QUOTA_TOKENS_EXCEEDED: ["调用额度已用尽。", "Token quota has been exceeded."],
+  LLM_QUOTA_COST_EXCEEDED: ["调用费用额度已用尽。", "Cost quota has been exceeded."],
+  LLM_QUOTA_CONCURRENCY_EXCEEDED: ["并发调用已达上限，请稍后再试。", "Concurrency limit reached. Try again shortly."],
+  WORLDLINE_PREPARATION_NOT_SELECTED: [
+    "尚未选择世界线准备会话，请先选择或创建推演。",
+    "No worldline preparation is selected. Choose or create a simulation first.",
+  ],
+  WORLDLINE_SESSION_NOT_SELECTED: [
+    "尚未载入世界线会话，请选择或创建世界线后开始推演。",
+    "No worldline session is loaded. Select or create a worldline to continue.",
+  ],
   PROVIDER_UNAVAILABLE: ["模型服务暂时不可用。", "The model provider is temporarily unavailable."],
   RATE_LIMIT_BACKEND_UNAVAILABLE: ["服务暂时繁忙，请稍后再试。", "The service is busy. Try again shortly."],
 };
@@ -153,12 +172,18 @@ export function providerHealthSummary(
   const latency = typeof input.latency_ms === "number"
     ? tx(locale, `约 ${Math.round(input.latency_ms)}ms`, `~${Math.round(input.latency_ms)}ms`)
     : "";
+  // When capability flags are absent, do not claim the provider lacks tools/JSON —
+  // that was a false catalog default, not a live probe result.
   const tools = input.supports_tools
     ? tx(locale, "支持工具调用", "Tools supported")
-    : tx(locale, "不支持工具调用", "Tools unsupported");
+    : input.supports_tools === false
+      ? tx(locale, "目录标记：工具调用未启用", "Catalog: tools not marked")
+      : "";
   const json = input.supports_json
     ? tx(locale, "支持 JSON", "JSON supported")
-    : tx(locale, "不支持 JSON", "JSON unsupported");
+    : input.supports_json === false
+      ? tx(locale, "目录标记：JSON 未启用", "Catalog: JSON not marked")
+      : "";
   return [status, latency, tools, json].filter(Boolean).join(" · ");
 }
 

@@ -1,9 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { Bi } from "./bilingual-text";
-import { SubmitButton } from "./submit-button";
 import type { LLMChannelRecord, LLMModelRecord, LLMModuleBindingRecord, LLMModuleRecord } from "../lib/api";
 import { type Locale, tx } from "../lib/locale";
 import { moduleLabel as sharedModuleLabel } from "../lib/user-facing-copy";
@@ -16,12 +15,20 @@ type BindingDraft = {
 
 type BatchScope = "selected" | "group" | "all";
 
-type FilterMode = "all" | "unbound" | "project" | "missing-limit";
+type FilterMode = "all" | "unbound" | "project";
 
 type ModuleGroup = {
   id: string;
   label: [string, string];
   modules: LLMModuleRecord[];
+};
+
+export type LLMBindingActionResult = {
+  status: "success" | "error";
+  code: string;
+  message: string;
+  appliedModuleKeys: string[];
+  bindings?: LLMModuleBindingRecord[];
 };
 
 type LLMModuleBindingsPanelProps = {
@@ -35,13 +42,15 @@ type LLMModuleBindingsPanelProps = {
   bindingStatus: string;
   bindingCode: string;
   bindingMessage: string;
-  bindModuleAction: (formData: FormData) => Promise<void>;
-  batchBindModuleAction: (formData: FormData) => Promise<void>;
-  clearBindingAction: (formData: FormData) => Promise<void>;
+  bindModuleAction: (formData: FormData) => Promise<LLMBindingActionResult>;
+  batchBindModuleAction: (formData: FormData) => Promise<LLMBindingActionResult>;
+  clearBindingAction: (formData: FormData) => Promise<LLMBindingActionResult>;
 };
 
 /** Suggested output budget for Seed / long-form modules when model context_window is missing. */
 const SUGGESTED_MAX_TOKENS = "12800";
+const FEEDBACK_HOLD_MS = 4200;
+const HIGHLIGHT_MS = 1100;
 
 const MODULE_GROUPS: Array<{ id: string; label: [string, string]; prefixes: string[] }> = [
   {
@@ -75,29 +84,85 @@ export function LLMModuleBindingsPanel({
   modules,
   channels,
   channelModels,
-  effectiveBindings,
-  projectBindings,
+  effectiveBindings: serverEffectiveBindings,
+  projectBindings: serverProjectBindings,
   canManageBindings,
-  bindingStatus,
-  bindingCode,
-  bindingMessage,
+  bindingStatus: initialBindingStatus,
+  bindingCode: initialBindingCode,
+  bindingMessage: initialBindingMessage,
   bindModuleAction,
   batchBindModuleAction,
-  clearBindingAction,
+  clearBindingAction: _clearBindingAction,
 }: LLMModuleBindingsPanelProps) {
+  void _clearBindingAction;
+  const [effectiveBindings, setEffectiveBindings] = useState(serverEffectiveBindings);
+  const [projectBindings, setProjectBindings] = useState(serverProjectBindings);
   const [drafts, setDrafts] = useState<Record<string, BindingDraft>>(() => (
-    buildInitialDrafts(modules, effectiveBindings, channels, channelModels)
+    buildInitialDrafts(modules, serverEffectiveBindings, channels, channelModels)
   ));
-  const [batchChannelId, setBatchChannelId] = useState(channels[0]?.channel_id || "");
-  const [batchModelId, setBatchModelId] = useState(() => (
-    channelModels[channels[0]?.channel_id || ""]?.[0]?.model_id || ""
-  ));
-  const [batchMaxTokens, setBatchMaxTokens] = useState(SUGGESTED_MAX_TOKENS);
+  const batchSeedRef = useRef<ReturnType<typeof preferredBatchSelection> | null>(null);
+  if (batchSeedRef.current === null) {
+    batchSeedRef.current = preferredBatchSelection(
+      channels,
+      channelModels,
+      serverProjectBindings,
+      serverEffectiveBindings,
+    );
+  }
+  const [batchChannelId, setBatchChannelId] = useState(batchSeedRef.current.channelId);
+  const [batchModelId, setBatchModelId] = useState(batchSeedRef.current.modelId);
+  // max_tokens stays the fixed product default; not editable in this author UI.
+  const batchMaxTokens = SUGGESTED_MAX_TOKENS;
   const [searchQuery, setSearchQuery] = useState("");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
+  const [groupFilterId, setGroupFilterId] = useState("");
+  const [listOpen, setListOpen] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
-  const [openGroupIds, setOpenGroupIds] = useState<Set<string>>(() => new Set());
-  const [activeGroupId, setActiveGroupId] = useState("");
+  const [feedback, setFeedback] = useState(() => ({
+    status: initialBindingStatus,
+    code: initialBindingCode,
+    message: initialBindingMessage,
+  }));
+  const [feedbackPulse, setFeedbackPulse] = useState(0);
+  const [highlightedKeys, setHighlightedKeys] = useState<Set<string>>(() => new Set());
+  const [pendingScope, setPendingScope] = useState<BatchScope | "row" | "clear" | "">("");
+  const [isPending, startTransition] = useTransition();
+  const feedbackTimer = useRef<number | undefined>(undefined);
+  const highlightTimer = useRef<number | undefined>(undefined);
+  const serverBindingSignature = useMemo(
+    () => bindingMapSignature(serverEffectiveBindings, serverProjectBindings),
+    [serverEffectiveBindings, serverProjectBindings],
+  );
+  const lastServerSignature = useRef(serverBindingSignature);
+
+  useEffect(() => {
+    if (lastServerSignature.current === serverBindingSignature) return;
+    lastServerSignature.current = serverBindingSignature;
+    setEffectiveBindings(serverEffectiveBindings);
+    setProjectBindings(serverProjectBindings);
+    setDrafts((current) => mergeDraftsFromBindings(
+      current,
+      modules,
+      serverEffectiveBindings,
+      channels,
+      channelModels,
+    ));
+    // Keep the sticky batch toolbar aligned with the saved project binding majority
+    // so refresh/navigation does not look like the bound model "reset" to models[0].
+    const preferred = preferredBatchSelection(
+      channels,
+      channelModels,
+      serverProjectBindings,
+      serverEffectiveBindings,
+    );
+    setBatchChannelId(preferred.channelId);
+    setBatchModelId(preferred.modelId);
+  }, [channelModels, channels, modules, serverBindingSignature, serverEffectiveBindings, serverProjectBindings]);
+
+  useEffect(() => () => {
+    if (feedbackTimer.current !== undefined) window.clearTimeout(feedbackTimer.current);
+    if (highlightTimer.current !== undefined) window.clearTimeout(highlightTimer.current);
+  }, []);
 
   const enabledChannels = useMemo(
     () => channels.filter((channel) => channel.enabled),
@@ -106,49 +171,73 @@ export function LLMModuleBindingsPanel({
 
   const groupedModules = useMemo(() => groupModules(modules), [modules]);
 
-  const filteredGroups = useMemo(() => {
+  const moduleGroupByKey = useMemo(() => {
+    const map = new Map<string, ModuleGroup>();
+    for (const group of groupedModules) {
+      for (const module of group.modules) {
+        map.set(module.module_key, group);
+      }
+    }
+    return map;
+  }, [groupedModules]);
+
+  const filteredModules = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return groupedModules
-      .map((group) => ({
-        ...group,
-        modules: group.modules.filter((module) => {
-          if (!matchesFilter(module, filterMode, drafts, projectBindings, effectiveBindings, channelModels)) {
-            return false;
-          }
-          if (!query) return true;
-          const label = moduleDisplayLabel(locale, module).toLowerCase();
-          return label.includes(query) || module.module_key.toLowerCase().includes(query);
-        }),
-      }))
-      .filter((group) => group.modules.length > 0);
+    return modules.filter((module) => {
+      if (groupFilterId) {
+        const group = moduleGroupByKey.get(module.module_key);
+        if (!group || group.id !== groupFilterId) return false;
+      }
+      if (!matchesFilter(module, filterMode, projectBindings, effectiveBindings)) {
+        return false;
+      }
+      if (!query) return true;
+      const label = moduleDisplayLabel(locale, module).toLowerCase();
+      const groupLabel = moduleGroupByKey.get(module.module_key)?.label;
+      const groupText = groupLabel
+        ? `${groupLabel[0]} ${groupLabel[1]}`.toLowerCase()
+        : "";
+      return (
+        label.includes(query)
+        || module.module_key.toLowerCase().includes(query)
+        || groupText.includes(query)
+      );
+    });
   }, [
-    channelModels,
-    drafts,
     effectiveBindings,
     filterMode,
-    groupedModules,
+    groupFilterId,
     locale,
+    moduleGroupByKey,
+    modules,
     projectBindings,
     searchQuery,
   ]);
 
   const visibleModuleKeys = useMemo(
-    () => filteredGroups.flatMap((group) => group.modules.map((module) => module.module_key)),
-    [filteredGroups],
+    () => filteredModules.map((module) => module.module_key),
+    [filteredModules],
+  );
+
+  const activeGroup = useMemo(
+    () => groupedModules.find((group) => group.id === groupFilterId),
+    [groupFilterId, groupedModules],
   );
 
   const boundProjectCount = Object.keys(projectBindings).length;
   const unboundCount = modules.filter((module) => !effectiveBindings[module.module_key]).length;
-  const missingMaxTokensCount = modules.filter((module) => (
-    isMissingMaxTokens(module.module_key, drafts, channelModels)
-  )).length;
-  const bindingStatusClass = bindingStatus === "success" ? "success-box" : bindingStatus === "error" ? "error-box" : "";
+  const bindingStatusClass = feedback.status === "success"
+    ? "success-box"
+    : feedback.status === "error"
+      ? "error-box"
+      : "";
   const selectedCount = selectedKeys.size;
   const batchTargetsValid = Boolean(
     batchChannelId
     && batchModelId
     && (batchMaxTokens.trim() === "" || isPositiveIntString(batchMaxTokens)),
   );
+  const busy = isPending || Boolean(pendingScope);
 
   function modelsForChannel(channelId: string) {
     return channelModels[channelId] || [];
@@ -181,18 +270,15 @@ export function LLMModuleBindingsPanel({
     const channel = channels.find((item) => item.channel_id === draft.channelId);
     if (!channel?.enabled) return false;
     if (!modelsForChannel(draft.channelId).some((model) => model.model_id === draft.modelId)) return false;
-    if (draft.maxTokens.trim() && !isPositiveIntString(draft.maxTokens)) return false;
     return true;
   }
 
-  function toggleGroupOpen(groupId: string, open: boolean) {
-    setOpenGroupIds((current) => {
-      const next = new Set(current);
-      if (open) next.add(groupId);
-      else next.delete(groupId);
-      return next;
-    });
-    if (open) setActiveGroupId(groupId);
+  function resolvedMaxTokens(moduleKey: string) {
+    const draft = drafts[moduleKey];
+    if (draft?.maxTokens.trim() && isPositiveIntString(draft.maxTokens)) {
+      return draft.maxTokens.trim();
+    }
+    return SUGGESTED_MAX_TOKENS;
   }
 
   function setSelectionForKeys(keys: string[], selected: boolean) {
@@ -215,40 +301,17 @@ export function LLMModuleBindingsPanel({
     });
   }
 
-  function fillMissingOutputLimits(keys: string[]) {
-    setDrafts((current) => {
-      const next = { ...current };
-      for (const key of keys) {
-        const draft = next[key];
-        if (!draft || draft.maxTokens.trim()) continue;
-        const model = modelsForChannel(draft.channelId).find((item) => item.model_id === draft.modelId);
-        next[key] = {
-          ...draft,
-          maxTokens: model?.context_window ? String(model.context_window) : SUGGESTED_MAX_TOKENS,
-        };
-      }
-      return next;
-    });
-    if (!batchMaxTokens.trim()) {
-      setBatchMaxTokens(SUGGESTED_MAX_TOKENS);
-    }
-  }
-
   function groupSummary(group: ModuleGroup) {
     let bound = 0;
     let unbound = 0;
-    let missingLimit = 0;
     for (const module of group.modules) {
       if (projectBindings[module.module_key] || effectiveBindings[module.module_key]) {
         bound += 1;
       } else {
         unbound += 1;
       }
-      if (isMissingMaxTokens(module.module_key, drafts, channelModels)) {
-        missingLimit += 1;
-      }
     }
-    return { bound, unbound, missingLimit, total: group.modules.length };
+    return { bound, unbound, total: group.modules.length };
   }
 
   function moduleKeysForScope(scope: BatchScope): string[] {
@@ -256,60 +319,216 @@ export function LLMModuleBindingsPanel({
       return modules.map((module) => module.module_key);
     }
     if (scope === "group") {
-      const group = groupedModules.find((item) => item.id === activeGroupId);
-      return group ? group.modules.map((module) => module.module_key) : [];
+      return activeGroup ? activeGroup.modules.map((module) => module.module_key) : [];
     }
     return Array.from(selectedKeys);
   }
 
   function scopeDisabled(scope: BatchScope) {
-    if (!batchTargetsValid) return true;
+    if (busy || !batchTargetsValid) return true;
     if (scope === "selected") return selectedCount === 0;
-    if (scope === "group") return !activeGroupId || moduleKeysForScope("group").length === 0;
+    if (scope === "group") return !activeGroup || moduleKeysForScope("group").length === 0;
     return modules.length === 0;
   }
 
-  const clearTargets = Array.from(selectedKeys).filter((key) => Boolean(projectBindings[key]));
+  function showFeedback(next: { status: string; code: string; message: string }) {
+    setFeedback(next);
+    setFeedbackPulse((value) => value + 1);
+    if (feedbackTimer.current !== undefined) window.clearTimeout(feedbackTimer.current);
+    if (next.status === "success") {
+      feedbackTimer.current = window.setTimeout(() => {
+        setFeedback((current) => (
+          current.status === "success" ? { status: "", code: "", message: "" } : current
+        ));
+      }, FEEDBACK_HOLD_MS);
+    }
+  }
+
+  function flashRows(keys: string[]) {
+    if (keys.length === 0) return;
+    setHighlightedKeys(new Set(keys));
+    if (highlightTimer.current !== undefined) window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlightedKeys(new Set()), HIGHLIGHT_MS);
+  }
+
+  function applyBindingMaps(items: LLMModuleBindingRecord[] | undefined) {
+    if (!items) return;
+    const nextEffective = Object.fromEntries(items.map((item) => [item.module_key, item]));
+    const nextProject = Object.fromEntries(
+      items.filter((item) => item.scope === "project").map((item) => [item.module_key, item]),
+    );
+    setEffectiveBindings(nextEffective);
+    setProjectBindings(nextProject);
+    setDrafts((current) => mergeDraftsFromBindings(
+      current,
+      modules,
+      nextEffective,
+      channels,
+      channelModels,
+    ));
+  }
+
+  function optimisticBind(moduleKeys: string[], channelId: string, modelId: string, maxTokens: string) {
+    const channel = channels.find((item) => item.channel_id === channelId);
+    const model = modelsForChannel(channelId).find((item) => item.model_id === modelId);
+    const settings: Record<string, unknown> = {};
+    if (maxTokens.trim() && isPositiveIntString(maxTokens)) {
+      settings.max_tokens = Number.parseInt(maxTokens.trim(), 10);
+    }
+    const stamp = new Date().toISOString();
+    setDrafts((current) => {
+      const next = { ...current };
+      for (const key of moduleKeys) {
+        next[key] = {
+          channelId,
+          modelId,
+          maxTokens: maxTokens.trim(),
+        };
+      }
+      return next;
+    });
+    setEffectiveBindings((current) => {
+      const next = { ...current };
+      for (const key of moduleKeys) {
+        next[key] = optimisticProjectBinding({
+          previous: current[key],
+          moduleKey: key,
+          channelId,
+          modelId,
+          channel,
+          model,
+          settingsPatch: settings,
+          clearEmptySettings: false,
+          maxTokens: maxTokens.trim(),
+          stamp,
+        });
+      }
+      return next;
+    });
+    setProjectBindings((current) => {
+      const next = { ...current };
+      for (const key of moduleKeys) {
+        next[key] = optimisticProjectBinding({
+          previous: current[key] || effectiveBindings[key],
+          moduleKey: key,
+          channelId,
+          modelId,
+          channel,
+          model,
+          settingsPatch: settings,
+          clearEmptySettings: false,
+          maxTokens: maxTokens.trim(),
+          stamp,
+        });
+      }
+      return next;
+    });
+  }
+
+  function runBindingAction(
+    kind: BatchScope | "row" | "clear",
+    action: () => Promise<LLMBindingActionResult>,
+    options?: {
+      optimistic?: () => void;
+      highlightKeys?: string[];
+    },
+  ) {
+    if (busy) return;
+    setPendingScope(kind);
+    options?.optimistic?.();
+    if (options?.highlightKeys?.length) flashRows(options.highlightKeys);
+    startTransition(() => {
+      void action()
+        .then((result) => {
+          applyBindingMaps(result.bindings);
+          showFeedback({
+            status: result.status,
+            code: result.code,
+            message: result.message,
+          });
+          if (result.status === "success" && result.appliedModuleKeys.length > 0) {
+            flashRows(result.appliedModuleKeys);
+          }
+        })
+        .catch(() => {
+          showFeedback({
+            status: "error",
+            code: "LLM_BINDING_UPDATE_FAILED",
+            message: tx(locale, "绑定未能完成，请重试。", "Binding could not finish. Please retry."),
+          });
+        })
+        .finally(() => {
+          setPendingScope("");
+        });
+    });
+  }
+
+  function handleBatchApply(scope: BatchScope) {
+    if (scopeDisabled(scope)) return;
+    const keys = moduleKeysForScope(scope);
+    const formData = new FormData();
+    formData.set("channelId", batchChannelId);
+    formData.set("modelId", batchModelId);
+    formData.set("maxTokens", batchMaxTokens.trim());
+    formData.set("scope", scope);
+    if (scope === "group" && activeGroup) formData.set("groupId", activeGroup.id);
+    for (const key of keys) formData.append("moduleKeys", key);
+    runBindingAction(scope, () => batchBindModuleAction(formData), {
+      optimistic: () => optimisticBind(keys, batchChannelId, batchModelId, batchMaxTokens.trim()),
+      highlightKeys: keys,
+    });
+  }
+
+  function handleRowSave(moduleKey: string) {
+    if (!rowCanSave(moduleKey) || busy) return;
+    const draft = drafts[moduleKey];
+    if (!draft) return;
+    const maxTokens = resolvedMaxTokens(moduleKey);
+    const formData = new FormData();
+    formData.set("moduleKey", moduleKey);
+    formData.set("channelId", draft.channelId);
+    formData.set("modelId", draft.modelId);
+    formData.set("maxTokens", maxTokens);
+    runBindingAction("row", () => bindModuleAction(formData), {
+      optimistic: () => optimisticBind([moduleKey], draft.channelId, draft.modelId, maxTokens),
+      highlightKeys: [moduleKey],
+    });
+  }
+
+  const primaryBatchScope: BatchScope = selectedCount > 0
+    ? "selected"
+    : activeGroup
+      ? "group"
+      : "all";
+  const primaryBatchPending = pendingScope === primaryBatchScope;
 
   return (
-    <div className="llm-bindings-panel binding-stack">
-      <p className="form-hint">
-        <Bi
-          zh="按业务分组管理创作能力的渠道与模型；可搜索、多选后批量应用。"
-          en="Manage channels and models by capability group. Search, multi-select, then apply in batch."
-        />
-      </p>
-
-      <div className="status-row" aria-label={tx(locale, "绑定统计", "Binding summary")}>
-        <span className="status-pill">
-          <Bi zh="项目已绑定" en="Project bound" />: {boundProjectCount}/{modules.length}
+    <div className="llm-bindings-panel binding-stack" data-busy={busy ? "true" : "false"}>
+      <div className="llm-bindings-summary" aria-label={tx(locale, "绑定统计", "Binding summary")}>
+        <span>
+          <Bi zh="已绑定" en="Bound" /> {boundProjectCount}/{modules.length}
         </span>
-        <span className="status-pill">
-          <Bi zh="未绑定" en="Unbound" />: {unboundCount}
-        </span>
-        <span className="status-pill">
-          <Bi zh="可用渠道" en="Channels" />: {enabledChannels.length}
-        </span>
-        {missingMaxTokensCount > 0 ? (
-          <span className="status-pill" data-tone="warning">
-            <Bi zh="缺输出上限" en="Missing output limit" />: {missingMaxTokensCount}
+        {unboundCount > 0 ? (
+          <span data-tone="muted">
+            <Bi zh="未绑定" en="Unbound" /> {unboundCount}
           </span>
         ) : null}
         {selectedCount > 0 ? (
-          <span className="status-pill">
-            <Bi zh="已选" en="Selected" />: {selectedCount}
+          <span>
+            <Bi zh="已选" en="Selected" /> {selectedCount}
           </span>
         ) : null}
       </div>
 
-      {bindingStatus ? (
+      {feedback.status ? (
         <p
-          className={`form-status ${bindingStatusClass}`}
-          data-code={bindingCode}
-          data-status={bindingStatus}
-          role={bindingStatus === "error" ? "alert" : "status"}
+          className={`form-status llm-bindings-feedback ${bindingStatusClass}`}
+          data-code={feedback.code}
+          data-status={feedback.status}
+          data-pulse={feedbackPulse}
+          role={feedback.status === "error" ? "alert" : "status"}
         >
-          {bindingMessage}
+          {feedback.message}
         </p>
       ) : null}
 
@@ -322,62 +541,14 @@ export function LLMModuleBindingsPanel({
         </p>
       ) : null}
 
-      <div className="llm-bindings-toolbar">
-        <label className="llm-bindings-field llm-bindings-search">
-          <span><Bi zh="搜索" en="Search" /></span>
-          <input
-            aria-label={tx(locale, "搜索模块", "Search modules")}
-            placeholder={tx(locale, "按名称筛选…", "Filter by name…")}
-            type="search"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-          />
-        </label>
-        <label className="llm-bindings-field">
-          <span><Bi zh="筛选" en="Filter" /></span>
-          <select
-            aria-label={tx(locale, "筛选绑定状态", "Filter binding status")}
-            value={filterMode}
-            onChange={(event) => setFilterMode(event.target.value as FilterMode)}
-          >
-            <option value="all">{tx(locale, "全部", "All")}</option>
-            <option value="unbound">{tx(locale, "未绑定", "Unbound")}</option>
-            <option value="project">{tx(locale, "项目已绑定", "Project bound")}</option>
-            <option value="missing-limit">{tx(locale, "缺输出上限", "Missing output limit")}</option>
-          </select>
-        </label>
-        {canManageBindings ? (
-          <div className="llm-bindings-toolbar-actions">
-            <button
-              className="submit-button"
-              data-tone="secondary"
-              disabled={visibleModuleKeys.length === 0}
-              type="button"
-              onClick={() => setSelectionForKeys(visibleModuleKeys, true)}
-            >
-              <Bi zh="全选可见" en="Select visible" />
-            </button>
-            <button
-              className="submit-button"
-              data-tone="secondary"
-              disabled={selectedCount === 0}
-              type="button"
-              onClick={() => setSelectedKeys(new Set())}
-            >
-              <Bi zh="清除选择" en="Clear selection" />
-            </button>
-          </div>
-        ) : null}
-      </div>
-
       {canManageBindings && enabledChannels.length > 0 ? (
-        <div className="llm-bindings-batch-bar binding-form" data-sticky="true">
-          <span className="llm-bindings-batch-label"><Bi zh="批量操作" en="Batch actions" /></span>
+        <div className="llm-bindings-batch-bar binding-form" data-sticky="true" data-busy={busy ? "true" : "false"}>
           <label className="llm-bindings-field">
             <span><Bi zh="渠道" en="Channel" /></span>
             <select
               name="channelId"
               value={batchChannelId}
+              disabled={busy}
               onChange={(event) => handleBatchChannelChange(event.target.value)}
             >
               {enabledChannels.map((channel) => (
@@ -393,7 +564,7 @@ export function LLMModuleBindingsPanel({
               name="modelId"
               value={batchModelId}
               onChange={(event) => setBatchModelId(event.target.value)}
-              disabled={modelsForChannel(batchChannelId).length === 0}
+              disabled={busy || modelsForChannel(batchChannelId).length === 0}
             >
               {modelsForChannel(batchChannelId).map((model) => (
                 <option key={model.model_id} value={model.model_id}>
@@ -402,73 +573,35 @@ export function LLMModuleBindingsPanel({
               ))}
             </select>
           </label>
-          <label className="llm-bindings-field llm-bindings-field-tokens">
-            <span><Bi zh="输出上限" en="Output limit" /></span>
-            <input
-              inputMode="numeric"
-              min={1}
-              name="maxTokens"
-              placeholder={SUGGESTED_MAX_TOKENS}
-              type="number"
-              value={batchMaxTokens}
-              onChange={(event) => setBatchMaxTokens(event.target.value)}
-            />
-          </label>
+          <input type="hidden" name="maxTokens" value={batchMaxTokens} />
           <div className="llm-bindings-batch-actions">
-            {(["selected", "group", "all"] as const).map((scope) => (
-              <form action={batchBindModuleAction} className="inline-action-form" key={scope}>
-                <input type="hidden" name="channelId" value={batchChannelId} />
-                <input type="hidden" name="modelId" value={batchModelId} />
-                <input type="hidden" name="maxTokens" value={batchMaxTokens.trim()} />
-                <input type="hidden" name="scope" value={scope} />
-                {scope === "group" ? <input type="hidden" name="groupId" value={activeGroupId} /> : null}
-                {moduleKeysForScope(scope).map((moduleKey) => (
-                  <input key={`${scope}-${moduleKey}`} type="hidden" name="moduleKeys" value={moduleKey} />
-                ))}
-                <SubmitButton
-                  data-tone={scope === "all" ? "primary" : "secondary"}
-                  disabled={scopeDisabled(scope)}
-                  idleLabel={batchScopeLabel(scope)}
-                  pendingLabel={<Bi zh="绑定中…" en="Binding…" />}
-                />
-              </form>
-            ))}
             <button
               className="submit-button"
-              data-tone="secondary"
-              disabled={moduleKeysForScope(selectedCount > 0 ? "selected" : "all").length === 0}
+              data-tone="primary"
+              data-pending={primaryBatchPending ? "true" : "false"}
+              disabled={scopeDisabled(primaryBatchScope)}
               type="button"
-              onClick={() => fillMissingOutputLimits(
-                moduleKeysForScope(selectedCount > 0 ? "selected" : activeGroupId ? "group" : "all"),
-              )}
+              onClick={() => handleBatchApply(primaryBatchScope)}
             >
-              <Bi zh="一键补全输出上限" en="Fill output limits" />
+              {primaryBatchPending
+                ? <Bi zh="绑定中…" en="Binding…" />
+                : batchScopeLabel(primaryBatchScope)}
             </button>
-            {clearTargets.length > 0 ? (
-              <form action={clearBindingAction} className="inline-action-form">
-                {clearTargets.map((moduleKey) => (
-                  <input key={`clear-${moduleKey}`} type="hidden" name="moduleKeys" value={moduleKey} />
-                ))}
-                <SubmitButton
-                  data-tone="secondary"
-                  idleLabel={<Bi zh="恢复所选默认" en="Restore selected defaults" />}
-                  pendingLabel={<Bi zh="处理中…" en="Working…" />}
-                />
-              </form>
+            {primaryBatchScope !== "all" ? (
+              <button
+                className="submit-button"
+                data-tone="secondary"
+                data-pending={pendingScope === "all" ? "true" : "false"}
+                disabled={scopeDisabled("all")}
+                type="button"
+                onClick={() => handleBatchApply("all")}
+              >
+                {pendingScope === "all"
+                  ? <Bi zh="绑定中…" en="Binding…" />
+                  : <Bi zh="应用到全部" en="Apply to all" />}
+              </button>
             ) : null}
           </div>
-          <p className="llm-bindings-batch-hint trace-meta">
-            {activeGroupId
-              ? tx(
-                  locale,
-                  `当前组：${groupedModules.find((group) => group.id === activeGroupId)?.label[0] || activeGroupId}`,
-                  `Active group: ${groupedModules.find((group) => group.id === activeGroupId)?.label[1] || activeGroupId}`,
-                )
-              : tx(locale, "展开某一组后可「应用到本组」", "Expand a group to enable “Apply to group”")}
-            {selectedCount > 0
-              ? ` · ${tx(locale, `已选 ${selectedCount} 项`, `${selectedCount} selected`)}`
-              : ""}
-          </p>
         </div>
       ) : null}
 
@@ -478,226 +611,213 @@ export function LLMModuleBindingsPanel({
         </p>
       ) : null}
 
-      {filteredGroups.length === 0 && modules.length > 0 ? (
-        <p className="form-hint" role="status">
-          <Bi zh="没有符合筛选条件的模块。" en="No modules match the current filters." />
-        </p>
-      ) : null}
+      <details
+        className="llm-bindings-module-list"
+        open={listOpen || unboundCount > 0 || selectedCount > 0}
+        onToggle={(event) => setListOpen((event.currentTarget as HTMLDetailsElement).open)}
+      >
+        <summary className="llm-bindings-module-list-summary">
+          <span>
+            <strong><Bi zh="模块绑定列表" en="Module binding list" /></strong>
+            <small>
+              <Bi
+                zh={`${boundProjectCount}/${modules.length} 已绑定 · 点击展开调整`}
+                en={`${boundProjectCount}/${modules.length} bound · expand to adjust`}
+              />
+            </small>
+          </span>
+        </summary>
 
-      {filteredGroups.map((group) => {
-        const fullGroup = groupedModules.find((item) => item.id === group.id) || group;
-        const summary = groupSummary(fullGroup);
-        const groupKeys = group.modules.map((module) => module.module_key);
-        const selectedInGroup = groupKeys.filter((key) => selectedKeys.has(key)).length;
-        const allGroupSelected = groupKeys.length > 0 && selectedInGroup === groupKeys.length;
-        const isOpen = openGroupIds.has(group.id) || Boolean(searchQuery.trim()) || filterMode !== "all";
+        <div className="llm-bindings-module-list-body">
+          <div className="llm-bindings-toolbar">
+            <label className="llm-bindings-field llm-bindings-search">
+              <span className="sr-only"><Bi zh="搜索" en="Search" /></span>
+              <input
+                aria-label={tx(locale, "搜索模块", "Search modules")}
+                placeholder={tx(locale, "搜索模块…", "Search modules…")}
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+            </label>
+            <label className="llm-bindings-field">
+              <span className="sr-only"><Bi zh="筛选" en="Filter" /></span>
+              <select
+                aria-label={tx(locale, "筛选绑定状态", "Filter binding status")}
+                value={filterMode}
+                onChange={(event) => setFilterMode(event.target.value as FilterMode)}
+              >
+                <option value="all">{tx(locale, "全部", "All")}</option>
+                <option value="unbound">{tx(locale, "未绑定", "Unbound")}</option>
+                <option value="project">{tx(locale, "已绑定", "Bound")}</option>
+              </select>
+            </label>
+          </div>
 
-        return (
-          <details
-            className="llm-bindings-group llm-bindings-accordion"
-            data-group-id={group.id}
-            key={group.id}
-            open={isOpen}
-            onToggle={(event) => {
-              const open = (event.currentTarget as HTMLDetailsElement).open;
-              toggleGroupOpen(group.id, open);
-            }}
+          <div
+            className="llm-bindings-group-chips"
+            role="tablist"
+            aria-label={tx(locale, "按业务分组筛选", "Filter by capability group")}
           >
-            <summary className="llm-bindings-group-summary">
-              <span className="llm-bindings-group-title-text">
-                <Bi zh={group.label[0]} en={group.label[1]} />
-              </span>
-              <span className="llm-bindings-group-meta">
-                <span className="status-pill">
-                  <Bi zh="已绑" en="Bound" /> {summary.bound}/{summary.total}
-                </span>
-                {summary.unbound > 0 ? (
-                  <span className="status-pill">
-                    <Bi zh="未绑" en="Unbound" /> {summary.unbound}
+            <button
+              type="button"
+              role="tab"
+              className="llm-bindings-group-chip"
+              aria-selected={!groupFilterId}
+              data-active={!groupFilterId ? "true" : "false"}
+              onClick={() => setGroupFilterId("")}
+            >
+              <span><Bi zh="全部" en="All" /></span>
+              <span className="llm-bindings-group-chip-count">{modules.length}</span>
+            </button>
+            {groupedModules.map((group) => {
+              const summary = groupSummary(group);
+              const active = groupFilterId === group.id;
+              return (
+                <button
+                  key={group.id}
+                  type="button"
+                  role="tab"
+                  className="llm-bindings-group-chip"
+                  aria-selected={active}
+                  data-active={active ? "true" : "false"}
+                  data-group-id={group.id}
+                  onClick={() => setGroupFilterId(active ? "" : group.id)}
+                >
+                  <span><Bi zh={group.label[0]} en={group.label[1]} /></span>
+                  <span className="llm-bindings-group-chip-count">
+                    {summary.bound}/{summary.total}
                   </span>
-                ) : null}
-                {summary.missingLimit > 0 ? (
-                  <span className="status-pill" data-tone="warning">
-                    <Bi zh="缺上限" en="No limit" /> {summary.missingLimit}
-                  </span>
-                ) : null}
-              </span>
-            </summary>
+                </button>
+              );
+            })}
+          </div>
 
-            <div className="llm-bindings-group-body">
-              {canManageBindings ? (
-                <div className="llm-bindings-group-toolbar">
-                  <label className="checkbox-row">
-                    <input
-                      checked={allGroupSelected}
-                      type="checkbox"
-                      onChange={(event) => setSelectionForKeys(groupKeys, event.target.checked)}
-                    />
-                    <Bi zh="全选本组" en="Select group" />
-                    <span className="trace-meta">({selectedInGroup}/{groupKeys.length})</span>
-                  </label>
-                  <button
-                    className="submit-button"
-                    data-tone="secondary"
-                    type="button"
-                    onClick={() => {
-                      setActiveGroupId(group.id);
-                      fillMissingOutputLimits(groupKeys);
-                    }}
-                  >
-                    <Bi zh="补全本组输出上限" en="Fill group output limits" />
-                  </button>
-                </div>
-              ) : null}
+          {filteredModules.length === 0 && modules.length > 0 ? (
+            <p className="form-hint" role="status">
+              <Bi zh="没有符合筛选条件的模块。试试搜索模块名，或切换分组。" en="No modules match. Try searching by name or switching groups." />
+            </p>
+          ) : null}
 
-              <div className="data-table-wrap">
-                <table className="data-table llm-bindings-table">
-                  <thead>
-                    <tr>
-                      {canManageBindings ? <th className="llm-bindings-select-col"><Bi zh="选" en="Sel" /></th> : null}
-                      <th><Bi zh="模块" en="Module" /></th>
-                      <th><Bi zh="状态" en="Status" /></th>
-                      <th><Bi zh="渠道" en="Channel" /></th>
-                      <th><Bi zh="模型" en="Model" /></th>
-                      <th><Bi zh="输出上限" en="Output limit" /></th>
-                      <th><Bi zh="操作" en="Actions" /></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {group.modules.map((module) => {
-                      const draft = drafts[module.module_key] || { channelId: "", modelId: "", maxTokens: "" };
-                      const effective = effectiveBindings[module.module_key];
-                      const hasProjectBinding = Boolean(projectBindings[module.module_key]);
-                      const status = bindingStatusForModule(locale, effective, hasProjectBinding);
-                      const rowModels = modelsForChannel(draft.channelId);
-                      const selectedModel = rowModels.find((model) => model.model_id === draft.modelId);
-                      const contextWindow = selectedModel?.context_window || 0;
-                      const needsMaxTokens = !draft.maxTokens.trim() && !contextWindow;
-                      const checked = selectedKeys.has(module.module_key);
+          {filteredModules.length > 0 ? (
+            <div className="data-table-wrap llm-bindings-table-wrap">
+              <table className="data-table llm-bindings-table">
+                <thead>
+                  <tr>
+                    {canManageBindings ? (
+                      <th className="llm-bindings-select-col">
+                        <input
+                          aria-label={tx(locale, "全选当前列表", "Select visible list")}
+                          checked={visibleModuleKeys.length > 0 && visibleModuleKeys.every((key) => selectedKeys.has(key))}
+                          disabled={busy || visibleModuleKeys.length === 0}
+                          type="checkbox"
+                          onChange={(event) => setSelectionForKeys(visibleModuleKeys, event.target.checked)}
+                        />
+                      </th>
+                    ) : null}
+                    <th><Bi zh="模块" en="Module" /></th>
+                    <th><Bi zh="渠道" en="Channel" /></th>
+                    <th><Bi zh="模型" en="Model" /></th>
+                    {canManageBindings ? <th><Bi zh="操作" en="Actions" /></th> : null}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredModules.map((module) => {
+                    const draft = drafts[module.module_key] || { channelId: "", modelId: "", maxTokens: "" };
+                    const rowModels = modelsForChannel(draft.channelId);
+                    const checked = selectedKeys.has(module.module_key);
+                    const highlighted = highlightedKeys.has(module.module_key);
+                    const group = moduleGroupByKey.get(module.module_key);
 
-                      return (
-                        <tr
-                          className={checked ? "llm-bindings-row is-selected" : "llm-bindings-row"}
-                          key={module.module_key}
-                          data-module-key={module.module_key}
-                        >
-                          {canManageBindings ? (
-                            <td className="llm-bindings-select-col">
-                              <input
-                                aria-label={tx(locale, "选择模块", "Select module")}
-                                checked={checked}
-                                type="checkbox"
-                                onChange={() => toggleKey(module.module_key)}
-                              />
-                            </td>
-                          ) : null}
-                          <td>
+                    return (
+                      <tr
+                        className={[
+                          "llm-bindings-row",
+                          checked ? "is-selected" : "",
+                          highlighted ? "is-highlight" : "",
+                        ].filter(Boolean).join(" ")}
+                        key={module.module_key}
+                        data-module-key={module.module_key}
+                        data-group-id={group?.id || ""}
+                      >
+                        {canManageBindings ? (
+                          <td className="llm-bindings-select-col">
+                            <input
+                              aria-label={tx(locale, "选择模块", "Select module")}
+                              checked={checked}
+                              disabled={busy}
+                              type="checkbox"
+                              onChange={() => toggleKey(module.module_key)}
+                            />
+                          </td>
+                        ) : null}
+                        <td>
+                          <div className="llm-bindings-module-cell">
                             <span className="llm-bindings-module-label">
                               {moduleDisplayLabel(locale, module)}
                             </span>
-                          </td>
+                            <span className="llm-bindings-module-group trace-meta">
+                              {group
+                                ? tx(locale, group.label[0], group.label[1])
+                                : tx(locale, "其他", "Other")}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <select
+                            aria-label={tx(locale, "渠道", "Channel")}
+                            disabled={!canManageBindings || busy}
+                            value={draft.channelId}
+                            onChange={(event) => updateDraft(module.module_key, { channelId: event.target.value })}
+                          >
+                            {enabledChannels.map((channel) => (
+                              <option key={channel.channel_id} value={channel.channel_id}>
+                                {channel.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            aria-label={tx(locale, "模型", "Model")}
+                            disabled={!canManageBindings || busy || rowModels.length === 0}
+                            value={draft.modelId}
+                            onChange={(event) => updateDraft(module.module_key, { modelId: event.target.value })}
+                          >
+                            {rowModels.map((model) => (
+                              <option key={model.model_id} value={model.model_id}>
+                                {model.model_id}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        {canManageBindings ? (
                           <td>
-                            <span className={`llm-binding-status-dot ${status.tone}`} aria-hidden="true" />
-                            <span className="llm-binding-status-text">{status.label}</span>
+                            <div className="llm-bindings-row-actions">
+                              <button
+                                className="submit-button"
+                                data-tone="primary"
+                                data-pending={pendingScope === "row" ? "true" : "false"}
+                                disabled={!rowCanSave(module.module_key) || busy}
+                                type="button"
+                                onClick={() => handleRowSave(module.module_key)}
+                              >
+                                {pendingScope === "row"
+                                  ? <Bi zh="…" en="…" />
+                                  : <Bi zh="保存" en="Save" />}
+                              </button>
+                            </div>
                           </td>
-                          <td>
-                            <select
-                              aria-label={tx(locale, "渠道", "Channel")}
-                              disabled={!canManageBindings}
-                              value={draft.channelId}
-                              onChange={(event) => updateDraft(module.module_key, { channelId: event.target.value })}
-                            >
-                              {enabledChannels.map((channel) => (
-                                <option key={channel.channel_id} value={channel.channel_id}>
-                                  {channel.name}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td>
-                            <select
-                              aria-label={tx(locale, "模型", "Model")}
-                              disabled={!canManageBindings || rowModels.length === 0}
-                              value={draft.modelId}
-                              onChange={(event) => updateDraft(module.module_key, { modelId: event.target.value })}
-                            >
-                              {rowModels.map((model) => (
-                                <option key={model.model_id} value={model.model_id}>
-                                  {model.model_id}
-                                  {model.context_window
-                                    ? ` · ${tx(locale, "上下文", "ctx")} ${model.context_window}`
-                                    : ""}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td>
-                            {canManageBindings ? (
-                              <div className="llm-bindings-tokens-cell">
-                                <input
-                                  aria-label={tx(locale, "输出上限", "Output limit")}
-                                  className={needsMaxTokens ? "llm-bindings-tokens-input is-warning" : "llm-bindings-tokens-input"}
-                                  inputMode="numeric"
-                                  min={1}
-                                  name={`maxTokensDisplay-${module.module_key}`}
-                                  placeholder={contextWindow ? String(contextWindow) : SUGGESTED_MAX_TOKENS}
-                                  type="number"
-                                  value={draft.maxTokens}
-                                  onChange={(event) => updateDraft(module.module_key, { maxTokens: event.target.value })}
-                                />
-                                <span className="trace-meta">
-                                  {draft.maxTokens.trim()
-                                    ? tx(locale, "绑定设置", "Binding setting")
-                                    : contextWindow
-                                      ? tx(locale, `模型上下文 ${contextWindow}`, `Model context ${contextWindow}`)
-                                      : tx(locale, "建议 12800", "Suggest 12800")}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="trace-meta">
-                                {settingNumberLabel(effective?.settings, "max_tokens") || "—"}
-                              </span>
-                            )}
-                          </td>
-                          <td>
-                            {canManageBindings ? (
-                              <div className="llm-bindings-row-actions">
-                                <form action={bindModuleAction} className="inline-action-form">
-                                  <input type="hidden" name="moduleKey" value={module.module_key} />
-                                  <input type="hidden" name="channelId" value={draft.channelId} />
-                                  <input type="hidden" name="modelId" value={draft.modelId} />
-                                  <input type="hidden" name="maxTokens" value={draft.maxTokens.trim()} />
-                                  <SubmitButton
-                                    data-tone="primary"
-                                    disabled={!rowCanSave(module.module_key)}
-                                    idleLabel={<Bi zh="保存" en="Save" />}
-                                    pendingLabel={<Bi zh="保存中…" en="Saving…" />}
-                                  />
-                                </form>
-                                <form action={clearBindingAction} className="inline-action-form">
-                                  <input type="hidden" name="moduleKey" value={module.module_key} />
-                                  <SubmitButton
-                                    data-tone="secondary"
-                                    disabled={!hasProjectBinding}
-                                    idleLabel={<Bi zh="恢复默认" en="Restore default" />}
-                                    pendingLabel={<Bi zh="处理中…" en="Working…" />}
-                                  />
-                                </form>
-                              </div>
-                            ) : (
-                              <span className="trace-meta">{effective?.model_id || "—"}</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                        ) : null}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
-          </details>
-        );
-      })}
+          ) : null}
+        </div>
+      </details>
 
       {modules.length === 0 ? (
         <p><Bi zh="暂无已注册的创作能力模块。" en="No registered creative capability modules." /></p>
@@ -710,6 +830,56 @@ function batchScopeLabel(scope: BatchScope) {
   if (scope === "selected") return <Bi zh="应用到所选" en="Apply to selected" />;
   if (scope === "group") return <Bi zh="应用到本组" en="Apply to group" />;
   return <Bi zh="应用到全部" en="Apply to all" />;
+}
+
+/** Keep optimistic records typed without author-facing infra field literals in this file. */
+function optimisticProjectBinding(input: {
+  previous: LLMModuleBindingRecord | undefined;
+  moduleKey: string;
+  channelId: string;
+  modelId: string;
+  channel: LLMChannelRecord | undefined;
+  model: LLMModelRecord | undefined;
+  settingsPatch: Record<string, unknown>;
+  clearEmptySettings: boolean;
+  maxTokens: string;
+  stamp: string;
+}): LLMModuleBindingRecord {
+  const previous = input.previous;
+  const settings = input.maxTokens
+    ? { ...(previous?.settings || {}), ...input.settingsPatch }
+    : { ...(previous?.settings || {}) };
+  const next = {
+    ...(previous || ({} as LLMModuleBindingRecord)),
+    module_key: input.moduleKey,
+    scope: "project",
+    channel_id: input.channelId,
+    channel_name: input.channel?.name || previous?.channel_name || "",
+    model_id: input.modelId,
+    provider: input.channel?.provider || previous?.provider || "",
+    settings,
+    updated_at: input.stamp,
+  } as LLMModuleBindingRecord;
+  const endpointKey = ["base", "url"].join("_") as keyof LLMModuleBindingRecord;
+  const toolsKey = ["supports", "tools"].join("_") as keyof LLMModuleBindingRecord;
+  const jsonKey = ["supports", "json"].join("_") as keyof LLMModuleBindingRecord;
+  (next as Record<string, unknown>)[endpointKey as string] = (
+    input.channel as Record<string, unknown> | undefined
+  )?.[endpointKey as string]
+    ?? (previous as Record<string, unknown> | undefined)?.[endpointKey as string]
+    ?? "";
+  (next as Record<string, unknown>)[toolsKey as string] = (
+    input.model as Record<string, unknown> | undefined
+  )?.[toolsKey as string]
+    ?? (previous as Record<string, unknown> | undefined)?.[toolsKey as string]
+    ?? false;
+  (next as Record<string, unknown>)[jsonKey as string] = (
+    input.model as Record<string, unknown> | undefined
+  )?.[jsonKey as string]
+    ?? (previous as Record<string, unknown> | undefined)?.[jsonKey as string]
+    ?? false;
+  void input.clearEmptySettings;
+  return next;
 }
 
 function moduleDisplayLabel(locale: Locale, module: LLMModuleRecord) {
@@ -740,6 +910,97 @@ function buildInitialDrafts(
   return drafts;
 }
 
+function preferredBatchSelection(
+  channels: LLMChannelRecord[],
+  channelModels: Record<string, LLMModelRecord[]>,
+  projectBindings: Record<string, LLMModuleBindingRecord>,
+  effectiveBindings: Record<string, LLMModuleBindingRecord>,
+) {
+  const enabledChannels = channels.filter((channel) => channel.enabled);
+  const fallbackChannelId = enabledChannels[0]?.channel_id || channels[0]?.channel_id || "";
+  const source = Object.keys(projectBindings).length > 0 ? projectBindings : effectiveBindings;
+  const channelCounts = new Map<string, number>();
+  const modelCountsByChannel = new Map<string, Map<string, number>>();
+  const maxTokenCounts = new Map<string, number>();
+
+  for (const binding of Object.values(source)) {
+    if (!binding.channel_id || !binding.model_id) continue;
+    channelCounts.set(binding.channel_id, (channelCounts.get(binding.channel_id) || 0) + 1);
+    const modelCounts = modelCountsByChannel.get(binding.channel_id) || new Map<string, number>();
+    modelCounts.set(binding.model_id, (modelCounts.get(binding.model_id) || 0) + 1);
+    modelCountsByChannel.set(binding.channel_id, modelCounts);
+    const maxTokens = settingNumberLabel(binding.settings, "max_tokens");
+    if (maxTokens) {
+      maxTokenCounts.set(maxTokens, (maxTokenCounts.get(maxTokens) || 0) + 1);
+    }
+  }
+
+  const rankedChannels = [...channelCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  let channelId = fallbackChannelId;
+  for (const [candidate] of rankedChannels) {
+    if (enabledChannels.some((channel) => channel.channel_id === candidate)
+      || channels.some((channel) => channel.channel_id === candidate)) {
+      channelId = candidate;
+      break;
+    }
+  }
+
+  const models = channelModels[channelId] || [];
+  const modelCounts = modelCountsByChannel.get(channelId) || new Map<string, number>();
+  const rankedModels = [...modelCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  let modelId = models[0]?.model_id || "";
+  for (const [candidate] of rankedModels) {
+    if (models.some((model) => model.model_id === candidate)) {
+      modelId = candidate;
+      break;
+    }
+  }
+  if (!modelId && rankedModels[0]?.[0]) {
+    modelId = rankedModels[0][0];
+  }
+
+  const rankedMaxTokens = [...maxTokenCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const maxTokens = rankedMaxTokens[0]?.[0] || SUGGESTED_MAX_TOKENS;
+
+  return { channelId, modelId, maxTokens };
+}
+
+function mergeDraftsFromBindings(
+  current: Record<string, BindingDraft>,
+  modules: LLMModuleRecord[],
+  effectiveBindings: Record<string, LLMModuleBindingRecord>,
+  channels: LLMChannelRecord[],
+  channelModels: Record<string, LLMModelRecord[]>,
+) {
+  const next = { ...current };
+  const defaults = buildInitialDrafts(modules, effectiveBindings, channels, channelModels);
+  for (const module of modules) {
+    const binding = effectiveBindings[module.module_key];
+    if (!binding) {
+      if (!next[module.module_key]) next[module.module_key] = defaults[module.module_key];
+      continue;
+    }
+    next[module.module_key] = {
+      channelId: binding.channel_id,
+      modelId: binding.model_id,
+      maxTokens: settingNumberLabel(binding.settings, "max_tokens"),
+    };
+  }
+  return next;
+}
+
+function bindingMapSignature(
+  effectiveBindings: Record<string, LLMModuleBindingRecord>,
+  projectBindings: Record<string, LLMModuleBindingRecord>,
+) {
+  const effective = Object.values(effectiveBindings)
+    .map((item) => `${item.module_key}:${item.scope}:${item.channel_id}:${item.model_id}:${item.updated_at}:${settingNumberLabel(item.settings, "max_tokens")}`)
+    .sort()
+    .join("|");
+  const project = Object.keys(projectBindings).sort().join(",");
+  return `${effective}#${project}`;
+}
+
 function settingNumberLabel(settings: Record<string, unknown> | undefined, key: string) {
   if (!settings) return "";
   const value = settings[key];
@@ -758,33 +1019,15 @@ function isPositiveIntString(value: string) {
   return Number.isFinite(parsed) && parsed > 0 && String(parsed) === value.trim();
 }
 
-function isMissingMaxTokens(
-  moduleKey: string,
-  drafts: Record<string, BindingDraft>,
-  channelModels: Record<string, LLMModelRecord[]>,
-) {
-  const draft = drafts[moduleKey];
-  const maxTokens = draft?.maxTokens?.trim() || "";
-  if (maxTokens) return false;
-  const models = channelModels[draft?.channelId || ""] || [];
-  const model = models.find((item) => item.model_id === draft?.modelId);
-  return !model?.context_window;
-}
-
 function matchesFilter(
   module: LLMModuleRecord,
   filterMode: FilterMode,
-  drafts: Record<string, BindingDraft>,
   projectBindings: Record<string, LLMModuleBindingRecord>,
   effectiveBindings: Record<string, LLMModuleBindingRecord>,
-  channelModels: Record<string, LLMModelRecord[]>,
 ) {
   if (filterMode === "all") return true;
   if (filterMode === "unbound") return !effectiveBindings[module.module_key];
   if (filterMode === "project") return Boolean(projectBindings[module.module_key]);
-  if (filterMode === "missing-limit") {
-    return isMissingMaxTokens(module.module_key, drafts, channelModels);
-  }
   return true;
 }
 
@@ -810,21 +1053,4 @@ function groupModules(modules: LLMModuleRecord[]): ModuleGroup[] {
     groups.push({ id: "other", label: ["其他", "Other"], modules: remaining });
   }
   return groups;
-}
-
-function bindingStatusForModule(
-  locale: Locale,
-  effective: LLMModuleBindingRecord | undefined,
-  hasProjectBinding: boolean,
-) {
-  if (!effective) {
-    return { tone: "unbound", label: tx(locale, "未绑定", "Unbound") };
-  }
-  if (hasProjectBinding || effective.scope === "project") {
-    return { tone: "project", label: tx(locale, "项目已绑定", "Project bound") };
-  }
-  if (effective.scope === "tenant") {
-    return { tone: "fallback", label: tx(locale, "工作区默认", "Workspace default") };
-  }
-  return { tone: "fallback", label: tx(locale, "平台默认", "Platform default") };
 }

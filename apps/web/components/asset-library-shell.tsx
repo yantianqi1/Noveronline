@@ -1,4 +1,4 @@
-import { Boxes, ChevronRight, Search, SlidersHorizontal } from "lucide-react";
+import { Boxes, ChevronRight, Filter, Search, SlidersHorizontal } from "lucide-react";
 
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import type {
@@ -137,6 +137,15 @@ export function AssetLibraryShell({
       />
 
       <div className="workbench-grid asset-library-grid">
+        <AssetFacetRail
+          facets={facets}
+          filters={searchFilters}
+          locale={locale}
+          projectId={projectId}
+          searchMode={searchMode}
+          searchQuery={searchQuery}
+          tenantSlug={tenantSlug}
+        />
         <main className="asset-library-main">
           <section
             className={`panel asset-overview-panel asset-search-panel ${assets.ok && (searchResults === null || searchResults.ok) ? "" : "error-box"}`}
@@ -287,6 +296,7 @@ export function AssetLibraryShell({
           status={<Bi zh="操作与记忆" en="Operations and memory" />}
           title={<Bi zh="资产检视" en="Asset inspector" />}
         >
+          <div id="asset-operations">
           <AssetOperationWorkspace
             description={<Bi zh="创建与管理资产" en="Create and manage assets" />}
             items={[
@@ -304,6 +314,7 @@ export function AssetLibraryShell({
             primaryId="create"
             title={<Bi zh="资产操作" en="Asset operations" />}
           />
+          </div>
           <details className={`overview-details asset-memory-panel ${archiveMemories === null || archiveMemories.ok ? "" : "error-box"}`}>
             <summary>
               <Boxes aria-hidden="true" size={18} strokeWidth={1.8} />
@@ -355,6 +366,134 @@ function operationItem(
   return { id, title, description, content, tone };
 }
 
+type FacetDimension = "assetType" | "category" | "lifecycle" | "source" | "tag";
+
+function AssetFacetRail({
+  facets,
+  filters,
+  locale,
+  projectId,
+  searchMode,
+  searchQuery,
+  tenantSlug,
+}: {
+  facets: AssetFacetsSummary;
+  filters: AssetLibraryShellProps["searchFilters"];
+  locale: Locale;
+  projectId: string;
+  searchMode: "keyword" | "vector" | "hybrid";
+  searchQuery: string;
+  tenantSlug: string;
+}) {
+  const groups: { dimension: FacetDimension; label: React.ReactNode; items: { value: string; count: number }[]; active: string | undefined; isLifecycle?: boolean }[] = facets.ok
+    ? [
+        { dimension: "assetType", label: <Bi zh="类型" en="Type" />, items: facets.asset_types, active: filters.asset_types[0] },
+        { dimension: "lifecycle", label: <Bi zh="状态" en="Status" />, items: facets.lifecycles, active: filters.lifecycles[0], isLifecycle: true },
+        { dimension: "category", label: <Bi zh="分类" en="Category" />, items: facets.categories, active: filters.categories[0] },
+        { dimension: "source", label: <Bi zh="来源" en="Source" />, items: facets.sources, active: filters.sources[0] },
+        { dimension: "tag", label: <Bi zh="标签" en="Tag" />, items: facets.tags, active: filters.tags[0] },
+      ]
+    : [];
+  const totalActive = [
+    filters.asset_types,
+    filters.categories,
+    filters.lifecycles,
+    filters.sources,
+    filters.tags,
+  ].reduce((count, values) => count + values.length, 0) + (filters.pinned === undefined ? 0 : 1);
+
+  return (
+    <nav className="asset-facet-rail" aria-label={tx(locale, "资产分面筛选", "Asset facets")}>
+      <div className="asset-facet-rail-head">
+        <span className="asset-facet-rail-title">
+          <Filter aria-hidden="true" size={15} strokeWidth={1.8} />
+          <strong><Bi zh="筛选" en="Filters" /></strong>
+        </span>
+        {totalActive > 0 ? (
+          <a className="asset-facet-rail-clear" href={facetFilterHref(tenantSlug, projectId, searchQuery, searchMode, filters, null, null)}>
+            <Bi zh="清除全部" en="Clear all" />
+          </a>
+        ) : null}
+      </div>
+      {!facets.ok ? (
+        <PublicFailureNotice code={facets.code} />
+      ) : groups.every((group) => group.items.length === 0) ? (
+        <p className="form-hint asset-facet-rail-empty"><Bi zh="暂无可筛选的分面。" en="No facets to filter yet." /></p>
+      ) : (
+        <div className="asset-facet-rail-groups">
+          {groups.filter((group) => group.items.length > 0).map((group) => (
+            <section className="asset-facet-group" key={group.dimension} aria-label={typeof group.label === "string" ? group.label : group.dimension}>
+              <p className="asset-facet-group-label">{group.label}</p>
+              <ul className="asset-facet-group-list">
+                {group.items.slice(0, 8).map((item) => {
+                  const active = group.active === item.value;
+                  const nextValue = active ? null : item.value;
+                  return (
+                    <li key={`${group.dimension}-${item.value}`}>
+                      <a
+                        className="asset-facet-chip"
+                        data-active={active ? "true" : "false"}
+                        aria-current={active ? "true" : undefined}
+                        href={facetFilterHref(tenantSlug, projectId, searchQuery, searchMode, filters, group.dimension, nextValue)}
+                      >
+                        <span className="asset-facet-chip-label">
+                          {group.isLifecycle ? assetLifecycleLabel(locale, item.value) : assetValueLabel(locale, item.value)}
+                        </span>
+                        <span className="asset-facet-chip-count">{item.count}</span>
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+    </nav>
+  );
+}
+
+function facetFilterHref(
+  tenantSlug: string,
+  projectId: string,
+  searchQuery: string,
+  mode: "keyword" | "vector" | "hybrid",
+  filters: AssetLibraryShellProps["searchFilters"],
+  dimension: FacetDimension | null,
+  value: string | null,
+) {
+  const next = {
+    asset_types: [...filters.asset_types],
+    categories: [...filters.categories],
+    lifecycles: [...filters.lifecycles],
+    sources: [...filters.sources],
+    tags: [...filters.tags],
+    pinned: filters.pinned,
+  };
+  if (dimension === null) {
+    next.asset_types = [];
+    next.categories = [];
+    next.lifecycles = [];
+    next.sources = [];
+    next.tags = [];
+    next.pinned = undefined;
+  } else {
+    const assignment: [FacetDimension, keyof typeof next][] = [
+      ["assetType", "asset_types"],
+      ["category", "categories"],
+      ["lifecycle", "lifecycles"],
+      ["source", "sources"],
+      ["tag", "tags"],
+    ];
+    for (const [dim, key] of assignment) {
+      if (dim === dimension) {
+        (next[key] as string[]) = value ? [value] : [];
+      }
+    }
+  }
+  return assetSearchHref(tenantSlug, projectId, searchQuery, { filters: next, mode });
+}
+
 function StatusLine({ status, code: _code, message: _message }: { status: string; code: string; message: string }) {
   if (!status) {
     return null;
@@ -384,32 +523,46 @@ function AssetList({
   if (assets.items.length === 0) {
     return (
       <EmptyState
-        description={<Bi zh="创建资产或导入素材后会出现在这里。" en="Created or ingested materials will appear here." />}
-        title={<Bi zh="暂无资产" en="No assets yet" />}
+        action={(
+          <a data-tone="primary" href="#asset-operations">
+            <Bi zh="+ 创建资产" en="+ Create asset" />
+          </a>
+        )}
+        className="asset-library-empty"
+        description={<Bi zh="创建资产或导入素材后会出现在这里。世界规则、角色与风格都会出现在此列表。" en="Created or ingested materials will appear here—rules, characters, and style." />}
+        title={<Bi zh="项目资产" en="Project assets" />}
       />
     );
   }
   return (
-    <div className="list-row-stack asset-browse-list">
-      {assets.items.map((asset) => {
-        const href = assetDetailHref(tenantSlug, projectId, asset.asset_id);
-        return (
-          <ListRow
-            className="asset-list-row"
-            href={href}
-            key={asset.asset_id}
-            meta={(
-              <>
-                <span>{assetValueLabel(locale, asset.asset_type)}</span>
-                <span>{assetLifecycleLabel(locale, asset.lifecycle)}</span>
-                <span>{assetValueLabel(locale, asset.source_kind)}</span>
-                <span>{formatAuthorTimestamp(locale, asset.updated_at)}</span>
-              </>
-            )}
-            title={<strong>{asset.title}</strong>}
-          />
-        );
-      })}
+    <div className="data-table-wrap asset-browse-table-wrap">
+      <table className="data-table asset-browse-table">
+        <thead>
+          <tr>
+            <th scope="col"><Bi zh="标题" en="Title" /></th>
+            <th scope="col"><Bi zh="类型" en="Type" /></th>
+            <th scope="col"><Bi zh="状态" en="Status" /></th>
+            <th scope="col"><Bi zh="来源" en="Source" /></th>
+            <th scope="col"><Bi zh="更新时间" en="Updated" /></th>
+          </tr>
+        </thead>
+        <tbody>
+          {assets.items.map((asset) => (
+            <tr className="asset-row-link" key={asset.asset_id}>
+              <td>
+                <a className="asset-title-link" href={assetDetailHref(tenantSlug, projectId, asset.asset_id)}>
+                  <strong>{asset.title || <Bi zh="未命名资产" en="Untitled asset" />}</strong>
+                </a>
+                {asset.pinned ? <span className="asset-pin-flag" title={tx(locale, "已置顶", "Pinned")}>★</span> : null}
+              </td>
+              <td><span className="asset-type-chip">{assetValueLabel(locale, asset.asset_type)}</span></td>
+              <td><span className={`asset-lifecycle-chip is-${asset.lifecycle}`}>{assetLifecycleLabel(locale, asset.lifecycle)}</span></td>
+              <td className="asset-cell-muted">{assetValueLabel(locale, asset.source_kind)}</td>
+              <td className="asset-cell-muted">{formatAuthorTimestamp(locale, asset.updated_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

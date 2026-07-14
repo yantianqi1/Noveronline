@@ -43,23 +43,242 @@
   transition: grid-template-columns 220ms var(--ease-natural);
 }
 
+/* Collapsed desktop rail: icon-only column. Must beat the unified
+   `.sidebar-drawer { display: flex }` rule (3 classes) or labels reflow
+   into vertical glyphs inside the narrow 72px track. */
 @media (min-width: 861px) {
   html[data-sidebar-collapsed="true"] .app-frame.app-frame-unified {
-    grid-template-columns: 76px minmax(0, 1fr) !important;
+    grid-template-columns: 72px minmax(0, 1fr) !important;
   }
 
   html[data-sidebar-collapsed="true"] .app-sidebar {
-    padding-inline: 10px !important;
+    /* Visible so icon-rail flyouts are not clipped by the sticky rail. */
+    overflow: visible !important;
+    padding: 12px 8px !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-stack {
+    align-items: center;
   }
 
   html[data-sidebar-collapsed="true"] .sidebar-top-row {
+    width: 100%;
     justify-content: center;
   }
 
-  html[data-sidebar-collapsed="true"] .brand-lockup,
-  html[data-sidebar-collapsed="true"] .language-switcher,
-  html[data-sidebar-collapsed="true"] .sidebar-drawer {
+  html[data-sidebar-collapsed="true"] .sidebar-top-actions {
+    justify-content: center;
+  }
+
+  html[data-sidebar-collapsed="true"] .app-frame.app-frame-unified .brand-lockup,
+  html[data-sidebar-collapsed="true"] .app-frame.app-frame-unified .language-switcher {
+    display: none !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .app-frame.app-frame-unified .sidebar-drawer {
+    display: flex !important;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    gap: 10px;
+    overflow: visible;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-section,
+  html[data-sidebar-collapsed="true"] .sidebar-primary-nav {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  html[data-sidebar-collapsed="true"] .nav-list {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-section .nav-group-label,
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-section > .eyebrow {
+    display: none !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .project-context {
+    width: 44px;
+    height: 44px;
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .project-context > span:last-child {
+    display: none !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .novel-switcher {
+    position: relative;
+    width: 44px;
+  }
+
+  html[data-sidebar-collapsed="true"] .novel-switcher-trigger {
+    width: 44px;
+    height: 44px;
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .novel-switcher-labels,
+  html[data-sidebar-collapsed="true"] .novel-switcher-caret {
+    display: none !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .novel-switcher-icon {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+  }
+
+  html[data-sidebar-collapsed="true"] .novel-switcher-panel {
+    top: 0;
+    right: auto;
+    left: calc(100% + 10px);
+    width: min(280px, 70vw);
+  }
+
+  html[data-sidebar-collapsed="true"] .nav-link {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    justify-content: center;
+    gap: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .nav-link::before {
     display: none;
+  }
+
+  html[data-sidebar-collapsed="true"] .nav-link > svg {
+    flex: 0 0 auto;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-section .nav-link-label,
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure > summary .nav-link-label {
+    display: none !important;
+  }
+
+  /* Only top-level rail disclosures become icon buttons + flyouts.
+     Nested account session details keep normal in-panel layout. */
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure {
+    position: relative;
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    border-top: 1px solid rgba(65, 88, 113, 0.13);
+    padding-top: 8px;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure > summary {
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+    gap: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure > summary::after {
+    display: none;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure > summary > svg {
+    flex: 0 0 auto;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-account-menu > summary.account-summary {
+    width: 44px;
+    min-height: 44px;
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure > :not(summary) {
+    position: absolute;
+    z-index: 50;
+    top: 0;
+    left: calc(100% + 10px);
+    display: grid;
+    width: min(280px, 70vw);
+    gap: 8px;
+    border: 1px solid var(--border-default, var(--border));
+    border-radius: var(--radius-panel, 10px);
+    background: var(--surface, #fffdf8);
+    box-shadow: 0 16px 40px rgba(46, 39, 31, 0.16);
+    padding: 10px;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure:not([open]) > :not(summary) {
+    display: none;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .sidebar-section {
+    width: auto;
+    align-items: stretch;
+    padding: 0;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .nav-list {
+    align-items: stretch;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .nav-link {
+    width: auto;
+    min-width: 0;
+    height: auto;
+    min-height: 40px;
+    justify-content: flex-start;
+    gap: 10px;
+    overflow: visible;
+    font-size: 0.82rem;
+    line-height: 1.2;
+    padding: 8px 10px;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .nav-link::before {
+    display: block;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .account-summary {
+    width: auto;
+    min-height: 0;
+    justify-content: flex-start;
+    gap: 9px;
+    padding: 5px 3px 8px;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .account-summary > span:last-child {
+    display: grid !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-drawer > .sidebar-disclosure .account-actions {
+    grid-template-columns: 1fr;
+  }
+
+  html[data-sidebar-collapsed="true"] .desktop-sidebar-toggle {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
   }
 }
 
@@ -94,6 +313,7 @@
   .app-frame.app-frame-unified .app-sidebar,
   .app-frame.app-frame-unified .sidebar-stack {
     height: auto;
+    min-height: 0;
     max-height: none;
   }
 
@@ -102,19 +322,16 @@
   }
 }
 
-/* Overview feedback pass: denser header, readable metrics, quieter upload form. */
+/* Overview feedback pass: denser header + readable metrics.
+   Do NOT force a fixed rail / dark aside here — that crushed narrow viewports. */
 .overview-header.workspace-header-compact {
-  height: 154px !important;
-  padding: 18px 32px 14px !important;
+  height: auto !important;
+  min-height: 0 !important;
+  padding: 18px 24px 14px !important;
 }
 
 .overview-header.workspace-header-compact::after {
   display: none;
-}
-
-.overview-root::before,
-.overview-root::after {
-  height: 232px;
 }
 
 .overview-root .overview-metric strong {
@@ -133,58 +350,48 @@
 }
 
 .overview-root .workbench-grid > aside {
-  padding-top: 78px;
+  padding-top: 0;
 }
 
-.overview-root .workbench-grid > aside .panel {
+.overview-root .workbench-grid > aside .panel.overview-upload-panel {
   min-height: 0;
-  border-radius: 6px 0 0 6px;
-  background: rgba(43, 45, 43, 0.96);
-  padding: 22px 28px;
+  border-radius: 16px;
+  background: linear-gradient(165deg, rgba(255, 252, 246, 0.96), rgba(244, 238, 228, 0.92));
+  color: #24211d;
+  padding: 14px 14px 12px;
 }
 
-.overview-upload-disclosure .overview-details-content {
-  padding-top: 12px;
+.overview-root .overview-rail {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.overview-root .overview-dropzone {
+  min-height: 88px;
 }
 
 .overview-upload-disclosure .binding-form {
   gap: 8px;
 }
 
-.overview-upload-disclosure input[type="file"],
 .overview-upload-disclosure select {
   min-height: 46px;
-  border: 1px solid rgba(255, 255, 255, 0.32) !important;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.1) !important;
-  color: #fffaf1 !important;
-  padding: 5px 8px;
+  border: 1px solid rgba(120, 104, 84, 0.22) !important;
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.92) !important;
+  color: #24211d !important;
+  padding: 8px 10px;
   transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
 
-.overview-upload-disclosure input[type="file"]::file-selector-button {
-  min-height: 34px;
-  margin-right: 10px;
-  border: 0;
-  border-radius: 3px;
-  background: #f4efe5;
-  color: #2c2925;
-  font: inherit;
-  font-weight: 650;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-
-.overview-upload-disclosure input[type="file"]:hover,
 .overview-upload-disclosure select:hover {
-  border-color: rgba(255, 255, 255, 0.62) !important;
-  background: rgba(255, 255, 255, 0.15) !important;
+  border-color: rgba(143, 33, 27, 0.35) !important;
 }
 
-.overview-upload-disclosure input[type="file"]:focus-visible,
 .overview-upload-disclosure select:focus-visible {
-  border-color: #fffaf1 !important;
-  box-shadow: 0 0 0 3px rgba(255, 250, 241, 0.2);
+  border-color: rgba(143, 33, 27, 0.55) !important;
+  box-shadow: 0 0 0 3px rgba(143, 33, 27, 0.12);
   outline: none;
 }
 
@@ -192,15 +399,26 @@
   .overview-header.workspace-header-compact {
     height: auto !important;
     min-height: 0 !important;
-    padding: 18px !important;
+    padding: 16px 14px 10px !important;
   }
 
   .overview-root::before,
   .overview-root::after {
-    height: 210px;
+    height: 160px;
   }
 
+  .overview-root .workbench-grid,
+  .overview-root > .workbench-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .overview-root .workbench-grid > main,
   .overview-root .workbench-grid > aside {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding-top: 0;
   }
 }
@@ -1576,16 +1794,19 @@
   .writer-mobile-switch {
     display: grid;
     position: sticky;
+    /* Under mobile top bar when present; desktop hides this control. */
     top: 0;
-    z-index: 7;
+    z-index: 12;
     grid-auto-flow: column;
     grid-auto-columns: 1fr;
     gap: 4px;
-    border-bottom: 1px solid rgba(65, 57, 47, 0.18);
-    background: rgba(250, 248, 243, 0.94);
-    box-shadow: 0 6px 18px rgba(43, 39, 34, 0.07);
+    border: 1px solid rgba(65, 57, 47, 0.14);
+    border-radius: 16px;
+    background: rgba(250, 248, 243, 0.96);
+    box-shadow: 0 8px 22px rgba(43, 39, 34, 0.08);
+    margin: 0 0 10px;
     padding: 6px 8px;
-    backdrop-filter: blur(8px);
+    backdrop-filter: blur(10px);
   }
 
   .writer-mobile-switch-tab {
@@ -1705,7 +1926,12 @@
   }
 
   .writer-composer-dock {
-    padding: 10px 12px 12px;
+    padding: 10px 12px calc(12px + var(--writer-keyboard-inset, 0px));
+    transition: padding-bottom var(--motion-fast) var(--ease-natural);
+  }
+
+  .writer-composer-dock[data-keyboard-open="true"] {
+    box-shadow: 0 -10px 28px rgba(43, 39, 34, 0.12);
   }
 
   .writer-mode-segmented {
@@ -2474,5 +2700,292 @@ button.writer-approval-approve {
 @media (prefers-reduced-motion: reduce) {
   .writer-manuscript-editor-loading .writer-manuscript-skeleton {
     animation: none;
+  }
+}
+
+/* Overview responsive contract (must stay last so route skins cannot crush the canvas).
+   Three content bands (shell still cuts over at 860):
+   - ≥1200px: main + upload rail (full dual-column)
+   - 861–1199px: compact dual-column / main+rail (no full-width waterfall)
+   - ≤860px: phone single-column paper stack */
+@media (min-width: 861px) {
+  .overview-root > .workbench-grid,
+  .overview-root .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr) !important;
+    width: 100%;
+    max-width: 100%;
+    gap: 14px 16px !important;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > main {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    min-width: 0;
+    width: auto;
+    max-width: none;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside {
+    grid-column: 2 !important;
+    grid-row: 1 / span 2 !important;
+    min-width: 0;
+    width: auto;
+    max-width: none;
+    padding-top: 0 !important;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside.overview-rail,
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside {
+    align-content: start;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside .panel.overview-upload-panel {
+    position: relative;
+    top: auto;
+  }
+
+  .overview-root .overview-status-pipeline {
+    grid-template-columns: minmax(140px, 0.72fr) minmax(0, 1.35fr) !important;
+    gap: 12px 16px;
+  }
+
+  .overview-root .overview-status-card,
+  .overview-root .overview-status-stage,
+  .overview-root .overview-seed-progress {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .overview-root .overview-status-headline,
+  .overview-root .overview-run-heading,
+  .overview-root .overview-progress-heading,
+  .overview-root .form-hint {
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+}
+
+/* Narrow desktop / tablet: denser dual-column, tighter panels. */
+@media (max-width: 1199px) and (min-width: 861px) {
+  .overview-root > .workbench-grid,
+  .overview-root .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1.35fr) minmax(220px, 0.72fr) !important;
+    gap: 12px 12px !important;
+    padding: 0 18px 24px !important;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > main > .panel,
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside > .panel {
+    border-radius: 16px !important;
+    padding: 14px 14px !important;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > main > .panel.overview-next-panel {
+    border-radius: 18px !important;
+    padding: 16px 14px 14px !important;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside .panel.overview-upload-panel {
+    padding: 12px 12px 10px !important;
+  }
+
+  .overview-root .overview-dropzone {
+    min-height: 76px !important;
+    padding: 8px 10px !important;
+  }
+
+  .overview-root .overview-status-pipeline {
+    grid-template-columns: minmax(120px, 0.62fr) minmax(0, 1.5fr) !important;
+  }
+
+  .overview-root .overview-run-actions-soft {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+}
+
+/* Very narrow desktop: keep dual-column but tighter rail. */
+@media (max-width: 999px) and (min-width: 861px) {
+  .overview-root > .workbench-grid,
+  .overview-root .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1.1fr) minmax(220px, 0.9fr) !important;
+    gap: 12px !important;
+    padding: 0 14px 20px !important;
+  }
+
+  .overview-root .overview-status-pipeline {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .overview-root .overview-status-card-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .overview-root .overview-run-actions-soft {
+    width: 100%;
+    flex-direction: row !important;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
+@media (min-width: 1200px) {
+  .overview-root > .workbench-grid,
+  .overview-root .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1.72fr) minmax(280px, 0.82fr) !important;
+    gap: 0 18px !important;
+  }
+}
+
+/* Mid-band workbench rails: keep structure until ~960, not 980–1100 scatter. */
+@media (max-width: 1199px) and (min-width: 961px) {
+  .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  }
+
+  .worldline-workbench,
+  .character-console-workbench {
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 300px) !important;
+  }
+
+  .workbench-grid.llm-facility-workbench {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+@media (max-width: 960px) and (min-width: 861px) {
+  .workbench-grid:not(.asset-library-grid),
+  .worldline-workbench,
+  .character-console-workbench,
+  .workbench-grid.llm-facility-workbench {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .worldline-workbench > aside,
+  .character-console-workbench > aside {
+    min-height: 0;
+  }
+
+  .character-console-workbench > aside {
+    border-top: 1px solid rgba(167, 135, 82, 0.45);
+    border-left: 0;
+  }
+}
+
+/* Tight desktop: slightly narrower sidebar so content keeps dual-column room.
+   Do not auto-hide .sidebar-drawer (that is user-toggled collapse only). */
+@media (max-width: 1100px) and (min-width: 861px) {
+  .app-frame.app-frame-unified {
+    grid-template-columns: minmax(200px, 220px) minmax(0, 1fr) !important;
+  }
+
+  .app-frame.app-frame-unified .app-sidebar {
+    padding-inline: 14px !important;
+  }
+}
+
+@media (max-width: 860px) {
+  .overview-header.workspace-header-compact {
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 14px 14px 10px !important;
+  }
+
+  .overview-root {
+    overflow-x: clip;
+  }
+
+  .overview-root > .workbench-grid,
+  .overview-root .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px !important;
+    margin-top: 0 !important;
+    padding: 0 12px 20px !important;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > main,
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside {
+    grid-column: auto !important;
+    grid-row: auto !important;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .overview-root .workbench-grid:not(.asset-library-grid) > aside .panel.overview-upload-panel {
+    position: relative !important;
+    top: auto !important;
+  }
+
+  .overview-root .overview-status-pipeline {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .overview-root .workbench-grid > main > .panel,
+  .overview-root .workbench-grid > aside > .panel {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    border-radius: 16px !important;
+    padding: 14px !important;
+  }
+
+  .overview-root .overview-status-card-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .overview-root .overview-run-actions-soft {
+    width: 100%;
+    flex-direction: row !important;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .overview-root .overview-status-headline {
+    font-size: clamp(1.55rem, 7vw, 2rem) !important;
+    line-height: 1.15 !important;
+  }
+}
+
+/* Materials / Me hubs: structured 2×2 on tablet/desktop; paper stack on phone. */
+@media (min-width: 861px) {
+  .mobile-hub {
+    max-width: 56rem;
+    width: 100%;
+  }
+
+  .mobile-hub .mobile-paper-stack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .mobile-hub .mobile-paper-stack > .mobile-hub-card,
+  .mobile-hub .mobile-paper-stack > a.mobile-hub-card,
+  .mobile-hub .mobile-paper-stack > .mobile-stack-row {
+    min-height: 88px;
+    border: 1px solid var(--mobile-border, rgba(120, 104, 84, 0.16));
+    border-radius: 16px;
+    border-bottom: 1px solid var(--mobile-border, rgba(120, 104, 84, 0.16));
+    background:
+      linear-gradient(165deg, rgba(255, 252, 246, 0.98), rgba(247, 242, 233, 0.92));
+    box-shadow: 0 10px 22px rgba(52, 42, 31, 0.06);
+  }
+}
+
+@media (max-width: 860px) {
+  .mobile-hub {
+    max-width: 42rem;
+  }
+
+  .mobile-hub .mobile-paper-stack {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

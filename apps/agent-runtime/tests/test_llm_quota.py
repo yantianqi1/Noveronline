@@ -230,3 +230,92 @@ def test_private_replay_payload_removes_credentials_without_dropping_usage_or_ca
         "nested": {"summary": "Allowed summary"},
         "__llm_usage": {"prompt_tokens": 4, "completion_tokens": 2},
     }
+
+
+def test_existing_reservation_marks_released_rows_for_reopen_instead_of_closed_error() -> None:
+    from mirofish_agents.llm_quota.postgres import _REOPEN_SENTINEL, _existing_reservation
+
+    request = ProviderCallRequest(
+        tenant_id=_context().tenant_id,
+        project_id=_context().project_id or "",
+        run_id=_context().run_id,
+        actor_user_id=_context().actor_user_id,
+        trace_id=_context().trace_id,
+        workflow_type=_context().workflow_type,
+        module_key="asset_ingestion",
+        channel_id="55555555-5555-5555-5555-555555555555",
+        model_id="model-json",
+        provider_call_id="llm:stable-retry-call",
+        stage="candidate_generation",
+        call_index=0,
+        input_token_upper_bound=100,
+        output_token_upper_bound=50,
+        module_max_concurrency=1,
+    )
+
+    class _Cursor:
+        def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def fetchone(self) -> tuple[Any, ...]:
+            return (
+                "reservation-1",
+                request.project_id,
+                request.run_id,
+                request.module_key,
+                request.channel_id,
+                request.model_id,
+                150,
+                10,
+                "released",
+            )
+
+    admission = _existing_reservation(_Cursor(), request, reserved_tokens=150, reserved_cost_micros=10)
+    assert admission is not None
+    assert admission.reservation_id == _REOPEN_SENTINEL
+    assert admission.provider_call_id == request.provider_call_id
+
+
+def test_existing_reservation_reopens_when_model_rebinding_changes_identity() -> None:
+    """Retry after switching DeepSeek/GPT must not hard-fail with CALL_CONFLICT."""
+    from mirofish_agents.llm_quota.postgres import _REOPEN_SENTINEL, _existing_reservation
+
+    request = ProviderCallRequest(
+        tenant_id=_context().tenant_id,
+        project_id=_context().project_id or "",
+        run_id=_context().run_id,
+        actor_user_id=_context().actor_user_id,
+        trace_id=_context().trace_id,
+        workflow_type=_context().workflow_type,
+        module_key="sequential_reading",
+        channel_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        model_id="deepseek-v4-flash",
+        provider_call_id="llm:stable-retry-call",
+        stage="sequential_reading",
+        call_index=0,
+        input_token_upper_bound=100,
+        output_token_upper_bound=50,
+        module_max_concurrency=1,
+    )
+
+    class _Cursor:
+        def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def fetchone(self) -> tuple[Any, ...]:
+            # Prior attempt used a different model under the same provider_call_id.
+            return (
+                "reservation-old",
+                request.project_id,
+                request.run_id,
+                request.module_key,
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "gpt-5.5",
+                33919,
+                1,
+                "released",
+            )
+
+    admission = _existing_reservation(_Cursor(), request, reserved_tokens=20000, reserved_cost_micros=1)
+    assert admission is not None
+    assert admission.reservation_id == _REOPEN_SENTINEL

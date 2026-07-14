@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   canonicalLLMFacilitySearch,
+  llmChannelAnchorId,
   llmChannelKey,
   llmModuleKeyFromSegment,
   llmModuleKeyFromPathSegment,
@@ -48,4 +49,11 @@ test("LLM modules use short product aliases in the visible path", () => {
   assert.equal(llmModuleKeyFromPathSegment("review"), "writer_reviewer");
   assert.equal(llmModulePathSegment("custom_module"), "custom-module");
   assert.equal(llmModuleKeyFromPathSegment("custom-module"), "custom_module");
+});
+
+test("LLM channel management cards use stable hash-safe anchors", () => {
+  const channelId = "b16c0012-e98c-4c8f-898e-803380e1991d";
+  assert.equal(llmChannelAnchorId(channelId), `channel-${llmChannelKey(channelId)}`);
+  assert.equal(llmChannelAnchorId(""), "");
+  assert.equal(llmChannelAnchorId("  "), "");
 });

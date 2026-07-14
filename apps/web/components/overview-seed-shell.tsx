@@ -7,15 +7,18 @@ import {
   Globe2,
   LayoutDashboard,
   Network,
-  RotateCcw,
   Upload,
   UserRound,
-  XCircle,
 } from "lucide-react";
 
 import { evaluateCreationReadiness, llmFacilityProjectHref } from "../lib/llm-creation-readiness";
+import { formatBeijingTime, formatBeijingTimeLabel } from "../lib/beijing-time";
 import { type Locale, tx } from "../lib/locale";
 import type {
+  AnalysisCandidatesSummary,
+  AnalysisRunStartSummary,
+  AnalysisWorkspaceFileSummary,
+  AnalysisWorkspaceFilesSummary,
   ProjectOverviewSummary,
   ProjectReadinessSummary,
   SeedRunStartSummary,
@@ -24,16 +27,31 @@ import type {
   SourceFilesSummary,
   SourceFileSummary,
   WorkflowControlSummary,
+  WorkflowRunEvent,
   WorkflowRunEventsSummary,
   WorkflowRunSummary,
 } from "../lib/api";
+import {
+  analysisActivityLogFromEvents,
+  analysisStageFromEvent,
+  analysisStageLabel,
+  ANALYSIS_PIPELINE_STAGE_ORDER,
+  ANALYSIS_STAGE_PROGRESS,
+  publicAnalysisFailureHint,
+} from "../lib/overview-analysis-activity";
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import { PublicErrorNotice } from "./public-error-notice";
 import { canCancelSeedRun, canRetrySeedRun } from "./overview-seed-run-controls";
+import { OverviewAnalysisCandidatesPanel } from "./overview-analysis-candidates-panel";
+import { OverviewAnalysisWorkspacePanel } from "./overview-analysis-workspace-panel";
+import {
+  OverviewSeedProgressWall,
+  type SeedActivityLogLine,
+} from "./overview-seed-progress-wall";
 import { OverviewSeedUploadForm } from "./overview-seed-upload-form";
+import { OverviewActivityLogLive } from "./overview-activity-log-live";
 import { SeedRunAutoRefresh } from "./seed-run-auto-refresh";
 import { SubmitButton } from "./submit-button";
-import { WorkflowProgress } from "./workflow-progress";
 import { WorkspaceHeader } from "./workspace-header";
 
 type ActionStatus = {
@@ -54,6 +72,11 @@ type OverviewSeedShellProps = {
   afterEventId: string;
   selectedSeedRun: WorkflowRunSummary | null;
   seedEvents: WorkflowRunEventsSummary | null;
+  workspaceFiles?: AnalysisWorkspaceFilesSummary | null;
+  selectedWorkspaceFile?: AnalysisWorkspaceFileSummary | null;
+  selectedWorkspacePath?: string;
+  analysisCandidates?: AnalysisCandidatesSummary | null;
+  materialsHref?: string;
   sourceStatus: ActionStatus | null;
   seedStatus: ActionStatus | null;
   bootstrapStatus: ActionStatus | null;
@@ -76,6 +99,11 @@ export function OverviewSeedShell({
   selectedRunId,
   selectedSeedRun,
   seedEvents,
+  workspaceFiles = null,
+  selectedWorkspaceFile = null,
+  selectedWorkspacePath = "",
+  analysisCandidates = null,
+  materialsHref = "",
   sourceStatus,
   seedStatus,
   bootstrapStatus,
@@ -107,20 +135,7 @@ export function OverviewSeedShell({
       <SeedRunAutoRefresh active={seedRunActive} />
       <WorkspaceHeader
         className="overview-header"
-        description={<Bi zh="从想法开始，或导入小说建立故事资料。" en="Start from an idea, or import a manuscript." />}
         icon={<LayoutDashboard size={22} strokeWidth={1.8} />}
-        meta={(
-          <>
-            <span className="status-pill">
-              {projectOverview.ok ? <StatusValue value={projectOverview.status} /> : <Bi zh="暂不可用" en="Unavailable" />}
-            </span>
-            <span className="status-pill">
-              {projectOverview.ok && projectOverview.active_workflow_status
-                ? <StatusValue value={projectOverview.active_workflow_status} />
-                : <Bi zh="无进行中分析" en="No active analysis" />}
-            </span>
-          </>
-        )}
         title={<Bi zh="项目总览" en="Project Overview" />}
       />
 
@@ -142,6 +157,7 @@ export function OverviewSeedShell({
               </div>
             ) : null}
             <OverviewNextStep
+              analysisCandidates={analysisCandidates}
               bootstrapIdeaAction={bootstrapIdeaAction}
               bootstrapStatus={bootstrapStatus}
               cancelSeedRunAction={cancelSeedRunAction}
@@ -149,6 +165,7 @@ export function OverviewSeedShell({
               completeUploadAction={completeUploadAction}
               creationReadiness={creationReadiness}
               locale={locale}
+              materialsHref={materialsHref || `/${tenantSlug}/projects/${projectId}/materials`}
               projectId={projectId}
               projectOverview={projectOverview}
               retrySeedRunAction={retrySeedRunAction}
@@ -156,9 +173,12 @@ export function OverviewSeedShell({
               seedEvents={seedEvents}
               selectedRunId={selectedRunId}
               selectedSeedRun={selectedSeedRun}
+              selectedWorkspaceFile={selectedWorkspaceFile}
+              selectedWorkspacePath={selectedWorkspacePath}
               sourceFiles={sourceFiles}
               startSeedRunAction={startSeedRunAction}
               tenantSlug={tenantSlug}
+              workspaceFiles={workspaceFiles}
             />
           </section>
 
@@ -179,112 +199,106 @@ export function OverviewSeedShell({
 
           {!foldHealthPanel ? (
           <section
-            className={`panel ${projectOverview.ok ? "" : "error-box"}`}
+            className={`panel overview-health-panel ${projectOverview.ok ? "" : "error-box"}`}
             aria-labelledby="project-health-heading"
           >
             <p className="eyebrow"><Bi zh="创作基础" en="Project Health" /></p>
             <h2 id="project-health-heading"><Bi zh="故事基础" en="Story foundation" /></h2>
             <ProjectHealthPanel locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
           </section>
-          ) : (
-          <details className="overview-details">
-            <summary>
-              <LayoutDashboard aria-hidden="true" size={18} strokeWidth={1.8} />
-              <span>
-                <strong><Bi zh="故事基础" en="Story foundation" /></strong>
-                <small><Bi zh={isEmptyProject ? "开始创作后查看指标" : "就绪后查看指标"} en={isEmptyProject ? "Metrics appear after you start writing" : "Available after readiness"} /></small>
-              </span>
-              <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-            </summary>
-            <div className="overview-details-content">
-              <ProjectHealthPanel locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
-            </div>
-          </details>
-          )}
-
-          <details className="overview-details">
-            <summary>
-              <FileText aria-hidden="true" size={18} strokeWidth={1.8} />
-              <span>
-                <strong><Bi zh="文件与分析记录" en="Files and analysis history" /></strong>
-                <small>
-                  {sourceFiles.ok ? sourceFiles.items.length : 0} <Bi zh="个文件" en="files" /> · {seedRuns.ok ? seedRuns.items.length : 0} <Bi zh="次分析" en="runs" />
-                </small>
-              </span>
-              <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-            </summary>
-            <div className="overview-details-content">
-              <section className={sourceFiles.ok ? "" : "error-box"} aria-labelledby="source-files-heading">
-                <h3 id="source-files-heading"><Bi zh="源文件" en="Source files" /></h3>
-                <SourceFilesTable
-                  completeUploadAction={completeUploadAction}
-                  locale={locale}
-                  projectId={projectId}
-                  sourceFiles={sourceFiles}
-                  startSeedRunAction={startSeedRunAction}
-                  tenantSlug={tenantSlug}
-                />
-              </section>
-              <section className={seedRuns.ok ? "" : "error-box"} aria-labelledby="seed-runs-heading">
-                <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Analysis history" /></h3>
-                <SeedRunsTable locale={locale} projectId={projectId} seedRuns={seedRuns} tenantSlug={tenantSlug} />
-              </section>
-            </div>
-          </details>
-
-          <details className="overview-details">
-            <summary>
-              <Activity aria-hidden="true" size={18} strokeWidth={1.8} />
-              <span>
-                <strong><Bi zh="进度与活动" en="Progress and activity" /></strong>
-                <small><Bi zh="就绪度、当前任务与事件" en="Readiness, current run, and events" /></small>
-              </span>
-              <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-            </summary>
-            <div className="overview-details-content">
-              <section aria-labelledby="project-details-heading">
-                <h3 id="project-details-heading"><Bi zh="项目状态详情" en="Project health details" /></h3>
-                <ProjectHealthDetails locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
-              </section>
-              <section className={projectReadiness.ok ? "" : "error-box"} aria-labelledby="project-readiness-heading">
-                <h3 id="project-readiness-heading"><Bi zh="项目就绪度" en="Project readiness" /></h3>
-                <ProjectReadinessPanel locale={locale} projectId={projectId} projectReadiness={projectReadiness} tenantSlug={tenantSlug} />
-              </section>
-              <section className={selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} aria-labelledby="seed-run-detail-heading">
-                <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Current analysis" /></h3>
-                <SeedRunDetail locale={locale} projectId={projectId} selectedRunId={selectedRunId} selectedSeedRun={selectedSeedRun} tenantSlug={tenantSlug} />
-              </section>
-              <section className={seedEvents && !seedEvents.ok ? "error-box" : ""} aria-labelledby="seed-events-heading">
-                <h3 id="seed-events-heading"><Bi zh="任务事件" en="Analysis events" /></h3>
-                <SeedEvents locale={locale} projectId={projectId} seedEvents={seedEvents} selectedRunId={selectedRunId} tenantSlug={tenantSlug} />
-              </section>
-            </div>
-          </details>
+          ) : null}
         </main>
 
-        <aside>
-          <details className="panel overview-details overview-upload-disclosure" open={!selectedRunId}>
-            <summary>
-              <Upload aria-hidden="true" size={18} strokeWidth={1.8} />
-              <span>
-                <strong><Bi zh="导入小说" en="Import manuscript" /></strong>
-                <small><Bi zh="上传 TXT、Markdown 或 PDF 并开始分析" en="Upload TXT, Markdown, or PDF and start analysis" /></small>
-              </span>
-              <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-            </summary>
-            <div className="overview-details-content">
-              <section aria-labelledby="upload-and-start-seed-heading">
-                <h2 id="upload-and-start-seed-heading"><Bi zh="上传并开始分析" en="Upload and start analysis" /></h2>
-                <OverviewSeedUploadForm
-                  action={uploadAndStartSeedAction}
-                  locale={locale}
-                  seedStatus={<StatusLine status={seedStatus} />}
-                  sourceStatus={<StatusLine status={sourceStatus} />}
-                />
-              </section>
-            </div>
-          </details>
+        <aside className="overview-rail">
+          <section
+            className="panel overview-upload-panel overview-upload-disclosure"
+            aria-labelledby="upload-and-start-seed-heading"
+            data-elevated={selectedRunId ? "true" : "false"}
+            data-density="compact"
+          >
+            <p className="eyebrow"><Bi zh="导入" en="Import" /></p>
+            <h2 id="upload-and-start-seed-heading"><Bi zh="导入小说" en="Import manuscript" /></h2>
+            <OverviewSeedUploadForm
+              action={uploadAndStartSeedAction}
+              locale={locale}
+              seedStatus={<StatusLine status={seedStatus} />}
+              sourceStatus={<StatusLine status={sourceStatus} />}
+            />
+          </section>
 
+          <div className="overview-secondary-stack">
+            {foldHealthPanel ? (
+            <details className="overview-details">
+              <summary>
+                <LayoutDashboard aria-hidden="true" size={18} strokeWidth={1.8} />
+                <span>
+                  <strong><Bi zh="故事基础" en="Story foundation" /></strong>
+                  <small><Bi zh={isEmptyProject ? "开始创作后查看指标" : "就绪后查看指标"} en={isEmptyProject ? "Metrics appear after you start writing" : "Available after readiness"} /></small>
+                </span>
+                <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
+              </summary>
+              <div className="overview-details-content">
+                <ProjectHealthPanel locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
+              </div>
+            </details>
+            ) : null}
+
+            <details className="overview-details">
+              <summary>
+                <FileText aria-hidden="true" size={18} strokeWidth={1.8} />
+                <span>
+                  <strong><Bi zh="文件与分析记录" en="Files and analysis history" /></strong>
+                  <small>
+                    {sourceFiles.ok ? sourceFiles.items.length : 0} <Bi zh="个文件" en="files" /> · {seedRuns.ok ? seedRuns.items.length : 0} <Bi zh="次分析" en="runs" />
+                  </small>
+                </span>
+                <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
+              </summary>
+              <div className="overview-details-content">
+                <section className={sourceFiles.ok ? "" : "error-box"} aria-labelledby="source-files-heading">
+                  <h3 id="source-files-heading"><Bi zh="源文件" en="Source files" /></h3>
+                  <SourceFilesTable
+                    completeUploadAction={completeUploadAction}
+                    locale={locale}
+                    projectId={projectId}
+                    sourceFiles={sourceFiles}
+                    startSeedRunAction={startSeedRunAction}
+                    tenantSlug={tenantSlug}
+                  />
+                </section>
+                <section className={seedRuns.ok ? "" : "error-box"} aria-labelledby="seed-runs-heading">
+                  <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Analysis history" /></h3>
+                  <SeedRunsTable locale={locale} projectId={projectId} seedRuns={seedRuns} tenantSlug={tenantSlug} />
+                </section>
+              </div>
+            </details>
+
+            <details className="overview-details">
+              <summary>
+                <Activity aria-hidden="true" size={18} strokeWidth={1.8} />
+                <span>
+                  <strong><Bi zh="项目诊断（可选）" en="Project diagnostics (optional)" /></strong>
+                  <small><Bi zh="就绪度与任务摘要，不含拆解结果" en="Readiness and run summary — not analysis results" /></small>
+                </span>
+                <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
+              </summary>
+              <div className="overview-details-content">
+                <section aria-labelledby="project-details-heading">
+                  <h3 id="project-details-heading"><Bi zh="项目状态详情" en="Project health details" /></h3>
+                  <ProjectHealthDetails locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
+                </section>
+                <section className={projectReadiness.ok ? "" : "error-box"} aria-labelledby="project-readiness-heading">
+                  <h3 id="project-readiness-heading"><Bi zh="项目就绪度" en="Project readiness" /></h3>
+                  <ProjectReadinessPanel locale={locale} projectId={projectId} projectReadiness={projectReadiness} tenantSlug={tenantSlug} />
+                </section>
+                <section className={selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} aria-labelledby="seed-run-detail-heading">
+                  <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Current analysis" /></h3>
+                  <SeedRunDetail locale={locale} projectId={projectId} selectedRunId={selectedRunId} selectedSeedRun={selectedSeedRun} tenantSlug={tenantSlug} />
+                </section>
+                {/* Raw event dumps are engineer telemetry; authors use the main-panel results instead. */}
+              </div>
+            </details>
+          </div>
         </aside>
       </div>
     </div>
@@ -292,6 +306,7 @@ export function OverviewSeedShell({
 }
 
 function OverviewNextStep({
+  analysisCandidates = null,
   bootstrapIdeaAction,
   bootstrapStatus,
   cancelSeedRunAction,
@@ -299,6 +314,7 @@ function OverviewNextStep({
   completeUploadAction,
   creationReadiness,
   locale,
+  materialsHref = "",
   projectId,
   projectOverview,
   retrySeedRunAction,
@@ -306,10 +322,14 @@ function OverviewNextStep({
   seedEvents,
   selectedRunId,
   selectedSeedRun,
+  selectedWorkspaceFile = null,
+  selectedWorkspacePath = "",
   sourceFiles,
   startSeedRunAction,
   tenantSlug,
+  workspaceFiles = null,
 }: {
+  analysisCandidates?: AnalysisCandidatesSummary | null;
   bootstrapIdeaAction: (formData: FormData) => Promise<void>;
   bootstrapStatus: ActionStatus | null;
   cancelSeedRunAction: (formData: FormData) => Promise<void>;
@@ -317,6 +337,7 @@ function OverviewNextStep({
   completeUploadAction: (formData: FormData) => Promise<void>;
   creationReadiness: ReturnType<typeof evaluateCreationReadiness>;
   locale: Locale;
+  materialsHref?: string;
   projectId: string;
   projectOverview: ProjectOverviewSummary;
   retrySeedRunAction: (formData: FormData) => Promise<void>;
@@ -324,9 +345,12 @@ function OverviewNextStep({
   seedEvents: WorkflowRunEventsSummary | null;
   selectedRunId: string;
   selectedSeedRun: WorkflowRunSummary | null;
+  selectedWorkspaceFile?: AnalysisWorkspaceFileSummary | null;
+  selectedWorkspacePath?: string;
   sourceFiles: SourceFilesSummary;
   startSeedRunAction: (formData: FormData) => Promise<void>;
   tenantSlug: string;
+  workspaceFiles?: AnalysisWorkspaceFilesSummary | null;
 }) {
   if (selectedRunId) {
     if (!selectedSeedRun) {
@@ -337,80 +361,72 @@ function OverviewNextStep({
     }
     const completed = selectedSeedRun.status === "completed";
     const interrupted = selectedSeedRun.status === "failed" || selectedSeedRun.status === "cancelled";
-    const displayProgress = seedDisplayProgress(selectedSeedRun, seedEvents);
-    const stageStates = seedPipelineStages(locale, selectedSeedRun, seedEvents);
-    const latestStage = latestSeedStageLabel(locale, seedEvents);
+    const isAnalysisRun = selectedSeedRun.workflow_type === "analysis_run"
+      || (seedEvents?.ok === true && seedEvents.items.some((event) => event.event_type.startsWith("analysis.")));
+    const displayProgress = isAnalysisRun
+      ? analysisDisplayProgress(selectedSeedRun, seedEvents)
+      : seedDisplayProgress(selectedSeedRun, seedEvents);
+    const stageStates = isAnalysisRun
+      ? analysisPipelineStages(locale, selectedSeedRun, seedEvents)
+      : seedPipelineStages(locale, selectedSeedRun, seedEvents);
+    const activityLog = isAnalysisRun
+      ? analysisActivityLog(locale, seedEvents)
+      : seedActivityLog(locale, seedEvents);
+    const runTone = overviewStatusTone(selectedSeedRun.status);
+    const failureHint = selectedSeedRun.error_code
+      ? publicSeedFailureHint(locale, selectedSeedRun.error_code)
+      : null;
+    const showResults = completed || Boolean(
+      (workspaceFiles && workspaceFiles.ok && workspaceFiles.items.length > 0)
+      || (analysisCandidates && analysisCandidates.ok && analysisCandidates.items.length > 0),
+    );
     return (
       <>
-        <p className="overview-next-copy">
-          <strong>
-            {completed
-              ? <Bi zh="审阅已整理的故事资产" en="Review the extracted story assets" />
-              : interrupted
-                ? <Bi zh="继续中断的分析" en="Continue the interrupted analysis" />
-                : <Bi zh="故事分析正在推进" en="Story analysis is in progress" />}
-          </strong>
-        </p>
-        <p className="form-hint">
-          {completed
-            ? <Bi zh={`已有 ${projectOverview.ok ? projectOverview.ready_asset_count : 0} 项资产可供审阅。`} en={`${projectOverview.ok ? projectOverview.ready_asset_count : 0} assets are ready to review.`} />
-            : interrupted
-              ? (
-                <>
-                  <Bi zh="任务未完成，可在下方重试；已有内容不会被删除。" en="The run did not finish. Retry below; existing work is preserved." />
-                  {selectedSeedRun.error_code ? (
-                    <>
-                      {" "}
-                      <Bi zh={`原因：${publicSeedFailureHint(locale, selectedSeedRun.error_code)}`} en={`Reason: ${publicSeedFailureHint(locale, selectedSeedRun.error_code)}`} />
-                    </>
-                  ) : null}
-                </>
-              )
-              : (
-                <>
-                  <Bi zh="页面会自动刷新阶段进度（不是正文 token 流）。" en="This page auto-refreshes stage progress (not prose token streaming)." />
-                  {latestStage ? <>{" "}{latestStage}</> : null}
-                </>
-              )}
-        </p>
-        <WorkflowProgress
-          actions={(
-            <div className="overview-run-actions">
-              <form action={cancelSeedRunAction}>
-                <input type="hidden" name="runId" value={selectedRunId} />
-                <button className="danger-action" disabled={!cancelSeedRunEnabled} type="submit">
-                  <XCircle aria-hidden="true" size={18} />
-                  <Bi zh="取消分析" en="Cancel analysis" />
-                </button>
-              </form>
-              <form action={retrySeedRunAction}>
-                <input type="hidden" name="runId" value={selectedRunId} />
-                <button disabled={!retrySeedRunEnabled} type="submit">
-                  <RotateCcw aria-hidden="true" size={18} />
-                  <Bi zh="重试分析" en="Retry analysis" />
-                </button>
-              </form>
-              {completed ? (
-                <a className="overview-next-link" href={projectSectionHref(tenantSlug, projectId, "assets")}>
-                  <Bi zh="查看资产" en="Review assets" />
-                  <ChevronRight aria-hidden="true" size={18} />
-                </a>
-              ) : null}
-            </div>
-          )}
-          currentLabel={<StatusValue value={selectedSeedRun.status} />}
-          progressLabel={<Bi zh={`进度 ${displayProgress}%`} en={`Progress ${displayProgress}%`} />}
-          stages={stageStates}
-          title={<Bi zh="分析进度" en="Analysis progress" />}
-        />
-        <SeedRunOverview
+        <OverviewSeedProgressWall
+          cancelSeedRunAction={cancelSeedRunAction}
+          cancelSeedRunEnabled={cancelSeedRunEnabled}
+          completed={completed}
           displayProgress={displayProgress}
-          locale={locale}
-          projectId={projectId}
+          failureHint={failureHint}
+          interrupted={interrupted}
+          retrySeedRunAction={retrySeedRunAction}
+          retrySeedRunEnabled={retrySeedRunEnabled}
+          runOverview={(
+            <SeedRunOverview
+              activityLog={activityLog}
+              displayProgress={displayProgress}
+              initialEvents={seedEvents?.ok ? seedEvents.items : []}
+              isAnalysisRun={isAnalysisRun}
+              locale={locale}
+              projectId={projectId}
+              selectedRunId={selectedRunId}
+              selectedSeedRun={selectedSeedRun}
+              tenantSlug={tenantSlug}
+            />
+          )}
+          runTone={runTone}
           selectedRunId={selectedRunId}
           selectedSeedRun={selectedSeedRun}
-          tenantSlug={tenantSlug}
+          stageStates={stageStates}
         />
+        {showResults && isAnalysisRun ? (
+          <div className="overview-analysis-results" data-completed={completed ? "true" : "false"}>
+            <OverviewAnalysisCandidatesPanel
+              candidates={analysisCandidates}
+              locale={locale}
+              materialsHref={materialsHref || projectSectionHref(tenantSlug, projectId, "materials")}
+            />
+            <OverviewAnalysisWorkspacePanel
+              locale={locale}
+              projectId={projectId}
+              runId={selectedRunId}
+              selectedFile={selectedWorkspaceFile}
+              selectedPath={selectedWorkspacePath}
+              tenantSlug={tenantSlug}
+              workspaceFiles={workspaceFiles}
+            />
+          </div>
+        ) : null}
       </>
     );
   }
@@ -604,7 +620,10 @@ export function sourceFileObjectActionStatus(result: SourceFileObjectUploadSumma
   };
 }
 
-export function seedRunActionStatus(result: SeedRunStartSummary, locale: Locale): ActionStatus & { runId: string } {
+export function seedRunActionStatus(
+  result: SeedRunStartSummary | AnalysisRunStartSummary,
+  locale: Locale,
+): ActionStatus & { runId: string } {
   if (!result.ok) {
     return {
       status: "error",
@@ -926,25 +945,39 @@ function ProjectHealthDetails({
         <dt><Bi zh="最近中断" en="Latest interruption" /></dt>
         <dd>{failedWorkflowSummary(projectOverview, locale)}</dd>
         <dt><Bi zh="中断时间" en="Interruption updated" /></dt>
-        <dd>{projectOverview.latest_failed_workflow_updated_at || tx(locale, "无", "none")}</dd>
+        <dd>
+          {projectOverview.latest_failed_workflow_updated_at
+            ? formatBeijingTimeLabel(locale, projectOverview.latest_failed_workflow_updated_at)
+            : tx(locale, "无", "none")}
+        </dd>
         <dt><Bi zh="就绪度" en="Readiness" /></dt>
         <dd>{readinessAvailable ? tx(locale, "已更新", "Up to date") : tx(locale, "等待首次分析", "Waiting for the first analysis")}</dd>
         <dt><Bi zh="更新时间" en="Updated" /></dt>
-        <dd>{projectOverview.updated_at || tx(locale, "无", "none")}</dd>
+        <dd>
+          {projectOverview.updated_at
+            ? formatBeijingTimeLabel(locale, projectOverview.updated_at)
+            : tx(locale, "无", "none")}
+        </dd>
       </dl>
     </>
   );
 }
 
 function SeedRunOverview({
+  activityLog,
   displayProgress,
+  initialEvents = [],
+  isAnalysisRun = false,
   locale,
   projectId,
   selectedRunId,
   selectedSeedRun,
   tenantSlug,
 }: {
+  activityLog?: SeedActivityLogLine[];
   displayProgress?: number;
+  initialEvents?: WorkflowRunEvent[];
+  isAnalysisRun?: boolean;
   locale: Locale;
   projectId: string;
   selectedRunId: string;
@@ -961,27 +994,51 @@ function SeedRunOverview({
     return <OverviewPublicFailureNotice code={selectedSeedRun.code} locale={locale} projectId={projectId} tenantSlug={tenantSlug} />;
   }
   const progress = typeof displayProgress === "number" ? displayProgress : selectedSeedRun.progress;
+  const isFailed = selectedSeedRun.status === "failed";
+  const isInterrupted = isFailed || selectedSeedRun.status === "cancelled";
+  const isActive = selectedSeedRun.status === "running" || selectedSeedRun.status === "queued";
+  const updatedLabel = formatBeijingTimeLabel(locale, selectedSeedRun.updated_at);
   return (
-    <div className="overview-run-summary">
-      <div className="overview-run-heading">
-        <span><Bi zh="状态" en="Status" /></span>
-        <strong><StatusValue value={selectedSeedRun.status} /></strong>
-      </div>
-      <div className="overview-progress-heading">
-        <span><Bi zh="分析进度" en="Analysis progress" /></span>
-        <strong>{progress}%</strong>
-      </div>
-      <progress
-        aria-label={tx(locale, "分析进度", "Analysis progress")}
-        max={100}
-        value={progress}
+    <div
+      className="overview-run-summary"
+      data-density={isInterrupted ? "compact" : "default"}
+      data-run-state={selectedSeedRun.status}
+    >
+      {!isInterrupted ? (
+        <>
+          <div className="overview-run-heading">
+            <span><Bi zh="状态" en="Status" /></span>
+            <strong><StatusValue value={selectedSeedRun.status} /></strong>
+          </div>
+          <div className="overview-progress-heading">
+            <span><Bi zh="分析进度" en="Analysis progress" /></span>
+            <strong>{progress}%</strong>
+          </div>
+          <progress
+            className="overview-progress-thin"
+            aria-label={tx(locale, "分析进度", "Analysis progress")}
+            max={100}
+            value={progress}
+          />
+        </>
+      ) : null}
+      <OverviewActivityLogLive
+        initialEvents={initialEvents}
+        isActive={isActive}
+        locale={locale}
+        projectId={projectId}
+        runId={selectedRunId}
+        staticLines={activityLog}
+        streamKind={isAnalysisRun ? "analysis" : "static"}
+        tenantSlug={tenantSlug}
       />
-      {selectedSeedRun.status === "failed" && selectedSeedRun.error_code ? (
-        <p className="form-hint">
-          <Bi zh={`失败原因：${publicSeedFailureHint(locale, selectedSeedRun.error_code)}`} en={`Failure: ${publicSeedFailureHint(locale, selectedSeedRun.error_code)}`} />
+      {/* Failure reason is shown once on the progress wall card; avoid duplicating here. */}
+      {updatedLabel ? (
+        <p className="form-hint overview-run-updated">
+          <Bi zh="更新时间：" en="Updated: " />
+          {updatedLabel}
         </p>
       ) : null}
-      <p className="form-hint"><Bi zh="更新时间：" en="Updated: " />{selectedSeedRun.updated_at}</p>
     </div>
   );
 }
@@ -1032,6 +1089,92 @@ function seedStageLabel(locale: Locale, stage: string) {
   return pair ? tx(locale, pair[0], pair[1]) : stage;
 }
 
+function analysisDisplayProgress(
+  run: Extract<WorkflowRunSummary, { ok: true }>,
+  events: WorkflowRunEventsSummary | null,
+): number {
+  if (run.status === "completed" || run.status === "failed") {
+    return 100;
+  }
+  let fromEvents = 0;
+  if (events?.ok) {
+    for (const event of events.items) {
+      const stage = analysisStageFromEvent(event);
+      if (!stage || !(stage in ANALYSIS_STAGE_PROGRESS)) continue;
+      const base = ANALYSIS_STAGE_PROGRESS[stage] ?? 0;
+      const done = event.event_type.endsWith(".completed")
+        || event.event_type === "analysis.candidates.saved"
+        || event.event_type === "analysis.run.completed"
+        || event.payload?.status === "completed";
+      fromEvents = Math.max(fromEvents, done ? base : Math.max(0, base - 8));
+    }
+  }
+  return Math.max(run.progress ?? 0, fromEvents, run.status === "running" ? 5 : 0);
+}
+
+function analysisPipelineStages(
+  locale: Locale,
+  run: Extract<WorkflowRunSummary, { ok: true }>,
+  events: WorkflowRunEventsSummary | null,
+) {
+  const stageMap = new Map<string, "pending" | "active" | "done" | "failed">();
+  for (const stage of ANALYSIS_PIPELINE_STAGE_ORDER) {
+    stageMap.set(stage, "pending");
+  }
+  if (events?.ok) {
+    for (const event of events.items) {
+      const stage = analysisStageFromEvent(event);
+      if (!stage || !stageMap.has(stage)) continue;
+      if (event.event_type.endsWith(".failed") || event.payload?.status === "failed") {
+        stageMap.set(stage, "failed");
+        continue;
+      }
+      if (
+        event.event_type.endsWith(".completed")
+        || event.event_type === "analysis.candidates.saved"
+        || event.event_type === "analysis.run.completed"
+        || event.payload?.status === "completed"
+      ) {
+        stageMap.set(stage, "done");
+        continue;
+      }
+      if (
+        event.event_type.endsWith(".started")
+        || event.event_type === "analysis.run.started"
+        || event.event_type === "analysis.file.written"
+        || event.event_type === "analysis.tool.started"
+        || event.event_type === "analysis.tool.completed"
+        || event.payload?.status === "running"
+      ) {
+        if (stageMap.get(stage) !== "done" && stageMap.get(stage) !== "failed") {
+          stageMap.set(stage, run.status === "failed" ? "failed" : "active");
+        }
+      }
+    }
+  }
+  if (run.status === "completed") {
+    for (const stage of ANALYSIS_PIPELINE_STAGE_ORDER) {
+      if (stageMap.get(stage) !== "failed") {
+        stageMap.set(stage, "done");
+      }
+    }
+  }
+  return ANALYSIS_PIPELINE_STAGE_ORDER.map((id) => ({
+    id,
+    label: analysisStageLabel(locale, id),
+    state: stageMap.get(id) ?? "pending",
+  }));
+}
+
+function analysisActivityLog(
+  locale: Locale,
+  events: WorkflowRunEventsSummary | null,
+  limit = 12,
+): SeedActivityLogLine[] {
+  if (!events?.ok) return [];
+  return analysisActivityLogFromEvents(locale, events.items, limit);
+}
+
 function seedDisplayProgress(
   run: Extract<WorkflowRunSummary, { ok: true }>,
   seedEvents: WorkflowRunEventsSummary | null,
@@ -1046,10 +1189,31 @@ function seedDisplayProgress(
       const eventStatus = typeof event.payload?.status === "string" ? event.payload.status : "";
       if (!stage || !(stage in SEED_STAGE_PROGRESS)) continue;
       const base = SEED_STAGE_PROGRESS[stage] ?? 0;
+      if (event.event_type === "seed.sequential_reading.progress" || stage === "sequential_reading") {
+        const batchProgress = sequentialReadingBatchProgress(event.payload);
+        if (batchProgress !== null) {
+          fromEvents = Math.max(fromEvents, batchProgress);
+          continue;
+        }
+      }
       fromEvents = Math.max(fromEvents, eventStatus === "completed" ? base : Math.max(0, base - 4));
     }
   }
   return Math.max(run.progress ?? 0, fromEvents, run.status === "running" ? 5 : 0);
+}
+
+function sequentialReadingBatchProgress(payload: Record<string, unknown> | undefined): number | null {
+  if (!payload) return null;
+  const completed = payload.completed_segments;
+  const total = payload.total_segments;
+  if (typeof completed !== "number" || typeof total !== "number" || total <= 0) {
+    return null;
+  }
+  const start = SEED_STAGE_PROGRESS.segment_text ?? 24;
+  const end = SEED_STAGE_PROGRESS.sequential_reading ?? 42;
+  const ratio = Math.max(0, Math.min(1, completed / total));
+  const value = start + Math.round((end - start) * ratio);
+  return completed >= total ? end : Math.min(end - 1, Math.max(start, value));
 }
 
 function seedPipelineStages(
@@ -1066,9 +1230,19 @@ function seedPipelineStages(
       const stage = typeof event.payload?.stage === "string" ? event.payload.stage : "";
       const eventStatus = typeof event.payload?.status === "string" ? event.payload.status : "";
       if (!stageMap.has(stage)) continue;
-      if (eventStatus === "completed") stageMap.set(stage, "done");
-      else if (eventStatus === "failed") stageMap.set(stage, "failed");
-      else if (eventStatus === "pending") stageMap.set(stage, run.status === "failed" ? "failed" : "active");
+      if (eventStatus === "completed" && event.event_type !== "seed.sequential_reading.progress") {
+        stageMap.set(stage, "done");
+      } else if (eventStatus === "failed") {
+        stageMap.set(stage, "failed");
+      } else if (
+        eventStatus === "pending"
+        || eventStatus === "running"
+        || event.event_type === "seed.sequential_reading.progress"
+      ) {
+        if (stageMap.get(stage) !== "done" && stageMap.get(stage) !== "failed") {
+          stageMap.set(stage, run.status === "failed" ? "failed" : "active");
+        }
+      }
     }
   }
   if (run.status === "queued") {
@@ -1081,38 +1255,124 @@ function seedPipelineStages(
   }));
 }
 
-function latestSeedStageLabel(locale: Locale, seedEvents: WorkflowRunEventsSummary | null) {
-  if (!seedEvents?.ok || seedEvents.items.length === 0) return null;
-  for (let index = seedEvents.items.length - 1; index >= 0; index -= 1) {
-    const event = seedEvents.items[index];
-    const stage = typeof event.payload?.stage === "string" ? event.payload.stage : "";
-    const status = typeof event.payload?.status === "string" ? event.payload.status : "";
-    if (!stage) continue;
-    const label = seedStageLabel(locale, stage);
-    if (status === "failed") return tx(locale, `当前阶段：${label}（失败）`, `Current stage: ${label} (failed)`);
-    if (status === "pending") return tx(locale, `当前阶段：${label}`, `Current stage: ${label}`);
-    if (status === "completed") return tx(locale, `已完成：${label}`, `Completed: ${label}`);
+function seedActivityLog(
+  locale: Locale,
+  seedEvents: WorkflowRunEventsSummary | null,
+  limit = 24,
+): SeedActivityLogLine[] {
+  if (!seedEvents?.ok || seedEvents.items.length === 0) {
+    return [];
+  }
+  const lines: SeedActivityLogLine[] = [];
+  for (const event of seedEvents.items) {
+    const line = seedActivityLineFromEvent(locale, event);
+    if (line) {
+      lines.push(line);
+    }
+  }
+  if (lines.length <= limit) {
+    return lines;
+  }
+  return lines.slice(lines.length - limit);
+}
+
+function seedActivityLineFromEvent(
+  locale: Locale,
+  event: {
+    event_id: string;
+    event_type: string;
+    payload: Record<string, unknown>;
+    created_at: string;
+    sequence: number;
+  },
+): SeedActivityLogLine | null {
+  const stage = typeof event.payload?.stage === "string" ? event.payload.stage : "";
+  const status = typeof event.payload?.status === "string" ? event.payload.status : "";
+  const payloadMessage = typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+  const timeLabel = formatBeijingTime(locale, event.created_at);
+  const stageLabel = stage ? seedStageLabel(locale, stage) : "";
+
+  if (event.event_type === "seed.sequential_reading.progress" || stage === "sequential_reading") {
+    if (payloadMessage) {
+      const tone = status === "failed"
+        ? "failed"
+        : status === "completed" && event.event_type === "seed.sequential_reading.progress"
+          ? "done"
+          : status === "completed"
+            ? "done"
+            : "running";
+      return {
+        id: event.event_id || `seq-${event.sequence}`,
+        tone: event.event_type === "seed.stage.completed" ? "done" : tone,
+        message: payloadMessage,
+        timeLabel: timeLabel || null,
+      };
+    }
+  }
+
+  if (event.event_type === "seed.stage.pending" && stageLabel) {
+    return {
+      id: event.event_id || `pending-${event.sequence}`,
+      tone: "running",
+      message: payloadMessage || tx(locale, `开始：${stageLabel}`, `Starting: ${stageLabel}`),
+      timeLabel: timeLabel || null,
+    };
+  }
+  if (event.event_type === "seed.stage.completed" && stageLabel) {
+    return {
+      id: event.event_id || `done-${event.sequence}`,
+      tone: "done",
+      message: payloadMessage || tx(locale, `完成：${stageLabel}`, `Completed: ${stageLabel}`),
+      timeLabel: timeLabel || null,
+    };
+  }
+  if (event.event_type === "seed.stage.failed" && stageLabel) {
+    const errorCode = typeof event.payload?.error_code === "string" ? event.payload.error_code : "";
+    const hint = errorCode ? publicSeedFailureHint(locale, errorCode) : "";
+    return {
+      id: event.event_id || `fail-${event.sequence}`,
+      tone: "failed",
+      message: payloadMessage
+        || (hint
+          ? tx(locale, `${stageLabel}失败：${hint}`, `${stageLabel} failed: ${hint}`)
+          : tx(locale, `${stageLabel}失败`, `${stageLabel} failed`)),
+      timeLabel: timeLabel || null,
+    };
+  }
+  if (event.event_type === "workflow.queued") {
+    return {
+      id: event.event_id || `queued-${event.sequence}`,
+      tone: "info",
+      message: tx(locale, "任务已入队", "Run queued"),
+      timeLabel: timeLabel || null,
+    };
   }
   return null;
 }
 
 function publicSeedFailureHint(locale: Locale, code: string) {
-  if (code === "LLM_MODULE_CAPABILITY_MISSING") {
+  const analysisHint = publicAnalysisFailureHint(locale, code);
+  if (analysisHint) return analysisHint;
+  if (code === "LLM_QUOTA_RESERVATION_CLOSED") {
     return tx(
       locale,
-      "绑定模型不支持结构化输出，请在模型设置中为顺序精读等能力换用支持 JSON 的模型后重试。",
-      "The bound model lacks JSON capability. Bind a JSON-capable model for sequential reading and retry.",
+      "上次调用的额度预留已关闭，请重试分析。若仍失败，检查模型通道是否可用。",
+      "The previous quota reservation closed. Retry analysis; if it still fails, check that the model channel is reachable.",
     );
   }
-  if (code === "LLM_QUOTA_RESERVATION_UNAVAILABLE") {
+  if (code === "LLM_PROVIDER_CALL_CONFLICT") {
     return tx(
       locale,
-      "模型已绑定，但预算预留失败：缺少输出上限或模型上下文窗口。请在模型设置中补全输出上限与上下文信息。",
-      "The model is bound, but quota reservation failed: set an output limit and ensure the model has context window metadata.",
+      "分析调用与上次预留冲突（常见于换模型后重试）。请再点一次重试；若仍失败，到模型设置测试连通性。",
+      "This analysis call conflicted with a previous quota reservation (common after rebinding models). Retry once more; if it still fails, use Test model in settings.",
     );
   }
-  if (code === "LLM_MODULE_UNBOUND") {
-    return tx(locale, "核心分析能力未绑定模型。", "A required analysis capability is unbound.");
+  if (code === "SCHEMA_VALIDATION_FAILED") {
+    return tx(
+      locale,
+      "某一批顺序精读返回了无法解析的结果（模型未按 JSON 输出）。系统会自动重试/拆批；请再点重试。若反复失败，可在模型设置中换用更稳定的聊天模型。",
+      "A sequential-reading batch returned unparsable output (not valid JSON). The system will auto-retry/split batches; retry the run. If it keeps failing, switch to a more stable chat model.",
+    );
   }
   if (code === "LLM_QUOTA_TOKENS_EXCEEDED" || code === "LLM_QUOTA_COST_EXCEEDED") {
     return tx(locale, "本周期调用额度已用尽，请提高额度或等待周期重置。", "Usage quota for this period is exhausted. Raise the limit or wait for reset.");
@@ -1152,7 +1412,10 @@ function ProjectReadinessPanel({
           </span>
         ))}
       </div>
-      <p className="form-hint"><Bi zh="更新时间：" en="Updated: " />{projectReadiness.updated_at}</p>
+      <p className="form-hint">
+        <Bi zh="更新时间：" en="Updated: " />
+        {formatBeijingTimeLabel(locale, projectReadiness.updated_at)}
+      </p>
     </>
   );
 }
@@ -1194,7 +1457,7 @@ function SeedRunsTable({
               <td><StatusValue value={run.status} /></td>
               <td>{run.progress}%</td>
               <td>{run.error_code ? <FailureText /> : <StatusValue value={run.status} />}</td>
-              <td>{run.updated_at}</td>
+              <td>{formatBeijingTime(locale, run.updated_at)}</td>
               <td><a href={overviewHref(tenantSlug, projectId, run.run_id)}><Bi zh="查看" en="Inspect" /></a></td>
             </tr>
           ) : (
@@ -1248,48 +1511,8 @@ function SeedRunDetail({
         </>
       ) : null}
       <dt><Bi zh="更新时间" en="Updated" /></dt>
-      <dd>{selectedSeedRun.updated_at}</dd>
+      <dd>{formatBeijingTimeLabel(locale, selectedSeedRun.updated_at)}</dd>
     </dl>
-  );
-}
-
-function SeedEvents({
-  locale,
-  projectId,
-  selectedRunId,
-  seedEvents,
-  tenantSlug,
-}: {
-  locale: Locale;
-  projectId: string;
-  selectedRunId: string;
-  seedEvents: WorkflowRunEventsSummary | null;
-  tenantSlug: string;
-}) {
-  if (!selectedRunId) {
-    return <p className="form-hint"><Bi zh="选择或开始分析后查看事件。" en="Select or start analysis to inspect events." /></p>;
-  }
-  if (!seedEvents) {
-    return <p className="form-hint"><Bi zh="事件回放尚未加载。" en="Event replay has not been loaded." /></p>;
-  }
-  if (!seedEvents.ok) {
-    return <OverviewPublicFailureNotice code={seedEvents.code} locale={locale} projectId={projectId} tenantSlug={tenantSlug} />;
-  }
-  if (seedEvents.items.length === 0) {
-    return <p className="form-hint"><Bi zh="当前之后没有新事件。" en="No events after the current cursor." /></p>;
-  }
-  return (
-    <div className="trace-list">
-      {seedEvents.items.map((event) => (
-        <article className="trace-event" key={event.event_id}>
-          <div className="trace-event-header">
-            <strong>{event.event_type}</strong>
-            <span className="trace-redaction"><Bi zh="序号 " en="seq " />{event.sequence}</span>
-          </div>
-          <p className="trace-meta">{event.created_at}</p>
-        </article>
-      ))}
-    </div>
   );
 }
 
@@ -1342,6 +1565,7 @@ function workflowTypeLabel(locale: Locale, workflowType: string) {
     asset_ingestion: ["素材导入", "Material import"],
     asset_reindex: ["资产搜索刷新", "Asset search refresh"],
     seed_pipeline: ["故事分析", "Story analysis"],
+    analysis_run: ["Pi 分析", "Pi analysis"],
     story_graph: ["故事图谱", "Story graph"],
     story_graph_build: ["故事图谱构建", "Story graph build"],
     worldline: ["世界线推演", "Worldline simulation"],
@@ -1378,4 +1602,21 @@ function formatFileSize(sizeBytes: number) {
     return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
   }
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function overviewStatusTone(status: string) {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "failed" || normalized === "blocked" || normalized === "error") {
+    return "danger";
+  }
+  if (normalized === "running" || normalized === "active" || normalized === "in_progress") {
+    return "live";
+  }
+  if (normalized === "completed" || normalized === "ready" || normalized === "success") {
+    return "success";
+  }
+  if (normalized === "queued" || normalized === "pending" || normalized === "cancelled" || normalized === "canceled") {
+    return "warn";
+  }
+  return "muted";
 }

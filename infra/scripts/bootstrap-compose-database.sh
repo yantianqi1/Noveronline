@@ -245,6 +245,33 @@ migration_marker_present() {
 	          AND table_name = 'writer_thread_messages'
 	          AND privilege_type = 'DELETE'
 	      )" ;;
+	    0020_*) marker="
+	      to_regclass('public.analysis_runs') IS NOT NULL
+	      AND to_regclass('public.analysis_workspace_files') IS NOT NULL
+	      AND to_regclass('public.analysis_candidates') IS NOT NULL
+	      AND EXISTS (
+	        SELECT 1 FROM pg_policies
+	        WHERE schemaname = 'public'
+	          AND tablename = 'analysis_runs'
+	          AND policyname = 'tenant_isolation_analysis_runs'
+	      )
+	      AND EXISTS (
+	        SELECT 1 FROM pg_policies
+	        WHERE schemaname = 'public'
+	          AND tablename = 'analysis_workspace_files'
+	          AND policyname = 'tenant_isolation_analysis_workspace_files'
+	      )
+	      AND EXISTS (
+	        SELECT 1 FROM pg_policies
+	        WHERE schemaname = 'public'
+	          AND tablename = 'analysis_candidates'
+	          AND policyname = 'tenant_isolation_analysis_candidates'
+	      )
+	      AND 3 = (
+	        SELECT count(*) FROM pg_class
+	        WHERE relname IN ('analysis_runs','analysis_workspace_files','analysis_candidates')
+	          AND relrowsecurity AND relforcerowsecurity
+	      )" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]

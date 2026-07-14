@@ -199,6 +199,11 @@ func (s *SQLQuotaStore) Reserve(ctx context.Context, input QuotaReservationInput
 		return QuotaReservation{}, quotaBackendError()
 	}
 	now := s.currentTime()
+	if _, err := tx.ExecContext(ctx, `UPDATE llm_quota_reservations
+SET status = 'expired', updated_at = now()
+WHERE tenant_id::text = $1 AND status = 'reserved' AND expires_at <= $2`, input.TenantID, now); err != nil {
+		return QuotaReservation{}, quotaBackendError()
+	}
 	if existing, found, err := findExistingReservation(ctx, tx, input, now); err != nil {
 		return QuotaReservation{}, err
 	} else if found {
@@ -214,19 +219,34 @@ func (s *SQLQuotaStore) Reserve(ctx context.Context, input QuotaReservationInput
 	}
 	expiresAt := now.Add(input.TTL)
 	var reservation QuotaReservation
+	// Reopen released/expired rows, or rows whose channel/model/budget no longer
+	// match (operator rebound mid-run), so stable provider_call_id can retry.
 	err = tx.QueryRowContext(ctx, `INSERT INTO llm_quota_reservations (
   tenant_id, provider_call_id, project_id, run_id, module_key, channel_id, model_id,
   reserved_tokens, reserved_cost_micros, expires_at
 ) VALUES ($1, $2, $3, NULLIF($4, '')::uuid, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (tenant_id, provider_call_id) DO UPDATE
-SET updated_at = llm_quota_reservations.updated_at
-WHERE llm_quota_reservations.status = 'reserved'
-  AND llm_quota_reservations.project_id::text = EXCLUDED.project_id::text
-  AND llm_quota_reservations.module_key = EXCLUDED.module_key
-  AND llm_quota_reservations.channel_id = EXCLUDED.channel_id
-  AND llm_quota_reservations.model_id = EXCLUDED.model_id
-  AND llm_quota_reservations.reserved_tokens = EXCLUDED.reserved_tokens
-  AND llm_quota_reservations.reserved_cost_micros = EXCLUDED.reserved_cost_micros
+SET project_id = EXCLUDED.project_id,
+    run_id = EXCLUDED.run_id,
+    module_key = EXCLUDED.module_key,
+    channel_id = EXCLUDED.channel_id,
+    model_id = EXCLUDED.model_id,
+    reserved_tokens = EXCLUDED.reserved_tokens,
+    reserved_cost_micros = EXCLUDED.reserved_cost_micros,
+    status = 'reserved',
+    expires_at = EXCLUDED.expires_at,
+    actual_prompt_tokens = NULL,
+    actual_completion_tokens = NULL,
+    actual_cost_micros = NULL,
+    finalized_at = NULL,
+    updated_at = now()
+WHERE llm_quota_reservations.status IN ('released', 'expired')
+   OR llm_quota_reservations.project_id IS DISTINCT FROM EXCLUDED.project_id
+   OR llm_quota_reservations.module_key IS DISTINCT FROM EXCLUDED.module_key
+   OR llm_quota_reservations.channel_id IS DISTINCT FROM EXCLUDED.channel_id
+   OR llm_quota_reservations.model_id IS DISTINCT FROM EXCLUDED.model_id
+   OR llm_quota_reservations.reserved_tokens IS DISTINCT FROM EXCLUDED.reserved_tokens
+   OR llm_quota_reservations.reserved_cost_micros IS DISTINCT FROM EXCLUDED.reserved_cost_micros
 RETURNING reservation_id::text, provider_call_id, expires_at`, input.TenantID, input.ProviderCallID,
 		input.ProjectID, input.RunID, input.ModuleKey, input.ChannelID, input.ModelID,
 		input.ReservedTokens, input.ReservedCostMicros, expiresAt).Scan(
@@ -259,11 +279,14 @@ FOR UPDATE`, input.TenantID, input.ProviderCallID).Scan(
 	}
 	matches := projectID == input.ProjectID && moduleKey == input.ModuleKey && channelID == input.ChannelID &&
 		modelID == input.ModelID && tokens == input.ReservedTokens && cost == input.ReservedCostMicros
+	// Stable provider_call_id is reused across retries. Released/expired rows, or
+	// rows left after rebinding a different channel/model/budget, must not block
+	// admission with CALL_CONFLICT — treat them as absent so a fresh reserve runs.
+	if status == "released" || status == "expired" || !matches {
+		return QuotaReservation{}, false, nil
+	}
 	if status != "reserved" || !reservation.ExpiresAt.After(now) {
 		return QuotaReservation{}, false, &AppError{Code: "LLM_QUOTA_RESERVATION_CLOSED", Message: "LLM quota reservation is closed"}
-	}
-	if !matches {
-		return QuotaReservation{}, false, &AppError{Code: "LLM_PROVIDER_CALL_CONFLICT", Message: "LLM provider call identity conflicts with an existing reservation"}
 	}
 	return reservation, true, nil
 }

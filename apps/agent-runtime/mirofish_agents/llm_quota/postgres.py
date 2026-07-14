@@ -30,6 +30,8 @@ _SENSITIVE_REPLAY_KEYS = {
 }
 _MODULE_RESOURCE_NAMESPACE = uuid.UUID("d84ddf36-75cd-4e8f-ab28-a29d46cd908f")
 _OWNER_NAMESPACE = uuid.UUID("0f3d1c90-5236-43f6-8f48-ea402f524ffc")
+# Marker reservation_id: matching released/expired rows may be reopened for the same provider_call_id.
+_REOPEN_SENTINEL = "__reopen__"
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ class PostgresQuotaStore:
                 if existing is not None and existing.replay_payload is not None:
                     connection.commit()
                     return existing
-                if existing is None:
+                if existing is None or existing.reservation_id == _REOPEN_SENTINEL:
                     for policy in policies:
                         _check_policy_capacity(
                             cursor,
@@ -105,13 +107,22 @@ class PostgresQuotaStore:
                             reserved_tokens=reserved_tokens,
                             reserved_cost_micros=reserved_cost,
                         )
-                    reservation_id = _insert_reservation(
-                        cursor,
-                        request,
-                        reserved_tokens=reserved_tokens,
-                        reserved_cost_micros=reserved_cost,
-                        ttl_seconds=self._ttl_seconds,
-                    )
+                    if existing is not None and existing.reservation_id == _REOPEN_SENTINEL:
+                        reservation_id = _reopen_reservation(
+                            cursor,
+                            request,
+                            reserved_tokens=reserved_tokens,
+                            reserved_cost_micros=reserved_cost,
+                            ttl_seconds=self._ttl_seconds,
+                        )
+                    else:
+                        reservation_id = _insert_reservation(
+                            cursor,
+                            request,
+                            reserved_tokens=reserved_tokens,
+                            reserved_cost_micros=reserved_cost,
+                            ttl_seconds=self._ttl_seconds,
+                        )
                 else:
                     reservation_id = existing.reservation_id
                 lock_ids = _acquire_concurrency_locks(
@@ -347,13 +358,8 @@ def _existing_reservation(
         and int(row[6]) == reserved_tokens
         and int(row[7]) == reserved_cost_micros
     )
-    if not matches:
-        raise LLMFacilityError(
-            "LLM_PROVIDER_CALL_CONFLICT",
-            "LLM provider call identity conflicts with an existing reservation",
-        )
     status = str(row[8])
-    if status == "finalized":
+    if status == "finalized" and matches:
         payload = _load_private_replay(cursor, request)
         return ProviderCallAdmission(
             reservation_id=str(row[0]),
@@ -362,6 +368,18 @@ def _existing_reservation(
             reserved_cost_micros=reserved_cost_micros,
             lock_ids=(),
             replay_payload=payload,
+        )
+    if status in {"released", "expired"} or not matches:
+        # Stable provider_call_id is reused across Temporal retries and operator
+        # re-runs of the same run_id. Prior released/expired rows, or rows left
+        # after the operator rebound a different channel/model/budget, must be
+        # reopened instead of hard-failing with CALL_CONFLICT.
+        return ProviderCallAdmission(
+            reservation_id=_REOPEN_SENTINEL,
+            provider_call_id=request.provider_call_id,
+            reserved_tokens=reserved_tokens,
+            reserved_cost_micros=reserved_cost_micros,
+            lock_ids=(),
         )
     if status != "reserved":
         raise LLMFacilityError("LLM_QUOTA_RESERVATION_CLOSED", "LLM quota reservation is closed")
@@ -372,6 +390,53 @@ def _existing_reservation(
         reserved_cost_micros=reserved_cost_micros,
         lock_ids=(),
     )
+
+
+def _reopen_reservation(
+    cursor: Any,
+    request: ProviderCallRequest,
+    *,
+    reserved_tokens: int,
+    reserved_cost_micros: int,
+    ttl_seconds: int,
+) -> str:
+    cursor.execute(
+        """UPDATE llm_quota_reservations
+           SET project_id = %s,
+               run_id = %s,
+               module_key = %s,
+               channel_id = %s,
+               model_id = %s,
+               reserved_tokens = %s,
+               reserved_cost_micros = %s,
+               status = 'reserved',
+               expires_at = now() + (%s * interval '1 second'),
+               actual_prompt_tokens = NULL,
+               actual_completion_tokens = NULL,
+               actual_cost_micros = NULL,
+               finalized_at = NULL,
+               updated_at = now()
+           WHERE tenant_id = %s
+             AND provider_call_id = %s
+             AND status IN ('released', 'expired', 'reserved', 'finalized')
+           RETURNING reservation_id::text""",
+        (
+            request.project_id,
+            request.run_id,
+            request.module_key,
+            request.channel_id,
+            request.model_id,
+            reserved_tokens,
+            reserved_cost_micros,
+            ttl_seconds,
+            request.tenant_id,
+            request.provider_call_id,
+        ),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise LLMFacilityError("LLM_QUOTA_RESERVE_FAILED", "LLM quota reservation failed")
+    return str(row[0])
 
 
 def _check_policy_capacity(

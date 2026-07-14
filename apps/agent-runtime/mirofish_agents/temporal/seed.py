@@ -534,6 +534,7 @@ class SequentialReadingReader(Protocol):
         context: AgentContext,
         module_key: str,
         segments: list[dict[str, Any]],
+        progress_callback: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
         """Run the LLM-bound sequential reading stage through LLM Facility."""
 
@@ -592,6 +593,8 @@ class PostgresWorkflowEventWriter:
                 phase = "completed" if event_type.endswith("completed") else "pending"
                 if stage:
                     _bump_seed_stage_progress(context=context, stage=stage, phase=phase)
+            elif event_type == "seed.sequential_reading.progress":
+                _bump_sequential_reading_batch_progress(context=context, payload=sanitized_payload)
         except Exception:
             _rollback_postgres_connection(connection)
             raise
@@ -4600,6 +4603,42 @@ def _bump_seed_stage_progress(
         return
 
 
+def _bump_sequential_reading_batch_progress(
+    *,
+    context: AgentContext,
+    payload: dict[str, Any],
+) -> None:
+    """Interpolate progress within sequential_reading (24→42) from batch counters."""
+    try:
+        writer = _workflow_status_writer_from_env()
+    except Exception:
+        return
+    if writer is None or not hasattr(writer, "_update_status"):
+        return
+    try:
+        completed = payload.get("completed_segments")
+        total = payload.get("total_segments")
+        if not isinstance(completed, int) or not isinstance(total, int) or total <= 0:
+            return
+        completed = max(0, min(completed, total))
+        # sequential_reading pending ≈ 38, completed = 42; start from segment_text done (24).
+        start = _seed_stage_progress("segment_text")  # 24
+        end = _seed_stage_progress("sequential_reading")  # 42
+        progress = start + int(round((end - start) * (completed / total)))
+        progress = max(start, min(end - 1 if completed < total else end, progress))
+        message = payload.get("message") if isinstance(payload.get("message"), str) else "sequential reading batch"
+        writer._update_status(  # noqa: SLF001
+            context=context,
+            status="running",
+            result=None,
+            code=None,
+            message=str(message)[:200],
+            progress=progress,
+        )
+    except Exception:
+        return
+
+
 def _mark_seed_workflow_completed(
     writer: WorkflowRunStatusWriter | None,
     *,
@@ -5624,6 +5663,51 @@ def _record_failed_segment_event(
     return True
 
 
+def _record_pending_sequential_reading_event(
+    *,
+    context: AgentContext,
+    segment_count: int,
+    workflow_event_writer: WorkflowEventWriter | None,
+) -> bool:
+    if workflow_event_writer is None:
+        return False
+    workflow_event_writer.record_workflow_event(
+        context=context,
+        event_type="seed.stage.pending",
+        payload={
+            "stage": "sequential_reading",
+            "status": "pending",
+            "activity": "sequential_reading_activity",
+            "module_key": "sequential_reading",
+            "segment_count": segment_count,
+            "message": f"开始顺序精读（共 {segment_count} 段）",
+        },
+    )
+    return True
+
+
+def _record_sequential_reading_batch_progress(
+    *,
+    context: AgentContext,
+    payload: dict[str, object],
+    workflow_event_writer: WorkflowEventWriter | None,
+) -> bool:
+    if workflow_event_writer is None:
+        return False
+    event_payload: dict[str, object] = {
+        "stage": "sequential_reading",
+        "activity": "sequential_reading_activity",
+        "module_key": "sequential_reading",
+        **payload,
+    }
+    workflow_event_writer.record_workflow_event(
+        context=context,
+        event_type="seed.sequential_reading.progress",
+        payload=event_payload,
+    )
+    return True
+
+
 def _record_failed_sequential_reading_event(
     *,
     context: AgentContext,
@@ -5667,6 +5751,7 @@ def _record_completed_sequential_reading_event(
         "module_key": "sequential_reading",
         "segment_count": segment_count,
         "note_count": note_count,
+        "message": f"顺序精读完成（{segment_count} 段，{note_count} 条笔记）",
     }
     if model_id is not None:
         payload["model_id"] = model_id
@@ -7143,12 +7228,69 @@ def sequential_reading_activity(
             workflow_event_writer=workflow_event_writer,
             workflow_status_writer=workflow_status_writer,
         )
+    _record_pending_sequential_reading_event(
+        context=context,
+        segment_count=segment_count,
+        workflow_event_writer=workflow_event_writer,
+    )
+
+    def _on_sequential_progress(progress_payload: dict[str, Any]) -> None:
+        if not isinstance(progress_payload, dict):
+            return
+        public_payload = {
+            key: value
+            for key, value in progress_payload.items()
+            if key
+            in {
+                "stage",
+                "status",
+                "phase",
+                "message",
+                "batch_index",
+                "batch_count",
+                "completed_segments",
+                "total_segments",
+                "segment_order_start",
+                "segment_order_end",
+                "chapter_guess",
+                "title_guess",
+                "note_count",
+                "error_code",
+                "error_message",
+            }
+        }
+        _record_sequential_reading_batch_progress(
+            context=context,
+            payload=public_payload,
+            workflow_event_writer=workflow_event_writer,
+        )
+
     try:
         reading_result = reader.read_segments(
             context=context,
             module_key="sequential_reading",
             segments=sanitized_segments,
+            progress_callback=_on_sequential_progress,
         )
+    except TypeError:
+        # Older test doubles may not accept progress_callback.
+        try:
+            reading_result = reader.read_segments(
+                context=context,
+                module_key="sequential_reading",
+                segments=sanitized_segments,
+            )
+        except Exception as exc:
+            return _sequential_reading_failed_result(
+                base=base,
+                context=context,
+                segment_count=segment_count,
+                code="LLM_PROVIDER_ERROR",
+                message=str(exc),
+                public_message="sequential reading provider failed",
+                workflow_event_writer=workflow_event_writer,
+                workflow_status_writer=workflow_status_writer,
+            )
     except Exception as exc:
         return _sequential_reading_failed_result(
             base=base,
@@ -9070,6 +9212,8 @@ def _public_llm_error_message(code: str) -> str:
         return "LLM concurrency limit reached"
     if code == "OBJECT_STORAGE_BACKEND_MISCONFIGURED":
         return "object storage backend is misconfigured"
+    if code == "SCHEMA_VALIDATION_FAILED":
+        return "sequential reading model returned unparsable JSON for a batch"
     return "sequential reading failed"
 
 

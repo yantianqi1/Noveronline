@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
@@ -9,6 +10,17 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.llm.model_capabilities import effective_supports_json
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+_TRANSIENT_BATCH_CODES = frozenset(
+    {
+        "SCHEMA_VALIDATION_FAILED",
+        "LLM_PROVIDER_ERROR",
+        "LLM_PROVIDER_TIMEOUT",
+        "LLM_PROVIDER_RATE_LIMITED",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -168,16 +180,20 @@ class PostgresModuleBindingResolver:
             connection.close()
         if row is None:
             raise LLMFacilityError("LLM_MODULE_UNBOUND", f"{normalized_module_key} module is not bound")
+        model_id = _row_value(row, 4, "model_id")
+        stored_supports_json = _row_bool(row, 7, "supports_json")
+        # Catalog default FALSE blocked real DeepSeek/GPT chat models. OR in
+        # inferred chat capabilities so sequential reading can call the provider.
         return ModuleBindingResolution(
             tenant_id=_row_value(row, 0, "tenant_id"),
             project_id=_row_value(row, 1, "project_id") or None,
             module_key=_row_value(row, 2, "module_key"),
             channel_id=_row_value(row, 3, "channel_id"),
-            model_id=_row_value(row, 4, "model_id"),
+            model_id=model_id,
             provider=_row_value(row, 5, "provider"),
             base_url=_row_value(row, 6, "base_url"),
             credential_ref=_row_value(row, 3, "channel_id"),
-            supports_json=_row_bool(row, 7, "supports_json"),
+            supports_json=effective_supports_json(model_id=model_id, stored=stored_supports_json),
             settings=_settings_from_row(row, 8, "settings_jsonb"),
         )
 
@@ -294,6 +310,7 @@ class LLMFacilitySequentialReader:
         context: AgentContext,
         module_key: str,
         segments: list[dict[str, Any]],
+        progress_callback: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
         if module_key != "sequential_reading":
             return _failed("VALIDATION_FAILED", "LLMFacilitySequentialReader only supports sequential_reading")
@@ -309,17 +326,65 @@ class LLMFacilitySequentialReader:
             )
             if not isinstance(api_key, str) or not api_key.strip():
                 raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
-            messages = _sequential_reading_messages(
-                context=context,
-                segments=segments,
+            # Long novels produce hundreds of segments. One giant provider call
+            # exhausts context/quota and fails permanently on retry. Batch by text size.
+            batches = _segment_batches(
+                segments,
                 segment_text_store=self._segment_text_store,
+                settings=resolution.settings,
             )
-            response_json = self._chat_client.complete_json(
-                context=context,
-                resolution=resolution,
-                api_key=api_key.strip(),
-                messages=messages,
-            )
+            total_segments = len(segments)
+            completed_segments = 0
+            notes: list[Any] = []
+            for batch_index, batch in enumerate(batches):
+                _emit_sequential_progress(
+                    progress_callback,
+                    phase="batch_start",
+                    batch_index=batch_index,
+                    batch_count=len(batches),
+                    batch=batch,
+                    completed_segments=completed_segments,
+                    total_segments=total_segments,
+                )
+                try:
+                    batch_notes = _read_batch_with_recovery(
+                        chat_client=self._chat_client,
+                        context=context,
+                        resolution=resolution,
+                        api_key=api_key.strip(),
+                        batch=batch,
+                        segment_text_store=self._segment_text_store,
+                        progress_callback=progress_callback,
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                        completed_segments=completed_segments,
+                        total_segments=total_segments,
+                    )
+                    notes.extend(batch_notes)
+                    completed_segments += len(batch)
+                    _emit_sequential_progress(
+                        progress_callback,
+                        phase="batch_completed",
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                        batch=batch,
+                        completed_segments=completed_segments,
+                        total_segments=total_segments,
+                        note_count=len(batch_notes),
+                    )
+                except LLMFacilityError as exc:
+                    _emit_sequential_progress(
+                        progress_callback,
+                        phase="batch_failed",
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                        batch=batch,
+                        completed_segments=completed_segments,
+                        total_segments=total_segments,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                    raise
         except LLMFacilityError as exc:
             return _failed(exc.code, exc.message)
         except Exception as exc:
@@ -330,7 +395,7 @@ class LLMFacilitySequentialReader:
             "pass_id": _reading_pass_id(context),
             "module_key": module_key,
             "model_id": resolution.model_id,
-            "notes": response_json.get("notes", []),
+            "notes": notes,
         }
 
 
@@ -365,12 +430,7 @@ class OpenAICompatibleJSONClient:
             content = response_json["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LLMFacilityError("LLM_PROVIDER_ERROR", "chat completion response was not valid") from exc
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion content was not valid JSON") from exc
-        if not isinstance(parsed, dict):
-            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion JSON must be an object")
+        parsed = _parse_chat_json_content(content)
         usage = _provider_usage(response_json.get("usage"))
         if usage:
             parsed["__llm_usage"] = usage
@@ -380,12 +440,283 @@ class OpenAICompatibleJSONClient:
 def _validate_resolution(resolution: ModuleBindingResolution) -> None:
     if resolution.module_key != "sequential_reading":
         raise LLMFacilityError("LLM_MODULE_UNBOUND", "resolved module key does not match sequential_reading")
-    if not resolution.supports_json:
+    supports_json = resolution.supports_json or effective_supports_json(
+        model_id=resolution.model_id,
+        stored=False,
+    )
+    if not supports_json:
         raise LLMFacilityError("LLM_MODULE_CAPABILITY_MISSING", "sequential_reading requires a JSON-capable model")
     for field_name in ("channel_id", "model_id", "provider", "base_url", "credential_ref"):
         value = getattr(resolution, field_name)
         if not isinstance(value, str) or not value.strip():
             raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
+
+
+def _read_batch_with_recovery(
+    *,
+    chat_client: JSONChatClient,
+    context: AgentContext,
+    resolution: ModuleBindingResolution,
+    api_key: str,
+    batch: list[dict[str, Any]],
+    segment_text_store: SegmentTextStore,
+    progress_callback: Callable[..., None] | None,
+    batch_index: int,
+    batch_count: int,
+    completed_segments: int,
+    total_segments: int,
+    attempt: int = 0,
+) -> list[Any]:
+    """Read one batch; on JSON/provider flakiness retry once, then split the batch."""
+    try:
+        messages = _sequential_reading_messages(
+            context=context,
+            segments=batch,
+            segment_text_store=segment_text_store,
+        )
+        response_json = chat_client.complete_json(
+            context=context,
+            resolution=resolution,
+            api_key=api_key,
+            messages=messages,
+        )
+        batch_notes = response_json.get("notes", [])
+        if not isinstance(batch_notes, list):
+            raise LLMFacilityError(
+                "SCHEMA_VALIDATION_FAILED",
+                "sequential reading notes must be an array",
+            )
+        return batch_notes
+    except LLMFacilityError as exc:
+        if exc.code not in _TRANSIENT_BATCH_CODES:
+            raise
+        # One more attempt on the same batch before splitting.
+        if attempt == 0:
+            _emit_sequential_progress(
+                progress_callback,
+                phase="batch_retry",
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch=batch,
+                completed_segments=completed_segments,
+                total_segments=total_segments,
+                error_code=exc.code,
+                error_message=exc.message,
+            )
+            return _read_batch_with_recovery(
+                chat_client=chat_client,
+                context=context,
+                resolution=resolution,
+                api_key=api_key,
+                batch=batch,
+                segment_text_store=segment_text_store,
+                progress_callback=progress_callback,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                completed_segments=completed_segments,
+                total_segments=total_segments,
+                attempt=1,
+            )
+        # Multi-segment batch: split and recover progress instead of failing the whole novel.
+        if len(batch) > 1:
+            mid = max(1, len(batch) // 2)
+            left = batch[:mid]
+            right = batch[mid:]
+            _emit_sequential_progress(
+                progress_callback,
+                phase="batch_split",
+                batch_index=batch_index,
+                batch_count=batch_count,
+                batch=batch,
+                completed_segments=completed_segments,
+                total_segments=total_segments,
+                error_code=exc.code,
+                error_message=exc.message,
+            )
+            left_notes = _read_batch_with_recovery(
+                chat_client=chat_client,
+                context=context,
+                resolution=resolution,
+                api_key=api_key,
+                batch=left,
+                segment_text_store=segment_text_store,
+                progress_callback=progress_callback,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                completed_segments=completed_segments,
+                total_segments=total_segments,
+                attempt=0,
+            )
+            right_notes = _read_batch_with_recovery(
+                chat_client=chat_client,
+                context=context,
+                resolution=resolution,
+                api_key=api_key,
+                batch=right,
+                segment_text_store=segment_text_store,
+                progress_callback=progress_callback,
+                batch_index=batch_index,
+                batch_count=batch_count,
+                completed_segments=completed_segments + len(left),
+                total_segments=total_segments,
+                attempt=0,
+            )
+            return [*left_notes, *right_notes]
+        raise
+
+
+def _parse_chat_json_content(content: Any) -> dict[str, Any]:
+    """Parse model content into a JSON object, tolerating common markdown fences."""
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion content was not valid JSON")
+    text = content.strip()
+    if not text:
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion content was not valid JSON")
+    candidates = [text]
+    fence = _JSON_FENCE_RE.search(text)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    # Leading/trailing prose around a top-level object.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion content was not valid JSON")
+
+
+def _emit_sequential_progress(
+    progress_callback: Callable[..., None] | None,
+    *,
+    phase: str,
+    batch_index: int,
+    batch_count: int,
+    batch: list[dict[str, Any]],
+    completed_segments: int,
+    total_segments: int,
+    note_count: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Best-effort Overview progress hook; never fail the reader on callback errors."""
+    if progress_callback is None:
+        return
+    first = batch[0] if batch else {}
+    last = batch[-1] if batch else {}
+    segment_order_start = first.get("segment_order") if isinstance(first, dict) else None
+    segment_order_end = last.get("segment_order") if isinstance(last, dict) else None
+    chapter_guess = _optional_text_safe(first.get("chapter_guess") if isinstance(first, dict) else None)
+    title_guess = _optional_text_safe(first.get("title_guess") if isinstance(first, dict) else None)
+    label = title_guess or chapter_guess or (
+        f"段落 {segment_order_start}" if isinstance(segment_order_start, int) else f"批次 {batch_index + 1}"
+    )
+    if phase == "batch_start":
+        message = f"开始精读 {completed_segments + 1}-{min(completed_segments + len(batch), total_segments)}/{total_segments} · {label}"
+        status = "running"
+    elif phase == "batch_completed":
+        message = f"完成精读 {completed_segments}/{total_segments} · {label}"
+        status = "completed"
+    elif phase == "batch_retry":
+        message = f"重试精读 {completed_segments + 1}-{min(completed_segments + len(batch), total_segments)}/{total_segments} · {label}"
+        status = "running"
+    elif phase == "batch_split":
+        message = f"拆分重试 {completed_segments + 1}-{min(completed_segments + len(batch), total_segments)}/{total_segments} · {label}"
+        status = "running"
+    else:
+        message = f"精读失败 {completed_segments}/{total_segments} · {label}"
+        status = "failed"
+    payload: dict[str, Any] = {
+        "stage": "sequential_reading",
+        "status": status,
+        "phase": phase,
+        "message": message,
+        "batch_index": batch_index,
+        "batch_count": batch_count,
+        "completed_segments": completed_segments,
+        "total_segments": total_segments,
+        "segment_order_start": segment_order_start if isinstance(segment_order_start, int) else None,
+        "segment_order_end": segment_order_end if isinstance(segment_order_end, int) else None,
+    }
+    if chapter_guess:
+        payload["chapter_guess"] = chapter_guess
+    if title_guess:
+        payload["title_guess"] = title_guess
+    if note_count is not None:
+        payload["note_count"] = note_count
+    if error_code:
+        payload["error_code"] = error_code
+    if error_message:
+        # Public log line only — keep short and free of raw content.
+        payload["error_message"] = error_message[:180]
+    try:
+        progress_callback(payload)
+    except Exception:
+        return
+
+
+def _optional_text_safe(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    # Overview log labels only; never ship long excerpt text.
+    return trimmed[:80]
+
+
+def _segment_batches(
+    segments: list[dict[str, Any]],
+    *,
+    segment_text_store: SegmentTextStore,
+    settings: dict[str, Any],
+) -> list[list[dict[str, Any]]]:
+    if not segments:
+        raise LLMFacilityError("VALIDATION_FAILED", "segments are required for sequential_reading")
+    max_segments = _positive_int_setting(settings, "batch_max_segments", default=4)
+    max_chars = _positive_int_setting(settings, "batch_max_chars", default=24_000)
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_chars = 0
+    for segment in segments:
+        # Estimate text size without mutating the public segment dict.
+        object_key = _required_text(segment.get("object_key"), "object_key")
+        try:
+            text_len = len(segment_text_store.read_bytes(object_key).decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise LLMFacilityError("TEXT_SEGMENT_DECODE_FAILED", "segment text was not valid UTF-8") from exc
+        except Exception as exc:
+            raise LLMFacilityError("TEXT_SEGMENT_READ_FAILED", "segment text read failed") from exc
+        would_exceed = current and (
+            len(current) >= max_segments or current_chars + text_len > max_chars
+        )
+        if would_exceed:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(segment)
+        current_chars += text_len
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _positive_int_setting(settings: dict[str, Any], key: str, *, default: int) -> int:
+    value = settings.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return default
+    return value
 
 
 def _sequential_reading_messages(

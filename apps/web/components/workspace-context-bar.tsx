@@ -15,6 +15,14 @@ const STAGES: Record<string, { label: ReactNode; activity: ReactNode }> = {
     label: <Bi zh="项目总览" en="Overview" />,
     activity: <Bi zh="下一步与分析进度" en="Next step and analysis" />,
   },
+  materials: {
+    label: <Bi zh="资料" en="Library" />,
+    activity: <Bi zh="资产、图谱与角色入口" en="Assets, graph, and characters" />,
+  },
+  me: {
+    label: <Bi zh="我的" en="Me" />,
+    activity: <Bi zh="账户与模型设置" en="Account and model settings" />,
+  },
   assets: {
     label: <Bi zh="资产库" en="Assets" />,
     activity: <Bi zh="浏览与检索创作资料" en="Browse story materials" />,

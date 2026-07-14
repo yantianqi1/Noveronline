@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { LANDING_BODY_HTML } from "../lib/landing-body-html";
 
-const LANDING_STYLE_HREF = "/landing/styles.css";
+const LANDING_STYLE_HREF = "/landing/styles.css?v=saas-spatial-5";
 const LANDING_SCRIPT_SRC = "/landing/main.js";
 const LANDING_FONT_HREF =
   "https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap";
@@ -54,7 +54,7 @@ export function LandingShell() {
     let cancelled = false;
     const script = document.createElement("script");
     script.id = "landing-main-script";
-    script.src = `${LANDING_SCRIPT_SRC}?v=saas-1`;
+    script.src = `${LANDING_SCRIPT_SRC}?v=saas-spatial-5`;
     script.async = false;
     script.onerror = () => {
       if (!cancelled) {

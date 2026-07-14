@@ -26,6 +26,7 @@ import (
 	"mirofish-novel/apps/api/internal/manuscriptworkspace"
 	"mirofish-novel/apps/api/internal/observability"
 	"mirofish-novel/apps/api/internal/platformratelimit"
+	"mirofish-novel/apps/api/internal/projectadmin"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
 	"mirofish-novel/apps/api/internal/registration"
@@ -223,6 +224,18 @@ func main() {
 			}
 		}()
 	}
+	analysisAdmissionStore, closeAnalysisAdmission, err := newAnalysisAdmissionStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure analysis admission store: %v", err)
+	}
+	if closeAnalysisAdmission != nil {
+		defer func() {
+			if err := closeAnalysisAdmission(); err != nil {
+				log.Printf("close analysis admission store: %v", err)
+			}
+		}()
+	}
+	analysisStarter := workflows.AnalysisRunStarter(workflows.NewFailClosedAnalysisStarter())
 	assetIngestionAdmissionStore, closeAssetIngestionAdmission, err := newAssetIngestionAdmissionStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure asset ingestion admission store: %v", err)
@@ -306,6 +319,15 @@ func main() {
 			storyGraphAdmissionStore,
 			storyGraphBondAdmissionStore,
 		)
+		analysisTaskQueue := strings.TrimSpace(os.Getenv("ANALYSIS_TASK_QUEUE"))
+		if analysisTaskQueue == "" {
+			analysisTaskQueue = workflows.AnalysisTaskQueue
+		}
+		analysisStarter = workflows.NewTemporalAnalysisStarter(workflows.TemporalAnalysisConfig{
+			Client:         temporalClient,
+			TaskQueue:      analysisTaskQueue,
+			AdmissionStore: analysisAdmissionStore,
+		})
 		if canceller, ok := writerStarter.(workflows.WriterCanceller); ok {
 			writerCanceller = canceller
 		}
@@ -403,6 +425,21 @@ func main() {
 				log.Printf("close seed run reader: %v", err)
 			}
 		}()
+	}
+	analysisRunReader, analysisEventReader, analysisWorkspaceReader, analysisCandidateReader, closeAnalysisReaders, err := newAnalysisReaders(databaseURL)
+	if err != nil {
+		log.Fatalf("configure analysis readers: %v", err)
+	}
+	if closeAnalysisReaders != nil {
+		defer func() {
+			if err := closeAnalysisReaders(); err != nil {
+				log.Printf("close analysis readers: %v", err)
+			}
+		}()
+	}
+	var analysisCanceller workflows.AnalysisCanceller = workflows.NewDisabledAnalysisCanceller()
+	if canceller, ok := analysisStarter.(workflows.AnalysisCanceller); ok {
+		analysisCanceller = canceller
 	}
 	projectReadinessReader, closeProjectReadinessReader, err := newProjectReadinessReader(databaseURL)
 	if err != nil {
@@ -992,7 +1029,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure trusted client proof verifier: %v", err)
 	}
-	authRecoveryHandler, collaborationHandler, llmAdminHandler, recoveryDispatcher, closePlatformHandlers, err := newPlatformHandlers(
+	authRecoveryHandler, collaborationHandler, projectAdminHandler, llmAdminHandler, recoveryDispatcher, closePlatformHandlers, err := newPlatformHandlers(
 		databaseURL,
 		os.Getenv("LLM_CREDENTIAL_ENCRYPTION_KEY"),
 		metricsRegistry,
@@ -1072,6 +1109,12 @@ func main() {
 		SeedSegmentRetrier:               seedSegmentRetrier,
 		SeedStarter:                      seedStarter,
 		SeedRunReader:                    seedRunReader,
+		AnalysisStarter:                  analysisStarter,
+		AnalysisRunReader:                analysisRunReader,
+		AnalysisEventReader:              analysisEventReader,
+		AnalysisCanceller:                analysisCanceller,
+		AnalysisWorkspaceReader:          analysisWorkspaceReader,
+		AnalysisCandidateReader:          analysisCandidateReader,
 		ProjectOverviewReader:            projectOverviewReader,
 		ProjectReadinessReader:           projectReadinessReader,
 		AgentHelloStarter:                helloStarter,
@@ -1128,6 +1171,7 @@ func main() {
 		DistillationEnqueuer:             distillationEnqueuer,
 		AuthRecoveryHandler:              authRecoveryHandler,
 		CollaborationHandler:             collaborationHandler,
+		ProjectAdminHandler:              projectAdminHandler,
 		LLMAdminHandler:                  llmAdminHandler,
 		RateLimiter:                      platformRateLimiter,
 		TrustedClientProofVerifier:       trustedClientProofVerifier,
@@ -1598,24 +1642,24 @@ func newPlatformHandlers(
 	metrics *observability.Registry,
 	rateLimiter platformratelimit.Limiter,
 	trustedClientVerifier *authrecovery.ClientProofVerifier,
-) (http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
+) (http.Handler, http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
 	tokenCipher, err := newRecoveryTokenCipher(
 		os.Getenv("MIROFISH_DEPLOYMENT_ENV"),
 		os.Getenv("AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY"),
 	)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	if strings.TrimSpace(databaseURL) == "" {
-		return nil, nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil, nil
 	}
 	db, err := openAppDatabase(databaseURL)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
-	fail := func(err error) (http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
+	fail := func(err error) (http.Handler, http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
 		_ = db.Close()
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 
 	recoveryStore := authrecovery.NewSQLStore(db)
@@ -1645,6 +1689,10 @@ func newPlatformHandlers(
 		RateLimiter:              rateLimiter,
 		TrustedClientKeyResolver: mountedTrustedClientKeyResolver{verifier: trustedClientVerifier},
 	})
+	projectAdminHandler := projectadmin.NewHandler(projectadmin.HandlerConfig{
+		Service:       projectadmin.NewService(projectadmin.ServiceConfig{DB: db}),
+		ActorResolver: mountedActorResolver{}, CSRFVerifier: mountedCSRFVerifier{},
+	})
 
 	llmStore := llmadmin.NewSQLStore(db)
 	var healthService *llmadmin.HealthService
@@ -1654,17 +1702,20 @@ func newPlatformHandlers(
 	if healthErr != nil {
 		log.Printf("LLM provider health disabled: %s", llmadmin.ErrorCode(healthErr))
 	} else {
+		capabilityStore := llm.NewSQLChannelStore(llm.SQLChannelStoreConfig{
+			Queryer: llm.NewSQLDBQueryer(db), CredentialKeyMaterial: credentialKey,
+		})
 		healthService = llmadmin.NewHealthService(
 			healthResolver,
 			llmadmin.NewHTTPHealthExecutor(http.DefaultClient, 10*time.Second, 1<<20),
 			llmadmin.NewSQLHealthRecorder(db),
-		).WithMetrics(metrics)
+		).WithMetrics(metrics).WithCapabilityStore(capabilityStore)
 	}
 	llmAdminHandler := llmadmin.NewHandler(llmadmin.Config{
 		Store: llmStore, Access: llmadmin.NewSQLAccessController(db), ActorResolver: mountedActorResolver{},
 		Health: healthService, Metrics: metrics, RateLimiter: rateLimiter,
 	})
-	return recoveryHandler, collaborationHandler, llmAdminHandler, recoveryDispatcher, db.Close, nil
+	return recoveryHandler, collaborationHandler, projectAdminHandler, llmAdminHandler, recoveryDispatcher, db.Close, nil
 }
 
 func newRecoveryTokenCipher(deploymentEnvironment string, encodedKey string) (*authrecovery.TokenCipher, error) {
@@ -1966,6 +2017,59 @@ func newSeedAdmissionStore(databaseURL string) (workflows.SeedAdmissionStore, fu
 	return workflows.NewSQLSeedAdmissionStore(workflows.SQLSeedAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
 	}), db.Close, nil
+}
+
+func newAnalysisAdmissionStore(databaseURL string) (workflows.AnalysisAdmissionStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return workflows.NewSQLAnalysisAdmissionStore(workflows.SQLAnalysisAdmissionStoreConfig{
+		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
+		DB:     db,
+	}), db.Close, nil
+}
+
+func newAnalysisReaders(databaseURL string) (
+	workflows.AnalysisRunReader,
+	workflows.AnalysisEventReader,
+	workflows.AnalysisWorkspaceReader,
+	workflows.AnalysisCandidateReader,
+	func() error,
+	error,
+) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return &disabledAnalysisRunReaderMain{},
+			workflows.NewDisabledAnalysisEventReader(),
+			workflows.NewDisabledAnalysisWorkspaceReader(),
+			workflows.NewDisabledAnalysisCandidateReader(),
+			nil,
+			nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	queryer := workflows.NewSQLDBWriterEventQueryer(db)
+	return workflows.NewSQLAnalysisRunReader(workflows.SQLAnalysisRunReaderConfig{Queryer: queryer}),
+		workflows.NewSQLAnalysisEventReader(workflows.SQLAnalysisEventReaderConfig{Queryer: queryer}),
+		workflows.NewSQLAnalysisWorkspaceReader(workflows.SQLAnalysisWorkspaceReaderConfig{Queryer: queryer}),
+		workflows.NewSQLAnalysisCandidateReader(workflows.SQLAnalysisCandidateReaderConfig{Queryer: queryer}),
+		db.Close,
+		nil
+}
+
+type disabledAnalysisRunReaderMain struct{}
+
+func (r *disabledAnalysisRunReaderMain) ListAnalysisRuns(context.Context, workflows.ListAnalysisRunsInput) ([]workflows.AnalysisRun, error) {
+	return nil, &workflows.AppError{Code: "WORKFLOW_BACKEND_UNCONFIGURED", Message: "analysis run reader is not configured"}
+}
+
+func (r *disabledAnalysisRunReaderMain) GetAnalysisRun(context.Context, workflows.GetAnalysisRunInput) (workflows.AnalysisRun, error) {
+	return workflows.AnalysisRun{}, &workflows.AppError{Code: "WORKFLOW_BACKEND_UNCONFIGURED", Message: "analysis run reader is not configured"}
 }
 
 func newAssetIngestionAdmissionStore(databaseURL string) (workflows.AssetIngestionAdmissionStore, func() error, error) {

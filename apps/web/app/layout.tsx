@@ -4,6 +4,7 @@ import { currentRequestLocale } from "../lib/request-locale";
 import "./auth-marketing.css";
 import "./globals.css";
 import "./workbench-polish.css";
+import "./mobile-chrome.css";
 
 export const metadata: Metadata = {
   title: "MiroFish Novel",
@@ -13,8 +14,9 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   colorScheme: "light",
   initialScale: 1,
-  themeColor: "#edf4fb",
+  themeColor: "#f3eee4",
   width: "device-width",
+  viewportFit: "cover",
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

@@ -22,8 +22,29 @@ type WriterMobileSwitchProps = {
  * sibling `.writer-agent-layout`, and the CSS shows only the selected region —
  * turning a long triple-stacked scroll into focused, switchable panes.
  */
+const WRITER_MOBILE_VIEW_KEY = "mirofish-writer-mobile-view";
+
+function readStoredMobileView(hasStructure: boolean): WriterMobileView {
+  if (typeof window === "undefined") {
+    return "agent";
+  }
+  try {
+    const stored = window.localStorage.getItem(WRITER_MOBILE_VIEW_KEY);
+    if (stored === "agent" || stored === "manuscript") {
+      return stored;
+    }
+    if (stored === "structure" && hasStructure) {
+      return "structure";
+    }
+  } catch {
+    // ignore storage failures
+  }
+  // Phone-first default: open on the Agent conversation surface.
+  return "agent";
+}
+
 export function WriterMobileSwitch({ locale, hasStructure }: WriterMobileSwitchProps) {
-  const [view, setView] = useState<WriterMobileView>("manuscript");
+  const [view, setView] = useState<WriterMobileView>("agent");
   const navRef = useRef<HTMLElement>(null);
 
   const layoutElement = useCallback(() => {
@@ -39,9 +60,18 @@ export function WriterMobileSwitch({ locale, hasStructure }: WriterMobileSwitchP
   }, []);
 
   useEffect(() => {
+    setView(readStoredMobileView(hasStructure));
+  }, [hasStructure]);
+
+  useEffect(() => {
     const layout = layoutElement();
     if (layout) {
       layout.dataset.mobileView = view;
+    }
+    try {
+      window.localStorage.setItem(WRITER_MOBILE_VIEW_KEY, view);
+    } catch {
+      // ignore storage failures
     }
   }, [view, layoutElement]);
 

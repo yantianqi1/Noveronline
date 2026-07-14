@@ -324,6 +324,90 @@ export type SeedRunStartSummary =
     }
   | ApiFailure;
 
+export type AnalysisRunStartSummary =
+  | {
+      ok: true;
+      run_id: string;
+      project_id: string;
+      workflow_type: string;
+      status: string;
+      mode?: string;
+    }
+  | ApiFailure;
+
+export type AnalysisRunSummary =
+  | {
+      ok: true;
+      run_id: string;
+      project_id: string;
+      workflow_type: string;
+      status: string;
+      mode?: string;
+      instruction?: string;
+      upload_id?: string;
+      source_file_id?: string;
+      progress?: number;
+      message?: string;
+      error_code?: string;
+      error_message?: string;
+      created_at?: string;
+      updated_at?: string;
+    }
+  | ApiFailure;
+
+export type AnalysisRunsSummary =
+  | {
+      ok: true;
+      items: AnalysisRunSummary[];
+    }
+  | ApiFailure;
+
+export type AnalysisWorkspaceFileSummary =
+  | {
+      ok: true;
+      file_id: string;
+      run_id: string;
+      project_id: string;
+      path: string;
+      kind: string;
+      mime_type: string;
+      size_bytes: number;
+      content_sha256: string;
+      content_text?: string;
+      updated_at?: string;
+    }
+  | ApiFailure;
+
+export type AnalysisWorkspaceFilesSummary =
+  | {
+      ok: true;
+      items: AnalysisWorkspaceFileSummary[];
+    }
+  | ApiFailure;
+
+export type AnalysisCandidateSummary =
+  | {
+      ok: true;
+      candidate_id: string;
+      run_id: string;
+      project_id: string;
+      candidate_type: string;
+      name: string;
+      status: string;
+      workspace_path?: string;
+      payload?: Record<string, unknown>;
+      created_at?: string;
+      updated_at?: string;
+    }
+  | ApiFailure;
+
+export type AnalysisCandidatesSummary =
+  | {
+      ok: true;
+      items: AnalysisCandidateSummary[];
+    }
+  | ApiFailure;
+
 export type SeedRunsSummary =
   | {
       ok: true;
@@ -2482,6 +2566,145 @@ export async function startSeedRun(input: StartSeedRunInput): Promise<SeedRunSta
   }
 }
 
+export type StartAnalysisRunInput = ApiContext & {
+  projectId: string;
+  uploadId: string;
+  mode?: string;
+  instruction?: string;
+  hints?: Record<string, unknown>;
+  options?: Record<string, unknown>;
+};
+
+export async function startAnalysisRun(input: StartAnalysisRunInput): Promise<AnalysisRunStartSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/analysis-runs`, {
+      method: "POST",
+      headers: {
+        ...contextHeaders(input),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        upload_id: input.uploadId,
+        mode: input.mode || "full",
+        instruction: input.instruction || "",
+        hints: input.hints ?? {},
+        options: input.options ?? {},
+      }),
+      cache: "no-store",
+    });
+    return await decodeAnalysisRunStartResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_RUN_START_FAILED");
+  }
+}
+
+export async function getProjectAnalysisRuns(
+  input: ApiContext & { projectId: string },
+): Promise<AnalysisRunsSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/analysis-runs`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeAnalysisRunsResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_RUN_QUERY_FAILED");
+  }
+}
+
+export async function getAnalysisRunSummary(
+  input: ApiContext & { runId: string },
+): Promise<AnalysisRunSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/analysis-runs/${input.runId}`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeAnalysisRunResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_RUN_QUERY_FAILED");
+  }
+}
+
+export async function getAnalysisRunEvents(
+  input: ApiContext & { runId: string; afterEventId?: string },
+): Promise<WorkflowRunEventsSummary> {
+  try {
+    const url = new URL(`${apiBaseUrl()}/v1/analysis-runs/${input.runId}/events`);
+    if (input.afterEventId) {
+      url.searchParams.set("after_event_id", input.afterEventId);
+    }
+    const response = await apiFetch(url, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeWorkflowRunEventsResponse(response, input.runId, input.afterEventId ?? "");
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_RUN_EVENTS_QUERY_FAILED");
+  }
+}
+
+export async function cancelAnalysisRun(
+  input: ApiContext & { runId: string },
+): Promise<WorkflowControlSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/analysis-runs/${input.runId}/cancel`, {
+      method: "POST",
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeWorkflowControlResponse(response, "WORKFLOW_CANCEL_FAILED");
+  } catch (error) {
+    return networkFailure(error, "WORKFLOW_CANCEL_FAILED");
+  }
+}
+
+export async function listAnalysisWorkspaceFiles(
+  input: ApiContext & { runId: string },
+): Promise<AnalysisWorkspaceFilesSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/analysis-runs/${input.runId}/workspace/files`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeAnalysisWorkspaceFilesResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_WORKSPACE_QUERY_FAILED");
+  }
+}
+
+export async function getAnalysisWorkspaceFile(
+  input: ApiContext & { runId: string; path: string },
+): Promise<AnalysisWorkspaceFileSummary> {
+  try {
+    const encodedPath = input.path.split("/").map(encodeURIComponent).join("/");
+    const response = await apiFetch(
+      `${apiBaseUrl()}/v1/analysis-runs/${input.runId}/workspace/files/${encodedPath}`,
+      {
+        headers: contextHeaders(input),
+        cache: "no-store",
+      },
+    );
+    return await decodeAnalysisWorkspaceFileResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_WORKSPACE_QUERY_FAILED");
+  }
+}
+
+export async function listAnalysisCandidates(
+  input: ApiContext & { runId: string },
+): Promise<AnalysisCandidatesSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/analysis-runs/${input.runId}/candidates`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+    return await decodeAnalysisCandidatesResponse(response);
+  } catch (error) {
+    return networkFailure(error, "ANALYSIS_CANDIDATES_QUERY_FAILED");
+  }
+}
+
 export async function cancelSeedRun(input: ApiContext & { runId: string }): Promise<WorkflowControlSummary> {
   try {
     const response = await apiFetch(`${apiBaseUrl()}/v1/seed-runs/${input.runId}/cancel`, {
@@ -4317,6 +4540,170 @@ async function decodeSeedRunsResponse(response: Response): Promise<SeedRunsSumma
   return {
     ok: true,
     items: payload.items.map((item) => decodeWorkflowRunRecord(item)),
+  };
+}
+
+async function decodeAnalysisRunStartResponse(response: Response): Promise<AnalysisRunStartSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ANALYSIS_RUN_START_FAILED");
+  }
+  if (typeof payload.run_id !== "string" || typeof payload.project_id !== "string") {
+    return invalidApiResponse("analysis run start response missing identifiers");
+  }
+  return {
+    ok: true,
+    run_id: payload.run_id,
+    project_id: payload.project_id,
+    workflow_type: typeof payload.workflow_type === "string" ? payload.workflow_type : "analysis_run",
+    status: typeof payload.status === "string" ? payload.status : "queued",
+    mode: typeof payload.mode === "string" ? payload.mode : undefined,
+  };
+}
+
+async function decodeAnalysisRunsResponse(response: Response): Promise<AnalysisRunsSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ANALYSIS_RUN_QUERY_FAILED");
+  }
+  if (!Array.isArray(payload.items)) {
+    return invalidApiResponse("analysis run response missing items");
+  }
+  return {
+    ok: true,
+    items: payload.items.map((item) => decodeAnalysisRunRecord(item)),
+  };
+}
+
+async function decodeAnalysisRunResponse(response: Response): Promise<AnalysisRunSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ANALYSIS_RUN_QUERY_FAILED");
+  }
+  return decodeAnalysisRunRecord(payload);
+}
+
+function decodeAnalysisRunRecord(item: Record<string, unknown>): AnalysisRunSummary {
+  if (typeof item.run_id !== "string" || typeof item.project_id !== "string") {
+    return invalidApiResponse("analysis run record missing identifiers");
+  }
+  return {
+    ok: true,
+    run_id: item.run_id,
+    project_id: item.project_id,
+    workflow_type: typeof item.workflow_type === "string" ? item.workflow_type : "analysis_run",
+    status: typeof item.status === "string" ? item.status : "unknown",
+    mode: typeof item.mode === "string" ? item.mode : undefined,
+    instruction: typeof item.instruction === "string" ? item.instruction : undefined,
+    upload_id: typeof item.upload_id === "string" ? item.upload_id : undefined,
+    source_file_id: typeof item.source_file_id === "string" ? item.source_file_id : undefined,
+    progress: typeof item.progress === "number" ? item.progress : undefined,
+    message: typeof item.message === "string" ? item.message : undefined,
+    error_code: typeof item.error_code === "string" ? item.error_code : undefined,
+    error_message: typeof item.error_message === "string" ? item.error_message : undefined,
+    created_at: typeof item.created_at === "string" ? item.created_at : undefined,
+    updated_at: typeof item.updated_at === "string" ? item.updated_at : undefined,
+  };
+}
+
+async function decodeAnalysisWorkspaceFilesResponse(
+  response: Response,
+): Promise<AnalysisWorkspaceFilesSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ANALYSIS_WORKSPACE_QUERY_FAILED");
+  }
+  if (!Array.isArray(payload.items)) {
+    return invalidApiResponse("analysis workspace response missing items");
+  }
+  return {
+    ok: true,
+    items: payload.items.map((item) => decodeAnalysisWorkspaceFileRecord(item)),
+  };
+}
+
+async function decodeAnalysisWorkspaceFileResponse(
+  response: Response,
+): Promise<AnalysisWorkspaceFileSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ANALYSIS_WORKSPACE_QUERY_FAILED");
+  }
+  return decodeAnalysisWorkspaceFileRecord(payload);
+}
+
+function decodeAnalysisWorkspaceFileRecord(item: Record<string, unknown>): AnalysisWorkspaceFileSummary {
+  if (typeof item.file_id !== "string" || typeof item.path !== "string") {
+    return invalidApiResponse("analysis workspace file missing identifiers");
+  }
+  return {
+    ok: true,
+    file_id: item.file_id,
+    run_id: typeof item.run_id === "string" ? item.run_id : "",
+    project_id: typeof item.project_id === "string" ? item.project_id : "",
+    path: item.path,
+    kind: typeof item.kind === "string" ? item.kind : "text",
+    mime_type: typeof item.mime_type === "string" ? item.mime_type : "text/plain",
+    size_bytes: typeof item.size_bytes === "number" ? item.size_bytes : 0,
+    content_sha256: typeof item.content_sha256 === "string" ? item.content_sha256 : "",
+    content_text: typeof item.content_text === "string" ? item.content_text : undefined,
+    updated_at: typeof item.updated_at === "string" ? item.updated_at : undefined,
+  };
+}
+
+async function decodeAnalysisCandidatesResponse(
+  response: Response,
+): Promise<AnalysisCandidatesSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, "ANALYSIS_CANDIDATES_QUERY_FAILED");
+  }
+  if (!Array.isArray(payload.items)) {
+    return invalidApiResponse("analysis candidates response missing items");
+  }
+  return {
+    ok: true,
+    items: payload.items.map((item) => decodeAnalysisCandidateRecord(item)),
+  };
+}
+
+function decodeAnalysisCandidateRecord(item: Record<string, unknown>): AnalysisCandidateSummary {
+  if (typeof item.candidate_id !== "string") {
+    return invalidApiResponse("analysis candidate missing identifiers");
+  }
+  return {
+    ok: true,
+    candidate_id: item.candidate_id,
+    run_id: typeof item.run_id === "string" ? item.run_id : "",
+    project_id: typeof item.project_id === "string" ? item.project_id : "",
+    candidate_type: typeof item.candidate_type === "string" ? item.candidate_type : "",
+    name: typeof item.name === "string" ? item.name : "",
+    status: typeof item.status === "string" ? item.status : "candidate",
+    workspace_path: typeof item.workspace_path === "string" ? item.workspace_path : undefined,
+    payload:
+      item.payload && typeof item.payload === "object" && !Array.isArray(item.payload)
+        ? (item.payload as Record<string, unknown>)
+        : undefined,
+    created_at: typeof item.created_at === "string" ? item.created_at : undefined,
+    updated_at: typeof item.updated_at === "string" ? item.updated_at : undefined,
   };
 }
 

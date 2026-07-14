@@ -1,4 +1,7 @@
 import { Bi } from "../../../../../components/bilingual-text";
+import { MobileScrollChrome } from "../../../../../components/mobile-scroll-chrome";
+import { MobileTabBar } from "../../../../../components/mobile-tab-bar";
+import { MobileTopBar } from "../../../../../components/mobile-top-bar";
 import { ProjectNav } from "../../../../../components/project-nav";
 import { SessionAutoRefresh } from "../../../../../components/session-auto-refresh";
 import { WorkspaceContextBar } from "../../../../../components/workspace-context-bar";
@@ -10,8 +13,9 @@ import {
 import { devActorUserId, isDevLoginBypassEnabled } from "../../../../../lib/dev-access";
 import { currentRequestSessionCookie } from "../../../../../lib/request-session";
 import { workspaceBasePathForProject } from "../../../../../lib/workspace-route";
+import { createProjectAction, renameProjectAction } from "./project-actions";
 import {
-	logoutAction,
+  logoutAction,
   revokeAllSessionsAction,
   revokeTenantSessionsAction,
   rotateSessionAction,
@@ -55,13 +59,25 @@ export default async function ProjectLayout({
         <Bi zh="跳到工作区" en="Skip to workspace" />
       </a>
       <SessionAutoRefresh enabled={Boolean(sessionCookie)} />
+      <MobileScrollChrome />
+      <MobileTopBar
+        changePasswordHref={`${basePath}/security`}
+        createProjectAction={createProjectAction.bind(null, tenantSlug)}
+        currentUser={currentUser}
+        logoutAction={logoutAction}
+        projectId={projectId}
+        renameProjectAction={renameProjectAction.bind(null, tenantSlug, projectId)}
+        tenantSlug={tenantSlug}
+      />
       <aside className="app-sidebar" aria-label="项目导航 / Project navigation">
         <ProjectNav
           basePath={basePath}
           currentUser={currentUser}
           changePasswordHref={`${basePath}/security`}
+          createProjectAction={createProjectAction.bind(null, tenantSlug)}
           logoutAction={logoutAction}
           projectId={projectId}
+          renameProjectAction={renameProjectAction.bind(null, tenantSlug, projectId)}
           revokeTenantSessionsAction={revokeTenantSessionsAction.bind(null, tenantSlug)}
           revokeAllSessionsAction={revokeAllSessionsAction}
           rotateSessionAction={rotateSessionAction}
@@ -76,6 +92,11 @@ export default async function ProjectLayout({
           <WorkspaceRouteTransition>{children}</WorkspaceRouteTransition>
         </main>
       </div>
+      <MobileTabBar
+        currentUser={currentUser}
+        projectId={projectId}
+        tenantSlug={tenantSlug}
+      />
     </div>
   );
 }

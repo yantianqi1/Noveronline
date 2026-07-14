@@ -56,10 +56,38 @@ test("Wave 3: Assets use CompactFilterBar and InspectorPanel", async () => {
 
 test("Wave 3: Overview wires shared WorkflowProgress and SubmitButton", async () => {
   const shell = await source("components/overview-seed-shell.tsx");
-  assert.match(shell, /from "\.\/workflow-progress"/);
-  assert.match(shell, /<WorkflowProgress/);
+  const wall = await source("components/overview-seed-progress-wall.tsx");
+  assert.match(shell, /OverviewSeedProgressWall/);
+  assert.match(wall, /from "\.\/workflow-progress"/);
+  assert.match(wall, /<WorkflowProgress/);
   assert.match(shell, /SubmitButton/);
   assert.match(shell, /overview-next-panel/);
+});
+
+test("Overview seed progress wall collapses idle stages and densifies failed cards", async () => {
+  const shell = await source("components/overview-seed-shell.tsx");
+  const wall = await source("components/overview-seed-progress-wall.tsx");
+  const css = await source("app/globals.css");
+  const beijing = await source("lib/beijing-time.ts");
+
+  assert.match(shell, /OverviewSeedProgressWall/);
+  assert.match(shell, /formatBeijingTimeLabel|formatBeijingTime/);
+  assert.match(wall, /data-wall="seed-progress"/);
+  assert.match(wall, /shouldAutoExpand/);
+  assert.match(wall, /previewStages|stageStates\.slice\(0,\s*2\)/);
+  assert.match(wall, /overview-status-wall-ellipsis/);
+  assert.match(wall, /data-density=\{isFailed \|\| interrupted \? "compact"/);
+  assert.match(wall, /aria-expanded=\{expanded\}/);
+  assert.match(shell, /seedActivityLog|overview-activity-log/);
+  assert.match(shell, /seed\.sequential_reading\.progress/);
+  assert.match(css, /\.overview-status-card\[data-density="compact"\]/);
+  assert.match(css, /min-height:\s*0/);
+  assert.match(css, /overview-wall-pop/);
+  assert.match(css, /\.overview-activity-log/);
+  assert.match(css, /overview-progress-thin|height:\s*4px/);
+  assert.match(css, /prefers-reduced-motion/);
+  assert.match(beijing, /Asia\/Shanghai/);
+  assert.match(beijing, /export function formatBeijingTime/);
 });
 
 test("Wave 4: Graph exclusive Explore/Build/Curate/Compose modes", async () => {
@@ -146,6 +174,7 @@ test("paper-ink tokens and responsive shell remain complete", async () => {
   assert.match(css, /\.workflow-progress\s*\{/);
   assert.match(css, /\.technical-details-dialog\s*\{/);
   assert.match(css, /\.workspace-mode-switcher\s*\{/);
+  assert.match(css, /clip-path:\s*polygon\(/);
   assert.match(css, /@media\s*\(max-width:\s*860px\)/);
   assert.match(css, /min-height:\s*44px/);
   assert.doesNotMatch(css, /--primary:\s*#0f6cbd/);
@@ -173,10 +202,16 @@ test("Wave A polish: author LLM bindings panel hides infrastructure fields", asy
   const shell = await source("components/llm-facility-shell.tsx");
   const panel = await source("components/llm-module-bindings-panel.tsx");
   assert.match(shell, /LLMModuleBindingsPanel/);
+  assert.match(shell, /data-layout="single"/);
+  assert.match(shell, /workspace-header-actions|actions=\{diagnosticsDrawer\}/);
+  assert.doesNotMatch(shell, /llm-observability-rail/);
+  assert.doesNotMatch(shell, /配置项目模型|Configure project models/);
   assert.match(panel, /llm-bindings-panel/);
   assert.match(panel, /batchBindModuleAction/);
-  assert.match(panel, /llm-bindings-accordion/);
+  assert.match(panel, /llm-bindings-group-chips/);
+  assert.match(panel, /llm-bindings-group-chip/);
   assert.match(panel, /应用到所选|Apply to selected/);
+  assert.doesNotMatch(panel, /一张表管理全部模块绑定/);
   assert.doesNotMatch(panel, /base_url/);
   assert.doesNotMatch(panel, /supports_tools/);
   assert.doesNotMatch(panel, /effective\?\.channel_id/);

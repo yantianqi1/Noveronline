@@ -232,20 +232,17 @@ const reserveSQL = `WITH expired AS MATERIALIZED (
 ), decision AS MATERIALIZED (
   SELECT CASE
     WHEN NOT EXISTS (SELECT 1 FROM applicable) THEN 'policy_unavailable'
-    WHEN EXISTS (SELECT 1 FROM existing) THEN CASE
-      WHEN EXISTS (SELECT 1 FROM existing WHERE
-        project_id = $2::text AND run_id = $3::text AND module_key = $4
-        AND channel_id = $5::text AND model_id = $6
-        AND reserved_tokens = $8 AND reserved_cost_micros = $9
-        AND status = 'reserved' AND expires_at > now()) THEN 'replay_reserved'
-      WHEN EXISTS (SELECT 1 FROM existing WHERE
-        project_id = $2::text AND run_id = $3::text AND module_key = $4
-        AND channel_id = $5::text AND model_id = $6
-        AND reserved_tokens = $8 AND reserved_cost_micros = $9
-        AND status = 'finalized') THEN 'finalized'
-      WHEN EXISTS (SELECT 1 FROM existing WHERE status IN ('released', 'expired')) THEN 'reservation_closed'
-      ELSE 'provider_call_conflict'
-    END
+    WHEN EXISTS (SELECT 1 FROM existing WHERE
+      project_id = $2::text AND run_id = $3::text AND module_key = $4
+      AND channel_id = $5::text AND model_id = $6
+      AND reserved_tokens = $8 AND reserved_cost_micros = $9
+      AND status = 'reserved' AND expires_at > now()) THEN 'replay_reserved'
+    WHEN EXISTS (SELECT 1 FROM existing WHERE
+      project_id = $2::text AND run_id = $3::text AND module_key = $4
+      AND channel_id = $5::text AND model_id = $6
+      AND reserved_tokens = $8 AND reserved_cost_micros = $9
+      AND status = 'finalized') THEN 'finalized'
+    WHEN EXISTS (SELECT 1 FROM existing WHERE status NOT IN ('released', 'expired')) THEN 'provider_call_conflict'
     WHEN $10::boolean = FALSE AND EXISTS (SELECT 1 FROM capacity WHERE cost_limit_micros IS NOT NULL)
       THEN 'pricing_unavailable'
     WHEN EXISTS (SELECT 1 FROM capacity WHERE token_limit IS NOT NULL
@@ -254,6 +251,7 @@ const reserveSQL = `WITH expired AS MATERIALIZED (
       AND used_cost + active_cost + $9::numeric > cost_limit_micros::numeric) THEN 'cost_exceeded'
     WHEN EXISTS (SELECT 1 FROM capacity WHERE concurrency_limit IS NOT NULL
       AND active_calls >= concurrency_limit) THEN 'concurrency_exceeded'
+    WHEN EXISTS (SELECT 1 FROM existing WHERE status IN ('released', 'expired')) THEN 'reopen'
     ELSE 'allow'
   END AS code
 ), inserted AS (
@@ -267,16 +265,42 @@ const reserveSQL = `WITH expired AS MATERIALIZED (
   ON CONFLICT (tenant_id, provider_call_id) DO NOTHING
   RETURNING reservation_id::text, provider_call_id, status, expires_at,
             actual_prompt_tokens, actual_completion_tokens, actual_cost_micros
+), reopened AS (
+  UPDATE llm_quota_reservations AS reservation
+     SET project_id = $2::uuid,
+         run_id = NULLIF($3, '')::uuid,
+         module_key = $4,
+         channel_id = $5::uuid,
+         model_id = $6,
+         reserved_tokens = $8::bigint,
+         reserved_cost_micros = $9::bigint,
+         status = 'reserved',
+         expires_at = now() + ($11::integer * interval '1 second'),
+         actual_prompt_tokens = NULL,
+         actual_completion_tokens = NULL,
+         actual_cost_micros = NULL,
+         finalized_at = NULL,
+         updated_at = now()
+    FROM decision
+   WHERE decision.code = 'reopen'
+     AND reservation.tenant_id = $1::uuid
+     AND reservation.provider_call_id = $7
+     AND reservation.status IN ('released', 'expired')
+  RETURNING reservation.reservation_id::text, reservation.provider_call_id, reservation.status,
+            reservation.expires_at, reservation.actual_prompt_tokens,
+            reservation.actual_completion_tokens, reservation.actual_cost_micros
 ), selected AS (
   SELECT * FROM inserted
+  UNION ALL
+  SELECT * FROM reopened
   UNION ALL
   SELECT reservation_id, provider_call_id, status, expires_at,
          actual_prompt_tokens, actual_completion_tokens, actual_cost_micros
     FROM existing
    WHERE (SELECT code FROM decision) IN ('replay_reserved', 'finalized')
 )
-SELECT CASE WHEN decision.code = 'allow' AND selected.reservation_id IS NOT NULL THEN 'reserved'
-            WHEN decision.code = 'allow' THEN 'reserve_failed'
+SELECT CASE WHEN decision.code IN ('allow', 'reopen') AND selected.reservation_id IS NOT NULL THEN 'reserved'
+            WHEN decision.code IN ('allow', 'reopen') THEN 'reserve_failed'
             ELSE decision.code END AS decision,
        selected.reservation_id, selected.provider_call_id, selected.status, selected.expires_at,
        selected.actual_prompt_tokens, selected.actual_completion_tokens, selected.actual_cost_micros

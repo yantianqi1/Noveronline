@@ -10,7 +10,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run src",
-    "worker": "node dist/worker.js"
+    "worker": "node dist/worker.js",
+    "analysis-worker": "node dist/analysis-worker.js"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.80.3",

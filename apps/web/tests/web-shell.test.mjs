@@ -143,6 +143,7 @@ test("Writer shell renders metadata-only manuscript and export panels", async ()
 test("project navigation includes writer and LLM Facility routes with active path state", async () => {
   const layout = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const nav = await fileText("components/project-nav.tsx");
+  const workspaceRoute = await fileText("lib/workspace-route.ts");
   const transition = await fileText("components/workspace-route-transition.tsx");
   const css = await fileText("app/globals.css");
 
@@ -160,11 +161,12 @@ test("project navigation includes writer and LLM Facility routes with active pat
   assert.doesNotMatch(nav, /navigationBasePath/);
   assert.match(nav, /const activeTenants = currentUser\.ok \? currentUser\.active_tenants : \[\]/);
   assert.match(nav, /const href = workspacePathForProject\(activeTenants, currentProject, item\.path\)/);
-  assert.match(nav, /function matchesNavigationHref\(pathname: string, href: string, sectionPath: string\)/);
-  assert.match(nav, /matchesNavigationHref\(\s*pathname,\s*workspacePathForProject\(activeTenants, currentProject, item\.path\),\s*item\.path,\s*\)/s);
-  assert.match(nav, /pathname\.startsWith\(`\$\{href\}\/`\)/);
+  assert.match(nav, /matchesWorkspaceNavigationPath/);
+  assert.match(nav, /matchesWorkspaceNavigationPath\(\s*pathname,\s*workspacePathForProject\(activeTenants, currentProject, item\.path\),\s*item\.path,\s*\)/s);
+  assert.match(workspaceRoute, /export function matchesWorkspaceNavigationPath/);
+  assert.match(workspaceRoute, /pathname\.startsWith\(`\$\{href\}\/`\)/);
   assert.match(nav, /const activeHref = optimisticHref \?\? pathname/);
-  assert.match(nav, /const active = matchesNavigationHref\(activeHref, href, item\.path\)/);
+  assert.match(nav, /const active = matchesWorkspaceNavigationPath\(activeHref, href, item\.path\)/);
   assert.match(nav, /data-active=\{active \? "true" : undefined\}/);
   assert.match(nav, /onNavigate=\{navigateWorkspace\}/);
   assert.match(nav, /onNavigate=\{\(event\) => onNavigate\(event, href\)\}/);
@@ -221,6 +223,18 @@ test("project chrome is content-sized and keeps route identifiers out of display
     polish,
     /@media \(max-width:\s*860px\)\s*\{[\s\S]*?\.app-frame\.app-frame-unified \.app-sidebar[\s\S]*?height:\s*auto/,
   );
+  // Collapsed desktop rail must stay icon-only; the old hide-drawer rule was
+  // overridden by `.sidebar-drawer { display: flex }` and crushed labels.
+  assert.match(
+    polish,
+    /html\[data-sidebar-collapsed="true"\] \.app-frame\.app-frame-unified \.sidebar-drawer\s*\{[\s\S]*?display:\s*flex\s*!important/,
+  );
+  assert.match(
+    polish,
+    /html\[data-sidebar-collapsed="true"\] \.sidebar-drawer > \.sidebar-section \.nav-link-label/,
+  );
+  assert.match(nav, /className="nav-link-label"/);
+  assert.match(nav, /title=\{label\}/);
   assert.match(layout, /const\s+currentProject\s*=\s*currentUser\.ok/);
   assert.match(layout, /currentProject\?\.name/);
   assert.doesNotMatch(layout, /<span>\{tenantSlug\}<\/span>/);
@@ -366,6 +380,7 @@ test("marketing landing is the product homepage and CTAs enter login", async () 
   const bodyHtml = await fileText("lib/landing-body-html.ts");
   const publicMain = await fileText("public/landing/main.js");
   const publicBody = await fileText("public/landing/body.html");
+  const landingCss = await fileText("public/landing/styles.css");
   const authCss = await fileText("app/auth-marketing.css");
   const dockerfile = await fileText("../../infra/docker/web.Dockerfile");
 
@@ -392,8 +407,36 @@ test("marketing landing is the product homepage and CTAs enter login", async () 
     "a session-wide boot guard leaves the remounted landing page stuck on its preload screen",
   );
   assert.doesNotMatch(publicMain, /href="#workbench"/);
+  assert.match(publicMain, /visualViewport/);
+  assert.match(landingCss, /--landing-topbar-h/);
+  assert.match(landingCss, /--landing-bottom-chrome-h/);
+  assert.match(landingCss, /--landing-rail-h/);
+  assert.match(landingCss, /--landing-content-pad-x/);
+  assert.match(
+    landingCss,
+    /@media \(max-width:\s*768px\)[\s\S]*\.scene\s*\{[\s\S]*var\(--landing-topbar-h\)[\s\S]*var\(--landing-bottom-chrome-h\)/s,
+    "mobile scenes must pad with reserved chrome so content is not under topbar/rail",
+  );
+  assert.match(
+    landingCss,
+    /@media \(max-width:\s*768px\)[\s\S]*\.scene-rail\s*\{[\s\S]*var\(--landing-rail-gap\)[\s\S]*var\(--landing-rail-h\)/s,
+  );
+  assert.match(
+    landingCss,
+    /@media \(max-width:\s*768px\)[\s\S]*\.scene-counter\s*\{[\s\S]*var\(--landing-rail-h\)/s,
+    "scene counter must share the bottom rail baseline on mobile",
+  );
   assert.match(authCss, /auth-shell/);
   assert.match(authCss, /#9b2c2c/);
+  assert.match(authCss, /--login-topbar-h/);
+  assert.match(
+    authCss,
+    /@media \(max-width:\s*960px\)[\s\S]*\.login-page \.auth-topbar\s*\{[\s\S]*position:\s*sticky/s,
+  );
+  assert.match(
+    authCss,
+    /@media \(max-width:\s*960px\)[\s\S]*\.login-input-wrap input\s*\{[\s\S]*font-size:\s*16px/s,
+  );
   assert.match(dockerfile, /COPY --from=build \/app\/public \.\/public/);
 });
 
@@ -1186,21 +1229,26 @@ test("Next app shell declares tenant/project Overview route for source files and
   assert.match(page, /createSourceFileUpload/);
   assert.match(page, /uploadSourceFileObject/);
   assert.match(page, /completeSourceFileUpload/);
-  assert.match(page, /startSeedRun/);
-  assert.match(page, /getProjectSeedRuns/);
-  assert.match(page, /getSeedRunSummary/);
-  assert.match(page, /getSeedRunEvents/);
-  assert.match(page, /cancelSeedRun/);
-  assert.match(page, /retrySeedRun/);
+  assert.match(page, /startAnalysisRun/);
+  assert.match(page, /getProjectAnalysisRuns/);
+  assert.match(page, /getAnalysisRunSummary/);
+  assert.match(page, /getAnalysisRunEvents/);
+  assert.match(page, /cancelAnalysisRun/);
+  assert.match(page, /listAnalysisWorkspaceFiles/);
+  assert.match(page, /listAnalysisCandidates/);
   assert.match(page, /uploadAndStartSeedAction/);
   assert.match(page, /completeUploadAction/);
   assert.match(page, /startSeedRunAction/);
   assert.doesNotMatch(page, /admitSourceFileAction|uploadSourceObjectAction/);
   assert.match(page, /cancelSeedRunAction/);
   assert.match(page, /retrySeedRunAction/);
+  assert.doesNotMatch(page, /startSeedRun\(/);
+  assert.doesNotMatch(page, /getProjectSeedRuns/);
   assert.match(page, /OverviewSeedShell/);
   assert.match(page, /projectOverview=\{projectOverview\}/);
   assert.match(page, /projectReadiness=\{projectReadiness\}/);
+  assert.match(page, /workspaceFiles=\{workspaceFiles\}/);
+  assert.match(page, /analysisCandidates=\{analysisCandidates\}/);
 });
 
 test("source file, Seed, readiness, and overview API client uses sanitized Go endpoints and tenant context headers", async () => {
@@ -1222,11 +1270,18 @@ test("source file, Seed, readiness, and overview API client uses sanitized Go en
   assert.match(client, /uploadSourceFileObject/);
   assert.match(client, /completeSourceFileUpload/);
   assert.match(client, /startSeedRun/);
+  assert.match(client, /startAnalysisRun/);
   assert.match(client, /cancelSeedRun/);
+  assert.match(client, /cancelAnalysisRun/);
   assert.match(client, /retrySeedRun/);
   assert.match(client, /getProjectSeedRuns/);
+  assert.match(client, /getProjectAnalysisRuns/);
   assert.match(client, /getSeedRunSummary/);
+  assert.match(client, /getAnalysisRunSummary/);
   assert.match(client, /getSeedRunEvents/);
+  assert.match(client, /getAnalysisRunEvents/);
+  assert.match(client, /listAnalysisWorkspaceFiles/);
+  assert.match(client, /listAnalysisCandidates/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/uploads`/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/overview`/);
   assert.match(client, /\/v1\/uploads\/\$\{input\.uploadId\}\/object`/);
@@ -1236,9 +1291,15 @@ test("source file, Seed, readiness, and overview API client uses sanitized Go en
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/source-files`/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/readiness`/);
   assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/seed-runs`/);
+  assert.match(client, /\/v1\/projects\/\$\{input\.projectId\}\/analysis-runs`/);
   assert.match(client, /\/v1\/seed-runs\/\$\{input\.runId\}`/);
+  assert.match(client, /\/v1\/analysis-runs\/\$\{input\.runId\}`/);
   assert.match(client, /\/v1\/seed-runs\/\$\{input\.runId\}\/events/);
+  assert.match(client, /\/v1\/analysis-runs\/\$\{input\.runId\}\/events/);
   assert.match(client, /\/v1\/seed-runs\/\$\{input\.runId\}\/cancel`/);
+  assert.match(client, /\/v1\/analysis-runs\/\$\{input\.runId\}\/cancel`/);
+  assert.match(client, /\/v1\/analysis-runs\/\$\{input\.runId\}\/workspace\/files/);
+  assert.match(client, /\/v1\/analysis-runs\/\$\{input\.runId\}\/candidates/);
   assert.match(client, /\/v1\/seed-runs\/\$\{input\.runId\}\/retry`/);
   assert.match(client, /X-Tenant-Id/);
   assert.match(client, /X-User-Id/);
@@ -1311,13 +1372,16 @@ test("Overview page exposes one-step upload and Seed start server action", async
   assert.match(action, /createSourceFileUpload\(/);
   assert.match(action, /uploadSourceFileObject\(/);
   assert.match(action, /completeSourceFileUpload\(/);
-  assert.match(action, /startSeedRun\(/);
+  assert.match(action, /startAnalysisRun\(/);
   assert.match(action, /uploadId:\s*admitted\.upload_id/);
   assert.match(action, /mode:\s*stringFromFormData\(formData,\s*"mode"\)\s*\|\|\s*"full"/);
+  assert.match(action, /hintsText|hints:/);
   assert.match(action, /if\s*\(!admitted\.ok\)[\s\S]*return\s+redirect\(/);
   assert.match(action, /if\s*\(!uploaded\.ok\)[\s\S]*return\s+redirect\(/);
   assert.match(action, /if\s*\(!completed\.ok\)[\s\S]*return\s+redirect\(/);
   assert.match(action, /return\s+redirect\(overviewRoute/);
+  assert.match(page, /function\s+overviewRoute\([\s\S]*workspacePathForProject\(/);
+  assert.doesNotMatch(page, /function\s+overviewRoute\([\s\S]*`\/\$\{input\.tenantSlug\}\/projects\/\$\{input\.projectId\}\/overview/);
   assert.doesNotMatch(action, /mock|fake|MIROFISH_.*LLM|OPENAI_API_KEY|api_key|credential_ref|encrypted_api_key/i);
   assert.match(nextConfig, /serverActions:\s*\{/);
   assert.match(nextConfig, /bodySizeLimit:\s*SOURCE_UPLOAD_BODY_LIMIT|bodySizeLimit:\s*"64mb"/);
@@ -1445,16 +1509,20 @@ test("Overview Seed browser live harness is opt-in and privacy bounded", async (
 
 test("Overview Seed shell renders explicit source file and Seed run states", async () => {
   const shell = await fileText("components/overview-seed-shell.tsx");
+  const wall = await fileText("components/overview-seed-progress-wall.tsx");
+  const overviewSurface = `${shell}\n${wall}`;
 
   assert.match(shell, /Source files/);
   assert.match(shell, /Project health/);
   assert.match(shell, /projectOverview\.ok/);
-  assert.match(shell, /projectOverview\.status/);
   assert.match(shell, /source_file_count/);
   assert.match(shell, /seed_run_count/);
   assert.match(shell, /active_workflow_run_id/);
   assert.match(shell, /active_workflow_type/);
   assert.match(shell, /active_workflow_status/);
+  assert.match(shell, /OverviewActivityLogLive/);
+  assert.doesNotMatch(shell, /zh="项目状态"/);
+  assert.doesNotMatch(shell, /zh="当前分析"/);
   assert.match(shell, /Asset records/);
   assert.match(shell, /Graph nodes/);
   assert.match(shell, /Graph edges/);
@@ -1484,9 +1552,10 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.match(shell, /ready_entity_count/);
   assert.match(shell, /ready_relationship_count/);
   assert.match(shell, /ready_world_rule_count/);
-  assert.match(shell, /Upload and start analysis/);
+  assert.match(shell, /Import manuscript/);
   assert.match(shell, /uploadAndStartSeedAction/);
   assert.match(shell, /OverviewSeedUploadForm/);
+  assert.match(shell, /OverviewSeedProgressWall/);
   const uploadForm = await fileText("components/overview-seed-upload-form.tsx");
   assert.match(uploadForm, /type="file"/);
   assert.match(uploadForm, /name="file"/);
@@ -1502,18 +1571,30 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
   assert.doesNotMatch(shell, /Admit source file|Upload object|Complete this upload|uploadSourceObjectAction|<label htmlFor=".*upload-id"|placeholder=".*upload/i);
   assert.match(shell, /Analysis history/);
   assert.match(shell, /Inspect/);
-  assert.match(shell, /name="runId"/);
-  assert.match(shell, /Analysis events/);
+  assert.match(overviewSurface, /name="runId"/);
+  // Authors see progress/results on the main path; raw event dumps stay out of the secondary rail.
+  assert.match(shell, /Project diagnostics \(optional\)|项目诊断（可选）/);
+  assert.match(shell, /Analysis progress|分析进度/);
   assert.match(shell, /cancelSeedRunAction/);
   assert.match(shell, /retrySeedRunAction/);
-  assert.match(shell, /Cancel analysis/);
-  assert.match(shell, /Retry analysis/);
+  assert.match(wall, /Cancel analysis/);
+  assert.match(wall, /Retry analysis/);
+  assert.match(shell, /formatBeijingTimeLabel|formatBeijingTime/);
   assert.match(shell, /projectReadiness\.code/);
   assert.match(shell, /sourceFiles\.ok/);
   assert.match(shell, /seedRuns\.ok/);
   assert.match(shell, /selectedSeedRun\.ok/);
-  assert.match(shell, /seedEvents\.ok/);
+  assert.match(shell, /seedEvents\?\.ok|seedEvents\.ok/);
   assert.match(shell, /sourceFiles\.code/);
+  assert.match(shell, /seedActivityLog/);
+  assert.match(shell, /seed\.sequential_reading\.progress/);
+  assert.match(shell, /OverviewActivityLogLive/);
+  const activityLive = await fileText("components/overview-activity-log-live.tsx");
+  assert.match(activityLive, /overview-activity-log/);
+  assert.match(activityLive, /关键进度|Key progress/);
+  assert.match(activityLive, /实时 SSE|Live SSE/);
+  assert.match(activityLive, /connectAnalysisEventStream/);
+  assert.match(shell, /overview-progress-thin/);
   assert.match(shell, /<FailureText \/>/);
   assert.doesNotMatch(shell, /object key/i);
   assert.doesNotMatch(shell, /presigned/i);
@@ -1525,6 +1606,7 @@ test("Overview Seed shell renders explicit source file and Seed run states", asy
 test("Overview Seed controls are status-gated and retry resets successful event cursor", async () => {
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
   const shell = await fileText("components/overview-seed-shell.tsx");
+  const wall = await fileText("components/overview-seed-progress-wall.tsx");
   const controls = await import(`../components/overview-seed-run-controls.ts?seedControls=${Date.now()}`);
   const cancelAction = sourceSlice(page, "async function cancelSeedRunAction", "async function retrySeedRunAction");
   const retryAction = sourceSlice(page, "async function retrySeedRunAction", "return (");
@@ -1549,14 +1631,17 @@ test("Overview Seed controls are status-gated and retry resets successful event 
 
   assert.match(shell, /const\s+cancelSeedRunEnabled\s*=\s*canCancelSeedRun\(selectedSeedRun\)/);
   assert.match(shell, /const\s+retrySeedRunEnabled\s*=\s*canRetrySeedRun\(selectedSeedRun\)/);
-  assert.match(shell, /disabled=\{!cancelSeedRunEnabled\}/);
-  assert.match(shell, /disabled=\{!retrySeedRunEnabled\}/);
+  assert.match(wall, /disabled=\{!cancelSeedRunEnabled\}/);
+  assert.match(wall, /disabled=\{!retrySeedRunEnabled\}/);
   assert.doesNotMatch(shell, /const\s+hasSelectedRun\s*=/);
-  assert.doesNotMatch(shell, /disabled=\{!hasSelectedRun\}/);
+  assert.doesNotMatch(`${shell}\n${wall}`, /disabled=\{!hasSelectedRun\}/);
 
   assert.match(cancelAction, /afterEventId:\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
-  assert.match(retryAction, /afterEventId:\s*result\.ok\s*\?\s*""\s*:\s*\(query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""\)/);
-  assert.doesNotMatch(`${shell}\n${retryAction}\n${cancelAction}`, /raw_body|content_text|draft_text|manuscript_text|provider_response|credential_ref|encrypted_api_key|api_key|object_key/i);
+  assert.match(cancelAction, /cancelAnalysisRun/);
+  assert.match(retryAction, /ANALYSIS_RETRY_USE_NEW_RUN/);
+  assert.match(retryAction, /afterEventId:\s*query\.after_event_id\s*\?\?\s*query\.afterEventId\s*\?\?\s*""/);
+  assert.doesNotMatch(retryAction, /retrySeedRun\(/);
+  assert.doesNotMatch(`${shell}\n${wall}\n${retryAction}\n${cancelAction}`, /raw_body|content_text|draft_text|manuscript_text|provider_response|credential_ref|encrypted_api_key|api_key|object_key/i);
 });
 
 test("Next app shell declares tenant/project LLM Facility route", async () => {
@@ -1580,6 +1665,12 @@ test("Next app shell declares tenant/project LLM Facility route", async () => {
   assert.match(page, /updateChannelAction/);
   assert.match(page, /deleteChannelAction/);
   assert.match(page, /syncChannelAction/);
+  assert.match(page, /testModelAction/);
+  assert.match(page, /checkProviderHealth/);
+  assert.match(page, /healthStatus/);
+  assert.match(page, /llmChannelAnchorId/);
+  assert.match(page, /focusChannelId/);
+  assert.match(page, /channel: channelQueryValue\(selectedChannelId\)/);
   assert.match(page, /getLLMChannels/);
   assert.match(page, /getLLMChannelModels/);
   assert.match(page, /getLLMModules/);
@@ -2549,23 +2640,38 @@ test("LLM Facility shell is an operational settings console", async () => {
   assert.match(shell, /settingsSnapshot/);
   assert.match(shell, /Channels/);
   assert.match(shell, /Channel Management/);
-  assert.match(shell, /Create channel/);
+  assert.match(shell, /LLMCreateChannelDialog/);
+  assert.match(shell, /Channels and model sync/);
   assert.match(shell, /Update channel/);
-  assert.match(shell, /name="apiKey"/);
   assert.match(shell, /updateChannelAction/);
   assert.match(shell, /deleteChannelAction/);
   assert.match(shell, /syncChannelAction/);
+  assert.match(shell, /testModelAction/);
+  assert.match(shell, /Test model/);
+  assert.match(shell, /Test link/);
+  assert.match(shell, /ChannelModelTestForm/);
   assert.match(shell, /Sync models/);
   assert.match(shell, /last_sync_status/);
+  assert.match(shell, /llm-channel-edit-list/);
+  assert.match(shell, /llm-channel-edit-card/);
+  assert.match(shell, /llmChannelAnchorId/);
+  assert.match(shell, /LLMChannelFocus/);
+  assert.match(shell, /id=\{anchorId\}/);
+
+  const createChannelDialog = await fileText("components/llm-create-channel-dialog.tsx");
+  assert.match(createChannelDialog, /Create channel/);
+  assert.match(createChannelDialog, /showModal/);
+  assert.match(createChannelDialog, /name="apiKey"/);
+  assert.match(createChannelDialog, /createChannelAction/);
+  assert.match(createChannelDialog, /llm-create-channel-dialog/);
   assert.match(shell, /Models/);
-  assert.match(shell, /Configure project models/);
+  assert.match(shell, /Project model bindings/);
   assert.match(shell, /LLMModuleBindingsPanel/);
   assert.match(shell, /batchBindModuleAction/);
   assert.match(shell, /canManageBindings/);
   assert.match(shell, /channelModels/);
   assert.match(shell, /clearBindingAction/);
   assert.match(shell, /bindingStatus/);
-  assert.match(shell, /Module binding/);
   assert.match(shell, /Module Bindings/);
   assert.match(shell, /Module Catalog/);
   assert.match(shell, /modules\.items\.map/);
@@ -2646,12 +2752,17 @@ test("global styles avoid one-note purple, cream, and dark-slate dominance", asy
 
 test("project app frame collapses to one column on mobile", async () => {
   const css = await fileText("app/globals.css");
+  const polish = await fileText("app/workbench-polish.css");
 
   assert.match(css, /\.panel\s*\{[^}]*min-width:\s*0/s);
   assert.match(css, /@media\s*\(max-width:\s*860px\)/);
   assert.match(css, /\.app-frame\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(css, /\.app-main\s*\{[^}]*padding:\s*16px/s);
   assert.match(css, /\.app-sidebar\s*\{[^}]*border-right:\s*0/s);
+  assert.match(
+    polish,
+    /@media\s*\(max-width:\s*860px\)[\s\S]*?\.app-frame\.app-frame-unified \.app-sidebar,[\s\S]*?min-height:\s*0/s,
+  );
 });
 
 test("trace JSON blocks stay inside mobile workbench panels", async () => {
@@ -2734,21 +2845,37 @@ test("login page keeps the reference editorial split-screen proportions", async 
   assert.match(styles, /font-size:\s*clamp\(2\.1rem, 2\.7vw, 2\.8rem\)/);
   assert.match(styles, /@media \(min-width: 961px\) and \(max-height: 800px\)/);
   assert.match(styles, /@media \(max-width: 960px\)[\s\S]*\.login-copy\s*\{[^}]*margin-right:\s*auto;[^}]*margin-left:\s*auto/s);
+  assert.match(styles, /--login-topbar-h/);
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*\.login-form-panel\s*\{[\s\S]*align-items:\s*start/s,
+  );
 });
 
 test("Project Overview keeps operational detail collapsed by default", async () => {
   const shell = await fileText("components/overview-seed-shell.tsx");
+  const wall = await fileText("components/overview-seed-progress-wall.tsx");
   const css = await fileText("app/globals.css");
 
   assert.ok(((shell.match(/<details className="overview-details">/g) ?? []).length) >= 2);
   assert.doesNotMatch(shell, /<details className="overview-details" open/);
   assert.match(shell, /文件与分析记录/);
-  assert.match(shell, /进度与活动/);
+  assert.match(shell, /项目诊断（可选）|Project diagnostics \(optional\)/);
   assert.match(shell, /<SeedRunOverview/);
-  assert.match(shell, /className="overview-run-actions"/);
+  assert.match(wall, /className="overview-run-actions overview-run-actions-soft"/);
+  assert.match(wall, /data-wall="seed-progress"/);
   assert.match(css, /\.overview-details\s*\{/);
   assert.match(css, /\.overview-details > summary\s*\{[^}]*min-height:\s*60px/s);
+  assert.match(
+    css,
+    /\.overview-secondary-stack \.overview-details-content\s*\{[^}]*max-height:\s*min\(36vh,\s*320px\)/s,
+  );
+  assert.match(
+    css,
+    /\.overview-secondary-stack \.overview-details-content\s*\{[^}]*overflow-y:\s*auto/s,
+  );
   assert.match(css, /\.overview-metric-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,/s);
+  assert.match(css, /\.overview-status-card\[data-density="compact"\]/);
   assert.match(css, /\.sidebar-top-actions\s*\{/);
   assert.doesNotMatch(css, /\.sidebar-bottom-row\s*\{/);
   assert.doesNotMatch(css, /\.sidebar-drawer\[data-open="false"\] \+ \.sidebar-bottom-row/);
@@ -2819,6 +2946,8 @@ test("Paper-ink design tokens and bookish app shell stay explicit", async () => 
   assert.match(layout, /className="skip-link"/);
   assert.match(layout, /WorkspaceContextBar|className="app-command-bar project-context-bar"/);
   assert.match(layout, /id="workspace-main"/);
+  assert.match(layout, /MobileTopBar/);
+  assert.match(layout, /MobileTabBar/);
   assert.match(nav, /mobile-nav-toggle/);
   assert.match(nav, /aria-expanded=\{navigationOpen\}/);
   assert.match(nav, /LanguageSwitcher/);

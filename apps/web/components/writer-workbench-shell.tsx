@@ -36,6 +36,7 @@ import { TechnicalDetailsDrawer } from "./technical-details-drawer";
 import { WorkspaceHeader } from "./workspace-header";
 import { WriterLiveDraft } from "./writer-live-draft";
 import { WriterCommandPalette, WriterCommandPaletteTrigger } from "./writer-command-palette";
+import { WriterComposerKeyboard } from "./writer-composer-keyboard";
 import { WriterMobileSwitch } from "./writer-mobile-switch";
 import { WriterWorkbenchProvider } from "./writer-workbench-context";
 
@@ -145,6 +146,7 @@ export function WriterWorkbenchShell({
   return (
     <div className="writer-root">
       <WriterWorkbenchProvider>
+      <WriterComposerKeyboard />
       <WorkspaceHeader
         actions={
           <>
@@ -193,7 +195,7 @@ export function WriterWorkbenchShell({
       />
 
       <WriterMobileSwitch locale={locale} hasStructure={Boolean(structureNav)} />
-      <div className="writer-agent-layout" data-layout="manuscript-primary" data-has-structure={structureNav ? "true" : "false"} data-mobile-view="manuscript">
+      <div className="writer-agent-layout" data-layout="manuscript-primary" data-has-structure={structureNav ? "true" : "false"} data-mobile-view="agent">
         {structureNav ? (
           <nav className="writer-structure-rail" aria-label={tx(locale, "创作结构导航", "Manuscript structure")}>
             {structureNav}

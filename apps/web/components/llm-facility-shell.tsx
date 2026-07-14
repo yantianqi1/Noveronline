@@ -14,9 +14,11 @@ import type {
   LLMUsageSummary,
 } from "../lib/api";
 import type { LLMModelRecord } from "../lib/api";
-import { llmChannelKey, llmModuleSegment } from "../lib/llm-facility-route";
+import { llmChannelAnchorId, llmChannelKey, llmModuleSegment } from "../lib/llm-facility-route";
 import { type Locale, tx } from "../lib/locale";
-import { LLMModuleBindingsPanel } from "./llm-module-bindings-panel";
+import { LLMChannelFocus } from "./llm-channel-focus";
+import { LLMCreateChannelDialog } from "./llm-create-channel-dialog";
+import { LLMModuleBindingsPanel, type LLMBindingActionResult } from "./llm-module-bindings-panel";
 import { TechnicalDetailsDrawer } from "./technical-details-drawer";
 import { WorkspaceHeader } from "./workspace-header";
 
@@ -44,17 +46,21 @@ type LLMFacilityShellProps = {
   quotaStatus: string;
   quotaCode: string;
   quotaMessage: string;
-  bindModuleAction: (formData: FormData) => Promise<void>;
-  batchBindModuleAction: (formData: FormData) => Promise<void>;
-  clearBindingAction: (formData: FormData) => Promise<void>;
+  bindModuleAction: (formData: FormData) => Promise<LLMBindingActionResult>;
+  batchBindModuleAction: (formData: FormData) => Promise<LLMBindingActionResult>;
+  clearBindingAction: (formData: FormData) => Promise<LLMBindingActionResult>;
   canManageBindings: boolean;
   channelModels: Record<string, LLMModelRecord[]>;
   createChannelAction: (formData: FormData) => Promise<void>;
   updateChannelAction: (formData: FormData) => Promise<void>;
   deleteChannelAction: (formData: FormData) => Promise<void>;
   syncChannelAction: (formData: FormData) => Promise<void>;
+  testModelAction: (formData: FormData) => Promise<void>;
   updateModelAction: (formData: FormData) => Promise<void>;
   upsertQuotaPolicyAction: (formData: FormData) => Promise<void>;
+  healthStatus: string;
+  healthCode: string;
+  healthMessage: string;
   resolution: LLMModuleResolutionSummary;
   modules: LLMModulesSummary;
   bindings: LLMModuleBindingsSummary;
@@ -129,8 +135,12 @@ export function LLMFacilityShell({
   updateChannelAction,
   deleteChannelAction,
   syncChannelAction,
+  testModelAction,
   updateModelAction,
   upsertQuotaPolicyAction,
+  healthStatus,
+  healthCode,
+  healthMessage,
   resolution,
   modules,
   bindings,
@@ -158,29 +168,60 @@ export function LLMFacilityShell({
     ? llmChannelKey(selectedChannelId)
     : "";
 
+  const diagnosticsDrawer = canManageAdmin ? (
+    <TechnicalDetailsDrawer
+      description={<Bi zh="渠道调用与用量仅管理角色使用" en="Channel calls and usage are for admin roles" />}
+      label={<Bi zh="调用诊断" en="Call diagnostics" />}
+    >
+      <section className="panel" aria-labelledby="telemetry-filter-heading">
+        <p className="eyebrow"><Bi zh="调用筛选" en="Telemetry filter" /></p>
+        <h2 id="telemetry-filter-heading"><Bi zh="筛选调用记录" en="Filter telemetry" /></h2>
+        <TelemetryFilter
+          moduleKey={moduleKey}
+          runId={runId}
+          selectedChannelKey={selectedChannelKey}
+          modules={modules}
+          locale={locale}
+        />
+      </section>
+
+      <details className="llm-module-group" open>
+        <summary>
+          <span><Bi zh="调用与用量" en="Calls and usage" /></span>
+          <small><Bi zh="活动、令牌与计费" en="Activity, tokens and billing" /></small>
+        </summary>
+        <div className="llm-module-content">
+          {telemetryContent}
+        </div>
+      </details>
+    </TechnicalDetailsDrawer>
+  ) : null;
+
   return (
     <div className="llm-facility-root">
       <WorkspaceHeader
+        actions={diagnosticsDrawer}
         className="llm-facility-header"
         description={<Bi zh="为项目各创作能力绑定渠道与模型。" en="Bind channels and models for each creative capability." />}
         icon={<Cpu size={22} strokeWidth={1.8} />}
         meta={(
           <>
-            <span className="status-pill"><Bi zh="已绑定" en="Bound" />: {projectBindingCount}/{moduleCount || "—"}</span>
+            <span className="status-pill">
+              <Bi zh="已绑定" en="Bound" />: {projectBindingCount}/{moduleCount || "—"}
+            </span>
             <span className="status-pill">{moduleLabel(locale, moduleKey, moduleKey)} · {statusLabel}</span>
           </>
         )}
         title={<Bi zh="模型设置" en="Model settings" />}
       />
 
-      <div className="workbench-grid llm-facility-workbench">
+      <div className="workbench-grid llm-facility-workbench" data-layout="single">
         <main>
         <section
           className="panel llm-author-surface"
-          aria-labelledby="module-binding-heading"
+          aria-label={tx(locale, "项目模型绑定", "Project model bindings")}
           data-surface="author"
         >
-          <h2 id="module-binding-heading"><Bi zh="配置项目模型" en="Configure project models" /></h2>
           {modules.ok && channels.ok ? (
             <LLMModuleBindingsPanel
               locale={locale}
@@ -206,12 +247,18 @@ export function LLMFacilityShell({
 
         {canManageAdmin ? (
           <>
-        <details className="llm-module-group" data-surface="admin">
+        {/* Keep admin open after create/update/sync so redirect remount does not collapse layout mid-scroll. */}
+        <details
+          className="llm-module-group"
+          data-surface="admin"
+          open={Boolean(channelStatus || syncStatus) ? true : undefined}
+        >
           <summary><span><Bi zh="管理：渠道管理" en="Admin: Channel management" /></span><small><Bi zh="创建、更新与同步模型" en="Create, update and sync models" /></small></summary>
           <div className="llm-module-content">
-        <section className="panel" aria-labelledby="channel-management-heading">
+        <section className="panel" aria-labelledby="channel-management-heading" id="llm-channel-management">
           <p className="eyebrow"><Bi zh="渠道管理" en="Channel Management" /></p>
-          <h2 id="channel-management-heading"><Bi zh="创建渠道" en="Create channel" /></h2>
+          <h2 id="channel-management-heading"><Bi zh="渠道与模型同步" en="Channels and model sync" /></h2>
+          <LLMChannelFocus />
           <ChannelManagement
             channelStatus={channelStatus}
             channelCode={channelCode}
@@ -219,10 +266,15 @@ export function LLMFacilityShell({
             syncStatus={syncStatus}
             syncCode={syncCode}
             syncMessage={syncMessage}
+            healthStatus={healthStatus}
+            healthCode={healthCode}
+            healthMessage={healthMessage}
             createChannelAction={createChannelAction}
             updateChannelAction={updateChannelAction}
             deleteChannelAction={deleteChannelAction}
             syncChannelAction={syncChannelAction}
+            testModelAction={testModelAction}
+            channelModels={channelModels}
             channels={channels}
             locale={locale}
           />
@@ -314,53 +366,15 @@ export function LLMFacilityShell({
             locale={locale}
             models={models}
             selectedChannelId={selectedChannelId}
+            testModelAction={testModelAction}
             updateModelAction={updateModelAction}
           />
         </section>
           </div>
         </details>
           </>
-        ) : (
-          <section className="panel" data-surface="author" aria-labelledby="llm-author-only-heading">
-            <p className="eyebrow"><Bi zh="作者视图" en="Author view" /></p>
-            <h2 id="llm-author-only-heading"><Bi zh="模块绑定说明" en="Module binding guide" /></h2>
-            <p className="form-hint">
-              <Bi
-                zh="渠道与用量仅管理员可见；修改绑定需要工作区管理员权限。"
-                en="Channels and usage are admin-only; binding changes need workspace admin."
-              />
-            </p>
-          </section>
-        )}
-        </main>
-
-        {canManageAdmin ? (
-        <aside className="llm-observability-rail" data-surface="admin">
-          <TechnicalDetailsDrawer
-            description={<Bi zh="渠道调用与用量仅管理角色使用" en="Channel calls and usage are for admin roles" />}
-            label={<Bi zh="管理：调用诊断" en="Admin: Call diagnostics" />}
-          >
-            <section className="panel" aria-labelledby="telemetry-filter-heading">
-              <p className="eyebrow"><Bi zh="调用筛选" en="Telemetry filter" /></p>
-              <h2 id="telemetry-filter-heading"><Bi zh="筛选调用记录" en="Filter telemetry" /></h2>
-              <TelemetryFilter
-                moduleKey={moduleKey}
-                runId={runId}
-                selectedChannelKey={selectedChannelKey}
-                modules={modules}
-                locale={locale}
-              />
-            </section>
-
-            <details className="llm-module-group" open>
-              <summary><span><Bi zh="调用与用量" en="Calls and usage" /></span><small><Bi zh="活动、令牌与计费" en="Activity, tokens and billing" /></small></summary>
-              <div className="llm-module-content">
-                {telemetryContent}
-              </div>
-            </details>
-          </TechnicalDetailsDrawer>
-        </aside>
         ) : null}
+        </main>
       </div>
     </div>
   );
@@ -479,10 +493,15 @@ function ChannelManagement({
   syncStatus,
   syncCode,
   syncMessage,
+  healthStatus,
+  healthCode,
+  healthMessage,
   createChannelAction,
   updateChannelAction,
   deleteChannelAction,
   syncChannelAction,
+  testModelAction,
+  channelModels,
   channels,
   locale,
 }: {
@@ -492,126 +511,163 @@ function ChannelManagement({
   syncStatus: string;
   syncCode: string;
   syncMessage: string;
+  healthStatus: string;
+  healthCode: string;
+  healthMessage: string;
   createChannelAction: (formData: FormData) => Promise<void>;
   updateChannelAction: (formData: FormData) => Promise<void>;
   deleteChannelAction: (formData: FormData) => Promise<void>;
   syncChannelAction: (formData: FormData) => Promise<void>;
+  testModelAction: (formData: FormData) => Promise<void>;
+  channelModels: Record<string, LLMModelRecord[]>;
   channels: LLMChannelsSummary;
   locale: Locale;
 }) {
   const channelStatusClass = channelStatus === "success" ? "success-box" : "error-box";
   const syncStatusClass = syncStatus === "success" ? "success-box" : "error-box";
+  const healthStatusClass = healthStatus === "success" ? "success-box" : "error-box";
 
-  return (
-    <div className="binding-stack">
+  const channelStatusSlot = (
+    <>
       {channelStatus ? (
-        <p className={`form-status ${channelStatusClass}`} data-code={channelCode} data-status={channelStatus}>
+        <p
+          className={`form-status ${channelStatusClass}`}
+          data-code={channelCode}
+          data-status={channelStatus}
+          role="status"
+          tabIndex={-1}
+        >
           {channelMessage}
         </p>
       ) : null}
       {syncStatus ? (
-        <p className={`form-status ${syncStatusClass}`} data-code={syncCode} data-status={syncStatus}>
+        <p
+          className={`form-status ${syncStatusClass}`}
+          data-code={syncCode}
+          data-status={syncStatus}
+          role="status"
+          tabIndex={-1}
+        >
           {syncMessage}
         </p>
       ) : null}
+      {healthStatus ? (
+        <p
+          className={`form-status ${healthStatusClass}`}
+          data-code={healthCode}
+          data-status={healthStatus}
+          role={healthStatus === "error" ? "alert" : "status"}
+          tabIndex={-1}
+        >
+          {healthMessage}
+        </p>
+      ) : null}
+    </>
+  );
 
-      <form action={createChannelAction} className="binding-form">
-        <label htmlFor="channel-name"><Bi zh="名称" en="Name" /></label>
-        <input id="channel-name" name="name" required placeholder={tx(locale, "写作渠道", "Writing channel")} />
-
-        <label htmlFor="channel-provider"><Bi zh="提供方" en="Provider" /></label>
-        <select id="channel-provider" name="provider" defaultValue="openai-compatible">
-          <option value="openai-compatible">openai-compatible</option>
-          <option value="openai">openai</option>
-        </select>
-
-        <label htmlFor="channel-base-url"><Bi zh="基础 URL" en="Base URL" /></label>
-        <input
-          id="channel-base-url"
-          name="baseUrl"
-          required
-          placeholder="https://api.example.com/v1"
-          type="url"
-        />
-
-        <label htmlFor="channel-api-key"><Bi zh="API 密钥" en="API key" /></label>
-        <input id="channel-api-key" name="apiKey" required type="password" />
-
-        <label htmlFor="channel-concurrency"><Bi zh="最大并发数" en="Max concurrency" /></label>
-        <input id="channel-concurrency" min="1" name="maxConcurrency" required type="number" defaultValue="1" />
-
-        <label className="checkbox-row">
-          <input name="enabled" type="checkbox" defaultChecked />
-          <Bi zh="启用" en="Enabled" />
-        </label>
-
-        <label className="checkbox-row">
-          <input name="externalProviderOptIn" type="checkbox" />
-          <Bi zh="允许调用该外部 HTTPS 提供方" en="Allow calls to this external HTTPS provider" />
-        </label>
-
-        <button type="submit"><Bi zh="创建渠道" en="Create channel" /></button>
-      </form>
+  return (
+    <div className="binding-stack">
+      <LLMCreateChannelDialog
+        createChannelAction={createChannelAction}
+        forceOpen={channelStatus === "error"}
+        locale={locale}
+        statusSlot={channelStatusSlot}
+      />
 
       {channels.ok && channels.items.some((channel) => channel.scope === "tenant") ? (
-        <div className="compact-action-list">
+        <div className="llm-channel-edit-list" aria-label={tx(locale, "已配置渠道", "Configured channels")}>
           {channels.items
             .filter((channel) => channel.scope === "tenant")
-            .map((channel) => (
-              <div className="channel-edit-row" key={channel.channel_id}>
-                <form action={updateChannelAction} className="binding-form">
-                  <input type="hidden" name="channelId" value={channel.channel_id} />
-                  <label htmlFor={`channel-name-${channel.channel_id}`}><Bi zh="更新渠道" en="Update channel" /></label>
-                  <input id={`channel-name-${channel.channel_id}`} name="name" defaultValue={channel.name} required />
-                  <label htmlFor={`channel-base-${channel.channel_id}`}><Bi zh="基础 URL" en="Base URL" /></label>
-                  <input
-                    id={`channel-base-${channel.channel_id}`}
-                    name="baseUrl"
-                    defaultValue={channel.base_url}
-                    required
-                    type="url"
-                  />
-                  <label htmlFor={`channel-key-${channel.channel_id}`}><Bi zh="更换 API 密钥" en="Rotate API key" /></label>
-                  <input id={`channel-key-${channel.channel_id}`} name="apiKey" type="password" />
-                  <label htmlFor={`channel-limit-${channel.channel_id}`}><Bi zh="最大并发数" en="Max concurrency" /></label>
-                  <input
-                    id={`channel-limit-${channel.channel_id}`}
-                    min="1"
-                    name="maxConcurrency"
-                    required
-                    type="number"
-                    defaultValue={String(channel.max_concurrency || 1)}
-                  />
-                  <label className="checkbox-row">
-                    <input name="enabled" type="checkbox" defaultChecked={channel.enabled} />
-                    <Bi zh="启用" en="Enabled" />
-                  </label>
-                  <label className="checkbox-row">
+            .map((channel) => {
+              const anchorId = llmChannelAnchorId(channel.channel_id);
+              return (
+              <details
+                className="llm-channel-edit-card"
+                id={anchorId}
+                key={channel.channel_id}
+              >
+                <summary>
+                  <span className="llm-channel-edit-title">
+                    <strong>{channel.name}</strong>
+                    <span className="status-pill" data-tone={channel.enabled ? "success" : "warning"}>
+                      {channel.enabled ? tx(locale, "已启用", "Enabled") : tx(locale, "已停用", "Disabled")}
+                    </span>
+                  </span>
+                  <small className="llm-channel-edit-meta">
+                    <span>{channel.provider || "openai-compatible"}</span>
+                    <span title={channel.base_url}>{channel.base_url}</span>
+                    <span>
+                      {channel.last_sync_status
+                        ? tx(locale, `同步：${channel.last_sync_status}`, `Sync: ${channel.last_sync_status}`)
+                        : tx(locale, "未同步", "Not synced")}
+                    </span>
+                  </small>
+                </summary>
+                <div className="llm-channel-edit-body channel-edit-row">
+                  <form action={updateChannelAction} className="binding-form">
+                    <input type="hidden" name="channelId" value={channel.channel_id} />
+                    <label htmlFor={`channel-name-${channel.channel_id}`}><Bi zh="更新渠道" en="Update channel" /></label>
+                    <input id={`channel-name-${channel.channel_id}`} name="name" defaultValue={channel.name} required />
+                    <label htmlFor={`channel-base-${channel.channel_id}`}><Bi zh="基础 URL" en="Base URL" /></label>
                     <input
-                      name="externalProviderOptIn"
-                      type="checkbox"
-                      defaultChecked={channelExternalOptIn(channel)}
+                      id={`channel-base-${channel.channel_id}`}
+                      name="baseUrl"
+                      defaultValue={channel.base_url}
+                      required
+                      type="url"
                     />
-                    <Bi zh="允许调用该外部 HTTPS 提供方" en="Allow calls to this external HTTPS provider" />
-                  </label>
-                  <button type="submit"><Bi zh="更新渠道" en="Update channel" /></button>
-                </form>
-                <form action={deleteChannelAction} className="inline-action-form">
-                  <input type="hidden" name="channelId" value={channel.channel_id} />
-                  <span>{channel.name}</span>
-                  <button type="submit" disabled={!channel.enabled}>
-                    <Bi zh="停用" en="Disable" />
-                  </button>
-                </form>
-                <form action={syncChannelAction} className="inline-action-form">
-                  <input type="hidden" name="channelId" value={channel.channel_id} />
-                  <span>{channel.last_sync_status || tx(locale, "未同步", "not synced")}</span>
-                  <button type="submit" disabled={!channel.enabled}>
-                    <Bi zh="同步模型" en="Sync models" />
-                  </button>
-                </form>
-              </div>
-            ))}
+                    <label htmlFor={`channel-key-${channel.channel_id}`}><Bi zh="更换 API 密钥" en="Rotate API key" /></label>
+                    <input id={`channel-key-${channel.channel_id}`} name="apiKey" type="password" />
+                    <label htmlFor={`channel-limit-${channel.channel_id}`}><Bi zh="最大并发数" en="Max concurrency" /></label>
+                    <input
+                      id={`channel-limit-${channel.channel_id}`}
+                      min="1"
+                      name="maxConcurrency"
+                      required
+                      type="number"
+                      defaultValue={String(channel.max_concurrency || 1)}
+                    />
+                    <label className="checkbox-row">
+                      <input name="enabled" type="checkbox" defaultChecked={channel.enabled} />
+                      <Bi zh="启用" en="Enabled" />
+                    </label>
+                    <label className="checkbox-row">
+                      <input
+                        name="externalProviderOptIn"
+                        type="checkbox"
+                        defaultChecked={channelExternalOptIn(channel)}
+                      />
+                      <Bi zh="允许调用该外部 HTTPS 提供方" en="Allow calls to this external HTTPS provider" />
+                    </label>
+                    <button type="submit"><Bi zh="更新渠道" en="Update channel" /></button>
+                  </form>
+                  <div className="llm-channel-edit-actions">
+                    <form action={syncChannelAction} className="inline-action-form">
+                      <input type="hidden" name="channelId" value={channel.channel_id} />
+                      <span>{channel.last_sync_status || tx(locale, "未同步", "not synced")}</span>
+                      <button type="submit" disabled={!channel.enabled}>
+                        <Bi zh="同步模型" en="Sync models" />
+                      </button>
+                    </form>
+                    <ChannelModelTestForm
+                      channelId={channel.channel_id}
+                      disabled={!channel.enabled}
+                      locale={locale}
+                      models={channelModels[channel.channel_id] || []}
+                      testModelAction={testModelAction}
+                    />
+                    <form action={deleteChannelAction} className="inline-action-form">
+                      <input type="hidden" name="channelId" value={channel.channel_id} />
+                      <span>{channel.name}</span>
+                      <button type="submit" disabled={!channel.enabled}>
+                        <Bi zh="停用" en="Disable" />
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              </details>
+              );
+            })}
         </div>
       ) : null}
 
@@ -622,6 +678,52 @@ function ChannelManagement({
 
 function channelExternalOptIn(channel: LLMChannelRecord) {
   return Boolean((channel as LLMChannelRecord & { external_provider_opt_in?: boolean }).external_provider_opt_in);
+}
+
+function ChannelModelTestForm({
+  channelId,
+  disabled,
+  locale,
+  models,
+  testModelAction,
+}: {
+  channelId: string;
+  disabled: boolean;
+  locale: Locale;
+  models: LLMModelRecord[];
+  testModelAction: (formData: FormData) => Promise<void>;
+}) {
+  const preferred = models.find((model) => model.supports_json) || models[0];
+  if (!preferred) {
+    return (
+      <p className="form-hint">
+        <Bi zh="先同步模型后再测试连通性" en="Sync models before testing connectivity" />
+      </p>
+    );
+  }
+  return (
+    <form action={testModelAction} className="inline-action-form llm-model-test-form">
+      <input type="hidden" name="channelId" value={channelId} />
+      <label className="sr-only" htmlFor={`test-model-${channelId}`}>
+        <Bi zh="测试模型" en="Test model" />
+      </label>
+      <select
+        id={`test-model-${channelId}`}
+        name="modelId"
+        defaultValue={preferred.model_id}
+        disabled={disabled || models.length === 0}
+      >
+        {models.map((model) => (
+          <option key={model.model_id} value={model.model_id}>
+            {model.model_id}
+          </option>
+        ))}
+      </select>
+      <button type="submit" disabled={disabled || models.length === 0}>
+        <Bi zh="测试模型" en="Test model" />
+      </button>
+    </form>
+  );
 }
 
 function QuotaPolicyManagement({
@@ -859,12 +961,14 @@ function ModelsTable({
   selectedChannelId,
   locale,
   canManage,
+  testModelAction,
   updateModelAction,
 }: {
   models: LLMChannelModelsSummary;
   selectedChannelId: string;
   locale: Locale;
   canManage: boolean;
+  testModelAction: (formData: FormData) => Promise<void>;
   updateModelAction: (formData: FormData) => Promise<void>;
 }) {
   if (!models.ok) {
@@ -966,9 +1070,18 @@ function ModelsTable({
               <input defaultChecked={item.supports_json} name="supportsJSON" type="checkbox" />
               <span>JSON</span>
             </label>
-            <button type="submit">
-              <Bi zh="保存模型设置" en="Save model settings" />
-            </button>
+            <div className="llm-model-edit-actions">
+              <button type="submit">
+                <Bi zh="保存模型设置" en="Save model settings" />
+              </button>
+              <button
+                type="submit"
+                formAction={testModelAction}
+                formNoValidate
+              >
+                <Bi zh="测试连通" en="Test link" />
+              </button>
+            </div>
           </div>
         </form>
       ))}

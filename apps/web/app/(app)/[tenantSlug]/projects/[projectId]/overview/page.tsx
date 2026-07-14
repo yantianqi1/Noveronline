@@ -9,22 +9,27 @@ import {
   sourceFileObjectActionStatus,
 } from "../../../../../../components/overview-seed-shell";
 import {
-  cancelSeedRun,
+  cancelAnalysisRun,
   completeSourceFileUpload,
   createSourceFileUpload,
+  getAnalysisRunEvents,
+  getAnalysisRunSummary,
+  getAnalysisWorkspaceFile,
+  getProjectAnalysisRuns,
   getProjectOverview,
   getProjectReadinessSnapshot,
-  getProjectSeedRuns,
   getProjectSourceFiles,
-  getSeedRunEvents,
-  getSeedRunSummary,
-  retrySeedRun,
-  startSeedRun,
+  listAnalysisCandidates,
+  listAnalysisWorkspaceFiles,
+  startAnalysisRun,
   uploadSourceFileObject,
+  type AnalysisRunSummary,
+  type WorkflowRunSummary,
 } from "../../../../../../lib/api";
 import { tx } from "../../../../../../lib/locale";
 import { currentRequestLocale } from "../../../../../../lib/request-locale";
 import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
+import { workspacePathForProject } from "../../../../../../lib/workspace-route";
 import { createBookPlan, createChapter, createScene } from "../../../../../../lib/writer-workspace-api";
 
 export const dynamic = "force-dynamic";
@@ -47,26 +52,36 @@ export default async function OverviewPage({
     sourceCode?: string;
     sourceMessage?: string;
     sourceStatus?: string;
+    workspacePath?: string;
   }>;
 }) {
   const { tenantSlug, projectId } = await params;
   const locale = await currentRequestLocale();
   const query = searchParams ? await searchParams : {};
   const apiContext = webReadApiContext({ tenantId: tenantSlug, projectId });
-  const [projectOverview, sourceFiles, projectReadiness, seedRuns] = await Promise.all([
+  const [projectOverview, sourceFiles, projectReadiness, analysisRuns] = await Promise.all([
     getProjectOverview(apiContext),
     getProjectSourceFiles(apiContext),
     getProjectReadinessSnapshot(apiContext),
-    getProjectSeedRuns(apiContext),
+    getProjectAnalysisRuns(apiContext),
   ]);
-  const selectedRunId = query.runId ?? latestSeedRunId(seedRuns);
+  const seedRuns = analysisRunsToSeedRunsSummary(analysisRuns);
+  const selectedRunId = query.runId ?? latestAnalysisRunId(analysisRuns);
   const afterEventId = query.after_event_id ?? query.afterEventId ?? "";
-  const [selectedSeedRun, seedEvents] = selectedRunId
-    ? await Promise.all([
-        getSeedRunSummary({ ...apiContext, runId: selectedRunId }),
-        getSeedRunEvents({ ...apiContext, runId: selectedRunId, afterEventId }),
-      ])
-    : [null, null];
+  const workspacePath = query.workspacePath ?? "";
+  const [selectedAnalysisRun, seedEvents, workspaceFiles, selectedWorkspaceFile, analysisCandidates] =
+    selectedRunId
+      ? await Promise.all([
+          getAnalysisRunSummary({ ...apiContext, runId: selectedRunId }),
+          getAnalysisRunEvents({ ...apiContext, runId: selectedRunId, afterEventId }),
+          listAnalysisWorkspaceFiles({ ...apiContext, runId: selectedRunId }),
+          workspacePath
+            ? getAnalysisWorkspaceFile({ ...apiContext, runId: selectedRunId, path: workspacePath })
+            : Promise.resolve(null),
+          listAnalysisCandidates({ ...apiContext, runId: selectedRunId }),
+        ])
+      : [null, null, null, null, null];
+  const selectedSeedRun = selectedAnalysisRun ? analysisRunToWorkflowRun(selectedAnalysisRun) : null;
 
   async function uploadAndStartSeedAction(formData: FormData) {
     "use server";
@@ -174,12 +189,18 @@ export default async function OverviewPage({
       }));
     }
 
-    const result = await startSeedRun({
+    const hintsText = stringFromFormData(formData, "hints");
+    const result = await startAnalysisRun({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       uploadId: admitted.upload_id,
+      mode: stringFromFormData(formData, "mode") || "full",
+      instruction: hintsText
+        ? `Analyze the uploaded novel. User hints: ${hintsText}`
+        : "Analyze the uploaded novel into structured story knowledge.",
+      hints: hintsText ? { focus: hintsText } : {},
       options: {
-        mode: stringFromFormData(formData, "mode") || "full",
+        module_key: "analysis_planner",
       },
     });
     const sourceStatus = sourceFileActionStatus(completed, locale);
@@ -304,7 +325,7 @@ export default async function OverviewPage({
       workspaceStatus: "success",
       workspaceCode: "IDEA_BOOTSTRAP_READY",
     });
-    return redirect(`/${tenantSlug}/projects/${projectId}/writer?${writerQuery.toString()}`);
+    return redirect(`${workspacePathForProject([], { tenant_id: tenantSlug, project_id: projectId, name: "" }, "writer")}?${writerQuery.toString()}`);
   }
 
   async function completeUploadAction(formData: FormData) {
@@ -335,12 +356,18 @@ export default async function OverviewPage({
   async function startSeedRunAction(formData: FormData) {
     "use server";
 
-    const result = await startSeedRun({
+    const hintsText = stringFromFormData(formData, "hints");
+    const result = await startAnalysisRun({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       uploadId: stringFromFormData(formData, "uploadId"),
+      mode: stringFromFormData(formData, "mode") || "full",
+      instruction: hintsText
+        ? `Analyze the uploaded novel. User hints: ${hintsText}`
+        : "Analyze the uploaded novel into structured story knowledge.",
+      hints: hintsText ? { focus: hintsText } : {},
       options: {
-        mode: stringFromFormData(formData, "mode") || "full",
+        module_key: "analysis_planner",
       },
     });
     const status = seedRunActionStatus(result, locale);
@@ -362,7 +389,7 @@ export default async function OverviewPage({
     "use server";
 
     const runId = stringFromFormData(formData, "runId");
-    const result = await cancelSeedRun({
+    const result = await cancelAnalysisRun({
       ...(await webApiContext({ tenantId: tenantSlug })),
       runId,
     });
@@ -384,12 +411,19 @@ export default async function OverviewPage({
   async function retrySeedRunAction(formData: FormData) {
     "use server";
 
+    // Retry is not a separate Temporal path yet for analysis runs: restart requires a new upload start.
+    // Surface a clear control message instead of calling the retired seed retry route.
     const runId = stringFromFormData(formData, "runId");
-    const result = await retrySeedRun({
-      ...(await webApiContext({ tenantId: tenantSlug })),
+    const status = {
+      status: "error",
+      code: "ANALYSIS_RETRY_USE_NEW_RUN",
+      message: tx(
+        locale,
+        "分析任务请重新上传或从已上传文件再次启动分析。",
+        "Start a new analysis run from the uploaded source instead of seed retry.",
+      ),
       runId,
-    });
-    const status = seedRunControlStatus(result, "retry", locale);
+    };
     redirect(overviewRoute({
       tenantSlug,
       projectId,
@@ -400,7 +434,7 @@ export default async function OverviewPage({
       seedCode: status.code,
       seedMessage: status.message,
       runId: status.runId || runId || query.runId || "",
-      afterEventId: result.ok ? "" : (query.after_event_id ?? query.afterEventId ?? ""),
+      afterEventId: query.after_event_id ?? query.afterEventId ?? "",
     }));
   }
 
@@ -417,6 +451,11 @@ export default async function OverviewPage({
       afterEventId={afterEventId}
       selectedSeedRun={selectedSeedRun}
       seedEvents={seedEvents}
+      workspaceFiles={workspaceFiles}
+      selectedWorkspaceFile={selectedWorkspaceFile}
+      selectedWorkspacePath={workspacePath}
+      analysisCandidates={analysisCandidates}
+      materialsHref={`/${tenantSlug}/projects/${projectId}/materials`}
       sourceStatus={
         query.sourceStatus
           ? {
@@ -454,12 +493,43 @@ export default async function OverviewPage({
   );
 }
 
-function latestSeedRunId(seedRuns: Awaited<ReturnType<typeof getProjectSeedRuns>>) {
-  if (!seedRuns.ok) {
+function latestAnalysisRunId(analysisRuns: Awaited<ReturnType<typeof getProjectAnalysisRuns>>) {
+  if (!analysisRuns.ok) {
     return "";
   }
-  const latest = seedRuns.items.find((run) => run.ok);
+  const latest = analysisRuns.items.find((run) => run.ok);
   return latest && latest.ok ? latest.run_id : "";
+}
+
+function analysisRunsToSeedRunsSummary(
+  analysisRuns: Awaited<ReturnType<typeof getProjectAnalysisRuns>>,
+) {
+  if (!analysisRuns.ok) {
+    return analysisRuns;
+  }
+  return {
+    ok: true as const,
+    items: analysisRuns.items.map((run) => analysisRunToWorkflowRun(run)),
+  };
+}
+
+function analysisRunToWorkflowRun(run: AnalysisRunSummary): WorkflowRunSummary {
+  if (!run.ok) {
+    return run;
+  }
+  return {
+    ok: true,
+    run_id: run.run_id,
+    project_id: run.project_id,
+    workflow_type: run.workflow_type || "analysis_run",
+    status: run.status,
+    progress: run.progress ?? 0,
+    message: run.message ?? "",
+    error_code: run.error_code ?? "",
+    error_message: run.error_message ?? "",
+    created_at: run.created_at ?? "",
+    updated_at: run.updated_at ?? "",
+  };
 }
 
 function overviewRoute(input: {
@@ -477,6 +547,14 @@ function overviewRoute(input: {
   runId: string;
   afterEventId: string;
 }) {
+  // Server actions must redirect to the public /p/{key} path. Internal UUID paths
+  // trigger middleware canonical redirects that break Next.js form action navigation
+  // and surface as a client-side "Failed to fetch".
+  const path = workspacePathForProject(
+    [],
+    { tenant_id: input.tenantSlug, project_id: input.projectId, name: "" },
+    "overview",
+  );
   const query = new URLSearchParams();
   setQueryIfPresent(query, "sourceStatus", input.sourceStatus);
   setQueryIfPresent(query, "sourceCode", input.sourceCode);
@@ -489,7 +567,8 @@ function overviewRoute(input: {
   setQueryIfPresent(query, "bootstrapMessage", input.bootstrapMessage ?? "");
   setQueryIfPresent(query, "runId", input.runId);
   setQueryIfPresent(query, "after_event_id", input.afterEventId);
-  return `/${input.tenantSlug}/projects/${input.projectId}/overview?${query.toString()}`;
+  const search = query.toString();
+  return search ? `${path}?${search}` : path;
 }
 
 function stringFromFormData(formData: FormData, key: string) {

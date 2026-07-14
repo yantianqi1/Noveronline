@@ -84,10 +84,40 @@ test("account entry and project navigation present workspace language without si
   assert.match(nav, /hasMultipleWorkspaces\s*\?\s*\(/);
   assert.match(nav, /zh="我的工作区"/);
   assert.match(nav, /zh="切换工作区"/);
-  assert.match(nav, /routeTenantProjects\.length > 1/);
-  assert.match(nav, /zh="切换项目"/);
+  assert.match(nav, /<NovelSwitcher/);
+  assert.match(nav, /createAction=\{createProjectAction\}/);
+  assert.match(nav, /renameAction=\{renameProjectAction\}/);
+  assert.match(nav, /novels=\{routeTenantProjects\.map/);
   assert.match(nav, /zh="撤销工作区会话"/);
   assert.doesNotMatch(nav, /租户/);
+});
+
+test("novel switcher exposes an always-visible switch, create, and rename surface", async () => {
+  const [switcher, layout] = await Promise.all([
+    source("components/novel-switcher.tsx"),
+    source("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx"),
+  ]);
+
+  assert.match(switcher, /useActionState/);
+  assert.match(switcher, /useFormStatus/);
+  assert.match(switcher, /zh="我的小说"/);
+  assert.match(switcher, /zh="新建小说"/);
+  assert.match(switcher, /zh="重命名当前小说"/);
+  assert.match(switcher, /aria-current=\{current \? "page" : undefined\}/);
+  assert.match(switcher, /onSwitch\(event, novel\.href\)/);
+
+  assert.match(layout, /createProjectAction\.bind\(null, tenantSlug\)/);
+  assert.match(layout, /renameProjectAction\.bind\(null, tenantSlug, projectId\)/);
+});
+
+test("project administration API targets tenant-scoped novel routes with CSRF", async () => {
+  const client = await source("lib/project-admin-api.ts");
+
+  assert.match(client, /\/v1\/tenants\/\$\{encodeURIComponent\(input\.tenantId\)\}\/projects/);
+  assert.match(client, /method:\s*"POST"/);
+  assert.match(client, /method:\s*"PATCH"/);
+  assert.match(client, /"X-CSRF-Token"\]\s*=\s*input\.csrfToken/);
+  assert.doesNotMatch(client, /X-User-Id|X-Tenant-Id|console\./);
 });
 
 test("user-visible collaboration and configuration surfaces use workspace terminology", async () => {

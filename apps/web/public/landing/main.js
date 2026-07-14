@@ -4,24 +4,80 @@
   if (previousBootScreen === bootScreen && bootScreen?.isConnected) return;
   window.__MIROFISH_LANDING_BOOTED__ = bootScreen;
   /**
+   * 手机端（≤768px）使用竖屏 9:16 插画与视频素材，对齐「首页-手机端」设计稿；
+   * 桌面仍用横版 cinematic 素材，互不覆盖。
+   */
+  const isMobileLanding = window.matchMedia("(max-width: 768px)").matches;
+  const ASSET_PREFIX = "/landing/assets/";
+  const MOBILE_ASSET_PREFIX = "/landing/assets/mobile/";
+
+  function resolveLandingAsset(path) {
+    if (!path || typeof path !== "string") return path;
+    if (!isMobileLanding) return path;
+    if (path.startsWith(MOBILE_ASSET_PREFIX)) return path;
+    if (path.startsWith(ASSET_PREFIX)) {
+      return MOBILE_ASSET_PREFIX + path.slice(ASSET_PREFIX.length);
+    }
+    return path;
+  }
+
+  function applyMobileAssetSources() {
+    if (!isMobileLanding) return;
+    document.documentElement.classList.add("landing-mobile-assets");
+
+    document.querySelectorAll(".scene-video-stack[data-video-src]").forEach((stack) => {
+      const src = stack.getAttribute("data-video-src");
+      if (src) stack.setAttribute("data-video-src", resolveLandingAsset(src));
+    });
+
+    document.querySelectorAll("video[poster]").forEach((video) => {
+      const poster = video.getAttribute("poster");
+      if (poster) video.setAttribute("poster", resolveLandingAsset(poster));
+    });
+
+    document.querySelectorAll("[data-reveal-src]").forEach((el) => {
+      const src = el.getAttribute("data-reveal-src");
+      if (src) el.setAttribute("data-reveal-src", resolveLandingAsset(src));
+    });
+
+    document.querySelectorAll(".scene-reveal-img[style]").forEach((el) => {
+      const style = el.getAttribute("style") || "";
+      const next = style.replace(
+        /url\((['"]?)(\/landing\/assets\/(?!mobile\/)[^'")]+)\1\)/g,
+        (_m, q, url) => `url(${q || ""}${resolveLandingAsset(url)}${q || ""})`,
+      );
+      if (next !== style) el.setAttribute("style", next);
+    });
+  }
+
+  applyMobileAssetSources();
+
+  /**
    * 开屏只预载「首幕关键资源」，其余按需加载。
    * 禁止把整段视频 fetch 成 Blob（易 OOM，Chrome 报错/崩溃 错误代码 5）。
    */
   const BOOT_IMAGES = [
-    "/landing/assets/scene-0-hero.jpg",
-    "/landing/assets/scene-0-reveal.jpg",
+    resolveLandingAsset("/landing/assets/scene-0-hero.jpg"),
+    resolveLandingAsset("/landing/assets/scene-0-reveal.jpg"),
   ];
   const LAZY_IMAGES = [
-    "/landing/assets/scene-1-pain.jpg",
-    "/landing/assets/scene-1-reveal.jpg",
-    "/landing/assets/scene-2-pipeline.jpg",
-    "/landing/assets/scene-2-reveal.jpg",
-    "/landing/assets/scene-3-caps.jpg",
-    "/landing/assets/scene-3-reveal.jpg",
-    "/landing/assets/scene-4-workbench.jpg",
-    "/landing/assets/scene-4-reveal.jpg",
-    "/landing/assets/scene-5-finale.jpg",
-    "/landing/assets/scene-5-reveal.jpg",
+    resolveLandingAsset("/landing/assets/scene-1-pain.jpg"),
+    resolveLandingAsset("/landing/assets/scene-1-reveal.jpg"),
+    resolveLandingAsset("/landing/assets/scene-2-pipeline.jpg"),
+    resolveLandingAsset("/landing/assets/scene-2-reveal.jpg"),
+    resolveLandingAsset("/landing/assets/scene-3-caps.jpg"),
+    resolveLandingAsset("/landing/assets/scene-3-reveal.jpg"),
+    resolveLandingAsset("/landing/assets/scene-4-workbench.jpg"),
+    resolveLandingAsset("/landing/assets/scene-4-reveal.jpg"),
+    resolveLandingAsset("/landing/assets/scene-5-finale.jpg"),
+    resolveLandingAsset("/landing/assets/scene-5-reveal.jpg"),
+    // 手机端装饰层（桌面路径不存在时 load 会静默失败，可接受）
+    "/landing/assets/mobile/decor/constellation-graph.jpg",
+    "/landing/assets/mobile/decor/vermilion-seal.jpg",
+    "/landing/assets/mobile/decor/floating-note-cards.jpg",
+    "/landing/assets/mobile/decor/pipeline-node-icons.jpg",
+    "/landing/assets/mobile/decor/book-cover-shanhai.jpg",
+    "/landing/assets/mobile/decor/character-portrait-hanfu.jpg",
   ];
 
   const bootFill = document.getElementById("boot-bar-fill");
@@ -51,7 +107,18 @@
   const videoStacks = new Map();
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const SNAP_DURATION = 480;
+  /**
+   * 手机端立体叠层 deck：不用文档滚动，手势/滚轮驱动 3D 切幕
+   * 前进：旧幕沉入深处消失，新幕自上方「映射」落位；
+   * 后退：镜像路径（旧幕沉入深处，前一幕自下方映回）。
+   */
+  const useSpatialDeck = isMobileLanding;
+  if (useSpatialDeck) {
+    document.documentElement.classList.add("landing-spatial");
+  }
+  const SNAP_DURATION = useSpatialDeck ? 820 : 480;
+  const SPATIAL_DURATION = reducedMotion ? 0 : 820;
+  const SPATIAL_SCRUB_PX = Math.max(160, Math.min(280, (window.innerHeight || 640) * 0.32));
 
   scenes.forEach((scene) => {
     scene.querySelectorAll("[data-reveal]").forEach((el, i) => {
@@ -769,6 +836,11 @@
 
   function measureSceneMetrics() {
     metricsFrame = 0;
+    if (useSpatialDeck) {
+      // 立体 deck 为固定叠层，不再依赖文档 scroll offset
+      sceneMetrics = scenes.map(() => ({ top: 0, height: window.innerHeight || 1 }));
+      return;
+    }
     sceneMetrics = scenes.map((scene) => ({
       top: scene.offsetTop,
       height: scene.offsetHeight,
@@ -823,13 +895,153 @@
     scenes[index]?.classList.add("is-snap-target");
   }
 
+  function clearSpatialPaint() {
+    scenes.forEach((scene) => {
+      scene.classList.remove("is-spatial-source", "is-spatial-target", "is-spatial-scrubbing");
+      scene.style.removeProperty("transform");
+      scene.style.removeProperty("opacity");
+      scene.style.removeProperty("z-index");
+      scene.style.removeProperty("filter");
+      scene.style.removeProperty("box-shadow");
+      scene.style.removeProperty("transform-origin");
+      scene.style.removeProperty("clip-path");
+    });
+  }
+
+  /** 丝滑缓动：前段略加速离场，后段柔和落位（近似 smoothstep + 过冲回收） */
+  function spatialEase(t) {
+    const x = Math.max(0, Math.min(1, t));
+    if (x < 0.62) {
+      const local = x / 0.62;
+      return 0.86 * (1 - Math.pow(1 - local, 2.85));
+    }
+    const local = (x - 0.62) / 0.38;
+    // 末端轻微 settle，避免硬停
+    const settle = 1 - Math.pow(1 - local, 2.4);
+    return 0.86 + 0.14 * settle;
+  }
+
+  /**
+   * 立体切幕插值。
+   * dir > 0：去下一幕 — 旧幕往深处消失，新幕自上方映射映入
+   * dir < 0：回上一幕 — 旧幕沉入深处，上一幕自下方映回
+   * @param {number} rawT 0→1
+   * @param {{ scrubbing?: boolean }} [opts]
+   */
+  function paintSpatialFrame(source, target, dir, rawT, opts = {}) {
+    const t = Math.max(0, Math.min(1, rawT));
+    // 跟手拖拽时用近似线性，动画结算时用丝滑缓动
+    const e = opts.scrubbing ? t * (0.92 + t * 0.08) : spatialEase(t);
+
+    source.classList.add("is-spatial-source");
+    target.classList.add("is-spatial-target");
+    source.classList.remove("is-spatial-target");
+    target.classList.remove("is-spatial-source");
+    if (opts.scrubbing) {
+      source.classList.add("is-spatial-scrubbing");
+      target.classList.add("is-spatial-scrubbing");
+    } else {
+      source.classList.remove("is-spatial-scrubbing");
+      target.classList.remove("is-spatial-scrubbing");
+    }
+
+    // 跟手时弱化 blur，避免 iOS 合成层掉帧；结算动画保留完整景深
+    const blurScale = opts.scrubbing ? 0.35 : 1;
+
+    if (dir > 0) {
+      // ── 旧幕：向画面深处消失（缩小 + 后移 + 微暗 + 轻微模糊）──
+      const sy = e * 6;
+      const sz = -e * 480;
+      const ss = 1 - e * 0.32;
+      const srx = e * 9;
+      const so = 1 - e * 0.92;
+      const sBlur = e * 10 * blurScale;
+      const sBright = 1 - e * 0.42;
+      source.style.transformOrigin = "50% 55%";
+      source.style.transform = `translate3d(0, ${sy}%, ${sz}px) scale(${ss}) rotateX(${srx}deg)`;
+      source.style.opacity = String(Math.max(0, so));
+      source.style.filter =
+        sBlur < 0.2
+          ? `brightness(${sBright}) saturate(${1 - e * 0.35})`
+          : `brightness(${sBright}) saturate(${1 - e * 0.35}) blur(${sBlur}px)`;
+      source.style.zIndex = "2";
+      source.style.boxShadow = opts.scrubbing
+        ? "none"
+        : `0 ${8 + e * 28}px ${36 + e * 90}px rgba(8,6,4,${0.12 + e * 0.38})`;
+
+      // ── 新幕：自上方「映射」进来（俯冲落位 + 轻微透视展开）──
+      // 起势：在上方、略放大、顶边更近镜头；落位：铺满屏幕
+      const ty = -(1 - e) * 112;
+      const tz = (1 - e) * 160 - e * 8;
+      const ts = 1.08 - e * 0.08;
+      const trx = (1 - e) * 22;
+      const to = Math.min(1, 0.12 + e * 0.92);
+      const tBlur = (1 - e) * 6 * blurScale;
+      target.style.transformOrigin = "50% 0%";
+      target.style.transform = `translate3d(0, ${ty}%, ${tz}px) scale(${ts}) rotateX(${trx}deg)`;
+      target.style.opacity = String(to);
+      target.style.filter =
+        e > 0.92 || tBlur < 0.2
+          ? e > 0.92
+            ? "none"
+            : `brightness(${0.88 + e * 0.12})`
+          : `brightness(${0.88 + e * 0.12}) blur(${tBlur}px)`;
+      target.style.zIndex = "6";
+      target.style.boxShadow = opts.scrubbing
+        ? "none"
+        : `0 ${18 - e * 14}px ${48 + (1 - e) * 70}px rgba(8,6,4,${0.22 * (1 - e)})`;
+    } else {
+      // ── 旧幕：同样沉入深处（方向镜像，微上抬）──
+      const sy = -e * 5;
+      const sz = -e * 460;
+      const ss = 1 - e * 0.3;
+      const srx = -e * 8;
+      const so = 1 - e * 0.9;
+      const sBlur = e * 9 * blurScale;
+      source.style.transformOrigin = "50% 45%";
+      source.style.transform = `translate3d(0, ${sy}%, ${sz}px) scale(${ss}) rotateX(${srx}deg)`;
+      source.style.opacity = String(Math.max(0, so));
+      source.style.filter =
+        sBlur < 0.2
+          ? `brightness(${1 - e * 0.4}) saturate(${1 - e * 0.3})`
+          : `brightness(${1 - e * 0.4}) saturate(${1 - e * 0.3}) blur(${sBlur}px)`;
+      source.style.zIndex = "2";
+      source.style.boxShadow = opts.scrubbing
+        ? "none"
+        : `0 ${-6 - e * 24}px ${32 + e * 80}px rgba(8,6,4,${0.12 + e * 0.34})`;
+
+      // ── 上一幕：自下方映射映回 ──
+      const ty = (1 - e) * 110;
+      const tz = (1 - e) * 140 - e * 6;
+      const ts = 1.06 - e * 0.06;
+      const trx = (1 - e) * -18;
+      const to = Math.min(1, 0.12 + e * 0.92);
+      const tBlur = (1 - e) * 5 * blurScale;
+      target.style.transformOrigin = "50% 100%";
+      target.style.transform = `translate3d(0, ${ty}%, ${tz}px) scale(${ts}) rotateX(${trx}deg)`;
+      target.style.opacity = String(to);
+      target.style.filter =
+        e > 0.92 || tBlur < 0.2
+          ? e > 0.92
+            ? "none"
+            : `brightness(${0.88 + e * 0.12})`
+          : `brightness(${0.88 + e * 0.12}) blur(${tBlur}px)`;
+      target.style.zIndex = "6";
+      target.style.boxShadow = opts.scrubbing
+        ? "none"
+        : `0 ${-14 + e * 12}px ${44 + (1 - e) * 64}px rgba(8,6,4,${0.2 * (1 - e)})`;
+    }
+  }
+
   function finishSlide() {
     scenes.forEach((scene) => scene.classList.remove("is-snap-source", "is-snap-target"));
+    clearSpatialPaint();
     document.documentElement.classList.remove("is-scrolling");
     locked = false;
   }
 
   function nearestSceneIndex() {
+    if (useSpatialDeck) return current;
     const pageTop = window.scrollY || document.documentElement.scrollTop || 0;
     let nearest = 0;
     let nearestDistance = Number.POSITIVE_INFINITY;
@@ -865,6 +1077,7 @@
   }
 
   function settleStageScroll() {
+    if (useSpatialDeck) return;
     window.clearTimeout(settleTimer);
     settleTimer = 0;
     if (snapLocked) return;
@@ -875,13 +1088,13 @@
   }
 
   function queueStageSettle() {
-    if (snapLocked) return;
+    if (useSpatialDeck || snapLocked) return;
     window.clearTimeout(settleTimer);
     settleTimer = window.setTimeout(settleStageScroll, reducedMotion ? 0 : 80);
   }
 
   function handleStageScroll() {
-    if (!ready || snapLocked) return;
+    if (useSpatialDeck || !ready || snapLocked) return;
     if (!locked) {
       locked = true;
       document.documentElement.classList.add("is-scrolling");
@@ -922,9 +1135,13 @@
     stopSnapFrame();
     window.clearTimeout(settleTimer);
     settleTimer = 0;
-    window.scrollTo({ top: sceneMetric(index).top, behavior: "auto" });
+    if (!useSpatialDeck) {
+      window.scrollTo({ top: sceneMetric(index).top, behavior: "auto" });
+    }
+    clearSpatialPaint();
     setActiveScene(index, { force: true });
     scenes[index]?.classList.add("is-settled");
+    // 触发内容级联入场：先卸 is-settled 再 rAF 加回亦可，这里直接依赖 is-active
     syncSceneMedia(index, { sliding: false });
     snapLocked = false;
     snapTarget = -1;
@@ -932,7 +1149,128 @@
     finishSlide();
   }
 
+  /**
+   * 从当前进度插值到 0 或 1 并完成切幕 / 取消。
+   * @param {number} index 目标幕
+   * @param {number} fromProgress 当前 0→1 进度
+   * @param {boolean} commit true=完成到目标，false=弹回当前
+   * @param {number} dir
+   */
+  function animateSpatialProgress(index, fromProgress, commit, dir) {
+    stopSnapFrame();
+    const source = scenes[current];
+    const target = scenes[index];
+    if (!source || !target) {
+      clearSpatialPaint();
+      snapLocked = false;
+      snapTarget = -1;
+      finishSlide();
+      return false;
+    }
+
+    const start = Math.max(0, Math.min(1, fromProgress));
+    const end = commit ? 1 : 0;
+    const distance = end - start;
+    // 剩余路程越短，时长越短，最低 220ms 保持「丝滑」感
+    const duration = reducedMotion
+      ? 0
+      : Math.max(220, Math.round(SPATIAL_DURATION * (0.35 + Math.abs(distance) * 0.65)));
+
+    snapLocked = true;
+    snapTarget = commit ? index : current;
+    locked = true;
+    document.documentElement.classList.add("is-snap-animating");
+    paintSpatialFrame(source, target, dir, start);
+
+    if (duration <= 0 || Math.abs(distance) < 0.008) {
+      if (commit) completeSnap(index);
+      else {
+        clearSpatialPaint();
+        setActiveScene(current, { force: true });
+        scenes[current]?.classList.add("is-settled");
+        syncSceneMedia(current, { sliding: false });
+        snapLocked = false;
+        snapTarget = -1;
+        document.documentElement.classList.remove("is-snap-animating");
+        finishSlide();
+      }
+      return true;
+    }
+
+    let startedAt = 0;
+    const step = (now) => {
+      if (!startedAt) startedAt = now;
+      const elapsed = now - startedAt;
+      const u = Math.min(1, elapsed / duration);
+      // 结算用 ease-out cubic
+      const easeOut = 1 - Math.pow(1 - u, 2.6);
+      const progress = start + distance * easeOut;
+      paintSpatialFrame(source, target, dir, progress);
+
+      if (u < 1) {
+        snapFrame = requestAnimationFrame(step);
+        return;
+      }
+
+      if (commit) {
+        completeSnap(index);
+      } else {
+        clearSpatialPaint();
+        setActiveScene(current, { force: true });
+        scenes[current]?.classList.add("is-settled");
+        syncSceneMedia(current, { sliding: false });
+        snapLocked = false;
+        snapTarget = -1;
+        document.documentElement.classList.remove("is-snap-animating");
+        finishSlide();
+      }
+    };
+
+    snapFrame = requestAnimationFrame(step);
+    return true;
+  }
+
+  function animateSpatialToScene(index, { fromProgress = 0 } = {}) {
+    stopSnapFrame();
+    if (scrollFrame) cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    window.clearTimeout(settleTimer);
+    settleTimer = 0;
+
+    const from = current;
+    if (index === from) return false;
+    const dir = index > from ? 1 : -1;
+    const source = scenes[from];
+    const target = scenes[index];
+    if (!source || !target) return false;
+
+    snapLocked = true;
+    snapTarget = index;
+    locked = true;
+    resetSpotlight();
+    markSnapScenes(index);
+    source.classList.add("is-spatial-source");
+    target.classList.add("is-spatial-target");
+    // 预亮目标幕，保证视频/内容在过渡中可见
+    target.classList.add("is-active");
+    target.removeAttribute("data-far");
+    syncSceneMedia(index, { sliding: true });
+    warmNeighborVideos(index);
+    document.documentElement.classList.add("is-snap-animating");
+
+    if (reducedMotion || SPATIAL_DURATION <= 0) {
+      completeSnap(index);
+      return true;
+    }
+
+    return animateSpatialProgress(index, fromProgress, true, dir);
+  }
+
   function animateToScene(index) {
+    if (useSpatialDeck) {
+      return animateSpatialToScene(index);
+    }
+
     stopSnapFrame();
     if (scrollFrame) cancelAnimationFrame(scrollFrame);
     scrollFrame = 0;
@@ -976,6 +1314,10 @@
 
   function goTo(next) {
     if (!ready || next < 0 || next >= total || next === snapTarget) return false;
+    if (useSpatialDeck) {
+      if (!snapLocked && next === current) return false;
+      return animateToScene(next);
+    }
     const pageTop = window.scrollY || document.documentElement.scrollTop || 0;
     if (!snapLocked && next === current && Math.abs(sceneMetric(next).top - pageTop) < 1) {
       return false;
@@ -1000,13 +1342,230 @@
     );
   }
 
+  function bindSpatialGestures() {
+    if (!useSpatialDeck) return;
+
+    let touchStartY = 0;
+    let touchStartX = 0;
+    let touchStartT = 0;
+    let tracking = false;
+    let scrubbing = false;
+    let scrubDir = 0;
+    let scrubIndex = -1;
+    let scrubProgress = 0;
+    let lastTouchY = 0;
+    let lastTouchT = 0;
+    let wheelGateUntil = 0;
+
+    const endScrubSession = () => {
+      tracking = false;
+      scrubbing = false;
+      scrubDir = 0;
+      scrubIndex = -1;
+      scrubProgress = 0;
+    };
+
+    const beginScrub = (dir) => {
+      const index = current + dir;
+      if (index < 0 || index >= total) return false;
+      const source = scenes[current];
+      const target = scenes[index];
+      if (!source || !target) return false;
+
+      scrubbing = true;
+      scrubDir = dir;
+      scrubIndex = index;
+      scrubProgress = 0;
+      locked = true;
+      resetSpotlight();
+      markSnapScenes(index);
+      source.classList.add("is-spatial-source");
+      target.classList.add("is-spatial-target", "is-active");
+      target.removeAttribute("data-far");
+      syncSceneMedia(index, { sliding: true });
+      warmNeighborVideos(index);
+      document.documentElement.classList.add("is-snap-animating", "is-scrolling");
+      paintSpatialFrame(source, target, dir, 0, { scrubbing: true });
+      return true;
+    };
+
+    const onTouchStart = (event) => {
+      if (!ready || snapLocked || event.touches.length !== 1) return;
+      if (isInteractiveTarget(event.target)) return;
+      // 清掉边界橡皮筋残留
+      const active = scenes[current];
+      if (active && !active.classList.contains("is-spatial-source")) {
+        active.style.removeProperty("transform");
+        active.style.removeProperty("opacity");
+      }
+      tracking = true;
+      scrubbing = false;
+      scrubDir = 0;
+      scrubIndex = -1;
+      scrubProgress = 0;
+      touchStartY = event.touches[0].clientY;
+      touchStartX = event.touches[0].clientX;
+      touchStartT = performance.now();
+      lastTouchY = touchStartY;
+      lastTouchT = touchStartT;
+    };
+
+    const onTouchMove = (event) => {
+      if (!tracking || snapLocked) return;
+      if (event.cancelable) event.preventDefault();
+      const touch = event.touches[0];
+      if (!touch) return;
+
+      const dy = touch.clientY - touchStartY;
+      const dx = touch.clientX - touchStartX;
+      lastTouchY = touch.clientY;
+      lastTouchT = performance.now();
+
+      // 横向主导则放弃
+      if (!scrubbing && Math.abs(dx) > Math.abs(dy) * 1.2 && Math.abs(dx) > 28) {
+        tracking = false;
+        return;
+      }
+
+      // 手指上滑 (dy < 0) → 下一幕；手指下滑 → 上一幕
+      const intentDir = dy < 0 ? 1 : -1;
+      if (!scrubbing) {
+        if (Math.abs(dy) < 10) return;
+        // 边界：第一幕不能再上滑回退、最后一幕不能再前进时给一点橡皮筋
+        if ((intentDir > 0 && current >= total - 1) || (intentDir < 0 && current <= 0)) {
+          const rubber = Math.min(1, Math.abs(dy) / (SPATIAL_SCRUB_PX * 1.6));
+          const scene = scenes[current];
+          if (scene) {
+            const pull = intentDir > 0 ? rubber * 4 : -rubber * 4;
+            const depth = -rubber * 40;
+            scene.style.transform = `translate3d(0, ${pull}%, ${depth}px) scale(${1 - rubber * 0.03})`;
+            scene.style.opacity = String(1 - rubber * 0.08);
+          }
+          return;
+        }
+        if (!beginScrub(intentDir)) return;
+      }
+
+      // 跟手进度：用与起始方向一致的位移
+      const signed = scrubDir > 0 ? -dy : dy;
+      const raw = Math.max(0, Math.min(1.05, signed / SPATIAL_SCRUB_PX));
+      // 轻微过冲阻尼
+      scrubProgress = raw > 1 ? 1 + (raw - 1) * 0.18 : raw;
+      const source = scenes[current];
+      const target = scenes[scrubIndex];
+      if (source && target) {
+        paintSpatialFrame(source, target, scrubDir, Math.min(1, scrubProgress), { scrubbing: true });
+      }
+    };
+
+    const onTouchEnd = (event) => {
+      if (!tracking && !scrubbing) return;
+
+      const touch = event.changedTouches[0];
+      const endY = touch ? touch.clientY : lastTouchY;
+      const dy = endY - touchStartY;
+      const dx = (touch ? touch.clientX : touchStartX) - touchStartX;
+      const dt = Math.max(16, performance.now() - touchStartT);
+      const recentDt = Math.max(16, performance.now() - lastTouchT);
+      const vy = (endY - lastTouchY) / recentDt;
+      const overallVy = dy / dt;
+
+      if (!scrubbing) {
+        // 边界橡皮筋复位
+        const scene = scenes[current];
+        if (scene) {
+          scene.style.removeProperty("transform");
+          scene.style.removeProperty("opacity");
+        }
+        tracking = false;
+
+        if (snapLocked || !ready) return;
+        if (Math.abs(dx) > Math.abs(dy) * 1.25 && Math.abs(dx) > 36) return;
+        const distanceOk = Math.abs(dy) > 48;
+        const flingOk = Math.abs(overallVy) > 0.42;
+        if (!distanceOk && !flingOk) return;
+        if (dy < 0 || overallVy < -0.42) goTo(current + 1);
+        else goTo(current - 1);
+        return;
+      }
+
+      // 结算跟手：进度/速度阈值决定提交或回弹
+      const progress = scrubProgress;
+      const flingCommit =
+        (scrubDir > 0 && (overallVy < -0.45 || vy < -0.55)) ||
+        (scrubDir < 0 && (overallVy > 0.45 || vy > 0.55));
+      const commit = progress >= 0.28 || flingCommit;
+      const index = scrubIndex;
+      const dir = scrubDir;
+      endScrubSession();
+
+      if (commit && index >= 0) {
+        animateSpatialProgress(index, progress, true, dir);
+      } else if (index >= 0) {
+        animateSpatialProgress(index, progress, false, dir);
+      } else {
+        clearSpatialPaint();
+        document.documentElement.classList.remove("is-snap-animating", "is-scrolling");
+        finishSlide();
+      }
+    };
+
+    const onTouchCancel = () => {
+      if (scrubbing && scrubIndex >= 0) {
+        const index = scrubIndex;
+        const dir = scrubDir;
+        const progress = scrubProgress;
+        endScrubSession();
+        animateSpatialProgress(index, progress, false, dir);
+        return;
+      }
+      const scene = scenes[current];
+      if (scene) {
+        scene.style.removeProperty("transform");
+        scene.style.removeProperty("opacity");
+      }
+      endScrubSession();
+      document.documentElement.classList.remove("is-snap-animating", "is-scrolling");
+      finishSlide();
+    };
+
+    const onWheel = (event) => {
+      if (!ready) return;
+      if (snapLocked || scrubbing || performance.now() < wheelGateUntil) {
+        if (event.cancelable) event.preventDefault();
+        return;
+      }
+      const dy = event.deltaY;
+      if (Math.abs(dy) < 10) return;
+      if (event.cancelable) event.preventDefault();
+      wheelGateUntil = performance.now() + SPATIAL_DURATION + 140;
+      // 滚轮向下 → 下一幕（内容向下推进）
+      if (dy > 0) goTo(current + 1);
+      else goTo(current - 1);
+    };
+
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    window.addEventListener("wheel", onWheel, { passive: false });
+  }
+
   function bindInteraction() {
-    window.addEventListener("scroll", handleStageScroll, { passive: true });
-    window.addEventListener("scrollend", settleStageScroll, { passive: true });
+    if (!useSpatialDeck) {
+      window.addEventListener("scroll", handleStageScroll, { passive: true });
+      window.addEventListener("scrollend", settleStageScroll, { passive: true });
+    }
     window.addEventListener("resize", queueSceneMeasurement, { passive: true });
+    // Mobile browser chrome / orientation changes often fire on visualViewport, not window.resize.
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", queueSceneMeasurement, { passive: true });
+    }
     if (document.fonts?.ready) {
       document.fonts.ready.then(queueSceneMeasurement).catch(() => {});
     }
+
+    bindSpatialGestures();
 
     window.addEventListener("keydown", (event) => {
       if (
@@ -1042,7 +1601,7 @@
       if (!direction) return;
       event.preventDefault();
       if (snapLocked) return;
-      goTo(nearestSceneIndex() + direction);
+      goTo((useSpatialDeck ? current : nearestSceneIndex()) + direction);
     });
 
     document.querySelectorAll("[data-goto]").forEach((el) => {

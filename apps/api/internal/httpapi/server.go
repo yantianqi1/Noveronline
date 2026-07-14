@@ -24,6 +24,7 @@ import (
 	"mirofish-novel/apps/api/internal/characterconsole"
 	"mirofish-novel/apps/api/internal/llm"
 	"mirofish-novel/apps/api/internal/platformratelimit"
+	"mirofish-novel/apps/api/internal/projectadmin"
 	"mirofish-novel/apps/api/internal/projectoverview"
 	"mirofish-novel/apps/api/internal/projectreadiness"
 	"mirofish-novel/apps/api/internal/registration"
@@ -62,6 +63,12 @@ type Config struct {
 	SeedSegmentRetrier               workflows.SeedSegmentRetrier
 	SeedStarter                      workflows.SeedRunStarter
 	SeedRunReader                    workflows.SeedRunReader
+	AnalysisStarter                  workflows.AnalysisRunStarter
+	AnalysisRunReader                workflows.AnalysisRunReader
+	AnalysisEventReader              workflows.AnalysisEventReader
+	AnalysisCanceller                workflows.AnalysisCanceller
+	AnalysisWorkspaceReader          workflows.AnalysisWorkspaceReader
+	AnalysisCandidateReader          workflows.AnalysisCandidateReader
 	ProjectOverviewReader            projectoverview.Reader
 	ProjectReadinessReader           projectreadiness.Reader
 	AgentHelloStarter                workflows.AgentHelloStarter
@@ -122,6 +129,7 @@ type Config struct {
 	DistillationEnqueuer             DistillationEnqueuer
 	AuthRecoveryHandler              http.Handler
 	CollaborationHandler             http.Handler
+	ProjectAdminHandler              http.Handler
 	LLMAdminHandler                  http.Handler
 	RateLimiter                      platformratelimit.Limiter
 	TrustedClientProofVerifier       TrustedClientProofVerifier
@@ -194,6 +202,12 @@ type Server struct {
 	seedSegmentRetrier               workflows.SeedSegmentRetrier
 	seedStarter                      workflows.SeedRunStarter
 	seedRunReader                    workflows.SeedRunReader
+	analysisStarter                  workflows.AnalysisRunStarter
+	analysisRunReader                workflows.AnalysisRunReader
+	analysisEventReader              workflows.AnalysisEventReader
+	analysisCanceller                workflows.AnalysisCanceller
+	analysisWorkspaceReader          workflows.AnalysisWorkspaceReader
+	analysisCandidateReader          workflows.AnalysisCandidateReader
 	projectOverviewReader            projectoverview.Reader
 	projectReadinessReader           projectreadiness.Reader
 	agentHelloStarter                workflows.AgentHelloStarter
@@ -254,6 +268,7 @@ type Server struct {
 	distillationEnqueuer             DistillationEnqueuer
 	authRecoveryHandler              http.Handler
 	collaborationHandler             http.Handler
+	projectAdminHandler              http.Handler
 	llmAdminHandler                  http.Handler
 	rateLimiter                      platformratelimit.Limiter
 	trustedClientProofVerifier       TrustedClientProofVerifier
@@ -834,6 +849,46 @@ func NewServer(config Config) *Server {
 	if seedRunReader == nil {
 		seedRunReader = workflows.NewDisabledSeedRunReader()
 	}
+	analysisStarter := config.AnalysisStarter
+	if analysisStarter == nil {
+		analysisStarter = workflows.NewFailClosedAnalysisStarter()
+	}
+	analysisRunReader := config.AnalysisRunReader
+	if analysisRunReader == nil {
+		if reader, ok := analysisStarter.(workflows.AnalysisRunReader); ok {
+			analysisRunReader = reader
+		} else {
+			analysisRunReader = &disabledAnalysisRunReader{}
+		}
+	}
+	analysisEventReader := config.AnalysisEventReader
+	if analysisEventReader == nil {
+		if reader, ok := analysisStarter.(workflows.AnalysisEventReader); ok {
+			analysisEventReader = reader
+		} else {
+			analysisEventReader = workflows.NewDisabledAnalysisEventReader()
+		}
+	}
+	analysisCanceller := config.AnalysisCanceller
+	if analysisCanceller == nil {
+		if canceller, ok := analysisStarter.(workflows.AnalysisCanceller); ok {
+			analysisCanceller = canceller
+		} else {
+			analysisCanceller = workflows.NewDisabledAnalysisCanceller()
+		}
+	}
+	analysisWorkspaceReader := config.AnalysisWorkspaceReader
+	if analysisWorkspaceReader == nil {
+		if reader, ok := analysisStarter.(workflows.AnalysisWorkspaceReader); ok {
+			analysisWorkspaceReader = reader
+		} else {
+			analysisWorkspaceReader = workflows.NewDisabledAnalysisWorkspaceReader()
+		}
+	}
+	analysisCandidateReader := config.AnalysisCandidateReader
+	if analysisCandidateReader == nil {
+		analysisCandidateReader = workflows.NewDisabledAnalysisCandidateReader()
+	}
 	projectReadinessReader := config.ProjectReadinessReader
 	if projectReadinessReader == nil {
 		projectReadinessReader = projectreadiness.NewDisabledReader()
@@ -1062,6 +1117,12 @@ func NewServer(config Config) *Server {
 		seedSegmentRetrier:               seedSegmentRetrier,
 		seedStarter:                      seedStarter,
 		seedRunReader:                    seedRunReader,
+		analysisStarter:                  analysisStarter,
+		analysisRunReader:                analysisRunReader,
+		analysisEventReader:              analysisEventReader,
+		analysisCanceller:                analysisCanceller,
+		analysisWorkspaceReader:          analysisWorkspaceReader,
+		analysisCandidateReader:          analysisCandidateReader,
 		projectOverviewReader:            projectOverviewReader,
 		projectReadinessReader:           projectReadinessReader,
 		agentHelloStarter:                helloStarter,
@@ -1122,6 +1183,7 @@ func NewServer(config Config) *Server {
 		distillationEnqueuer:             config.DistillationEnqueuer,
 		authRecoveryHandler:              config.AuthRecoveryHandler,
 		collaborationHandler:             config.CollaborationHandler,
+		projectAdminHandler:              config.ProjectAdminHandler,
 		llmAdminHandler:                  config.LLMAdminHandler,
 		rateLimiter:                      config.RateLimiter,
 		trustedClientProofVerifier:       config.TrustedClientProofVerifier,
@@ -1634,7 +1696,12 @@ func isActorSensitiveRoute(request *http.Request) bool {
 		isAssetCatalogRoute(request.Method, request.URL.Path) ||
 		isAssetDistillationRoute(request.Method, request.URL.Path) ||
 		isCollaborationRoute(request.Method, request.URL.Path) ||
+		isProjectAdminRoute(request.Method, request.URL.Path) ||
 		isLLMAdminRoute(request.Method, request.URL.Path)
+}
+
+func isProjectAdminRoute(method string, path string) bool {
+	return projectadmin.IsRoute(method, path)
 }
 
 func isAssetDistillationRoute(method string, path string) bool {
@@ -2142,6 +2209,22 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartSeedRun(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/seed-runs"):
 		s.handleListSeedRuns(response, request)
+	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/analysis-runs"):
+		s.handleStartAnalysisRun(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/analysis-runs"):
+		s.handleListAnalysisRuns(response, request)
+	case request.Method == http.MethodGet && isAnalysisRunEventsPath(request.URL.Path):
+		s.handleListAnalysisRunEvents(response, request)
+	case request.Method == http.MethodPost && isAnalysisRunCancelPath(request.URL.Path):
+		s.handleCancelAnalysisRun(response, request)
+	case request.Method == http.MethodGet && isAnalysisWorkspaceFilePath(request.URL.Path):
+		s.handleGetAnalysisWorkspaceFile(response, request)
+	case request.Method == http.MethodGet && isAnalysisWorkspaceFilesPath(request.URL.Path):
+		s.handleListAnalysisWorkspaceFiles(response, request)
+	case request.Method == http.MethodGet && isAnalysisCandidatesPath(request.URL.Path):
+		s.handleListAnalysisCandidates(response, request)
+	case request.Method == http.MethodGet && isAnalysisRunDetailPath(request.URL.Path):
+		s.handleGetAnalysisRun(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/readiness"):
 		s.handleGetProjectReadiness(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/overview"):
@@ -2362,6 +2445,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.serveMountedHandler(response, request, s.assetDistillationHandler, "ASSET_DISTILLATION_BACKEND_UNCONFIGURED")
 	case isCollaborationRoute(request.Method, request.URL.Path):
 		s.serveMountedHandler(response, request, s.collaborationHandler, "COLLABORATION_BACKEND_UNCONFIGURED")
+	case isProjectAdminRoute(request.Method, request.URL.Path):
+		s.serveMountedHandler(response, request, s.projectAdminHandler, "PROJECT_ADMIN_BACKEND_UNCONFIGURED")
 	case isLLMAdminRoute(request.Method, request.URL.Path):
 		s.serveMountedHandler(response, request, s.llmAdminHandler, "LLM_ADMIN_BACKEND_UNCONFIGURED")
 	default:

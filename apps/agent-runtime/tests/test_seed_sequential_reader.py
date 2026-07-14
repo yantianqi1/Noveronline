@@ -119,6 +119,158 @@ def test_llm_facility_sequential_reader_calls_provider_with_explicit_key_and_seg
     assert "content" not in str(result)
 
 
+def test_llm_facility_sequential_reader_batches_long_segment_lists() -> None:
+    class BatchingChatClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            payload = json.loads(kwargs["messages"][1]["content"])
+            segment_ids = [item["segment_id"] for item in payload["segments"]]
+            return {
+                "notes": [
+                    {
+                        "segment_id": segment_id,
+                        "summary": f"note-{segment_id}",
+                        "payload_jsonb": {
+                            "characters": [],
+                            "organizations": [],
+                            "relationships": [],
+                            "plot_threads": [],
+                            "world_rules": [],
+                            "events": [],
+                            "consistency_notes": [],
+                        },
+                    }
+                    for segment_id in segment_ids
+                ]
+            }
+
+    base = _resolution()
+    resolution = ModuleBindingResolution(
+        tenant_id=base.tenant_id,
+        project_id=base.project_id,
+        module_key=base.module_key,
+        channel_id=base.channel_id,
+        model_id=base.model_id,
+        provider=base.provider,
+        base_url=base.base_url,
+        credential_ref=base.credential_ref,
+        supports_json=base.supports_json,
+        settings={"temperature": 0.1, "max_tokens": 1200, "batch_max_segments": 1, "batch_max_chars": 20_000},
+    )
+    store = InMemoryObjectStore(
+        {
+            "segments/0000.txt": ("第一章 " + ("甲" * 12_000)).encode("utf-8"),
+            "segments/0001.txt": ("第二章 " + ("乙" * 12_000)).encode("utf-8"),
+            "segments/0002.txt": ("第三章 " + ("丙" * 12_000)).encode("utf-8"),
+        }
+    )
+    chat_client = BatchingChatClient()
+    reader = LLMFacilitySequentialReader(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-real"),
+        chat_client=chat_client,
+        segment_text_store=store,
+    )
+
+    result = reader.read_segments(
+        context=_context(),
+        module_key="sequential_reading",
+        segments=[
+            {"segment_id": "segment-1", "segment_order": 0, "object_key": "segments/0000.txt"},
+            {"segment_id": "segment-2", "segment_order": 1, "object_key": "segments/0001.txt"},
+            {"segment_id": "segment-3", "segment_order": 2, "object_key": "segments/0002.txt"},
+        ],
+    )
+
+    assert result["status"] == "completed"
+    assert [note["segment_id"] for note in result["notes"]] == ["segment-1", "segment-2", "segment-3"]
+    assert len(chat_client.calls) == 3
+
+
+def test_llm_facility_sequential_reader_emits_batch_progress_callbacks() -> None:
+    base = _resolution()
+    resolution = ModuleBindingResolution(
+        tenant_id=base.tenant_id,
+        project_id=base.project_id,
+        module_key=base.module_key,
+        channel_id=base.channel_id,
+        model_id=base.model_id,
+        provider=base.provider,
+        base_url=base.base_url,
+        credential_ref=base.credential_ref,
+        supports_json=base.supports_json,
+        settings={"temperature": 0.1, "max_tokens": 1200, "batch_max_segments": 1},
+    )
+    store = InMemoryObjectStore(
+        {
+            "segments/0000.txt": "第一章 雨夜".encode("utf-8"),
+            "segments/0001.txt": "第二章 晨光".encode("utf-8"),
+        }
+    )
+    class MatchingNotesClient:
+        def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+            payload = json.loads(kwargs["messages"][1]["content"])
+            segment_id = payload["segments"][0]["segment_id"]
+            return {
+                "notes": [
+                    {
+                        "segment_id": segment_id,
+                        "summary": f"note-{segment_id}",
+                        "payload_jsonb": {
+                            "characters": [],
+                            "organizations": [],
+                            "relationships": [],
+                            "plot_threads": [],
+                            "world_rules": [],
+                            "events": [],
+                            "consistency_notes": [],
+                        },
+                    }
+                ]
+            }
+
+    events: list[dict[str, Any]] = []
+    reader = LLMFacilitySequentialReader(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-real"),
+        chat_client=MatchingNotesClient(),
+        segment_text_store=store,
+    )
+    result = reader.read_segments(
+        context=_context(),
+        module_key="sequential_reading",
+        segments=[
+            {
+                "segment_id": "segment-1",
+                "segment_order": 0,
+                "object_key": "segments/0000.txt",
+                "title_guess": "第一章 雨夜",
+            },
+            {
+                "segment_id": "segment-2",
+                "segment_order": 1,
+                "object_key": "segments/0001.txt",
+                "title_guess": "第二章 晨光",
+            },
+        ],
+        progress_callback=events.append,
+    )
+
+    assert result["status"] == "completed"
+    phases = [item["phase"] for item in events]
+    assert phases == ["batch_start", "batch_completed", "batch_start", "batch_completed"]
+    assert events[0]["total_segments"] == 2
+    assert events[0]["completed_segments"] == 0
+    assert "第一章 雨夜" in events[0]["message"]
+    assert events[1]["completed_segments"] == 1
+    assert events[-1]["completed_segments"] == 2
+    assert "object_key" not in str(events)
+    assert "content" not in str(events)
+
+
 def test_llm_facility_sequential_reader_fails_closed_when_module_is_unbound() -> None:
     resolver = RecordingBindingResolver(LLMFacilityError("LLM_MODULE_UNBOUND", "sequential_reading module is not bound"))
     credentials = RecordingCredentialProvider(api_key="sk-real")
@@ -264,6 +416,131 @@ def test_openai_compatible_json_client_sends_explicit_key_and_parses_json_conten
     assert request_body["max_tokens"] == 1200
 
 
+def test_openai_compatible_json_client_parses_markdown_fenced_json_content() -> None:
+    fenced = (
+        "以下是结果：\n```json\n"
+        + json.dumps(
+            {
+                "notes": [
+                    {
+                        "segment_id": "segment-1",
+                        "summary": "围栏 JSON",
+                        "payload_jsonb": {"characters": []},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        + "\n```\n"
+    )
+    transport = RecordingHTTPTransport(
+        response_body=json.dumps({"choices": [{"message": {"content": fenced}}]}).encode("utf-8")
+    )
+    client = OpenAICompatibleJSONClient(http_request=transport)
+
+    result = client.complete_json(
+        context=_context(),
+        resolution=_resolution(),
+        api_key="sk-real",
+        messages=[{"role": "user", "content": "return JSON"}],
+    )
+
+    assert result["notes"][0]["summary"] == "围栏 JSON"
+
+
+def test_llm_facility_sequential_reader_retries_and_splits_invalid_json_batches() -> None:
+    base = _resolution()
+    resolution = ModuleBindingResolution(
+        tenant_id=base.tenant_id,
+        project_id=base.project_id,
+        module_key=base.module_key,
+        channel_id=base.channel_id,
+        model_id=base.model_id,
+        provider=base.provider,
+        base_url=base.base_url,
+        credential_ref=base.credential_ref,
+        supports_json=base.supports_json,
+        settings={"temperature": 0.1, "max_tokens": 1200, "batch_max_segments": 2},
+    )
+    store = InMemoryObjectStore(
+        {
+            "segments/0000.txt": "第一章 雨夜".encode("utf-8"),
+            "segments/0001.txt": "第二章 晨光".encode("utf-8"),
+        }
+    )
+
+    class FlakyThenSplitClient:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+            payload = json.loads(kwargs["messages"][1]["content"])
+            segment_ids = [item["segment_id"] for item in payload["segments"]]
+            self.calls.append(segment_ids)
+            # First two attempts on the 2-segment batch fail (retry + split trigger).
+            if len(segment_ids) == 2:
+                raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion content was not valid JSON")
+            return {
+                "notes": [
+                    {
+                        "segment_id": segment_ids[0],
+                        "summary": f"note-{segment_ids[0]}",
+                        "payload_jsonb": {
+                            "characters": [],
+                            "organizations": [],
+                            "relationships": [],
+                            "plot_threads": [],
+                            "world_rules": [],
+                            "events": [],
+                            "consistency_notes": [],
+                        },
+                    }
+                ]
+            }
+
+    events: list[dict[str, Any]] = []
+    chat_client = FlakyThenSplitClient()
+    reader = LLMFacilitySequentialReader(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-real"),
+        chat_client=chat_client,
+        segment_text_store=store,
+    )
+    result = reader.read_segments(
+        context=_context(),
+        module_key="sequential_reading",
+        segments=[
+            {
+                "segment_id": "segment-1",
+                "segment_order": 0,
+                "object_key": "segments/0000.txt",
+                "title_guess": "第一章 雨夜",
+            },
+            {
+                "segment_id": "segment-2",
+                "segment_order": 1,
+                "object_key": "segments/0001.txt",
+                "title_guess": "第二章 晨光",
+            },
+        ],
+        progress_callback=events.append,
+    )
+
+    assert result["status"] == "completed"
+    assert [note["segment_id"] for note in result["notes"]] == ["segment-1", "segment-2"]
+    # 2 failing full-batch attempts + 1 per half after split.
+    assert chat_client.calls == [
+        ["segment-1", "segment-2"],
+        ["segment-1", "segment-2"],
+        ["segment-1"],
+        ["segment-2"],
+    ]
+    phases = [item["phase"] for item in events]
+    assert "batch_retry" in phases
+    assert "batch_split" in phases
+    assert phases[-1] == "batch_completed"
+
+
 def test_postgres_module_binding_resolver_resolves_project_binding_without_credential_material() -> None:
     connection = QueryConnection(
         rows=[
@@ -304,6 +581,31 @@ def test_postgres_module_binding_resolver_resolves_project_binding_without_crede
     assert connection.cursor_instance.query.count("m.enabled = TRUE") == 2
     assert connection.cursor_instance.params == ("tenant-1", "project-1", "sequential_reading")
     assert connection.closed is True
+
+
+def test_postgres_module_binding_resolver_infers_json_for_chat_models_with_false_catalog() -> None:
+    """Stale supports_json=false must not block DeepSeek-class chat models."""
+    connection = QueryConnection(
+        rows=[
+            {
+                "tenant_id": "tenant-1",
+                "project_id": "project-1",
+                "module_key": "sequential_reading",
+                "channel_id": "channel-project",
+                "model_id": "deepseek-v4-flash",
+                "provider": "openai-compatible",
+                "base_url": "https://api.deepseek.com/v1",
+                "supports_json": False,
+                "settings_jsonb": "{}",
+            }
+        ]
+    )
+    resolver = PostgresModuleBindingResolver(connect=lambda: connection)
+
+    resolution = resolver.resolve_module_binding(context=_context(), module_key="sequential_reading")
+
+    assert resolution.model_id == "deepseek-v4-flash"
+    assert resolution.supports_json is True
 
 
 def test_postgres_module_binding_resolver_fails_closed_when_unbound() -> None:

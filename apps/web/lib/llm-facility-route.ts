@@ -33,6 +33,15 @@ export function llmChannelKey(channelId: string) {
   return `${first.toString(36).padStart(7, "0")}${second.toString(36).padStart(7, "0")}`.slice(0, 12);
 }
 
+/** Stable DOM id / hash target for a channel management card. */
+export function llmChannelAnchorId(channelId: string) {
+  const trimmed = channelId.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return `channel-${llmChannelKey(trimmed)}`;
+}
+
 export function resolveLLMChannelKey(channelIds: string[], channelKey: string) {
   const direct = channelIds.filter((channelId) => channelId === channelKey);
   if (direct.length === 1) {

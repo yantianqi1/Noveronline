@@ -267,6 +267,18 @@ export function StoryGraphShell({
             />
           </section>
         </main>
+        <aside className="story-graph-ops-rail" aria-label={tx(locale, "整理上下文", "Curation context")}>
+          <section className="panel story-graph-ink-section" aria-labelledby="graph-curate-stats-heading">
+            <p className="eyebrow"><Bi zh="整理模式" en="Curate Mode" /></p>
+            <h2 id="graph-curate-stats-heading"><Bi zh="候选概览" en="Candidate overview" /></h2>
+            <CurateContext graphCandidates={graphCandidates} adoptionStatus={adoptionStatus} locale={locale} />
+          </section>
+          <section className={`panel story-graph-ink-section ${current.ok ? "" : "error-box"}`} aria-labelledby="graph-curate-snapshot-heading">
+            <p className="eyebrow"><Bi zh="当前快照" en="Current Snapshot" /></p>
+            <h2 id="graph-curate-snapshot-heading"><Bi zh="图谱快照" en="Graph snapshot" /></h2>
+            <CurrentSnapshot current={current} locale={locale} />
+          </section>
+        </aside>
       </div>
       ) : null}
 
@@ -319,7 +331,97 @@ export function StoryGraphShell({
             </form>
           </section>
         </main>
+        <aside className="story-graph-ops-rail" aria-label={tx(locale, "生成上下文", "Compose context")}>
+          <section className={`panel story-graph-ink-section ${current.ok ? "" : "error-box"}`} aria-labelledby="graph-compose-snapshot-heading">
+            <p className="eyebrow"><Bi zh="当前快照" en="Current Snapshot" /></p>
+            <h2 id="graph-compose-snapshot-heading"><Bi zh="图谱快照" en="Graph snapshot" /></h2>
+            <CurrentSnapshot current={current} locale={locale} />
+          </section>
+          <section className={`panel story-graph-ink-section ${view.ok ? "" : "error-box"}`} aria-labelledby="graph-compose-selection-heading">
+            <p className="eyebrow"><Bi zh="生成模式" en="Compose Mode" /></p>
+            <h2 id="graph-compose-selection-heading"><Bi zh="可选节点" en="Available nodes" /></h2>
+            <ComposeNodePreview view={view} locale={locale} />
+          </section>
+          <section
+            className={`panel story-graph-ink-section ${workflowRun && !workflowRun.ok ? "error-box" : ""}`}
+            aria-labelledby="graph-compose-run-heading"
+          >
+            <p className="eyebrow"><Bi zh="生成模式" en="Compose Mode" /></p>
+            <h2 id="graph-compose-run-heading"><Bi zh="最近生成任务" en="Latest run" /></h2>
+            <StoryGraphBuildProgress locale={locale} selectedBuildRunId={selectedRunId} workflowRun={workflowRun} />
+          </section>
+        </aside>
       </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CurateContext({
+  graphCandidates,
+  adoptionStatus,
+  locale,
+}: {
+  graphCandidates: AssetListSummary;
+  adoptionStatus: string;
+  locale: Locale;
+}) {
+  if (!graphCandidates.ok) {
+    return <p className="form-hint"><FailureText /></p>;
+  }
+  const total = graphCandidates.items.length;
+  const bondCount = graphCandidates.items.filter((candidate) => candidate.asset_type === "graph_bond").length;
+  const threadCount = total - bondCount;
+  return (
+    <div className="binding-stack">
+      <dl className="story-graph-context-metrics">
+        <div>
+          <dt><Bi zh="待采用候选" en="Awaiting adoption" /></dt>
+          <dd>{total}</dd>
+        </div>
+        <div>
+          <dt><Bi zh="关系候选" en="Bond candidates" /></dt>
+          <dd>{bondCount}</dd>
+        </div>
+        <div>
+          <dt><Bi zh="剧情线索候选" en="Thread candidates" /></dt>
+          <dd>{threadCount}</dd>
+        </div>
+      </dl>
+      {total === 0 ? (
+        <p className="form-hint"><Bi zh="生成关系后，候选会出现在左侧等待采用。" en="Generate bonds and candidates will appear on the left, ready to adopt." /></p>
+      ) : (
+        <p className="form-hint"><Bi zh="逐条采纳为关系或剧情线索，进入正史。" en="Adopt each one as a relationship or plot thread to promote into canon." /></p>
+      )}
+      {adoptionStatus === "success" ? (
+        <p className="form-status success-box" role="status"><Bi zh="最近一次采用已完成。" en="The latest adoption completed." /></p>
+      ) : null}
+    </div>
+  );
+}
+
+function ComposeNodePreview({ view, locale }: { view: StoryGraphViewSummary; locale: Locale }) {
+  if (!view.ok) {
+    return <p className="form-hint"><FailureText /></p>;
+  }
+  if (view.nodes.length === 0) {
+    return <p className="form-hint"><Bi zh="暂无节点。请先构建图谱。" en="No nodes yet. Build the graph first." /></p>;
+  }
+  return (
+    <div className="binding-stack">
+      <p className="form-hint">
+        {view.nodes.length} <Bi zh="个节点" en="nodes" /> · {view.edges.length} <Bi zh="条关系" en="edges" />
+      </p>
+      <ul className="story-graph-context-node-list">
+        {view.nodes.slice(0, 6).map((node, index) => (
+          <li key={node.node_id}>
+            <span className="story-graph-context-node-name">{graphNodeLabel(node.title, index, locale)}</span>
+            <span className="story-graph-context-node-type">{node.node_type}</span>
+          </li>
+        ))}
+      </ul>
+      {view.nodes.length > 6 ? (
+        <p className="form-hint">{tx(locale, `另有 ${view.nodes.length - 6} 个节点可在左侧选择`, `${view.nodes.length - 6} more nodes selectable on the left`)}</p>
       ) : null}
     </div>
   );
@@ -428,6 +530,7 @@ function GraphCanvas({
   if (!view.ok) {
     return (
       <div className="story-graph-canvas story-graph-canvas-empty" aria-label={tx(locale, "故事图谱元数据画布", "Story graph metadata canvas")}>
+        <strong><Bi zh="暂时无法加载图谱" en="Graph unavailable" /></strong>
         <p className="form-hint"><FailureText /></p>
       </div>
     );
@@ -435,6 +538,7 @@ function GraphCanvas({
   if (!layout.ok) {
     return (
       <div className="story-graph-canvas story-graph-canvas-empty" aria-label={tx(locale, "故事图谱画布", "Story graph canvas")}>
+        <strong><Bi zh="暂时无法加载布局" en="Layout unavailable" /></strong>
         <p className="form-hint"><FailureText /></p>
       </div>
     );
@@ -443,7 +547,7 @@ function GraphCanvas({
     return (
       <div className="story-graph-canvas story-graph-canvas-empty" aria-label={tx(locale, "故事图谱元数据画布", "Story graph metadata canvas")}>
         <strong><Bi zh="暂无图谱节点" en="No graph nodes available" /></strong>
-        <p className="form-hint"><Bi zh="运行故事图谱构建后，这里会显示可查看的节点。" en="Run a Story Graph build to populate the public viewport." /></p>
+        <p className="form-hint"><Bi zh="运行故事图谱构建后，这里会显示可查看的节点。可在下方开始构建。" en="Run a Story Graph build below to populate this canvas." /></p>
       </div>
     );
   }

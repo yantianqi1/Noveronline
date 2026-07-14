@@ -25,6 +25,8 @@ import {
 } from "lucide-react";
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import { LanguageSwitcher } from "./language-switcher";
+import { NovelSwitcher } from "./novel-switcher";
+import type { ProjectActionState } from "../app/(app)/[tenantSlug]/projects/[projectId]/project-actions";
 import {
   signalWorkspaceNavigationComplete,
   signalWorkspaceNavigationStart,
@@ -35,7 +37,7 @@ import type {
   ProjectMembershipSummary,
   TenantMembershipSummary,
 } from "../lib/api";
-import { workspacePathForProject } from "../lib/workspace-route";
+import { matchesWorkspaceNavigationPath, workspacePathForProject } from "../lib/workspace-route";
 
 const creativeNavItems = [
   { label: "Overview", zh: "项目总览", path: "/overview", icon: LayoutDashboard },
@@ -52,11 +54,15 @@ const settingsNavItems = [
 
 const navItems = [...creativeNavItems, ...settingsNavItems];
 
+type ProjectActionHandler = (state: ProjectActionState, formData: FormData) => Promise<ProjectActionState>;
+
 type ProjectNavProps = {
   basePath: string;
   changePasswordHref: string;
   currentUser: CurrentUserSummary;
+  createProjectAction: ProjectActionHandler;
   logoutAction: () => Promise<void>;
+  renameProjectAction: ProjectActionHandler;
   revokeAllSessionsAction: () => Promise<void>;
   revokeTenantSessionsAction: () => Promise<void>;
   rotateSessionAction: () => Promise<void>;
@@ -72,7 +78,9 @@ export function ProjectNav({
   basePath: _basePath,
   changePasswordHref,
   currentUser,
+  createProjectAction,
   logoutAction,
+  renameProjectAction,
   revokeAllSessionsAction,
   revokeTenantSessionsAction,
   rotateSessionAction,
@@ -97,7 +105,7 @@ export function ProjectNav({
   const currentProject = routeTenantProjects.find((project) => project.project_id === projectId);
   const currentSectionPath = currentProject && currentUser.ok
     ? navItems.find((item) => (
-        matchesNavigationHref(
+        matchesWorkspaceNavigationPath(
           pathname,
           workspacePathForProject(activeTenants, currentProject, item.path),
           item.path,
@@ -269,19 +277,35 @@ export function ProjectNav({
         ref={drawerRef}
       >
         <section className="sidebar-section sidebar-primary-nav" aria-label="Project sections / 项目导航">
-          <div className="project-context">
-            <span className="project-context-icon" aria-hidden="true">
-              <FolderKanban size={17} strokeWidth={1.8} />
-            </span>
-            <span>
-              <strong>{currentProject?.name || <Bi zh="当前项目" en="Current project" />}</strong>
-              <small>
-                {hasMultipleWorkspaces
+          {currentProject ? (
+            <NovelSwitcher
+              createAction={createProjectAction}
+              currentName={currentProject.name}
+              currentProjectId={currentProject.project_id}
+              novels={routeTenantProjects.map((project) => ({
+                projectId: project.project_id,
+                name: project.name,
+                href: workspacePathForProject(activeTenants, project, currentSectionPath),
+              }))}
+              onSwitch={navigateWorkspace}
+              renameAction={renameProjectAction}
+              workspaceLabel={
+                hasMultipleWorkspaces
                   ? currentTenant?.name || <Bi zh="当前工作区" en="Current workspace" />
-                  : <Bi zh="我的工作区" en="My workspace" />}
-              </small>
-            </span>
-          </div>
+                  : <Bi zh="我的工作区" en="My workspace" />
+              }
+            />
+          ) : (
+            <div className="project-context">
+              <span className="project-context-icon" aria-hidden="true">
+                <FolderKanban size={17} strokeWidth={1.8} />
+              </span>
+              <span>
+                <strong><Bi zh="当前项目" en="Current project" /></strong>
+                <small><Bi zh="我的工作区" en="My workspace" /></small>
+              </span>
+            </div>
+          )}
           {currentProject ? (
             <nav className="nav-list" aria-label="创作流程 / Creative workflow">
               <p className="nav-group-label"><Bi zh="创作流程" en="Creative workflow" /></p>
@@ -304,9 +328,9 @@ export function ProjectNav({
 
         {hasMultipleWorkspaces ? (
           <details className="sidebar-disclosure">
-            <summary>
+            <summary title="切换工作区 / Switch workspace">
               <Building2 aria-hidden="true" size={16} />
-              <Bi zh="切换工作区" en="Switch workspace" />
+              <span className="nav-link-label"><Bi zh="切换工作区" en="Switch workspace" /></span>
             </summary>
             <section className="sidebar-section" aria-label="Workspaces / 工作区">
               <p className="eyebrow"><Bi zh="工作区" en="Workspaces" /></p>
@@ -333,27 +357,13 @@ export function ProjectNav({
               projects={routeTenantProjects}
             />
           </details>
-        ) : routeTenantProjects.length > 1 ? (
-          <details className="sidebar-disclosure">
-            <summary>
-              <FolderKanban aria-hidden="true" size={16} />
-              <Bi zh="切换项目" en="Switch project" />
-            </summary>
-            <ProjectChoices
-              activeTenants={activeTenants}
-              currentSectionPath={currentSectionPath}
-              onNavigate={navigateWorkspace}
-              projectId={projectId}
-              projects={routeTenantProjects}
-            />
-          </details>
         ) : null}
 
         {currentProject ? (
-          <details className="sidebar-disclosure sidebar-settings" open={settingsNavItems.some((item) => matchesNavigationHref(pathname, workspacePathForProject(activeTenants, currentProject, item.path), item.path))}>
-            <summary>
+          <details className="sidebar-disclosure sidebar-settings" open={settingsNavItems.some((item) => matchesWorkspaceNavigationPath(pathname, workspacePathForProject(activeTenants, currentProject, item.path), item.path))}>
+            <summary title="项目设置 / Project settings">
               <Cpu aria-hidden="true" size={16} />
-              <Bi zh="项目设置" en="Project settings" />
+              <span className="nav-link-label"><Bi zh="项目设置" en="Project settings" /></span>
             </summary>
             <nav className="sidebar-section nav-list" aria-label="项目设置 / Project settings">
               <NavigationLinks
@@ -369,11 +379,11 @@ export function ProjectNav({
         ) : null}
 
         <details className="sidebar-disclosure sidebar-account-menu">
-          <summary className="account-summary">
+          <summary className="account-summary" title={`${userLabel} · 账户与会话 / Account and sessions`}>
             <span className="account-avatar" aria-hidden="true">
               {userLabel.slice(0, 1).toUpperCase()}
             </span>
-            <span>
+            <span className="nav-link-label">
               <strong>{userLabel}</strong>
               <small><Bi zh="账户与会话" en="Account and sessions" /></small>
             </span>
@@ -476,11 +486,13 @@ function NavigationLinks({
 }) {
   return items.map((item) => {
     const href = workspacePathForProject(activeTenants, currentProject, item.path);
-    const active = matchesNavigationHref(activeHref, href, item.path);
+    const active = matchesWorkspaceNavigationPath(activeHref, href, item.path);
     const Icon = item.icon;
+    const label = `${item.zh} / ${item.label}`;
     return (
       <Link
         aria-current={active ? "page" : undefined}
+        aria-label={label}
         className="nav-link"
         data-active={active ? "true" : undefined}
         href={href}
@@ -488,16 +500,15 @@ function NavigationLinks({
         onFocus={() => onFocus(href)}
         onMouseEnter={() => onFocus(href)}
         onNavigate={(event) => onNavigate(event, href)}
+        title={label}
       >
         <Icon aria-hidden="true" size={18} strokeWidth={1.8} />
-        <Bi zh={item.zh} en={item.label} />
+        <span className="nav-link-label">
+          <Bi zh={item.zh} en={item.label} />
+        </span>
       </Link>
     );
   });
-}
-
-function matchesNavigationHref(pathname: string, href: string, sectionPath: string) {
-  return pathname === href || (sectionPath !== "/overview" && pathname.startsWith(`${href}/`));
 }
 
 function ProjectChoices({

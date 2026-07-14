@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   isInternalWorkspaceSegment,
   internalWorkspaceSection,
+  matchesWorkspaceNavigationPath,
   projectPublicKey,
   publicWorkspaceSection,
   resolvePublicWorkspaceRoute,
@@ -51,9 +52,25 @@ test("workspace page aliases stay short and round-trip to internal routes", () =
   assert.equal(publicWorkspaceSection("llm-facility"), "llm");
   assert.equal(publicWorkspaceSection("character-console"), "characters");
   assert.equal(publicWorkspaceSection("llm-facility/quotas"), "llm/quotas");
+  assert.equal(publicWorkspaceSection("materials"), "materials");
+  assert.equal(publicWorkspaceSection("me"), "me");
   assert.equal(internalWorkspaceSection(""), "overview");
   assert.equal(internalWorkspaceSection("llm"), "llm-facility");
   assert.equal(internalWorkspaceSection("characters"), "character-console");
+  assert.equal(internalWorkspaceSection("materials"), "materials");
+  assert.equal(internalWorkspaceSection("me"), "me");
+});
+
+test("workspace navigation stays active across public URLs and server rewrites", () => {
+  const overviewHref = workspacePathForProject(tenants, projects[0], "overview");
+  const assetsHref = workspacePathForProject(tenants, projects[0], "assets");
+  const internalBase = `/${tenants[0].tenant_id}/projects/${projects[0].project_id}`;
+
+  assert.equal(matchesWorkspaceNavigationPath(overviewHref, overviewHref, "/overview"), true);
+  assert.equal(matchesWorkspaceNavigationPath(`${internalBase}/overview`, overviewHref, "/overview"), true);
+  assert.equal(matchesWorkspaceNavigationPath(`${assetsHref}/asset-1`, assetsHref, "/assets"), true);
+  assert.equal(matchesWorkspaceNavigationPath(`${internalBase}/assets/asset-1`, assetsHref, "/assets"), true);
+  assert.equal(matchesWorkspaceNavigationPath(`${internalBase}/writer`, assetsHref, "/assets"), false);
 });
 
 test("public workspace routes resolve only through active membership data", () => {

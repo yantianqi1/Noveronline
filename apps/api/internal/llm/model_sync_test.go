@@ -125,6 +125,12 @@ func TestSQLModelSyncerSyncsOpenAICompatibleModelsWithDecryptedCredential(t *tes
 	if !strings.Contains(queryer.args[1][2].(string), "gpt-4.1") {
 		t.Fatalf("expected sanitized provider models JSON as upsert arg, got %#v", queryer.args[1])
 	}
+	if !strings.Contains(queryer.args[1][2].(string), "\"supports_json\":true") {
+		t.Fatalf("expected documented capability metadata in upsert payload, got %#v", queryer.args[1][2])
+	}
+	if !strings.Contains(queryer.queries[1], "supports_json = llm_models.supports_json OR EXCLUDED.supports_json") {
+		t.Fatalf("expected monotonic capability upgrade on conflict, got %s", queryer.queries[1])
+	}
 }
 
 func TestSQLModelSyncerRecordsExplicitFailureStatusWhenProviderFails(t *testing.T) {

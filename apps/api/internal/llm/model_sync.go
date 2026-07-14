@@ -187,25 +187,32 @@ LIMIT 1`
 }
 
 func (s *SQLModelSyncer) upsertModels(ctx context.Context, input ModelSyncInput, models []ProviderModel) (ModelSyncResult, error) {
-	modelsJSON, err := json.Marshal(sanitizeProviderModels(models))
+	modelsJSON, err := json.Marshal(enrichProviderModels(models))
 	if err != nil {
 		return ModelSyncResult{}, &AppError{Code: "LLM_MODEL_SYNC_FAILED", Message: "provider models must be JSON serializable"}
 	}
 	status := fmt.Sprintf("ok:%d", len(models))
+	// supports_json / supports_tools are seeded from documented per-model
+	// capability metadata (enrichProviderModels). ON CONFLICT only ever ORs the
+	// inferred capability in, so re-syncing upgrades stale FALSE defaults without
+	// ever clobbering an operator-confirmed capability from the Models settings UI.
 	query := `WITH incoming AS (
-  SELECT model_id, owned_by
-  FROM jsonb_to_recordset($3::jsonb) AS model(model_id TEXT, owned_by TEXT)
+  SELECT model_id, owned_by, supports_json, supports_tools
+  FROM jsonb_to_recordset($3::jsonb) AS model(model_id TEXT, owned_by TEXT, supports_json BOOLEAN, supports_tools BOOLEAN)
 ), upserted AS (
   INSERT INTO llm_models (
-    tenant_id, channel_id, model_id, owned_by, updated_at
+    tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools, updated_at
   )
-  SELECT $1::uuid, c.channel_id, incoming.model_id, NULLIF(incoming.owned_by, ''), now()
+  SELECT $1::uuid, c.channel_id, incoming.model_id, NULLIF(incoming.owned_by, ''),
+    COALESCE(incoming.supports_json, FALSE), COALESCE(incoming.supports_tools, FALSE), now()
   FROM llm_channels c
   JOIN incoming ON incoming.model_id IS NOT NULL AND incoming.model_id <> ''
   WHERE c.tenant_id = $1::uuid
     AND c.channel_id = $2::uuid
   ON CONFLICT (channel_id, model_id) DO UPDATE SET
     owned_by = EXCLUDED.owned_by,
+    supports_json = llm_models.supports_json OR EXCLUDED.supports_json,
+    supports_tools = llm_models.supports_tools OR EXCLUDED.supports_tools,
     updated_at = now()
   RETURNING
     model_id,
@@ -378,6 +385,31 @@ func validateModelSyncInput(input ModelSyncInput) error {
 		return &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and channel_id are required"}
 	}
 	return nil
+}
+
+// syncedModel is the sync upsert payload row. It extends the sanitized provider
+// listing with documented capability metadata so freshly synced models carry
+// accurate supports_json / supports_tools instead of the FALSE column default.
+type syncedModel struct {
+	ModelID       string `json:"model_id"`
+	OwnedBy       string `json:"owned_by,omitempty"`
+	SupportsJSON  bool   `json:"supports_json"`
+	SupportsTools bool   `json:"supports_tools"`
+}
+
+func enrichProviderModels(models []ProviderModel) []syncedModel {
+	sanitized := sanitizeProviderModels(models)
+	enriched := make([]syncedModel, 0, len(sanitized))
+	for _, model := range sanitized {
+		capabilities := inferModelCapabilities(model.ModelID)
+		enriched = append(enriched, syncedModel{
+			ModelID:       model.ModelID,
+			OwnedBy:       model.OwnedBy,
+			SupportsJSON:  capabilities.SupportsJSON,
+			SupportsTools: capabilities.SupportsTools,
+		})
+	}
+	return enriched
 }
 
 func sanitizeProviderModels(models []ProviderModel) []ProviderModel {

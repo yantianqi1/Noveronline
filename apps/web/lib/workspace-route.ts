@@ -19,6 +19,8 @@ const PUBLIC_SECTION_ALIASES: Record<string, string> = {
   overview: "",
   "llm-facility": "llm",
   "character-console": "characters",
+  materials: "materials",
+  me: "me",
 };
 const INTERNAL_SECTION_ALIASES = Object.fromEntries(
   Object.entries(PUBLIC_SECTION_ALIASES)
@@ -83,6 +85,19 @@ export function internalWorkspaceSection(section: string) {
   const [first, ...rest] = parts;
   const internalFirst = INTERNAL_SECTION_ALIASES[first] ?? first;
   return [internalFirst, ...rest].join("/");
+}
+
+export function matchesWorkspaceNavigationPath(pathname: string, href: string, section: string) {
+  if (pathname === href) {
+    return true;
+  }
+  const internalSection = normalizedSectionParts(section).join("/") || "overview";
+  if (internalSection !== "overview" && pathname.startsWith(`${href}/`)) {
+    return true;
+  }
+  const internalSuffix = `/${internalSection}`;
+  return pathname.endsWith(internalSuffix)
+    || (internalSection !== "overview" && pathname.includes(`${internalSuffix}/`));
 }
 
 export function workspaceKeyFromIds(tenantId: string, projectId: string) {

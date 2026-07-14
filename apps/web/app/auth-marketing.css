@@ -1009,33 +1009,56 @@
 
 @media (max-width: 960px) {
   .login-page {
+    --login-topbar-h: 4.5rem;
     min-height: 100dvh;
     overflow: auto;
+    overflow-x: hidden;
+    padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
   }
 
   .login-page .auth-topbar {
-    min-height: 96px;
-    padding: 20px 24px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    width: 100%;
+    max-width: none;
+    min-height: var(--login-topbar-h);
+    margin: 0;
+    padding:
+      calc(12px + env(safe-area-inset-top, 0px))
+      max(20px, env(safe-area-inset-right, 0px))
+      12px
+      max(20px, env(safe-area-inset-left, 0px));
+    background: linear-gradient(
+      180deg,
+      rgba(246, 240, 230, 0.96) 0%,
+      rgba(246, 240, 230, 0.88) 70%,
+      transparent 100%
+    );
+    backdrop-filter: blur(10px);
   }
 
   .login-page .auth-brand-mark {
-    width: 52px;
-    height: 52px;
+    width: 44px;
+    height: 44px;
   }
 
   .login-page .auth-brand-copy strong {
-    font-size: 1.12rem;
+    font-size: 1.05rem;
   }
 
   .login-page .auth-brand-copy small {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
   }
 
   .login-page .auth-ghost-link {
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 48px;
     min-height: 48px;
     border-color: rgba(37, 49, 58, 0.16);
-    background: rgba(255, 253, 248, 0.66);
+    background: rgba(255, 253, 248, 0.72);
     color: #39454d;
     backdrop-filter: blur(8px);
   }
@@ -1046,13 +1069,19 @@
     color: var(--login-red);
   }
 
+  .login-page .auth-stage {
+    min-height: 0;
+  }
+
   .login-workspace {
-    min-height: 100dvh;
+    min-height: 0;
+    overflow: visible;
     grid-template-columns: minmax(0, 1fr);
   }
 
   .login-form-panel {
-    min-height: 100dvh;
+    min-height: calc(100dvh - var(--login-topbar-h) - env(safe-area-inset-top, 0px));
+    align-items: start;
     background:
       linear-gradient(rgba(246, 240, 230, 0.94), rgba(246, 240, 230, 0.98)),
       url("/landing/assets/scene-5-finale.jpg") center / cover;
@@ -1063,10 +1092,47 @@
   }
 
   .login-copy {
-    width: min(100% - 48px, 520px);
+    width: min(100% - 40px, 480px);
     margin-right: auto;
     margin-left: auto;
-    padding: 138px 0 56px;
+    /* sticky topbar already reserves chrome; keep form density tight for one-screen path */
+    padding: 28px 0 max(32px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .login-kicker {
+    margin-bottom: 18px;
+  }
+
+  .login-copy h1 {
+    font-size: clamp(2.15rem, 5.5vw, 2.75rem);
+  }
+
+  .login-intro {
+    margin: 14px 0 28px;
+  }
+
+  .login-form {
+    width: min(100%, 400px);
+    margin: 0 auto;
+  }
+
+  .login-input-wrap {
+    min-height: 52px;
+  }
+
+  .login-input-wrap input {
+    min-height: 52px;
+    font-size: 16px; /* iOS: avoid auto-zoom on focus */
+  }
+
+  .login-password-toggle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .login-submit {
+    min-height: 52px;
+    border-radius: 14px;
   }
 
   .login-visual {
@@ -1075,35 +1141,48 @@
 
   .signup-page .login-workspace,
   .signup-page .login-form-panel {
-    min-height: max(100dvh, 940px);
+    min-height: 0;
+  }
+
+  .signup-page .login-form-panel {
+    min-height: calc(100dvh - var(--login-topbar-h) - env(safe-area-inset-top, 0px));
   }
 
   .signup-copy {
-    width: min(100% - 48px, 520px);
-    padding-top: 124px;
-    padding-bottom: 48px;
+    width: min(100% - 40px, 480px);
+    padding-top: 28px;
+    padding-bottom: max(32px, env(safe-area-inset-bottom, 0px));
   }
 }
 
 @media (max-width: 520px) {
+  .login-page {
+    --login-topbar-h: 3.75rem;
+  }
+
   .login-page .auth-topbar {
-    min-height: 84px;
-    padding: 16px;
+    min-height: var(--login-topbar-h);
+    padding:
+      calc(10px + env(safe-area-inset-top, 0px))
+      max(14px, env(safe-area-inset-right, 0px))
+      10px
+      max(14px, env(safe-area-inset-left, 0px));
   }
 
   .login-page .auth-brand {
     gap: 10px;
+    min-width: 0;
   }
 
   .login-page .auth-brand-mark {
-    width: 46px;
-    height: 46px;
+    width: 40px;
+    height: 40px;
     border-radius: 7px;
-    font-size: 0.8rem;
+    font-size: 0.75rem;
   }
 
   .login-page .auth-brand-copy strong {
-    font-size: 0.96rem;
+    font-size: 0.92rem;
   }
 
   .login-page .auth-brand-copy small {
@@ -1111,9 +1190,13 @@
   }
 
   .login-page .auth-ghost-link {
+    min-width: 44px;
     min-height: 44px;
-    padding: 0 9px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
     font-size: 0;
+    border-radius: 999px;
   }
 
   .login-page .auth-ghost-link svg {
@@ -1122,40 +1205,46 @@
   }
 
   .login-copy {
-    width: min(100% - 32px, 440px);
-    padding: 116px 0 40px;
+    width: min(100% - 28px, 420px);
+    padding: 20px 0 max(28px, env(safe-area-inset-bottom, 0px));
   }
 
   .login-copy h1 {
-    font-size: 2.65rem;
+    font-size: clamp(2rem, 8.5vw, 2.45rem);
   }
 
   .login-intro {
-    margin: 14px 0 28px;
-    font-size: 1rem;
+    margin: 12px 0 22px;
+    font-size: 0.95rem;
+    line-height: 1.55;
   }
 
   .login-form {
-    gap: 24px;
+    gap: 18px;
+  }
+
+  .login-field {
+    gap: 8px;
   }
 
   .login-submit {
-    min-height: 60px;
+    min-height: 52px;
   }
 
   .login-join {
-    gap: 12px;
-    margin-top: 30px;
+    gap: 10px;
+    margin-top: 22px;
+    padding-bottom: 4px;
   }
 
   .signup-copy {
-    width: min(100% - 32px, 440px);
-    padding-top: 104px;
-    padding-bottom: 32px;
+    width: min(100% - 28px, 420px);
+    padding-top: 20px;
+    padding-bottom: max(28px, env(safe-area-inset-bottom, 0px));
   }
 
   .signup-copy h1 {
-    font-size: 2.4rem;
+    font-size: clamp(1.9rem, 8vw, 2.25rem);
   }
 }
 

@@ -53,7 +53,8 @@ type SQLWorkflowEventReader struct {
 func NewSQLWorkflowEventReader(config SQLWorkflowEventReaderConfig) *SQLWorkflowEventReader {
 	limit := config.Limit
 	if limit <= 0 {
-		limit = 100
+		// Seed sequential reading emits batch progress lines; keep enough for Overview logs.
+		limit = 500
 	}
 	return &SQLWorkflowEventReader{queryer: config.Queryer, limit: limit}
 }
@@ -71,6 +72,8 @@ func (r *SQLWorkflowEventReader) ListWorkflowEvents(ctx context.Context, input L
 			Message: "workflow event reader is not configured",
 		}
 	}
+	// Without after_event_id, return the latest N events (not the oldest) so long
+	// sequential-reading batch logs remain visible on Overview.
 	query := `WITH after_cursor AS (
   SELECT sequence
   FROM workflow_events
@@ -91,12 +94,24 @@ event_rows AS (
     event_type,
     payload_jsonb::text,
     created_at::text
-  FROM workflow_events
-  WHERE tenant_id::text = $1
-    AND run_id::text = $2
-    AND ($3 = '' OR sequence > COALESCE((SELECT sequence FROM after_cursor), -1))
-  ORDER BY sequence ASC
-  LIMIT $4
+  FROM (
+    SELECT
+      event_id,
+      run_id,
+      project_id,
+      sequence,
+      event_type,
+      payload_jsonb,
+      created_at
+    FROM workflow_events
+    WHERE tenant_id::text = $1
+      AND run_id::text = $2
+      AND ($3 = '' OR sequence > COALESCE((SELECT sequence FROM after_cursor), -1))
+    ORDER BY
+      CASE WHEN $3 = '' THEN sequence END DESC NULLS LAST,
+      CASE WHEN $3 <> '' THEN sequence END ASC NULLS LAST
+    LIMIT $4
+  ) limited_events
 )
 SELECT
   cursor_state.cursor_found,

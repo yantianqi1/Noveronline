@@ -34,14 +34,19 @@ test("Asset Library uses one compact search surface and one advanced filter disc
 
 test("Overview prioritizes the current next step and folds secondary activity", async () => {
   const shell = await source("components/overview-seed-shell.tsx");
+  const wall = await source("components/overview-seed-progress-wall.tsx");
   const nextPanelIndex = shell.indexOf("overview-next-panel");
   const metricsPanelIndex = shell.indexOf('aria-labelledby="project-health-heading"');
 
   assert.ok(nextPanelIndex >= 0 && nextPanelIndex < metricsPanelIndex);
   assert.match(shell, /<OverviewNextStep/);
   assert.match(shell, /Files and analysis history/);
-  assert.match(shell, /Progress and activity/);
+  assert.match(shell, /Project diagnostics \(optional\)/);
+  assert.match(shell, /overview-analysis-results/);
   assert.match(shell, /overview-upload-disclosure/);
+  assert.match(shell, /OverviewSeedProgressWall/);
+  assert.match(wall, /收起进度|Collapse progress/);
+  assert.match(wall, /overview-status-wall-preview-stages/);
   assert.doesNotMatch(shell, /<dd>\{selectedSeedRun\.run_id\}<\/dd>/);
   assert.doesNotMatch(shell, /<dd>\{projectReadiness\.run_id\}<\/dd>/);
   assert.doesNotMatch(shell, /<dd>\{projectReadiness\.project_readiness_snapshot_id\}<\/dd>/);

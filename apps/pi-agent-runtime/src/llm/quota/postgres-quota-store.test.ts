@@ -104,6 +104,26 @@ describe("Postgres Pi writer quota store", () => {
     await expect(store.reserve(reserveRequest)).rejects.toThrow(`${code}:`);
   });
 
+  it("reserve SQL reopens released/expired rows for the same provider_call_id", async () => {
+    const db = new RecordingQuotaDb();
+    db.enqueue([{
+      decision: "reserved",
+      reservation_id: "reservation-reopened",
+      provider_call_id: reserveRequest.provider_call_id,
+      status: "reserved",
+      expires_at: "2026-07-10T12:05:00.000Z"
+    }]);
+    const store = createPostgresQuotaStore(db);
+    await expect(store.reserve(reserveRequest)).resolves.toMatchObject({
+      reservation_id: "reservation-reopened",
+      status: "reserved"
+    });
+    const query = db.queries[0]!;
+    expect(query.text).toContain("THEN 'reopen'");
+    expect(query.text).toContain("status IN ('released', 'expired')");
+    expect(query.text).toContain("status = 'reserved'");
+  });
+
   it("recognizes an exactly matching finalized provider call without reopening it", async () => {
     const db = new RecordingQuotaDb();
     db.enqueue([{

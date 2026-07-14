@@ -639,26 +639,26 @@ func TestNewPlatformHandlersAreExplicitlyConfiguredAndFailClosed(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	metrics := observability.NewRegistry()
-	recovery, collaborationHandler, admin, dispatcher, closeHandlers, err := newPlatformHandlers("", "", metrics, nil, nil)
-	if err != nil || recovery != nil || collaborationHandler != nil || admin != nil || dispatcher != nil || closeHandlers != nil {
-		t.Fatalf("expected platform handlers disabled without DB: recovery=%T collaboration=%T admin=%T dispatcher=%v close=%v err=%v", recovery, collaborationHandler, admin, dispatcher != nil, closeHandlers != nil, err)
+	recovery, collaborationHandler, projectAdmin, admin, dispatcher, closeHandlers, err := newPlatformHandlers("", "", metrics, nil, nil)
+	if err != nil || recovery != nil || collaborationHandler != nil || projectAdmin != nil || admin != nil || dispatcher != nil || closeHandlers != nil {
+		t.Fatalf("expected platform handlers disabled without DB: recovery=%T collaboration=%T project=%T admin=%T dispatcher=%v close=%v err=%v", recovery, collaborationHandler, projectAdmin, admin, dispatcher != nil, closeHandlers != nil, err)
 	}
 
 	databaseURL := "postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable"
-	recovery, collaborationHandler, admin, dispatcher, closeHandlers, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil)
-	if err != nil || recovery == nil || collaborationHandler == nil || admin == nil || dispatcher != nil || closeHandlers == nil {
-		t.Fatalf("expected DB-backed handlers with optional facilities fail-closed: recovery=%T collaboration=%T admin=%T dispatcher=%v close=%v err=%v", recovery, collaborationHandler, admin, dispatcher != nil, closeHandlers != nil, err)
+	recovery, collaborationHandler, projectAdmin, admin, dispatcher, closeHandlers, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil)
+	if err != nil || recovery == nil || collaborationHandler == nil || projectAdmin == nil || admin == nil || dispatcher != nil || closeHandlers == nil {
+		t.Fatalf("expected DB-backed handlers with optional facilities fail-closed: recovery=%T collaboration=%T project=%T admin=%T dispatcher=%v close=%v err=%v", recovery, collaborationHandler, projectAdmin, admin, dispatcher != nil, closeHandlers != nil, err)
 	}
 	_ = closeHandlers()
 
 	t.Setenv("AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY", "not-standard-base64")
-	if _, _, _, _, _, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil); err == nil {
+	if _, _, _, _, _, _, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil); err == nil {
 		t.Fatal("expected malformed recovery token key to fail construction")
 	}
 	t.Setenv("AUTH_RECOVERY_OUTBOX_ENCRYPTION_KEY", "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=")
 	t.Setenv("MIROFISH_RECOVERY_CLIENT_PROOF_SECRET", "0123456789abcdef0123456789abcdef")
 	t.Setenv("SMTP_HOST", "smtp.example.test")
-	if _, _, _, _, _, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil); err == nil {
+	if _, _, _, _, _, _, err = newPlatformHandlers(databaseURL, "", metrics, nil, nil); err == nil {
 		t.Fatal("expected partial SMTP configuration to fail construction")
 	}
 }
@@ -710,7 +710,7 @@ func TestNewPlatformHandlersWiresRecoveryDispatcherMetrics(t *testing.T) {
 		t.Setenv(name, value)
 	}
 	metrics := observability.NewRegistry()
-	_, _, _, dispatcher, closeHandlers, err := newPlatformHandlers(
+	_, _, _, _, dispatcher, closeHandlers, err := newPlatformHandlers(
 		"postgres://mirofish:secret@127.0.0.1:1/mirofish?sslmode=disable&connect_timeout=1",
 		"", metrics, nil, nil,
 	)

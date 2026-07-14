@@ -102,6 +102,16 @@ func TestLiveQuotaReserveFinalizeReleaseConcurrencyAndRLS(t *testing.T) {
 	if err := store.Release(context.Background(), liveQuotaTenantA, released.ReservationID); err != nil {
 		t.Fatalf("release failed-call reservation: %v", err)
 	}
+	reopened, err := store.Reserve(context.Background(), liveReservationInput("live-provider-call-failed", 5, 50))
+	if err != nil {
+		t.Fatalf("reopen released provider call reservation: %v", err)
+	}
+	if reopened.ReservationID != released.ReservationID {
+		t.Fatalf("expected same reservation id after reopen, got %#v vs %#v", reopened, released)
+	}
+	if err := store.Release(context.Background(), liveQuotaTenantA, reopened.ReservationID); err != nil {
+		t.Fatalf("release reopened reservation: %v", err)
+	}
 	reader := NewSQLTelemetryReader(SQLTelemetryConfig{Queryer: NewSQLDBQueryer(appDB)})
 	billing, err := reader.BillingUsage(context.Background(), BillingUsageQuery{
 		TenantID: liveQuotaTenantA, ProjectID: liveQuotaProjectA, ModuleKey: "writer_composer",

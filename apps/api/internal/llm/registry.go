@@ -46,6 +46,8 @@ func documentedModules() []ModuleRecord {
 		{ModuleKey: "entity_resolution", Group: "Seed / Graph", Label: "Entity Resolution", Description: "Resolve aliases and canonical entities."},
 		{ModuleKey: "novel_chapter_summarizer", Group: "Seed / Graph", Label: "Novel Chapter Summarizer", Description: "Summarize chapter-level narrative state."},
 		{ModuleKey: "sequential_reading", Group: "Seed / Graph", Label: "Sequential Reading", Description: "Read source text in order and produce structured notes."},
+		{ModuleKey: "analysis_planner", Group: "Seed / Graph", Label: "Analysis Planner", Description: "Plan novel analysis tasks and write the analysis workspace task pack."},
+		{ModuleKey: "analysis_worker", Group: "Seed / Graph", Label: "Analysis Worker", Description: "Process source segments and write analysis notes and candidates into the workspace."},
 		{ModuleKey: "character_agent_profile", Group: "Seed / Graph", Label: "Character Agent Profile", Description: "Generate character profiles for agent use."},
 		{ModuleKey: "graph_bond_generator", Group: "Seed / Graph", Label: "Graph Bond Generator", Description: "Generate candidate graph bonds and relationships."},
 		{ModuleKey: "narrative_archives", Group: "Archive / Assets", Label: "Narrative Archives", Description: "Build narrative archive records."},

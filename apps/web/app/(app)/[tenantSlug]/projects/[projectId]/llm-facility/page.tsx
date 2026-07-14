@@ -5,6 +5,7 @@ import {
   type LLMBillingUsageSummary,
   type LLMQuotaPoliciesSummary,
 } from "../../../../../../components/llm-facility-shell";
+import type { LLMBindingActionResult } from "../../../../../../components/llm-module-bindings-panel";
 import { Suspense } from "react";
 import {
   apiBaseUrl,
@@ -27,10 +28,12 @@ import {
   type LLMChannelsSummary,
   type LLMModelRecord,
 } from "../../../../../../lib/api";
+import { checkProviderHealth } from "../../../../../../lib/llm-admin-api";
 import { tx } from "../../../../../../lib/locale";
 import {
   canonicalLLMFacilitySearch,
   DEFAULT_LLM_MODULE_KEY,
+  llmChannelAnchorId,
   llmChannelKey,
   llmModuleKeyFromSegment,
   llmModulePathSegment,
@@ -40,7 +43,11 @@ import {
 import { currentRequestLocale } from "../../../../../../lib/request-locale";
 import { currentRequestSessionCookie } from "../../../../../../lib/request-session";
 import { webApiContext, webReadApiContext } from "../../../../../../lib/server-auth";
-import { humanizeFailure, moduleLabel as sharedModuleLabel } from "../../../../../../lib/user-facing-copy";
+import {
+  humanizeFailure,
+  moduleLabel as sharedModuleLabel,
+  providerHealthSummary,
+} from "../../../../../../lib/user-facing-copy";
 import { workspacePathForProject } from "../../../../../../lib/workspace-route";
 import { redirect } from "next/navigation";
 
@@ -70,6 +77,9 @@ export default async function LLMFacilityPage({
     modelCode?: string;
     modelMessage?: string;
     modelStatus?: string;
+    healthCode?: string;
+    healthMessage?: string;
+    healthStatus?: string;
     quotaCode?: string;
     quotaMessage?: string;
     quotaStatus?: string;
@@ -133,7 +143,7 @@ export default async function LLMFacilityPage({
   ]);
   const channelModels = await loadChannelModels(apiContext, channels);
 
-  async function bindModuleAction(formData: FormData) {
+  async function bindModuleAction(formData: FormData): Promise<LLMBindingActionResult> {
     "use server";
 
     const nextModuleKey = stringFromFormData(formData, "moduleKey") || DEFAULT_LLM_MODULE_KEY;
@@ -154,26 +164,33 @@ export default async function LLMFacilityPage({
       settings,
     });
     const maxTokensLabel = settingsNumberLabel(settings, "max_tokens");
-    const nextQuery = new URLSearchParams({
-      module: llmModuleSegment(nextModuleKey),
-      bindingStatus: result.ok ? "success" : "error",
-      bindingCode: result.ok ? "LLM_BINDING_UPDATED" : result.code,
-      bindingMessage: result.ok
-        ? tx(
-            locale,
-            maxTokensLabel
-              ? `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}，输出上限 ${maxTokensLabel}`
-              : `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}`,
-            maxTokensLabel
-              ? `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}, output limit ${maxTokensLabel}`
-              : `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}`,
-          )
-        : bindingFailureMessage(locale, result.code, result.message),
-    });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+    if (!result.ok) {
+      return {
+        status: "error",
+        code: result.code,
+        message: bindingFailureMessage(locale, result.code, result.message),
+        appliedModuleKeys: [],
+      };
+    }
+    const refreshed = await getLLMModuleBindings(context);
+    return {
+      status: "success",
+      code: "LLM_BINDING_UPDATED",
+      message: tx(
+        locale,
+        maxTokensLabel
+          ? `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}，输出上限 ${maxTokensLabel}`
+          : `「${moduleLabel(locale, result.module_key)}」已绑定至 ${result.channel_name || result.channel_id} / ${result.model_id}`,
+        maxTokensLabel
+          ? `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}, output limit ${maxTokensLabel}`
+          : `“${moduleLabel(locale, result.module_key, result.module_key)}” bound to ${result.channel_name || result.channel_id} / ${result.model_id}`,
+      ),
+      appliedModuleKeys: [result.module_key],
+      bindings: refreshed.ok ? refreshed.items : undefined,
+    };
   }
 
-  async function batchBindModuleAction(formData: FormData) {
+  async function batchBindModuleAction(formData: FormData): Promise<LLMBindingActionResult> {
     "use server";
 
     const nextChannelId = stringFromFormData(formData, "channelId");
@@ -199,18 +216,19 @@ export default async function LLMFacilityPage({
     let lastCode = "LLM_BINDING_UPDATE_FAILED";
     let appliedMaxTokens = "";
     const failedLabels: string[] = [];
+    const appliedModuleKeys: string[] = [];
 
     if (targetModules.length === 0) {
-      const nextQuery = new URLSearchParams({
-        bindingStatus: "error",
-        bindingCode: "VALIDATION_FAILED",
-        bindingMessage: tx(
+      return {
+        status: "error",
+        code: "VALIDATION_FAILED",
+        message: tx(
           locale,
           "没有可应用的模块，请先选择模块、展开分组或改为全部。",
           "No modules to update. Select modules, expand a group, or apply to all.",
         ),
-      });
-      redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+        appliedModuleKeys: [],
+      };
     }
 
     for (const module of targetModules) {
@@ -232,6 +250,7 @@ export default async function LLMFacilityPage({
       });
       if (result.ok) {
         successCount += 1;
+        appliedModuleKeys.push(module.module_key);
       } else {
         lastCode = result.code;
         lastError = result.message;
@@ -243,10 +262,12 @@ export default async function LLMFacilityPage({
 
     const total = targetModules.length;
     const scopeLabelText = batchScopeLabel(locale, scope);
-    const nextQuery = new URLSearchParams({
-      bindingStatus: successCount === total ? "success" : "error",
-      bindingCode: successCount === total ? "LLM_BINDING_BATCH_UPDATED" : lastCode,
-      bindingMessage: successCount === total
+    const refreshed = await getLLMModuleBindings(context);
+    const ok = successCount === total;
+    return {
+      status: ok ? "success" : "error",
+      code: ok ? "LLM_BINDING_BATCH_UPDATED" : lastCode,
+      message: ok
         ? tx(
             locale,
             appliedMaxTokens
@@ -261,11 +282,12 @@ export default async function LLMFacilityPage({
             `批量绑定未全部成功：${successCount}/${total}。${failedLabels.length ? `失败项：${failedLabels.join("、")}${failedLabels.length < total - successCount ? "…" : ""}。` : ""}${bindingFailureMessage(locale, lastCode, lastError)}`,
             `Batch bind incomplete: ${successCount}/${total}. ${failedLabels.length ? `Failed: ${failedLabels.join(", ")}${failedLabels.length < total - successCount ? "…" : ""}. ` : ""}${bindingFailureMessage(locale, lastCode, lastError)}`,
           ),
-    });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+      appliedModuleKeys,
+      bindings: refreshed.ok ? refreshed.items : undefined,
+    };
   }
 
-  async function clearBindingAction(formData: FormData) {
+  async function clearBindingAction(formData: FormData): Promise<LLMBindingActionResult> {
     "use server";
 
     const requestedKeys = stringListFromFormData(formData, "moduleKeys");
@@ -277,10 +299,9 @@ export default async function LLMFacilityPage({
     let successCount = 0;
     let lastCode = "LLM_BINDING_CLEAR_FAILED";
     let lastError = "";
-    let lastModuleKey = moduleKeys[0] || DEFAULT_LLM_MODULE_KEY;
+    const appliedModuleKeys: string[] = [];
 
     for (const nextModuleKey of moduleKeys) {
-      lastModuleKey = nextModuleKey;
       const result = await deleteLLMModuleBinding({
         ...context,
         projectId,
@@ -288,6 +309,7 @@ export default async function LLMFacilityPage({
       });
       if (result.ok) {
         successCount += 1;
+        appliedModuleKeys.push(nextModuleKey);
       } else {
         lastCode = result.code;
         lastError = result.message;
@@ -295,12 +317,12 @@ export default async function LLMFacilityPage({
     }
 
     const total = moduleKeys.length;
-    const nextQuery = new URLSearchParams({
-      channel: channelQueryValue(selectedChannelId),
-      module: llmModuleSegment(lastModuleKey),
-      bindingStatus: successCount === total ? "success" : "error",
-      bindingCode: successCount === total ? "LLM_BINDING_CLEARED" : lastCode,
-      bindingMessage: successCount === total
+    const ok = successCount === total;
+    const refreshed = await getLLMModuleBindings(context);
+    return {
+      status: ok ? "success" : "error",
+      code: ok ? "LLM_BINDING_CLEARED" : lastCode,
+      message: ok
         ? total > 1
           ? tx(locale, `已恢复 ${successCount} 项项目默认绑定`, `Restored ${successCount} project defaults`)
           : tx(locale, "已恢复项目默认绑定", "Project default restored")
@@ -311,8 +333,9 @@ export default async function LLMFacilityPage({
               `Restore defaults incomplete: ${successCount}/${total}. ${bindingFailureMessage(locale, lastCode, lastError)}`,
             )
           : bindingFailureMessage(locale, lastCode, lastError),
-    });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+      appliedModuleKeys,
+      bindings: refreshed.ok ? refreshed.items : undefined,
+    };
   }
 
   async function createChannelAction(formData: FormData) {
@@ -320,16 +343,18 @@ export default async function LLMFacilityPage({
 
     const context = await webApiContext({ tenantId: tenantSlug });
     const result = await createLLMChannel(context, channelPayload(formData));
+    const focusChannelId = result.ok ? result.channel_id : "";
     const nextQuery = new URLSearchParams({
       module: llmModuleSegment(moduleKey),
-      channel: channelQueryValue(result.ok ? result.channel_id : selectedChannelId),
+      // Keep the models panel selection stable; focus the edited channel card via hash.
+      channel: channelQueryValue(selectedChannelId),
       channelStatus: result.ok ? "success" : "error",
       channelCode: result.ok ? "LLM_CHANNEL_CREATED" : result.code,
       channelMessage: result.ok
         ? tx(locale, `已创建渠道「${result.name}」`, `Channel “${result.name}” created`)
         : result.message,
     });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId, focusChannelId));
   }
 
   async function deleteChannelAction(formData: FormData) {
@@ -342,14 +367,14 @@ export default async function LLMFacilityPage({
     });
     const nextQuery = new URLSearchParams({
       module: llmModuleSegment(moduleKey),
-      channel: channelQueryValue(result.ok ? result.channel_id : targetChannelId),
+      channel: channelQueryValue(selectedChannelId),
       channelStatus: result.ok ? "success" : "error",
       channelCode: result.ok ? "LLM_CHANNEL_DISABLED" : result.code,
       channelMessage: result.ok
         ? tx(locale, `已停用渠道「${result.name}」`, `Channel “${result.name}” disabled`)
         : result.message,
     });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId, targetChannelId));
   }
 
   async function updateChannelAction(formData: FormData) {
@@ -360,14 +385,45 @@ export default async function LLMFacilityPage({
     const result = await updateLLMChannel(context, targetChannelId, channelPayload(formData));
     const nextQuery = new URLSearchParams({
       module: llmModuleSegment(moduleKey),
-      channel: channelQueryValue(targetChannelId),
+      channel: channelQueryValue(selectedChannelId),
       channelStatus: result.ok ? "success" : "error",
       channelCode: result.ok ? "LLM_CHANNEL_UPDATED" : result.code,
       channelMessage: result.ok
         ? tx(locale, `已更新渠道「${result.name}」`, `Channel “${result.name}” updated`)
         : result.message,
     });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId, targetChannelId));
+  }
+
+  async function testModelAction(formData: FormData) {
+    "use server";
+
+    const targetChannelId = stringFromFormData(formData, "channelId");
+    const targetModelId = stringFromFormData(formData, "modelId");
+    const context = await webApiContext({ tenantId: tenantSlug, projectId });
+    const result = await checkProviderHealth(context, {
+      project_id: projectId,
+      channel_id: targetChannelId,
+      model_id: targetModelId,
+    });
+    const nextQuery = new URLSearchParams({
+      module: llmModuleSegment(moduleKey),
+      channel: channelQueryValue(selectedChannelId),
+      healthStatus: result.ok ? "success" : "error",
+      healthCode: result.ok ? "LLM_PROVIDER_HEALTH_OK" : result.code,
+      healthMessage: result.ok
+        ? tx(
+            locale,
+            `模型连通正常：${targetModelId} · ${providerHealthSummary(locale, result)}`,
+            `Model link OK: ${targetModelId} · ${providerHealthSummary(locale, result)}`,
+          )
+        : tx(
+            locale,
+            `模型连通失败（${targetModelId}）：${result.message}`,
+            `Model link failed (${targetModelId}): ${result.message}`,
+          ),
+    });
+    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId, targetChannelId));
   }
 
   async function syncChannelAction(formData: FormData) {
@@ -380,7 +436,9 @@ export default async function LLMFacilityPage({
     });
     const nextQuery = new URLSearchParams({
       module: llmModuleSegment(moduleKey),
-      channel: channelQueryValue(result.ok ? result.channel.channel_id : targetChannelId),
+      // Do not retarget the models panel to the synced channel — that full panel
+      // swap + top status insert after redirect is what made the page thrash.
+      channel: channelQueryValue(selectedChannelId),
       syncStatus: result.ok ? "success" : "error",
       syncCode: result.ok ? "LLM_MODELS_SYNCED" : result.code,
       syncMessage: result.ok
@@ -391,7 +449,7 @@ export default async function LLMFacilityPage({
           )
         : result.message,
     });
-    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId));
+    redirect(llmFacilityRoute(tenantSlug, projectId, nextQuery, defaultChannelId, targetChannelId));
   }
 
   async function updateModelAction(formData: FormData) {
@@ -482,6 +540,9 @@ export default async function LLMFacilityPage({
       modelStatus={query.modelStatus?.trim() || ""}
       modelCode={query.modelCode?.trim() || ""}
       modelMessage={query.modelMessage?.trim() || ""}
+      healthStatus={query.healthStatus?.trim() || ""}
+      healthCode={query.healthCode?.trim() || ""}
+      healthMessage={query.healthMessage?.trim() || ""}
       quotaStatus={query.quotaStatus?.trim() || ""}
       quotaCode={query.quotaCode?.trim() || ""}
       quotaMessage={query.quotaMessage?.trim() || ""}
@@ -492,6 +553,7 @@ export default async function LLMFacilityPage({
       updateChannelAction={updateChannelAction}
       deleteChannelAction={deleteChannelAction}
       syncChannelAction={syncChannelAction}
+      testModelAction={testModelAction}
       updateModelAction={updateModelAction}
       upsertQuotaPolicyAction={upsertQuotaPolicyAction}
       resolution={resolution}
@@ -557,6 +619,7 @@ function llmFacilityRoute(
   projectId: string,
   query: URLSearchParams,
   defaultChannelId = "",
+  focusChannelId = "",
 ) {
   const canonicalSearch = canonicalLLMFacilitySearch(query);
   if (canonicalSearch.get("module") === llmModuleSegment(DEFAULT_LLM_MODULE_KEY)) {
@@ -577,7 +640,9 @@ function llmFacilityRoute(
     section,
   );
   const search = canonicalSearch.toString();
-  return search ? `${path}?${search}` : path;
+  const hash = llmChannelAnchorId(focusChannelId);
+  const withSearch = search ? `${path}?${search}` : path;
+  return hash ? `${withSearch}#${hash}` : withSearch;
 }
 
 function channelQueryValue(channelId: string) {

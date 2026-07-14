@@ -64,14 +64,15 @@ func (r *SQLHealthCredentialResolver) ResolveHealthTarget(
 	}
 	var target HealthTarget
 	var encryptedAPIKey string
+	var storedTools, storedJSON bool
 	if err := rows.Scan(
 		&target.ChannelID,
 		&target.ModelID,
 		&target.BaseURL,
 		&encryptedAPIKey,
 		&target.ExternalProviderOptIn,
-		&target.SupportsTools,
-		&target.SupportsJSON,
+		&storedTools,
+		&storedJSON,
 	); err != nil {
 		return HealthTarget{}, healthTargetUnavailable()
 	}
@@ -86,6 +87,11 @@ func (r *SQLHealthCredentialResolver) ResolveHealthTarget(
 		return HealthTarget{}, healthTargetUnavailable()
 	}
 	target.APIKey = apiKey
+	// Catalog rows often keep FALSE defaults after sync. Official DeepSeek chat
+	// models support tools + JSON; report effective capabilities, not the stale bit.
+	caps := llm.EffectiveModelCapabilities(target.ModelID, storedJSON, storedTools)
+	target.SupportsJSON = caps.SupportsJSON
+	target.SupportsTools = caps.SupportsTools
 	return target, nil
 }
 
