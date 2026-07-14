@@ -156,10 +156,14 @@ test("writer mobile hides status header and reclaims writing canvas height", asy
     /\[data-mobile-immersive="true"\]\s*\.writer-agent-layout[\s\S]*?-\s*132px/s,
   );
 
-  // Folded immersive must reclaim topbar padding so 结构/手稿/Agent pin under safe area.
+  // Folded immersive must reclaim topbar + tabbar padding so content pins under safe area.
   assert.match(
     chrome,
     /\[data-mobile-immersive="true"\]\[data-mobile-chrome="folded"\]\s*\.app-main\s*\{[\s\S]*?padding-top:\s*calc\(6px\s*\+\s*var\(--mobile-safe-top\)\)/s,
+  );
+  assert.match(
+    chrome,
+    /\[data-mobile-immersive="true"\]\[data-mobile-chrome="folded"\]\s*\{[\s\S]*?--mobile-main-pad-bottom:\s*calc\(12px\s*\+\s*var\(--mobile-safe-bottom\)\)/s,
   );
 
   // Admission feedback is a light toast, not a permanent form-status strip.

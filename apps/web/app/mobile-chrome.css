@@ -447,17 +447,13 @@
 /* ── Phone shell ── */
 @media (max-width: 860px) {
   .app-frame.app-frame-unified {
-    --mobile-main-pad-bottom: calc(var(--mobile-tabbar-height) + var(--mobile-safe-bottom) + 28px);
+    --mobile-main-pad-bottom: calc(var(--mobile-tabbar-height) + var(--mobile-safe-bottom) + 14px);
     position: relative;
     min-height: 100dvh;
     background:
       radial-gradient(120% 70% at 50% -8%, rgba(169, 133, 79, 0.1), transparent 48%),
       radial-gradient(90% 50% at 100% 20%, rgba(143, 33, 27, 0.045), transparent 42%),
       linear-gradient(180deg, #f3eee4 0%, #f7f2e9 42%, #f1ebe1 100%);
-  }
-
-  .app-frame.app-frame-unified[data-mobile-immersive="true"] {
-    --mobile-main-pad-bottom: calc(12px + var(--mobile-safe-bottom));
   }
 
   .app-frame.app-frame-unified .app-sidebar {
@@ -974,8 +970,12 @@
     padding-right: 8px;
   }
 
-  /* Immersive alone keeps topbar clearance; when chrome folds, reclaim the band
-     so 结构/手稿/Agent pin under the safe area (no empty mountain-height gap). */
+  /* Immersive alone keeps topbar + tabbar clearance; when chrome folds, reclaim
+     both bands so conversation/composer pin under the safe area (no empty gap). */
+  .app-frame.app-frame-unified[data-mobile-immersive="true"][data-mobile-chrome="folded"] {
+    --mobile-main-pad-bottom: calc(12px + var(--mobile-safe-bottom));
+  }
+
   .app-frame.app-frame-unified[data-mobile-immersive="true"][data-mobile-chrome="folded"] .app-main {
     padding-top: calc(6px + var(--mobile-safe-top));
   }
@@ -1319,6 +1319,161 @@
 
   .overview-root .workbench-grid > main > *:nth-child(3) {
     animation-delay: 130ms;
+  }
+
+  /* ── Materials deep pages: compact page headers under mobile topbar ──
+     Phone shell owns top chrome; page WorkspaceHeader must not re-hero. */
+  .app-frame.app-frame-unified:has(.asset-library-root) .app-main,
+  .app-frame.app-frame-unified:has(.story-graph-root) .app-main,
+  .app-frame.app-frame-unified:has(.worldline-root) .app-main,
+  .app-frame.app-frame-unified:has(.character-console-root) .app-main {
+    padding-left: var(--mobile-stage-pad-x);
+    padding-right: var(--mobile-stage-pad-x);
+  }
+
+  .asset-library-header,
+  .story-graph-header,
+  .worldline-header,
+  .llm-facility-header {
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 6px 2px 10px !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .asset-library-header .eyebrow,
+  .story-graph-header .eyebrow,
+  .worldline-header .eyebrow,
+  .llm-facility-header .eyebrow {
+    display: none;
+  }
+
+  .asset-library-header h1,
+  .story-graph-header h1,
+  .worldline-header h1,
+  .llm-facility-header h1 {
+    margin: 0 0 4px !important;
+    font-family: var(--font-serif, "Songti SC", serif);
+    font-size: clamp(1.2rem, 4.8vw, 1.4rem) !important;
+    font-weight: 650;
+    line-height: 1.25 !important;
+  }
+
+  .asset-library-header .status-pill,
+  .story-graph-header .status-pill,
+  .worldline-header .status-pill {
+    min-height: 28px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+  }
+
+  .asset-library-header .page-title-icon,
+  .story-graph-header .page-title-icon,
+  .worldline-header .page-title-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  /* Story graph / worldline: short segmented mode bar (not diamond facets). */
+  .story-graph-root .workspace-mode-switcher,
+  .worldline-root .workspace-mode-switcher,
+  .character-console-root .workspace-mode-switcher {
+    --mode-facet-h: 36px;
+    --mode-facet-w: auto;
+    --mode-facet-gap: 4px;
+    width: 100%;
+    justify-content: stretch;
+    gap: 4px;
+    margin: 0 0 8px;
+    padding: 4px;
+    border: 1px solid var(--mobile-border);
+    border-radius: 12px;
+    background: rgba(255, 252, 246, 0.88);
+    box-shadow: none;
+  }
+
+  .story-graph-root .workspace-mode-switcher::before,
+  .worldline-root .workspace-mode-switcher::before,
+  .character-console-root .workspace-mode-switcher::before {
+    display: none;
+  }
+
+  .story-graph-root .workspace-mode-switcher > button,
+  .worldline-root .workspace-mode-switcher > button,
+  .character-console-root .workspace-mode-switcher > button {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    height: var(--mode-facet-h);
+    min-height: var(--mode-facet-h);
+    border-radius: 9px;
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+    clip-path: none;
+  }
+
+  .story-graph-root .workspace-mode-switcher > button::before,
+  .story-graph-root .workspace-mode-switcher > button::after,
+  .worldline-root .workspace-mode-switcher > button::before,
+  .worldline-root .workspace-mode-switcher > button::after,
+  .character-console-root .workspace-mode-switcher > button::before,
+  .character-console-root .workspace-mode-switcher > button::after {
+    clip-path: none;
+    border-radius: 9px;
+    inset: 0;
+  }
+
+  .story-graph-root .workspace-mode-switcher > button[aria-selected="true"]::after,
+  .worldline-root .workspace-mode-switcher > button[aria-selected="true"]::after,
+  .character-console-root .workspace-mode-switcher > button[aria-selected="true"]::after {
+    background: rgba(143, 33, 27, 0.12);
+    box-shadow: none;
+  }
+
+  /* Overview: tighter page head under mobile topbar. */
+  .overview-header.workspace-header-compact {
+    padding: 4px 4px 8px !important;
+  }
+
+  .overview-header.workspace-header-compact h1 {
+    font-size: clamp(1.28rem, 4.6vw, 1.5rem);
+  }
+
+  .overview-header.workspace-header-compact .status-pill {
+    min-height: 26px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+  }
+
+  /* Seed wall: when expanded, never show preview-bar retry (belt + suspenders). */
+  .overview-status-stage[data-expanded="true"] .overview-status-wall-preview-action {
+    display: none !important;
+  }
+
+  /* Asset library: single-column scroll — no 52dvh aside clamp sandwich. */
+  .overview-root .workbench-grid.asset-library-grid > aside.asset-library-aside,
+  .asset-library-root .asset-library-aside {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* Graph explore: inspector flows instead of stealing half the viewport. */
+  .story-graph-root .inspector-panel {
+    max-height: none;
+  }
+
+  /* Immersive writer: one stage pad only — inner thread/composer stay tight. */
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-thread-scroll {
+    padding-left: 2px;
+    padding-right: 2px;
+  }
+
+  .app-frame.app-frame-unified[data-mobile-immersive="true"] .writer-composer-dock {
+    padding-left: 2px;
+    padding-right: 2px;
   }
 }
 
