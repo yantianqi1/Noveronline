@@ -485,6 +485,11 @@ test("password login page issues browser session server-side without exposing to
 
   assert.match(page, /<LoginForm action=\{loginAction\} \/>/);
   assert.match(page, /欢迎回来/);
+  assert.match(page, /login-atmosphere/);
+  assert.match(page, /login-seal/);
+  assert.match(page, /执笔/);
+  assert.match(page, /Feather/);
+  assert.match(page, /login-kicker-icon/);
   assert.match(form, /<form action=\{action\}/);
   assert.match(form, /htmlFor="login-email"/);
   assert.match(form, /type="email"/);
@@ -2841,6 +2846,7 @@ test("cookie-backed locale selection controls the root document and bilingual co
 
 test("login page keeps the reference editorial split-screen proportions", async () => {
   const styles = await fileText("app/auth-marketing.css");
+  const page = await fileText("app/login/page.tsx");
 
   assert.match(styles, /\.login-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(560px, 43\.5%\) minmax\(0, 56\.5%\)/s);
   assert.match(styles, /\.login-copy\s*\{[^}]*width:\s*min\(100% - 80px, 455px\)/s);
@@ -2856,6 +2862,29 @@ test("login page keeps the reference editorial split-screen proportions", async 
   assert.match(
     styles,
     /@media \(max-width: 960px\)[\s\S]*\.login-form-panel\s*\{[\s\S]*align-items:\s*start/s,
+  );
+  assert.match(page, /className="login-atmosphere"/);
+  assert.match(page, /className="login-seal"/);
+  assert.match(styles, /\.login-atmosphere,\s*\n\.login-seal\s*\{[^}]*display:\s*none/s);
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*\.login-atmosphere\s*\{[\s\S]*display:\s*block/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*\.login-input-wrap\s*\{[\s\S]*border-bottom:\s*1px solid/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*\.login-submit\s*\{[\s\S]*border-radius:\s*999px/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*url\("\/landing\/assets\/mobile\/scene-4-workbench\.jpg"\)/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*url\("\/landing\/assets\/mobile\/scene-5-finale\.jpg"\)/s,
   );
 });
 
