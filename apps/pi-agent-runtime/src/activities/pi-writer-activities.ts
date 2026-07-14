@@ -576,11 +576,12 @@ export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps>
             project_id: input.project_id,
             run_id: input.run_id,
             role: "agent",
-            body: draft.content,
+            body: candidateReadyThreadBody(draft.content),
             metadata: {
               draft_id: saved.draft_id,
               mode: input.mode,
-              status: "candidate"
+              status: "candidate",
+              kind: "candidate_ready"
             }
           });
         } catch {
@@ -1024,7 +1025,8 @@ async function runDualStagePiWriterActivity(
       status: "candidate",
       source_metadata: sourceMetadata
     }, "summary", "completed");
-    // CONN-009: durable agent message for persistent Writer threads (best-effort).
+    // CONN-009: durable agent status for persistent Writer threads (best-effort).
+    // Keep the full prose on the canvas only — the thread stores a short status line.
     if (deps.appendWriterThreadMessage) {
       try {
         await deps.appendWriterThreadMessage({
@@ -1032,11 +1034,12 @@ async function runDualStagePiWriterActivity(
           project_id: input.project_id,
           run_id: input.run_id,
           role: "agent",
-          body: draft.content,
+          body: candidateReadyThreadBody(draft.content),
           metadata: {
             draft_id: saved.draft_id,
             mode: input.mode,
-            status: "candidate"
+            status: "candidate",
+            kind: "candidate_ready"
           }
         });
       } catch {
@@ -1092,6 +1095,18 @@ function writerSourceMetadata(input: WriterRunInput): Record<string, unknown> {
       worldline_paths: input.worldline_path_ids.length
     }
   };
+}
+
+/**
+ * Thread messages stay short: full candidate prose lives on the canvas.
+ * Count Unicode code points so CJK length matches the author-facing status line.
+ */
+function candidateReadyThreadBody(content: string): string {
+  const chars = [...content.trim()].length;
+  if (chars <= 0) {
+    return "候选稿已写好，见左侧画布。";
+  }
+  return `候选稿已写好（${chars} 字），见左侧画布。`;
 }
 
 function publicWriterToolResult(toolName: string, value: unknown): Record<string, unknown> {

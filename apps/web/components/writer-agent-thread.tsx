@@ -149,15 +149,30 @@ export function WriterAgentThread({
       </header>
 
       <div className="writer-thread-scroll" ref={scrollRef}>
-        {threadMessages.map((message, index) => (
-          <article
-            className={`writer-message writer-message-${message.role === "user" ? "user" : "agent"}`}
-            key={`thread-${index}-${message.created_at ?? ""}`}
-            data-thread-message="true"
-          >
-            <p>{message.body}</p>
-          </article>
-        ))}
+        {threadMessages.map((message, index) => {
+          // While the live run card is mounted, skip the durable agent status for the
+          // same run so the canvas summary is not duplicated in the thread.
+          if (
+            showLiveRun &&
+            message.role !== "user" &&
+            message.run_id &&
+            message.run_id === liveRunId &&
+            isCandidateStatusMessage(message.body)
+          ) {
+            return null;
+          }
+          const display = displayThreadBody(locale, message);
+          return (
+            <article
+              className={`writer-message writer-message-${message.role === "user" ? "user" : "agent"}`}
+              key={`thread-${index}-${message.created_at ?? ""}`}
+              data-thread-message="true"
+              data-kind={display.kind}
+            >
+              <p>{display.body}</p>
+            </article>
+          );
+        })}
         {showPending ? (
           <article className="writer-message writer-message-user" data-pending-message="true">
             <p>{pendingInstruction}</p>
@@ -193,8 +208,8 @@ export function WriterAgentThread({
               {recoveredDraftId && !draftIsAdopted ? (
                 <p className="form-hint">
                   <Bi
-                    zh="候选稿已放在右侧画布，采用后才会进入正式手稿。"
-                    en="The candidate is on the canvas. Adopt it to place it into the manuscript."
+                    zh="候选稿已放在左侧画布，采用后才会进入正式手稿。"
+                    en="The candidate is on the left canvas. Adopt it to place it into the manuscript."
                   />
                 </p>
               ) : null}
@@ -278,4 +293,43 @@ function threadContainsUserInstruction(
   const needle = instruction.trim();
   if (!needle) return false;
   return messages.some((message) => message.role === "user" && message.body.trim() === needle);
+}
+
+/**
+ * Older runs stored the full candidate prose as an agent thread message.
+ * Collapse those into a short status so the canvas stays the only prose surface.
+ */
+function displayThreadBody(locale: Locale, message: WriterThreadMessageView): { kind: string; body: string } {
+  if (message.role === "user") {
+    return { kind: "user", body: message.body };
+  }
+  const trimmed = message.body.trim();
+  if (!looksLikeFullCandidateProse(trimmed)) {
+    return { kind: "status", body: message.body };
+  }
+  const chars = [...trimmed].length;
+  return {
+    kind: "candidate_ready",
+    body: tx(
+      locale,
+      `候选稿已写好（${chars} 字），见左侧画布。`,
+      `Candidate draft ready (${chars} characters) — see the left canvas.`,
+    ),
+  };
+}
+
+function looksLikeFullCandidateProse(body: string): boolean {
+  if (body.length < 220) return false;
+  if (/^候选稿已写好/.test(body) || /^Candidate draft ready/i.test(body)) return false;
+  // Short status lines stay as-is; multi-paragraph or long narrative bodies collapse.
+  return body.includes("\n") || body.length >= 280;
+}
+
+function isCandidateStatusMessage(body: string): boolean {
+  const trimmed = body.trim();
+  return (
+    /^候选稿已写好/.test(trimmed) ||
+    /^Candidate draft ready/i.test(trimmed) ||
+    looksLikeFullCandidateProse(trimmed)
+  );
 }

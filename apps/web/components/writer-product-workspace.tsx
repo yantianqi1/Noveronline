@@ -305,36 +305,44 @@ function ChapterScenePanel({ compact = false, ...props }: WriterProductWorkspace
   return (
     <section className={`panel writer-structure-panel ${compact ? "writer-structure-compact" : ""}`} aria-labelledby="chapter-scene-heading">
       <p className="eyebrow"><Bi zh="结构" en="Structure" /></p>
-      <h2 id="chapter-scene-heading"><Bi zh="章节" en="Chapters" /></h2>
-      <form action={props.actions.createChapter} className="binding-form">
-        <label htmlFor="new-chapter-title"><Bi zh="新章节" en="New chapter" /></label>
-        <input id="new-chapter-title" name="title" required placeholder={tx(locale, "章节标题", "Chapter title")} />
-        <button data-tone="primary" type="submit"><Save size={16} /><Bi zh="创建" en="Create" /></button>
+      <h2 id="chapter-scene-heading"><Bi zh="章节管理" en="Chapter management" /></h2>
+      <p className="form-hint">
+        <Bi
+          zh="点章节标题切换写作位置；改名、写大纲或归档放在每章的「编辑」里。"
+          en="Click a chapter title to switch where you write. Renaming, outlines and archiving live inside each chapter's Edit."
+        />
+      </p>
+      <form action={props.actions.createChapter} className="binding-form writer-structure-create">
+        <input aria-label={tx(locale, "新章节标题", "New chapter title")} name="title" required placeholder={tx(locale, "新章节标题，例如「第一章 归乡」", "New chapter title")} />
+        <button data-tone="primary" type="submit"><Save size={16} /><Bi zh="新建章节" en="New chapter" /></button>
       </form>
-      <ResultBoundary locale={locale} result={chapters} empty={tx(locale, "暂无章节。", "No chapters.")} render={(items) => (
+      <ResultBoundary locale={locale} result={chapters} empty={tx(locale, "暂无章节。先在上方创建第一章。", "No chapters yet. Create chapter one above.")} render={(items) => (
         <div className="compact-action-list writer-chapter-tree">
           {items.map((chapter, index) => (
-            <article className={`tool-result-card ${props.selectedChapterId === chapter.chapter_id ? "is-selected" : ""}`} key={chapter.chapter_id}>
-              <div className="inline-controls">
+            <article className={`writer-structure-card ${props.selectedChapterId === chapter.chapter_id ? "is-selected" : ""}`} key={chapter.chapter_id}>
+              <div className="writer-structure-card-row">
                 <ChapterNavigateForm props={props} chapterId={chapter.chapter_id} label={<strong>{chapter.chapter_order}. {chapter.title}</strong>} />
+                <small><StatusValue value={chapter.status} /></small>
                 {!compact ? (
-                  <>
+                  <span className="writer-structure-reorder">
                     <ReorderButton action={props.actions.reorderChapters} ariaLabel={tx(locale, "上移章节", "Move chapter up")} direction={-1} disabled={index <= 0} orderedIds={reorderedIds(items.map((item) => item.chapter_id), index, -1)} />
                     <ReorderButton action={props.actions.reorderChapters} ariaLabel={tx(locale, "下移章节", "Move chapter down")} direction={1} disabled={index >= items.length - 1} orderedIds={reorderedIds(items.map((item) => item.chapter_id), index, 1)} />
-                  </>
+                  </span>
                 ) : null}
               </div>
-              <small><StatusValue value={chapter.status} /></small>
               {!compact ? (
-                <>
-                  <form action={props.actions.updateChapter} className="binding-form">
-                    <input name="chapterId" type="hidden" value={chapter.chapter_id} /><input name="expectedVersion" type="hidden" value={chapter.optimistic_version} />
-                    <input name="title" defaultValue={chapter.title} aria-label={`Chapter title ${chapter.title}`} />
-                    <textarea name="outline" defaultValue={chapter.private?.outline ?? ""} placeholder={tx(locale, "章节大纲", "Chapter outline")} rows={2} />
-                    <button type="submit"><Save size={14} /><Bi zh="保存章节" en="Save chapter" /></button>
-                  </form>
-                  <DeleteForm action={props.actions.deleteChapter} idName="chapterId" id={chapter.chapter_id} version={chapter.optimistic_version} label={tx(locale, "归档章节", "Archive chapter")} />
-                </>
+                <details className="writer-structure-edit">
+                  <summary><Bi zh="编辑" en="Edit" /></summary>
+                  <div className="writer-structure-edit-body">
+                    <form action={props.actions.updateChapter} className="binding-form">
+                      <input name="chapterId" type="hidden" value={chapter.chapter_id} /><input name="expectedVersion" type="hidden" value={chapter.optimistic_version} />
+                      <input name="title" defaultValue={chapter.title} aria-label={`Chapter title ${chapter.title}`} />
+                      <textarea name="outline" defaultValue={chapter.private?.outline ?? ""} placeholder={tx(locale, "章节大纲（可选）", "Chapter outline (optional)")} rows={2} />
+                      <button type="submit"><Save size={14} /><Bi zh="保存" en="Save" /></button>
+                    </form>
+                    <DeleteForm action={props.actions.deleteChapter} idName="chapterId" id={chapter.chapter_id} version={chapter.optimistic_version} label={tx(locale, "归档章节", "Archive chapter")} />
+                  </div>
+                </details>
               ) : null}
             </article>
           ))}
@@ -342,46 +350,52 @@ function ChapterScenePanel({ compact = false, ...props }: WriterProductWorkspace
       )} />
       {props.selectedChapterId ? (
         <div className="compact-action-list">
-          <h3><Bi zh="场景" en="Scenes" /></h3>
-          <form action={props.actions.createScene} className="binding-form">
+          <h3><Bi zh="当前章节的场景" en="Scenes in this chapter" /></h3>
+          <form action={props.actions.createScene} className="binding-form writer-structure-create">
             <input name="chapterId" type="hidden" value={props.selectedChapterId} />
-            <input name="title" required placeholder={tx(locale, "场景标题", "Scene title")} />
-            <button type="submit"><Save size={14} /><Bi zh="创建场景" en="Create scene" /></button>
+            <input aria-label={tx(locale, "新场景标题", "New scene title")} name="title" required placeholder={tx(locale, "新场景标题", "New scene title")} />
+            <button type="submit"><Save size={14} /><Bi zh="新建场景" en="New scene" /></button>
           </form>
-          <ResultBoundary locale={locale} result={scenes} empty={tx(locale, "暂无场景。", "No scenes.")} render={(items) => (
+          <ResultBoundary locale={locale} result={scenes} empty={tx(locale, "暂无场景。场景是可选的细分。", "No scenes. Scenes are optional subdivisions.")} render={(items) => (
             <>
               {items.map((scene, index) => (
-                <article className={`tool-result-card ${props.selectedSceneId === scene.scene_id ? "is-selected" : ""}`} key={scene.scene_id}>
-                  <div className="inline-controls">
+                <article className={`writer-structure-card is-scene ${props.selectedSceneId === scene.scene_id ? "is-selected" : ""}`} key={scene.scene_id}>
+                  <div className="writer-structure-card-row">
                     <SceneNavigateForm props={props} chapterId={scene.chapter_id} sceneId={scene.scene_id} label={<strong>{scene.scene_order}. {scene.title}</strong>} />
+                    <small><StatusValue value={scene.status} /></small>
                     {!compact ? (
-                      <>
+                      <span className="writer-structure-reorder">
                         <ReorderButton action={props.actions.reorderScenes} ariaLabel={tx(locale, "上移场景", "Move scene up")} direction={-1} disabled={index <= 0} extraFields={{ chapterId: props.selectedChapterId }} orderedIds={reorderedIds(items.map((item) => item.scene_id), index, -1)} />
                         <ReorderButton action={props.actions.reorderScenes} ariaLabel={tx(locale, "下移场景", "Move scene down")} direction={1} disabled={index >= items.length - 1} extraFields={{ chapterId: props.selectedChapterId }} orderedIds={reorderedIds(items.map((item) => item.scene_id), index, 1)} />
-                      </>
+                      </span>
                     ) : null}
                   </div>
-                  <small><StatusValue value={scene.status} /></small>
                   {!compact ? (
-                    <>
-                      <form action={props.actions.updateScene} className="binding-form">
-                        <input name="sceneId" type="hidden" value={scene.scene_id} /><input name="expectedVersion" type="hidden" value={scene.optimistic_version} />
-                        <input name="title" defaultValue={scene.title} aria-label={`Scene title ${scene.title}`} />
-                        <textarea name="outline" defaultValue={scene.private?.outline ?? ""} placeholder={tx(locale, "场景大纲", "Scene outline")} rows={2} />
-                        <button type="submit"><Save size={14} /><Bi zh="保存场景" en="Save scene" /></button>
-                      </form>
-                      <DeleteForm action={props.actions.deleteScene} idName="sceneId" id={scene.scene_id} version={scene.optimistic_version} label={tx(locale, "归档场景", "Archive scene")} />
-                    </>
+                    <details className="writer-structure-edit">
+                      <summary><Bi zh="编辑" en="Edit" /></summary>
+                      <div className="writer-structure-edit-body">
+                        <form action={props.actions.updateScene} className="binding-form">
+                          <input name="sceneId" type="hidden" value={scene.scene_id} /><input name="expectedVersion" type="hidden" value={scene.optimistic_version} />
+                          <input name="title" defaultValue={scene.title} aria-label={`Scene title ${scene.title}`} />
+                          <textarea name="outline" defaultValue={scene.private?.outline ?? ""} placeholder={tx(locale, "场景大纲（可选）", "Scene outline (optional)")} rows={2} />
+                          <button type="submit"><Save size={14} /><Bi zh="保存" en="Save" /></button>
+                        </form>
+                        <DeleteForm action={props.actions.deleteScene} idName="sceneId" id={scene.scene_id} version={scene.optimistic_version} label={tx(locale, "归档场景", "Archive scene")} />
+                      </div>
+                    </details>
                   ) : null}
                 </article>
               ))}
             </>
           )} />
           {!compact ? (
-            <>
-              <VersionList locale={locale} label={tx(locale, "章节版本", "Chapter versions")} result={chapterVersions} />
-              <VersionList locale={locale} label={tx(locale, "场景版本", "Scene versions")} result={sceneVersions} />
-            </>
+            <details className="writer-structure-versions">
+              <summary><Bi zh="历史版本" en="Version history" /></summary>
+              <div className="writer-structure-edit-body">
+                <VersionList locale={locale} label={tx(locale, "章节版本", "Chapter versions")} result={chapterVersions} />
+                <VersionList locale={locale} label={tx(locale, "场景版本", "Scene versions")} result={sceneVersions} />
+              </div>
+            </details>
           ) : null}
         </div>
       ) : null}

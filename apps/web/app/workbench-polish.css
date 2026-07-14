@@ -751,30 +751,35 @@
 }
 
 .writer-artifact-canvas {
-  /* Tools rail + stage: stage stays column-flex so chapter head / manuscript /
-     candidate / meta keep the scroll model that avoids a dead empty band. */
+  /* Stage stays column-flex so chapter head / manuscript / candidate / meta
+     keep the scroll model that avoids a dead empty band. The tools group is a
+     compact overlay row aligned with the canvas head (命令 / 技术详情). */
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  position: relative;
   min-height: 0;
   overflow: hidden;
   background: #fbf8f1;
 }
 
 .writer-canvas-tools {
+  position: absolute;
+  top: 0;
+  right: 14px;
+  z-index: 6;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: stretch;
-  align-self: stretch;
-  padding: 12px 10px;
-  border-right: 1px solid rgba(65, 57, 47, 0.16);
-  background: #f0ebe3;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.writer-canvas-tools .writer-command-palette-trigger,
-.writer-canvas-tools .technical-details-trigger {
-  width: 100%;
-  justify-content: flex-start;
+/* Leave room in the head row so the word-count meta sits left of the tools. */
+.writer-artifact-workspace > .writer-canvas-head {
+  padding-right: 246px;
 }
 
 .writer-canvas-tools .technical-details-drawer {
@@ -782,24 +787,41 @@
   background: transparent;
 }
 
+.writer-canvas-tools .writer-command-palette-trigger,
 .writer-canvas-tools .technical-details-trigger {
   display: inline-flex;
-  width: 100%;
-  min-height: 40px;
+  width: auto;
   align-items: center;
-  justify-content: flex-start;
-  gap: 7px;
-  border-color: rgba(65, 57, 47, 0.2);
-  background: rgba(255, 253, 248, 0.48);
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid rgba(65, 57, 47, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 253, 248, 0.6);
   box-shadow: none;
-  color: #4d514d;
-  padding: 8px 11px;
+  color: #5a564c;
+  font-size: 0.76rem;
+  line-height: 1;
+}
+
+.writer-canvas-tools .writer-command-palette-trigger:hover,
+.writer-canvas-tools .technical-details-trigger:hover {
+  background: rgba(255, 253, 248, 0.95);
+  border-color: rgba(65, 57, 47, 0.32);
+  color: #35322b;
 }
 
 .writer-canvas-tools .technical-details-trigger > span {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
+}
+
+.writer-canvas-tools .technical-details-trigger svg,
+.writer-canvas-tools .writer-command-palette-trigger svg {
+  width: 13px;
+  height: 13px;
 }
 
 .writer-canvas-tools .technical-details-trigger > small {
@@ -816,12 +838,18 @@
 
 .writer-canvas-stage > .writer-candidate-sheet {
   order: 2;
-  flex: 0 0 auto;
-  /* Long candidate prose scrolls in place; body below keeps the remaining space. */
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  /* Long candidate prose scrolls inside .writer-candidate-prose; meta/actions stay visible. */
   min-height: 0;
-  max-height: min(42vh, 420px);
-  overflow-y: auto;
+  max-height: min(62vh, 640px);
+  overflow: visible;
   overscroll-behavior: contain;
+}
+
+.writer-canvas-stage > .writer-candidate-sheet .writer-candidate-prose {
+  max-height: min(52vh, 520px);
 }
 
 .writer-canvas-stage > .writer-artifact-meta {
@@ -1473,15 +1501,13 @@
   left: 28px;
 }
 
-/* Inside the scrolling canvas variant, a -11px badge would be clipped by
-   overflow; keep it pinned within the scroll area instead. */
+/* Badge stays in the sheet chrome (outside the scrolling prose). */
 .writer-canvas-stage > .writer-candidate-sheet .writer-candidate-badge {
-  position: sticky;
-  top: 0;
+  position: absolute;
+  top: -11px;
+  left: 28px;
   z-index: 1;
-  display: inline-block;
-  margin: -14px 0 10px;
-  left: auto;
+  margin: 0;
 }
 
 .writer-candidate-badge {
@@ -1498,16 +1524,28 @@
 }
 
 .writer-candidate-prose {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   font-family: var(--font-serif, "Noto Serif SC", "Songti SC", serif);
   font-size: 1.05rem;
   line-height: 2.05;
   color: #24211c;
   letter-spacing: 0.015em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .writer-candidate-prose p {
   text-indent: 2em;
-  margin: 0 0 0.35em;
+  margin: 0 0 0.85em;
+  white-space: pre-wrap;
+}
+
+.writer-candidate-prose p:last-child {
+  margin-bottom: 0;
 }
 
 .writer-candidate-placeholder {
@@ -1534,6 +1572,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+  flex: 0 0 auto;
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px dashed rgba(41, 39, 34, 0.12);
@@ -1553,6 +1592,7 @@
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  flex: 0 0 auto;
   margin-top: 14px;
 }
 
@@ -2652,6 +2692,185 @@
   background: rgba(139, 47, 39, 0.055);
 }
 
+/* Structure panel (章节管理): quiet grouped cards, edit tools behind a disclosure. */
+.writer-structure-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.writer-structure-create input[name="title"] {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.writer-chapter-tree {
+  gap: 6px;
+}
+
+.writer-structure-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 3px 12px;
+  border: 1px solid rgba(65, 57, 47, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 253, 248, 0.6);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.writer-structure-card:hover {
+  border-color: rgba(65, 57, 47, 0.2);
+  background: rgba(255, 253, 248, 0.95);
+}
+
+.writer-structure-card.is-selected {
+  border-color: rgba(139, 47, 39, 0.32);
+  background: rgba(139, 47, 39, 0.05);
+  box-shadow: inset 3px 0 0 #8b2f27;
+}
+
+.writer-structure-card.is-scene {
+  margin-left: 16px;
+}
+
+.writer-structure-card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 36px;
+}
+
+.writer-structure-card-row > form:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.writer-structure-card-row > form:first-child button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+.writer-structure-card-row > form:first-child button strong {
+  display: block;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writer-structure-card-row > form:first-child button:hover strong {
+  color: #8b2f27;
+}
+
+.writer-structure-card-row small {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: #7c766a;
+  background: rgba(65, 57, 47, 0.07);
+}
+
+.writer-structure-card.is-selected .writer-structure-card-row small {
+  color: #8b2f27;
+  background: rgba(139, 47, 39, 0.1);
+}
+
+.writer-structure-reorder {
+  display: inline-flex;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.writer-structure-card:hover .writer-structure-reorder,
+.writer-structure-card:focus-within .writer-structure-reorder,
+.writer-structure-card.is-selected .writer-structure-reorder {
+  opacity: 1;
+}
+
+.writer-structure-reorder button {
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 1px solid rgba(65, 57, 47, 0.14);
+  border-radius: 6px;
+  background: transparent;
+  color: #6d6759;
+}
+
+.writer-structure-reorder button:hover:not(:disabled) {
+  border-color: rgba(139, 47, 39, 0.3);
+  color: #8b2f27;
+}
+
+.writer-structure-edit,
+.writer-structure-versions {
+  padding-top: 0;
+}
+
+.writer-structure-edit > summary,
+.writer-structure-versions > summary {
+  cursor: pointer;
+  font-size: 0.74rem;
+  color: #8a857a;
+  list-style: none;
+  user-select: none;
+  padding: 0 0 6px;
+}
+
+.writer-structure-edit > summary:hover,
+.writer-structure-versions > summary:hover {
+  color: #8b2f27;
+}
+
+.writer-structure-edit > summary::before,
+.writer-structure-versions > summary::before {
+  content: "▸ ";
+}
+
+.writer-structure-edit[open] > summary::before,
+.writer-structure-versions[open] > summary::before {
+  content: "▾ ";
+}
+
+.writer-structure-edit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  margin-top: 2px;
+  border-top: 1px dashed rgba(65, 57, 47, 0.16);
+}
+
+/* Scene subsection separated from the chapter list. */
+.writer-structure-panel > .compact-action-list:not(.writer-chapter-tree) {
+  margin-top: 16px;
+  padding-top: 14px;
+  gap: 6px;
+  border-top: 1px solid rgba(65, 57, 47, 0.12);
+}
+
+.writer-structure-panel h3 {
+  margin: 0 0 2px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .writer-artifact-meta {
   border-top: 1px solid rgba(65, 57, 47, 0.16);
   background: #f0ece3;
@@ -2857,6 +3076,10 @@
 
   .writer-artifact-canvas {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .writer-artifact-workspace > .writer-canvas-head {
+    padding-right: 12px;
   }
 
   .writer-root {
