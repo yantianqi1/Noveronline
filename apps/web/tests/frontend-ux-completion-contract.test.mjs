@@ -226,8 +226,10 @@ test("Wave A polish: author LLM bindings panel hides infrastructure fields", asy
 
 test("Wave A polish: writer draft panel hides raw draft id", async () => {
   const shell = await source("components/writer-workbench-shell.tsx");
+  const candidate = await source("components/writer-candidate-sheet.tsx");
   assert.doesNotMatch(shell, /<Bi zh="草稿" en="Draft" \/> <strong>\{draftId\}<\/strong>/);
-  assert.match(shell, /候选草稿|Candidate draft/);
+  // Adoption is automatic now; the user-facing label lives on the candidate sheet.
+  assert.match(candidate, /已存入手稿|In manuscript/);
 });
 
 test("Wave A polish: product errors avoid raw error codes", async () => {

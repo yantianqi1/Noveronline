@@ -29,20 +29,24 @@ test("writer recovery keeps run trace and explicit replay cursors across refresh
   assert.doesNotMatch(shell, /JSON\.stringify\(event\.payload/);
 });
 
-test("writer candidate recovery and adoption remain metadata-only and explicitly user triggered", async () => {
+test("writer candidate recovery is metadata-only and adoption is automatic with a user undo", async () => {
   const shell = await writerShell();
+  const candidate = await readFile(path.join(root, "components/writer-candidate-sheet.tsx"), "utf8");
 
   assert.match(shell, /selectedDraftId\?: string/);
   assert.match(shell, /recoverDraftId\(selectedDraftId, runSummary, workflowEvents\)/);
   assert.match(shell, /writer\.draft\.saved/);
   assert.match(shell, /writer\.run\.completed/);
   assert.match(shell, /stringValue\(event\.payload, "draft_id"\)/);
-  assert.match(shell, /function DraftAdoptionPanel/);
-  assert.match(shell, /name="draftId"/);
-  assert.match(shell, /Adopt draft into manuscript/);
-  assert.match(shell, /!adopted && action/);
+  assert.match(shell, /undoAdoptionAction/);
+  assert.match(shell, /adoptedBlockId=\{adoptedBlock\?\.block_id \?\? ""\}/);
+  assert.doesNotMatch(shell, /function DraftAdoptionPanel/);
   assert.doesNotMatch(shell, /useEffect|componentDidMount/);
   assert.doesNotMatch(shell, /draft_text|manuscript_text|content_text|prompt_snapshot/i);
+  // Candidate sheet auto-adopts once per finished run and offers a single undo.
+  assert.match(candidate, /autoAdoptRef/);
+  assert.match(candidate, /undoAdoptionAction/);
+  assert.match(candidate, /重试存入手稿|Retry saving/);
 });
 
 test("writer export controls expose a real artifact download and fail closed without one", async () => {

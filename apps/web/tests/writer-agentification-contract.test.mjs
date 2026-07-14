@@ -133,13 +133,20 @@ test("Phase 5: SSE client + approval card + held-open stream route", async () =>
   assert.doesNotMatch(live, /WriterActivityTimeline/);
   assert.doesNotMatch(live, /ConnectionBanner/);
   assert.match(candidate, /writer-candidate-sheet/);
-  assert.match(candidate, /采用为手稿|Adopt into manuscript/);
+  // Auto adoption + undo (conversation-first simplification): no manual adopt gate.
+  assert.match(candidate, /Auto-adopt exactly once|autoAdoptRef/);
+  assert.match(candidate, /undoAdoptionAction/);
+  assert.match(candidate, /撤回，不放进手稿|Undo — remove from manuscript/);
+  assert.doesNotMatch(candidate, /采用为手稿/);
   assert.match(candidate, /revealArtifact/);
   assert.match(candidate, /splitCandidateParagraphs/);
   const agentThread = await source("components/writer-agent-thread.tsx");
   assert.match(agentThread, /displayThreadBody|looksLikeFullCandidateProse/);
-  assert.match(agentThread, /候选稿已放在左侧画布|left canvas/);
+  assert.match(agentThread, /正文已放在左侧画布|left canvas/);
   assert.doesNotMatch(agentThread, /候选稿已放在右侧画布/);
+  const page = await source("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx");
+  assert.match(page, /undoDraftAdoptionAction/);
+  assert.match(page, /undoAdoptionAction=\{undoDraftAdoptionAction\}/);
   const activities = await repositorySource("apps/pi-agent-runtime/src/activities/pi-writer-activities.ts");
   assert.match(activities, /candidateReadyThreadBody/);
   assert.doesNotMatch(activities, /body:\s*draft\.content/);

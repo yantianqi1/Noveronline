@@ -152,7 +152,9 @@ export function WriterCandidateSheet({
       </span>
       <div className="writer-candidate-prose">
         {draftText ? (
-          draftText.split(/\n+/).map((paragraph, index) => <p key={`p-${index}`}>{paragraph}</p>)
+          splitCandidateParagraphs(draftText).map((paragraph, index) => (
+            <p key={`p-${index}`}>{paragraph}</p>
+          ))
         ) : (
           <p className="writer-candidate-placeholder">
             <Bi zh="正文正在生成…" en="Prose is being drafted…" />
@@ -239,4 +241,14 @@ export function WriterCandidateSheet({
       ) : null}
     </section>
   );
+}
+
+/** Prefer blank-line breaks; fall back to single newlines so long CJK drafts stay readable. */
+function splitCandidateParagraphs(text: string): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+  const byBlank = normalized.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  if (byBlank.length > 1) return byBlank;
+  const byLine = normalized.split(/\n+/).map((part) => part.trim()).filter(Boolean);
+  return byLine.length > 0 ? byLine : [normalized];
 }

@@ -62,6 +62,7 @@ type WriterWorkbenchShellProps = {
   writerRunAction?: (formData: FormData) => Promise<WriterRunActionResult>;
   exportTraceAction?: (formData: FormData) => Promise<void>;
   adoptDraftAction?: (formData: FormData) => Promise<DraftAdoptionActionResult>;
+  undoAdoptionAction?: (formData: FormData) => Promise<DraftAdoptionActionResult>;
   exportManuscriptAction?: (formData: FormData) => Promise<void>;
   cancelWriterRunAction?: (formData: FormData) => Promise<void>;
   decideApprovalAction?: (formData: FormData) => Promise<void>;
@@ -115,6 +116,7 @@ export function WriterWorkbenchShell({
   writerRunAction,
   exportTraceAction,
   adoptDraftAction,
+  undoAdoptionAction,
   exportManuscriptAction,
   cancelWriterRunAction,
   decideApprovalAction,
@@ -126,9 +128,12 @@ export function WriterWorkbenchShell({
   const replayRunId = runSummary?.ok === true ? runSummary.run_id : selectedRunId;
   const replayTraceId = selectedTraceId || traceId;
   const recoveredDraftId = recoverDraftId(selectedDraftId, runSummary, workflowEvents);
-  const draftIsAdopted = manuscript.ok
-    ? manuscript.blocks.some((block) => block.source_draft_id === recoveredDraftId)
-    : false;
+  const adoptedBlock = manuscript.ok
+    ? manuscript.blocks.find(
+        (block) => block.source_draft_id === recoveredDraftId && block.status !== "deleted",
+      )
+    : undefined;
+  const draftIsAdopted = Boolean(adoptedBlock);
   const latestRecoveredEvent = latestWriterEvent(workflowEvents);
   const runActive = runSummary?.ok === true && isActiveWriterStatus(runSummary.status);
   const showHomeState =
@@ -209,10 +214,12 @@ export function WriterWorkbenchShell({
                     <WriterCandidateSheet
                       adoptDraftAction={adoptDraftAction}
                       adopted={draftIsAdopted}
+                      adoptedBlockId={adoptedBlock?.block_id ?? ""}
                       chapterId={selectedChapterId}
                       draftId={recoveredDraftId}
                       initialEvents={workflowEvents?.ok === true ? workflowEvents.items : []}
                       locale={locale}
+                      undoAdoptionAction={undoAdoptionAction}
                     />
                     {productWorkspace}
                     <details className="writer-artifact-meta">
@@ -494,44 +501,6 @@ function RecoveryFields({
       <input name="after_event_id" type="hidden" value={afterEventId} />
       {draftId ? <input name="draftId" type="hidden" value={draftId} /> : null}
     </>
-  );
-}
-
-function DraftAdoptionPanel({
-  action,
-  adopted,
-  chapterId = "",
-  draftId,
-  status,
-}: {
-  action?: (formData: FormData) => Promise<void>;
-  adopted: boolean;
-  chapterId?: string;
-  draftId: string;
-  status: ActionStatus | null;
-}) {
-  if (!draftId) {
-    return <p className="form-hint"><Bi zh="候选草稿尚不可用。" en="Candidate draft unavailable." /></p>;
-  }
-
-  return (
-    <div className="compact-action-list">
-      <p className="trace-meta">
-        <Bi zh="候选草稿" en="Candidate draft" />{" "}
-        <strong><StatusValue value={adopted ? "adopted" : "candidate"} /></strong>
-      </p>
-      {status ? <StatusLine status={status} /> : null}
-      {!adopted && action ? (
-        <form action={action} className="inline-action-form">
-          <input name="draftId" type="hidden" value={draftId} />
-          {chapterId ? <input name="chapterId" type="hidden" value={chapterId} /> : null}
-          <button type="submit">
-            <FileCheck2 aria-hidden="true" size={16} />
-            <Bi zh="采用为手稿" en="Adopt draft into manuscript" />
-          </button>
-        </form>
-      ) : null}
-    </div>
   );
 }
 

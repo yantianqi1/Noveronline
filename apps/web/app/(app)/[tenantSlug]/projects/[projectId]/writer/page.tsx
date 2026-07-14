@@ -327,6 +327,38 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     };
   }
 
+  async function undoDraftAdoptionAction(formData: FormData): Promise<{
+    ok: boolean;
+    code: string;
+    message: string;
+  }> {
+    "use server";
+
+    const blockId = stringFromFormData(formData, "blockId");
+    if (!blockId) {
+      return {
+        ok: false,
+        code: "VALIDATION_FAILED",
+        message: tx(locale, "缺少手稿块。", "Manuscript block is required."),
+      };
+    }
+    const context = await writerWorkspaceContext(tenantSlug, projectId);
+    const block = await getPrivateBlock(context, blockId);
+    if (!block.ok || !block.value) {
+      const code = block.ok ? "NOT_FOUND" : block.code;
+      return { ok: false, code, message: humanizeFailure(locale, code, undefined) };
+    }
+    const result = await deleteManuscriptBlock(context, blockId, block.value.version);
+    if (result.ok) {
+      return { ok: true, code: "DRAFT_ADOPTION_UNDONE", message: "" };
+    }
+    return {
+      ok: false,
+      code: result.code,
+      message: humanizeFailure(locale, result.code, result.message),
+    };
+  }
+
   async function cancelWriterRunAction(formData: FormData) {
     "use server";
 
@@ -607,6 +639,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       writerRunAction={startWriterRunAction}
       exportTraceAction={exportTraceAction}
       adoptDraftAction={adoptDraftAction}
+      undoAdoptionAction={undoDraftAdoptionAction}
       cancelWriterRunAction={cancelWriterRunAction}
       structureNav={
         <Suspense fallback={<WriterStructureNavLoading />}>

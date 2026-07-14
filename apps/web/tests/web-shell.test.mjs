@@ -2958,13 +2958,13 @@ test("Paper-ink design tokens and bookish app shell stay explicit", async () => 
 });
 
 test("module headers use one Lucide icon language", async () => {
-  // Character console is headerless (content card aligns to command bar); nav still uses UsersRound.
+  // Character console and the conversation-first writer workbench are headerless
+  // (content aligns to command bar); nav still uses UsersRound.
   const shellPaths = [
     "components/overview-seed-shell.tsx",
     "components/asset-library-shell.tsx",
     "components/story-graph-shell.tsx",
     "components/worldline-shell.tsx",
-    "components/writer-workbench-shell.tsx",
     "components/llm-facility-shell.tsx",
   ];
   const shells = (await Promise.all(shellPaths.map((path) => fileText(path)))).join("\n");
@@ -2979,6 +2979,6 @@ test("module headers use one Lucide icon language", async () => {
   assert.match(shells, /GitBranch/);
   assert.match(nav, /UsersRound/);
   assert.doesNotMatch(characterShell, /WorkspaceHeader|UsersRound|与角色互动|次互动|次推演/);
-  assert.match(shells, /PenLine/);
+  assert.match(nav, /PenLine/);
   assert.match(shells, /Cpu/);
 });

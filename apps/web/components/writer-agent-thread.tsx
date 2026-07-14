@@ -208,8 +208,8 @@ export function WriterAgentThread({
               {recoveredDraftId && !draftIsAdopted ? (
                 <p className="form-hint">
                   <Bi
-                    zh="候选稿已放在左侧画布，采用后才会进入正式手稿。"
-                    en="The candidate is on the left canvas. Adopt it to place it into the manuscript."
+                    zh="正文已放在左侧画布，写完会自动存入手稿；不满意可以撤回。"
+                    en="The prose is on the left canvas and is saved into the manuscript automatically; you can undo it."
                   />
                 </p>
               ) : null}
@@ -234,8 +234,8 @@ export function WriterAgentThread({
             </h2>
             <p>
               <Bi
-                zh="在下方描述你想要的结果。候选稿会出现在左侧画布；采用后才会进入正式手稿。"
-                en="Describe what you want below. The candidate appears on the canvas; adopt it into the manuscript."
+                zh="在下方描述你想要的结果。写好的正文会出现在左侧画布，并自动存入手稿。"
+                en="Describe what you want below. The prose appears on the canvas and is saved into the manuscript automatically."
               />
             </p>
           </div>
