@@ -1149,6 +1149,15 @@
     letter-spacing: 0.01em;
   }
 
+  .overview-foundation-bar {
+    margin: 0 0 2px;
+    border: 1px solid var(--mobile-border) !important;
+    border-radius: var(--mobile-radius-sheet) !important;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 246, 0.97), rgba(248, 243, 234, 0.92)) !important;
+    box-shadow: var(--mobile-shadow-card) !important;
+  }
+
   .overview-root .panel,
   .overview-root .overview-details,
   .overview-root .overview-status-card,
@@ -1283,6 +1292,7 @@
   }
 
   /* Stagger visible top sections for soft depth. */
+  .overview-root > .overview-foundation-bar,
   .overview-root > .overview-header,
   .overview-root .workbench-grid > main > *:nth-child(1),
   .overview-root .workbench-grid > main > *:nth-child(2),
@@ -1292,6 +1302,7 @@
     animation: mobile-layer-rise var(--mobile-motion-slow) var(--mobile-ease-soft) both;
   }
 
+  .overview-root > .overview-foundation-bar,
   .overview-root > .overview-header {
     animation-delay: 0ms;
   }
@@ -1328,6 +1339,7 @@
   .mobile-layer,
   .mobile-hub .mobile-layer,
   .app-frame.app-frame-unified .workspace-route-content,
+  .overview-root > .overview-foundation-bar,
   .overview-root > .overview-header,
   .overview-root .workbench-grid > main > *,
   .overview-root .workbench-grid > aside > * {

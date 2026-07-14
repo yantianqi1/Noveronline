@@ -71,10 +71,13 @@ test("Asset Library opens in-page preview instead of catalog detail navigation",
 test("Overview prioritizes the current next step and folds secondary activity", async () => {
   const shell = await source("components/overview-seed-shell.tsx");
   const wall = await source("components/overview-seed-progress-wall.tsx");
+  const foundationBarIndex = shell.indexOf("overview-foundation-bar");
   const nextPanelIndex = shell.indexOf("overview-next-panel");
   const metricsPanelIndex = shell.indexOf('aria-labelledby="project-health-heading"');
 
-  assert.ok(nextPanelIndex >= 0 && nextPanelIndex < metricsPanelIndex);
+  assert.ok(foundationBarIndex >= 0 && foundationBarIndex < nextPanelIndex);
+  assert.ok(nextPanelIndex >= 0 && metricsPanelIndex >= 0 && metricsPanelIndex < nextPanelIndex);
+  assert.match(shell, /data-layout="foundation-bar"/);
   assert.match(shell, /<OverviewNextStep/);
   assert.match(shell, /Files and analysis history/);
   assert.match(shell, /Project diagnostics \(optional\)/);
@@ -83,6 +86,8 @@ test("Overview prioritizes the current next step and folds secondary activity", 
   assert.match(shell, /OverviewSeedProgressWall/);
   assert.match(wall, /收起进度|Collapse progress/);
   assert.match(wall, /overview-status-wall-preview-stages/);
+  assert.doesNotMatch(shell, /overview-header/);
+  assert.doesNotMatch(shell, /WorkspaceHeader/);
   assert.doesNotMatch(shell, /<dd>\{selectedSeedRun\.run_id\}<\/dd>/);
   assert.doesNotMatch(shell, /<dd>\{projectReadiness\.run_id\}<\/dd>/);
   assert.doesNotMatch(shell, /<dd>\{projectReadiness\.project_readiness_snapshot_id\}<\/dd>/);
