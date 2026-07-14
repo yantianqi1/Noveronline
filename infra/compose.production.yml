@@ -60,46 +60,67 @@ services:
     security_opt: *service-security
     stop_grace_period: 30s
   agent-runtime:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
     security_opt: *service-security
   agent-runtime-seed:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   agent-runtime-asset:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   agent-runtime-graph:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   agent-runtime-worldline:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   agent-runtime-character:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   agent-runtime-reviewer:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   agent-runtime-writer-planning:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
     security_opt: *service-security
   pi-agent-runtime:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+    security_opt: *service-security
+  pi-agent-runtime-analysis:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+      MIROFISH_OBJECT_STORAGE_ENDPOINT: ${MIROFISH_OBJECT_STORAGE_ENDPOINT:?MIROFISH_OBJECT_STORAGE_ENDPOINT is required}
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:?MIROFISH_OBJECT_STORAGE_BUCKET is required}
+      MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MIROFISH_OBJECT_STORAGE_ACCESS_KEY:?MIROFISH_OBJECT_STORAGE_ACCESS_KEY is required}
+      MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MIROFISH_OBJECT_STORAGE_SECRET_KEY:?MIROFISH_OBJECT_STORAGE_SECRET_KEY is required}
+      MIROFISH_OBJECT_STORAGE_USE_SSL: ${MIROFISH_OBJECT_STORAGE_USE_SSL:?MIROFISH_OBJECT_STORAGE_USE_SSL is required}
     security_opt: *service-security
   legacy-import-worker:
     build:

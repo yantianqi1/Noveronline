@@ -79,6 +79,32 @@ def test_writer_planning_worker_has_staging_and_production_runtime_contracts() -
             assert "security_opt: *service-security" in section
 
 
+def test_production_workers_share_the_configured_temporal_namespace() -> None:
+    encoded = (INFRA / "compose.production.yml").read_text(encoding="utf-8")
+    worker_services = (
+        "agent-runtime",
+        "agent-runtime-seed",
+        "agent-runtime-asset",
+        "agent-runtime-graph",
+        "agent-runtime-worldline",
+        "agent-runtime-character",
+        "agent-runtime-reviewer",
+        "agent-runtime-writer-planning",
+        "pi-agent-runtime",
+        "pi-agent-runtime-analysis",
+        "legacy-import-worker",
+    )
+    for index, service in enumerate(worker_services):
+        start = encoded.index(f"  {service}:\n")
+        later_starts = [
+            encoded.find(f"  {candidate}:\n", start + 1)
+            for candidate in worker_services[index + 1 :]
+        ]
+        end = min((position for position in later_starts if position != -1), default=len(encoded))
+        section = encoded[start:end]
+        assert "TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}" in section
+
+
 def test_base_compose_legacy_worker_uses_fixed_read_only_local_source_root() -> None:
     encoded = (INFRA / "docker-compose.yml").read_text(encoding="utf-8")
     section = encoded.split("  legacy-import-worker:", 1)[1].split("\n  pi-agent-runtime:", 1)[0]

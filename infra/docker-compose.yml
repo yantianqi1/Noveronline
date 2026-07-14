@@ -89,6 +89,20 @@ services:
       - "${TEMPORAL_UI_PORT:-8233}:8080"
     restart: unless-stopped
 
+  temporal-namespace-init:
+    image: temporalio/auto-setup:1.25
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_NAMESPACE_RETENTION: ${TEMPORAL_NAMESPACE_RETENTION:-72h}
+    volumes:
+      - ./scripts/ensure-temporal-namespace.sh:/usr/local/bin/ensure-temporal-namespace:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/ensure-temporal-namespace"]
+    restart: "no"
+
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: ["server", "/data", "--console-address", ":9001"]
@@ -155,6 +169,8 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio-init:
@@ -232,6 +248,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       AGENT_RUNTIME_TASK_QUEUE: maintenance
@@ -250,6 +268,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
       schema-init:
@@ -279,6 +299,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -296,6 +318,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -313,6 +337,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -330,6 +356,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -348,6 +376,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -370,6 +400,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -393,6 +425,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -420,6 +454,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
     environment:
@@ -444,6 +480,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
       schema-init:
         condition: service_completed_successfully
       minio:

@@ -4,7 +4,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . ./
-RUN npm run build
+RUN ! find . -maxdepth 1 -type f -name '.env*' ! -name '.env.example' | grep -q . \
+    && npm run build
 
 FROM node:22.19.0-alpine
 RUN apk add --no-cache wget
