@@ -5,7 +5,11 @@ import type {
   AnalysisWorkspaceFilesSummary,
 } from "../lib/api";
 import { type Locale, tx } from "../lib/locale";
+import { analysisWorkspaceSummaryHint } from "../lib/overview-analysis-workspace-copy";
 import { Bi } from "./bilingual-text";
+import { OverviewAnalysisWorkspaceBrowser } from "./overview-analysis-workspace-browser";
+
+export { analysisWorkspaceSummaryHint } from "../lib/overview-analysis-workspace-copy";
 
 type OverviewAnalysisWorkspacePanelProps = {
   locale: Locale;
@@ -15,6 +19,8 @@ type OverviewAnalysisWorkspacePanelProps = {
   runId: string;
   tenantSlug: string;
   projectId: string;
+  /** details = expandable disclosure (default); body = content only for modal hosts */
+  presentation?: "details" | "body";
 };
 
 export function OverviewAnalysisWorkspacePanel({
@@ -22,8 +28,22 @@ export function OverviewAnalysisWorkspacePanel({
   workspaceFiles,
   selectedFile,
   selectedPath,
+  runId,
+  tenantSlug,
+  projectId,
+  presentation = "details",
 }: OverviewAnalysisWorkspacePanelProps) {
   if (!workspaceFiles) {
+    const body = (
+      <section>
+        <p className="form-hint">
+          <Bi zh="开始分析后，这里会显示计划、笔记与候选文件。" en="After analysis starts, plan, notes, and candidate files appear here." />
+        </p>
+      </section>
+    );
+    if (presentation === "body") {
+      return body;
+    }
     return (
       <details className="overview-details overview-analysis-workspace">
         <summary>
@@ -36,18 +56,20 @@ export function OverviewAnalysisWorkspacePanel({
           </span>
           <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
         </summary>
-        <div className="overview-details-content">
-          <section>
-            <p className="form-hint">
-              <Bi zh="开始分析后，这里会显示计划、笔记与候选文件。" en="After analysis starts, plan, notes, and candidate files appear here." />
-            </p>
-          </section>
-        </div>
+        <div className="overview-details-content">{body}</div>
       </details>
     );
   }
 
   if (!workspaceFiles.ok) {
+    const body = (
+      <section>
+        <p>{workspaceFiles.message || tx(locale, "无法加载工作区文件。", "Could not load workspace files.")}</p>
+      </section>
+    );
+    if (presentation === "body") {
+      return body;
+    }
     return (
       <details className="overview-details overview-analysis-workspace error-box" open>
         <summary>
@@ -60,20 +82,37 @@ export function OverviewAnalysisWorkspacePanel({
           </span>
           <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
         </summary>
-        <div className="overview-details-content">
-          <section>
-            <p>{workspaceFiles.message || tx(locale, "无法加载工作区文件。", "Could not load workspace files.")}</p>
-          </section>
-        </div>
+        <div className="overview-details-content">{body}</div>
       </details>
     );
   }
 
-  const files = workspaceFiles.items.filter((item): item is Extract<AnalysisWorkspaceFileSummary, { ok: true }> => item.ok);
-  const summaryHint =
-    files.length === 0
-      ? tx(locale, "尚无文件", "No files yet")
-      : tx(locale, `${files.length} 个文件`, `${files.length} files`);
+  const summaryHint = analysisWorkspaceSummaryHint(locale, workspaceFiles);
+
+  const body = (
+    <section data-workspace-panel={presentation}>
+      <p className="form-hint">
+        <Bi
+          zh="智能分析写入的项目文件夹（计划 / 源切片 / 笔记 / 候选）。拆解结果会自动写入素材库，可直接在资产库使用。"
+          en="Project analysis folder (plan / source slices / notes / candidates). Results are auto-imported into the asset library."
+        />
+      </p>
+      <OverviewAnalysisWorkspaceBrowser
+        locale={locale}
+        presentation={presentation}
+        projectId={projectId}
+        runId={runId}
+        selectedFile={selectedFile}
+        selectedPath={selectedPath}
+        tenantSlug={tenantSlug}
+        workspaceFiles={workspaceFiles}
+      />
+    </section>
+  );
+
+  if (presentation === "body") {
+    return body;
+  }
 
   return (
     <details className="overview-details overview-analysis-workspace">
@@ -87,49 +126,7 @@ export function OverviewAnalysisWorkspacePanel({
         </span>
         <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
       </summary>
-      <div className="overview-details-content">
-        <section>
-          <p className="form-hint">
-            <Bi
-              zh="智能分析写入的项目文件夹（计划 / 源切片 / 笔记 / 候选）。拆解结果会自动写入素材库，可直接在资产库使用。"
-              en="Project analysis folder (plan / source slices / notes / candidates). Results are auto-imported into the asset library."
-            />
-          </p>
-          {files.length === 0 ? (
-            <p className="form-hint"><Bi zh="工作区尚无文件。" en="No workspace files yet." /></p>
-          ) : (
-            <div className="overview-analysis-workspace-grid">
-              <ul className="overview-analysis-file-tree">
-                {files.map((file) => (
-                  <li key={file.file_id} data-kind={file.kind} data-active={file.path === selectedPath ? "true" : "false"}>
-                    <a href={`?runId=${encodeURIComponent(file.run_id)}&workspacePath=${encodeURIComponent(file.path)}`}>
-                      <span className="overview-analysis-file-path">{file.path}</span>
-                      <span className="overview-analysis-file-meta">
-                        {file.kind} · {file.size_bytes} B
-                      </span>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-              <div className="overview-analysis-file-preview">
-                {selectedFile && selectedFile.ok ? (
-                  <>
-                    <header>
-                      <strong>{selectedFile.path}</strong>
-                      <span>{selectedFile.kind}</span>
-                    </header>
-                    <pre>{selectedFile.content_text || tx(locale, "（无文本预览）", "(no text preview)")}</pre>
-                  </>
-                ) : (
-                  <p className="form-hint">
-                    <Bi zh="选择左侧文件以预览内容。" en="Select a file on the left to preview." />
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-        </section>
-      </div>
+      <div className="overview-details-content">{body}</div>
     </details>
   );
 }

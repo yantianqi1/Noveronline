@@ -108,6 +108,12 @@ test("overview surfaces analysis results with tool_ progress lines", async () =>
   assert.match(wall, /#analysis-candidates-heading/);
   assert.match(activity, /analysis\.assets\.imported/);
   assert.match(activity, /已自动入库|Auto-imported/);
+  assert.match(shell, /overview-completed-board|OverviewCompletedBoard/);
+  assert.match(shell, /overview-completed-import/);
+  assert.match(shell, /presentation="body"/);
+  assert.match(shell, /embedResults=\{false\}/);
+  assert.match(shell, /data-overview-state=\{overviewState\}/);
+  assert.doesNotMatch(shell, /overview-upload-collapsed/);
 });
 
 test("analysis API client exposes workspace and candidates endpoints", async () => {

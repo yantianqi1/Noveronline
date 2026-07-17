@@ -46,12 +46,15 @@ test("retired root frontend and blue Writer evidence stay removed", async () => 
   assert.doesNotMatch(activeGraph, /#0f6cbd/i);
 });
 
-test("Wave 3: Assets use CompactFilterBar and InspectorPanel", async () => {
+test("Wave 3: Assets use CompactFilterBar with inline search-row ops", async () => {
   const shell = await source("components/asset-library-shell.tsx");
   assert.match(shell, /CompactFilterBar/);
-  assert.match(shell, /InspectorPanel/);
+  assert.match(shell, /asset-search-ops/);
+  assert.match(shell, /trailing=\{/);
   assert.match(shell, /asset-filter-disclosure/);
-  assert.match(shell, /WorkspaceHeader/);
+  assert.match(shell, /WorkspaceCommandMeta/);
+  assert.doesNotMatch(shell, /InspectorPanel/);
+  assert.doesNotMatch(shell, /WorkspaceHeader/);
 });
 
 test("Wave 3: Overview wires shared WorkflowProgress and SubmitButton", async () => {
@@ -92,11 +95,18 @@ test("Overview seed progress wall collapses idle stages and densifies failed car
 
 test("Wave 4: Graph exclusive Explore/Build/Curate/Compose modes", async () => {
   const shell = await source("components/story-graph-shell.tsx");
+  const page = await source("app/(app)/[tenantSlug]/projects/[projectId]/graph/page.tsx");
   assert.match(shell, /"explore" \| "build" \| "curate" \| "compose"/);
   assert.match(shell, /workspaceMode === "explore"/);
   assert.match(shell, /workspaceMode === "build"/);
   assert.match(shell, /workspaceMode === "curate"/);
   assert.match(shell, /workspaceMode === "compose"/);
+  assert.match(shell, /initialWorkspaceMode/);
+  assert.match(shell, /analysisBuildOptions/);
+  assert.match(shell, /graph-build-analysis-run/);
+  assert.match(page, /mode: "build"/);
+  assert.match(page, /analysis_run_id/);
+  assert.match(page, /getProjectAnalysisRuns/);
   assert.match(shell, /InspectorPanel/);
 });
 
@@ -193,7 +203,9 @@ test("Wave A polish: Assets open in-page preview and search is optional", async 
   const ops = await source("components/asset-operation-workspace.tsx");
   const queryInput = shell.slice(shell.indexOf('id="asset-search-query"'), shell.indexOf('id="asset-search-query"') + 320);
   assert.match(shell, /AssetBrowseClient/);
+  assert.match(shell, /asset-active-scope|activeAssetScopeTab/);
   assert.match(browse, /asset-title-link/);
+  assert.match(browse, /asset-browse-grid|asset-browse-card/);
   assert.match(browse, /AssetPreviewDialog/);
   assert.match(preview, /asset-preview-dialog/);
   assert.match(preview, /displayAssetTitle|structureAssetBody|asset-preview-raw/);

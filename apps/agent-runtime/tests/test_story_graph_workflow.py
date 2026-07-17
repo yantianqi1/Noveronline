@@ -1027,6 +1027,79 @@ def test_postgres_story_graph_builder_persists_snapshot_nodes_edges_evidence_lay
     assert connection.closed is True
 
 
+def test_postgres_story_graph_builder_builds_from_selected_analysis_assets() -> None:
+    rows = {
+        "fetch_assets": [
+            {
+                "asset_id": "asset-character-1",
+                "asset_type": "character",
+                "category": "characters",
+                "lifecycle": "material",
+                "title": "林澈",
+                "summary": "雨夜谈判者。",
+                "payload_jsonb": {"name": "林澈"},
+                "tags_jsonb": ["pi_analysis", "character"],
+            },
+            {
+                "asset_id": "asset-character-2",
+                "asset_type": "character",
+                "category": "characters",
+                "lifecycle": "material",
+                "title": "白塔会",
+                "summary": "秘密组织。",
+                "payload_jsonb": {"name": "白塔会"},
+                "tags_jsonb": ["pi_analysis", "character"],
+            },
+            {
+                "asset_id": "asset-relationship-1",
+                "asset_type": "relationship",
+                "category": "relationships",
+                "lifecycle": "material",
+                "title": "林澈 → 白塔会 / opposes",
+                "summary": "林澈调查白塔会。",
+                "payload_jsonb": {
+                    "source_entity_name": "林澈",
+                    "target_entity_name": "白塔会",
+                    "relationship_type": "opposes",
+                },
+                "tags_jsonb": ["pi_analysis", "relationship"],
+            },
+            {
+                "asset_id": "asset-rule-1",
+                "asset_type": "world_rule",
+                "category": "world",
+                "lifecycle": "material",
+                "title": "灵气守恒",
+                "summary": "世界规则摘要。",
+                "payload_jsonb": {"rule_text": "灵气守恒"},
+                "tags_jsonb": ["pi_analysis", "world_rule"],
+            },
+        ],
+        "fetch_version": [{"next_version": 1}],
+    }
+    connection = FakeStoryGraphConnection(rows)
+    builder = PostgresStoryGraphBuilder(connect=lambda: connection)
+
+    result = builder.build(
+        context=_context(),
+        mode="full",
+        options={"source": "assets", "analysis_run_id": "analysis-run-1"},
+    )
+
+    assert result["status"] == "completed"
+    assert result["node_count"] == 3
+    assert result["edge_count"] == 1
+    executed_sql = "\n".join(query for query, _params in connection.cursor_instance.executed)
+    assert "source_kind = 'pi_analysis'" in executed_sql
+    assert "FROM entities" not in executed_sql
+    assert any(
+        params[-1] == "analysis-run-1:%"
+        for _query, params in connection.cursor_instance.executed
+        if params and isinstance(params[-1], str) and params[-1].endswith(":%")
+    )
+    assert connection.committed is True
+
+
 def test_story_graph_semantic_merge_deduplicates_alias_entities_and_relationship_edges() -> None:
     graph_id = "80d8a69e-6be3-47e9-94d2-b144c96bde71"
     entities = [

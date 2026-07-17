@@ -18,22 +18,51 @@ import type {
 import { displayAssetTitle } from "../lib/asset-display";
 import { type Locale, tx } from "../lib/locale";
 
+export type AssetBrowseFilters = {
+  asset_types: string[];
+  categories: string[];
+  lifecycles: string[];
+  sources: string[];
+  tags: string[];
+  pinned?: boolean;
+};
+
 type AssetBrowseClientProps = {
   assets: AssetListSummary;
+  filters?: AssetBrowseFilters;
   locale: Locale;
   searchResults: AssetSearchSummary | null;
 };
 
+type BrowseRow = {
+  key: string;
+  title: string;
+  assetType: string;
+  summary: string;
+  pinned: boolean;
+  lifecycle: string;
+  source: string;
+  createdAt: string;
+  preview: AssetPreviewModel | null;
+};
+
 /**
- * Grouped asset list + in-page preview dialog (no full-page catalog navigation).
+ * Card-grid asset browse + in-page preview dialog (no full-page catalog navigation).
+ * Facet filters apply client-side when browsing without a search query.
+ * Uniform status/source/type across the current page are collapsed so cards stay title-first.
  */
-export function AssetBrowseClient({ assets, locale, searchResults }: AssetBrowseClientProps) {
+export function AssetBrowseClient({
+  assets,
+  filters,
+  locale,
+  searchResults,
+}: AssetBrowseClientProps) {
   const [selected, setSelected] = useState<AssetPreviewModel | null>(null);
 
   if (searchResults !== null) {
     return (
       <>
-        <SearchResultsList
+        <SearchResultsGrid
           locale={locale}
           onSelect={setSelected}
           searchResults={searchResults}
@@ -50,7 +79,7 @@ export function AssetBrowseClient({ assets, locale, searchResults }: AssetBrowse
 
   return (
     <>
-      <GroupedAssetList assets={assets} locale={locale} onSelect={setSelected} />
+      <AssetBrowseGrid assets={assets} filters={filters} locale={locale} onSelect={setSelected} />
       <AssetPreviewDialog
         asset={selected}
         locale={locale}
@@ -61,21 +90,43 @@ export function AssetBrowseClient({ assets, locale, searchResults }: AssetBrowse
   );
 }
 
-function GroupedAssetList({
+function AssetBrowseGrid({
   assets,
+  filters,
   locale,
   onSelect,
 }: {
   assets: AssetListSummary;
+  filters?: AssetBrowseFilters;
   locale: Locale;
   onSelect: (asset: AssetPreviewModel) => void;
 }) {
-  const groups = useMemo(() => {
+  const rows = useMemo(() => {
     if (!assets.ok) {
-      return [];
+      return [] as BrowseRow[];
     }
-    return groupAssetsByType(assets.items);
-  }, [assets]);
+    const filtered = filterAssets(assets.items, filters);
+    return filtered
+      .slice()
+      .sort((a, b) => {
+        const pinnedDiff = Number(b.pinned) - Number(a.pinned);
+        if (pinnedDiff !== 0) {
+          return pinnedDiff;
+        }
+        return (b.created_at || "").localeCompare(a.created_at || "");
+      })
+      .map((asset) => ({
+        key: asset.asset_id,
+        title: displayAssetTitle(asset) || "",
+        assetType: asset.asset_type,
+        summary: distinctCardSummary(asset.summary, displayAssetTitle(asset) || ""),
+        pinned: asset.pinned,
+        lifecycle: asset.lifecycle,
+        source: asset.source_kind,
+        createdAt: asset.created_at,
+        preview: assetRecordToPreview(asset),
+      }));
+  }, [assets, filters]);
 
   if (!assets.ok) {
     return <PublicFailureNotice />;
@@ -94,51 +145,27 @@ function GroupedAssetList({
       />
     );
   }
+  if (rows.length === 0) {
+    return (
+      <div className="asset-search-empty asset-type-groups" data-testid="asset-type-groups">
+        <p className="form-hint">
+          <Bi zh="当前筛选下没有资产，请调整或清除筛选。" en="No assets match the current filters. Adjust or clear filters." />
+        </p>
+      </div>
+    );
+  }
 
   return (
-    <div className="asset-type-groups" data-testid="asset-type-groups">
-      {groups.map((group) => (
-        <details className="asset-type-group" key={group.type} open>
-          <summary className="asset-type-group-summary">
-            <span className="asset-type-group-title">
-              <strong>{assetValueLabel(locale, group.type)}</strong>
-              <span className="asset-type-group-count">{group.items.length}</span>
-            </span>
-          </summary>
-          <ul className="asset-type-group-list">
-            {group.items.map((asset) => (
-              <li key={asset.asset_id}>
-                <button
-                  className="asset-title-link asset-row-button"
-                  onClick={() => onSelect(assetRecordToPreview(asset))}
-                  type="button"
-                >
-                  <span className="asset-row-main">
-                    <strong>
-                      {displayAssetTitle(asset) || <Bi zh="未命名资产" en="Untitled asset" />}
-                    </strong>
-                    {asset.pinned ? (
-                      <span className="asset-pin-flag" title={tx(locale, "已置顶", "Pinned")}>★</span>
-                    ) : null}
-                  </span>
-                  <span className="asset-row-meta">
-                    <span className={`asset-lifecycle-chip is-${asset.lifecycle}`}>
-                      {assetLifecycleLabel(locale, asset.lifecycle)}
-                    </span>
-                    <span className="asset-cell-muted">{assetValueLabel(locale, asset.source_kind)}</span>
-                    <span className="asset-cell-muted">{formatAuthorTimestamp(locale, asset.updated_at)}</span>
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ))}
-    </div>
+    <AssetCardGrid
+      locale={locale}
+      onSelect={onSelect}
+      rows={rows}
+      testId="asset-type-groups"
+    />
   );
 }
 
-function SearchResultsList({
+function SearchResultsGrid({
   locale,
   onSelect,
   searchResults,
@@ -152,7 +179,7 @@ function SearchResultsList({
   }
   if (searchResults.items.length === 0) {
     return (
-      <div className="asset-search-empty">
+      <div className="asset-search-empty asset-type-groups" data-testid="asset-type-groups">
         <p className="form-hint">
           <Bi zh="未找到匹配资产，请调整关键词或清除筛选。" en="No matching assets. Adjust the wording or clear the filters." />
         </p>
@@ -160,92 +187,172 @@ function SearchResultsList({
     );
   }
 
+  const rows: BrowseRow[] = searchResults.items.map((item) => {
+    const preview = searchItemToPreview(item);
+    const readableTitle = displayAssetTitle({
+      title: item.title,
+      asset_type: item.entity_type || item.source,
+      payload: item.payload,
+    });
+    const title = readableTitle || item.title;
+    const lifecycle = item.collections[0]?.lifecycle
+      || (typeof item.payload?.lifecycle === "string" ? item.payload.lifecycle : "");
+    const source = typeof item.payload?.source_kind === "string" && item.payload.source_kind.trim()
+      ? item.payload.source_kind
+      : item.source;
+    const summaryRaw = typeof item.payload?.summary === "string" ? item.payload.summary : "";
+    return {
+      key: item.search_document_id,
+      title,
+      assetType: item.entity_type || "",
+      summary: distinctCardSummary(summaryRaw, title),
+      pinned: Boolean(item.payload?.pinned),
+      lifecycle,
+      source,
+      createdAt: item.created_at,
+      preview,
+    };
+  });
+
+  return <AssetCardGrid locale={locale} onSelect={onSelect} rows={rows} testId="asset-type-groups" />;
+}
+
+function AssetCardGrid({
+  locale,
+  onSelect,
+  rows,
+  testId,
+}: {
+  locale: Locale;
+  onSelect: (asset: AssetPreviewModel) => void;
+  rows: BrowseRow[];
+  testId?: string;
+}) {
+  const showType = !isUniformField(rows, (row) => row.assetType);
+  const showLifecycle = !isUniformField(rows, (row) => row.lifecycle);
+  const showSource = !isUniformField(rows, (row) => row.source);
+  const showTime = !isUniformField(rows, (row) => formatCardDate(locale, row.createdAt));
+
   return (
-    <div className="trace-list asset-search-results asset-type-groups" style={{ marginTop: 12 }}>
-      {searchResults.items.map((item) => {
-        const preview = searchItemToPreview(item);
-        const readableTitle = displayAssetTitle({
-          title: item.title,
-          asset_type: item.entity_type || item.source,
-          payload: item.payload,
-        });
-        const title = <strong>{readableTitle || item.title}</strong>;
-        return (
-          <article className="trace-event asset-search-card" key={item.search_document_id}>
-            <div className="trace-event-header">
-              {preview ? (
+    <div className="asset-type-groups asset-browse-grid" data-testid={testId}>
+      <ul className="asset-browse-card-list">
+        {rows.map((row) => {
+          const title = row.title || tx(locale, "未命名资产", "Untitled asset");
+          const metaBits: string[] = [];
+          if (showSource && row.source) {
+            metaBits.push(assetValueLabel(locale, row.source));
+          }
+          if (showTime && row.createdAt) {
+            metaBits.push(formatCardDate(locale, row.createdAt));
+          }
+          const card = (
+            <>
+              <span className="asset-browse-card-top">
+                {showType && row.assetType ? (
+                  <span className="asset-browse-card-type">{assetValueLabel(locale, row.assetType)}</span>
+                ) : (
+                  <span className="asset-browse-card-type is-spacer" aria-hidden="true" />
+                )}
+                {row.pinned ? (
+                  <span className="asset-pin-flag" title={tx(locale, "已置顶", "Pinned")}>★</span>
+                ) : null}
+              </span>
+              <strong className="asset-browse-card-title">{title}</strong>
+              {row.summary ? <span className="asset-browse-card-summary">{row.summary}</span> : null}
+              <span className="asset-browse-card-footer">
+                {showLifecycle && row.lifecycle ? (
+                  <span className={`asset-lifecycle-chip is-${row.lifecycle}`}>
+                    {assetLifecycleLabel(locale, row.lifecycle)}
+                  </span>
+                ) : null}
+                {metaBits.length > 0 ? (
+                  <span className="asset-browse-card-meta">{metaBits.join(" · ")}</span>
+                ) : null}
+              </span>
+            </>
+          );
+
+          return (
+            <li key={row.key}>
+              {row.preview ? (
                 <button
-                  className="asset-title-link asset-row-button asset-search-title-button"
-                  onClick={() => onSelect(preview)}
+                  className="asset-browse-card asset-title-link"
+                  onClick={() => onSelect(row.preview!)}
                   type="button"
                 >
-                  {title}
+                  {card}
                 </button>
-              ) : title}
-              <span className="trace-redaction">
-                {assetValueLabel(locale, item.entity_type || item.source)}
-              </span>
-            </div>
-            {item.tags.length > 0 ? (
-              <p className="trace-meta"><Bi zh="标签" en="Tags" />: {item.tags.join(", ")}</p>
-            ) : null}
-          </article>
-        );
-      })}
+              ) : (
+                <div className="asset-browse-card is-static">{card}</div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
 
-function groupAssetsByType(items: AssetRecord[]): Array<{ type: string; items: AssetRecord[] }> {
-  const order: string[] = [];
-  const map = new Map<string, AssetRecord[]>();
-  for (const asset of items) {
-    const type = (asset.asset_type || "unknown").trim() || "unknown";
-    if (!map.has(type)) {
-      map.set(type, []);
-      order.push(type);
-    }
-    map.get(type)!.push(asset);
+function isUniformField(rows: BrowseRow[], pick: (row: BrowseRow) => string) {
+  if (rows.length <= 1) {
+    return true;
   }
-  order.sort((a, b) => {
-    const rank = (type: string) => TYPE_PRIORITY[type.toLowerCase()] ?? 50;
-    const diff = rank(a) - rank(b);
-    if (diff !== 0) {
-      return diff;
-    }
-    return a.localeCompare(b);
-  });
-  return order.map((type) => ({ type, items: map.get(type)! }));
+  const first = pick(rows[0]!);
+  return rows.every((row) => pick(row) === first);
 }
 
-const TYPE_PRIORITY: Record<string, number> = {
-  character: 1,
-  character_archetype: 2,
-  world_rule: 3,
-  organization: 4,
-  relationship: 5,
-  clue: 6,
-  note: 7,
-  style: 8,
-  writing_style: 9,
-  plot_template: 10,
-  archive: 11,
-  graph: 12,
-  seed: 13,
-  seed_canon: 14,
-};
+function distinctCardSummary(summary: string, title: string) {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed === title.trim()) {
+    return "";
+  }
+  if (trimmed.length <= 72) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 72)}…`;
+}
 
-function formatAuthorTimestamp(locale: Locale, value: string) {
+function filterAssets(items: AssetRecord[], filters?: AssetBrowseFilters) {
+  if (!filters) {
+    return items;
+  }
+  return items.filter((asset) => {
+    if (filters.asset_types.length > 0 && !filters.asset_types.includes(asset.asset_type)) {
+      return false;
+    }
+    if (filters.categories.length > 0 && !filters.categories.includes(asset.category)) {
+      return false;
+    }
+    if (filters.lifecycles.length > 0 && !filters.lifecycles.includes(asset.lifecycle)) {
+      return false;
+    }
+    if (filters.sources.length > 0 && !filters.sources.includes(asset.source_kind)) {
+      return false;
+    }
+    if (filters.tags.length > 0 && !filters.tags.some((tag) => asset.tags.includes(tag))) {
+      return false;
+    }
+    if (filters.pinned !== undefined && asset.pinned !== filters.pinned) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function formatCardDate(locale: Locale, value: string) {
   if (!value) {
-    return "—";
+    return "";
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
-    return "—";
+    return "";
   }
   return new Intl.DateTimeFormat(locale === "zh-CN" ? "zh-CN" : "en", {
-    dateStyle: "medium",
-    timeStyle: "short",
+    month: "short",
+    day: "numeric",
   }).format(date);
 }
 
@@ -277,6 +384,8 @@ function assetValueLabel(locale: Locale, value: string) {
     style: ["风格", "Style"],
     writing_style: ["写作风格", "Writing style"],
     world_rule: ["世界规则", "World rule"],
+    "pi analysis": ["Pi Analysis", "Pi Analysis"],
+    pi_analysis: ["Pi Analysis", "Pi Analysis"],
   };
   const normalized = value.trim().toLowerCase();
   const label = labels[normalized];

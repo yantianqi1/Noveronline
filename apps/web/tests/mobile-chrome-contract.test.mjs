@@ -337,10 +337,10 @@ test("phone density: compact materials headers, short artifact tabs, no aside cl
     /\.overview-status-stage\[data-expanded="true"\]\s+\.overview-status-wall-preview-action\s*\{[\s\S]*?display:\s*none/s,
   );
 
-  // Asset aside must not clamp to 52dvh on phone (avoids dual-scroll sandwich).
+  // Asset ops must not clamp to 52dvh on phone (avoids dual-scroll sandwich).
   assert.match(
     chrome,
-    /aside\.asset-library-aside[\s\S]*?max-height:\s*none\s*!important/s,
+    /\.asset-library-root \.asset-search-ops[\s\S]*?max-height:\s*none\s*!important/s,
   );
 
   // Writer artifact tabs stay one short row on full phone band (≤860).

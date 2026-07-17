@@ -2316,6 +2316,11 @@ test("Story Graph shell renders explicit snapshot and build states", async () =>
   assert.match(shell, /workspaceMode === "build"/);
   assert.match(shell, /workspaceMode === "curate"/);
   assert.match(shell, /workspaceMode === "compose"/);
+  assert.match(shell, /initialWorkspaceMode/);
+  assert.match(shell, /analysisBuildOptions/);
+  assert.match(shell, /graph-build-analysis-run/);
+  assert.match(shell, /analysisRunId/);
+  assert.match(shell, /searchParams\.set\("mode"/);
   assert.match(shell, /workflowRun\.ok/);
   assert.match(shell, /workflowEvents\.ok/);
   assert.match(shell, /event\.event_type/);
@@ -2381,6 +2386,11 @@ test("Story Graph page loads graph candidates and wires explicit adoption action
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/graph/page.tsx");
 
   assert.match(page, /getProjectAssets/);
+  assert.match(page, /getProjectAnalysisRuns/);
+  assert.match(page, /getProjectSourceFiles/);
+  assert.match(page, /analysisBuildOptionsFromRuns/);
+  assert.match(page, /analysis_run_id/);
+  assert.match(page, /mode: "build"/);
   assert.match(page, /graphCandidatesFromAssets/);
   assert.match(page, /source_kind\s*===\s*"graph_bond_generation"/);
   assert.match(page, /lifecycle\s*===\s*"candidate"/);
@@ -2703,7 +2713,8 @@ test("LLM Facility shell is an operational settings console", async () => {
 test("Asset Library shell is an operational asset console", async () => {
   const shell = await fileText("components/asset-library-shell.tsx");
 
-  assert.match(shell, /Asset Library/);
+  assert.match(shell, /asset-library-root|WorkspaceCommandMeta/);
+  assert.match(shell, /Browse assets|浏览资产/);
   assert.match(shell, /Facets/);
   assert.match(shell, /FacetGroup label=\{tx\(locale, "标签", "Tags"\)\}/);
   assert.match(shell, /Search/);
@@ -2850,7 +2861,14 @@ test("login page keeps the reference editorial split-screen proportions", async 
 
   assert.match(styles, /\.login-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(560px, 43\.5%\) minmax\(0, 56\.5%\)/s);
   assert.match(styles, /\.login-copy\s*\{[^}]*width:\s*min\(100% - 80px, 455px\)/s);
-  assert.match(styles, /\.login-form-panel::after\s*\{[^}]*right:\s*-200px;[^}]*width:\s*200px/s);
+  assert.match(styles, /\.login-form-panel::after\s*\{[^}]*right:\s*-360px;[^}]*width:\s*360px/s);
+  assert.match(styles, /\.login-visual::before\s*\{[^}]*width:\s*min\(34%, 280px\)/s);
+  assert.match(styles, /\.login-input-wrap\s*\{[^}]*border-bottom:\s*1\.5px solid/s);
+  assert.match(
+    styles,
+    /\.login-page \.login-input-wrap input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\)/,
+  );
+  assert.match(styles, /\.login-join\s*>\s*span\s*\{[^}]*display:\s*none/s);
   assert.match(styles, /\.login-form-panel\s*\{[^}]*overflow:\s*visible/s);
   assert.match(styles, /\.login-submit\s*\{[^}]*min-height:\s*66px/s);
   assert.match(styles, /\.login-visual\s*\{[^}]*background-image:\s*url\("\/landing\/assets\/scene-5-finale\.jpg"\)/s);
@@ -2991,25 +3009,26 @@ test("Paper-ink design tokens and bookish app shell stay explicit", async () => 
 });
 
 test("module headers use one Lucide icon language", async () => {
-  // Character console and the conversation-first writer workbench are headerless
+  // Character console, conversation-first writer, and Asset Library are headerless
   // (content aligns to command bar); Overview uses a compact foundation metrics bar.
-  // Nav still uses UsersRound.
-  const shellPaths = [
-    "components/asset-library-shell.tsx",
+  // Nav still uses UsersRound / Boxes for Characters / Assets.
+  const titledShellPaths = [
     "components/story-graph-shell.tsx",
     "components/worldline-shell.tsx",
     "components/llm-facility-shell.tsx",
   ];
-  const shells = (await Promise.all(shellPaths.map((path) => fileText(path)))).join("\n");
+  const shells = (await Promise.all(titledShellPaths.map((path) => fileText(path)))).join("\n");
+  const assets = await fileText("components/asset-library-shell.tsx");
   const overview = await fileText("components/overview-seed-shell.tsx");
   const nav = await fileText("components/project-nav.tsx");
   const characterShell = await fileText("components/character-console-shell.tsx");
 
-  // WorkspaceHeader owns page-title-icon for Assets and other titled shells.
-  assert.ok((shells.match(/page-title-icon|icon=\{</g) ?? []).length >= shellPaths.length);
+  assert.ok((shells.match(/page-title-icon|icon=\{</g) ?? []).length >= titledShellPaths.length);
+  assert.match(assets, /WorkspaceCommandMeta|asset-command-stats/);
+  assert.doesNotMatch(assets, /WorkspaceHeader/);
   assert.match(overview, /overview-foundation-bar/);
   assert.match(overview, /LayoutDashboard/);
-  assert.match(shells, /Boxes/);
+  assert.match(nav, /Boxes/);
   assert.match(shells, /Network/);
   assert.match(shells, /GitBranch/);
   assert.match(nav, /UsersRound/);

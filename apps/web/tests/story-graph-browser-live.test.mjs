@@ -55,15 +55,20 @@ browserGraphTest("Browser Story Graph builds, inspects, generates a candidate, a
       }
     });
 
-    await page.goto(graphUrl(config), { waitUntil: "networkidle" });
+    await page.goto(graphUrl(config, { mode: "build" }), { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: "Story Graph", exact: true }).waitFor();
+    await page.getByRole("tab", { name: "Build", exact: true }).click();
 
     const buildPanel = page.getByRole("heading", { name: "Start build" }).locator("..");
     await buildPanel.locator("#graph-build-mode").selectOption("full");
     await buildPanel.locator("#graph-build-source").selectOption("seed_canon");
     const buildStarted = performance.now();
     await Promise.all([
-      page.waitForURL((url) => url.searchParams.get("buildStatus") === "success" && Boolean(url.searchParams.get("runId")), {
+      page.waitForURL((url) => (
+        url.searchParams.get("buildStatus") === "success"
+        && Boolean(url.searchParams.get("runId"))
+        && url.searchParams.get("mode") === "build"
+      ), {
         timeout: config.timeoutMs,
       }),
       buildPanel.getByRole("button", { name: "Build", exact: true }).click(),

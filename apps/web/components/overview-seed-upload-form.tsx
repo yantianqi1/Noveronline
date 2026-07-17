@@ -15,6 +15,8 @@ type OverviewSeedUploadFormProps = {
   locale: Locale;
   sourceStatus: ReactNode;
   seedStatus: ReactNode;
+  /** stack = vertical (default rail); split = dropzone | controls then full-width submit */
+  variant?: "stack" | "split";
 };
 
 export function OverviewSeedUploadForm({
@@ -22,6 +24,7 @@ export function OverviewSeedUploadForm({
   locale,
   sourceStatus,
   seedStatus,
+  variant = "stack",
 }: OverviewSeedUploadFormProps) {
   const [error, setError] = useState<string>("");
   const [fileName, setFileName] = useState<string>("");
@@ -86,6 +89,85 @@ export function OverviewSeedUploadForm({
     setError(validateFile(file));
   }
 
+  const dropzone = (
+    <label
+      className="overview-dropzone"
+      data-dragging={dragging ? "true" : "false"}
+      data-has-file={fileName ? "true" : "false"}
+      htmlFor="source-file"
+      onDragEnter={(event) => {
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(event) => {
+        event.preventDefault();
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          return;
+        }
+        setDragging(false);
+      }}
+      onDragOver={(event) => {
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDrop={onDrop}
+    >
+      <span className="overview-dropzone-icon" aria-hidden="true">
+        {fileName ? <FileUp size={20} strokeWidth={1.6} /> : <Upload size={20} strokeWidth={1.6} />}
+      </span>
+      <span className="overview-dropzone-copy">
+        <strong>
+          {fileName
+            ? fileName
+            : <Bi zh="选择或拖入小说文件" en="Choose or drop a manuscript" />}
+        </strong>
+        <small>
+          {fileName
+            ? <Bi zh="点击可重新选择" en="Click to choose another file" />
+            : <Bi zh="TXT / Markdown / PDF" en="TXT / Markdown / PDF" />}
+        </small>
+      </span>
+      <input
+        accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+        className="overview-dropzone-input"
+        id="source-file"
+        name="file"
+        onChange={onFileChange}
+        required
+        type="file"
+      />
+    </label>
+  );
+
+  const modeAndHints = (
+    <>
+      <label htmlFor="seed-mode"><Bi zh="分析方式" en="Analysis mode" /></label>
+      <select id="seed-mode" name="mode" defaultValue="full">
+        <option value="full">{tx(locale, "完整分析", "Full analysis")}</option>
+        <option value="focused">{tx(locale, "重点分析", "Focused analysis")}</option>
+        <option value="resume">{tx(locale, "继续分析", "Continue analysis")}</option>
+      </select>
+      <label htmlFor="analysis-hints"><Bi zh="分析提示（可选）" en="Analysis hints (optional)" /></label>
+      <textarea
+        id="analysis-hints"
+        name="hints"
+        rows={3}
+        placeholder={tx(
+          locale,
+          "例如：先拆前 10 章；关注权谋线与主要人物关系",
+          "e.g. Focus on the first 10 chapters; track intrigue and main relationships",
+        )}
+      />
+    </>
+  );
+
+  const submit = (
+    <SubmitButton
+      idleLabel={<><Upload aria-hidden="true" size={18} /><Bi zh="上传并开始分析" en="Upload and start analysis" /></>}
+      pendingLabel={<Bi zh="上传中…" en="Uploading…" />}
+    />
+  );
+
   return (
     <>
       {sourceStatus}
@@ -95,78 +177,28 @@ export function OverviewSeedUploadForm({
           {error}
         </p>
       ) : null}
-      <form action={action} className="binding-form overview-upload-form" onSubmit={onSubmit}>
-        <label
-          className="overview-dropzone"
-          data-dragging={dragging ? "true" : "false"}
-          data-has-file={fileName ? "true" : "false"}
-          htmlFor="source-file"
-          onDragEnter={(event) => {
-            event.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={(event) => {
-            event.preventDefault();
-            if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              return;
-            }
-            setDragging(false);
-          }}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragging(true);
-          }}
-          onDrop={onDrop}
-        >
-          <span className="overview-dropzone-icon" aria-hidden="true">
-            {fileName ? <FileUp size={20} strokeWidth={1.6} /> : <Upload size={20} strokeWidth={1.6} />}
-          </span>
-          <span className="overview-dropzone-copy">
-            <strong>
-              {fileName
-                ? fileName
-                : <Bi zh="选择或拖入小说文件" en="Choose or drop a manuscript" />}
-            </strong>
-            <small>
-              {fileName
-                ? <Bi zh="点击可重新选择" en="Click to choose another file" />
-                : <Bi zh="TXT / Markdown / PDF" en="TXT / Markdown / PDF" />}
-            </small>
-          </span>
-          <input
-            accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
-            className="overview-dropzone-input"
-            id="source-file"
-            name="file"
-            onChange={onFileChange}
-            required
-            type="file"
-          />
-        </label>
-
-        <div className="overview-upload-controls">
-          <label htmlFor="seed-mode"><Bi zh="分析方式" en="Analysis mode" /></label>
-          <select id="seed-mode" name="mode" defaultValue="full">
-            <option value="full">{tx(locale, "完整分析", "Full analysis")}</option>
-            <option value="focused">{tx(locale, "重点分析", "Focused analysis")}</option>
-            <option value="resume">{tx(locale, "继续分析", "Continue analysis")}</option>
-          </select>
-          <label htmlFor="analysis-hints"><Bi zh="分析提示（可选）" en="Analysis hints (optional)" /></label>
-          <textarea
-            id="analysis-hints"
-            name="hints"
-            rows={3}
-            placeholder={tx(
-              locale,
-              "例如：先拆前 10 章；关注权谋线与主要人物关系",
-              "e.g. Focus on the first 10 chapters; track intrigue and main relationships",
-            )}
-          />
-          <SubmitButton
-            idleLabel={<><Upload aria-hidden="true" size={18} /><Bi zh="上传并开始分析" en="Upload and start analysis" /></>}
-            pendingLabel={<Bi zh="上传中…" en="Uploading…" />}
-          />
-        </div>
+      <form
+        action={action}
+        className={`binding-form overview-upload-form overview-upload-form--${variant}`}
+        onSubmit={onSubmit}
+      >
+        {variant === "split" ? (
+          <>
+            <div className="overview-upload-split-row">
+              {dropzone}
+              <div className="overview-upload-controls">{modeAndHints}</div>
+            </div>
+            {submit}
+          </>
+        ) : (
+          <>
+            {dropzone}
+            <div className="overview-upload-controls">
+              {modeAndHints}
+              {submit}
+            </div>
+          </>
+        )}
       </form>
     </>
   );

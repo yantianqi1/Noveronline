@@ -12,6 +12,7 @@ async function source(relativePath) {
 test("Asset Library uses one compact search surface and one advanced filter disclosure", async () => {
   const shell = await source("components/asset-library-shell.tsx");
   const css = await source("app/globals.css");
+  const polish = await source("app/workbench-polish.css");
   const formStart = shell.indexOf('<form action={searchAction}');
   const formEnd = shell.indexOf("</form>", formStart);
   const searchForm = shell.slice(formStart, formEnd);
@@ -25,7 +26,10 @@ test("Asset Library uses one compact search surface and one advanced filter disc
   }
   assert.match(shell, /appliedAssetFilters/);
   assert.match(shell, /assetSearchHref/);
-  assert.match(shell, /InspectorPanel/);
+  assert.match(searchForm, /asset-search-ops/);
+  assert.match(searchForm, /trailing=\{/);
+  assert.match(searchForm, /记忆审阅|Memory review/);
+  assert.doesNotMatch(shell, /InspectorPanel/);
   assert.doesNotMatch(shell, /data-search-document-id|data-search-mode|formatScore|searchRanking/);
   assert.doesNotMatch(shell, /<span className="form-hint">\{asset\.asset_id\}<\/span>/);
   assert.match(shell, /AssetBrowseClient/);
@@ -34,6 +38,15 @@ test("Asset Library uses one compact search surface and one advanced filter disc
 
   // Open filter panel must span the toolbar (bar is the containing block), not the narrow trigger.
   assert.match(css, /\.asset-library-grid \.compact-filter-bar\s*\{[^}]*position:\s*relative/s);
+  assert.match(css, /\.asset-search-primary-field\s*\{[^}]*max-width:\s*260px/s);
+  assert.match(css, /\.asset-search-ops\s*\{[^}]*margin-left:\s*auto/s);
+  // Overview polish must not force dual-column onto the asset library direct child grid.
+  assert.match(css, /\.overview-root \.workbench-grid\.asset-library-grid\s*\{[^}]*grid-template-columns:\s*168px\s+minmax\(0,\s*1fr\)\s*!important/s);
+  assert.match(polish, /\.overview-root\s*>\s*\.workbench-grid:not\(\.asset-library-grid\)/);
+  assert.doesNotMatch(
+    polish,
+    /\.overview-root\s*>\s*\.workbench-grid\s*,\s*\n\s*\.overview-root \.workbench-grid:not\(\.asset-library-grid\)/,
+  );
   assert.match(css, /\.asset-filter-disclosure\s*\{[^}]*position:\s*static/s);
   assert.match(css, /\.asset-filter-disclosure > \.asset-filter-content\s*\{[^}]*left:\s*0/s);
   assert.match(css, /\.asset-filter-disclosure > \.asset-filter-content\s*\{[^}]*right:\s*0/s);
@@ -42,6 +55,10 @@ test("Asset Library uses one compact search surface and one advanced filter disc
   assert.match(css, /background(?:-color)?:\s*#fffdf8/);
   assert.match(css, /\.overview-root \.overview-details:not\(\.asset-filter-disclosure\)/);
   assert.match(css, /\.asset-type-groups\s*\{/);
+  assert.match(css, /\.asset-browse-grid\s*\{/);
+  assert.match(css, /\.asset-browse-card-list\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill/s);
+  assert.match(css, /\.asset-browse-card\s*\{/);
+  assert.match(css, /\.asset-active-scope\s*\{/);
   assert.match(css, /\.asset-preview-dialog\s*\{/);
 });
 
@@ -54,9 +71,12 @@ test("Asset Library opens in-page preview instead of catalog detail navigation",
   assert.match(shell, /AssetBrowseClient/);
   assert.doesNotMatch(shell, /assetDetailHref/);
   assert.match(browse, /asset-type-groups/);
+  assert.match(browse, /asset-browse-grid|asset-browse-card/);
+  assert.match(browse, /isUniformField|showLifecycle|showSource/);
   assert.match(browse, /AssetPreviewDialog/);
   assert.match(browse, /assetRecordToPreview|searchItemToPreview/);
   assert.match(browse, /asset-title-link/);
+  assert.match(browse, /filterAssets|filters\?/);
   assert.match(preview, /asset-preview-dialog/);
   assert.match(preview, /showModal/);
   assert.match(preview, /displayAssetTitle|structureAssetBody/);
@@ -78,6 +98,13 @@ test("Overview prioritizes the current next step and folds secondary activity", 
   assert.ok(foundationBarIndex >= 0 && foundationBarIndex < nextPanelIndex);
   assert.ok(nextPanelIndex >= 0 && metricsPanelIndex >= 0 && metricsPanelIndex < nextPanelIndex);
   assert.match(shell, /data-layout="foundation-bar"/);
+  assert.match(shell, /data-overview-state=\{overviewState\}/);
+  assert.match(shell, /isCompletedRun/);
+  assert.match(shell, /OverviewCompletedBoard/);
+  assert.match(shell, /overview-completed-import/);
+  assert.match(shell, /导入新文本|Import new manuscript/);
+  assert.match(shell, /variant=\{isCompletedRun \? "split" : "stack"\}/);
+  assert.doesNotMatch(shell, /overview-upload-collapsed/);
   assert.match(shell, /<OverviewNextStep/);
   assert.match(shell, /Files and analysis history/);
   assert.match(shell, /Project diagnostics \(optional\)/);
@@ -93,6 +120,63 @@ test("Overview prioritizes the current next step and folds secondary activity", 
   assert.doesNotMatch(shell, /<dd>\{projectReadiness\.project_readiness_snapshot_id\}<\/dd>/);
   assert.doesNotMatch(shell, /<strong>\{status\.code\}<\/strong>/);
   assert.doesNotMatch(shell, /<strong>\{(?:projectOverview|projectReadiness|selectedSeedRun|seedEvents|sourceFiles|seedRuns)\.code\}<\/strong>/);
+});
+
+test("Overview completed state collapses re-import and rebalances the mid-band", async () => {
+  const shell = await source("components/overview-seed-shell.tsx");
+  const board = await source("components/overview-completed-board.tsx");
+  const uploadForm = await source("components/overview-seed-upload-form.tsx");
+  const globals = await source("app/globals.css");
+  const polish = await source("app/workbench-polish.css");
+
+  assert.match(shell, /data-overview-state=\{overviewState\}/);
+  assert.match(shell, /overviewState = isCompletedRun/);
+  assert.match(shell, /overview-completed-layout/);
+  assert.match(shell, /OverviewCompletedBoard/);
+  assert.match(board, /data-board="completed-disclosures"/);
+  assert.match(shell, /overview-completed-import/);
+  assert.match(shell, /id: "diagnostics"/);
+  assert.match(shell, /embedResults=\{false\}/);
+  assert.match(shell, /presentation="body"/);
+  assert.match(shell, /overview-visually-hidden/);
+  assert.match(shell, /variant=\{isCompletedRun \? "split" : "stack"\}/);
+  assert.match(shell, /isCompletedRun \? \([\s\S]*OverviewCompletedBoard/);
+  assert.doesNotMatch(shell, /overview-upload-collapsed/);
+  assert.doesNotMatch(
+    shell.slice(shell.indexOf("OverviewCompletedBoard"), shell.indexOf("overview-completed-import")),
+    /<details/,
+  );
+  assert.match(uploadForm, /variant\?:\s*"stack"\s*\|\s*"split"/);
+  assert.match(uploadForm, /overview-upload-split-row/);
+  assert.match(uploadForm, /overview-upload-form--\$\{variant\}/);
+  assert.match(board, /showModal/);
+  assert.match(board, /overview-board-dialog/);
+  assert.match(board, /data-interaction="modal"/);
+  assert.match(board, /initialActiveId/);
+  assert.match(board, /searchParams\.set\("board"/);
+  assert.match(shell, /initialBoardId/);
+  const overviewPage = await source("app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx");
+  assert.match(overviewPage, /initialBoardId = query\.board\?\.trim\(\)/);
+  assert.doesNotMatch(overviewPage, /workspacePath \? "workspace"/);
+  assert.match(board, /searchParams\.delete\("workspacePath"\)/);
+  const workspacePanel = await source("components/overview-analysis-workspace-panel.tsx");
+  assert.match(workspacePanel, /board=workspace|OverviewAnalysisWorkspaceBrowser/);
+  assert.match(await source("components/overview-analysis-workspace-browser.tsx"), /history\.replaceState/);
+  assert.match(await source("components/overview-analysis-workspace-browser.tsx"), /\/api\/analysis-workspace\//);
+  assert.match(globals, /\.overview-board-dialog-body\s+\.overview-analysis-workspace-grid/);
+  assert.match(globals, /\.overview-completed-board\s*\{/);
+  assert.match(globals, /\.overview-completed-board\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(globals, /\.overview-completed-import\s*\{/);
+  assert.match(globals, /\.overview-board-dialog\s*\{/);
+  assert.match(globals, /\.overview-upload-split-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)/s);
+  assert.match(
+    polish,
+    /\[data-overview-state="completed"\][\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
+  );
+  assert.doesNotMatch(
+    polish,
+    /\[data-overview-state="completed"\][\s\S]*grid-template-columns:\s*minmax\(0,\s*1\.25fr\)\s+minmax\(280px,\s*0\.9fr\)/s,
+  );
 });
 
 test("Overview empty project exposes dual idea-first and upload entries", async () => {

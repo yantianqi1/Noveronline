@@ -128,7 +128,8 @@ def worker_components_for_task_queue(task_queue: str) -> dict[str, list[object]]
 
 async def run_worker() -> None:
     temporal_address = os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233")
-    client = await Client.connect(temporal_address)
+    temporal_namespace = os.environ.get("TEMPORAL_NAMESPACE", "default").strip() or "default"
+    client = await Client.connect(temporal_address, namespace=temporal_namespace)
     task_queue = os.environ.get("AGENT_RUNTIME_TASK_QUEUE", HELLO_AGENT_TASK_QUEUE)
     components = worker_components_for_task_queue(task_queue)
     with ThreadPoolExecutor(max_workers=32) as activity_executor:

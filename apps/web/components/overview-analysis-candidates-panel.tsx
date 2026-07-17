@@ -8,18 +8,54 @@ type OverviewAnalysisCandidatesPanelProps = {
   locale: Locale;
   candidates: AnalysisCandidatesSummary | null;
   materialsHref: string;
+  /** details = expandable disclosure (default); body = content only for modal hosts */
+  presentation?: "details" | "body";
 };
+
+export function analysisCandidatesSummaryHint(
+  locale: Locale,
+  candidates: AnalysisCandidatesSummary | null,
+) {
+  if (!candidates) {
+    return tx(locale, "开始分析后显示", "Appears after analysis starts");
+  }
+  if (!candidates.ok) {
+    return tx(locale, "加载失败", "Failed to load");
+  }
+  const count = candidates.items.filter((item) => item.ok).length;
+  return count === 0
+    ? tx(locale, "完成后在此预览", "Preview after analysis")
+    : tx(locale, `已入库 ${count} 项`, `${count} items imported`);
+}
 
 export function OverviewAnalysisCandidatesPanel({
   locale,
   candidates,
   materialsHref,
+  presentation = "details",
 }: OverviewAnalysisCandidatesPanelProps) {
   if (!candidates) {
+    if (presentation === "body") {
+      return (
+        <section>
+          <p className="form-hint">
+            <Bi zh="开始分析后，这里会显示拆解结果预览。" en="Analysis results preview appears here after a run starts." />
+          </p>
+        </section>
+      );
+    }
     return null;
   }
 
   if (!candidates.ok) {
+    const body = (
+      <section>
+        <p>{candidates.message || tx(locale, "无法加载分析候选。", "Could not load analysis candidates.")}</p>
+      </section>
+    );
+    if (presentation === "body") {
+      return body;
+    }
     return (
       <details className="overview-details overview-analysis-candidates error-box" open>
         <summary>
@@ -32,11 +68,7 @@ export function OverviewAnalysisCandidatesPanel({
           </span>
           <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
         </summary>
-        <div className="overview-details-content">
-          <section>
-            <p>{candidates.message || tx(locale, "无法加载分析候选。", "Could not load analysis candidates.")}</p>
-          </section>
-        </div>
+        <div className="overview-details-content">{body}</div>
       </details>
     );
   }
@@ -55,10 +87,64 @@ export function OverviewAnalysisCandidatesPanel({
     .sort((a, b) => b[1] - a[1])
     .map(([type, count]) => `${type} ${count}`)
     .join(" · ");
-  const summaryHint =
-    items.length === 0
-      ? tx(locale, "完成后在此预览", "Preview after analysis")
-      : tx(locale, `已入库 ${items.length} 项`, `${items.length} items imported`);
+  const summaryHint = analysisCandidatesSummaryHint(locale, candidates);
+
+  const body = (
+    <section>
+      <p className="form-hint">
+        <Bi
+          zh="拆解完成后会自动写入素材库，可直接在资产库查看角色、关系、世界规则等。它们标记为「素材」，可随时编辑或升为正典。"
+          en="When analysis finishes, results are auto-imported into the library. Open Assets to browse characters, relationships, and world rules. They are stored as materials you can edit or promote to canon."
+        />
+      </p>
+      {items.length === 0 ? (
+        <p className="form-hint">
+          <Bi zh="尚无拆解结果。分析完成后会出现角色、关系、规则等条目，并自动入库。" en="No results yet. After analysis completes, characters, relationships, and rules appear here and are auto-imported." />
+        </p>
+      ) : (
+        <>
+          <p className="overview-analysis-candidate-summary">
+            <strong>
+              <Bi zh={`已入库 ${items.length} 项`} en={`${items.length} items imported`} />
+            </strong>
+            {typeSummary ? <span>{typeSummary}</span> : null}
+          </p>
+          <ul className="overview-analysis-candidate-list">
+            {previewItems.map((item) => (
+              <li key={item.candidate_id} data-status={item.status} data-type={item.candidate_type}>
+                <strong>{item.name || item.candidate_type}</strong>
+                <span>
+                  {item.candidate_type}
+                  {item.status === "accepted" || item.status === "candidate" ? (
+                    <> · <Bi zh="已入库" en="imported" /></>
+                  ) : (
+                    <> · {item.status}</>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {items.length > previewLimit ? (
+            <p className="form-hint">
+              <Bi
+                zh={`列表仅预览前 ${previewLimit} 项；完整条目请到资产库查看。`}
+                en={`Showing the first ${previewLimit} items; open Assets for the full set.`}
+              />
+            </p>
+          ) : null}
+        </>
+      )}
+      <p className="overview-analysis-candidate-actions">
+        <a className="text-link" href={materialsHref}>
+          <Bi zh="打开资产库 / 素材" en="Open Assets / Materials" />
+        </a>
+      </p>
+    </section>
+  );
+
+  if (presentation === "body") {
+    return body;
+  }
 
   return (
     <details className="overview-details overview-analysis-candidates">
@@ -72,58 +158,7 @@ export function OverviewAnalysisCandidatesPanel({
         </span>
         <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
       </summary>
-      <div className="overview-details-content">
-        <section>
-          <p className="form-hint">
-            <Bi
-              zh="拆解完成后会自动写入素材库，可直接在资产库查看角色、关系、世界规则等。它们标记为「素材」，可随时编辑或升为正典。"
-              en="When analysis finishes, results are auto-imported into the library. Open Assets to browse characters, relationships, and world rules. They are stored as materials you can edit or promote to canon."
-            />
-          </p>
-          {items.length === 0 ? (
-            <p className="form-hint">
-              <Bi zh="尚无拆解结果。分析完成后会出现角色、关系、规则等条目，并自动入库。" en="No results yet. After analysis completes, characters, relationships, and rules appear here and are auto-imported." />
-            </p>
-          ) : (
-            <>
-              <p className="overview-analysis-candidate-summary">
-                <strong>
-                  <Bi zh={`已入库 ${items.length} 项`} en={`${items.length} items imported`} />
-                </strong>
-                {typeSummary ? <span>{typeSummary}</span> : null}
-              </p>
-              <ul className="overview-analysis-candidate-list">
-                {previewItems.map((item) => (
-                  <li key={item.candidate_id} data-status={item.status} data-type={item.candidate_type}>
-                    <strong>{item.name || item.candidate_type}</strong>
-                    <span>
-                      {item.candidate_type}
-                      {item.status === "accepted" || item.status === "candidate" ? (
-                        <> · <Bi zh="已入库" en="imported" /></>
-                      ) : (
-                        <> · {item.status}</>
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              {items.length > previewLimit ? (
-                <p className="form-hint">
-                  <Bi
-                    zh={`列表仅预览前 ${previewLimit} 项；完整条目请到资产库查看。`}
-                    en={`Showing the first ${previewLimit} items; open Assets for the full set.`}
-                  />
-                </p>
-              ) : null}
-            </>
-          )}
-          <p className="overview-analysis-candidate-actions">
-            <a className="text-link" href={materialsHref}>
-              <Bi zh="打开资产库 / 素材" en="Open Assets / Materials" />
-            </a>
-          </p>
-        </section>
-      </div>
+      <div className="overview-details-content">{body}</div>
     </details>
   );
 }

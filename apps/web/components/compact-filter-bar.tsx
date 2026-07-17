@@ -13,6 +13,8 @@ type CompactFilterBarProps = {
   clearHref?: string;
   clearLabel?: ReactNode;
   disclosure?: ReactNode;
+  /** Extra controls after search/filter (e.g. create / more / memory). */
+  trailing?: ReactNode;
   searchField: ReactNode;
   submitControl: ReactNode;
 };
@@ -28,6 +30,7 @@ export function CompactFilterBar({
   clearHref,
   clearLabel,
   disclosure,
+  trailing,
   searchField,
   submitControl,
 }: CompactFilterBarProps) {
@@ -39,6 +42,7 @@ export function CompactFilterBar({
         <div className="compact-filter-actions">
           {submitControl}
           {disclosure}
+          {trailing}
         </div>
       </div>
       {appliedFilters.length > 0 ? (

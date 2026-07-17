@@ -46,13 +46,17 @@ test("global app shell uses paper navigation and compact context bar", async () 
   assert.match(layout, /className="skip-link"/);
 });
 
-test("Assets keep WorkspaceHeader; Overview uses foundation metrics bar", async () => {
+test("Assets put counts in command bar; Overview uses foundation metrics bar", async () => {
   const assets = await source("components/asset-library-shell.tsx");
+  const contextBar = await source("components/workspace-context-bar.tsx");
   const overview = await source("components/overview-seed-shell.tsx");
 
-  assert.match(assets, /WorkspaceHeader/);
-  assert.match(assets, /from "\.\/workspace-header"/);
-  assert.match(assets, /page-title-icon|icon=\{/);
+  assert.doesNotMatch(assets, /WorkspaceHeader/);
+  assert.doesNotMatch(assets, /from "\.\/workspace-header"/);
+  assert.doesNotMatch(assets, /asset-browse-heading|浏览与检索创作资料|WorkspaceHeader/);
+  assert.match(assets, /WorkspaceCommandMeta/);
+  assert.match(assets, /asset-command-stats|项资产|Showing/);
+  assert.match(contextBar, /data-workspace-command-meta/);
   assert.match(overview, /overview-foundation-bar/);
   assert.match(overview, /data-layout="foundation-bar"/);
   assert.doesNotMatch(overview, /WorkspaceHeader/);

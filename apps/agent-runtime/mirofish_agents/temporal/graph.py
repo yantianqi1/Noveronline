@@ -484,31 +484,66 @@ class PostgresStoryGraphBuilder:
             raise ValueError("project_id is required to build a story graph")
         graph_id = str(uuid.uuid4())
         safe_options = _sanitize_graph_value(options)
+        safe_options_dict = safe_options if isinstance(safe_options, dict) else {}
+        build_source = _normalize_build_source(safe_options_dict.get("source"))
+        analysis_run_id = _optional_text(safe_options_dict.get("analysis_run_id")) or ""
         connection = self._connect()
         try:
             set_postgres_tenant_context(connection, context=context)
             with connection.cursor() as cursor:
-                entities = self._fetch_entities(cursor, context)
-                aliases = self._fetch_entity_aliases(cursor, context)
-                labels = self._fetch_entity_labels(cursor, context)
-                relationships = self._fetch_relationships(cursor, context)
-                plot_threads = self._fetch_plot_threads(cursor, context)
-                world_rules = self._fetch_world_rules(cursor, context)
-                assets = self._fetch_assets(cursor, context)
+                if build_source == "assets":
+                    entities: list[dict[str, Any]] = []
+                    aliases: list[dict[str, Any]] = []
+                    labels: list[dict[str, Any]] = []
+                    relationships: list[dict[str, Any]] = []
+                    plot_threads: list[dict[str, Any]] = []
+                    world_rules: list[dict[str, Any]] = []
+                    assets = self._fetch_assets(
+                        cursor,
+                        context,
+                        include_analysis_types=True,
+                        analysis_run_id=analysis_run_id,
+                    )
+                else:
+                    entities = self._fetch_entities(cursor, context)
+                    aliases = self._fetch_entity_aliases(cursor, context)
+                    labels = self._fetch_entity_labels(cursor, context)
+                    relationships = self._fetch_relationships(cursor, context)
+                    plot_threads = self._fetch_plot_threads(cursor, context)
+                    world_rules = self._fetch_world_rules(cursor, context)
+                    assets = self._fetch_assets(cursor, context)
                 version = self._next_snapshot_version(cursor, context)
 
+                node_assets = [
+                    row
+                    for row in assets
+                    if str(row.get("asset_type") or "").strip().lower() != "relationship"
+                ]
+                relationship_assets = [
+                    row
+                    for row in assets
+                    if str(row.get("asset_type") or "").strip().lower() == "relationship"
+                ]
                 nodes = self._build_nodes(
                     graph_id=graph_id,
                     entities=entities,
                     aliases=aliases,
                     plot_threads=plot_threads,
                     world_rules=world_rules,
-                    assets=assets,
+                    assets=node_assets,
                 )
+                name_index = _node_name_index(nodes)
                 edges = self._build_edges(
                     graph_id=graph_id,
                     relationships=relationships,
-                    node_by_entity_name=_entity_name_index(nodes),
+                    node_by_entity_name=name_index,
+                )
+                edges.extend(
+                    self._build_edges_from_relationship_assets(
+                        graph_id=graph_id,
+                        rows=relationship_assets,
+                        node_by_name=name_index,
+                    )
                 )
                 clusters = _assign_graph_clusters(graph_id=graph_id, nodes=nodes, edges=edges)
                 source_hash = _source_version_hash(
@@ -629,18 +664,58 @@ class PostgresStoryGraphBuilder:
         )
         return _rows(cursor.fetchall())
 
-    def _fetch_assets(self, cursor: Any, context: AgentContext) -> list[dict[str, Any]]:
-        cursor.execute(
-            """SELECT asset_id, asset_type, category, lifecycle, title, summary, payload_jsonb, tags_jsonb
-               FROM assets
-               WHERE tenant_id = %s
-                 AND project_id = %s
-                 AND enabled = true
-                 AND lifecycle IN ('seed', 'canon', 'manuscript', 'material')
-                 AND asset_type IN ('archive_entity', 'artifact', 'location', 'concept')
-               ORDER BY title""",
-            (context.tenant_id, context.project_id),
+    def _fetch_assets(
+        self,
+        cursor: Any,
+        context: AgentContext,
+        *,
+        include_analysis_types: bool = False,
+        analysis_run_id: str = "",
+    ) -> list[dict[str, Any]]:
+        asset_types = (
+            (
+                "character",
+                "relationship",
+                "world_rule",
+                "plot_thread",
+                "note",
+                "story_ontology",
+                "archive_entity",
+                "artifact",
+                "location",
+                "concept",
+            )
+            if include_analysis_types
+            else ("archive_entity", "artifact", "location", "concept")
         )
+        type_placeholders = ", ".join(["%s"] * len(asset_types))
+        run_id = str(analysis_run_id or "").strip()
+        if run_id:
+            cursor.execute(
+                f"""SELECT asset_id, asset_type, category, lifecycle, title, summary, payload_jsonb, tags_jsonb
+                   FROM assets
+                   WHERE tenant_id = %s
+                     AND project_id = %s
+                     AND enabled = true
+                     AND lifecycle IN ('seed', 'canon', 'manuscript', 'material')
+                     AND asset_type IN ({type_placeholders})
+                     AND source_kind = 'pi_analysis'
+                     AND source_ref LIKE %s
+                   ORDER BY title""",
+                (context.tenant_id, context.project_id, *asset_types, f"{run_id}:%"),
+            )
+        else:
+            cursor.execute(
+                f"""SELECT asset_id, asset_type, category, lifecycle, title, summary, payload_jsonb, tags_jsonb
+                   FROM assets
+                   WHERE tenant_id = %s
+                     AND project_id = %s
+                     AND enabled = true
+                     AND lifecycle IN ('seed', 'canon', 'manuscript', 'material')
+                     AND asset_type IN ({type_placeholders})
+                   ORDER BY title""",
+                (context.tenant_id, context.project_id, *asset_types),
+            )
         return _rows(cursor.fetchall())
 
     def _next_snapshot_version(self, cursor: Any, context: AgentContext) -> int:
@@ -737,6 +812,72 @@ class PostgresStoryGraphBuilder:
                     ),
                     "evidence": [evidence],
                 }
+            edges.append(edge)
+            edge_by_key[stable_key] = edge
+        return sorted(edges, key=lambda edge: edge["stable_identity"])
+
+    def _build_edges_from_relationship_assets(
+        self,
+        *,
+        graph_id: str,
+        rows: list[dict[str, Any]],
+        node_by_name: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        edges: list[dict[str, Any]] = []
+        edge_by_key: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            payload = row.get("payload_jsonb") if isinstance(row.get("payload_jsonb"), dict) else {}
+            source_name, target_name, relationship_type = _relationship_asset_endpoints(payload, row.get("title"))
+            source = node_by_name.get(_semantic_text_key(source_name))
+            target = node_by_name.get(_semantic_text_key(target_name))
+            if source is None or target is None or source["node_id"] == target["node_id"]:
+                continue
+            edge_type = _graph_edge_type(relationship_type)
+            label = _optional_text(relationship_type) or "relationship"
+            asset_id = str(row.get("asset_id") or "")
+            stable_key = ":".join(
+                (
+                    "asset_relationship",
+                    source["stable_identity"],
+                    target["stable_identity"],
+                    edge_type,
+                    _semantic_text_key(label),
+                    asset_id,
+                )
+            )
+            if stable_key in edge_by_key:
+                continue
+            evidence = {
+                "source_type": "asset",
+                "source_id": asset_id,
+                "segment_id": None,
+                "confidence": None,
+            }
+            edge = {
+                "edge_id": _snapshot_graph_uuid(graph_id, "edge", stable_key),
+                "graph_id": graph_id,
+                "source_node_id": source["node_id"],
+                "target_node_id": target["node_id"],
+                "source_type": "asset",
+                "source_id": asset_id,
+                "source_ids": [asset_id],
+                "stable_identity": stable_key,
+                "edge_type": edge_type,
+                "label": label,
+                "summary": _optional_text(row.get("summary")),
+                "weight": 1,
+                "lifecycle": _graph_lifecycle(row.get("lifecycle")),
+                "attributes": _sanitize_graph_value(
+                    {
+                        "source_type": "asset",
+                        "asset_type": "relationship",
+                        "relationship_type": relationship_type,
+                        "stable_identity": stable_key,
+                        "source_count": 1,
+                    }
+                ),
+                "evidence": [evidence],
+            }
             edges.append(edge)
             edge_by_key[stable_key] = edge
         return sorted(edges, key=lambda edge: edge["stable_identity"])
@@ -2131,6 +2272,85 @@ def _entity_name_index(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return result
 
 
+def _node_name_index(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index character-like nodes by title/alias so asset relationships can link endpoints."""
+    result: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        names = [node.get("title"), *(node.get("attributes", {}).get("aliases", []) or [])]
+        for name in names:
+            key = _semantic_text_key(name)
+            if key and key not in result:
+                result[key] = node
+    return result
+
+
+def _normalize_build_source(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "assets":
+        return "assets"
+    return "seed_canon"
+
+
+def _relationship_asset_endpoints(payload: dict[str, Any], title: Any) -> tuple[str, str, str]:
+    source = _first_payload_text(
+        payload,
+        "source",
+        "source_name",
+        "source_entity",
+        "source_entity_name",
+        "from",
+        "from_name",
+        "a",
+        "character_a",
+        "left",
+        "subject",
+    )
+    target = _first_payload_text(
+        payload,
+        "target",
+        "target_name",
+        "target_entity",
+        "target_entity_name",
+        "to",
+        "to_name",
+        "b",
+        "character_b",
+        "right",
+        "object",
+    )
+    relationship_type = _first_payload_text(
+        payload,
+        "relationship_type",
+        "relation_type",
+        "type",
+        "kind",
+        "relation",
+        "bond_type",
+    )
+    if (not source or not target) and isinstance(title, str) and "→" in title:
+        left, _, right = title.partition("→")
+        if not source:
+            source = left.strip()
+        if not target:
+            target_part = right.strip()
+            if " / " in target_part:
+                target_part, _, rel = target_part.partition(" / ")
+                if not relationship_type:
+                    relationship_type = rel.strip()
+            target = target_part.strip()
+    return source, target, relationship_type
+
+
+def _first_payload_text(payload: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+    return ""
+
+
 def _graph_node_sort_key(node: dict[str, Any]) -> tuple[Any, ...]:
     return (-float(node.get("importance") or 0), node.get("node_type") or "", node.get("stable_identity") or "")
 
@@ -2327,9 +2547,11 @@ def _graph_node_type(value: Any) -> str:
 
 def _asset_node_type(value: Any) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"location", "artifact", "concept"}:
+    if normalized in {"character", "organization", "faction", "location", "artifact", "concept"}:
         return normalized
-    return "artifact"
+    if normalized in {"world_rule", "plot_thread", "note", "story_ontology", "ontology", "archive_entity"}:
+        return "concept"
+    return "concept"
 
 
 def _graph_edge_type(value: Any) -> str:

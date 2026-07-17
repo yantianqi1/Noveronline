@@ -25,7 +25,8 @@ const STAGES: Record<string, { label: ReactNode; activity: ReactNode | null }> =
   },
   assets: {
     label: <Bi zh="资产库" en="Assets" />,
-    activity: <Bi zh="浏览与检索创作资料" en="Browse story materials" />,
+    // Counts are injected by AssetLibraryShell into the command-meta slot.
+    activity: null,
   },
   graph: {
     label: <Bi zh="故事图谱" en="Story Graph" />,
@@ -81,12 +82,15 @@ export function WorkspaceContextBar({ projectName }: WorkspaceContextBarProps) {
         <ChevronRight aria-hidden="true" size={14} />
         <span className="app-stage-label">{stage.label}</span>
       </div>
-      {stage.activity ? (
-        <span className="app-command-label">
-          <span className="app-activity-dot" aria-hidden="true" />
-          {stage.activity}
-        </span>
-      ) : null}
+      <div className="app-command-trailing">
+        <span className="workspace-command-meta" data-workspace-command-meta />
+        {stage.activity ? (
+          <span className="app-command-label">
+            <span className="app-activity-dot" aria-hidden="true" />
+            {stage.activity}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 }

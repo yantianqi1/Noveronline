@@ -440,8 +440,8 @@
     display: none;
   }
 
-  .overview-root .workbench-grid,
-  .overview-root > .workbench-grid {
+  .overview-root > .workbench-grid:not(.asset-library-grid),
+  .overview-root .workbench-grid:not(.asset-library-grid) {
     grid-template-columns: minmax(0, 1fr) !important;
     width: 100%;
     max-width: 100%;
@@ -468,6 +468,17 @@
   background: rgba(247, 242, 233, 0.98);
   box-shadow: none;
   padding: 16px 14px;
+}
+
+/* Asset Library: reclaim horizontal space for the catalog table. */
+@media (min-width: 1181px) {
+  .app-frame.app-frame-unified:has(.asset-library-root) {
+    grid-template-columns: 204px minmax(0, 1fr);
+  }
+
+  .app-frame.app-frame-unified:has(.asset-library-root) .app-sidebar {
+    padding: 14px 10px;
+  }
 }
 
 .app-frame.app-frame-unified:has(.worldline-root) .app-command-bar,
@@ -3448,7 +3459,7 @@
 .story-graph-snapshot-disclosure,
 .story-graph-stats-disclosure {
   margin: 0;
-  border-top: 1px solid rgba(233, 226, 215, 0.18);
+  border-top: 1px solid rgba(104, 88, 65, 0.16);
 }
 
 .story-graph-snapshot-disclosure > summary,
@@ -3458,8 +3469,9 @@
   gap: 8px;
   cursor: pointer;
   list-style: none;
-  padding: 12px 16px;
-  color: inherit;
+  padding: 12px 4px;
+  color: #4d473f;
+  font-family: "Songti SC", "SimSun", Georgia, serif;
 }
 
 .story-graph-snapshot-disclosure > summary::-webkit-details-marker,
@@ -4215,12 +4227,27 @@ button.writer-approval-approve {
    - 861–1199px: compact dual-column / main+rail (no full-width waterfall)
    - ≤860px: phone single-column paper stack */
 @media (min-width: 861px) {
-  .overview-root > .workbench-grid,
+  .overview-root > .workbench-grid:not(.asset-library-grid),
   .overview-root .workbench-grid:not(.asset-library-grid) {
     grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr) !important;
     width: 100%;
     max-width: 100%;
     gap: 14px 16px !important;
+  }
+
+  .overview-root[data-overview-state="completed"] > .workbench-grid,
+  .overview-root[data-overview-state="completed"] .workbench-grid.overview-completed-layout,
+  .overview-root[data-overview-state="completed"] .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1fr) !important;
+    align-items: start !important;
+  }
+
+  .overview-root[data-overview-state="completed"] .workbench-grid.overview-completed-layout > main,
+  .overview-root[data-overview-state="completed"] .overview-completed-main {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    width: 100%;
+    max-width: none;
   }
 
   .overview-root .workbench-grid:not(.asset-library-grid) > main {
@@ -4273,11 +4300,17 @@ button.writer-approval-approve {
 
 /* Narrow desktop / tablet: denser dual-column, tighter panels. */
 @media (max-width: 1199px) and (min-width: 861px) {
-  .overview-root > .workbench-grid,
+  .overview-root > .workbench-grid:not(.asset-library-grid),
   .overview-root .workbench-grid:not(.asset-library-grid) {
     grid-template-columns: minmax(0, 1.35fr) minmax(220px, 0.72fr) !important;
     gap: 12px 12px !important;
     padding: 0 18px 24px !important;
+  }
+
+  .overview-root[data-overview-state="completed"] > .workbench-grid,
+  .overview-root[data-overview-state="completed"] .workbench-grid.overview-completed-layout,
+  .overview-root[data-overview-state="completed"] .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1fr) !important;
   }
 
   .overview-root .workbench-grid:not(.asset-library-grid) > main > .panel,
@@ -4312,7 +4345,7 @@ button.writer-approval-approve {
 
 /* Very narrow desktop: keep dual-column but tighter rail. */
 @media (max-width: 999px) and (min-width: 861px) {
-  .overview-root > .workbench-grid,
+  .overview-root > .workbench-grid:not(.asset-library-grid),
   .overview-root .workbench-grid:not(.asset-library-grid) {
     grid-template-columns: minmax(0, 1.1fr) minmax(220px, 0.9fr) !important;
     gap: 12px !important;
@@ -4337,10 +4370,17 @@ button.writer-approval-approve {
 }
 
 @media (min-width: 1200px) {
-  .overview-root > .workbench-grid,
+  .overview-root > .workbench-grid:not(.asset-library-grid),
   .overview-root .workbench-grid:not(.asset-library-grid) {
     grid-template-columns: minmax(0, 1.72fr) minmax(280px, 0.82fr) !important;
     gap: 0 18px !important;
+  }
+
+  .overview-root[data-overview-state="completed"] > .workbench-grid,
+  .overview-root[data-overview-state="completed"] .workbench-grid.overview-completed-layout,
+  .overview-root[data-overview-state="completed"] .workbench-grid:not(.asset-library-grid) {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 0 !important;
   }
 }
 
@@ -4406,7 +4446,7 @@ button.writer-approval-approve {
     overflow-x: clip;
   }
 
-  .overview-root > .workbench-grid,
+  .overview-root > .workbench-grid:not(.asset-library-grid),
   .overview-root .workbench-grid:not(.asset-library-grid) {
     grid-template-columns: minmax(0, 1fr) !important;
     gap: 12px !important;

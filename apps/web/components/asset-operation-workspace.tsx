@@ -5,6 +5,7 @@ import {
   Boxes,
   FileInput,
   ListChecks,
+  MessageSquare,
   PencilLine,
   Plus,
   SearchCheck,
@@ -32,6 +33,8 @@ type AssetOperationWorkspaceProps = {
   moreLabel?: ReactNode;
   /** Operation opened by the primary button. Defaults to create when present. */
   primaryId?: AssetOperationItem["id"];
+  /** `toolbar` hides the card heading and renders a compact action cluster. */
+  variant?: "card" | "toolbar";
 };
 
 const operationIcons = {
@@ -52,6 +55,7 @@ export function AssetOperationWorkspace({
   openLabel,
   primaryId = "create",
   title,
+  variant = "card",
 }: AssetOperationWorkspaceProps) {
   const [activeId, setActiveId] = useState<AssetOperationItem["id"] | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -64,6 +68,7 @@ export function AssetOperationWorkspace({
     () => items.filter((item) => item.id !== primaryItem?.id),
     [items, primaryItem],
   );
+  const isToolbar = variant === "toolbar";
 
   useEffect(() => setMounted(true), []);
 
@@ -81,14 +86,20 @@ export function AssetOperationWorkspace({
   }, [activeItem]);
 
   return (
-    <section className="asset-command-center" aria-labelledby="asset-command-center-title">
-      <div className="asset-command-heading">
-        <span className="asset-command-icon" aria-hidden="true"><Boxes size={20} strokeWidth={1.7} /></span>
-        <span>
-          <strong id="asset-command-center-title">{title}</strong>
-          <small>{description}</small>
-        </span>
-      </div>
+    <section
+      className="asset-command-center"
+      data-variant={variant}
+      aria-labelledby={isToolbar ? undefined : "asset-command-center-title"}
+    >
+      {!isToolbar ? (
+        <div className="asset-command-heading">
+          <span className="asset-command-icon" aria-hidden="true"><Boxes size={20} strokeWidth={1.7} /></span>
+          <span>
+            <strong id="asset-command-center-title">{title}</strong>
+            <small>{description}</small>
+          </span>
+        </div>
+      ) : null}
       <div className="asset-command-actions">
         <button
           className="asset-command-launch"
@@ -107,7 +118,7 @@ export function AssetOperationWorkspace({
             onClick={() => setActiveId(secondaryItems[0]?.id ?? null)}
             type="button"
           >
-            <Boxes aria-hidden="true" size={16} strokeWidth={1.7} />
+            <MessageSquare aria-hidden="true" size={16} strokeWidth={1.7} />
             <span>{moreLabel ?? "More"}</span>
           </button>
         ) : null}

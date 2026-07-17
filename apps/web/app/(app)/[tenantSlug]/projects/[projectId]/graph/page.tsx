@@ -3,7 +3,9 @@ import { StoryGraphShell } from "../../../../../../components/story-graph-shell"
 import { storyGraphBondStatus, storyGraphBuildStatus } from "../../../../../../components/story-graph-status";
 import {
   adoptStoryGraphCandidate,
+  getProjectAnalysisRuns,
   getProjectAssets,
+  getProjectSourceFiles,
   getWorkflowRunEvents,
   getWorkflowRunSummary,
   getStoryGraphClusters,
@@ -13,7 +15,9 @@ import {
   getStoryGraphView,
   startStoryGraphBondGeneration,
   startStoryGraphBuild,
+  type AnalysisRunsSummary,
   type AssetListSummary,
+  type SourceFilesSummary,
   type StoryGraphCandidateAdoptionSummary,
   type StoryGraphEvidenceSummary,
 } from "../../../../../../lib/api";
@@ -36,6 +40,7 @@ export default async function StoryGraphPage({
     bondMessage?: string;
     bondStatus?: string;
     bondRunId?: string;
+    mode?: string;
     runId?: string;
     storyGraphAdoptionCode?: string;
     storyGraphAdoptionMessage?: string;
@@ -49,7 +54,17 @@ export default async function StoryGraphPage({
   const apiContext = webReadApiContext({ tenantId: tenantSlug, projectId });
   const selectedRunId = query.bondRunId || query.runId || "";
   const workflowContext = selectedRunId ? webReadApiContext({ tenantId: tenantSlug }) : null;
-  const [current, view, layout, clusters, projectAssets, workflowRun, workflowEvents] = await Promise.all([
+  const [
+    current,
+    view,
+    layout,
+    clusters,
+    projectAssets,
+    analysisRuns,
+    sourceFiles,
+    workflowRun,
+    workflowEvents,
+  ] = await Promise.all([
     getStoryGraphCurrent(apiContext),
     getStoryGraphView({
       ...apiContext,
@@ -66,6 +81,8 @@ export default async function StoryGraphPage({
       limit: 50,
     }),
     getProjectAssets(apiContext),
+    getProjectAnalysisRuns(apiContext),
+    getProjectSourceFiles(apiContext),
     selectedRunId && workflowContext
       ? getWorkflowRunSummary({ ...workflowContext, runId: selectedRunId })
       : Promise.resolve(null),
@@ -75,22 +92,28 @@ export default async function StoryGraphPage({
   ]);
   const evidence = await firstEvidenceSummary(apiContext, view, locale);
   const graphCandidates = graphCandidatesFromAssets(projectAssets);
+  const analysisBuildOptions = analysisBuildOptionsFromRuns(analysisRuns, sourceFiles, locale);
+  const initialWorkspaceMode = resolveInitialWorkspaceMode(query);
 
   async function buildAction(formData: FormData) {
     "use server";
 
+    const source = stringFromFormData(formData, "source") || "assets";
+    const analysisRunId = stringFromFormData(formData, "analysisRunId");
     const result = await startStoryGraphBuild({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       mode: stringFromFormData(formData, "mode") || "full",
       options: {
-        source: stringFromFormData(formData, "source") || "seed_canon",
+        source,
+        ...(analysisRunId ? { analysis_run_id: analysisRunId } : {}),
       },
     });
     const status = storyGraphBuildStatus(result, locale);
     redirect(storyGraphRoute({
       tenantSlug,
       projectId,
+      mode: "build",
       buildStatus: status.status,
       buildCode: status.code,
       buildMessage: status.message,
@@ -119,6 +142,7 @@ export default async function StoryGraphPage({
     redirect(storyGraphRoute({
       tenantSlug,
       projectId,
+      mode: "compose",
       buildStatus: query.buildStatus ?? "",
       buildCode: query.buildCode ?? "",
       buildMessage: query.buildMessage ?? "",
@@ -138,6 +162,7 @@ export default async function StoryGraphPage({
       redirect(storyGraphRoute({
         tenantSlug,
         projectId,
+        mode: "curate",
         buildStatus: query.buildStatus ?? "",
         buildCode: query.buildCode ?? "",
         buildMessage: query.buildMessage ?? "",
@@ -162,6 +187,7 @@ export default async function StoryGraphPage({
     redirect(storyGraphRoute({
       tenantSlug,
       projectId,
+      mode: "curate",
       buildStatus: query.buildStatus ?? "",
       buildCode: query.buildCode ?? "",
       buildMessage: query.buildMessage ?? "",
@@ -188,6 +214,8 @@ export default async function StoryGraphPage({
       layout={layout}
       clusters={clusters}
       graphCandidates={graphCandidates}
+      analysisBuildOptions={analysisBuildOptions}
+      initialWorkspaceMode={initialWorkspaceMode}
       buildStatus={query.buildStatus ?? ""}
       buildCode={query.buildCode ?? ""}
       buildMessage={query.buildMessage ?? ""}
@@ -213,6 +241,7 @@ export default async function StoryGraphPage({
 function storyGraphRoute(input: {
   tenantSlug: string;
   projectId: string;
+  mode?: string;
   buildStatus: string;
   buildCode: string;
   buildMessage: string;
@@ -227,6 +256,7 @@ function storyGraphRoute(input: {
   storyGraphAdoptionTargetId?: string;
 }) {
   const query = new URLSearchParams();
+  setQueryIfPresent(query, "mode", input.mode ?? "");
   setQueryIfPresent(query, "buildStatus", input.buildStatus);
   setQueryIfPresent(query, "buildCode", input.buildCode);
   setQueryIfPresent(query, "buildMessage", input.buildMessage);
@@ -244,6 +274,77 @@ function storyGraphRoute(input: {
   setQueryIfPresent(query, "storyGraphAdoptionMessage", input.storyGraphAdoptionMessage ?? "");
   setQueryIfPresent(query, "storyGraphAdoptionTargetId", input.storyGraphAdoptionTargetId ?? "");
   return `/${input.tenantSlug}/projects/${input.projectId}/graph?${query.toString()}`;
+}
+
+type StoryGraphWorkspaceMode = "explore" | "build" | "curate" | "compose";
+
+function resolveInitialWorkspaceMode(query: {
+  mode?: string;
+  buildStatus?: string;
+  bondStatus?: string;
+  bondRunId?: string;
+  runId?: string;
+  storyGraphAdoptionStatus?: string;
+}): StoryGraphWorkspaceMode {
+  const mode = query.mode?.trim();
+  if (mode === "explore" || mode === "build" || mode === "curate" || mode === "compose") {
+    return mode;
+  }
+  if (query.buildStatus || query.runId) {
+    return "build";
+  }
+  if (query.bondStatus || query.bondRunId) {
+    return "compose";
+  }
+  if (query.storyGraphAdoptionStatus) {
+    return "curate";
+  }
+  return "explore";
+}
+
+function analysisBuildOptionsFromRuns(
+  analysisRuns: AnalysisRunsSummary,
+  sourceFiles: SourceFilesSummary,
+  locale: "zh-CN" | "en",
+) {
+  if (!analysisRuns.ok) {
+    return {
+      ok: false as const,
+      code: analysisRuns.code,
+      message: analysisRuns.message,
+      items: [] as Array<{ runId: string; label: string; status: string }>,
+    };
+  }
+  const filenameByUploadId = new Map<string, string>();
+  const filenameByFileId = new Map<string, string>();
+  if (sourceFiles.ok) {
+    for (const file of sourceFiles.items) {
+      filenameByUploadId.set(file.upload_id, file.filename);
+      filenameByFileId.set(file.file_id, file.filename);
+    }
+  }
+  const completed = analysisRuns.items
+    .filter((run): run is Extract<typeof run, { ok: true }> => run.ok && run.status === "completed")
+    .map((run, index, items) => {
+      const filename = (run.source_file_id && filenameByFileId.get(run.source_file_id))
+        || (run.upload_id && filenameByUploadId.get(run.upload_id))
+        || "";
+      const ordinal = items.length - index;
+      const base = filename
+        ? filename
+        : tx(locale, `分析 ${ordinal}`, `Analysis ${ordinal}`);
+      return {
+        runId: run.run_id,
+        label: filename
+          ? tx(locale, `${filename} · 已完成`, `${filename} · completed`)
+          : tx(locale, `${base} · 已完成`, `${base} · completed`),
+        status: run.status,
+      };
+    });
+  return {
+    ok: true as const,
+    items: completed,
+  };
 }
 
 function stringFromFormData(formData: FormData, key: string) {

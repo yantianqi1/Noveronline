@@ -53,6 +53,7 @@ export default async function OverviewPage({
     sourceMessage?: string;
     sourceStatus?: string;
     workspacePath?: string;
+    board?: string;
   }>;
 }) {
   const { tenantSlug, projectId } = await params;
@@ -69,6 +70,7 @@ export default async function OverviewPage({
   const selectedRunId = query.runId ?? latestAnalysisRunId(analysisRuns);
   const afterEventId = query.after_event_id ?? query.afterEventId ?? "";
   const workspacePath = query.workspacePath ?? "";
+  const initialBoardId = query.board?.trim() ?? "";
   const [selectedAnalysisRun, seedEvents, workspaceFiles, selectedWorkspaceFile, analysisCandidates] =
     selectedRunId
       ? await Promise.all([
@@ -489,6 +491,7 @@ export default async function OverviewPage({
       workspaceFiles={workspaceFiles}
       selectedWorkspaceFile={selectedWorkspaceFile}
       selectedWorkspacePath={workspacePath}
+      initialBoardId={initialBoardId}
       analysisCandidates={analysisCandidates}
       materialsHref={`/${tenantSlug}/projects/${projectId}/materials`}
       sourceStatus={

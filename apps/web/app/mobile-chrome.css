@@ -1453,9 +1453,10 @@
     display: none !important;
   }
 
-  /* Asset library: single-column scroll — no 52dvh aside clamp sandwich. */
-  .overview-root .workbench-grid.asset-library-grid > aside.asset-library-aside,
-  .asset-library-root .asset-library-aside {
+  /* Asset library: inline ops (search-row or legacy aside) must not clamp height. */
+  .overview-root .workbench-grid.asset-library-grid aside.asset-library-aside,
+  .asset-library-root .asset-library-aside,
+  .asset-library-root .asset-search-ops {
     max-height: none !important;
     overflow: visible !important;
   }
@@ -1479,20 +1480,19 @@
     display: none !important;
   }
 
-  /* Asset browse: no forced 620px table width on phone. */
-  .asset-browse-table-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+  /* Asset browse cards: keep a tight 2-up grid on phone. */
+  .asset-browse-card-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
 
-  .asset-browse-table {
-    min-width: 0 !important;
-    width: 100%;
+  .asset-browse-card {
+    min-height: 136px;
+    padding: 11px 12px 10px;
   }
 
-  .asset-browse-table th,
-  .asset-browse-table td {
-    white-space: normal;
+  .asset-browse-card-title {
+    font-size: 0.95rem;
   }
 
   /* Immersive writer: one stage pad only — inner thread/composer stay tight. */

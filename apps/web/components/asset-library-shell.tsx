@@ -1,4 +1,4 @@
-import { Boxes, ChevronRight, Filter, Search, SlidersHorizontal } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, Filter, Search, SlidersHorizontal } from "lucide-react";
 
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import type {
@@ -14,8 +14,7 @@ import { type Locale, tx } from "../lib/locale";
 import { AssetBrowseClient } from "./asset-browse-client";
 import { AssetOperationWorkspace, type AssetOperationItem } from "./asset-operation-workspace";
 import { CompactFilterBar } from "./compact-filter-bar";
-import { InspectorPanel } from "./inspector-panel";
-import { WorkspaceHeader } from "./workspace-header";
+import { WorkspaceCommandMeta } from "./workspace-command-meta";
 
 type AssetLibraryShellProps = {
   locale: Locale;
@@ -119,21 +118,39 @@ export function AssetLibraryShell({
 }: AssetLibraryShellProps) {
   const appliedFilters = appliedAssetFilters(locale, searchMode, searchFilters);
   const availableAssets = assets.ok ? assets.items : [];
+  const showingCount = searchResults?.ok
+    ? searchResults.items.length
+    : assets.ok
+      ? countFilteredAssets(assets.items, searchFilters)
+      : 0;
+  const activeScope = activeAssetScopeTab(locale, searchFilters, facets, showingCount);
+
+  const filterChips = appliedFilters.map((filter) => ({
+    href: assetSearchHref(tenantSlug, projectId, searchQuery, {
+      filters: searchFilters,
+      mode: searchMode,
+      omit: filter.parameter,
+    }),
+    key: filter.key,
+    label: filter.label,
+    removeLabel: tx(locale, `移除筛选：${filter.label}`, `Remove filter: ${filter.label}`),
+  }));
+  const clearFiltersHref = assetSearchHref(tenantSlug, projectId, searchQuery);
+
+  const totalCount = assets.ok ? assets.items.length : "—";
 
   return (
-    <div className="overview-root asset-library-root">
-      <WorkspaceHeader
-        className="asset-library-header"
-        description={<Bi zh="浏览角色、设定与素材。" en="Browse characters, lore, and materials." />}
-        icon={<Boxes size={22} strokeWidth={1.8} />}
-        meta={(
-          <>
-            <span className="status-pill">{assets.ok ? assets.items.length : "—"} <Bi zh="项资产" en="assets" /></span>
-            <span className="status-pill"><Bi zh="当前" en="Showing" /> {searchResults?.ok ? searchResults.items.length : assets.ok ? assets.items.length : 0}</span>
-          </>
-        )}
-        title={<Bi zh="资产库" en="Asset Library" />}
-      />
+    <div className="overview-root asset-library-root" data-chrome="command-meta">
+      <WorkspaceCommandMeta>
+        <span className="asset-command-stats" aria-live="polite">
+          <span className="asset-command-stat">
+            {totalCount} <Bi zh="项资产" en="assets" />
+          </span>
+          <span className="asset-command-stat">
+            <Bi zh="当前" en="Showing" /> {showingCount}
+          </span>
+        </span>
+      </WorkspaceCommandMeta>
 
       <div className="workbench-grid asset-library-grid">
         <AssetFacetRail
@@ -150,29 +167,11 @@ export function AssetLibraryShell({
             className={`panel asset-overview-panel asset-search-panel ${assets.ok && (searchResults === null || searchResults.ok) ? "" : "error-box"}`}
             aria-labelledby="assets-heading"
           >
-            <div className="asset-browse-heading">
-              <div>
-                <p className="eyebrow"><Bi zh="创作资料" en="Story materials" /></p>
-                <h2 id="assets-heading"><Bi zh="浏览资产" en="Browse assets" /></h2>
-              </div>
-              <p className="form-hint asset-browse-hint">
-                <Bi zh="搜索与筛选后，结果会列在下方。" en="Results appear below after search and filters." />
-              </p>
-            </div>
+            <h2 className="asset-visually-hidden" id="assets-heading">
+              <Bi zh="浏览资产" en="Browse assets" />
+            </h2>
             <form action={searchAction} className="binding-form asset-search-form">
               <CompactFilterBar
-                appliedFilters={appliedFilters.map((filter) => ({
-                  href: assetSearchHref(tenantSlug, projectId, searchQuery, {
-                    filters: searchFilters,
-                    mode: searchMode,
-                    omit: filter.parameter,
-                  }),
-                  key: filter.key,
-                  label: filter.label,
-                  removeLabel: tx(locale, `移除筛选：${filter.label}`, `Remove filter: ${filter.label}`),
-                }))}
-                clearHref={assetSearchHref(tenantSlug, projectId, searchQuery)}
-                clearLabel={<Bi zh="清除筛选" en="Clear filters" />}
                 disclosure={(
                   <details className="overview-details asset-filter-disclosure">
                     <summary className="asset-filter-trigger">
@@ -263,87 +262,123 @@ export function AssetLibraryShell({
                 )}
                 searchField={(
                   <div className="asset-search-field asset-search-primary-field">
-                    <label htmlFor="asset-search-query"><Bi zh="搜索词" en="Search query" /></label>
+                    <label htmlFor="asset-search-query" className="asset-search-query-label"><Bi zh="搜索词" en="Search query" /></label>
                     <input
                       id="asset-search-query"
                       defaultValue={searchQuery}
                       name="query"
-                      placeholder={tx(locale, "世界规则、角色、风格（可留空浏览）", "world rule, character, style (optional)")}
+                      placeholder={tx(locale, "世界规则、角色、风格", "world rule, character, style")}
                     />
                   </div>
                 )}
                 submitControl={(
                   <button className="submit-button asset-search-submit" data-tone="primary" type="submit"><Search aria-hidden="true" size={18} /><Bi zh="搜索" en="Search" /></button>
                 )}
+                trailing={(
+                  <div className="asset-search-ops" id="asset-operations">
+                    <AssetOperationWorkspace
+                      description={<Bi zh="创建与管理资产" en="Create and manage assets" />}
+                      items={[
+                        operationItem("create", <Bi zh="创建资产" en="Create asset" />, <Bi zh="建立新的结构化创作资产" en="Create a structured story asset" />, <><StatusLine status={assetStatus} code={assetCode} message={assetMessage} /><CreateAssetForm action={createAssetAction} locale={locale} /></>),
+                        operationItem("update", <Bi zh="更新资产" en="Update asset" />, <Bi zh="修改内容、生命周期与标签" en="Edit content, lifecycle, and tags" />, <UpdateAssetForm action={updateAssetAction} assets={availableAssets} locale={locale} />),
+                        operationItem("delete", <Bi zh="删除资产" en="Delete asset" />, <Bi zh="从资产库中移除一条记录" en="Remove a record from the library" />, <DeleteAssetForm action={deleteAssetAction} assets={availableAssets} locale={locale} />, "danger"),
+                        operationItem("adopt", <Bi zh="采纳候选" en="Adopt candidate" />, <Bi zh="将候选资产转为素材或正史" en="Promote a candidate to material or canon" />, <AdoptAssetForm action={adoptAssetAction} assets={availableAssets} locale={locale} />),
+                        operationItem("bulk", <Bi zh="批量操作" en="Bulk action" />, <Bi zh="批量调整分类、状态与生命周期" en="Update classification and lifecycle in bulk" />, <><StatusLine status={bulkStatus} code={bulkCode} message={bulkMessage} /><BulkAssetActionForm action={bulkAssetAction} assets={availableAssets} locale={locale} /></>),
+                        operationItem("ingest", <Bi zh="导入素材" en="Ingest material" />, <Bi zh="将笔记、规则或风格素材交给 Agent 入库" en="Send material to ingestion" />, <><StatusLine status={ingestionStatus} code={ingestionCode} message={ingestionMessage} /><IngestAssetForm action={ingestAssetAction} locale={locale} /></>),
+                        operationItem("reindex", <Bi zh="刷新搜索" en="Reindex assets" />, <Bi zh="让最近修改的内容重新进入资产搜索" en="Make recent changes available in library search" />, <><StatusLine status={reindexStatus} code={reindexCode} message={reindexMessage} /><ReindexRunStatus run={reindexRun} locale={locale} /><ReindexAssetsForm action={reindexAssetsAction} capabilities={searchCapabilities} locale={locale} tenantSlug={tenantSlug} /></>),
+                        operationItem("style", <Bi zh="提取风格" en="Extract style" />, <Bi zh="从已有资产或素材中提取写作风格" en="Extract writing style" />, <><StatusLine status={styleStatus} code={styleCode} message={styleMessage} /><ExtractStyleForm action={extractStyleAction} assets={availableAssets} locale={locale} /></>),
+                      ]}
+                      moreLabel={<Bi zh="更多操作" en="More operations" />}
+                      openLabel={<Bi zh="创建资产" en="Create asset" />}
+                      primaryId="create"
+                      title={<Bi zh="资产操作" en="Asset operations" />}
+                      variant="toolbar"
+                    />
+                    <details className={`overview-details asset-memory-panel ${archiveMemories === null || archiveMemories.ok ? "" : "error-box"}`}>
+                      <summary className="asset-memory-trigger">
+                        <Brain aria-hidden="true" size={16} strokeWidth={1.7} />
+                        <span><Bi zh="记忆审阅" en="Memory review" /></span>
+                      </summary>
+                      <div className="overview-details-content asset-memory-body">
+                        <section aria-labelledby="archive-memory-heading">
+                          <h3 id="archive-memory-heading"><Bi zh="档案记忆" en="Archive Memory" /></h3>
+                          <p className="form-hint"><Bi zh="按需查看和处理档案记忆" en="Review archive memories when needed" /></p>
+                          <StatusLine status={memoryStatus} code={memoryCode} message={memoryMessage} />
+                          <div className="inline-controls">
+                            <label className="asset-search-field" htmlFor="archive-memory-asset">
+                              <span><Bi zh="选择资产" en="Choose asset" /></span>
+                              <select
+                                form="archive-memory-form"
+                                id="archive-memory-asset"
+                                defaultValue={memoryAssetId}
+                                name="memoryAssetId"
+                              >
+                                <option value="">{tx(locale, "请选择", "Choose an asset")}</option>
+                                {availableAssets.map((asset) => (
+                                  <option key={asset.asset_id} value={asset.asset_id}>{asset.title}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <button form="archive-memory-form" type="submit"><Bi zh="查看" en="View" /></button>
+                          </div>
+                          <ArchiveMemoryPanel
+                            memories={archiveMemories}
+                            events={archiveMemoryEvents}
+                            adoptAction={adoptArchiveMemoryAction}
+                            rejectAction={rejectArchiveMemoryAction}
+                            locale={locale}
+                          />
+                        </section>
+                      </div>
+                    </details>
+                  </div>
+                )}
               />
             </form>
+            <form action={memoryAssetAction} className="asset-visually-hidden" hidden id="archive-memory-form" />
+
+            {filterChips.length > 0 || activeScope ? (
+              <div className="asset-results-meta">
+                {filterChips.length > 0 ? (
+                  <div className="compact-filter-chips" aria-label={tx(locale, "已应用筛选", "Applied filters")}>
+                    <div className="facet-pills">
+                      {filterChips.map((filter) => (
+                        <a
+                          aria-label={filter.removeLabel}
+                          className="status-pill compact-filter-chip"
+                          href={filter.href}
+                          key={filter.key}
+                          title={filter.removeLabel}
+                        >
+                          {filter.label}
+                          <span aria-hidden="true">×</span>
+                        </a>
+                      ))}
+                    </div>
+                    <a className="asset-clear-filters compact-filter-clear" href={clearFiltersHref}>
+                      <Bi zh="清除筛选" en="Clear filters" />
+                    </a>
+                  </div>
+                ) : <span />}
+                {activeScope ? (
+                  <p className="asset-active-scope" aria-live="polite">
+                    <span className="asset-active-scope-label">{activeScope.label}</span>
+                    <span className="asset-active-scope-count">{activeScope.count}</span>
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="asset-results-region">
-              <AssetBrowseClient assets={assets} locale={locale} searchResults={searchResults} />
+              <AssetBrowseClient
+                assets={assets}
+                filters={searchFilters}
+                locale={locale}
+                searchResults={searchResults}
+              />
             </div>
           </section>
-
         </main>
-
-        <InspectorPanel
-          className="asset-library-aside"
-          status={<Bi zh="操作与记忆" en="Operations and memory" />}
-          title={<Bi zh="资产检视" en="Asset inspector" />}
-        >
-          <div id="asset-operations">
-          <AssetOperationWorkspace
-            description={<Bi zh="创建与管理资产" en="Create and manage assets" />}
-            items={[
-              operationItem("create", <Bi zh="创建资产" en="Create asset" />, <Bi zh="建立新的结构化创作资产" en="Create a structured story asset" />, <><StatusLine status={assetStatus} code={assetCode} message={assetMessage} /><CreateAssetForm action={createAssetAction} locale={locale} /></>),
-              operationItem("update", <Bi zh="更新资产" en="Update asset" />, <Bi zh="修改内容、生命周期与标签" en="Edit content, lifecycle, and tags" />, <UpdateAssetForm action={updateAssetAction} assets={availableAssets} locale={locale} />),
-              operationItem("delete", <Bi zh="删除资产" en="Delete asset" />, <Bi zh="从资产库中移除一条记录" en="Remove a record from the library" />, <DeleteAssetForm action={deleteAssetAction} assets={availableAssets} locale={locale} />, "danger"),
-              operationItem("adopt", <Bi zh="采纳候选" en="Adopt candidate" />, <Bi zh="将候选资产转为素材或正史" en="Promote a candidate to material or canon" />, <AdoptAssetForm action={adoptAssetAction} assets={availableAssets} locale={locale} />),
-              operationItem("bulk", <Bi zh="批量操作" en="Bulk action" />, <Bi zh="批量调整分类、状态与生命周期" en="Update classification and lifecycle in bulk" />, <><StatusLine status={bulkStatus} code={bulkCode} message={bulkMessage} /><BulkAssetActionForm action={bulkAssetAction} assets={availableAssets} locale={locale} /></>),
-              operationItem("ingest", <Bi zh="导入素材" en="Ingest material" />, <Bi zh="将笔记、规则或风格素材交给 Agent 入库" en="Send material to ingestion" />, <><StatusLine status={ingestionStatus} code={ingestionCode} message={ingestionMessage} /><IngestAssetForm action={ingestAssetAction} locale={locale} /></>),
-              operationItem("reindex", <Bi zh="刷新搜索" en="Reindex assets" />, <Bi zh="让最近修改的内容重新进入资产搜索" en="Make recent changes available in library search" />, <><StatusLine status={reindexStatus} code={reindexCode} message={reindexMessage} /><ReindexRunStatus run={reindexRun} locale={locale} /><ReindexAssetsForm action={reindexAssetsAction} capabilities={searchCapabilities} locale={locale} tenantSlug={tenantSlug} /></>),
-              operationItem("style", <Bi zh="提取风格" en="Extract style" />, <Bi zh="从已有资产或素材中提取写作风格" en="Extract writing style" />, <><StatusLine status={styleStatus} code={styleCode} message={styleMessage} /><ExtractStyleForm action={extractStyleAction} assets={availableAssets} locale={locale} /></>),
-            ]}
-            moreLabel={<Bi zh="更多操作" en="More operations" />}
-            openLabel={<Bi zh="创建资产" en="Create asset" />}
-            primaryId="create"
-            title={<Bi zh="资产操作" en="Asset operations" />}
-          />
-          </div>
-          <details className={`overview-details asset-memory-panel ${archiveMemories === null || archiveMemories.ok ? "" : "error-box"}`}>
-            <summary>
-              <Boxes aria-hidden="true" size={18} strokeWidth={1.8} />
-              <span>
-                <strong><Bi zh="记忆审阅" en="Memory review" /></strong>
-                <small><Bi zh="按需查看和处理档案记忆" en="Review archive memories when needed" /></small>
-              </span>
-              <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-            </summary>
-            <div className="overview-details-content">
-              <section aria-labelledby="archive-memory-heading">
-                <h3 id="archive-memory-heading"><Bi zh="档案记忆" en="Archive Memory" /></h3>
-                <StatusLine status={memoryStatus} code={memoryCode} message={memoryMessage} />
-                <form action={memoryAssetAction} className="inline-controls">
-                  <label className="asset-search-field" htmlFor="archive-memory-asset">
-                    <span><Bi zh="选择资产" en="Choose asset" /></span>
-                    <select id="archive-memory-asset" defaultValue={memoryAssetId} name="memoryAssetId">
-                      <option value="">{tx(locale, "请选择", "Choose an asset")}</option>
-                      {availableAssets.map((asset) => (
-                        <option key={asset.asset_id} value={asset.asset_id}>{asset.title}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <button type="submit"><Bi zh="查看" en="View" /></button>
-                </form>
-                <ArchiveMemoryPanel
-                  memories={archiveMemories}
-                  events={archiveMemoryEvents}
-                  adoptAction={adoptArchiveMemoryAction}
-                  rejectAction={rejectArchiveMemoryAction}
-                  locale={locale}
-                />
-              </section>
-            </div>
-          </details>
-        </InspectorPanel>
       </div>
     </div>
   );
@@ -415,8 +450,11 @@ function AssetFacetRail({
       ) : (
         <div className="asset-facet-rail-groups">
           {groups.filter((group) => group.items.length > 0).map((group) => (
-            <section className="asset-facet-group" key={group.dimension} aria-label={typeof group.label === "string" ? group.label : group.dimension}>
-              <p className="asset-facet-group-label">{group.label}</p>
+            <details className="asset-facet-group" key={group.dimension} open>
+              <summary className="asset-facet-group-summary">
+                <span className="asset-facet-group-label">{group.label}</span>
+                <ChevronDown className="asset-facet-group-chevron" aria-hidden="true" size={14} strokeWidth={1.8} />
+              </summary>
               <ul className="asset-facet-group-list">
                 {group.items.slice(0, 8).map((item) => {
                   const active = group.active === item.value;
@@ -438,7 +476,7 @@ function AssetFacetRail({
                   );
                 })}
               </ul>
-            </section>
+            </details>
           ))}
         </div>
       )}
@@ -1062,6 +1100,75 @@ function bulkAssetSelections(assets: AssetOption[], locale: Locale) {
     }
   }
   return selections.concat(assets.map((asset) => ({ label: asset.title, value: asset.asset_id })));
+}
+
+function countFilteredAssets(
+  items: AssetOption[],
+  filters: AssetLibraryShellProps["searchFilters"],
+) {
+  return items.filter((asset) => {
+    if (filters.asset_types.length > 0 && !filters.asset_types.includes(asset.asset_type)) {
+      return false;
+    }
+    if (filters.categories.length > 0 && !filters.categories.includes(asset.category)) {
+      return false;
+    }
+    if (filters.lifecycles.length > 0 && !filters.lifecycles.includes(asset.lifecycle)) {
+      return false;
+    }
+    if (filters.sources.length > 0 && !filters.sources.includes(asset.source_kind)) {
+      return false;
+    }
+    if (filters.tags.length > 0 && !filters.tags.some((tag) => asset.tags.includes(tag))) {
+      return false;
+    }
+    if (filters.pinned !== undefined && asset.pinned !== filters.pinned) {
+      return false;
+    }
+    return true;
+  }).length;
+}
+
+function activeAssetScopeTab(
+  locale: Locale,
+  filters: AssetLibraryShellProps["searchFilters"],
+  facets: AssetFacetsSummary,
+  showingCount: number,
+) {
+  if (filters.asset_types[0]) {
+    const facetCount = facets.ok
+      ? facets.asset_types.find((item) => item.value === filters.asset_types[0])?.count
+      : undefined;
+    return {
+      label: assetValueLabel(locale, filters.asset_types[0]),
+      count: showingCount || facetCount || 0,
+    };
+  }
+  if (filters.lifecycles[0]) {
+    return {
+      label: assetLifecycleLabel(locale, filters.lifecycles[0]),
+      count: showingCount,
+    };
+  }
+  if (filters.categories[0]) {
+    return {
+      label: assetValueLabel(locale, filters.categories[0]),
+      count: showingCount,
+    };
+  }
+  if (filters.sources[0]) {
+    return {
+      label: assetValueLabel(locale, filters.sources[0]),
+      count: showingCount,
+    };
+  }
+  if (filters.tags[0]) {
+    return {
+      label: filters.tags[0],
+      count: showingCount,
+    };
+  }
+  return null;
 }
 
 function appliedAssetFilters(

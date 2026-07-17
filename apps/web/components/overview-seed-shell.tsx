@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Globe2,
   LayoutDashboard,
+  Library,
   Network,
   Upload,
   UserRound,
@@ -42,8 +43,9 @@ import {
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import { PublicErrorNotice } from "./public-error-notice";
 import { canCancelSeedRun, canRetrySeedRun } from "./overview-seed-run-controls";
-import { OverviewAnalysisCandidatesPanel } from "./overview-analysis-candidates-panel";
-import { OverviewAnalysisWorkspacePanel } from "./overview-analysis-workspace-panel";
+import { OverviewAnalysisCandidatesPanel, analysisCandidatesSummaryHint } from "./overview-analysis-candidates-panel";
+import { OverviewAnalysisWorkspacePanel, analysisWorkspaceSummaryHint } from "./overview-analysis-workspace-panel";
+import { OverviewCompletedBoard } from "./overview-completed-board";
 import {
   OverviewSeedProgressWall,
   type SeedActivityLogLine,
@@ -74,6 +76,8 @@ type OverviewSeedShellProps = {
   workspaceFiles?: AnalysisWorkspaceFilesSummary | null;
   selectedWorkspaceFile?: AnalysisWorkspaceFileSummary | null;
   selectedWorkspacePath?: string;
+  /** Completed-board modal id from ?board= (or inferred when a workspace file is open). */
+  initialBoardId?: string;
   analysisCandidates?: AnalysisCandidatesSummary | null;
   materialsHref?: string;
   sourceStatus: ActionStatus | null;
@@ -101,6 +105,7 @@ export function OverviewSeedShell({
   workspaceFiles = null,
   selectedWorkspaceFile = null,
   selectedWorkspacePath = "",
+  initialBoardId = "",
   analysisCandidates = null,
   materialsHref = "",
   sourceStatus,
@@ -127,9 +132,35 @@ export function OverviewSeedShell({
     && selectedSeedRun.ok
     && (selectedSeedRun.status === "queued" || selectedSeedRun.status === "running"),
   );
+  const isCompletedRun = Boolean(
+    selectedSeedRun
+    && selectedSeedRun.ok
+    && selectedSeedRun.status === "completed",
+  );
+  const overviewState = isCompletedRun
+    ? "completed"
+    : seedRunActive
+      ? "active"
+      : isEmptyProject
+        ? "empty"
+        : "idle";
+
+  const uploadForm = (
+    <OverviewSeedUploadForm
+      action={uploadAndStartSeedAction}
+      locale={locale}
+      seedStatus={<StatusLine status={seedStatus} />}
+      sourceStatus={<StatusLine status={sourceStatus} />}
+      variant={isCompletedRun ? "split" : "stack"}
+    />
+  );
 
   return (
-    <div className="overview-root" data-layout="foundation-bar">
+    <div
+      className="overview-root"
+      data-layout="foundation-bar"
+      data-overview-state={overviewState}
+    >
       <SeedRunAutoRefresh active={seedRunActive} />
       <section
         className={`overview-foundation-bar ${projectOverview.ok ? "" : "error-box"}`}
@@ -149,141 +180,280 @@ export function OverviewSeedShell({
         />
       </section>
 
-      <div className="workbench-grid">
-        <main>
-          <section
-            className={`panel overview-next-panel ${selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} ${showCreationReadinessPanel && !isEmptyProject ? "overview-next-blocked" : ""}`}
-            aria-labelledby="recent-seed-run-heading"
-          >
-            <p className="eyebrow"><Bi zh="当前重点" en="Next step" /></p>
-            <h2 id="recent-seed-run-heading"><Bi zh="下一步" en="Next step" /></h2>
+      {isCompletedRun ? (
+        <div className="workbench-grid overview-completed-layout">
+          <main className="overview-completed-main">
+            <section
+              className={`panel overview-next-panel overview-completed-panel ${selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""}`}
+              aria-labelledby="recent-seed-run-heading"
+            >
+              <p className="eyebrow overview-visually-hidden">
+                <Bi zh="当前重点" en="Next step" />
+              </p>
+              <h2 id="recent-seed-run-heading" className="overview-visually-hidden">
+                <Bi zh="下一步" en="Next step" />
+              </h2>
+              <OverviewNextStep
+                analysisCandidates={analysisCandidates}
+                bootstrapIdeaAction={bootstrapIdeaAction}
+                bootstrapStatus={bootstrapStatus}
+                cancelSeedRunAction={cancelSeedRunAction}
+                cancelSeedRunEnabled={cancelSeedRunEnabled}
+                completeUploadAction={completeUploadAction}
+                creationReadiness={creationReadiness}
+                embedResults={false}
+                locale={locale}
+                materialsHref={materialsHref || `/${tenantSlug}/projects/${projectId}/materials`}
+                projectId={projectId}
+                projectOverview={projectOverview}
+                retrySeedRunAction={retrySeedRunAction}
+                retrySeedRunEnabled={retrySeedRunEnabled}
+                seedEvents={seedEvents}
+                selectedRunId={selectedRunId}
+                selectedSeedRun={selectedSeedRun}
+                selectedWorkspaceFile={selectedWorkspaceFile}
+                selectedWorkspacePath={selectedWorkspacePath}
+                sourceFiles={sourceFiles}
+                startSeedRunAction={startSeedRunAction}
+                tenantSlug={tenantSlug}
+                workspaceFiles={workspaceFiles}
+              />
+              <OverviewCompletedBoard
+                initialActiveId={initialBoardId || null}
+                cards={[
+                  {
+                    id: "results",
+                    icon: <Library aria-hidden="true" size={18} strokeWidth={1.8} />,
+                    title: <Bi zh="拆解结果（已自动入库）" en="Analysis results (auto-imported)" />,
+                    subtitle: analysisCandidatesSummaryHint(locale, analysisCandidates),
+                    body: (
+                      <OverviewAnalysisCandidatesPanel
+                        candidates={analysisCandidates}
+                        locale={locale}
+                        materialsHref={materialsHref || `/${tenantSlug}/projects/${projectId}/materials`}
+                        presentation="body"
+                      />
+                    ),
+                  },
+                  {
+                    id: "workspace",
+                    icon: <FolderOpen aria-hidden="true" size={18} strokeWidth={1.8} />,
+                    title: <Bi zh="分析工作区" en="Analysis workspace" />,
+                    subtitle: analysisWorkspaceSummaryHint(locale, workspaceFiles),
+                    body: (
+                      <OverviewAnalysisWorkspacePanel
+                        locale={locale}
+                        presentation="body"
+                        projectId={projectId}
+                        runId={selectedRunId}
+                        selectedFile={selectedWorkspaceFile}
+                        selectedPath={selectedWorkspacePath}
+                        tenantSlug={tenantSlug}
+                        workspaceFiles={workspaceFiles}
+                      />
+                    ),
+                  },
+                  {
+                    id: "files",
+                    icon: <FileText aria-hidden="true" size={18} strokeWidth={1.8} />,
+                    title: <Bi zh="文件与分析记录" en="Files and analysis history" />,
+                    subtitle: (
+                      <>
+                        {sourceFiles.ok ? sourceFiles.items.length : 0} <Bi zh="个文件" en="files" /> · {seedRuns.ok ? seedRuns.items.length : 0} <Bi zh="次分析" en="runs" />
+                      </>
+                    ),
+                    body: (
+                      <>
+                        <section className={sourceFiles.ok ? "" : "error-box"} aria-labelledby="source-files-heading">
+                          <h3 id="source-files-heading"><Bi zh="源文件" en="Source files" /></h3>
+                          <SourceFilesTable
+                            completeUploadAction={completeUploadAction}
+                            locale={locale}
+                            projectId={projectId}
+                            sourceFiles={sourceFiles}
+                            startSeedRunAction={startSeedRunAction}
+                            tenantSlug={tenantSlug}
+                          />
+                        </section>
+                        <section className={seedRuns.ok ? "" : "error-box"} aria-labelledby="seed-runs-heading">
+                          <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Analysis history" /></h3>
+                          <SeedRunsTable locale={locale} projectId={projectId} seedRuns={seedRuns} tenantSlug={tenantSlug} />
+                        </section>
+                      </>
+                    ),
+                  },
+                  {
+                    id: "diagnostics",
+                    icon: <Activity aria-hidden="true" size={18} strokeWidth={1.8} />,
+                    title: <Bi zh="项目诊断（可选）" en="Project diagnostics (optional)" />,
+                    subtitle: <Bi zh="就绪度与任务摘要，不含拆解结果" en="Readiness and run summary — not analysis results" />,
+                    body: (
+                      <>
+                        <section aria-labelledby="project-details-heading">
+                          <h3 id="project-details-heading"><Bi zh="项目状态详情" en="Project health details" /></h3>
+                          <ProjectHealthDetails locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
+                        </section>
+                        <section className={projectReadiness.ok ? "" : "error-box"} aria-labelledby="project-readiness-heading">
+                          <h3 id="project-readiness-heading"><Bi zh="项目就绪度" en="Project readiness" /></h3>
+                          <ProjectReadinessPanel locale={locale} projectId={projectId} projectReadiness={projectReadiness} tenantSlug={tenantSlug} />
+                        </section>
+                        <section className={selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} aria-labelledby="seed-run-detail-heading">
+                          <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Current analysis" /></h3>
+                          <SeedRunDetail locale={locale} projectId={projectId} selectedRunId={selectedRunId} selectedSeedRun={selectedSeedRun} tenantSlug={tenantSlug} />
+                        </section>
+                      </>
+                    ),
+                  },
+                ]}
+              />
+
+              <section
+                className="overview-completed-import overview-upload-disclosure"
+                aria-labelledby="upload-and-start-seed-heading"
+                data-density="compact"
+              >
+                <div className="overview-completed-import-heading">
+                  <p className="eyebrow"><Bi zh="次级操作" en="Secondary action" /></p>
+                  <h3 id="upload-and-start-seed-heading">
+                    <Bi zh="导入新文本" en="Import new manuscript" />
+                  </h3>
+                </div>
+                {uploadForm}
+              </section>
+            </section>
+          </main>
+        </div>
+      ) : (
+        <div className="workbench-grid">
+          <main>
+            <section
+              className={`panel overview-next-panel ${selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} ${showCreationReadinessPanel && !isEmptyProject ? "overview-next-blocked" : ""}`}
+              aria-labelledby="recent-seed-run-heading"
+            >
+              <p className="eyebrow"><Bi zh="当前重点" en="Next step" /></p>
+              <h2 id="recent-seed-run-heading"><Bi zh="下一步" en="Next step" /></h2>
+              {showCreationReadinessPanel && !isEmptyProject ? (
+                <div className="overview-readiness-inline">
+                  <CreationReadinessPanel
+                    creationReadiness={creationReadiness}
+                    locale={locale}
+                    projectOverview={projectOverview}
+                  />
+                </div>
+              ) : null}
+              <OverviewNextStep
+                analysisCandidates={analysisCandidates}
+                bootstrapIdeaAction={bootstrapIdeaAction}
+                bootstrapStatus={bootstrapStatus}
+                cancelSeedRunAction={cancelSeedRunAction}
+                cancelSeedRunEnabled={cancelSeedRunEnabled}
+                completeUploadAction={completeUploadAction}
+                creationReadiness={creationReadiness}
+                locale={locale}
+                materialsHref={materialsHref || `/${tenantSlug}/projects/${projectId}/materials`}
+                projectId={projectId}
+                projectOverview={projectOverview}
+                retrySeedRunAction={retrySeedRunAction}
+                retrySeedRunEnabled={retrySeedRunEnabled}
+                seedEvents={seedEvents}
+                selectedRunId={selectedRunId}
+                selectedSeedRun={selectedSeedRun}
+                selectedWorkspaceFile={selectedWorkspaceFile}
+                selectedWorkspacePath={selectedWorkspacePath}
+                sourceFiles={sourceFiles}
+                startSeedRunAction={startSeedRunAction}
+                tenantSlug={tenantSlug}
+                workspaceFiles={workspaceFiles}
+              />
+            </section>
+
             {showCreationReadinessPanel && !isEmptyProject ? (
-              <div className="overview-readiness-inline">
+              <section
+                className="panel overview-readiness-panel"
+                aria-labelledby="creation-readiness-heading"
+              >
+                <p className="eyebrow"><Bi zh="创作就绪" en="Creation readiness" /></p>
+                <h2 id="creation-readiness-heading"><Bi zh="模型与预算" en="Models and budget" /></h2>
                 <CreationReadinessPanel
                   creationReadiness={creationReadiness}
                   locale={locale}
                   projectOverview={projectOverview}
                 />
-              </div>
+              </section>
             ) : null}
-            <OverviewNextStep
-              analysisCandidates={analysisCandidates}
-              bootstrapIdeaAction={bootstrapIdeaAction}
-              bootstrapStatus={bootstrapStatus}
-              cancelSeedRunAction={cancelSeedRunAction}
-              cancelSeedRunEnabled={cancelSeedRunEnabled}
-              completeUploadAction={completeUploadAction}
-              creationReadiness={creationReadiness}
-              locale={locale}
-              materialsHref={materialsHref || `/${tenantSlug}/projects/${projectId}/materials`}
-              projectId={projectId}
-              projectOverview={projectOverview}
-              retrySeedRunAction={retrySeedRunAction}
-              retrySeedRunEnabled={retrySeedRunEnabled}
-              seedEvents={seedEvents}
-              selectedRunId={selectedRunId}
-              selectedSeedRun={selectedSeedRun}
-              selectedWorkspaceFile={selectedWorkspaceFile}
-              selectedWorkspacePath={selectedWorkspacePath}
-              sourceFiles={sourceFiles}
-              startSeedRunAction={startSeedRunAction}
-              tenantSlug={tenantSlug}
-              workspaceFiles={workspaceFiles}
-            />
-          </section>
+          </main>
 
-          {showCreationReadinessPanel && !isEmptyProject ? (
+          <aside className="overview-rail">
             <section
-              className="panel overview-readiness-panel"
-              aria-labelledby="creation-readiness-heading"
+              className="panel overview-upload-panel overview-upload-disclosure"
+              aria-labelledby="upload-and-start-seed-heading"
+              data-elevated={selectedRunId ? "true" : "false"}
+              data-density="compact"
             >
-              <p className="eyebrow"><Bi zh="创作就绪" en="Creation readiness" /></p>
-              <h2 id="creation-readiness-heading"><Bi zh="模型与预算" en="Models and budget" /></h2>
-              <CreationReadinessPanel
-                creationReadiness={creationReadiness}
-                locale={locale}
-                projectOverview={projectOverview}
-              />
+              <p className="eyebrow"><Bi zh="导入" en="Import" /></p>
+              <h2 id="upload-and-start-seed-heading"><Bi zh="导入小说" en="Import manuscript" /></h2>
+              {uploadForm}
             </section>
-          ) : null}
-        </main>
 
-        <aside className="overview-rail">
-          <section
-            className="panel overview-upload-panel overview-upload-disclosure"
-            aria-labelledby="upload-and-start-seed-heading"
-            data-elevated={selectedRunId ? "true" : "false"}
-            data-density="compact"
-          >
-            <p className="eyebrow"><Bi zh="导入" en="Import" /></p>
-            <h2 id="upload-and-start-seed-heading"><Bi zh="导入小说" en="Import manuscript" /></h2>
-            <OverviewSeedUploadForm
-              action={uploadAndStartSeedAction}
-              locale={locale}
-              seedStatus={<StatusLine status={seedStatus} />}
-              sourceStatus={<StatusLine status={sourceStatus} />}
-            />
-          </section>
+            <div className="overview-secondary-stack">
+              <details className="overview-details">
+                <summary>
+                  <FileText aria-hidden="true" size={18} strokeWidth={1.8} />
+                  <span>
+                    <strong><Bi zh="文件与分析记录" en="Files and analysis history" /></strong>
+                    <small>
+                      {sourceFiles.ok ? sourceFiles.items.length : 0} <Bi zh="个文件" en="files" /> · {seedRuns.ok ? seedRuns.items.length : 0} <Bi zh="次分析" en="runs" />
+                    </small>
+                  </span>
+                  <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
+                </summary>
+                <div className="overview-details-content">
+                  <section className={sourceFiles.ok ? "" : "error-box"} aria-labelledby="source-files-heading">
+                    <h3 id="source-files-heading"><Bi zh="源文件" en="Source files" /></h3>
+                    <SourceFilesTable
+                      completeUploadAction={completeUploadAction}
+                      locale={locale}
+                      projectId={projectId}
+                      sourceFiles={sourceFiles}
+                      startSeedRunAction={startSeedRunAction}
+                      tenantSlug={tenantSlug}
+                    />
+                  </section>
+                  <section className={seedRuns.ok ? "" : "error-box"} aria-labelledby="seed-runs-heading">
+                    <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Analysis history" /></h3>
+                    <SeedRunsTable locale={locale} projectId={projectId} seedRuns={seedRuns} tenantSlug={tenantSlug} />
+                  </section>
+                </div>
+              </details>
 
-          <div className="overview-secondary-stack">
-            <details className="overview-details">
-              <summary>
-                <FileText aria-hidden="true" size={18} strokeWidth={1.8} />
-                <span>
-                  <strong><Bi zh="文件与分析记录" en="Files and analysis history" /></strong>
-                  <small>
-                    {sourceFiles.ok ? sourceFiles.items.length : 0} <Bi zh="个文件" en="files" /> · {seedRuns.ok ? seedRuns.items.length : 0} <Bi zh="次分析" en="runs" />
-                  </small>
-                </span>
-                <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-              </summary>
-              <div className="overview-details-content">
-                <section className={sourceFiles.ok ? "" : "error-box"} aria-labelledby="source-files-heading">
-                  <h3 id="source-files-heading"><Bi zh="源文件" en="Source files" /></h3>
-                  <SourceFilesTable
-                    completeUploadAction={completeUploadAction}
-                    locale={locale}
-                    projectId={projectId}
-                    sourceFiles={sourceFiles}
-                    startSeedRunAction={startSeedRunAction}
-                    tenantSlug={tenantSlug}
-                  />
-                </section>
-                <section className={seedRuns.ok ? "" : "error-box"} aria-labelledby="seed-runs-heading">
-                  <h3 id="seed-runs-heading"><Bi zh="分析历史" en="Analysis history" /></h3>
-                  <SeedRunsTable locale={locale} projectId={projectId} seedRuns={seedRuns} tenantSlug={tenantSlug} />
-                </section>
-              </div>
-            </details>
-
-            <details className="overview-details">
-              <summary>
-                <Activity aria-hidden="true" size={18} strokeWidth={1.8} />
-                <span>
-                  <strong><Bi zh="项目诊断（可选）" en="Project diagnostics (optional)" /></strong>
-                  <small><Bi zh="就绪度与任务摘要，不含拆解结果" en="Readiness and run summary — not analysis results" /></small>
-                </span>
-                <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
-              </summary>
-              <div className="overview-details-content">
-                <section aria-labelledby="project-details-heading">
-                  <h3 id="project-details-heading"><Bi zh="项目状态详情" en="Project health details" /></h3>
-                  <ProjectHealthDetails locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
-                </section>
-                <section className={projectReadiness.ok ? "" : "error-box"} aria-labelledby="project-readiness-heading">
-                  <h3 id="project-readiness-heading"><Bi zh="项目就绪度" en="Project readiness" /></h3>
-                  <ProjectReadinessPanel locale={locale} projectId={projectId} projectReadiness={projectReadiness} tenantSlug={tenantSlug} />
-                </section>
-                <section className={selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} aria-labelledby="seed-run-detail-heading">
-                  <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Current analysis" /></h3>
-                  <SeedRunDetail locale={locale} projectId={projectId} selectedRunId={selectedRunId} selectedSeedRun={selectedSeedRun} tenantSlug={tenantSlug} />
-                </section>
-                {/* Raw event dumps are engineer telemetry; authors use the main-panel results instead. */}
-              </div>
-            </details>
-          </div>
-        </aside>
-      </div>
+              <details className="overview-details">
+                <summary>
+                  <Activity aria-hidden="true" size={18} strokeWidth={1.8} />
+                  <span>
+                    <strong><Bi zh="项目诊断（可选）" en="Project diagnostics (optional)" /></strong>
+                    <small><Bi zh="就绪度与任务摘要，不含拆解结果" en="Readiness and run summary — not analysis results" /></small>
+                  </span>
+                  <ChevronRight className="overview-details-chevron" aria-hidden="true" size={18} />
+                </summary>
+                <div className="overview-details-content">
+                  <section aria-labelledby="project-details-heading">
+                    <h3 id="project-details-heading"><Bi zh="项目状态详情" en="Project health details" /></h3>
+                    <ProjectHealthDetails locale={locale} projectId={projectId} projectOverview={projectOverview} tenantSlug={tenantSlug} />
+                  </section>
+                  <section className={projectReadiness.ok ? "" : "error-box"} aria-labelledby="project-readiness-heading">
+                    <h3 id="project-readiness-heading"><Bi zh="项目就绪度" en="Project readiness" /></h3>
+                    <ProjectReadinessPanel locale={locale} projectId={projectId} projectReadiness={projectReadiness} tenantSlug={tenantSlug} />
+                  </section>
+                  <section className={selectedSeedRun && !selectedSeedRun.ok ? "error-box" : ""} aria-labelledby="seed-run-detail-heading">
+                    <h3 id="seed-run-detail-heading"><Bi zh="当前任务" en="Current analysis" /></h3>
+                    <SeedRunDetail locale={locale} projectId={projectId} selectedRunId={selectedRunId} selectedSeedRun={selectedSeedRun} tenantSlug={tenantSlug} />
+                  </section>
+                </div>
+              </details>
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
@@ -296,6 +466,7 @@ function OverviewNextStep({
   cancelSeedRunEnabled,
   completeUploadAction,
   creationReadiness,
+  embedResults = true,
   locale,
   materialsHref = "",
   projectId,
@@ -319,6 +490,7 @@ function OverviewNextStep({
   cancelSeedRunEnabled: boolean;
   completeUploadAction: (formData: FormData) => Promise<void>;
   creationReadiness: ReturnType<typeof evaluateCreationReadiness>;
+  embedResults?: boolean;
   locale: Locale;
   materialsHref?: string;
   projectId: string;
@@ -359,9 +531,11 @@ function OverviewNextStep({
     const failureHint = selectedSeedRun.error_code
       ? publicSeedFailureHint(locale, selectedSeedRun.error_code)
       : null;
-    const showResults = completed || Boolean(
-      (workspaceFiles && workspaceFiles.ok && workspaceFiles.items.length > 0)
-      || (analysisCandidates && analysisCandidates.ok && analysisCandidates.items.length > 0),
+    const showResults = embedResults && (
+      completed || Boolean(
+        (workspaceFiles && workspaceFiles.ok && workspaceFiles.items.length > 0)
+        || (analysisCandidates && analysisCandidates.ok && analysisCandidates.items.length > 0),
+      )
     );
     return (
       <>

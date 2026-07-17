@@ -16,8 +16,9 @@ def test_run_worker_provides_activity_executor_for_sync_activities(
     captured: dict[str, object] = {}
     fake_client = object()
 
-    async def connect(address: str) -> object:
+    async def connect(address: str, namespace: str = "default") -> object:
         captured["address"] = address
+        captured["namespace"] = namespace
         return fake_client
 
     class FakeWorker:
@@ -33,6 +34,7 @@ def test_run_worker_provides_activity_executor_for_sync_activities(
             assert future.result(timeout=1) == "ok"
 
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
+    monkeypatch.setenv("TEMPORAL_NAMESPACE", "mirofish-production")
     monkeypatch.setenv("AGENT_RUNTIME_TASK_QUEUE", SEED_TASK_QUEUE)
     monkeypatch.setattr(worker_module.Client, "connect", staticmethod(connect))
     monkeypatch.setattr(worker_module, "Worker", FakeWorker)
@@ -40,6 +42,7 @@ def test_run_worker_provides_activity_executor_for_sync_activities(
     asyncio.run(worker_module.run_worker())
 
     assert captured["address"] == "temporal:7233"
+    assert captured["namespace"] == "mirofish-production"
     assert captured["client"] is fake_client
     assert captured["task_queue"] == SEED_TASK_QUEUE
     assert captured["ran"] is True
