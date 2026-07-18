@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import unicodedata
 import uuid
@@ -31,11 +32,20 @@ STORY_GRAPH_BUILD_MODULE_KEY = "story_graph_build"
 GRAPH_BOND_GENERATION_MODULE_KEY = "graph_bond_generator"
 STORY_GRAPH_BUILD_WORKFLOW_TYPE = "story_graph_build"
 STORY_GRAPH_BOND_GENERATION_WORKFLOW_TYPE = "story_graph_bond_generation"
-GRAPH_LAYOUT_SCHEMA_VERSION = 2
+GRAPH_LAYOUT_SCHEMA_VERSION = 3
+GRAPH_LAYOUT_STRATEGY = "deterministic_force_components"
 GRAPH_LAYOUT_DEFAULT_VIEWPORT_NODE_BUDGET = 300
 GRAPH_LAYOUT_NODE_WIDTH = 180
 GRAPH_LAYOUT_NODE_HEIGHT = 112
-GRAPH_LAYOUT_CLUSTER_GAP = 160
+GRAPH_LAYOUT_CLUSTER_GAP = 140
+GRAPH_LAYOUT_FORCE_ITERATIONS = 100
+GRAPH_LAYOUT_IDEAL_EDGE_LENGTH = 148.0
+GRAPH_LAYOUT_REPULSION = 9200.0
+GRAPH_LAYOUT_ATTRACTION = 0.085
+GRAPH_LAYOUT_CENTERING = 0.015
+GRAPH_LAYOUT_REPULSION_CUTOFF = 420.0
+GRAPH_LAYOUT_MAX_DISPLACEMENT = 28.0
+GRAPH_LAYOUT_COMPONENT_PADDING = 56.0
 SENSITIVE_GRAPH_KEYS = {
     "api_key",
     "body",
@@ -1104,6 +1114,7 @@ class PostgresStoryGraphBuilder:
         options: dict[str, Any],
     ) -> int:
         layout = _deterministic_cluster_layout(
+            graph_id=graph_id,
             nodes=nodes,
             edges=edges,
             clusters=clusters,
@@ -2428,66 +2439,204 @@ def _assign_graph_clusters(
     return sorted(clusters, key=lambda cluster: (-cluster["importance"], cluster["cluster_key"]))
 
 
+def _layout_rng(graph_id: str) -> random.Random:
+    digest = hashlib.sha256(f"story-graph-layout:{graph_id}".encode("utf-8")).digest()
+    return random.Random(int.from_bytes(digest[:8], "big"))
+
+
+def _force_layout_component(
+    *,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    rng: random.Random,
+) -> dict[str, tuple[float, float]]:
+    if not nodes:
+        return {}
+    ordered = sorted(nodes, key=_graph_node_sort_key)
+    node_ids = [node["node_id"] for node in ordered]
+    count = len(node_ids)
+    radius = max(96.0, GRAPH_LAYOUT_IDEAL_EDGE_LENGTH * max(1.0, math.sqrt(count)) / math.tau * 1.35)
+    positions: dict[str, list[float]] = {}
+    for index, node_id in enumerate(node_ids):
+        angle = (math.tau * index / count) + rng.uniform(-0.04, 0.04)
+        jitter = rng.uniform(-8.0, 8.0)
+        positions[node_id] = [
+            math.cos(angle) * radius + jitter,
+            math.sin(angle) * radius + jitter,
+        ]
+
+    node_id_set = set(node_ids)
+    local_edges: list[tuple[str, str, float]] = []
+    for edge in edges:
+        source_id = edge["source_node_id"]
+        target_id = edge["target_node_id"]
+        if source_id not in node_id_set or target_id not in node_id_set or source_id == target_id:
+            continue
+        weight = max(0.5, float(edge.get("weight") or 1.0))
+        local_edges.append((source_id, target_id, weight))
+
+    if count <= 1:
+        iterations = 0
+    elif count <= 80:
+        iterations = GRAPH_LAYOUT_FORCE_ITERATIONS
+    elif count <= 250:
+        iterations = 48
+    else:
+        iterations = 28
+    # Large components keep pairwise repulsion sparse while remaining deterministic.
+    pair_stride = 1 if count <= 120 else max(1, count // 90)
+    for step in range(iterations):
+        cooling = 1.0 - (step / iterations)
+        forces = {node_id: [0.0, 0.0] for node_id in node_ids}
+        for left_index, left_id in enumerate(node_ids):
+            left_x, left_y = positions[left_id]
+            for right_index in range(left_index + 1, count, pair_stride):
+                right_id = node_ids[right_index]
+                right_x, right_y = positions[right_id]
+                dx = left_x - right_x
+                dy = left_y - right_y
+                dist_sq = dx * dx + dy * dy + 0.01
+                dist = math.sqrt(dist_sq)
+                if dist > GRAPH_LAYOUT_REPULSION_CUTOFF:
+                    continue
+                force = (GRAPH_LAYOUT_REPULSION / dist_sq) * cooling
+                fx = (dx / dist) * force
+                fy = (dy / dist) * force
+                forces[left_id][0] += fx
+                forces[left_id][1] += fy
+                forces[right_id][0] -= fx
+                forces[right_id][1] -= fy
+
+        for source_id, target_id, weight in local_edges:
+            sx, sy = positions[source_id]
+            tx, ty = positions[target_id]
+            dx = tx - sx
+            dy = ty - sy
+            dist = math.sqrt(dx * dx + dy * dy) + 0.01
+            stretch = dist - GRAPH_LAYOUT_IDEAL_EDGE_LENGTH
+            force = stretch * GRAPH_LAYOUT_ATTRACTION * min(3.0, weight) * cooling
+            fx = (dx / dist) * force
+            fy = (dy / dist) * force
+            forces[source_id][0] += fx
+            forces[source_id][1] += fy
+            forces[target_id][0] -= fx
+            forces[target_id][1] -= fy
+
+        centroid_x = sum(positions[node_id][0] for node_id in node_ids) / count
+        centroid_y = sum(positions[node_id][1] for node_id in node_ids) / count
+        max_step = GRAPH_LAYOUT_MAX_DISPLACEMENT * (0.35 + 0.65 * cooling)
+        for node_id in node_ids:
+            forces[node_id][0] -= (positions[node_id][0] - centroid_x) * GRAPH_LAYOUT_CENTERING
+            forces[node_id][1] -= (positions[node_id][1] - centroid_y) * GRAPH_LAYOUT_CENTERING
+            dx, dy = forces[node_id]
+            magnitude = math.sqrt(dx * dx + dy * dy)
+            if magnitude > max_step:
+                scale = max_step / magnitude
+                dx *= scale
+                dy *= scale
+            positions[node_id][0] += dx
+            positions[node_id][1] += dy
+
+    min_x = min(positions[node_id][0] for node_id in node_ids)
+    min_y = min(positions[node_id][1] for node_id in node_ids)
+    return {
+        node_id: (
+            positions[node_id][0] - min_x + GRAPH_LAYOUT_COMPONENT_PADDING,
+            positions[node_id][1] - min_y + GRAPH_LAYOUT_COMPONENT_PADDING,
+        )
+        for node_id in node_ids
+    }
+
+
+def _pack_component_boxes(
+    boxes: list[tuple[str, float, float]],
+) -> dict[str, tuple[float, float]]:
+    """Deterministic shelf packing: taller boxes first, left-to-right then next shelf."""
+    ordered = sorted(boxes, key=lambda item: (-item[2], -item[1], item[0]))
+    placements: dict[str, tuple[float, float]] = {}
+    shelf_x = 0.0
+    shelf_y = 0.0
+    shelf_height = 0.0
+    shelf_width_limit = 0.0
+    total_area = sum(width * height for _, width, height in ordered)
+    target_row_width = max(720.0, math.sqrt(max(total_area, 1.0)) * 1.25)
+    for cluster_key, width, height in ordered:
+        if shelf_x > 0 and shelf_x + width > target_row_width:
+            shelf_y += shelf_height + GRAPH_LAYOUT_CLUSTER_GAP
+            shelf_x = 0.0
+            shelf_height = 0.0
+        placements[cluster_key] = (shelf_x, shelf_y)
+        shelf_x += width + GRAPH_LAYOUT_CLUSTER_GAP
+        shelf_height = max(shelf_height, height)
+        shelf_width_limit = max(shelf_width_limit, shelf_x)
+    return placements
+
+
 def _deterministic_cluster_layout(
     *,
+    graph_id: str,
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     clusters: list[dict[str, Any]],
     viewport_node_budget: int,
 ) -> dict[str, Any]:
+    rng = _layout_rng(graph_id)
+    component_local: dict[str, dict[str, tuple[float, float]]] = {}
+    component_size: list[tuple[str, float, float]] = []
+    for cluster in clusters:
+        local_positions = _force_layout_component(nodes=cluster["nodes"], edges=edges, rng=rng)
+        component_local[cluster["cluster_key"]] = local_positions
+        if local_positions:
+            max_x = max(x for x, _ in local_positions.values())
+            max_y = max(y for _, y in local_positions.values())
+        else:
+            max_x = GRAPH_LAYOUT_COMPONENT_PADDING
+            max_y = GRAPH_LAYOUT_COMPONENT_PADDING
+        width = max(280.0, max_x + GRAPH_LAYOUT_COMPONENT_PADDING)
+        height = max(180.0, max_y + GRAPH_LAYOUT_COMPONENT_PADDING)
+        component_size.append((cluster["cluster_key"], width, height))
+
+    placements = _pack_component_boxes(component_size)
+    size_by_key = {key: (width, height) for key, width, height in component_size}
     layout_nodes: list[dict[str, Any]] = []
     layout_clusters: list[dict[str, Any]] = []
-    row_y = 0
-    cluster_index = 0
-    while cluster_index < len(clusters):
-        row = clusters[cluster_index : cluster_index + 3]
-        row_layout: list[tuple[dict[str, Any], int, int]] = []
-        x = 0
-        row_height = 0
-        for cluster in row:
-            count = max(1, cluster["node_count"])
-            columns = max(1, math.ceil(math.sqrt(count)))
-            rows = math.ceil(count / columns)
-            width = max(280, columns * GRAPH_LAYOUT_NODE_WIDTH + (columns + 1) * 28)
-            height = max(180, rows * GRAPH_LAYOUT_NODE_HEIGHT + (rows + 1) * 24 + 44)
-            row_layout.append((cluster, x, width))
-            x += width + GRAPH_LAYOUT_CLUSTER_GAP
-            row_height = max(row_height, height)
-        for cluster, cluster_x, width in row_layout:
-            count = max(1, cluster["node_count"])
-            columns = max(1, math.ceil(math.sqrt(count)))
-            rows = math.ceil(count / columns)
-            height = max(180, rows * GRAPH_LAYOUT_NODE_HEIGHT + (rows + 1) * 24 + 44)
-            layout_clusters.append(
+    for cluster in clusters:
+        cluster_key = cluster["cluster_key"]
+        origin_x, origin_y = placements[cluster_key]
+        width, height = size_by_key[cluster_key]
+        layout_clusters.append(
+            {
+                "cluster_id": cluster["cluster_id"],
+                "cluster_key": cluster_key,
+                "x": origin_x,
+                "y": origin_y,
+                "width": width,
+                "height": height,
+                "node_count": cluster["node_count"],
+            }
+        )
+        local_positions = component_local[cluster_key]
+        for node in sorted(cluster["nodes"], key=_graph_node_sort_key):
+            local_x, local_y = local_positions[node["node_id"]]
+            layout_nodes.append(
                 {
+                    "node_id": node["node_id"],
+                    "x": origin_x + local_x,
+                    "y": origin_y + local_y,
+                    "node_type": node["node_type"],
                     "cluster_id": cluster["cluster_id"],
-                    "cluster_key": cluster["cluster_key"],
-                    "x": cluster_x,
-                    "y": row_y,
-                    "width": width,
-                    "height": height,
-                    "node_count": cluster["node_count"],
+                    "cluster_key": cluster_key,
+                    "importance": node["importance"],
+                    "degree": node.get("degree", 0),
                 }
             )
-            for node_index, node in enumerate(cluster["nodes"]):
-                layout_nodes.append(
-                    {
-                        "node_id": node["node_id"],
-                        "x": cluster_x + 28 + (node_index % columns) * GRAPH_LAYOUT_NODE_WIDTH,
-                        "y": row_y + 68 + (node_index // columns) * GRAPH_LAYOUT_NODE_HEIGHT,
-                        "node_type": node["node_type"],
-                        "cluster_id": cluster["cluster_id"],
-                        "cluster_key": cluster["cluster_key"],
-                        "importance": node["importance"],
-                        "degree": node.get("degree", 0),
-                    }
-                )
-        row_y += row_height + GRAPH_LAYOUT_CLUSTER_GAP
-        cluster_index += 3
+
+    layout_nodes.sort(key=lambda item: item["node_id"])
+    layout_clusters.sort(key=lambda item: item["cluster_key"])
     return {
         "view_id": "world",
         "schema_version": GRAPH_LAYOUT_SCHEMA_VERSION,
-        "strategy": "deterministic_cluster_grid",
+        "strategy": GRAPH_LAYOUT_STRATEGY,
         "node_count": len(nodes),
         "edge_count": len(edges),
         "nodes": layout_nodes,

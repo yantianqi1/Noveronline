@@ -16,7 +16,6 @@ import type {
   WorkflowRunSummary,
 } from "../lib/api";
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
-import { InspectorPanel } from "./inspector-panel";
 import { WorkspaceHeader } from "./workspace-header";
 
 export { storyGraphBondStatus, storyGraphBuildStatus } from "./story-graph-status";
@@ -170,6 +169,7 @@ export function StoryGraphShell({
           evidence={evidence}
           layout={layout}
           locale={locale}
+          onOpenBuild={() => setWorkspaceMode("build")}
           onSelectNodeId={setSelectedNodeId}
           selectedNodeId={selectedNode?.node_id ?? selectedNodeId}
           view={view}
@@ -533,6 +533,7 @@ function GraphCanvas({
   evidence,
   layout,
   locale,
+  onOpenBuild,
   onSelectNodeId,
   selectedNodeId,
   view,
@@ -542,36 +543,81 @@ function GraphCanvas({
   evidence: StoryGraphEvidenceSummary;
   layout: StoryGraphLayoutSummary;
   locale: Locale;
+  onOpenBuild?: () => void;
   onSelectNodeId?: (nodeId: string) => void;
   selectedNodeId?: string;
   view: StoryGraphViewSummary;
 }) {
+  const missingGraph = isStoryGraphMissing(current) || isStoryGraphMissing(view);
+
   if (!view.ok) {
     return (
-      <div className="workbench-grid story-graph-explore-grid">
+      <div className="story-graph-stage story-graph-stage-empty">
         <div className="story-graph-canvas story-graph-canvas-empty" aria-label={tx(locale, "故事图谱元数据画布", "Story graph metadata canvas")}>
-          <strong><Bi zh="暂时无法加载图谱" en="Graph unavailable" /></strong>
-          <p className="form-hint"><FailureText /></p>
+          {missingGraph ? (
+            <>
+              <strong><Bi zh="尚未构建故事图谱" en="Story graph not built yet" /></strong>
+              <p className="form-hint">
+                <Bi
+                  zh="当前项目还没有可用的图谱快照。请先在总览完成拆解并入库，再切换到「构建」生成故事图谱。"
+                  en="This project has no story-graph snapshot yet. Finish analysis in Overview, then switch to Build to generate the graph."
+                />
+              </p>
+              {onOpenBuild ? (
+                <button type="button" className="story-graph-empty-cta" onClick={onOpenBuild}>
+                  <Bi zh="去构建图谱" en="Go to Build" />
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <strong><Bi zh="暂时无法加载图谱" en="Graph unavailable" /></strong>
+              <p className="form-hint"><FailureText /></p>
+            </>
+          )}
         </div>
       </div>
     );
   }
   if (!layout.ok) {
     return (
-      <div className="workbench-grid story-graph-explore-grid">
+      <div className="story-graph-stage story-graph-stage-empty">
         <div className="story-graph-canvas story-graph-canvas-empty" aria-label={tx(locale, "故事图谱画布", "Story graph canvas")}>
-          <strong><Bi zh="暂时无法加载布局" en="Layout unavailable" /></strong>
-          <p className="form-hint"><FailureText /></p>
+          {missingGraph || isStoryGraphMissing(layout) ? (
+            <>
+              <strong><Bi zh="尚未构建故事图谱" en="Story graph not built yet" /></strong>
+              <p className="form-hint">
+                <Bi zh="构建完成后，这里会显示节点布局与关系。" en="After a successful build, node layout and relationships appear here." />
+              </p>
+              {onOpenBuild ? (
+                <button type="button" className="story-graph-empty-cta" onClick={onOpenBuild}>
+                  <Bi zh="去构建图谱" en="Go to Build" />
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <strong><Bi zh="暂时无法加载布局" en="Layout unavailable" /></strong>
+              <p className="form-hint"><FailureText /></p>
+            </>
+          )}
         </div>
       </div>
     );
   }
   if (view.nodes.length === 0) {
     return (
-      <div className="workbench-grid story-graph-explore-grid">
+      <div className="story-graph-stage story-graph-stage-empty">
         <div className="story-graph-canvas story-graph-canvas-empty" aria-label={tx(locale, "故事图谱元数据画布", "Story graph metadata canvas")}>
           <strong><Bi zh="暂无图谱节点" en="No graph nodes available" /></strong>
-          <p className="form-hint"><Bi zh="运行故事图谱构建后，这里会显示可查看的节点。可在下方开始构建。" en="Run a Story Graph build below to populate this canvas." /></p>
+          <p className="form-hint">
+            <Bi zh="当前快照还没有节点。请切换到「构建」，选择已完成的拆解结果后再生成。" en="This snapshot has no nodes yet. Switch to Build, pick a completed analysis result, then generate the graph." />
+          </p>
+          {onOpenBuild ? (
+            <button type="button" className="story-graph-empty-cta" onClick={onOpenBuild}>
+              <Bi zh="去构建图谱" en="Go to Build" />
+            </button>
+          ) : null}
         </div>
       </div>
     );
@@ -589,6 +635,10 @@ function GraphCanvas({
       view={view}
     />
   );
+}
+
+function isStoryGraphMissing(summary: { ok: boolean; code?: string }) {
+  return !summary.ok && summary.code === "NOT_FOUND";
 }
 
 function InteractiveGraphCanvas({
@@ -626,7 +676,7 @@ function InteractiveGraphCanvas({
     onSelectNodeId?.(nodeId);
   };
   const [zoom, setZoom] = useState(1);
-  const stageRef = useRef<HTMLElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
 
   const positionedNodes = useMemo(() => {
     const layoutByNodeId = new Map(model.nodes.map((node) => [node.nodeId, node]));
@@ -674,6 +724,17 @@ function InteractiveGraphCanvas({
   const viewportOmitted = Math.max(model.viewport.omittedNodeCount, currentNodeCount - view.nodes.length, 0);
   const legendTypes = nodeTypes.length > 0 ? nodeTypes.slice(0, 6) : ["character", "concept"];
   const zoomPercent = Math.round(zoom * 100);
+  const selectedNeighborIds = useMemo(() => {
+    if (!selectedNode) {
+      return new Set<string>();
+    }
+    const ids = new Set<string>([selectedNode.node_id]);
+    for (const edge of selectedRelations) {
+      ids.add(edge.source_node_id);
+      ids.add(edge.target_node_id);
+    }
+    return ids;
+  }, [selectedNode, selectedRelations]);
 
   function chooseCluster(value: string) {
     setClusterId(value);
@@ -701,8 +762,8 @@ function InteractiveGraphCanvas({
   }
 
   return (
-    <div className="workbench-grid story-graph-explore-grid">
-      <aside className="story-graph-filter-rail" aria-label={tx(locale, "图谱筛选", "Graph filters")}>
+    <div className="story-graph-stage" ref={stageRef}>
+      <div className="story-graph-floating-toolbar" role="toolbar" aria-label={tx(locale, "图谱画布工具", "Graph canvas tools")}>
         <div className="story-graph-view-toggle" role="group" aria-label={tx(locale, "图谱视图控制", "Graph view controls")}>
           <button type="button" aria-pressed={mode === "clusters"} onClick={() => setMode("clusters")}>
             <Bi zh="聚类概览" en="Cluster overview" />
@@ -711,53 +772,212 @@ function InteractiveGraphCanvas({
             <Bi zh="节点视图" en="Node view" />
           </button>
         </div>
+        <span className="story-graph-search-field">
+          <Search size={15} aria-hidden="true" />
+          <input
+            id="story-graph-search"
+            aria-label={tx(locale, "搜索节点", "Search nodes")}
+            placeholder={tx(locale, "搜索节点...", "Search nodes...")}
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setMode("nodes"); }}
+          />
+        </span>
+        <select
+          id="story-graph-node-type"
+          aria-label={tx(locale, "节点类型", "Node type")}
+          value={nodeType}
+          onChange={(event) => { setNodeType(event.target.value); setMode("nodes"); }}
+        >
+          <option value="all">{tx(locale, "全部类型", "All types")}</option>
+          {nodeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+        </select>
+        <select
+          id="story-graph-cluster"
+          aria-label={tx(locale, "聚类", "Cluster")}
+          value={clusterId}
+          onChange={(event) => chooseCluster(event.target.value)}
+        >
+          <option value="all">{tx(locale, "全部聚类", "All clusters")}</option>
+          {model.clusters.map((cluster, index) => (
+            <option key={cluster.clusterId} value={cluster.clusterId}>
+              {publicGraphLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`))}
+            </option>
+          ))}
+        </select>
+        <span id="graph-canvas-heading" className="story-graph-canvas-title">
+          <Bi zh="图谱画布" en="Graph canvas" />
+        </span>
+        <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} title={tx(locale, "缩小", "Zoom out")} onClick={() => adjustZoom(zoom - 0.15)}>
+          <Minus size={15} aria-hidden="true" />
+        </button>
+        <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} title={tx(locale, "放大", "Zoom in")} onClick={() => adjustZoom(zoom + 0.15)}>
+          <Plus size={15} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label={tx(locale, "重置图谱视图", "Reset graph view")}
+          title={tx(locale, "重置视图", "Reset view")}
+          onClick={() => { setZoom(1); setQuery(""); setNodeType("all"); chooseCluster("all"); }}
+        >
+          <RotateCcw size={15} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label={tx(locale, "全屏画布", "Fullscreen canvas")}
+          title={tx(locale, "全屏", "Fullscreen")}
+          onClick={() => { void toggleFullscreen(); }}
+        >
+          <Maximize2 size={15} aria-hidden="true" />
+        </button>
+      </div>
 
-        <div className="story-graph-filter-block">
-          <label htmlFor="story-graph-search"><Bi zh="搜索节点" en="Search nodes" /></label>
-          <span className="story-graph-search-field">
-            <Search size={16} aria-hidden="true" />
-            <input
-              id="story-graph-search"
-              placeholder={tx(locale, "搜索节点...", "Search nodes...")}
-              value={query}
-              onChange={(event) => { setQuery(event.target.value); setMode("nodes"); }}
-            />
-          </span>
-        </div>
-
-        <div className="story-graph-filter-block">
-          <label htmlFor="story-graph-node-type"><Bi zh="节点类型" en="Node type" /></label>
-          <select id="story-graph-node-type" value={nodeType} onChange={(event) => { setNodeType(event.target.value); setMode("nodes"); }}>
-            <option value="all">{tx(locale, "全部类型", "All types")}</option>
-            {nodeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
-          </select>
-        </div>
-
-        <div className="story-graph-filter-block">
-          <label htmlFor="story-graph-cluster"><Bi zh="聚类" en="Cluster" /></label>
-          <select id="story-graph-cluster" value={clusterId} onChange={(event) => chooseCluster(event.target.value)}>
-            <option value="all">{tx(locale, "全部聚类", "All clusters")}</option>
-            {model.clusters.map((cluster, index) => (
-              <option key={cluster.clusterId} value={cluster.clusterId}>
-                {publicGraphLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`))}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <p className="story-graph-filter-status" role="status">
-          {mode === "clusters"
-            ? tx(locale, `${model.clusters.length} 个聚类代表 ${currentNodeCount} 个节点`, `${model.clusters.length} clusters represent ${currentNodeCount} nodes`)
-            : tx(locale, `当前窗口显示 ${filteredNodes.length}/${currentNodeCount} 个节点、${visibleEdges.length} 条关系`, `Viewport shows ${filteredNodes.length}/${currentNodeCount} nodes and ${visibleEdges.length} edges`)}
-          {viewportOmitted > 0 ? tx(locale, `；其余 ${viewportOmitted} 个节点由聚类概览表示`, `; ${viewportOmitted} remaining nodes are represented by cluster overview`) : ""}
+      <p className="story-graph-filter-status" role="status">
+        {mode === "clusters"
+          ? tx(locale, `${model.clusters.length} 个聚类代表 ${currentNodeCount} 个节点`, `${model.clusters.length} clusters represent ${currentNodeCount} nodes`)
+          : tx(locale, `当前窗口显示 ${filteredNodes.length}/${currentNodeCount} 个节点、${visibleEdges.length} 条关系`, `Viewport shows ${filteredNodes.length}/${currentNodeCount} nodes and ${visibleEdges.length} edges`)}
+        {viewportOmitted > 0 ? tx(locale, `；其余 ${viewportOmitted} 个节点由聚类概览表示`, `; ${viewportOmitted} remaining nodes are represented by cluster overview`) : ""}
+      </p>
+      {missingLayoutCount > 0 ? (
+        <p className="story-graph-stage-alert form-hint error-box" role="alert">
+          {tx(locale, `${missingLayoutCount} 个视图节点缺少持久化布局坐标。`, `${missingLayoutCount} viewport nodes are missing persisted layout coordinates.`)}
         </p>
-        {missingLayoutCount > 0 ? (
-          <p className="form-hint error-box" role="alert">
-            {tx(locale, `${missingLayoutCount} 个视图节点缺少持久化布局坐标。`, `${missingLayoutCount} viewport nodes are missing persisted layout coordinates.`)}
-          </p>
-        ) : null}
+      ) : null}
 
-        <div className="story-graph-legend">
+      <div className="story-graph-canvas" aria-label={tx(locale, "故事图谱交互画布", "Interactive story graph canvas")}>
+        <svg
+          className="story-graph-svg"
+          data-graph-canvas="true"
+          role="img"
+          aria-label={mode === "clusters" ? tx(locale, "故事图谱聚类概览", "Story graph cluster overview") : tx(locale, "故事图谱节点与关系", "Story graph nodes and edges")}
+          viewBox={viewBox}
+          preserveAspectRatio="xMidYMid meet"
+        >
+          <defs>
+            <filter id="story-graph-node-glow" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <filter id="story-graph-selected-glow" x="-140%" y="-140%" width="380%" height="380%">
+              <feGaussianBlur stdDeviation="11" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
+          {mode === "clusters" ? model.clusters.map((cluster, index) => {
+            const clusterLabel = publicGraphLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`));
+            return (
+              <g
+                key={cluster.clusterId}
+                data-graph-cluster-id={cluster.clusterId}
+                role="button"
+                tabIndex={0}
+                aria-label={tx(locale, `打开${clusterLabel}，${cluster.nodeCount} 个节点`, `Open ${clusterLabel} with ${cluster.nodeCount} nodes`)}
+                onClick={() => chooseCluster(cluster.clusterId)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    chooseCluster(cluster.clusterId);
+                  }
+                }}
+                style={{ cursor: "pointer" }}
+              >
+                <rect x={cluster.x} y={cluster.y} width={cluster.width} height={cluster.height} rx={14} fill={clusterColor(cluster.clusterKey)} fillOpacity={0.14} stroke={clusterColor(cluster.clusterKey)} strokeWidth={2} />
+                <text x={cluster.x + 18} y={cluster.y + 30} fill="#f0ebe2" fontSize={16} fontWeight={700}>{shortGraphLabel(clusterLabel, 22)}</text>
+                <text x={cluster.x + 18} y={cluster.y + 54} fill="#b8b0a4" fontSize={13}>{tx(locale, `${cluster.nodeCount} 个节点`, `${cluster.nodeCount} nodes`)}</text>
+                <title>{`${clusterLabel}: ${cluster.nodeCount}`}</title>
+              </g>
+            );
+          }) : (
+            <>
+              {visibleEdges.map((edge) => {
+                const source = positionByNodeId.get(edge.source_node_id);
+                const target = positionByNodeId.get(edge.target_node_id);
+                if (!source || !target) {
+                  return null;
+                }
+                const linkedToSelected = Boolean(
+                  selectedNode
+                  && (edge.source_node_id === selectedNode.node_id || edge.target_node_id === selectedNode.node_id),
+                );
+                return (
+                  <line
+                    key={edge.edge_id}
+                    data-graph-edge-id={edge.edge_id}
+                    className={linkedToSelected ? "story-graph-edge-selected" : "story-graph-edge"}
+                    x1={source.x + 36}
+                    y1={source.y + 36}
+                    x2={target.x + 36}
+                    y2={target.y + 36}
+                    stroke={linkedToSelected ? "#c43b35" : "#6b7280"}
+                    strokeOpacity={linkedToSelected ? 0.92 : 0.32}
+                    strokeWidth={linkedToSelected ? Math.max(2, Math.min(4, edge.weight + 0.8)) : Math.max(1, Math.min(2.2, edge.weight))}
+                    filter={linkedToSelected ? "url(#story-graph-selected-glow)" : undefined}
+                  >
+                    <title>{edge.label || edge.edge_type}</title>
+                  </line>
+                );
+              })}
+              {filteredNodes.map(({ node, position }) => {
+                const selected = selectedNode?.node_id === node.node_id;
+                const neighbor = selectedNeighborIds.has(node.node_id);
+                const color = selected ? "#c43b35" : nodeTypeColor(node.node_type);
+                const radius = selected ? 32 : Math.max(18, Math.min(26, 16 + Number(node.importance || 0) * 2.2));
+                const nodeLabel = graphNodeLabel(node.title, view.nodes.findIndex((item) => item.node_id === node.node_id), locale);
+                return (
+                  <g
+                    key={node.node_id}
+                    data-graph-node-id={node.node_id}
+                    className={selected ? "story-graph-node-selected" : neighbor ? "story-graph-node-neighbor" : "story-graph-node"}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={selected}
+                    aria-label={tx(locale, `查看节点 ${nodeLabel}`, `Inspect node ${nodeLabel}`)}
+                    transform={`translate(${position.x} ${position.y})`}
+                    onClick={() => setSelectedNodeId(node.node_id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedNodeId(node.node_id);
+                      }
+                    }}
+                    style={{ cursor: "pointer" }}
+                  >
+                    {selected ? <circle cx={36} cy={36} r={radius + 20} fill="#c43b35" fillOpacity={0.2} /> : null}
+                    <circle
+                      cx={36}
+                      cy={36}
+                      r={radius}
+                      fill={selected ? "#c43b35" : "rgba(14, 16, 18, 0.94)"}
+                      stroke={color}
+                      strokeWidth={selected ? 3.8 : neighbor ? 2.6 : 2}
+                      filter={selected ? "url(#story-graph-selected-glow)" : "url(#story-graph-node-glow)"}
+                      opacity={selected || !selectedNode || neighbor ? 1 : 0.55}
+                    />
+                    <text
+                      x={36}
+                      y={36 + radius + 16}
+                      textAnchor="middle"
+                      fill={selected ? "#ffd7d2" : "#efe8dc"}
+                      fontSize={selected ? 12 : 11}
+                      fontWeight={selected ? 700 : 500}
+                      opacity={selected || !selectedNode || neighbor ? 1 : 0.55}
+                    >
+                      {shortGraphLabel(nodeLabel, selected ? 14 : 10)}
+                    </text>
+                    <title>{`${nodeLabel} (${node.node_type})`}</title>
+                  </g>
+                );
+              })}
+            </>
+          )}
+        </svg>
+
+        <aside className="story-graph-floating-legend" aria-label={tx(locale, "图例", "Legend")}>
           <p className="story-graph-legend-title"><Bi zh="图例" en="Legend" /></p>
           <ul>
             {legendTypes.map((type) => (
@@ -767,245 +987,56 @@ function InteractiveGraphCanvas({
               </li>
             ))}
           </ul>
+        </aside>
+
+        <div className="story-graph-minimap" aria-hidden="true">
+          <svg viewBox={`${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}`} preserveAspectRatio="xMidYMid meet">
+            {filteredNodes.map(({ node, position }) => (
+              <circle
+                key={`mini-${node.node_id}`}
+                cx={position.x + 36}
+                cy={position.y + 36}
+                r={8}
+                fill={selectedNode?.node_id === node.node_id ? "#c43b35" : nodeTypeColor(node.node_type)}
+                fillOpacity={0.85}
+              />
+            ))}
+            <rect
+              x={Number(viewBox.split(" ")[0])}
+              y={Number(viewBox.split(" ")[1])}
+              width={Number(viewBox.split(" ")[2])}
+              height={Number(viewBox.split(" ")[3])}
+              fill="none"
+              stroke="#c43b35"
+              strokeWidth={Math.max(4, bounds.width / 40)}
+            />
+          </svg>
         </div>
-      </aside>
 
-      <main className="story-graph-explore-main">
-        <section
-          ref={stageRef}
-          className="panel story-graph-canvas-panel"
-          aria-labelledby="graph-canvas-heading"
-        >
-          <div className="story-graph-canvas-chrome">
-            <div className="story-graph-canvas-toolbar" role="toolbar" aria-label={tx(locale, "图谱画布工具", "Graph canvas tools")}>
-              <span id="graph-canvas-heading" className="story-graph-canvas-title">
-                <Bi zh="图谱画布" en="Graph canvas" />
-              </span>
-              <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} title={tx(locale, "缩小", "Zoom out")} onClick={() => adjustZoom(zoom - 0.15)}>
-                <Minus size={15} aria-hidden="true" />
-              </button>
-              <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} title={tx(locale, "放大", "Zoom in")} onClick={() => adjustZoom(zoom + 0.15)}>
-                <Plus size={15} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                aria-label={tx(locale, "重置图谱视图", "Reset graph view")}
-                title={tx(locale, "重置视图", "Reset view")}
-                onClick={() => { setZoom(1); setQuery(""); setNodeType("all"); chooseCluster("all"); }}
-              >
-                <RotateCcw size={15} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                aria-label={tx(locale, "全屏画布", "Fullscreen canvas")}
-                title={tx(locale, "全屏", "Fullscreen")}
-                onClick={() => { void toggleFullscreen(); }}
-              >
-                <Maximize2 size={15} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
+        <div className="story-graph-zoom-bar" role="group" aria-label={tx(locale, "缩放控制", "Zoom controls")}>
+          <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} onClick={() => adjustZoom(zoom - 0.15)}>
+            <Minus size={14} aria-hidden="true" />
+          </button>
+          <span>{zoomPercent}%</span>
+          <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} onClick={() => adjustZoom(zoom + 0.15)}>
+            <Plus size={14} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-pressed={zoomLocked}
+            aria-label={zoomLocked ? tx(locale, "解锁缩放", "Unlock zoom") : tx(locale, "锁定缩放", "Lock zoom")}
+            onClick={() => setZoomLocked((value) => !value)}
+          >
+            {zoomLocked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
+          </button>
+        </div>
 
-          <div className="story-graph-canvas" aria-label={tx(locale, "故事图谱交互画布", "Interactive story graph canvas")}>
-            <svg
-              className="story-graph-svg"
-              data-graph-canvas="true"
-              role="img"
-              aria-label={mode === "clusters" ? tx(locale, "故事图谱聚类概览", "Story graph cluster overview") : tx(locale, "故事图谱节点与关系", "Story graph nodes and edges")}
-              viewBox={viewBox}
-              preserveAspectRatio="xMidYMid meet"
-            >
-              <defs>
-                <filter id="story-graph-node-glow" x="-80%" y="-80%" width="260%" height="260%">
-                  <feGaussianBlur stdDeviation="4" result="blur" />
-                  <feMerge>
-                    <feMergeNode in="blur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
-                <filter id="story-graph-selected-glow" x="-120%" y="-120%" width="340%" height="340%">
-                  <feGaussianBlur stdDeviation="8" result="blur" />
-                  <feMerge>
-                    <feMergeNode in="blur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
-              </defs>
-              {mode === "clusters" ? model.clusters.map((cluster, index) => {
-                const clusterLabel = publicGraphLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`));
-                return (
-                  <g
-                    key={cluster.clusterId}
-                    data-graph-cluster-id={cluster.clusterId}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={tx(locale, `打开${clusterLabel}，${cluster.nodeCount} 个节点`, `Open ${clusterLabel} with ${cluster.nodeCount} nodes`)}
-                    onClick={() => chooseCluster(cluster.clusterId)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        chooseCluster(cluster.clusterId);
-                      }
-                    }}
-                    style={{ cursor: "pointer" }}
-                  >
-                    <rect x={cluster.x} y={cluster.y} width={cluster.width} height={cluster.height} rx={10} fill={clusterColor(cluster.clusterKey)} fillOpacity={0.16} stroke={clusterColor(cluster.clusterKey)} strokeWidth={2} />
-                    <text x={cluster.x + 18} y={cluster.y + 30} fill="#f0ebe2" fontSize={16} fontWeight={700}>{shortGraphLabel(clusterLabel, 26)}</text>
-                    <text x={cluster.x + 18} y={cluster.y + 54} fill="#b8b0a4" fontSize={13}>{tx(locale, `${cluster.nodeCount} 个节点`, `${cluster.nodeCount} nodes`)}</text>
-                    <title>{`${clusterLabel}: ${cluster.nodeCount}`}</title>
-                  </g>
-                );
-              }) : (
-                <>
-                  {visibleEdges.map((edge) => {
-                    const source = positionByNodeId.get(edge.source_node_id);
-                    const target = positionByNodeId.get(edge.target_node_id);
-                    if (!source || !target) {
-                      return null;
-                    }
-                    const linkedToSelected = Boolean(
-                      selectedNode
-                      && (edge.source_node_id === selectedNode.node_id || edge.target_node_id === selectedNode.node_id),
-                    );
-                    return (
-                      <line
-                        key={edge.edge_id}
-                        data-graph-edge-id={edge.edge_id}
-                        x1={source.x + 36}
-                        y1={source.y + 36}
-                        x2={target.x + 36}
-                        y2={target.y + 36}
-                        stroke={linkedToSelected ? "#c43b35" : "#6b7280"}
-                        strokeOpacity={linkedToSelected ? 0.9 : 0.38}
-                        strokeWidth={linkedToSelected ? Math.max(1.8, Math.min(3.8, edge.weight + 0.6)) : Math.max(1, Math.min(2.4, edge.weight))}
-                        filter={linkedToSelected ? "url(#story-graph-selected-glow)" : undefined}
-                      >
-                        <title>{edge.label || edge.edge_type}</title>
-                      </line>
-                    );
-                  })}
-                  {filteredNodes.map(({ node, position }) => {
-                    const selected = selectedNode?.node_id === node.node_id;
-                    const color = selected ? "#c43b35" : nodeTypeColor(node.node_type);
-                    const radius = selected ? 28 : Math.max(16, Math.min(24, 14 + Number(node.importance || 0) * 2));
-                    const nodeLabel = graphNodeLabel(node.title, view.nodes.findIndex((item) => item.node_id === node.node_id), locale);
-                    return (
-                      <g
-                        key={node.node_id}
-                        data-graph-node-id={node.node_id}
-                        role="button"
-                        tabIndex={0}
-                        aria-pressed={selected}
-                        aria-label={tx(locale, `查看节点 ${nodeLabel}`, `Inspect node ${nodeLabel}`)}
-                        transform={`translate(${position.x} ${position.y})`}
-                        onClick={() => setSelectedNodeId(node.node_id)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            setSelectedNodeId(node.node_id);
-                          }
-                        }}
-                        style={{ cursor: "pointer" }}
-                      >
-                        {selected ? <circle cx={36} cy={36} r={radius + 14} fill="#c43b35" fillOpacity={0.18} /> : null}
-                        <circle
-                          cx={36}
-                          cy={36}
-                          r={radius}
-                          fill={selected ? "#c43b35" : "rgba(18, 20, 22, 0.92)"}
-                          stroke={color}
-                          strokeWidth={selected ? 3.2 : 2}
-                          filter={selected ? "url(#story-graph-selected-glow)" : "url(#story-graph-node-glow)"}
-                        />
-                        <text
-                          x={36}
-                          y={36 + radius + 16}
-                          textAnchor="middle"
-                          fill={selected ? "#ffd7d2" : "#efe8dc"}
-                          fontSize={11}
-                          fontWeight={selected ? 700 : 500}
-                        >
-                          {shortGraphLabel(nodeLabel, 18)}
-                        </text>
-                        <title>{`${nodeLabel} (${node.node_type})`}</title>
-                      </g>
-                    );
-                  })}
-                </>
-              )}
-            </svg>
+        {mode === "nodes" && filteredNodes.length === 0 ? (
+          <p className="story-graph-canvas-empty-hint" role="status"><Bi zh="当前过滤条件没有匹配节点。" en="No nodes match the current filters." /></p>
+        ) : null}
+      </div>
 
-            <div className="story-graph-minimap" aria-hidden="true">
-              <svg viewBox={`${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}`} preserveAspectRatio="xMidYMid meet">
-                {filteredNodes.map(({ node, position }) => (
-                  <circle
-                    key={`mini-${node.node_id}`}
-                    cx={position.x + 36}
-                    cy={position.y + 36}
-                    r={8}
-                    fill={selectedNode?.node_id === node.node_id ? "#c43b35" : nodeTypeColor(node.node_type)}
-                    fillOpacity={0.85}
-                  />
-                ))}
-                <rect
-                  x={Number(viewBox.split(" ")[0])}
-                  y={Number(viewBox.split(" ")[1])}
-                  width={Number(viewBox.split(" ")[2])}
-                  height={Number(viewBox.split(" ")[3])}
-                  fill="none"
-                  stroke="#c43b35"
-                  strokeWidth={Math.max(4, bounds.width / 40)}
-                />
-              </svg>
-            </div>
-
-            <div className="story-graph-zoom-bar" role="group" aria-label={tx(locale, "缩放控制", "Zoom controls")}>
-              <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} onClick={() => adjustZoom(zoom - 0.15)}>
-                <Minus size={14} aria-hidden="true" />
-              </button>
-              <span>{zoomPercent}%</span>
-              <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} onClick={() => adjustZoom(zoom + 0.15)}>
-                <Plus size={14} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                aria-pressed={zoomLocked}
-                aria-label={zoomLocked ? tx(locale, "解锁缩放", "Unlock zoom") : tx(locale, "锁定缩放", "Lock zoom")}
-                onClick={() => setZoomLocked((value) => !value)}
-              >
-                {zoomLocked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-              </button>
-            </div>
-
-            {mode === "nodes" && filteredNodes.length === 0 ? (
-              <p className="story-graph-canvas-empty-hint" role="status"><Bi zh="当前过滤条件没有匹配节点。" en="No nodes match the current filters." /></p>
-            ) : null}
-          </div>
-        </section>
-
-        <details className="story-graph-snapshot-disclosure">
-          <summary>
-            <span><Bi zh="快照摘要" en="Snapshot summary" /></span>
-            <small>{current.ok ? <StatusValue value={current.status} /> : <Bi zh="暂不可用" en="unavailable" />}</small>
-          </summary>
-          <div className="story-graph-snapshot-content">
-            <section
-              className={`panel story-graph-snapshot-panel ${current.ok ? "" : "error-box"}`}
-              aria-labelledby="graph-current-heading"
-            >
-              <p className="eyebrow"><Bi zh="当前快照" en="Current Snapshot" /></p>
-              <h2 id="graph-current-heading"><Bi zh="图谱快照" en="Graph snapshot" /></h2>
-              <CurrentSnapshot current={current} locale={locale} />
-            </section>
-          </div>
-        </details>
-      </main>
-
-      <InspectorPanel
-        className="story-graph-explore-rail"
-        title={<Bi zh="图谱检视" en="Graph inspector" />}
-        status={selectedNode ? (selectedNodeLabel || <Bi zh="已选节点" en="Selected node" />) : <Bi zh="选择节点查看" en="Select a node" />}
-      >
+      <aside className="story-graph-floating-inspector" aria-label={tx(locale, "图谱检视", "Graph inspector")}>
         <div className="story-graph-inspector-tabs" role="tablist" aria-label={tx(locale, "检视分区", "Inspector sections")}>
           {([
             ["node", tx(locale, "当前节点", "Current node")],
@@ -1025,8 +1056,8 @@ function InteractiveGraphCanvas({
         </div>
 
         {inspectorTab === "node" ? (
-          <section className="panel story-graph-paper-section" aria-labelledby="graph-selected-heading">
-            <h2 id="graph-selected-heading" className="sr-only"><Bi zh="当前节点" en="Current node" /></h2>
+          <section className="story-graph-paper-section" aria-labelledby="graph-selected-heading">
+            <h2 id="graph-selected-heading"><Bi zh="当前节点" en="Current node" /></h2>
             {selectedNode ? (
               <dl className="story-graph-node-fields">
                 <dt><Bi zh="名称" en="Name" /></dt>
@@ -1044,9 +1075,7 @@ function InteractiveGraphCanvas({
                 <summary><Bi zh="节点检查器" en="Node inspector" /></summary>
                 <section className="story-graph-node-inspector" aria-labelledby="story-graph-inspector-heading" aria-live="polite">
                   <h3 id="story-graph-inspector-heading">{selectedNodeLabel}</h3>
-                  <p>{selectedNode.summary || tx(locale, "暂无公开摘要。", "No public summary available.")}</p>
                   <dl>
-                    <dt><Bi zh="类型" en="Type" /></dt><dd>{selectedNode.node_type}</dd>
                     <dt><Bi zh="生命周期" en="Lifecycle" /></dt><dd><StatusValue value={selectedNode.lifecycle} /></dd>
                     <dt><Bi zh="聚类" en="Cluster" /></dt>
                     <dd>{publicGraphLabel(selectedNode.cluster_id, tx(locale, "未分配", "Unassigned"))}</dd>
@@ -1057,15 +1086,11 @@ function InteractiveGraphCanvas({
                 </section>
               </details>
             ) : null}
-            <section className={`panel story-graph-paper-section story-graph-evidence-inline ${evidence.ok ? "" : "error-box"}`} aria-labelledby="graph-evidence-heading">
-              <h2 id="graph-evidence-heading"><Bi zh="公开证据" en="Public evidence" /></h2>
-              <GraphEvidence evidence={evidence} selectedNodeId={selectedNode?.node_id} />
-            </section>
           </section>
         ) : null}
 
         {inspectorTab === "evidence" ? (
-          <section className={`panel story-graph-paper-section ${evidence.ok ? "" : "error-box"}`} aria-labelledby="graph-evidence-heading-tab">
+          <section className={`story-graph-paper-section ${evidence.ok ? "" : "error-box"}`} aria-labelledby="graph-evidence-heading-tab">
             <h2 id="graph-evidence-heading-tab"><Bi zh="公开证据" en="Public evidence" /></h2>
             <GraphEvidence evidence={evidence} selectedNodeId={selectedNode?.node_id} />
           </section>
@@ -1079,23 +1104,10 @@ function InteractiveGraphCanvas({
                 <small><Bi zh="次要信息" en="Secondary" /></small>
               </summary>
               <div className="story-graph-stats-content">
-                <section className={`panel story-graph-paper-section ${layout.ok ? "" : "error-box"}`} aria-labelledby="graph-layout-heading">
-                  <p className="eyebrow"><Bi zh="布局" en="Layout" /></p>
-                  <h2 id="graph-layout-heading"><Bi zh="世界布局" en="World layout" /></h2>
-                  <GraphLayoutSummary layout={layout} locale={locale} />
-                </section>
-                <section className={`panel story-graph-paper-section ${clusters.ok ? "" : "error-box"}`} aria-labelledby="graph-clusters-heading">
-                  <p className="eyebrow"><Bi zh="聚类" en="Clusters" /></p>
-                  <h2 id="graph-clusters-heading"><Bi zh="图谱聚类" en="Graph clusters" /></h2>
-                  <GraphClusters clusters={clusters} />
-                </section>
-                <section className={`panel story-graph-paper-section ${view.ok ? "" : "error-box"}`} aria-labelledby="graph-view-heading">
-                  <p className="eyebrow"><Bi zh="视图" en="Viewport" /></p>
-                  <h2 id="graph-view-heading"><Bi zh="世界视图" en="World view" /></h2>
-                  <GraphViewport locale={locale} view={view} />
-                </section>
+                <GraphLayoutSummary layout={layout} locale={locale} />
+                <GraphClusters clusters={clusters} />
                 <p className="form-hint">
-                  {model.viewport.strategyBasis || tx(locale, "布局来自已持久化的确定性聚类坐标。", "Layout uses persisted deterministic cluster coordinates.")}
+                  {model.viewport.strategyBasis || tx(locale, "布局来自已持久化的确定性力导向坐标。", "Layout uses persisted deterministic force-directed coordinates.")}
                 </p>
               </div>
             </details>
@@ -1109,20 +1121,29 @@ function InteractiveGraphCanvas({
               <small><Bi zh="次要信息" en="Secondary" /></small>
             </summary>
             <div className="story-graph-stats-content">
-              <section className={`panel story-graph-paper-section ${layout.ok ? "" : "error-box"}`} aria-labelledby="graph-layout-heading-secondary">
-                <p className="eyebrow"><Bi zh="布局" en="Layout" /></p>
-                <h2 id="graph-layout-heading-secondary"><Bi zh="世界布局" en="World layout" /></h2>
-                <GraphLayoutSummary layout={layout} locale={locale} />
-              </section>
-              <section className={`panel story-graph-paper-section ${clusters.ok ? "" : "error-box"}`} aria-labelledby="graph-clusters-heading-secondary">
-                <p className="eyebrow"><Bi zh="聚类" en="Clusters" /></p>
-                <h2 id="graph-clusters-heading-secondary"><Bi zh="图谱聚类" en="Graph clusters" /></h2>
-                <GraphClusters clusters={clusters} />
-              </section>
+              <GraphLayoutSummary layout={layout} locale={locale} />
+              <GraphClusters clusters={clusters} />
             </div>
           </details>
         ) : null}
-      </InspectorPanel>
+      </aside>
+
+      <details className="story-graph-snapshot-disclosure">
+        <summary>
+          <span><Bi zh="快照摘要" en="Snapshot summary" /></span>
+          <small>{current.ok ? <StatusValue value={current.status} /> : <Bi zh="暂不可用" en="unavailable" />}</small>
+        </summary>
+        <div className="story-graph-snapshot-content">
+          <section
+            className={`panel story-graph-snapshot-panel ${current.ok ? "" : "error-box"}`}
+            aria-labelledby="graph-current-heading"
+          >
+            <p className="eyebrow"><Bi zh="当前快照" en="Current Snapshot" /></p>
+            <h2 id="graph-current-heading"><Bi zh="图谱快照" en="Graph snapshot" /></h2>
+            <CurrentSnapshot current={current} locale={locale} />
+          </section>
+        </div>
+      </details>
     </div>
   );
 }

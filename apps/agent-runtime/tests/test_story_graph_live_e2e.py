@@ -60,8 +60,8 @@ def test_story_graph_large_build_is_reproducible_and_rls_backed() -> None:
         second_state = _graph_state(admin_url, second["graph_id"])
         assert first_state["source_hash"] == second_state["source_hash"]
         assert first_state["stable_identities"] == second_state["stable_identities"]
-        assert first_state["layout"]["schema_version"] == 2
-        assert first_state["layout"]["strategy"] == "deterministic_cluster_grid"
+        assert first_state["layout"]["schema_version"] == 3
+        assert first_state["layout"]["strategy"] == "deterministic_force_components"
         assert first_state["layout"]["node_count"] == first["node_count"]
         assert len(first_state["layout"]["nodes"]) == first["node_count"]
         assert first_state["layout"]["viewport"]["mode"] == "cluster_overview"

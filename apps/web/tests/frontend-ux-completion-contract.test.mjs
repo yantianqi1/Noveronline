@@ -107,7 +107,8 @@ test("Wave 4: Graph exclusive Explore/Build/Curate/Compose modes", async () => {
   assert.match(page, /mode: "build"/);
   assert.match(page, /analysis_run_id/);
   assert.match(page, /getProjectAnalysisRuns/);
-  assert.match(shell, /InspectorPanel/);
+  assert.match(shell, /story-graph-floating-inspector/);
+  assert.match(shell, /story-graph-stage/);
 });
 
 test("Wave 4: Worldline exclusive mode switcher", async () => {
@@ -341,6 +342,22 @@ test("Wave B: Graph inspector is selection-first", async () => {
   assert.match(shell, /onSelectNodeId/);
   assert.match(shell, /graph-selected-heading/);
   assert.match(shell, /story-graph-stats-disclosure/);
+  assert.match(shell, /story-graph-stage/);
+  assert.match(shell, /story-graph-floating-toolbar/);
+  assert.match(shell, /story-graph-floating-inspector/);
+  assert.doesNotMatch(shell, /story-graph-filter-rail/);
+  assert.doesNotMatch(shell, /story-graph-explore-grid/);
+});
+
+test("Story Graph explore is canvas-primary with floating chrome", async () => {
+  const polish = await source("app/workbench-polish.css");
+  const styles = await source("app/globals.css");
+  assert.match(polish, /\.overview-root\.story-graph-root \.story-graph-stage[\s\S]*?width:\s*100%\s*!important/s);
+  assert.match(styles, /\.story-graph-floating-toolbar/);
+  assert.match(styles, /\.story-graph-floating-inspector/);
+  assert.match(styles, /\.story-graph-floating-legend/);
+  assert.doesNotMatch(polish, /story-graph-filter-rail/);
+  assert.doesNotMatch(polish, /story-graph-explore-grid/);
 });
 
 test("Wave B/C: compact header, list row, polish CSS, context bar", async () => {

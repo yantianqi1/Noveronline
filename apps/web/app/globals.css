@@ -6015,6 +6015,17 @@ dd {
   text-align: center;
 }
 
+.story-graph-empty-cta {
+  margin-top: 12px;
+  min-height: 40px;
+  padding: 0 18px;
+  border: 1px solid #7d1c17;
+  border-radius: 6px;
+  background: linear-gradient(#9d2923, #791813);
+  color: #f7f1e8;
+  font-family: "Songti SC", "SimSun", Georgia, serif;
+}
+
 .story-graph-svg {
   width: 100%;
   height: 520px;
@@ -10087,15 +10098,19 @@ button.asset-workspace-close:hover {
     background: #3f6687;
   }
 
-  .overview-root.story-graph-root .workbench-grid.story-graph-explore-grid {
+  .overview-root.story-graph-root .story-graph-stage {
     position: relative;
     z-index: 2;
     display: grid;
-    grid-template-columns: minmax(232px, 268px) minmax(0, 1fr) minmax(300px, 340px);
-    gap: 16px;
+    grid-template-rows: auto auto minmax(640px, 1fr) auto;
+    gap: 10px;
     margin: 0;
-    padding: 0 28px 28px;
-    align-items: stretch;
+    padding: 0 20px 24px;
+    min-width: 0;
+  }
+
+  .overview-root.story-graph-root .story-graph-stage-empty {
+    grid-template-rows: minmax(420px, 1fr);
   }
 
   .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid {
@@ -10108,9 +10123,7 @@ button.asset-workspace-close:hover {
     padding: 0 32px 22px;
   }
 
-  .overview-root.story-graph-root .workbench-grid.story-graph-explore-grid > main,
   .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid > main,
-  .overview-root.story-graph-root .workbench-grid.story-graph-explore-grid > aside,
   .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid > aside {
     display: grid;
     grid-column: auto;
@@ -10121,115 +10134,111 @@ button.asset-workspace-close:hover {
     padding-top: 0;
   }
 
-  .story-graph-filter-rail {
+  .story-graph-floating-toolbar {
     position: relative;
-    overflow: hidden;
-    display: grid;
-    align-content: start;
-    gap: 14px;
-    min-height: 640px;
-    border: 1px solid rgba(104, 88, 65, .18);
-    border-radius: 6px;
-    background:
-      linear-gradient(180deg, rgba(250, 247, 240, .94), rgba(244, 238, 226, .9)),
-      #f3eee4;
-    box-shadow: 0 8px 20px rgba(57, 47, 34, .08);
-    padding: 16px 16px 120px;
-  }
-
-  .story-graph-filter-rail::after {
-    position: absolute;
-    inset: auto 0 0;
-    height: 120px;
-    background:
-      linear-gradient(180deg, rgba(243, 238, 228, 0), rgba(243, 238, 228, .72) 38%, rgba(243, 238, 228, .92)),
-      url("/landing/assets/scene-2-pipeline.jpg");
-    background-position: center, center 70%;
-    background-size: cover;
-    filter: grayscale(1) sepia(.18) contrast(.92) brightness(1.35);
-    opacity: .42;
-    content: "";
-    pointer-events: none;
+    z-index: 4;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(232, 225, 212, .14);
+    border-radius: 12px;
+    background: rgba(12, 14, 16, .88);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, .32);
+    padding: 8px 10px;
   }
 
   .story-graph-view-toggle {
-    display: grid;
+    display: inline-grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    gap: 6px;
   }
 
   .story-graph-view-toggle > button {
-    min-height: 38px;
-    border: 1px solid rgba(104, 88, 65, .22);
+    min-height: 34px;
+    padding: 0 12px;
+    border: 1px solid rgba(232, 225, 212, .18);
     border-radius: 999px;
-    background: rgba(255, 252, 246, .88);
-    color: #3f3a34;
+    background: rgba(255, 255, 255, .04);
+    color: #d9d1c4;
     font-family: "Songti SC", "SimSun", Georgia, serif;
-    font-size: .9rem;
+    font-size: .86rem;
   }
 
   .story-graph-view-toggle > button[aria-pressed="true"] {
-    border-color: #7d1c17;
+    border-color: #9a2822;
     background: linear-gradient(#9a2822, #781812);
     color: #f7f1e8;
     box-shadow: 0 6px 14px rgba(80, 16, 12, .22);
   }
 
-  .story-graph-filter-block {
-    display: grid;
-    gap: 6px;
-  }
-
-  .story-graph-filter-block > label,
   .story-graph-legend-title {
-    color: #5d564c;
-    font-size: .78rem;
+    color: #cfc5b5;
+    font-size: .74rem;
     font-weight: 650;
   }
 
-  .story-graph-filter-block select,
+  .story-graph-floating-toolbar select,
   .story-graph-search-field input {
-    width: 100%;
-    min-height: 40px;
-    border: 1px solid rgba(104, 88, 65, .24);
-    border-radius: 6px;
-    background: rgba(255, 252, 246, .95);
-    color: #2b2824;
+    min-height: 34px;
+    border: 1px solid rgba(232, 225, 212, .16);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .05);
+    color: #efe8dc;
+  }
+
+  .story-graph-floating-toolbar select {
+    min-width: 120px;
+    padding: 0 10px;
   }
 
   .story-graph-search-field {
     position: relative;
     display: block;
+    min-width: 180px;
+    flex: 1 1 180px;
   }
 
   .story-graph-search-field > svg {
     position: absolute;
-    top: 12px;
-    left: 12px;
-    color: #7a7165;
+    top: 10px;
+    left: 10px;
+    color: #9a9184;
     pointer-events: none;
   }
 
   .story-graph-search-field input {
-    padding-left: 36px;
+    width: 100%;
+    padding-left: 32px;
   }
 
   .story-graph-filter-status {
     margin: 0;
-    color: #6d655a;
+    color: rgba(232, 225, 212, .72);
     font-size: .78rem;
     line-height: 1.45;
   }
 
-  .story-graph-legend {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    gap: 8px;
-    margin-top: 4px;
+  .story-graph-stage-alert {
+    margin: 0;
   }
 
-  .story-graph-legend ul {
+  .story-graph-floating-legend {
+    position: absolute;
+    left: 14px;
+    bottom: 122px;
+    z-index: 3;
+    display: grid;
+    gap: 8px;
+    min-width: 132px;
+    border: 1px solid rgba(232, 225, 212, .14);
+    border-radius: 10px;
+    background: rgba(10, 12, 13, .78);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, .28);
+    padding: 10px 12px;
+  }
+
+  .story-graph-floating-legend ul {
     display: grid;
     gap: 8px;
     margin: 0;
@@ -10237,74 +10246,69 @@ button.asset-workspace-close:hover {
     list-style: none;
   }
 
-  .story-graph-legend li {
+  .story-graph-floating-legend li {
     display: grid;
-    grid-template-columns: 16px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 14px minmax(0, 1fr);
+    gap: 8px;
     align-items: center;
-    color: #4d473f;
-    font-size: .86rem;
+    color: #d9d1c4;
+    font-size: .8rem;
   }
 
   .story-graph-legend-swatch {
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     border: 2px solid currentColor;
     border-radius: 50%;
     background: transparent;
   }
 
-  .story-graph-explore-main {
-    display: grid;
-    gap: 14px;
-    min-width: 0;
+  .story-graph-floating-inspector {
+    position: absolute;
+    top: 72px;
+    right: 34px;
+    z-index: 4;
+    width: min(320px, calc(100% - 48px));
+    max-height: calc(100% - 120px);
+    overflow: auto;
+    border: 1px solid rgba(232, 225, 212, .16);
+    border-radius: 12px;
+    background: rgba(12, 14, 16, .9);
+    box-shadow: 0 14px 32px rgba(0, 0, 0, .36);
+    color: #efe8dc;
+    padding: 12px 14px 14px;
   }
 
-  .story-graph-canvas-panel {
+  .story-graph-stage > .story-graph-canvas {
     position: relative;
     overflow: hidden;
     min-height: 640px;
-    padding: 0 !important;
-  }
-
-  .story-graph-canvas-chrome {
-    position: absolute;
-    top: 12px;
-    left: 12px;
-    z-index: 3;
-  }
-
-  .story-graph-canvas-toolbar {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: 1px solid rgba(232, 225, 212, .14);
-    border-radius: 8px;
-    background: rgba(16, 18, 20, .82);
-    box-shadow: 0 8px 18px rgba(0, 0, 0, .28);
-    padding: 4px;
+    height: min(78vh, 860px);
+    border: 1px solid rgba(232, 225, 212, .1);
+    border-radius: 14px;
   }
 
   .story-graph-canvas-title {
-    padding: 0 10px 0 8px;
+    margin-left: auto;
+    padding: 0 8px;
     color: #efe8dc;
     font-family: "Songti SC", "SimSun", Georgia, serif;
     font-size: .86rem;
     white-space: nowrap;
   }
 
-  .story-graph-canvas-toolbar > button {
+  .story-graph-floating-toolbar > button {
     display: grid;
     place-items: center;
     width: 32px;
     height: 32px;
     border: 0;
-    border-radius: 6px;
+    border-radius: 8px;
     background: transparent;
     color: #efe8dc;
   }
 
-  .story-graph-canvas-toolbar > button:hover {
+  .story-graph-floating-toolbar > button:hover {
     background: rgba(255, 255, 255, .08);
   }
 
@@ -10377,23 +10381,23 @@ button.asset-workspace-close:hover {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0;
     margin: 0 0 12px;
-    border-bottom: 1px solid rgba(104, 88, 65, .16);
+    border-bottom: 1px solid rgba(232, 225, 212, .12);
   }
 
   .story-graph-inspector-tabs > button {
-    min-height: 40px;
+    min-height: 36px;
     border: 0;
     border-bottom: 2px solid transparent;
     border-radius: 0;
     background: transparent;
-    color: #6a6358;
+    color: #9a9184;
     font-family: "Songti SC", "SimSun", Georgia, serif;
-    font-size: .92rem;
+    font-size: .86rem;
   }
 
   .story-graph-inspector-tabs > button[aria-selected="true"] {
-    border-bottom-color: #8e201b;
-    color: #8e201b;
+    border-bottom-color: #c43b35;
+    color: #f0d2ce;
     font-weight: 650;
   }
 
@@ -10404,14 +10408,14 @@ button.asset-workspace-close:hover {
   }
 
   .story-graph-node-fields dt {
-    color: #716a60;
+    color: #9a9184;
     font-size: .74rem;
     font-weight: 650;
   }
 
   .story-graph-node-fields dd {
     margin: 0 0 6px;
-    color: #221f1b;
+    color: #efe8dc;
     font-size: .95rem;
     line-height: 1.45;
   }
@@ -10421,26 +10425,26 @@ button.asset-workspace-close:hover {
     border-radius: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
-    color: #2b2824;
+    color: #efe8dc;
     padding: 0 0 14px !important;
   }
 
   .story-graph-paper-section h2 {
     margin: 0 0 10px;
-    color: #2b2824;
+    color: #efe8dc;
     font-family: "Songti SC", "SimSun", Georgia, serif;
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     font-weight: 500;
   }
 
   .story-graph-paper-section .eyebrow,
   .story-graph-paper-section .form-hint,
   .story-graph-paper-section dt {
-    color: #716a60;
+    color: #9a9184;
   }
 
   .story-graph-paper-section dd {
-    color: #221f1b;
+    color: #efe8dc;
   }
 
   .story-graph-evidence-inline {
@@ -10612,9 +10616,10 @@ button.asset-workspace-close:hover {
     padding: 0;
   }
 
-  .story-graph-explore-grid .story-graph-svg {
-    height: 640px;
-    max-height: none;
+  .story-graph-stage .story-graph-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
     min-height: 640px;
     border: 0;
     border-radius: 0;
@@ -10823,16 +10828,19 @@ button.asset-workspace-close:hover {
 }
 
 @media (max-width: 1180px) and (min-width: 861px) {
-  .overview-root.story-graph-root .workbench-grid.story-graph-explore-grid {
-    grid-template-columns: minmax(210px, 240px) minmax(0, 1fr) minmax(260px, 300px);
-    padding-right: 18px;
-    padding-left: 18px;
+  .overview-root.story-graph-root .story-graph-stage {
+    padding-right: 16px;
+    padding-left: 16px;
   }
 
   .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid {
     grid-template-columns: minmax(0, 1.45fr) minmax(280px, .85fr);
     padding-right: 22px;
     padding-left: 22px;
+  }
+
+  .story-graph-floating-inspector {
+    width: min(280px, calc(100% - 36px));
   }
 
   .story-graph-snapshot-metrics {
@@ -10867,30 +10875,38 @@ button.asset-workspace-close:hover {
     font-weight: 500;
   }
 
-  .story-graph-explore-grid,
+  .story-graph-stage,
   .story-graph-compose-grid {
     position: relative;
     z-index: 2;
-    grid-template-columns: minmax(0, 1fr);
     padding: 0 16px 20px;
   }
 
-  .story-graph-filter-rail {
-    min-height: 0;
-    padding-bottom: 88px;
+  .story-graph-compose-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .story-graph-canvas,
-  .story-graph-explore-grid .story-graph-svg {
+  .story-graph-stage > .story-graph-canvas,
+  .story-graph-stage .story-graph-svg {
     min-height: 420px;
     height: 420px;
   }
 
-  .story-graph-explore-rail {
-    border: 1px solid rgba(104, 88, 65, .18);
-    background: #f3eee4;
-    color: #2b2824;
-    padding: 12px 14px 16px;
+  .story-graph-floating-toolbar {
+    align-items: stretch;
+  }
+
+  .story-graph-floating-inspector {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: 100%;
+    max-height: none;
+    margin-top: 8px;
+  }
+
+  .story-graph-floating-legend {
+    bottom: 112px;
   }
 
   .story-graph-ops-rail {

@@ -4539,3 +4539,44 @@ button.writer-approval-approve {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Story Graph explore is canvas-primary; keep compose dual-column and protect stage width. */
+@media (min-width: 861px) {
+  .overview-root.story-graph-root .story-graph-stage {
+    display: grid !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 20px 24px !important;
+  }
+
+  .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.9fr) !important;
+    gap: 18px !important;
+    margin: 0 !important;
+    padding: 0 28px 22px !important;
+  }
+
+  .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid > main {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+  }
+
+  .overview-root.story-graph-root .workbench-grid.story-graph-compose-grid > aside {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+  }
+}
+
+.story-graph-floating-inspector {
+  backdrop-filter: blur(10px);
+}
+
+.story-graph-inspector-tabs > button {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  font-size: 0.86rem !important;
+  padding: 0 4px;
+}

@@ -1191,15 +1191,27 @@ def test_story_graph_large_layout_persists_every_node_and_only_recommends_cluste
     ]
     nodes = _merge_entity_nodes(graph_id=graph_id, entities=entities, aliases=[])
     clusters = _assign_graph_clusters(graph_id=graph_id, nodes=nodes, edges=[])
-    layout = _deterministic_cluster_layout(nodes=nodes, edges=[], clusters=clusters, viewport_node_budget=300)
-    repeated = _deterministic_cluster_layout(nodes=nodes, edges=[], clusters=clusters, viewport_node_budget=300)
+    layout = _deterministic_cluster_layout(
+        graph_id=graph_id,
+        nodes=nodes,
+        edges=[],
+        clusters=clusters,
+        viewport_node_budget=300,
+    )
+    repeated = _deterministic_cluster_layout(
+        graph_id=graph_id,
+        nodes=nodes,
+        edges=[],
+        clusters=clusters,
+        viewport_node_budget=300,
+    )
 
     assert len(nodes) == 1001
     assert len(layout["nodes"]) == 1001
     assert {item["node_id"] for item in layout["nodes"]} == {node["node_id"] for node in nodes}
     assert layout == repeated
-    assert layout["schema_version"] == 2
-    assert layout["strategy"] == "deterministic_cluster_grid"
+    assert layout["schema_version"] == 3
+    assert layout["strategy"] == "deterministic_force_components"
     assert layout["viewport"] == {
         "mode": "cluster_overview",
         "total_node_count": 1001,
@@ -1208,6 +1220,47 @@ def test_story_graph_large_layout_persists_every_node_and_only_recommends_cluste
         "omitted_node_count": 0,
         "strategy_basis": "all node positions persisted; cluster overview recommended when the interactive node budget is exceeded",
     }
+
+
+def test_story_graph_force_layout_pulls_connected_nodes_closer_than_grid_baseline() -> None:
+    graph_id = "a1b2c3d4-1551-43fb-9b7a-9b1b192753d4"
+    nodes = [
+        {
+            "node_id": f"node-{index}",
+            "stable_identity": f"entity:{index}",
+            "node_type": "character",
+            "importance": 0.5,
+            "title": f"角色{index}",
+        }
+        for index in range(6)
+    ]
+    edges = [
+        {"source_node_id": "node-0", "target_node_id": "node-1", "weight": 2},
+        {"source_node_id": "node-1", "target_node_id": "node-2", "weight": 2},
+        {"source_node_id": "node-2", "target_node_id": "node-3", "weight": 1},
+        {"source_node_id": "node-3", "target_node_id": "node-4", "weight": 1},
+        {"source_node_id": "node-4", "target_node_id": "node-5", "weight": 1},
+        {"source_node_id": "node-0", "target_node_id": "node-5", "weight": 1},
+    ]
+    clusters = _assign_graph_clusters(graph_id=graph_id, nodes=nodes, edges=edges)
+    layout = _deterministic_cluster_layout(
+        graph_id=graph_id,
+        nodes=nodes,
+        edges=edges,
+        clusters=clusters,
+        viewport_node_budget=300,
+    )
+    by_id = {item["node_id"]: item for item in layout["nodes"]}
+    lengths = []
+    for edge in edges:
+        source = by_id[edge["source_node_id"]]
+        target = by_id[edge["target_node_id"]]
+        lengths.append(((source["x"] - target["x"]) ** 2 + (source["y"] - target["y"]) ** 2) ** 0.5)
+    average_length = sum(lengths) / len(lengths)
+    # Old grid used ~180x112 cell spacing; connected force layout should stay tighter.
+    assert average_length < 220
+    assert layout["strategy"] == "deterministic_force_components"
+    assert len(layout["clusters"]) == 1
 
 
 def test_story_graph_build_activity_uses_env_db_builder_when_configured(monkeypatch: Any) -> None:
