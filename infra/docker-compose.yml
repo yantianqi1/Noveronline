@@ -190,6 +190,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       WRITER_TASK_QUEUE: writer-streaming
       ANALYSIS_TASK_QUEUE: analysis-streaming
+      WORLDLINE_CAST_TASK_QUEUE: worldline-cast-streaming
       HELLO_AGENT_TASK_QUEUE: maintenance
       SEED_TASK_QUEUE: seed-heavy
       ASSET_TASK_QUEUE: asset-light
@@ -504,6 +505,40 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  pi-agent-runtime-worldline-cast:
+    build:
+      context: ../apps/pi-agent-runtime
+      args:
+        NODE_VERSION: ${PI_AGENT_RUNTIME_NODE_VERSION:-22.19.0}
+    command: npm run worldline-cast-worker
+    depends_on:
+      temporal:
+        condition: service_healthy
+      temporal-namespace-init:
+        condition: service_completed_successfully
+      schema-init:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      WORLDLINE_CAST_TASK_QUEUE: worldline-cast-streaming
+      WORLDLINE_TASK_QUEUE: worldline-interactive
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-mirofish_runtime}:${APP_DATABASE_PASSWORD:-mirofish_runtime_dev_password}@postgres:5432/${POSTGRES_DB:-mirofish}?sslmode=disable
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:-}
+      MIROFISH_OBJECT_STORAGE_ENDPOINT: minio:9000
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:-mirofish-uploads}
+      MIROFISH_OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-mirofish}
+      MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-mirofish_dev_password}
+      MIROFISH_OBJECT_STORAGE_USE_SSL: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'npm run worldline-cast-worker' /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
   worker-readiness:
     image: temporalio/auto-setup:1.25
     depends_on:
@@ -530,6 +565,8 @@ services:
       pi-agent-runtime:
         condition: service_healthy
       pi-agent-runtime-analysis:
+        condition: service_healthy
+      pi-agent-runtime-worldline-cast:
         condition: service_healthy
       api:
         condition: service_healthy

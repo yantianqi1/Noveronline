@@ -56,6 +56,7 @@ func documentedModules() []ModuleRecord {
 		{ModuleKey: "style_extractor", Group: "Archive / Assets", Label: "Style Extractor", Description: "Extract reusable style and voice assets."},
 		{ModuleKey: "character_dialogue", Group: "Character Console", Label: "Character Dialogue", Description: "Generate character dialogue turns and candidate state updates."},
 		{ModuleKey: "parallel_world_config", Group: "Worldline", Label: "Parallel World Config", Description: "Prepare worldline configuration."},
+		{ModuleKey: "worldline_cast_planner", Group: "Worldline", Label: "Worldline Cast Planner", Description: "Analyze a simulation goal and select participating agents and context refs."},
 		{ModuleKey: "worldline_agent_prepare", Group: "Worldline", Label: "Worldline Agent Prepare", Description: "Prepare worldline character agents."},
 		{ModuleKey: "worldline_agent_dialogue", Group: "Worldline", Label: "Worldline Agent Dialogue", Description: "Generate worldline agent dialogue turns."},
 		{ModuleKey: "worldline_character_proposal", Group: "Worldline", Label: "Worldline Character Proposal", Description: "Propose character actions in worldline runs."},

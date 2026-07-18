@@ -17,8 +17,8 @@ func TestStaticModuleRegistryListsAllDocumentedModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list modules: %v", err)
 	}
-	if len(modules) != 30 {
-		t.Fatalf("expected 30 documented modules, got %d: %#v", len(modules), modules)
+	if len(modules) != 31 {
+		t.Fatalf("expected 31 documented modules, got %d: %#v", len(modules), modules)
 	}
 	byKey := map[string]ModuleRecord{}
 	for _, module := range modules {
@@ -27,7 +27,7 @@ func TestStaticModuleRegistryListsAllDocumentedModules(t *testing.T) {
 		}
 		byKey[module.ModuleKey] = module
 	}
-	for _, key := range []string{"story_ontology", "asset_ingestion", "asset_search_embedding", "character_dialogue", "worldline_director", "writer_composer", "writer_dedup_extractor", "writer_book_planner", "writer_asset_distiller", "writer_reviewer", "analysis_planner", "analysis_worker"} {
+	for _, key := range []string{"story_ontology", "asset_ingestion", "asset_search_embedding", "character_dialogue", "worldline_director", "worldline_cast_planner", "writer_composer", "writer_dedup_extractor", "writer_book_planner", "writer_asset_distiller", "writer_reviewer", "analysis_planner", "analysis_worker"} {
 		if _, ok := byKey[key]; !ok {
 			t.Fatalf("expected module %s in registry: %#v", key, byKey)
 		}

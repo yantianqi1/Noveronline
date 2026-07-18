@@ -871,6 +871,32 @@ func main() {
 			}
 		}()
 	}
+	worldlineGoalStartStarter, closeWorldlineGoalStartStarter, err := newWorldlineGoalStartStarter(
+		temporalWorkflowClient,
+		databaseURL,
+		os.Getenv("WORLDLINE_CAST_TASK_QUEUE"),
+	)
+	if err != nil {
+		log.Fatalf("configure worldline goal-start starter: %v", err)
+	}
+	if closeWorldlineGoalStartStarter != nil {
+		defer func() {
+			if err := closeWorldlineGoalStartStarter(); err != nil {
+				log.Printf("close worldline goal-start starter: %v", err)
+			}
+		}()
+	}
+	worldlineGoalStartReader, closeWorldlineGoalStartReader, err := newWorldlineGoalStartReader(databaseURL)
+	if err != nil {
+		log.Fatalf("configure worldline goal-start reader: %v", err)
+	}
+	if closeWorldlineGoalStartReader != nil {
+		defer func() {
+			if err := closeWorldlineGoalStartReader(); err != nil {
+				log.Printf("close worldline goal-start reader: %v", err)
+			}
+		}()
+	}
 	worldlineVariableStore, closeWorldlineVariableStore, err := newWorldlineVariableStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure worldline variable store: %v", err)
@@ -1161,6 +1187,8 @@ func main() {
 		WorldlineVariableStore:           worldlineVariableStore,
 		WorldlinePreparationStarter:      worldlinePreparationStarter,
 		WorldlinePreparationStore:        worldlinePreparationStore,
+		WorldlineGoalStartStarter:        worldlineGoalStartStarter,
+		WorldlineGoalStartReader:         worldlineGoalStartReader,
 		CharacterConsoleStore:            characterConsoleStore,
 		CharacterProposalStore:           characterProposalStore,
 		CharacterDialogueStarter:         characterDialogueStarter,
@@ -2381,6 +2409,38 @@ func newWorldlinePreparationStarter(
 		Store:     worldline.NewSQLPreparationAdmissionStore(db),
 		Client:    temporalClient,
 		TaskQueue: taskQueue,
+	}), db.Close, nil
+}
+
+func newWorldlineGoalStartStarter(
+	temporalClient worldline.TemporalWorkflowClient,
+	databaseURL string,
+	taskQueue string,
+) (worldline.GoalStartStarter, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" || temporalClient == nil {
+		return worldline.NewDisabledGoalStartStarter(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return worldline.NewSQLGoalStartStarter(worldline.SQLGoalStartStarterConfig{
+		Store:     worldline.NewSQLGoalStartAdmissionStore(db),
+		Client:    temporalClient,
+		TaskQueue: taskQueue,
+	}), db.Close, nil
+}
+
+func newWorldlineGoalStartReader(databaseURL string) (worldline.GoalStartReader, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return worldline.NewDisabledGoalStartReader(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return worldline.NewSQLGoalStartReader(worldline.SQLGoalStartReaderConfig{
+		Queryer: worldline.NewSQLDBQueryer(db),
 	}), db.Close, nil
 }
 

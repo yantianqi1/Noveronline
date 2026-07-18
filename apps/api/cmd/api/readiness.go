@@ -25,8 +25,8 @@ const (
 	temporalPollerWorkers   = 4
 	temporalPollerAttempts  = 2
 	temporalPollerRetryWait = 25 * time.Millisecond
-	latestRequiredMigration = "0019_writer_threads"
-	requiredMigrationCount  = 19
+	latestRequiredMigration = "0022_worldline_goal_starts"
+	requiredMigrationCount  = 22
 )
 
 type productionReadinessConfig struct {

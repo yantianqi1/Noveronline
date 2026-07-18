@@ -57,3 +57,6 @@ services:
 
   pi-agent-runtime-analysis:
     image: *pi-agent-runtime-image
+
+  pi-agent-runtime-worldline-cast:
+    image: *pi-agent-runtime-image

@@ -274,6 +274,22 @@ migration_marker_present() {
 	      )" ;;
 	    0021_*) marker="
 	      has_table_privilege('mirofish_app', 'analysis_candidates', 'DELETE')" ;;
+	    0022_*) marker="
+	      to_regclass('public.worldline_goal_starts') IS NOT NULL
+	      AND EXISTS (
+	        SELECT 1 FROM pg_policies
+	        WHERE schemaname = 'public'
+	          AND tablename = 'worldline_goal_starts'
+	          AND policyname = 'tenant_isolation_worldline_goal_starts'
+	      )
+	      AND EXISTS (
+	        SELECT 1 FROM pg_class
+	        WHERE relname = 'worldline_goal_starts'
+	          AND relrowsecurity AND relforcerowsecurity
+	      )
+	      AND has_table_privilege('mirofish_app', 'worldline_goal_starts', 'SELECT')
+	      AND has_table_privilege('mirofish_app', 'worldline_goal_starts', 'INSERT')
+	      AND has_table_privilege('mirofish_app', 'worldline_goal_starts', 'UPDATE')" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]

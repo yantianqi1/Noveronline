@@ -122,6 +122,14 @@ services:
       MIROFISH_OBJECT_STORAGE_SECRET_KEY: ${MIROFISH_OBJECT_STORAGE_SECRET_KEY:?MIROFISH_OBJECT_STORAGE_SECRET_KEY is required}
       MIROFISH_OBJECT_STORAGE_USE_SSL: ${MIROFISH_OBJECT_STORAGE_USE_SSL:?MIROFISH_OBJECT_STORAGE_USE_SSL is required}
     security_opt: *service-security
+  pi-agent-runtime-worldline-cast:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+      WORLDLINE_CAST_TASK_QUEUE: worldline-cast-streaming
+      WORLDLINE_TASK_QUEUE: worldline-interactive
+    security_opt: *service-security
   legacy-import-worker:
     build:
       context: ../apps/agent-runtime

@@ -2,18 +2,19 @@ import { redirect } from "next/navigation";
 import { WorldlineShell } from "../../../../../../components/worldline-shell";
 import {
   adoptWorldlineEvent,
+  createWorldlineGoalStart,
   createWorldlineSavedPath,
   createWorldlinePreparation,
   getProjectAssets,
   getStoryGraphView,
   getWorldlineEvents,
+  getWorldlineGoalStart,
   getWorldlinePreparation,
   getWorldlinePreparedAgents,
   getWorldlineSavedPaths,
   getWorldlineSessions,
   getWorldlineTimeline,
   injectWorldlineVariable,
-  startWorldlineSession,
   startWorldlineAutoEvolution,
   startWorldlineStep,
   updateWorldlineEvent,
@@ -36,10 +37,11 @@ export default async function WorldlinePage({
 }: {
   params: Promise<{ tenantSlug: string; projectId: string }>;
   searchParams?: Promise<{
-    worldlineSessionCode?: string;
-    worldlineSessionMessage?: string;
-    worldlineSessionRunId?: string;
-    worldlineSessionStatus?: string;
+    worldlineGoalStartCode?: string;
+    worldlineGoalStartMessage?: string;
+    worldlineGoalStartRunId?: string;
+    worldlineGoalStartStatus?: string;
+    goal_start_run_id?: string;
     worldlineStepCode?: string;
     worldlineStepMessage?: string;
     worldlineStepRunId?: string;
@@ -78,8 +80,10 @@ export default async function WorldlinePage({
   const locale = await currentRequestLocale();
   const query = searchParams ? await searchParams : {};
   const selectedPrepareId = query.prepare_id?.trim() || query.worldlinePreparationPrepareId?.trim() || "";
+  const selectedGoalStartRunId =
+    query.goal_start_run_id?.trim() || query.worldlineGoalStartRunId?.trim() || "";
   const apiContext = webReadApiContext({ tenantId: tenantSlug, projectId });
-  const [savedPaths, sessions, assets, graphView, preparation, preparedAgents] = await Promise.all([
+  const [savedPaths, sessions, assets, graphView, preparation, preparedAgents, goalStart] = await Promise.all([
     getWorldlineSavedPaths(apiContext),
     getWorldlineSessions(apiContext),
     getProjectAssets(apiContext),
@@ -111,9 +115,26 @@ export default async function WorldlinePage({
           message: "No worldline preparation is selected.",
           request_id: "",
       }),
+    selectedGoalStartRunId
+      ? getWorldlineGoalStart({
+          ...apiContext,
+          runId: selectedGoalStartRunId,
+        })
+      : Promise.resolve({
+          ok: false as const,
+          code: "WORLDLINE_GOAL_START_NOT_SELECTED",
+          message: "No worldline goal-start is selected.",
+          request_id: "",
+        }),
   ]);
-  const selectedSession = selectCurrentWorldSession(sessions, query.selectedSessionId?.trim() ?? "");
-  const selectedSessionId = selectedSession?.session_id ?? "";
+  const goalStartSessionId = goalStart.ok && goalStart.status === "ready" ? goalStart.session_id?.trim() ?? "" : "";
+  const goalStartPrepareId = goalStart.ok ? goalStart.prepare_id?.trim() ?? "" : "";
+  const effectivePrepareId = selectedPrepareId || goalStartPrepareId;
+  const selectedSession = selectCurrentWorldSession(
+    sessions,
+    query.selectedSessionId?.trim() || goalStartSessionId,
+  );
+  const selectedSessionId = selectedSession?.session_id ?? goalStartSessionId;
   const [timeline, events, pathEvents] = selectedSessionId
     ? await Promise.all([
         getWorldlineTimeline({
@@ -151,34 +172,54 @@ export default async function WorldlinePage({
         },
       ];
 
-  async function startWorldlineSessionAction(formData: FormData) {
+  async function createWorldlineGoalStartAction(formData: FormData) {
     "use server";
 
-    const prepareId = stringFromFormData(formData, "prepareId") || selectedPrepareId;
-    const result = await startWorldlineSession({
+    const result = await createWorldlineGoalStart({
       ...(await webApiContext({ tenantId: tenantSlug, projectId })),
       projectId,
       goal: stringFromFormData(formData, "goal"),
       anchorPathId: stringFromFormData(formData, "anchorPathId"),
-      options: prepareId
-        ? {
-            prepare_id: prepareId,
-            source: "worldline_shell",
-          }
-        : {
-            source: "worldline_shell",
-          },
+      options: { source: "worldline_shell" },
     });
 
     const nextQuery = new URLSearchParams();
-    nextQuery.set("worldlineSessionStatus", result.ok ? "success" : "error");
-    nextQuery.set("worldlineSessionCode", result.ok ? "WORLDLINE_SESSION_STARTED" : result.code);
+    nextQuery.set("worldlineGoalStartStatus", result.ok ? "success" : "error");
+    nextQuery.set("worldlineGoalStartCode", result.ok ? "WORLDLINE_GOAL_START_QUEUED" : result.code);
     nextQuery.set(
-      "worldlineSessionMessage",
+      "worldlineGoalStartMessage",
       result.ok ? `${result.workflow_type} ${result.status}` : result.message,
     );
     if (result.ok) {
-      nextQuery.set("worldlineSessionRunId", result.run_id);
+      nextQuery.set("goal_start_run_id", result.run_id);
+      nextQuery.set("worldlineGoalStartRunId", result.run_id);
+      if (result.session_id) {
+        nextQuery.set("selectedSessionId", result.session_id);
+      }
+      if (result.prepare_id) {
+        nextQuery.set("prepare_id", result.prepare_id);
+      }
+    }
+    redirect(worldlineRoute(tenantSlug, projectId, nextQuery));
+  }
+
+  async function refreshWorldlineGoalStartAction(formData: FormData) {
+    "use server";
+    const nextQuery = new URLSearchParams();
+    const runId = stringFromFormData(formData, "goalStartRunId") || selectedGoalStartRunId;
+    if (runId) {
+      nextQuery.set("goal_start_run_id", runId);
+      nextQuery.set("worldlineGoalStartRunId", runId);
+      const latest = await getWorldlineGoalStart({
+        ...(await webApiContext({ tenantId: tenantSlug, projectId })),
+        runId,
+      });
+      if (latest.ok && latest.session_id) {
+        nextQuery.set("selectedSessionId", latest.session_id);
+      }
+      if (latest.ok && latest.prepare_id) {
+        nextQuery.set("prepare_id", latest.prepare_id);
+      }
     }
     redirect(worldlineRoute(tenantSlug, projectId, nextQuery));
   }
@@ -195,7 +236,7 @@ export default async function WorldlinePage({
       redirect(worldlineRoute(tenantSlug, projectId, nextQuery));
     }
 
-    const prepareId = stringFromFormData(formData, "prepareId") || selectedPrepareId;
+    const prepareId = stringFromFormData(formData, "prepareId") || effectivePrepareId;
     const result = await startWorldlineStep({
       ...(await webApiContext({ tenantId: tenantSlug })),
       sessionId,
@@ -452,28 +493,38 @@ export default async function WorldlinePage({
       updateWorldlineEventAction={updateWorldlineEventAction}
       preparation={preparation}
       preparedAgents={preparedAgents}
+      goalStart={goalStart}
       events={events}
       pathEvents={pathEvents}
       graphView={graphView}
       locale={locale}
       projectId={projectId}
       savedPaths={savedPaths}
-      selectedAgentRefs={(query.selectedAgentRefs ?? "").split(",").filter(Boolean)}
+      selectedAgentRefs={
+        goalStart.ok && goalStart.agent_refs?.length
+          ? goalStart.agent_refs.map((ref) => `${ref.source_kind}:${ref.source_id}`)
+          : (query.selectedAgentRefs ?? "").split(",").filter(Boolean)
+      }
       selectedSessionId={selectedSessionId}
-      selectedSourceRefs={(query.selectedSourceRefs ?? "").split(",").filter(Boolean)}
+      selectedSourceRefs={
+        goalStart.ok && goalStart.source_refs?.length
+          ? goalStart.source_refs.map((ref) => `${ref.source_kind}:${ref.source_id}`)
+          : (query.selectedSourceRefs ?? "").split(",").filter(Boolean)
+      }
       selectWorldlineSessionAction={selectWorldlineSessionAction}
       sessions={sessions}
-      startWorldlineSessionAction={startWorldlineSessionAction}
+      createWorldlineGoalStartAction={createWorldlineGoalStartAction}
+      refreshWorldlineGoalStartAction={refreshWorldlineGoalStartAction}
       startWorldlineStepAction={startWorldlineStepAction}
       startWorldlineAutoEvolutionAction={startWorldlineAutoEvolutionAction}
       refreshWorldlinePreparationAction={refreshWorldlinePreparationAction}
       tenantSlug={tenantSlug}
       timeline={timeline}
-      worldlineSessionStatus={{
-        code: query.worldlineSessionCode ?? "",
-        message: query.worldlineSessionMessage ?? "",
-        runId: query.worldlineSessionRunId ?? "",
-        status: query.worldlineSessionStatus ?? "",
+      worldlineGoalStartStatus={{
+        code: query.worldlineGoalStartCode ?? "",
+        message: query.worldlineGoalStartMessage ?? "",
+        runId: query.worldlineGoalStartRunId ?? query.goal_start_run_id ?? "",
+        status: query.worldlineGoalStartStatus ?? "",
       }}
       worldlineStepStatus={{
         code: query.worldlineStepCode ?? "",

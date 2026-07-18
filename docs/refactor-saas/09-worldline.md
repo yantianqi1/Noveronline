@@ -4,7 +4,7 @@
 
 ## 模块定位
 
-世界线是作者拓展小说灵感的实验室。作者可以选择角色、组织、档案、世界变量，观察故事接下来如何发展，并把有价值的发展路径保存下来，供 Writer Agent 写作时引用。
+世界线是作者拓展小说灵感的实验室。默认作者只需填写推演目标：Pi `worldline_cast_planner` 分析并选定参与角色与上下文，再自动进入 prepare 与 session；手动勾选角色仅作为高级可选路径。观察故事发展后，把有价值的路径保存下来供 Writer Agent 写作时引用。
 
 长期语义仍是单世界 `current_world`。旧多分支 `/branches`、`/comparison` 不恢复为主模型。
 
@@ -191,18 +191,18 @@ Right Panel
 ### Author Flow
 
 1. 选择一个项目。
-2. 从资产库/角色档案中选择角色。
-3. 输入变量：例如“主角亲族提前失踪”。
-4. prepare agents。
-5. 启动推演。
-6. 查看候选事件。
-7. 采用或编辑事件。
-8. 保存发展路径。
-9. 在写作台引用该 path。
+2. 填写推演目标（可选参考路径）。
+3. Pi Cast Planner 自动选定参与角色与上下文，并串联 prepare + session。
+4. （高级可选）手动勾选角色后单独 prepare。
+5. 查看候选事件并推进/多步推演。
+6. 采用或编辑事件。
+7. 保存发展路径。
+8. 在写作台引用该 path。
 
 ## 数据模型
 
 ```text
+worldline_goal_starts
 worldline_sessions
 worldline_agents
 worldline_variables

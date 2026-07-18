@@ -817,6 +817,39 @@ export type WorldlinePreparationsSummary =
     }
   | ApiFailure;
 
+export type WorldlineGoalStartRecord = {
+  run_id: string;
+  trace_id?: string;
+  project_id: string;
+  workflow_type: string;
+  status: string;
+  goal?: string;
+  anchor_path_id?: string;
+  agent_refs?: WorldlinePreparationAgentRef[];
+  source_refs?: WorldlinePreparationSourceRef[];
+  rationale?: string;
+  prepare_id?: string;
+  session_id?: string;
+  error_code?: string;
+  error_message?: string;
+  created_at?: string;
+  updated_at?: string;
+  result?: Record<string, unknown>;
+};
+
+export type WorldlineGoalStartSummary =
+  | ({
+      ok: true;
+    } & WorldlineGoalStartRecord)
+  | ApiFailure;
+
+export type WorldlineGoalStartsSummary =
+  | {
+      ok: true;
+      items: WorldlineGoalStartRecord[];
+    }
+  | ApiFailure;
+
 export type AssetSearchCapabilitiesRecord = {
   keyword: boolean;
   vector: boolean;
@@ -1531,6 +1564,13 @@ export type CreateWorldlinePreparationInput = ApiContext & {
   anchorPathId?: string;
   agentRefs?: WorldlinePreparationAgentRef[];
   sourceRefs?: WorldlinePreparationSourceRef[];
+  options?: Record<string, unknown>;
+};
+
+export type CreateWorldlineGoalStartInput = ApiContext & {
+  projectId: string;
+  goal: string;
+  anchorPathId?: string;
   options?: Record<string, unknown>;
 };
 
@@ -3767,6 +3807,45 @@ export async function createWorldlinePreparation(
   }
 }
 
+export async function createWorldlineGoalStart(
+  input: CreateWorldlineGoalStartInput,
+): Promise<WorldlineGoalStartSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/worldline-goal-starts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...contextHeaders(input),
+      },
+      body: JSON.stringify({
+        goal: input.goal,
+        anchor_path_id: input.anchorPathId ?? "",
+        options: input.options ?? {},
+      }),
+      cache: "no-store",
+    });
+
+    return await decodeWorldlineGoalStartResponse(response, "WORLDLINE_GOAL_START_CREATE_FAILED");
+  } catch (error) {
+    return networkFailure(error, "WORLDLINE_GOAL_START_CREATE_FAILED");
+  }
+}
+
+export async function getWorldlineGoalStart(
+  input: ApiContext & { runId: string },
+): Promise<WorldlineGoalStartSummary> {
+  try {
+    const response = await apiFetch(`${apiBaseUrl()}/v1/worldline-goal-starts/${input.runId}`, {
+      headers: contextHeaders(input),
+      cache: "no-store",
+    });
+
+    return await decodeWorldlineGoalStartResponse(response, "WORLDLINE_GOAL_START_QUERY_FAILED");
+  } catch (error) {
+    return networkFailure(error, "WORLDLINE_GOAL_START_QUERY_FAILED");
+  }
+}
+
 export async function listWorldlinePreparations(
   input: ApiContext & { projectId: string },
 ): Promise<WorldlinePreparationsSummary> {
@@ -5316,6 +5395,23 @@ async function decodeWorldlinePreparationResponse(
   };
 }
 
+async function decodeWorldlineGoalStartResponse(
+  response: Response,
+  fallbackCode: string,
+): Promise<WorldlineGoalStartSummary> {
+  const payload = await readLLMPayload(response);
+  if (isApiFailure(payload)) {
+    return payload;
+  }
+  if (!response.ok) {
+    return decodeError(payload, response.status, fallbackCode);
+  }
+  return {
+    ok: true,
+    ...decodeWorldlineGoalStartRecord(payload),
+  };
+}
+
 async function decodeWorldlinePreparationsResponse(response: Response): Promise<WorldlinePreparationsSummary> {
   const payload = await readLLMPayload(response);
   if (isApiFailure(payload)) {
@@ -6389,6 +6485,65 @@ function decodeWorldlinePreparationRecord(item: unknown): WorldlinePreparationRe
     created_at: requiredString(value, "created_at"),
     updated_at: requiredString(value, "updated_at"),
   };
+}
+
+function decodeWorldlineGoalStartRecord(item: unknown): WorldlineGoalStartRecord {
+  const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  const agentRefs = Array.isArray(value.agent_refs)
+    ? value.agent_refs
+        .map((ref) => decodeWorldlineCastRef(ref))
+        .filter((ref): ref is WorldlinePreparationAgentRef =>
+          Boolean(ref && (ref.source_kind === "asset" || ref.source_kind === "entity")),
+        )
+    : [];
+  const sourceRefs = Array.isArray(value.source_refs)
+    ? value.source_refs
+        .map((ref) => decodeWorldlineCastRef(ref))
+        .filter((ref): ref is WorldlinePreparationSourceRef => Boolean(ref))
+    : [];
+  const optional = (key: string) => {
+    const text = requiredString(value, key).trim();
+    return text || undefined;
+  };
+  return {
+    run_id: requiredString(value, "run_id"),
+    trace_id: optional("trace_id"),
+    project_id: requiredString(value, "project_id"),
+    workflow_type: requiredString(value, "workflow_type") || "worldline_goal_start",
+    status: requiredString(value, "status"),
+    goal: optional("goal"),
+    anchor_path_id: optional("anchor_path_id"),
+    agent_refs: agentRefs,
+    source_refs: sourceRefs,
+    rationale: optional("rationale"),
+    prepare_id: optional("prepare_id"),
+    session_id: optional("session_id"),
+    error_code: optional("error_code"),
+    error_message: optional("error_message"),
+    created_at: optional("created_at"),
+    updated_at: optional("updated_at"),
+    result:
+      value.result && typeof value.result === "object" && !Array.isArray(value.result)
+        ? (value.result as Record<string, unknown>)
+        : undefined,
+  };
+}
+
+function decodeWorldlineCastRef(item: unknown): WorldlinePreparationSourceRef | null {
+  if (!item || typeof item !== "object") return null;
+  const value = item as Record<string, unknown>;
+  const sourceKind = typeof value.source_kind === "string" ? value.source_kind.trim() : "";
+  const sourceId = typeof value.source_id === "string" ? value.source_id.trim() : "";
+  if (
+    (sourceKind !== "asset" &&
+      sourceKind !== "entity" &&
+      sourceKind !== "saved_path" &&
+      sourceKind !== "worldline_event") ||
+    !sourceId
+  ) {
+    return null;
+  }
+  return { source_kind: sourceKind, source_id: sourceId };
 }
 
 function decodeWorldlinePreparedAgentRecord(item: unknown): WorldlinePreparedAgentRecord {

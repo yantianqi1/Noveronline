@@ -19,7 +19,8 @@ Pi 只替代 Writer Agent 的通用执行循环和 provider 抽象。小说领�
 
 - Writer Agent loop 使用 Pi SDK。
 - Seed / Graph / Asset ingestion / Worldline 第一阶段继续保留 Python 领域逻辑。
-- 后续再评估 Character Console 和 Worldline 是否也迁到 Pi。
+- Worldline Cast Planner（`worldline_cast_planner`）已作为独立 Pi 域接入：只负责目标驱动选角与上下文提交，随后仍调用 Python `worldline_preparation` / director；director 与 canon 写入不迁到 Pi。
+- 后续再评估 Character Console 与更广的 Worldline interactive layer 是否也迁到 Pi。
 
 收益：
 

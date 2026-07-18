@@ -5,12 +5,14 @@ import type {
   AssetListSummary,
   StoryGraphViewSummary,
   WorldlineEventsSummary,
+  WorldlineGoalStartSummary,
   WorldlinePreparationSummary,
   WorldlinePreparedAgentsSummary,
   WorldlineSavedPathsSummary,
   WorldlineSessionsSummary,
   WorldlineTimelineSummary,
 } from "../lib/api";
+import { encodeJourneyRef } from "../lib/worldline-character-journey";
 import { tx, type Locale } from "../lib/locale";
 import { SubmitButton } from "./submit-button";
 import { WorkspaceHeader } from "./workspace-header";
@@ -27,6 +29,7 @@ type WorldlineShellProps = {
   pathEvents: WorldlineEventsSummary;
   preparation: WorldlinePreparationSummary;
   preparedAgents: WorldlinePreparedAgentsSummary;
+  goalStart: WorldlineGoalStartSummary;
   assets: AssetListSummary;
   graphView: StoryGraphViewSummary;
   selectedSessionId: string;
@@ -34,7 +37,8 @@ type WorldlineShellProps = {
   selectedSourceRefs: string[];
   selectWorldlineSessionAction: (formData: FormData) => Promise<void>;
   refreshWorldlinePreparationAction: (formData: FormData) => Promise<void>;
-  startWorldlineSessionAction: (formData: FormData) => Promise<void>;
+  refreshWorldlineGoalStartAction: (formData: FormData) => Promise<void>;
+  createWorldlineGoalStartAction: (formData: FormData) => Promise<void>;
   startWorldlineStepAction: (formData: FormData) => Promise<void>;
   startWorldlineAutoEvolutionAction: (formData: FormData) => Promise<void>;
   createWorldlinePreparationAction: (formData: FormData) => Promise<void>;
@@ -42,7 +46,7 @@ type WorldlineShellProps = {
   createWorldlineSavedPathAction: (formData: FormData) => Promise<void>;
   adoptWorldlineEventAction: (formData: FormData) => Promise<void>;
   updateWorldlineEventAction: (formData: FormData) => Promise<void>;
-  worldlineSessionStatus: {
+  worldlineGoalStartStatus: {
     status: string;
     code: string;
     message: string;
@@ -103,6 +107,7 @@ export function WorldlineShell({
   pathEvents,
   preparation,
   preparedAgents,
+  goalStart,
   assets,
   graphView,
   selectedSessionId,
@@ -110,7 +115,8 @@ export function WorldlineShell({
   selectedSourceRefs,
   selectWorldlineSessionAction,
   refreshWorldlinePreparationAction,
-  startWorldlineSessionAction,
+  refreshWorldlineGoalStartAction,
+  createWorldlineGoalStartAction,
   startWorldlineStepAction,
   startWorldlineAutoEvolutionAction,
   createWorldlinePreparationAction,
@@ -118,7 +124,7 @@ export function WorldlineShell({
   createWorldlineSavedPathAction,
   adoptWorldlineEventAction,
   updateWorldlineEventAction,
-  worldlineSessionStatus,
+  worldlineGoalStartStatus,
   worldlineStepStatus,
   worldlineAutoStatus,
   worldlinePreparationStatus,
@@ -166,9 +172,14 @@ export function WorldlineShell({
           <section className="panel" aria-labelledby="start-session-heading" data-worldline-mode="start">
             <p className="eyebrow"><Bi zh="推演" en="Session" /></p>
             <h2 id="start-session-heading"><Bi zh="开始推演" en="Start session" /></h2>
-            <StatusLine worldlineSessionStatus={worldlineSessionStatus} />
-            <form action={startWorldlineSessionAction} className="binding-form">
-              {preparation.ok ? <input type="hidden" name="prepareId" value={preparation.prepare_id} /> : null}
+            <p className="form-hint">
+              <Bi
+                zh="只需写下推演目标。智能体会分析所需角色与上下文，自动准备后直接开始推演。"
+                en="Enter the simulation goal. The agent selects cast and context, prepares dossiers, then starts the session."
+              />
+            </p>
+            <GoalStartStatusLine worldlineGoalStartStatus={worldlineGoalStartStatus} />
+            <form action={createWorldlineGoalStartAction} className="binding-form">
               <label htmlFor="worldline-session-goal"><Bi zh="目标" en="Goal" /></label>
               <textarea
                 id="worldline-session-goal"
@@ -195,8 +206,13 @@ export function WorldlineShell({
                   disabled
                 ><option value="">{tx(locale, "暂无参考路径", "No saved path available")}</option></select>
               )}
-              <SubmitButton idleLabel={<Bi zh="开始推演" en="Start session" />} pendingLabel={<Bi zh="启动中…" en="Starting…" />} />
+              <SubmitButton idleLabel={<Bi zh="开始推演" en="Start session" />} pendingLabel={<Bi zh="分析并启动中…" en="Casting…" />} />
             </form>
+            <GoalStartProgress
+              goalStart={goalStart}
+              locale={locale}
+              refreshWorldlineGoalStartAction={refreshWorldlineGoalStartAction}
+            />
           </section>
               ),
               records: (
@@ -307,15 +323,21 @@ export function WorldlineShell({
         </main>
 
         <aside>
-          <details className="worldline-module-group worldline-module-group-dark" open={!activeSessionId}>
+          <details className="worldline-module-group worldline-module-group-dark" open={preparation.ok}>
             <summary>
-              <span><Bi zh="角色准备" en="Preparation" /></span>
+              <span><Bi zh="高级：手动选角" en="Advanced: manual cast" /></span>
               <small>{preparedAgents.ok ? preparedAgents.items.length : 0} <Bi zh="名角色" en="agents" /></small>
             </summary>
             <div className="worldline-module-content">
           <section className="panel" aria-labelledby="prepare-agents-heading">
-            <p className="eyebrow"><Bi zh="角色准备" en="Preparation" /></p>
-            <h2 id="prepare-agents-heading"><Bi zh="准备角色" en="Prepare agents" /></h2>
+            <p className="eyebrow"><Bi zh="可选" en="Optional" /></p>
+            <h2 id="prepare-agents-heading"><Bi zh="手动准备角色" en="Prepare agents manually" /></h2>
+            <p className="form-hint">
+              <Bi
+                zh="默认请在左侧只填写目标；这里仅供需要精确指定角色时使用。"
+                en="Prefer the goal-only start flow; use this only when you need an exact cast."
+              />
+            </p>
             <PreparationStatusLine worldlinePreparationStatus={worldlinePreparationStatus} />
             <form action={createWorldlinePreparationAction} className="binding-form">
               <label htmlFor="worldline-preparation-goal"><Bi zh="目标" en="Goal" /></label>
@@ -552,15 +574,88 @@ export function WorldlineShell({
   );
 }
 
-function StatusLine({
-  worldlineSessionStatus,
+function GoalStartStatusLine({
+  worldlineGoalStartStatus,
 }: {
-  worldlineSessionStatus: WorldlineShellProps["worldlineSessionStatus"];
+  worldlineGoalStartStatus: WorldlineShellProps["worldlineGoalStartStatus"];
 }) {
-  if (!worldlineSessionStatus.status) {
+  if (!worldlineGoalStartStatus.status) {
     return null;
   }
-  return <ActionFeedback code={worldlineSessionStatus.code} status={worldlineSessionStatus.status} successEn="Session started." successZh="推演已开始。" />;
+  return (
+    <ActionFeedback
+      code={worldlineGoalStartStatus.code}
+      status={worldlineGoalStartStatus.status}
+      successEn="Goal-start queued. Cast analysis is running."
+      successZh="已提交目标驱动启动，正在分析选角。"
+    />
+  );
+}
+
+function GoalStartProgress({
+  goalStart,
+  locale,
+  refreshWorldlineGoalStartAction,
+}: {
+  goalStart: WorldlineGoalStartSummary;
+  locale: Locale;
+  refreshWorldlineGoalStartAction: (formData: FormData) => Promise<void>;
+}) {
+  if (!goalStart.ok) {
+    return null;
+  }
+  const agentRefs = goalStart.agent_refs ?? [];
+  const sourceRefs = goalStart.source_refs ?? [];
+  return (
+    <div className="binding-stack worldline-goal-start-progress" data-goal-start-status={goalStart.status}>
+      <article className="reference-card">
+        <div className="status-row">
+          <span className="status-pill"><StatusValue value={goalStart.status} /></span>
+          {goalStart.prepare_id ? <span className="status-pill"><Bi zh="已准备" en="Prepared" /></span> : null}
+          {goalStart.session_id ? <span className="status-pill"><Bi zh="已开推演" en="Session ready" /></span> : null}
+        </div>
+        <h3>{goalStart.goal || <Bi zh="目标驱动推演" en="Goal-driven session" />}</h3>
+        {goalStart.rationale ? <p className="form-hint">{goalStart.rationale}</p> : null}
+        {goalStart.error_message ? <p className="form-hint error-box">{goalStart.error_message}</p> : null}
+      </article>
+      <fieldset className="checkbox-group">
+        <legend><Bi zh="参与角色（自动）" en="Agent refs (auto)" /></legend>
+        {agentRefs.length === 0 ? (
+          <p className="form-hint"><Bi zh="智能体尚未提交角色。" en="Cast has not been committed yet." /></p>
+        ) : (
+          agentRefs.map((ref) => (
+            <p className="form-hint" key={encodeJourneyRef(ref)}>
+              <strong>{ref.source_kind}</strong> {ref.source_id}
+            </p>
+          ))
+        )}
+      </fieldset>
+      <fieldset className="checkbox-group">
+        <legend><Bi zh="上下文来源（自动）" en="Source refs (auto)" /></legend>
+        {sourceRefs.length === 0 ? (
+          <p className="form-hint"><Bi zh="暂无额外上下文来源。" en="No extra context sources yet." /></p>
+        ) : (
+          sourceRefs.map((ref) => (
+            <p className="form-hint" key={encodeJourneyRef(ref)}>
+              <strong>{ref.source_kind}</strong> {ref.source_id}
+            </p>
+          ))
+        )}
+      </fieldset>
+      {goalStart.status !== "ready" && goalStart.status !== "failed" ? (
+        <form action={refreshWorldlineGoalStartAction} className="binding-form">
+          <input type="hidden" name="goalStartRunId" value={goalStart.run_id} />
+          <SubmitButton
+            idleLabel={<Bi zh="刷新进度" en="Refresh progress" />}
+            pendingLabel={<Bi zh="刷新中…" en="Refreshing…" />}
+          />
+          <p className="form-hint">
+            {tx(locale, "选角与准备完成后会自动进入推演。", "The session starts automatically after cast and prepare finish.")}
+          </p>
+        </form>
+      ) : null}
+    </div>
+  );
 }
 
 function StepStatusLine({

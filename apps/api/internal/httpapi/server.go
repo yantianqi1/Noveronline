@@ -119,6 +119,8 @@ type Config struct {
 	WorldlineVariableStore           worldline.VariableStore
 	WorldlinePreparationStarter      worldline.PreparationStarter
 	WorldlinePreparationStore        worldline.PreparationStore
+	WorldlineGoalStartStarter        worldline.GoalStartStarter
+	WorldlineGoalStartReader         worldline.GoalStartReader
 	CharacterConsoleStore            characterconsole.Store
 	CharacterProposalStore           characterconsole.ProposalStore
 	CharacterDialogueStarter         workflows.CharacterDialogueStarter
@@ -259,6 +261,8 @@ type Server struct {
 	worldlineVariableStore           worldline.VariableStore
 	worldlinePreparationStarter      worldline.PreparationStarter
 	worldlinePreparationStore        worldline.PreparationStore
+	worldlineGoalStartStarter        worldline.GoalStartStarter
+	worldlineGoalStartReader         worldline.GoalStartReader
 	characterConsoleStore            characterconsole.Store
 	characterProposalStore           characterconsole.ProposalStore
 	characterDialogueStarter         workflows.CharacterDialogueStarter
@@ -1083,6 +1087,14 @@ func NewServer(config Config) *Server {
 	if worldlinePreparationStore == nil {
 		worldlinePreparationStore = worldline.NewDisabledPreparationStore()
 	}
+	worldlineGoalStartStarter := config.WorldlineGoalStartStarter
+	if worldlineGoalStartStarter == nil {
+		worldlineGoalStartStarter = worldline.NewDisabledGoalStartStarter()
+	}
+	worldlineGoalStartReader := config.WorldlineGoalStartReader
+	if worldlineGoalStartReader == nil {
+		worldlineGoalStartReader = worldline.NewDisabledGoalStartReader()
+	}
 	characterConsoleStore := config.CharacterConsoleStore
 	if characterConsoleStore == nil {
 		characterConsoleStore = characterconsole.NewDisabledStore()
@@ -1179,6 +1191,8 @@ func NewServer(config Config) *Server {
 		worldlineVariableStore:           worldlineVariableStore,
 		worldlinePreparationStarter:      worldlinePreparationStarter,
 		worldlinePreparationStore:        worldlinePreparationStore,
+		worldlineGoalStartStarter:        worldlineGoalStartStarter,
+		worldlineGoalStartReader:         worldlineGoalStartReader,
 		characterConsoleStore:            characterConsoleStore,
 		characterProposalStore:           characterProposalStore,
 		characterDialogueStarter:         characterDialogueStarter,
@@ -1534,6 +1548,7 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "worldline session events", method: http.MethodGet, match: isWorldlineSessionEventsPath},
 	{name: "worldline preparation detail", method: http.MethodGet, match: isWorldlinePreparationDetailPath},
 	{name: "worldline preparation agents", method: http.MethodGet, match: isWorldlinePreparationAgentsPath},
+	{name: "worldline goal-start detail", method: http.MethodGet, match: isWorldlineGoalStartDetailPath},
 	{name: "worldline event adoption", method: http.MethodPost, match: isWorldlineEventAdoptionPath},
 	{name: "worldline event mutation", method: http.MethodPatch, match: isWorldlineEventMutationPath},
 	{name: "character interaction turn", method: http.MethodPost, match: matchCharacterInteractionNestedPath("turns")},
@@ -1599,6 +1614,8 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "seed run start", method: http.MethodPost, match: matchProjectSuffixPath("seed-runs")},
 	{name: "upload create", method: http.MethodPost, match: matchProjectSuffixPath("uploads")},
 	{name: "worldline session start", method: http.MethodPost, match: matchProjectSuffixPath("worldline-sessions")},
+	{name: "worldline goal-start list", method: http.MethodGet, match: matchProjectSuffixPath("worldline-goal-starts")},
+	{name: "worldline goal-start create", method: http.MethodPost, match: matchProjectSuffixPath("worldline-goal-starts")},
 	{name: "worldline preparation list", method: http.MethodGet, match: matchProjectSuffixPath("worldlines/preparations")},
 	{name: "worldline preparation create", method: http.MethodPost, match: matchProjectSuffixPath("worldlines/preparations")},
 	{name: "character interaction create", method: http.MethodPost, match: matchProjectSuffixPath("character-interactions")},
@@ -1951,6 +1968,16 @@ func isWorldlinePreparationDetailPath(path string) bool {
 
 func isWorldlinePreparationAgentsPath(path string) bool {
 	return worldlinePreparationPathPart(path, "agents") != ""
+}
+
+func isWorldlineGoalStartDetailPath(path string) bool {
+	const prefix = "/v1/worldline-goal-starts/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	runID := strings.TrimPrefix(path, prefix)
+	runID = strings.Trim(runID, "/")
+	return runID != "" && !strings.Contains(runID, "/")
 }
 
 func worldlineSessionPathPart(path string, suffix string) string {
@@ -2324,6 +2351,12 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartWorldlineSession(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldline-sessions"):
 		s.handleListWorldlineSessions(response, request)
+	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldline-goal-starts"):
+		s.handleStartWorldlineGoalStart(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldline-goal-starts"):
+		s.handleListWorldlineGoalStarts(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/worldline-goal-starts/"):
+		s.handleGetWorldlineGoalStart(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldlines/preparations"):
 		s.handleListWorldlinePreparations(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/worldlines/preparations"):

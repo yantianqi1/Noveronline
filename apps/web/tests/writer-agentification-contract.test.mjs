@@ -194,11 +194,12 @@ test("Phase 2–5 plan, migration 0019, shared revise mode exist", async () => {
   assert.match(events, /writer\.revision\.proposed/);
   assert.match(events, /writer\.approval\.required/);
   assert.match(contracts, /revise/);
-  assert.match(readiness, /0019_writer_threads/);
-  assert.match(readiness, /requiredMigrationCount\s*=\s*19/);
+  assert.match(readiness, /0022_worldline_goal_starts/);
+  assert.match(readiness, /requiredMigrationCount\s*=\s*22/);
   assert.match(piRun, /revise/);
   assert.match(workerSpec, /revise/);
   await access(path.join(repositoryRoot, "infra/postgres/rollbacks/0019_writer_threads.sql"));
+  await access(path.join(repositoryRoot, "infra/postgres/rollbacks/0022_worldline_goal_starts.sql"));
 });
 
 test("Phase 6: visual polish classes for manuscript paper and a11y", async () => {

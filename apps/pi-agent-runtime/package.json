@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run src",
     "worker": "node dist/worker.js",
-    "analysis-worker": "node dist/analysis-worker.js"
+    "analysis-worker": "node dist/analysis-worker.js",
+    "worldline-cast-worker": "node dist/worldline-cast-worker.js"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.80.3",
