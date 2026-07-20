@@ -34,6 +34,8 @@ export type WriterManuscriptFlowProps = {
   actionStatus: { status: string; code: string } | null;
   localDraft?: string | null;
   pendingRevision?: PendingRevision | null;
+  /** Live draft ghost rendered as the paper's last section (null when idle). */
+  draftBlock?: ReactNode;
   actions: {
     createBlock: Action;
     updateBlock: Action;
@@ -66,6 +68,7 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
         <h2 className="sr-only" id="manuscript-workspace-heading">
           <Bi zh="手稿正文" en="Manuscript prose" />
         </h2>
+        {props.draftBlock}
         <div className="writer-canvas-empty">
           <span aria-hidden="true" className="writer-canvas-empty-ico">
             ✦
@@ -205,6 +208,7 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
             </article>
           );
         })}
+        {props.draftBlock}
       </div>
 
       <form action={props.actions.createBlock} className="writer-add-section-form">

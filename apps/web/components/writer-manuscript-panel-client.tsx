@@ -8,6 +8,7 @@ import { type Locale, tx } from "../lib/locale";
 import { encodeLocalDraft, localDraftStorageKey } from "../lib/writer-local-draft";
 import { Bi } from "./bilingual-text";
 import { WriterManuscriptEditor, type PendingRevision } from "./writer-manuscript-editor";
+import { useWriterWorkbench } from "./writer-workbench-context";
 import type { SelectionAction } from "./writer-selection-toolbar";
 
 type WriterManuscriptPanelClientProps = {
@@ -69,6 +70,16 @@ export function WriterManuscriptPanelClient({
     () => Boolean(conflictLocalDraft) && workspaceCode === "OPTIMISTIC_CONFLICT",
   );
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const workbench = useWriterWorkbench();
+
+  // Mirror the local save state into the canvas-header status pill.
+  const updateSaveState = useCallback(
+    (next: SaveState) => {
+      setSaveState(next);
+      workbench?.setSaveStatus(next);
+    },
+    [workbench],
+  );
 
   useEffect(() => {
     setRevision(pendingRevision);
@@ -80,11 +91,11 @@ export function WriterManuscriptPanelClient({
 
   useEffect(() => {
     setLiveContent(content);
-    setSaveState("idle");
+    updateSaveState("idle");
     if (peTextareaRef.current && !showConflict) {
       peTextareaRef.current.value = content;
     }
-  }, [blockId, content, showConflict]);
+  }, [blockId, content, showConflict, updateSaveState]);
 
   useEffect(() => {
     const fromQuery =
@@ -119,9 +130,9 @@ export function WriterManuscriptPanelClient({
 
   const doSave = useCallback(() => {
     if (!formRef.current) return;
-    setSaveState("saving");
+    updateSaveState("saving");
     formRef.current.requestSubmit();
-  }, []);
+  }, [updateSaveState]);
 
   const requestSave = useCallback(() => {
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
@@ -134,7 +145,7 @@ export function WriterManuscriptPanelClient({
       peTextareaRef.current.value = text;
     }
     setEnhanced(true);
-    setSaveState("dirty");
+    updateSaveState("dirty");
     try {
       sessionStorage.setItem(localDraftStorageKey(blockId), text);
     } catch {
@@ -144,7 +155,7 @@ export function WriterManuscriptPanelClient({
     autoSaveTimerRef.current = setTimeout(() => {
       doSave();
     }, AUTO_SAVE_DELAY_MS);
-  }, [blockId, doSave]);
+  }, [blockId, doSave, updateSaveState]);
 
   const handleRevise = useCallback(
     (payload: {
@@ -246,10 +257,10 @@ export function WriterManuscriptPanelClient({
         // ignore
       }
       await updateBlockAction(formData);
-      setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 2000);
+      updateSaveState("saved");
+      setTimeout(() => updateSaveState("idle"), 2000);
     },
-    [blockId, expectedVersion, liveContent, statusValue, updateBlockAction],
+    [blockId, expectedVersion, liveContent, statusValue, updateBlockAction, updateSaveState],
   );
 
   const editorContent = showConflict && localDraft ? localDraft : liveContent;
@@ -257,7 +268,14 @@ export function WriterManuscriptPanelClient({
   return (
     <div className="writer-manuscript-panel-client" data-conflict={showConflict ? "true" : "false"}>
       {showConflict && localDraft ? (
-        <section className="writer-conflict-compare" data-conflict-panel="true" aria-labelledby="writer-conflict-heading">
+        <div className="writer-conflict-overlay" role="presentation">
+        <section
+          aria-labelledby="writer-conflict-heading"
+          aria-modal="true"
+          className="writer-conflict-compare"
+          data-conflict-panel="true"
+          role="dialog"
+        >
           <header className="writer-conflict-compare-head">
             <div>
               <p className="eyebrow"><Bi zh="并发冲突" en="Concurrent edit" /></p>
@@ -301,6 +319,7 @@ export function WriterManuscriptPanelClient({
           </div>
           <input type="hidden" name="localDraftEncoded" value={encodeLocalDraft(localDraft)} readOnly />
         </section>
+        </div>
       ) : null}
 
       <form ref={formRef} action={handleFormAction} className="binding-form writer-prose-form" data-manuscript-editor-form="true">

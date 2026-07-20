@@ -239,10 +239,10 @@ test("Wave A polish: author LLM bindings panel hides infrastructure fields", asy
 
 test("Wave A polish: writer draft panel hides raw draft id", async () => {
   const shell = await source("components/writer-workbench-shell.tsx");
-  const candidate = await source("components/writer-candidate-sheet.tsx");
+  const candidate = await source("components/writer-draft-block.tsx");
   assert.doesNotMatch(shell, /<Bi zh="草稿" en="Draft" \/> <strong>\{draftId\}<\/strong>/);
-  // Adoption is automatic now; the user-facing label lives on the candidate sheet.
-  assert.match(candidate, /已存入手稿|In manuscript/);
+  // Adoption is automatic now; the user-facing label lives on the in-paper draft block.
+  assert.match(candidate, /已存入手稿|Saved into manuscript/);
 });
 
 test("Wave A polish: product errors avoid raw error codes", async () => {
@@ -277,11 +277,11 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   assert.match(shell, /data-layout="conversation-first"/);
   assert.match(shell, /writer-artifact-canvas/);
   assert.match(shell, /writer-agent-dock/);
-  assert.match(shell, /data-has-structure="false"/);
   assert.doesNotMatch(shell, /writer-structure-rail/);
   assert.doesNotMatch(shell, /structureNav/);
   assert.match(shell, /WriterAgentThread/);
-  assert.match(shell, /WriterCandidateSheet/);
+  // Generated prose streams into the manuscript paper via the in-paper draft block.
+  assert.match(product, /draftBlock=\{props\.draftBlock\}/);
   const agentThread = await source("components/writer-agent-thread.tsx");
   assert.match(agentThread, /writer-agent-composer|WriterAgentComposer/);
   assert.match(agentThread, /WriterLiveDraft/);
@@ -331,7 +331,7 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   const canvasToolsIndex = shell.indexOf("writer-canvas-tools");
   const canvasStageIndex = shell.indexOf("writer-canvas-stage");
   assert.ok(canvasToolsIndex >= 0 && canvasStageIndex > canvasToolsIndex);
-  for (const retiredClass of ["writer-studio-grid", "writer-workbench-prose-first", "writer-composer-disclosure", "writer-agent-rail"]) {
+  for (const retiredClass of ["writer-studio-grid", "writer-workbench-prose-first", "writer-composer-disclosure", "writer-agent-rail", "writer-candidate-sheet", "writer-artifact-meta", "data-has-structure"]) {
     assert.doesNotMatch(`${product}\n${shell}`, new RegExp(retiredClass));
   }
 });

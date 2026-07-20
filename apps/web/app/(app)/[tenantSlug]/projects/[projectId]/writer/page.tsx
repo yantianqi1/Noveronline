@@ -1,5 +1,6 @@
 import { WriterWorkbenchShell } from "../../../../../../components/writer-workbench-shell";
 import { ProjectWorkspaceLoading } from "../../../../../../components/project-workspace-loading";
+import { WriterDraftBlock } from "../../../../../../components/writer-draft-block";
 import {
   WriterProductWorkspace,
   WriterProductWorkspaceLoading,
@@ -10,7 +11,6 @@ import {
   exportAgentTrace,
   getAgentTraceEvents,
   getProjectManuscript,
-  getProjectManuscriptExportManifest,
   getProjectAssets,
   getStoryGraphView,
   getWorldlineSavedPaths,
@@ -121,7 +121,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     : null;
   const workspaceContext: WriterWebContext = { ...apiContext, projectId };
   const recoveredDraftId = draftIdFromWriterEvents(selectedDraftId, workflowEvents);
-  const [assets, graphView, worldlineSavedPaths, manuscript, manuscriptExportManifest, writerThreads] =
+  const [assets, graphView, worldlineSavedPaths, manuscript, writerThreads] =
     await Promise.all([
       getProjectAssets({
         ...apiContext,
@@ -139,10 +139,6 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
         projectId,
       }),
       getProjectManuscript({
-        ...apiContext,
-        projectId,
-      }),
-      getProjectManuscriptExportManifest({
         ...apiContext,
         projectId,
       }),
@@ -586,6 +582,12 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
     redirect(`/${tenantSlug}/projects/${projectId}/writer?${nextQuery.toString()}`);
   }
 
+  const adoptedDraftBlock = manuscript.ok
+    ? manuscript.blocks.find(
+        (block) => block.source_draft_id === recoveredDraftId && block.status !== "deleted",
+      )
+    : undefined;
+
   return (
     <WriterWorkbenchShell
       locale={locale}
@@ -598,7 +600,6 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       graphView={graphView}
       worldlineSavedPaths={worldlineSavedPaths}
       manuscript={manuscript}
-      manuscriptExportManifest={manuscriptExportManifest}
       afterEventId={afterEventId}
       selectedRunId={selectedRunId}
       selectedTraceId={selectedTraceId}
@@ -637,8 +638,6 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       }
       writerRunAction={startWriterRunAction}
       exportTraceAction={exportTraceAction}
-      adoptDraftAction={adoptDraftAction}
-      undoAdoptionAction={undoDraftAdoptionAction}
       cancelWriterRunAction={cancelWriterRunAction}
       productWorkspace={
         <Suspense fallback={<WriterProductWorkspaceLoading />}>
@@ -658,6 +657,18 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
             locale={locale}
             localDraft={decodeLocalDraft(query.localDraft)}
             projectId={projectId}
+            draftBlock={
+              <WriterDraftBlock
+                adoptDraftAction={adoptDraftAction}
+                adopted={Boolean(adoptedDraftBlock)}
+                adoptedBlockId={adoptedDraftBlock?.block_id ?? ""}
+                chapterId={selectedChapterId}
+                draftId={recoveredDraftId}
+                initialEvents={workflowEvents?.ok === true ? workflowEvents.items : []}
+                locale={locale}
+                undoAdoptionAction={undoDraftAdoptionAction}
+              />
+            }
             selectedBlockId={selectedBlockId}
             selectedChapterId={selectedChapterId}
             selectedCommandId={selectedCommandId}
@@ -678,6 +689,7 @@ type WriterProductWorkspaceDataProps = Pick<
   WriterProductWorkspaceProps,
   | "actionStatus"
   | "actions"
+  | "draftBlock"
   | "locale"
   | "localDraft"
   | "projectId"

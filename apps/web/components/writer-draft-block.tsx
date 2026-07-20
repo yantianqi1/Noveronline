@@ -1,15 +1,14 @@
 "use client";
 
-import { Check, Copy, Eye, FileCheck2, PenLine, Undo2, X } from "lucide-react";
+import { Check, Copy, FileCheck2, Loader2, PenLine, Undo2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { WriterRunEvent } from "../lib/api";
 import { type Locale, tx } from "../lib/locale";
 import { humanizeFailure } from "../lib/user-facing-copy";
 import { writerDraftText } from "../lib/writer-event-store";
 import { Bi } from "./bilingual-text";
-import { PublicErrorNotice } from "./public-error-notice";
 import { useWriterRunStream } from "./writer-run-stream";
 import { useWriterWorkbench } from "./writer-workbench-context";
 
@@ -20,7 +19,7 @@ export type DraftAdoptionActionResult = {
   blockId?: string;
 };
 
-type WriterCandidateSheetProps = {
+type WriterDraftBlockProps = {
   locale: Locale;
   initialEvents: WriterRunEvent[];
   draftId: string;
@@ -31,17 +30,24 @@ type WriterCandidateSheetProps = {
   undoAdoptionAction?: (formData: FormData) => Promise<DraftAdoptionActionResult>;
 };
 
+const CHIP_AUTO_DISMISS_MS = 8000;
+
 /**
- * Canvas-primary candidate draft — three visual states.
+ * In-paper draft block — generated prose streams into the manuscript paper
+ * itself, then settles into a real manuscript section. The text stays in one
+ * place from first token to saved section, so the canvas never shows two
+ * competing documents.
  *
- * 1. **Active** (drafting): compact progress bar at canvas top; the Agent dock
- *    thread already shows streaming output, so the canvas doesn't duplicate it.
- * 2. **Adopted**: dismissible notification bar; the prose is now in the
- *    manuscript flow below, so showing it again is redundant.
- * 3. **Undone / Failed**: full panel with prose + actions (the text is NOT in
- *    the manuscript, so it must stay visible here).
+ * States:
+ * 1. **streaming**: ghost section at the end of the paper, prose grows live.
+ * 2. **saving**: same ghost, header switches to "saving into manuscript".
+ * 3. **adopted**: ghost collapses into a compact success chip (auto-dismiss);
+ *    the real section flashes in place.
+ * 4. **error**: auto-adoption failed — ghost turns amber with retry/copy.
+ * 5. **withdrawn**: user undid the adoption — text remains here, out of the
+ *    manuscript, with copy / keep-revising / close actions.
  */
-export function WriterCandidateSheet({
+export function WriterDraftBlock({
   locale,
   initialEvents,
   draftId,
@@ -50,7 +56,7 @@ export function WriterCandidateSheet({
   chapterId = "",
   adoptDraftAction,
   undoAdoptionAction,
-}: WriterCandidateSheetProps) {
+}: WriterDraftBlockProps) {
   const router = useRouter();
   const stream = useWriterRunStream();
   const workbench = useWriterWorkbench();
@@ -60,6 +66,7 @@ export function WriterCandidateSheet({
   const charCount = [...draftText].length;
   const revealedRef = useRef(false);
   const autoAdoptRef = useRef(false);
+  const flashedBlockRef = useRef("");
   const [pending, setPending] = useState(false);
   const [undoPending, setUndoPending] = useState(false);
   const [adoptedLocal, setAdoptedLocal] = useState(false);
@@ -99,6 +106,7 @@ export function WriterCandidateSheet({
     }
   }
 
+  // Auto-adopt exactly once per finished run; undo remains a single user action.
   useEffect(() => {
     if (autoAdoptRef.current) return;
     if (active || !draftText || !draftId || adopted || undone || !adoptDraftAction) return;
@@ -129,71 +137,50 @@ export function WriterCandidateSheet({
     }
   }
 
-  const scrollToAdoptedBlock = useCallback(() => {
-    if (!blockId) return;
-    const el = document.querySelector(`[data-block-id="${blockId}"]`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      const link = el.querySelector("a, button");
-      if (link) (link as HTMLElement).focus();
-    }
-  }, [blockId]);
+  // After adoption, bring the landed section into view and flash it once so
+  // "saved into manuscript" has a visible anchor instead of a silent mutation.
+  useEffect(() => {
+    if (!adopted || !blockId || flashedBlockRef.current === blockId) return;
+    flashedBlockRef.current = blockId;
+    let attempts = 0;
+    const tryReveal = () => {
+      const el = document.querySelector(`[data-block-id="${blockId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("is-flash");
+        window.setTimeout(() => el.classList.remove("is-flash"), 1800);
+        return;
+      }
+      attempts += 1;
+      if (attempts < 6) window.setTimeout(tryReveal, 400);
+    };
+    const timer = window.setTimeout(tryReveal, 250);
+    return () => window.clearTimeout(timer);
+  }, [adopted, blockId]);
+
+  // The success chip dismisses itself; the text stays as a normal section.
+  useEffect(() => {
+    if (!adopted || undone || dismissed || errorText) return;
+    const timer = window.setTimeout(() => setDismissed(true), CHIP_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [adopted, undone, dismissed, errorText]);
 
   if (!draftText && !active) {
     return null;
   }
 
-  // --- State 1: Active (drafting) — compact progress bar ---
-  if (active && !adopted) {
+  // --- Adopted: compact success chip; prose now lives in the paper itself ---
+  if (adopted) {
+    if (dismissed) return null;
     return (
-      <div
-        className="writer-candidate-progress"
-        data-streaming="true"
-        id="writer-candidate-sheet"
-        role="status"
-        aria-live="polite"
-      >
-        <span className="writer-candidate-progress-dot" aria-hidden="true" />
-        <span className="writer-candidate-progress-label">
-          {draftText ? (
-            <Bi zh={`正在创作… ${charCount} 字`} en={`Drafting… ${charCount} chars`} />
-          ) : (
-            <Bi zh="正在创作…" en="Drafting…" />
-          )}
-        </span>
-        <span className="writer-candidate-progress-hint">
-          <Bi zh="写完后自动存入手稿" en="Will be saved automatically" />
-        </span>
-      </div>
-    );
-  }
-
-  // --- State 2: Adopted — dismissible notification bar ---
-  if (adopted && !undone && !dismissed && !errorText) {
-    return (
-      <div
-        className="writer-candidate-notice"
-        data-adopted="true"
-        id="writer-candidate-sheet"
-        role="status"
-      >
-        <Check aria-hidden="true" size={15} className="writer-candidate-notice-icon" />
-        <span className="writer-candidate-notice-text">
+      <div className="writer-draft-chip" data-draft-chip="adopted" role="status">
+        <Check aria-hidden="true" size={15} className="writer-draft-chip-icon" />
+        <span className="writer-draft-chip-text">
           <Bi zh={`已存入手稿（${charCount} 字）`} en={`Saved into manuscript (${charCount} chars)`} />
         </span>
-        {blockId ? (
-          <button
-            className="writer-candidate-notice-action"
-            onClick={scrollToAdoptedBlock}
-            type="button"
-          >
-            <Eye aria-hidden="true" size={14} />
-            <Bi zh="查看" en="View" />
-          </button>
-        ) : null}
         {undoAdoptionAction && blockId ? (
           <button
-            className="writer-candidate-notice-action"
+            className="writer-draft-chip-action"
             disabled={undoPending}
             onClick={() => void onUndo()}
             type="button"
@@ -202,9 +189,10 @@ export function WriterCandidateSheet({
             {undoPending ? <Bi zh="撤回中…" en="Undoing…" /> : <Bi zh="撤回" en="Undo" />}
           </button>
         ) : null}
+        {errorText ? <span className="writer-draft-chip-error">{errorText}</span> : null}
         <button
           aria-label={tx(locale, "关闭通知", "Dismiss")}
-          className="writer-candidate-notice-dismiss"
+          className="writer-draft-chip-dismiss"
           onClick={() => setDismissed(true)}
           type="button"
         >
@@ -214,58 +202,73 @@ export function WriterCandidateSheet({
     );
   }
 
-  // --- State 3: Undone / Failed / Pending — full panel with prose ---
+  // --- Ghost section inside the paper: streaming / saving / error / withdrawn ---
+  if (undone && dismissed) return null;
+  const ghostState = active ? "streaming" : undone ? "withdrawn" : errorText ? "error" : "saving";
   return (
-    <section
+    <article
       aria-label={tx(locale, "本次生成的正文", "Generated prose")}
-      className="writer-candidate-sheet"
-      data-adopted={adopted ? "true" : "false"}
-      data-streaming="false"
-      id="writer-candidate-sheet"
+      className="writer-manuscript-section writer-draft-block"
+      data-draft-state={ghostState}
+      id="writer-draft-block"
     >
-      <span className="writer-candidate-badge">
-        {undone ? (
-          <Bi zh="已撤回" en="Removed" />
-        ) : adopted ? (
-          <Bi zh="已存入手稿" en="In manuscript" />
-        ) : (
-          <Bi zh="本次生成" en="This draft" />
-        )}
-      </span>
-      <div className="writer-candidate-prose">
+      <div className="writer-draft-block-head" role="status">
+        {ghostState === "streaming" ? (
+          <>
+            <span aria-hidden="true" className="writer-draft-block-dot" />
+            <span className="writer-draft-block-label">
+              {draftText ? (
+                <Bi zh={`Writer 正在创作… ${charCount} 字`} en={`Writer is drafting… ${charCount} chars`} />
+              ) : (
+                <Bi zh="Writer 正在创作…" en="Writer is drafting…" />
+              )}
+            </span>
+            <span className="writer-draft-block-hint">
+              <Bi zh="写完后自动存入手稿" en="Will be saved automatically" />
+            </span>
+          </>
+        ) : null}
+        {ghostState === "saving" ? (
+          <>
+            <Loader2 aria-hidden="true" size={14} className="writer-save-spin" />
+            <span className="writer-draft-block-label">
+              <Bi zh="正在存入手稿…" en="Saving into your manuscript…" />
+            </span>
+          </>
+        ) : null}
+        {ghostState === "withdrawn" ? (
+          <span className="writer-draft-block-label">
+            <Bi zh="已撤回 · 这段正文未进入手稿" en="Removed · this text is not in the manuscript" />
+          </span>
+        ) : null}
+        {ghostState === "error" ? (
+          <span className="writer-draft-block-label">
+            <Bi zh="存入手稿未完成" en="Could not save into manuscript" />
+          </span>
+        ) : null}
+      </div>
+
+      <div className="writer-draft-prose">
         {draftText ? (
           splitCandidateParagraphs(draftText).map((paragraph, index) => (
             <p key={`p-${index}`}>{paragraph}</p>
           ))
         ) : (
-          <p className="writer-candidate-placeholder">
+          <p className="writer-draft-placeholder">
             <Bi zh="正文正在生成…" en="Prose is being drafted…" />
           </p>
         )}
-      </div>
-      <div className="writer-candidate-meta">
-        <span>
-          {charCount} <Bi zh="字" en="chars" />
-        </span>
-        {undone ? (
-          <span>
-            <Bi zh="已从手稿撤回，这段正文只保留在这里" en="Removed from the manuscript; the text stays here" />
-          </span>
-        ) : pending ? (
-          <span>
-            <Bi zh="正在存入手稿…" en="Saving into your manuscript…" />
-          </span>
+        {ghostState === "streaming" && draftText ? (
+          <span aria-hidden="true" className="writer-draft-cursor" />
         ) : null}
       </div>
-      {errorText ? (
-        <div className="writer-candidate-actions">
-          <PublicErrorNotice
-            message={<span>{errorText}</span>}
-            title={<Bi zh="存入手稿未完成" en="Could not save into manuscript" />}
-          />
-          {!adopted && !undone && adoptDraftAction && draftId ? (
+
+      {ghostState === "error" ? (
+        <div className="writer-draft-block-actions">
+          <p className="writer-draft-block-error" role="alert">{errorText}</p>
+          {!undone && adoptDraftAction && draftId ? (
             <button
-              className="writer-candidate-adopt"
+              className="writer-draft-block-primary"
               disabled={pending}
               onClick={() => void runAdoption()}
               type="button"
@@ -274,23 +277,25 @@ export function WriterCandidateSheet({
               {pending ? <Bi zh="正在存入…" en="Saving…" /> : <Bi zh="重试存入手稿" en="Retry saving" />}
             </button>
           ) : null}
+          <button
+            className="writer-draft-block-secondary"
+            onClick={() => {
+              if (typeof navigator !== "undefined" && draftText) {
+                void navigator.clipboard?.writeText(draftText);
+              }
+            }}
+            type="button"
+          >
+            <Copy aria-hidden="true" size={15} />
+            <Bi zh="复制正文" en="Copy text" />
+          </button>
         </div>
       ) : null}
-      {!active && draftText ? (
-        <div className="writer-candidate-actions">
-          {adopted && undoAdoptionAction && blockId ? (
-            <button
-              className="writer-candidate-secondary"
-              disabled={undoPending}
-              onClick={() => void onUndo()}
-              type="button"
-            >
-              <Undo2 aria-hidden="true" size={15} />
-              {undoPending ? <Bi zh="正在撤回…" en="Undoing…" /> : <Bi zh="撤回，不放进手稿" en="Undo — remove from manuscript" />}
-            </button>
-          ) : null}
+
+      {ghostState === "withdrawn" ? (
+        <div className="writer-draft-block-actions">
           <button
-            className="writer-candidate-secondary"
+            className="writer-draft-block-secondary"
             onClick={() => {
               if (typeof navigator !== "undefined" && draftText) {
                 void navigator.clipboard?.writeText(draftText);
@@ -302,16 +307,24 @@ export function WriterCandidateSheet({
             <Bi zh="复制" en="Copy" />
           </button>
           <button
-            className="writer-candidate-secondary"
+            className="writer-draft-block-secondary"
             onClick={() => workbench?.setMobileView("conversation")}
             type="button"
           >
             <PenLine aria-hidden="true" size={15} />
             <Bi zh="继续和 Agent 修改" en="Keep revising with the Agent" />
           </button>
+          <button
+            className="writer-draft-block-secondary"
+            onClick={() => setDismissed(true)}
+            type="button"
+          >
+            <X aria-hidden="true" size={15} />
+            <Bi zh="关闭" en="Close" />
+          </button>
         </div>
       ) : null}
-    </section>
+    </article>
   );
 }
 

@@ -1,9 +1,6 @@
 import {
   Activity,
-  ChevronDown,
   CircleStop,
-  Download,
-  FileCheck2,
   Paperclip,
   RefreshCcw,
   RotateCw,
@@ -14,7 +11,6 @@ import { type Locale, tx } from "../lib/locale";
 import type {
   AgentTraceEventsSummary,
   AssetListSummary,
-  ProjectManuscriptExportManifestSummary,
   ProjectManuscriptSummary,
   StoryGraphViewSummary,
   WorldlineSavedPathsSummary,
@@ -25,7 +21,6 @@ import type {
 import { Bi, FailureText, StatusValue } from "./bilingual-text";
 import { PublicErrorNotice } from "./public-error-notice";
 import { TechnicalDetailsDrawer } from "./technical-details-drawer";
-import { WriterCandidateSheet, type DraftAdoptionActionResult } from "./writer-candidate-sheet";
 import { WriterCommandPalette, WriterCommandPaletteTrigger } from "./writer-command-palette";
 import { type WriterRunActionResult } from "./writer-agent-composer";
 import { WriterAgentThread } from "./writer-agent-thread";
@@ -46,38 +41,23 @@ type WriterWorkbenchShellProps = {
   graphView: StoryGraphViewSummary;
   worldlineSavedPaths: WorldlineSavedPathsSummary;
   manuscript: ProjectManuscriptSummary;
-  manuscriptExportManifest: ProjectManuscriptExportManifestSummary;
   afterEventId: string;
   selectedRunId: string;
   selectedTraceId: string;
   writerRunStatus: ActionStatus | null;
   traceExportStatus: TraceExportStatus | null;
   draftAdoptionStatus?: ActionStatus | null;
-  manuscriptExportStatus?: ActionStatus | null;
   writerControlStatus?: ActionStatus | null;
   selectedDraftId?: string;
   selectedChapterId?: string;
   selectedSceneId?: string;
-  manuscriptExportArtifact?: WriterManuscriptExportArtifact | null;
   writerRunAction?: (formData: FormData) => Promise<WriterRunActionResult>;
   exportTraceAction?: (formData: FormData) => Promise<void>;
-  adoptDraftAction?: (formData: FormData) => Promise<DraftAdoptionActionResult>;
-  undoAdoptionAction?: (formData: FormData) => Promise<DraftAdoptionActionResult>;
-  exportManuscriptAction?: (formData: FormData) => Promise<void>;
   cancelWriterRunAction?: (formData: FormData) => Promise<void>;
   decideApprovalAction?: (formData: FormData) => Promise<void>;
   productWorkspace?: ReactNode;
   /** Persistent thread messages when backend thread store is available. */
   threadMessages?: { role: string; body: string; created_at?: string }[];
-};
-
-export type WriterManuscriptExportArtifact = {
-  artifact_id: string;
-  file_name: string;
-  media_type: string;
-  size_bytes: number;
-  download_href: string;
-  created_at?: string;
 };
 
 type ActionStatus = {
@@ -99,24 +79,18 @@ export function WriterWorkbenchShell({
   graphView,
   worldlineSavedPaths,
   manuscript,
-  manuscriptExportManifest,
   afterEventId,
   selectedRunId,
   selectedTraceId,
   writerRunStatus,
   traceExportStatus,
   draftAdoptionStatus: _draftAdoptionStatus = null,
-  manuscriptExportStatus = null,
   writerControlStatus = null,
   selectedDraftId = "",
   selectedChapterId = "",
   selectedSceneId = "",
-  manuscriptExportArtifact = null,
   writerRunAction,
   exportTraceAction,
-  adoptDraftAction,
-  undoAdoptionAction,
-  exportManuscriptAction,
   cancelWriterRunAction,
   decideApprovalAction,
   productWorkspace,
@@ -179,7 +153,6 @@ export function WriterWorkbenchShell({
               <div
                 className="writer-agent-layout"
                 data-layout="conversation-first"
-                data-has-structure="false"
                 data-mobile-view="conversation"
               >
                 <main className="writer-artifact-canvas" aria-label={tx(locale, "稿件工作区", "Manuscript workspace")}>
@@ -216,53 +189,7 @@ export function WriterWorkbenchShell({
                     </TechnicalDetailsDrawer>
                   </aside>
                   <div className="writer-canvas-stage">
-                    <WriterCandidateSheet
-                      adoptDraftAction={adoptDraftAction}
-                      adopted={draftIsAdopted}
-                      adoptedBlockId={adoptedBlock?.block_id ?? ""}
-                      chapterId={selectedChapterId}
-                      draftId={recoveredDraftId}
-                      initialEvents={workflowEvents?.ok === true ? workflowEvents.items : []}
-                      locale={locale}
-                      undoAdoptionAction={undoAdoptionAction}
-                    />
                     {productWorkspace}
-                    <details className="writer-artifact-meta">
-                      <summary>
-                        <span>
-                          <FileCheck2 aria-hidden="true" size={16} />
-                          <Bi zh="稿件状态与导出" en="Manuscript status and export" />
-                        </span>
-                        <ChevronDown aria-hidden="true" size={16} />
-                      </summary>
-                      <div className="writer-artifact-meta-content">
-                        <section className={manuscript.ok ? "" : "error-box"} aria-labelledby="manuscript-metadata-heading">
-                          <h3 id="manuscript-metadata-heading">
-                            <Bi zh="手稿元数据" en="Manuscript metadata" />
-                          </h3>
-                          <ManuscriptMetadataPanel locale={locale} manuscript={manuscript} />
-                        </section>
-                        <section
-                          className={
-                            manuscriptExportManifest.ok && manuscriptExportStatus?.status !== "error"
-                              ? ""
-                              : "error-box"
-                          }
-                          aria-labelledby="manuscript-export-heading"
-                        >
-                          <h3 id="manuscript-export-heading">
-                            <Bi zh="导出正文" en="Export manuscript" />
-                          </h3>
-                          <ManuscriptExportManifestPanel
-                            artifact={manuscriptExportArtifact}
-                            exportAction={exportManuscriptAction}
-                            locale={locale}
-                            manifest={manuscriptExportManifest}
-                            status={manuscriptExportStatus}
-                          />
-                        </section>
-                      </div>
-                    </details>
                   </div>
                 </main>
 
@@ -509,139 +436,6 @@ function RecoveryFields({
   );
 }
 
-function ManuscriptMetadataPanel({ locale, manuscript }: { locale: Locale; manuscript: ProjectManuscriptSummary }) {
-  if (!manuscript.ok) {
-    return <p>{apiErrorLine(manuscript, "MANUSCRIPT_BACKEND_UNCONFIGURED", locale)}</p>;
-  }
-
-  if (manuscript.blocks.length === 0) {
-    return <p className="form-hint"><Bi zh="暂无手稿块元数据。" en="No manuscript metadata blocks returned." /></p>;
-  }
-
-  return (
-    <div>
-      <dl>
-        <dt><Bi zh="手稿块" en="Blocks" /></dt>
-        <dd>{manuscript.blocks.length}</dd>
-      </dl>
-      <div className="compact-action-list">
-        {manuscript.blocks.slice(0, 8).map((block, index) => (
-          <article className="tool-result-item" key={block.block_id} data-block-id={block.block_id} data-chapter-id={block.chapter_id || ""} data-source-draft-id={block.source_draft_id || ""}>
-            <strong><Bi zh={`片段 ${index + 1}`} en={`Section ${index + 1}`} /></strong>
-            <span>
-              <Bi zh="顺序 " en="Order " />{block.block_order} / <StatusValue value={block.status || "unknown"} />
-            </span>
-            <small>
-              <Bi zh="字数 " en="Words " />{block.word_count}
-            </small>
-            <small>
-              <Bi zh="更新于 " en="Updated " />{block.updated_at || tx(locale, "未知", "unknown")}
-            </small>
-          </article>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ManuscriptExportManifestPanel({
-  artifact,
-  exportAction,
-  locale,
-  manifest,
-  status,
-}: {
-  artifact: WriterManuscriptExportArtifact | null;
-  exportAction?: (formData: FormData) => Promise<void>;
-  locale: Locale;
-  manifest: ProjectManuscriptExportManifestSummary;
-  status: ActionStatus | null;
-}) {
-  if (!manifest.ok) {
-    return <p>{apiErrorLine(manifest, "MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED", locale)}</p>;
-  }
-
-  return (
-    <div>
-      <dl>
-        <dt><Bi zh="格式" en="Format" /></dt>
-        <dd>{manifest.format || tx(locale, "未知", "unknown")}</dd>
-        <dt><Bi zh="状态" en="Status" /></dt>
-        <dd>{manifest.status || tx(locale, "未知", "unknown")}</dd>
-        <dt><Bi zh="手稿块" en="Blocks" /></dt>
-        <dd>{manifest.block_count}</dd>
-        <dt><Bi zh="总字数" en="Total words" /></dt>
-        <dd>{manifest.total_word_count}</dd>
-        <dt><Bi zh="生成时间" en="Generated" /></dt>
-        <dd>{manifest.generated_at || tx(locale, "尚未生成", "not generated")}</dd>
-      </dl>
-      {manifest.blocks.length === 0 ? (
-        <p className="form-hint"><Bi zh="暂无导出清单块元数据。" en="No manifest block metadata returned." /></p>
-      ) : (
-        <div className="compact-action-list">
-          {manifest.blocks.slice(0, 8).map((manifestBlock, index) => (
-            <article className="tool-result-item" key={`${manifestBlock.block_id}-${manifestBlock.block_order}`}>
-              <strong><Bi zh={`片段 ${index + 1}`} en={`Section ${index + 1}`} /></strong>
-              <span><Bi zh="顺序 " en="Order " />{manifestBlock.block_order}</span>
-              <small><Bi zh="字数 " en="Words " />{manifestBlock.word_count}</small>
-            </article>
-          ))}
-        </div>
-      )}
-      {status ? <StatusLine status={status} /> : null}
-      {exportAction ? (
-        <form action={exportAction} className="inline-action-form">
-          <input name="format" type="hidden" value="text" />
-          <button disabled={manifest.block_count === 0} type="submit">
-            <Download aria-hidden="true" size={16} />
-            <Bi zh="生成正文导出文件" en="Generate manuscript export" />
-          </button>
-        </form>
-      ) : null}
-      {artifact ? <ManuscriptArtifactDownload artifact={artifact} locale={locale} /> : null}
-    </div>
-  );
-}
-
-function ManuscriptArtifactDownload({
-  artifact,
-  locale,
-}: {
-  artifact: WriterManuscriptExportArtifact;
-  locale: Locale;
-}) {
-  if (!artifact.artifact_id || !artifact.download_href) {
-    return (
-      <p className="form-status error-box" role="alert">
-        <FailureText />
-      </p>
-    );
-  }
-
-  return (
-    <div className="compact-action-list">
-      <dl>
-        <dt><Bi zh="文件" en="File" /></dt>
-        <dd>{artifact.file_name || tx(locale, "导出的手稿", "Exported manuscript")}</dd>
-        <dt><Bi zh="类型" en="Media type" /></dt>
-        <dd>{artifact.media_type || tx(locale, "未知", "unknown")}</dd>
-		{artifact.size_bytes > 0 ? (
-			<>
-				<dt><Bi zh="大小" en="Size" /></dt>
-				<dd>{formatByteSize(artifact.size_bytes, locale)}</dd>
-			</>
-		) : null}
-      </dl>
-      <form action={artifact.download_href} className="inline-action-form" method="get">
-        <button type="submit">
-          <Download aria-hidden="true" size={16} />
-          <Bi zh="下载导出的手稿" en="Download exported manuscript" />
-        </button>
-      </form>
-    </div>
-  );
-}
-
 function ContextPickers({
   assets,
   graphView,
@@ -792,11 +586,6 @@ function StatusLine({ status }: { status: ActionStatus }) {
       <Bi zh="操作已提交。" en="Action submitted." />
     </p>
   );
-}
-
-function apiErrorLine(status: { code: string; message: string }, fallbackCode: string, locale: Locale) {
-  const code = status.code || fallbackCode;
-  return tx(locale, `${code}: 暂时无法加载，请稍后重试。`, `${code}: Unable to load this data. Try again shortly.`);
 }
 
 type ToolCompletedEvent = {
@@ -1056,13 +845,6 @@ function latestWriterEvent(workflowEvents: WriterRunEventsSummary | null) {
     return null;
   }
   return workflowEvents.items.reduce((latest, event) => event.sequence > latest.sequence ? event : latest);
-}
-
-function formatByteSize(value: number, locale: Locale) {
-  if (!Number.isFinite(value) || value < 0) {
-    return tx(locale, "未知", "unknown");
-  }
-  return `${new Intl.NumberFormat(locale === "zh-CN" ? "zh-CN" : "en-US").format(value)} B`;
 }
 
 function WriterEvents({ workflowEvents }: { workflowEvents: WriterRunEventsSummary | null }) {

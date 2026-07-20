@@ -31,37 +31,35 @@ test("writer recovery keeps run trace and explicit replay cursors across refresh
 
 test("writer candidate recovery is metadata-only and adoption is automatic with a user undo", async () => {
   const shell = await writerShell();
-  const candidate = await readFile(path.join(root, "components/writer-candidate-sheet.tsx"), "utf8");
+  const candidate = await readFile(path.join(root, "components/writer-draft-block.tsx"), "utf8");
+  const page = await readFile(path.join(root, "app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx"), "utf8");
 
   assert.match(shell, /selectedDraftId\?: string/);
   assert.match(shell, /recoverDraftId\(selectedDraftId, runSummary, workflowEvents\)/);
   assert.match(shell, /writer\.draft\.saved/);
   assert.match(shell, /writer\.run\.completed/);
   assert.match(shell, /stringValue\(event\.payload, "draft_id"\)/);
-  assert.match(shell, /undoAdoptionAction/);
-  assert.match(shell, /adoptedBlockId=\{adoptedBlock\?\.block_id \?\? ""\}/);
   assert.doesNotMatch(shell, /function DraftAdoptionPanel/);
   assert.doesNotMatch(shell, /useEffect|componentDidMount/);
   assert.doesNotMatch(shell, /draft_text|manuscript_text|content_text|prompt_snapshot/i);
-  // Candidate sheet auto-adopts once per finished run and offers a single undo.
+  // The page wires the adoption actions into the in-paper draft block.
+  assert.match(page, /undoAdoptionAction=\{undoDraftAdoptionAction\}/);
+  assert.match(page, /adoptedBlockId=\{adoptedDraftBlock\?\.block_id \?\? ""\}/);
+  // Draft block auto-adopts once per finished run and offers a single undo.
   assert.match(candidate, /autoAdoptRef/);
   assert.match(candidate, /undoAdoptionAction/);
   assert.match(candidate, /重试存入手稿|Retry saving/);
 });
 
-test("writer export controls expose a real artifact download and fail closed without one", async () => {
-  const shell = await writerShell();
+test("writer export controls live in the studio tools tab with a real download link", async () => {
+  const workspace = await readFile(path.join(root, "components/writer-product-workspace.tsx"), "utf8");
 
-  assert.match(shell, /export type WriterManuscriptExportArtifact/);
-  assert.match(shell, /artifact_id: string/);
-  assert.match(shell, /download_href: string/);
-  assert.match(shell, /exportManuscriptAction/);
-  assert.match(shell, /Generate manuscript export/);
-  assert.match(shell, /function ManuscriptArtifactDownload/);
-  assert.match(shell, /action=\{artifact\.download_href\}/);
-  assert.match(shell, /Download exported manuscript/);
-  assert.match(shell, /FailureText/);
-  assert.doesNotMatch(shell, /data:text|URL\.createObjectURL|new Blob/);
+  assert.match(workspace, /createExport/);
+  assert.match(workspace, /生成 TXT 产物|Generate TXT artifact/);
+  assert.match(workspace, /artifact_sha256/);
+  assert.match(workspace, /\/api\/manuscript-export\//);
+  assert.match(workspace, /下载已完成的 TXT|Download completed TXT/);
+  assert.doesNotMatch(workspace, /data:text|URL\.createObjectURL|new Blob/);
 });
 
 test("writer cancellation is active-run only and retry remains an explicit new admission", async () => {

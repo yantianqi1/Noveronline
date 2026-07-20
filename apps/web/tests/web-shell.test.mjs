@@ -96,40 +96,26 @@ test("writer page loads manuscript summaries alongside picker data", async () =>
   const page = await fileText("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx");
 
   assert.match(page, /getProjectManuscript/);
-  assert.match(page, /getProjectManuscriptExportManifest/);
   assert.match(page, /listWriterThreads/);
   assert.match(page, /listWriterThreadMessages/);
   assert.match(
     page,
-    /const\s*\[\s*assets,\s*graphView,\s*worldlineSavedPaths,\s*manuscript,\s*manuscriptExportManifest,\s*writerThreads\s*\]\s*=\s*await\s+Promise\.all/,
+    /const\s*\[\s*assets,\s*graphView,\s*worldlineSavedPaths,\s*manuscript,\s*writerThreads\s*\]\s*=\s*await\s+Promise\.all/,
   );
   assert.match(page, /planningRun,\s*proposals,\s*distillationSettings\s*\]\s*=\s*await\s+Promise\.all/);
   assert.match(page, /<Suspense\s+fallback=\{<WriterProductWorkspaceLoading\s*\/>\}>/);
   assert.match(page, /getProjectManuscript\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
-  assert.match(page, /getProjectManuscriptExportManifest\(\{\s*\.\.\.apiContext,\s*projectId,\s*\}\)/s);
   assert.match(page, /manuscript=\{manuscript\}/);
-  assert.match(page, /manuscriptExportManifest=\{manuscriptExportManifest\}/);
   assert.match(page, /threadMessages=\{threadMessages\}/);
 });
 
-test("Writer shell renders metadata-only manuscript and export panels", async () => {
+test("Writer shell stays metadata-only; export UI lives in the studio tools tab", async () => {
   const shell = await fileText("components/writer-workbench-shell.tsx");
+  const workspace = await fileText("components/writer-product-workspace.tsx");
 
   assert.match(shell, /ProjectManuscriptSummary/);
-  assert.match(shell, /ProjectManuscriptExportManifestSummary/);
   assert.match(shell, /manuscript\.ok/);
-  assert.match(shell, /manuscriptExportManifest\.ok/);
-  assert.match(shell, /Manuscript metadata/);
-  assert.match(shell, /Export manuscript/);
-  assert.match(shell, /MANUSCRIPT_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /MANUSCRIPT_EXPORT_BACKEND_UNCONFIGURED/);
-  assert.match(shell, /block\.block_id/);
-  assert.match(shell, /data-chapter-id=\{block\.chapter_id/);
-  assert.match(shell, /data-source-draft-id=\{block\.source_draft_id/);
-  assert.match(shell, /block\.word_count/);
-  assert.match(shell, /manifestBlock\.block_id/);
-  assert.match(shell, /manifestBlock\.word_count/);
-  assert.match(shell, /generated_at/);
+  assert.match(shell, /source_draft_id/);
   assert.doesNotMatch(shell, /block_ids/);
   assert.doesNotMatch(shell, /content_text/);
   assert.doesNotMatch(shell, /draft_text/);
@@ -138,6 +124,10 @@ test("Writer shell renders metadata-only manuscript and export panels", async ()
   assert.doesNotMatch(shell, /exported_at/);
   assert.doesNotMatch(shell, /credential_ref|encrypted_api_key|api_key/i);
   assert.doesNotMatch(shell, /PDF|DOCX|TXT/);
+  // The only manuscript export surface is the studio tab's TXT artifact panel.
+  assert.match(workspace, /createExport/);
+  assert.match(workspace, /生成 TXT 产物|Generate TXT artifact/);
+  assert.match(workspace, /\/api\/manuscript-export\//);
 });
 
 test("project navigation includes writer and LLM Facility routes with active path state", async () => {

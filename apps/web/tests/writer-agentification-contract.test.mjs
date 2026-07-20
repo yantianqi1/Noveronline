@@ -77,7 +77,7 @@ test("Phase 4: activity timeline + context chips + thread helpers", async () => 
   assert.match(chip, /assets|graph|worldline/);
   assert.match(thread, /sortThreadMessages/);
   assert.match(shell, /threadMessages|WriterAgentThread/);
-  assert.match(shell, /WriterCandidateSheet/);
+  assert.match(shell, /writer-canvas-stage/);
   assert.match(shell, /writer-canvas-tools|TechnicalDetailsDrawer/);
   // No double RSC navigation when clearing admission query params.
   assert.doesNotMatch(toast, /useRouter|from "next\/navigation".*useRouter|router\.replace\(/);
@@ -123,7 +123,7 @@ test("Phase 5: SSE client + approval card + held-open stream route", async () =>
   const approval = await source("components/writer-approval-card.tsx");
   const route = await source("app/api/writer-events/[tenantId]/[projectId]/route.ts");
   const shell = await source("components/writer-workbench-shell.tsx");
-  const candidate = await source("components/writer-candidate-sheet.tsx");
+  const candidate = await source("components/writer-draft-block.tsx");
   const stream = await source("components/writer-run-stream.tsx");
   assert.match(sse, /EventSource/);
   assert.match(sse, /Last-Event-ID|after_event_id/);
@@ -134,11 +134,11 @@ test("Phase 5: SSE client + approval card + held-open stream route", async () =>
   assert.match(live, /proseOnCanvas|writer-result-summary/);
   assert.doesNotMatch(live, /WriterActivityTimeline/);
   assert.doesNotMatch(live, /ConnectionBanner/);
-  assert.match(candidate, /writer-candidate-sheet/);
+  assert.match(candidate, /writer-draft-block/);
   // Auto adoption + undo (conversation-first simplification): no manual adopt gate.
   assert.match(candidate, /Auto-adopt exactly once|autoAdoptRef/);
   assert.match(candidate, /undoAdoptionAction/);
-  assert.match(candidate, /撤回，不放进手稿|Undo — remove from manuscript/);
+  assert.match(candidate, /撤回|Undo/);
   assert.doesNotMatch(candidate, /采用为手稿/);
   assert.match(candidate, /revealArtifact/);
   assert.match(candidate, /splitCandidateParagraphs/);
@@ -153,7 +153,7 @@ test("Phase 5: SSE client + approval card + held-open stream route", async () =>
   assert.match(activities, /candidateReadyThreadBody/);
   assert.doesNotMatch(activities, /body:\s*draft\.content/);
   assert.match(stream, /WriterRunStreamProvider/);
-  assert.match(shell, /WriterCandidateSheet|WriterRunSessionProvider/);
+  assert.match(shell, /WriterRunSessionProvider/);
   assert.match(shell, /WriterHomeState|writer-home-state|data-home/);
   assert.match(shell, /WriterHomeOrTask/);
   assert.match(shell, /data-layout="conversation-first"/);

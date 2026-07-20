@@ -4,6 +4,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 
 export type WriterArtifactTab = "manuscript" | "structure" | "review" | "studio";
 export type WriterMobileView = "conversation" | "artifact";
+export type WriterSaveState = "idle" | "dirty" | "saving" | "saved";
+export type WriterSaveStatus = { state: WriterSaveState; at: number };
 
 type WriterWorkbenchContextValue = {
   activeTab: WriterArtifactTab;
@@ -19,6 +21,9 @@ type WriterWorkbenchContextValue = {
   clearArtifactBadge: () => void;
   /** Switch to artifact pane on phone and optionally show a badge. */
   revealArtifact: (options?: { badge?: boolean }) => void;
+  /** Latest manuscript edit save state, surfaced in the canvas header. */
+  saveStatus: WriterSaveStatus;
+  setSaveStatus: (state: WriterSaveState) => void;
 };
 
 const WriterWorkbenchContext = createContext<WriterWorkbenchContextValue | null>(null);
@@ -49,9 +54,13 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [mobileView, setMobileViewState] = useState<WriterMobileView>("conversation");
   const [artifactBadge, setArtifactBadge] = useState(false);
+  const [saveStatus, setSaveStatusState] = useState<WriterSaveStatus>({ state: "idle", at: 0 });
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const clearArtifactBadge = useCallback(() => setArtifactBadge(false), []);
+  const setSaveStatus = useCallback((state: WriterSaveState) => {
+    setSaveStatusState({ state, at: Date.now() });
+  }, []);
 
   useEffect(() => {
     setMobileViewState(readStoredMobileView());
@@ -111,6 +120,8 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       artifactBadge,
       clearArtifactBadge,
       revealArtifact,
+      saveStatus,
+      setSaveStatus,
     }),
     [
       activeTab,
@@ -122,6 +133,8 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       artifactBadge,
       clearArtifactBadge,
       revealArtifact,
+      saveStatus,
+      setSaveStatus,
     ],
   );
 

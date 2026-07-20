@@ -1,4 +1,5 @@
 import { ArchiveRestore, ArrowDown, ArrowUp, Check, FileClock, Play, Save, Trash2, X } from "lucide-react";
+import type { ReactNode } from "react";
 
 import type {
   AssetProposal, BookPlan, Chapter, DedupPattern, DistillationSettings, DraftReviewList, ExportRecord,
@@ -17,6 +18,7 @@ import { SubmitButton } from "./submit-button";
 import type { PendingRevision } from "./writer-manuscript-editor";
 import { ActionToast } from "./writer-action-toast";
 import { WriterArtifactTabChrome, WriterArtifactTabs } from "./writer-artifact-tabs";
+import { WriterCanvasStatus } from "./writer-canvas-status";
 import { WriterChapterSwitcher } from "./writer-chapter-switcher";
 import { WriterManuscriptFlow } from "./writer-manuscript-flow";
 
@@ -47,6 +49,8 @@ export type WriterProductWorkspaceProps = {
   actionStatus: { status: string; code: string } | null;
   localDraft?: string | null;
   pendingRevision?: PendingRevision | null;
+  /** Live draft ghost rendered at the end of the manuscript paper. */
+  draftBlock?: ReactNode;
   chapters: WriterWebResult<Chapter[]>;
   scenes: WriterWebResult<Scene[]>;
   chapterVersions: WriterWebResult<WritingVersion[]>;
@@ -98,15 +102,18 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
           />
         </div>
         <WriterArtifactTabChrome locale={props.locale} />
-        <p className="writer-canvas-meta" aria-label={tx(props.locale, "稿件统计", "Manuscript stats")}>
-          <span>
-            {flowWordCount || wordCount} <Bi zh="字" en="words" />
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>
-            {flowSectionCount} <Bi zh="片段" en="sections" />
-          </span>
-        </p>
+        <div className="writer-canvas-head-side">
+          <WriterCanvasStatus locale={props.locale} />
+          <p className="writer-canvas-meta" aria-label={tx(props.locale, "稿件统计", "Manuscript stats")}>
+            <span>
+              {flowWordCount || wordCount} <Bi zh="字" en="words" />
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {flowSectionCount} <Bi zh="片段" en="sections" />
+            </span>
+          </p>
+        </div>
       </header>
       <div className="writer-canvas-body">
         {props.actionStatus ? <ActionToast code={props.actionStatus.code} locale={props.locale} status={props.actionStatus.status} /> : null}
@@ -130,6 +137,7 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
               blocks={props.blocks}
               blockVersions={props.blockVersions}
               chapters={props.chapters}
+              draftBlock={props.draftBlock}
               locale={props.locale}
               localDraft={props.localDraft}
               pendingRevision={props.pendingRevision}
