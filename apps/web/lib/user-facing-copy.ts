@@ -67,7 +67,7 @@ const FAILURE_MESSAGES: Record<string, [string, string]> = {
   HTTP_400: ["请求无效，请检查章节/场景是否仍存在。", "Invalid request. Check that the chapter or scene still exists."],
   HTTP_401: ["请先登录后再试。", "Sign in and try again."],
   HTTP_403: ["你没有权限执行此操作。", "You do not have permission for this action."],
-  HTTP_404: ["找不到对应的章节、场景或正文块。", "Chapter, scene, or manuscript block was not found."],
+  HTTP_404: ["找不到对应的章节、场景或片段。", "Chapter, scene, or manuscript section was not found."],
   HTTP_409: ["正文版本冲突，请刷新后重试。", "Manuscript version conflict. Refresh and try again."],
   HTTP_500: ["服务内部错误，请稍后重试。", "Internal service error. Try again shortly."],
   HTTP_502: ["上游服务暂不可用，请稍后重试。", "Upstream service is temporarily unavailable. Try again shortly."],

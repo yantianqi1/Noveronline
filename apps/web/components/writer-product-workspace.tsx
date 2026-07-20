@@ -1,4 +1,4 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, Check, FileClock, ListRestart, Play, Save, Trash2, X } from "lucide-react";
+import { ArchiveRestore, ArrowDown, ArrowUp, Check, FileClock, Play, Save, Trash2, X } from "lucide-react";
 
 import type {
   AssetProposal, BookPlan, Chapter, DedupPattern, DistillationSettings, DraftReviewList, ExportRecord,
@@ -11,14 +11,14 @@ import {
   manuscriptCommandLabel,
   planningRunLabel,
 } from "../lib/writer-command-labels";
-import { humanizeFailure } from "../lib/user-facing-copy";
 import { Bi, StatusValue } from "./bilingual-text";
 import { ConfirmSubmitButton } from "./confirm-submit-button";
 import { SubmitButton } from "./submit-button";
 import type { PendingRevision } from "./writer-manuscript-editor";
-import { WriterArtifactTabs } from "./writer-artifact-tabs";
+import { ActionToast } from "./writer-action-toast";
+import { WriterArtifactTabChrome, WriterArtifactTabs } from "./writer-artifact-tabs";
 import { WriterChapterSwitcher } from "./writer-chapter-switcher";
-import { WriterManuscriptPanelClient } from "./writer-manuscript-panel-client";
+import { WriterManuscriptFlow } from "./writer-manuscript-flow";
 
 type Action = (formData: FormData) => Promise<void>;
 type Actions = {
@@ -57,6 +57,8 @@ export type WriterProductWorkspaceProps = {
   lexicon: WriterWebResult<ForbiddenEntry[]>;
   reviews: WriterWebResult<DraftReviewList>;
   blocks: WriterWebResult<ManuscriptBlock[]>;
+  /** Private prose for the current chapter flow (ordered, capped). */
+  blockContents?: PrivateManuscriptBlock[];
   selectedBlock: WriterWebResult<PrivateManuscriptBlock | null>;
   blockVersions: WriterWebResult<ManuscriptVersion[]>;
   dedupPatterns: WriterWebResult<DedupPattern[]>;
@@ -74,35 +76,72 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
   const wordCount = props.blocks.ok
     ? props.blocks.value.reduce((sum, block) => sum + (block.word_count ?? 0), 0)
     : 0;
+  const flowWordCount = (props.blockContents ?? []).reduce(
+    (sum, block) => sum + (block.word_count ?? 0),
+    0,
+  );
+  const flowSectionCount = props.blockContents?.length ?? blockCount;
+
   return (
     <div className="writer-product-modules writer-artifact-workspace" data-nav="conversation-first">
       <header className="writer-canvas-head">
-        <WriterChapterSwitcher
-          chapters={props.chapters}
-          locale={props.locale}
-          projectId={props.projectId}
-          scenes={props.scenes}
-          selectedChapterId={props.selectedChapterId}
-          selectedDraftId={props.selectedDraftId}
-          selectedSceneId={props.selectedSceneId}
-          tenantSlug={props.tenantSlug}
-        />
-        <div className="writer-canvas-meta">
-          <span>
-            {wordCount} <Bi zh="字" en="words" />
-          </span>
-          <span>
-            {blockCount} <Bi zh="段" en="blocks" />
-          </span>
+        <div className="writer-canvas-head-primary">
+          <WriterChapterSwitcher
+            chapters={props.chapters}
+            locale={props.locale}
+            projectId={props.projectId}
+            scenes={props.scenes}
+            selectedChapterId={props.selectedChapterId}
+            selectedDraftId={props.selectedDraftId}
+            selectedSceneId={props.selectedSceneId}
+            tenantSlug={props.tenantSlug}
+          />
         </div>
+        <WriterArtifactTabChrome locale={props.locale} />
+        <p className="writer-canvas-meta" aria-label={tx(props.locale, "稿件统计", "Manuscript stats")}>
+          <span>
+            {flowWordCount || wordCount} <Bi zh="字" en="words" />
+          </span>
+          <span aria-hidden="true">·</span>
+          <span>
+            {flowSectionCount} <Bi zh="片段" en="sections" />
+          </span>
+        </p>
       </header>
       <div className="writer-canvas-body">
-        {props.actionStatus ? <ActionStatus locale={props.locale} value={props.actionStatus} /> : null}
+        {props.actionStatus ? <ActionToast code={props.actionStatus.code} locale={props.locale} status={props.actionStatus.status} /> : null}
         <WriterArtifactTabs
-          hideChrome
+          chromeInHeader
           locale={props.locale}
           manuscript={
-            <ManuscriptPanel {...props} />
+            <WriterManuscriptFlow
+              actionStatus={props.actionStatus}
+              actions={{
+                createBlock: props.actions.createBlock,
+                updateBlock: props.actions.updateBlock,
+                deleteBlock: props.actions.deleteBlock,
+                reorderBlocks: props.actions.reorderBlocks,
+                moveBlock: props.actions.moveBlock,
+                tagBlock: props.actions.tagBlock,
+                restoreBlock: props.actions.restoreBlock,
+                reviseSelection: props.actions.reviseSelection,
+              }}
+              blockContents={props.blockContents ?? []}
+              blocks={props.blocks}
+              blockVersions={props.blockVersions}
+              chapters={props.chapters}
+              locale={props.locale}
+              localDraft={props.localDraft}
+              pendingRevision={props.pendingRevision}
+              projectId={props.projectId}
+              scenes={props.scenes}
+              selectedBlock={props.selectedBlock}
+              selectedBlockId={props.selectedBlockId}
+              selectedChapterId={props.selectedChapterId}
+              selectedDraftId={props.selectedDraftId}
+              selectedSceneId={props.selectedSceneId}
+              tenantSlug={props.tenantSlug}
+            />
           }
           structure={
             <div className="writer-artifact-stack">
@@ -132,7 +171,7 @@ export function WriterProductWorkspaceLoading() {
   return (
     <div className="writer-product-modules writer-product-modules-loading" aria-hidden="true">
       <div className="writer-artifact-loading-tabs">
-        {["稿件", "章节", "审校", "工作室"].map((label) => <span key={label}>{label}</span>)}
+        {["稿件", "章节", "审校", "工具"].map((label) => <span key={label}>{label}</span>)}
       </div>
       <div className="writer-module-loading">
         <span>稿件</span>
@@ -176,7 +215,7 @@ function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
         <form action={props.actions.startDistillation} className="inline-action-form">
           {selectedBlockId ? <input name="blockId" type="hidden" value={selectedBlockId} /> : null}
           <SubmitButton
-            idleLabel={<><Play size={14} /><Bi zh="蒸馏所选正文块" en="Distill selected block" /></>}
+            idleLabel={<><Play size={14} /><Bi zh="蒸馏所选片段" en="Distill selected section" /></>}
             pendingLabel={<Bi zh="提交中…" en="Submitting…" />}
             disabled={!selectedBlockId}
           />
@@ -427,147 +466,6 @@ function PlanningPanel(props: WriterProductWorkspaceProps) {
   );
 }
 
-function ManuscriptPanel(props: WriterProductWorkspaceProps) {
-  const { locale, selectedBlock } = props;
-  const hasBlocks = props.blocks.ok && props.blocks.value.length > 0;
-  const hasSelectedBlock = selectedBlock.ok && selectedBlock.value;
-
-  // Conversation-first empty canvas: quiet placeholder (doc 36 demo), not a long-form admin empty state.
-  if (!hasSelectedBlock && !hasBlocks) {
-    return (
-      <section
-        aria-labelledby="manuscript-workspace-heading"
-        className="writer-prose-panel writer-canvas-empty-panel"
-        data-manuscript-empty="true"
-      >
-        <h2 className="sr-only" id="manuscript-workspace-heading">
-          <Bi zh="手稿正文" en="Manuscript prose" />
-        </h2>
-        <div className="writer-canvas-empty">
-          <span aria-hidden="true" className="writer-canvas-empty-ico">
-            ✦
-          </span>
-          <p>
-            <Bi zh="产物会出现在这里" en="Artifacts will appear here" />
-          </p>
-          <p className="form-hint">
-            <Bi
-              zh="在右侧对话里起草，或新建空白正文自己写。"
-              en="Draft in the conversation on the right, or create a blank block to write by hand."
-            />
-          </p>
-          <form action={props.actions.createBlock} className="writer-create-block-form">
-            <input name="chapterId" type="hidden" value={props.selectedChapterId} />
-            <input name="sceneId" type="hidden" value={props.selectedSceneId} />
-            <button type="submit">
-              <Save size={14} />
-              <Bi zh="新建空白正文块" en="New blank manuscript block" />
-            </button>
-          </form>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="panel writer-prose-panel" aria-labelledby="manuscript-workspace-heading">
-      <p className="eyebrow"><Bi zh="正文" en="Manuscript" /></p>
-      <h2 id="manuscript-workspace-heading"><Bi zh="手稿正文" en="Manuscript prose" /></h2>
-      {hasSelectedBlock && selectedBlock.value ? (
-        <div className="writer-prose-editor compact-action-list">
-          {/* TipTap editor hydrates client-side; hidden textarea name="content" remains the form source (PE). */}
-          <WriterManuscriptPanelClient
-            locale={locale}
-            blockId={selectedBlock.value.block_id}
-            expectedVersion={selectedBlock.value.version}
-            content={selectedBlock.value.content_text}
-            status={selectedBlock.value.status}
-            chapterId={selectedBlock.value.chapter_id ?? props.selectedChapterId}
-            sceneId={selectedBlock.value.scene_id ?? props.selectedSceneId}
-            updateBlockAction={props.actions.updateBlock}
-            createBlockAction={props.actions.createBlock}
-            reviseAction={props.actions.reviseSelection}
-            pendingRevision={props.pendingRevision ?? null}
-            conflictLocalDraft={props.localDraft ?? null}
-            workspaceStatus={props.actionStatus?.status ?? null}
-            workspaceCode={props.actionStatus?.code ?? null}
-          />
-          {/* No-JS / pre-hydrate progressive enhancement: plain form still posts content + expectedVersion. */}
-          <noscript>
-            <form action={props.actions.updateBlock} className="binding-form writer-prose-form">
-              <input name="blockId" type="hidden" value={selectedBlock.value.block_id} />
-              <input name="expectedVersion" type="hidden" value={selectedBlock.value.version} />
-              <textarea
-                name="content"
-                className="writer-prose-textarea"
-                defaultValue={selectedBlock.value.content_text}
-                rows={16}
-                aria-label={tx(locale, "手稿正文", "Manuscript prose")}
-              />
-              <div className="writer-prose-toolbar">
-                <ManuscriptStatusSelect locale={locale} name="status" defaultValue={selectedBlock.value.status} />
-                <button data-tone="primary" type="submit"><Save size={14} /><Bi zh="保存正文" en="Save prose" /></button>
-              </div>
-            </form>
-          </noscript>
-          <details className="writer-module-group writer-block-advanced">
-            <summary><span><Bi zh="正文块管理" en="Block management" /></span><small><Bi zh="标签、移动、版本" en="Tags, move, versions" /></small></summary>
-            <div className="writer-module-content">
-        <form action={props.actions.tagBlock} className="inline-controls"><input name="blockId" type="hidden" value={selectedBlock.value.block_id} /><input name="expectedVersion" type="hidden" value={selectedBlock.value.version} /><input name="tags" defaultValue={selectedBlock.value.tags.join(",")} aria-label="Manuscript tags" /><button type="submit"><Save size={14} /><Bi zh="保存标签" en="Save tags" /></button></form>
-        <form action={props.actions.moveBlock} className="binding-form">
-          <input name="blockId" type="hidden" value={selectedBlock.value.block_id} />
-          <input name="expectedVersion" type="hidden" value={selectedBlock.value.version} />
-          <label htmlFor="move-block-chapter"><Bi zh="目标章节" en="Target chapter" /></label>
-          <ChapterSelect id="move-block-chapter" locale={locale} chapters={props.chapters} name="chapterId" selectedId={selectedBlock.value.chapter_id ?? props.selectedChapterId} />
-          <label htmlFor="move-block-scene"><Bi zh="目标场景" en="Target scene" /></label>
-          <SceneSelect id="move-block-scene" locale={locale} name="sceneId" scenes={props.scenes} selectedId={selectedBlock.value.scene_id ?? props.selectedSceneId} />
-          <button type="submit"><ListRestart size={14} /><Bi zh="移动正文块" en="Move block" /></button>
-        </form>
-        <DeleteForm action={props.actions.deleteBlock} idName="blockId" id={selectedBlock.value.block_id} version={selectedBlock.value.version} label={tx(locale, "归档正文块", "Archive block")} />
-        <ResultBoundary locale={locale} result={props.blockVersions} empty={tx(locale, "暂无版本。", "No versions.")} render={(versions) => <div className="compact-action-list">{versions.map((version) => <form action={props.actions.restoreBlock} className="inline-controls" key={version.version_id}><input name="blockId" type="hidden" value={selectedBlock.value?.block_id} /><input name="versionId" type="hidden" value={version.version_id} /><input name="expectedVersion" type="hidden" value={selectedBlock.value?.version} /><span>v{version.version_number} / {version.snapshot_reason}</span><button type="submit"><ArchiveRestore size={14} /><Bi zh="恢复" en="Restore" /></button></form>)}</div>} />
-            </div>
-          </details>
-        </div>
-      ) : (
-        <div className="writer-manuscript-empty" data-manuscript-empty="true">
-          <p className="form-hint">
-            <Bi
-              zh="选择左侧正文块继续编辑，或新建空白正文块。"
-              en="Select a manuscript block to keep editing, or create a blank block."
-            />
-          </p>
-        </div>
-      )}
-      <form action={props.actions.createBlock} className="binding-form writer-create-block-form">
-        <input name="chapterId" type="hidden" value={props.selectedChapterId} />
-        <input name="sceneId" type="hidden" value={props.selectedSceneId} />
-        <button data-tone="primary" type="submit"><Save size={14} /><Bi zh="新建空白正文块" en="New blank manuscript block" /></button>
-      </form>
-      {hasBlocks ? (
-        <>
-          <h3><Bi zh="正文块" en="Blocks" /></h3>
-          <ResultBoundary locale={locale} result={props.blocks} empty={tx(locale, "暂无正文块。", "No manuscript blocks.")} render={(items) => <div className="compact-action-list writer-block-list">
-            {items.map((block, index) => {
-              const orderedBlockItems = items.map((item) => `${item.block_id}:${item.version}`);
-              return (
-                <article className={`tool-result-item ${props.selectedBlockId === block.block_id ? "is-selected" : ""}`} key={block.block_id}>
-                  <div className="inline-controls">
-                    <BlockNavigateForm props={props} blockId={block.block_id} label={<strong>#{block.block_order}</strong>} />
-                    <ReorderButton action={props.actions.reorderBlocks} ariaLabel={tx(locale, "上移正文块", "Move block up")} direction={-1} disabled={index <= 0} orderedBlockItems={reorderedIds(orderedBlockItems, index, -1)} />
-                    <ReorderButton action={props.actions.reorderBlocks} ariaLabel={tx(locale, "下移正文块", "Move block down")} direction={1} disabled={index >= items.length - 1} orderedBlockItems={reorderedIds(orderedBlockItems, index, 1)} />
-                  </div>
-                  <span><StatusValue value={block.status} /> · {block.word_count} <Bi zh="字" en="words" /></span>
-                  <small>{block.tags.join(", ") || tx(locale, "无标签", "no tags")}</small>
-                </article>
-              );
-            })}
-          </div>} />
-        </>
-      ) : null}
-    </section>
-  );
-}
-
 function CommandDedupExportPanel(props: WriterProductWorkspaceProps) {
   const { locale } = props;
   const completedExport = props.exports.ok ? props.exports.value.find((item) => item.status === "completed" && item.export_id && item.artifact_sha256) : undefined;
@@ -584,7 +482,7 @@ function CommandDedupExportPanel(props: WriterProductWorkspaceProps) {
       <ChapterSelect id="writer-command-chapter" locale={locale} chapters={props.chapters} name="targetChapterId" selectedId={props.selectedChapterId} />
       <label htmlFor="writer-command-scene"><Bi zh="目标场景" en="Target scene" /></label>
       <SceneSelect id="writer-command-scene" locale={locale} name="targetSceneId" scenes={props.scenes} selectedId={props.selectedSceneId} />
-      <label htmlFor="writer-command-block"><Bi zh="目标正文块" en="Target block" /></label>
+      <label htmlFor="writer-command-block"><Bi zh="目标片段" en="Target section" /></label>
       <BlockSelect id="writer-command-block" blocks={props.blocks} locale={locale} name="targetBlockId" selectedId={props.selectedBlockId} />
       <button type="submit"><Play size={14} /><Bi zh="运行命令" en="Run command" /></button>
     </form>
@@ -593,10 +491,10 @@ function CommandDedupExportPanel(props: WriterProductWorkspaceProps) {
     <form action={props.actions.startDedup} className="binding-form">
       <label htmlFor="dedup-source-kind"><Bi zh="从已采纳正文提取" en="Extract from adopted manuscript" /></label>
       <select id="dedup-source-kind" name="sourceKind" defaultValue={props.selectedBlockId ? "block" : "chapter"}>
-        <option value="block">{tx(locale, "所选正文块", "Selected block")}</option>
+        <option value="block">{tx(locale, "所选片段", "Selected section")}</option>
         <option value="chapter">{tx(locale, "所选章节", "Selected chapter")}</option>
       </select>
-      <label htmlFor="dedup-block"><Bi zh="正文块" en="Block" /></label>
+      <label htmlFor="dedup-block"><Bi zh="片段" en="Section" /></label>
       <BlockSelect id="dedup-block" blocks={props.blocks} locale={locale} name="blockId" selectedId={props.selectedBlockId} />
       <label htmlFor="dedup-chapter"><Bi zh="章节" en="Chapter" /></label>
       <ChapterSelect id="dedup-chapter" locale={locale} chapters={props.chapters} name="chapterId" selectedId={props.selectedChapterId} />
@@ -620,21 +518,6 @@ function ResultBoundary<T>({ locale, result, empty, render }: { locale: Locale; 
 }
 
 function isEmptyReviewList(value: unknown) { return typeof value === "object" && value !== null && "reviews" in value && Array.isArray((value as { reviews: unknown[] }).reviews) && (value as { reviews: unknown[] }).reviews.length === 0; }
-function ActionStatus({ locale, value }: { locale: Locale; value: { status: string; code: string } }) {
-  const isConflict = value.code === "OPTIMISTIC_CONFLICT";
-  const errorText = isConflict
-    ? tx(locale, "正文版本冲突：本地草稿已保留，请在下方比较后处理。", "Manuscript version conflict: your local draft was kept. Resolve it in the compare panel below.")
-    : humanizeFailure(locale, value.code);
-  return (
-    <p
-      className={`form-status ${value.status === "error" ? "error-box" : "success-box"}`}
-      role="status"
-      data-workspace-code={value.code || undefined}
-    >
-      {value.status === "error" ? errorText : <Bi zh="操作已提交。" en="Action submitted." />}
-    </p>
-  );
-}
 function DeleteForm({ action, idName, id, version, label }: { action: Action; idName: string; id: string; version: number; label: string }) {
   return (
     <form action={action} className="inline-action-form">
@@ -732,22 +615,6 @@ function SceneNavigateForm({ chapterId, label, props, sceneId }: { chapterId: st
   );
 }
 
-function BlockNavigateForm({ blockId, label, props }: { blockId: string; label: React.ReactNode; props: WriterProductWorkspaceProps }) {
-  return (
-    <form action={writerHref(props)} className="inline-action-form" method="get">
-      <WriterSelectionFields
-        selectedBlockId={props.selectedBlockId}
-        selectedChapterId={props.selectedChapterId}
-        selectedCommandId={props.selectedCommandId}
-        selectedDraftId={props.selectedDraftId}
-        selectedSceneId={props.selectedSceneId}
-      />
-      <input name="blockId" type="hidden" value={blockId} />
-      <button type="submit">{label}</button>
-    </form>
-  );
-}
-
 function ReorderButton({ action, ariaLabel, direction, disabled, extraFields, orderedBlockItems, orderedIds }: { action: Action; ariaLabel: string; direction: -1 | 1; disabled: boolean; extraFields?: Record<string, string>; orderedBlockItems?: string[]; orderedIds?: string[] }) {
   return (
     <form action={action} className="inline-action-form">
@@ -756,19 +623,6 @@ function ReorderButton({ action, ariaLabel, direction, disabled, extraFields, or
       {orderedBlockItems?.map((item) => <input key={item} name="orderedBlockItems" type="hidden" value={item} />)}
       <button aria-label={ariaLabel} disabled={disabled} type="submit">{direction === -1 ? <ArrowUp size={14} /> : <ArrowDown size={14} />}</button>
     </form>
-  );
-}
-
-function ManuscriptStatusSelect({ defaultValue, locale, name }: { defaultValue: string; locale: Locale; name: string }) {
-  const options = [
-    { value: "active", zh: "进行中", en: "Active" },
-    { value: "draft", zh: "草稿", en: "Draft" },
-    { value: "archived", zh: "已归档", en: "Archived" },
-  ];
-  return (
-    <select aria-label={tx(locale, "状态", "Status")} defaultValue={defaultValue} name={name}>
-      {options.map((option) => <option key={option.value} value={option.value}>{tx(locale, option.zh, option.en)}</option>)}
-    </select>
   );
 }
 
@@ -798,12 +652,16 @@ function SceneSelect({ id, locale, name, scenes, selectedId }: { id: string; loc
 
 function BlockSelect({ blocks, id, locale, name, selectedId }: { blocks: WriterWebResult<ManuscriptBlock[]>; id: string; locale: Locale; name: string; selectedId: string }) {
   if (!blocks.ok || blocks.value.length === 0) {
-    return <select aria-label={tx(locale, "正文块", "Block")} disabled id={id} name={name}><option value="">{tx(locale, "暂无正文块", "No block")}</option></select>;
+    return <select aria-label={tx(locale, "片段", "Section")} disabled id={id} name={name}><option value="">{tx(locale, "暂无片段", "No section")}</option></select>;
   }
   return (
-    <select aria-label={tx(locale, "正文块", "Block")} defaultValue={selectedId || blocks.value[0]?.block_id} id={id} name={name}>
-      <option value="">{tx(locale, "不指定正文块", "No block")}</option>
-      {blocks.value.map((block) => <option key={block.block_id} value={block.block_id}>#{block.block_order} / {block.word_count} {tx(locale, "字", "words")}</option>)}
+    <select aria-label={tx(locale, "片段", "Section")} defaultValue={selectedId || blocks.value[0]?.block_id} id={id} name={name}>
+      <option value="">{tx(locale, "不指定片段", "No section")}</option>
+      {blocks.value.map((block) => (
+        <option key={block.block_id} value={block.block_id}>
+          {tx(locale, `片段 ${block.block_order}`, `Section ${block.block_order}`)} / {block.word_count} {tx(locale, "字", "words")}
+        </option>
+      ))}
     </select>
   );
 }

@@ -26,6 +26,6 @@ test("viewer DOM omits mutation and private content controls by capability", asy
 test("asset detail has stable responsive dimensions", async () => {
   const css = await file("components/asset-detail-shell.module.css");
   assert.match(css, /grid-template-columns:minmax\(0,1\.55fr\)/);
-  assert.match(css, /@media\(max-width:850px\)/);
+  assert.match(css, /@media\(max-width:860px\)/);
   assert.match(css, /@media\(max-width:430px\)/);
 });

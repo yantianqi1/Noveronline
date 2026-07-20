@@ -81,7 +81,7 @@ export function WriterStructureNav(props: WriterStructureNavProps) {
         </div>
         <div className="writer-structure-group">
           <p className="writer-structure-group-title">
-            <FileText aria-hidden="true" size={13} /><Bi zh="正文块" en="Manuscript" /><span>{blockCount}</span>
+            <FileText aria-hidden="true" size={13} /><Bi zh="片段" en="Sections" /><span>{blockCount}</span>
           </p>
           {blocks.ok && blocks.value.length > 0 ? (
             <ul className="writer-structure-list">
@@ -101,7 +101,7 @@ export function WriterStructureNav(props: WriterStructureNavProps) {
             </ul>
           ) : (
             <p className="form-hint writer-structure-empty">
-              <Bi zh="暂无正文块。采用草稿后出现。" en="No blocks yet. Adopt a draft to populate." />
+              <Bi zh="暂无片段。采用草稿后出现。" en="No sections yet. Adopt a draft to populate." />
             </p>
           )}
         </div>

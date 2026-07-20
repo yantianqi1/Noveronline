@@ -32,7 +32,9 @@ test("Phase 2: TipTap manuscript editor + PE textarea name=content", async () =>
   assert.match(panel, /name="content"/);
   assert.match(panel, /updateBlockAction/);
   assert.match(panel, /expectedVersion/);
-  assert.match(product, /WriterManuscriptPanelClient/);
+  const flow = await source("components/writer-manuscript-flow.tsx");
+  assert.match(product, /WriterManuscriptFlow/);
+  assert.match(flow, /WriterManuscriptPanelClient/);
   assert.match(product, /reviseSelection/);
 });
 

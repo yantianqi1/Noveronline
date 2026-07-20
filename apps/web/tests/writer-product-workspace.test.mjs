@@ -73,20 +73,27 @@ test("writer empty project bootstrap does not require upload or seed", async () 
   assert.doesNotMatch(workspace, /必须先上传|must upload before/i);
 });
 
-test("writer manuscript empty state explains blocks and create falls back on stale chapter", async () => {
-  const [workspace, page, copy] = await Promise.all([
+test("writer manuscript empty state explains sections and create falls back on stale chapter", async () => {
+  const [workspace, flow, page, copy] = await Promise.all([
     source("components/writer-product-workspace.tsx"),
+    source("components/writer-manuscript-flow.tsx"),
     source("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx"),
     source("lib/user-facing-copy.ts"),
   ]);
-  assert.match(workspace, /data-manuscript-empty/);
-  assert.match(workspace, /产物会出现在这里|Artifacts will appear here/);
-  assert.match(workspace, /新建空白正文块|New blank manuscript block/);
-  assert.match(workspace, /humanizeFailure/);
+  assert.match(workspace, /WriterManuscriptFlow/);
+  assert.match(flow, /data-manuscript-empty/);
+  assert.match(flow, /data-manuscript-flow/);
+  assert.match(flow, /这一章还没有正文|This chapter has no prose yet/);
+  assert.match(flow, /开始写这一章|Start writing this chapter/);
+  assert.match(flow, /添加空白片段|Add blank section/);
+  assert.match(workspace, /ActionToast/);
+  const toast = await source("components/writer-action-toast.tsx");
+  assert.match(toast, /humanizeFailure/);
   assert.match(page, /createBlockAction/);
   assert.match(page, /NOT_FOUND|HTTP_404/);
   assert.match(page, /chapter_id:\s*""/);
   assert.match(page, /humanizeFailure/);
+  assert.match(page, /pickChapterFlowBlocks|MANUSCRIPT_FLOW_CONTENT_LIMIT|getPrivateBlock/);
   assert.match(copy, /MODULE_BINDING_MISSING|LLM_MODULE_BINDING_MISSING|MODULE_NOT_BOUND/);
   assert.match(copy, /WRITER_WORKSPACE_UNAVAILABLE/);
 });
@@ -111,12 +118,14 @@ test("writer artifact views are mutually exclusive and the obsolete long-page la
     source("app/workbench-polish.css"),
   ]);
   assert.match(workspace, /WriterArtifactTabs/);
-  assert.match(workspace, /hideChrome/);
+  assert.match(workspace, /WriterArtifactTabChrome/);
+  assert.match(workspace, /chromeInHeader/);
   assert.match(workspace, /WriterChapterSwitcher/);
   assert.match(tabs, /role="tablist"/);
   assert.match(tabs, /role="tab"/);
   assert.match(tabs, /role="tabpanel"/);
-  assert.match(tabs, /hideChrome/);
+  assert.match(tabs, /WriterArtifactTabChrome/);
+  assert.match(tabs, /chromeInHeader/);
   assert.match(tabs, /aria-selected=\{selected\}/);
   assert.match(tabs, /hidden=\{activeTab !== tab\.id\}/);
   assert.match(polish, /\.writer-agent-layout/);

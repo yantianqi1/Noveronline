@@ -100,7 +100,7 @@ env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest 
 ## 前端退役边界
 
 - `apps/web/` 是唯一前端代码和唯一 Web 构建上下文。
-- Writer 必须保持 **manuscript-primary（手稿主导）**：主画布是稿件工作区（`manuscript` / `structure` / `review` / `studio` 四类 artifact tabs），Writer Agent 作为**常驻协作者**位于右侧 dock（连续 thread + 常驻 composer + 选区驱动调用），而非占据半屏。当前结构：`writer-agent-layout[data-layout="manuscript-primary"]` 包含 `writer-artifact-canvas`（主导主区）与 `writer-agent-dock`（常驻副区）。
+- Writer 保持 **产物主导（manuscript-primary 原则）+ conversation-first IA**：主画布是连续稿件文档（章节内片段按序渲染，选中片段就地编辑），画布头可见视图切换（稿件 / 章节 / 审校 / 工具），Writer Agent 作为**常驻协作者**位于右侧 dock（连续 thread + 常驻 composer + 选区驱动调用），而非占据半屏。当前结构：`writer-agent-layout[data-layout="conversation-first"]` 包含 `writer-artifact-canvas`（主导主区）与 `writer-agent-dock`（常驻副区）。
 - 旧蓝色 Vite UI、旧蓝色 Writer 长页截图、`writer-studio-grid`、折叠 composer 和深色 `writer-agent-rail` 均已退役，不得恢复或作为验收基线。
 - `docs/plans/` 与 `docs/superpowers/` 中指向旧 `frontend/` 的内容只是历史记录，不是待执行任务。
 

@@ -14,8 +14,11 @@ type WriterArtifactTabsProps = {
   structure: ReactNode;
   review: ReactNode;
   studio: ReactNode;
-  /** Hide the tab chrome; panels stay for ⌘K / setActiveTab (doc 36 W4). */
-  hideChrome?: boolean;
+  /**
+   * When true, the in-panel tablist is hidden because chrome lives in the
+   * canvas header via WriterArtifactTabChrome.
+   */
+  chromeInHeader?: boolean;
 };
 
 const tabIcons = {
@@ -25,52 +28,118 @@ const tabIcons = {
   studio: SlidersHorizontal,
 } satisfies Record<ArtifactTab, typeof BookOpenText>;
 
-export function WriterArtifactTabs(props: WriterArtifactTabsProps) {
+function tabLabel(locale: Locale, id: ArtifactTab) {
+  if (locale === "zh-CN") {
+    return (
+      {
+        manuscript: "稿件",
+        structure: "章节",
+        review: "审校",
+        studio: "工具",
+      } as const
+    )[id];
+  }
+  return (
+    {
+      manuscript: "Manuscript",
+      structure: "Structure",
+      review: "Review",
+      studio: "Tools",
+    } as const
+  )[id];
+}
+
+function useArtifactTabState() {
   const workbench = useWriterWorkbench();
   const [localTab, setLocalTab] = useState<ArtifactTab>("manuscript");
-  // Prefer shared workbench state so the ⌘K palette can drive tabs; fall back to local state standalone.
   const activeTab = workbench ? workbench.activeTab : localTab;
   const setActiveTab = workbench ? workbench.setActiveTab : setLocalTab;
+  return { activeTab, setActiveTab };
+}
+
+/** Compact segmented control for the canvas header. */
+export function WriterArtifactTabChrome({ locale }: { locale: Locale }) {
+  const { activeTab, setActiveTab } = useArtifactTabState();
   const groupId = useId();
-  const hideChrome = props.hideChrome === true;
+  const tabs: ArtifactTab[] = ["manuscript", "structure", "review", "studio"];
+
+  return (
+    <div
+      aria-label={locale === "zh-CN" ? "稿件视图" : "Artifact views"}
+      className="writer-artifact-tabchrome"
+      data-chrome="header"
+      role="tablist"
+    >
+      {tabs.map((id) => {
+        const Icon = tabIcons[id];
+        const selected = activeTab === id;
+        return (
+          <button
+            aria-controls={`${groupId}-${id}-panel`}
+            aria-selected={selected}
+            className="writer-artifact-tabchrome-tab"
+            id={`${groupId}-${id}-tab`}
+            key={id}
+            onClick={() => setActiveTab(id)}
+            role="tab"
+            type="button"
+          >
+            <Icon aria-hidden="true" size={14} strokeWidth={1.8} />
+            <span>{tabLabel(locale, id)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export function WriterArtifactTabs(props: WriterArtifactTabsProps) {
+  const { activeTab, setActiveTab } = useArtifactTabState();
+  const groupId = useId();
+  const chromeInHeader = props.chromeInHeader === true;
   const tabs: Array<{ id: ArtifactTab; label: string; content: ReactNode }> = [
-    { id: "manuscript", label: props.locale === "zh-CN" ? "稿件" : "Manuscript", content: props.manuscript },
-    { id: "structure", label: props.locale === "zh-CN" ? "章节" : "Structure", content: props.structure },
-    { id: "review", label: props.locale === "zh-CN" ? "审校" : "Review", content: props.review },
-    { id: "studio", label: props.locale === "zh-CN" ? "工作室" : "Studio", content: props.studio },
+    { id: "manuscript", label: tabLabel(props.locale, "manuscript"), content: props.manuscript },
+    { id: "structure", label: tabLabel(props.locale, "structure"), content: props.structure },
+    { id: "review", label: tabLabel(props.locale, "review"), content: props.review },
+    { id: "studio", label: tabLabel(props.locale, "studio"), content: props.studio },
   ];
 
   return (
-    <div className="writer-artifact-tabs" data-chrome={hideChrome ? "hidden" : "visible"}>
-      <div
-        aria-label={props.locale === "zh-CN" ? "稿件视图" : "Artifact views"}
-        className="writer-artifact-tablist"
-        hidden={hideChrome}
-        role="tablist"
-      >
-        {tabs.map((tab) => {
-          const Icon = tabIcons[tab.id];
-          const selected = activeTab === tab.id;
-          return (
-            <button
-              aria-controls={`${groupId}-${tab.id}-panel`}
-              aria-selected={selected}
-              className="writer-artifact-tab"
-              id={`${groupId}-${tab.id}-tab`}
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              role="tab"
-              type="button"
-            >
-              <Icon aria-hidden="true" size={16} strokeWidth={1.8} />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
+    <div
+      className="writer-artifact-tabs"
+      data-chrome={chromeInHeader ? "header" : "inline"}
+    >
+      {!chromeInHeader ? (
+        <div
+          aria-label={props.locale === "zh-CN" ? "稿件视图" : "Artifact views"}
+          className="writer-artifact-tablist"
+          role="tablist"
+        >
+          {tabs.map((tab) => {
+            const Icon = tabIcons[tab.id];
+            const selected = activeTab === tab.id;
+            return (
+              <button
+                aria-controls={`${groupId}-${tab.id}-panel`}
+                aria-selected={selected}
+                className="writer-artifact-tab"
+                id={`${groupId}-${tab.id}-tab`}
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                role="tab"
+                type="button"
+              >
+                <Icon aria-hidden="true" size={16} strokeWidth={1.8} />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       {tabs.map((tab) => (
         <section
-          aria-labelledby={`${groupId}-${tab.id}-tab`}
+          aria-label={chromeInHeader ? tab.label : undefined}
+          aria-labelledby={chromeInHeader ? undefined : `${groupId}-${tab.id}-tab`}
           className="writer-artifact-tabpanel"
           hidden={activeTab !== tab.id}
           id={`${groupId}-${tab.id}-panel`}

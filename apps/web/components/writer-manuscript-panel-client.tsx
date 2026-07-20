@@ -1,6 +1,6 @@
 "use client";
 
-import { Save } from "lucide-react";
+import { Check, Loader2, Save } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -27,11 +27,18 @@ type WriterManuscriptPanelClientProps = {
   workspaceCode?: string | null;
 };
 
+type SaveState = "idle" | "dirty" | "saving" | "saved";
+
+const AUTO_SAVE_DELAY_MS = 3000;
+
 /**
  * Client boundary for manuscript form + TipTap hydrate + revise selection + conflict recovery.
  *
  * Always renders `<textarea name="content">` as the progressive-enhancement form
  * source; TipTap (dynamic, ssr:false) mirrors into it when available.
+ *
+ * Auto-save: content changes trigger a debounced save after 3 s of inactivity.
+ * A compact indicator in the editor corner shows save state.
  */
 export function WriterManuscriptPanelClient({
   locale,
@@ -52,21 +59,28 @@ export function WriterManuscriptPanelClient({
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
   const peTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [revision, setRevision] = useState<PendingRevision | null>(pendingRevision);
-  const [statusValue, setStatusValue] = useState(status);
+  const [statusValue] = useState(status);
   const [enhanced, setEnhanced] = useState(false);
   const [liveContent, setLiveContent] = useState(content);
   const [localDraft, setLocalDraft] = useState(() => conflictLocalDraft ?? "");
   const [showConflict, setShowConflict] = useState(
     () => Boolean(conflictLocalDraft) && workspaceCode === "OPTIMISTIC_CONFLICT",
   );
+  const [saveState, setSaveState] = useState<SaveState>("idle");
 
   useEffect(() => {
     setRevision(pendingRevision);
   }, [pendingRevision]);
 
   useEffect(() => {
+    setEnhanced(true);
+  }, [blockId]);
+
+  useEffect(() => {
     setLiveContent(content);
+    setSaveState("idle");
     if (peTextareaRef.current && !showConflict) {
       peTextareaRef.current.value = content;
     }
@@ -96,9 +110,23 @@ export function WriterManuscriptPanelClient({
     }
   }, [blockId, conflictLocalDraft, workspaceCode, workspaceStatus]);
 
-  const requestSave = useCallback(() => {
-    formRef.current?.requestSubmit();
+  // Cleanup auto-save timer on unmount or block switch
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
+  }, [blockId]);
+
+  const doSave = useCallback(() => {
+    if (!formRef.current) return;
+    setSaveState("saving");
+    formRef.current.requestSubmit();
   }, []);
+
+  const requestSave = useCallback(() => {
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    doSave();
+  }, [doSave]);
 
   const handleContentChange = useCallback((text: string) => {
     setLiveContent(text);
@@ -106,12 +134,17 @@ export function WriterManuscriptPanelClient({
       peTextareaRef.current.value = text;
     }
     setEnhanced(true);
+    setSaveState("dirty");
     try {
       sessionStorage.setItem(localDraftStorageKey(blockId), text);
     } catch {
       // ignore
     }
-  }, [blockId]);
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      doSave();
+    }, AUTO_SAVE_DELAY_MS);
+  }, [blockId, doSave]);
 
   const handleRevise = useCallback(
     (payload: {
@@ -161,7 +194,6 @@ export function WriterManuscriptPanelClient({
   );
 
   const overwriteWithLocal = useCallback(() => {
-    // Force overwrite uses the server's current expected_version after conflict reload.
     submitBlockUpdate(localDraft, expectedVersion);
   }, [expectedVersion, localDraft, submitBlockUpdate]);
 
@@ -207,14 +239,17 @@ export function WriterManuscriptPanelClient({
       formData.set("localDraft", contentText);
       formData.set("expectedVersion", String(expectedVersion));
       formData.set("blockId", blockId);
+      formData.set("status", statusValue);
       try {
         sessionStorage.setItem(localDraftStorageKey(blockId), contentText);
       } catch {
         // ignore
       }
       await updateBlockAction(formData);
+      setSaveState("saved");
+      setTimeout(() => setSaveState("idle"), 2000);
     },
-    [blockId, expectedVersion, liveContent, updateBlockAction],
+    [blockId, expectedVersion, liveContent, statusValue, updateBlockAction],
   );
 
   const editorContent = showConflict && localDraft ? localDraft : liveContent;
@@ -231,8 +266,8 @@ export function WriterManuscriptPanelClient({
               </h3>
               <p className="form-hint">
                 <Bi
-                  zh="保存时版本已变化。请比较后选择覆盖、另存新块，或丢弃本地修改。"
-                  en="The block version changed while you were editing. Compare, then overwrite, save as a new block, or discard your local draft."
+                  zh="保存时版本已变化。请比较后选择覆盖、另存新片段，或丢弃本地修改。"
+                  en="The section version changed while you were editing. Compare, then overwrite, save as a new section, or discard your local draft."
                 />
               </p>
             </div>
@@ -254,7 +289,7 @@ export function WriterManuscriptPanelClient({
             </button>
             {createBlockAction ? (
               <button type="button" onClick={saveAsNewBlock}>
-                <Bi zh="另存为新正文块" en="Save as new block" />
+                <Bi zh="另存为新片段" en="Save as new section" />
               </button>
             ) : null}
             <button type="button" onClick={keepLocalInEditor}>
@@ -264,7 +299,6 @@ export function WriterManuscriptPanelClient({
               <Bi zh="丢弃本地草稿" en="Discard local draft" />
             </button>
           </div>
-          {/* Encoded draft retained for PE / no-JS recovery links if needed. */}
           <input type="hidden" name="localDraftEncoded" value={encodeLocalDraft(localDraft)} readOnly />
         </section>
       ) : null}
@@ -273,6 +307,19 @@ export function WriterManuscriptPanelClient({
         <input name="blockId" type="hidden" value={blockId} />
         <input name="expectedVersion" type="hidden" value={expectedVersion} />
         <input name="localDraft" type="hidden" value={editorContent} />
+        <input name="status" type="hidden" value={statusValue} />
+
+        <div className="writer-editor-save-indicator" data-save-state={saveState}>
+          {saveState === "saving" ? (
+            <><Loader2 size={13} className="writer-save-spin" /><Bi zh="保存中" en="Saving" /></>
+          ) : saveState === "saved" ? (
+            <><Check size={13} /><Bi zh="已保存" en="Saved" /></>
+          ) : saveState === "dirty" ? (
+            <button className="writer-save-btn" onClick={requestSave} title={tx(locale, "保存", "Save")} type="button">
+              <Save size={13} />
+            </button>
+          ) : null}
+        </div>
 
         <WriterManuscriptEditor
           locale={locale}
@@ -285,7 +332,6 @@ export function WriterManuscriptPanelClient({
           onRevisionResolved={() => setRevision(null)}
         />
 
-        {/* Form truth source — always present for PE / no-JS / pre-hydrate. */}
         <textarea
           ref={peTextareaRef}
           name="content"
@@ -295,22 +341,6 @@ export function WriterManuscriptPanelClient({
           aria-label={tx(locale, "手稿正文", "Manuscript prose")}
           data-pe-source="true"
         />
-
-        <div className="writer-prose-toolbar">
-          <select
-            aria-label={tx(locale, "状态", "Status")}
-            name="status"
-            value={statusValue}
-            onChange={(event) => setStatusValue(event.target.value)}
-          >
-            <option value="active">{tx(locale, "进行中", "Active")}</option>
-            <option value="deleted">{tx(locale, "已删除", "Deleted")}</option>
-          </select>
-          <button data-tone="primary" type="submit">
-            <Save size={14} />
-            <Bi zh="保存正文" en="Save prose" />
-          </button>
-        </div>
       </form>
     </div>
   );

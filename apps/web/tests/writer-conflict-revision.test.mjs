@@ -64,10 +64,11 @@ test("pendingRevisionFromWriterEvents maps writer.revision.proposed onto block c
 });
 
 test("CONN-006/007 writer wiring preserves localDraft and pendingRevision", async () => {
-  const [page, panel, product, css] = await Promise.all([
+  const [page, panel, product, flow, css] = await Promise.all([
     source("app/(app)/[tenantSlug]/projects/[projectId]/writer/page.tsx"),
     source("components/writer-manuscript-panel-client.tsx"),
     source("components/writer-product-workspace.tsx"),
+    source("components/writer-manuscript-flow.tsx"),
     source("app/workbench-polish.css"),
   ]);
   assert.match(page, /encodeLocalDraft|decodeLocalDraft/);
@@ -77,11 +78,13 @@ test("CONN-006/007 writer wiring preserves localDraft and pendingRevision", asyn
   assert.match(page, /OPTIMISTIC_CONFLICT/);
   assert.match(page, /content_text: contentText/);
   assert.match(panel, /writer-conflict-compare/);
-  assert.match(panel, /overwriteWithLocal|Save as new block|Discard local draft/);
+  assert.match(panel, /overwriteWithLocal|Save as new section|Discard local draft/);
   assert.match(panel, /createBlockAction/);
   assert.match(panel, /pendingRevision/);
+  assert.match(product, /WriterManuscriptFlow/);
   assert.match(product, /pendingRevision=\{props\.pendingRevision/);
-  assert.match(product, /conflictLocalDraft/);
-  assert.match(product, /OPTIMISTIC_CONFLICT/);
+  assert.match(flow, /conflictLocalDraft/);
+  const toast = await source("components/writer-action-toast.tsx");
+  assert.match(toast, /OPTIMISTIC_CONFLICT/);
   assert.match(css, /\.writer-conflict-compare/);
 });

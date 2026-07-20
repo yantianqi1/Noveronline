@@ -265,18 +265,21 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   const shell = await source("components/writer-workbench-shell.tsx");
   const polish = await source("app/workbench-polish.css");
   assert.match(product, /WriterArtifactTabs/);
-  assert.match(product, /hideChrome/);
+  assert.match(product, /WriterArtifactTabChrome/);
+  assert.match(product, /chromeInHeader/);
   assert.match(product, /WriterChapterSwitcher/);
+  assert.match(product, /WriterManuscriptFlow/);
   assert.match(product, /manuscript={/);
   assert.match(product, /structure={/);
   assert.match(product, /review={/);
   assert.match(product, /studio={/);
   assert.match(shell, /writer-agent-layout/);
-  assert.match(shell, /data-layout="conversation-first"|data-layout="manuscript-primary"/);
+  assert.match(shell, /data-layout="conversation-first"/);
   assert.match(shell, /writer-artifact-canvas/);
   assert.match(shell, /writer-agent-dock/);
   assert.match(shell, /data-has-structure="false"/);
   assert.doesNotMatch(shell, /writer-structure-rail/);
+  assert.doesNotMatch(shell, /structureNav/);
   assert.match(shell, /WriterAgentThread/);
   assert.match(shell, /WriterCandidateSheet/);
   const agentThread = await source("components/writer-agent-thread.tsx");
@@ -290,7 +293,7 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   assert.match(chapterSwitcher, /method="get"/);
   const structureNav = await source("components/writer-structure-nav.tsx");
   assert.match(structureNav, /WriterStructureNav/);
-  // ⌘K command palette drives the canvas panels via shared workbench context.
+  // Visible header tab chrome + ⌘K command palette drive canvas panels.
   assert.match(shell, /WriterCommandPalette/);
   assert.match(shell, /WriterWorkbenchProvider/);
   const palette = await source("components/writer-command-palette.tsx");
@@ -300,6 +303,12 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   assert.match(workbenchContext, /metaKey|ctrlKey/);
   const artifactTabs = await source("components/writer-artifact-tabs.tsx");
   assert.match(artifactTabs, /useWriterWorkbench/);
+  assert.match(artifactTabs, /WriterArtifactTabChrome/);
+  assert.match(polish, /\.writer-artifact-tabchrome/);
+  assert.match(polish, /\.writer-manuscript-flow/);
+  const manuscriptFlow = await source("components/writer-manuscript-flow.tsx");
+  assert.match(manuscriptFlow, /data-manuscript-flow/);
+  assert.match(manuscriptFlow, /添加空白片段|Add blank section/);
   // No page header strip: commands + technical details live in the canvas tools rail.
   assert.doesNotMatch(shell, /WorkspaceHeader|writer-breadcrumb|WriterRunStateChip|writer-sync-chip|writer-header/);
   assert.match(shell, /writer-canvas-tools/);
@@ -345,6 +354,8 @@ test("Wave B: Graph inspector is selection-first", async () => {
   assert.match(shell, /story-graph-stage/);
   assert.match(shell, /story-graph-floating-toolbar/);
   assert.match(shell, /story-graph-floating-inspector/);
+  assert.match(shell, /inspectorCollapsed|story-graph-inspector-collapse/);
+  assert.match(shell, /story-graph-inspector-reopen/);
   assert.doesNotMatch(shell, /story-graph-filter-rail/);
   assert.doesNotMatch(shell, /story-graph-explore-grid/);
 });
@@ -355,6 +366,7 @@ test("Story Graph explore is canvas-primary with floating chrome", async () => {
   assert.match(polish, /\.overview-root\.story-graph-root \.story-graph-stage[\s\S]*?width:\s*100%\s*!important/s);
   assert.match(styles, /\.story-graph-floating-toolbar/);
   assert.match(styles, /\.story-graph-floating-inspector/);
+  assert.match(styles, /\.story-graph-inspector-reopen/);
   assert.match(styles, /\.story-graph-floating-legend/);
   assert.doesNotMatch(polish, /story-graph-filter-rail/);
   assert.doesNotMatch(polish, /story-graph-explore-grid/);

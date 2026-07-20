@@ -5,7 +5,6 @@ import {
   WriterProductWorkspaceLoading,
   type WriterProductWorkspaceProps,
 } from "../../../../../../components/writer-product-workspace";
-import { WriterStructureNav, WriterStructureNavLoading } from "../../../../../../components/writer-structure-nav";
 import {
   decideWriterApproval,
   exportAgentTrace,
@@ -35,7 +34,7 @@ import {
   patchAssetDistillationSettings, reorderChapters, reorderManuscriptBlocks, reorderScenes, restoreManuscriptVersion, restoreOutline,
   getWriterPlanningRun, startBookPlanGeneration, startDedupExtraction, startDraftReview, startManuscriptAssetDistillation, startManuscriptCommand, tagManuscriptBlock, updateBookPlan, updateChapter,
   updateManuscriptBlock, updateReviewIssue, updateScene, upsertLexicon, upsertProjectPreset,
-  upsertTenantPreset, type WriterWebContext, type WriterWebResult, type WritingVersion,
+  upsertTenantPreset, type ManuscriptBlock, type PrivateManuscriptBlock, type WriterWebContext, type WriterWebResult, type WritingVersion,
 } from "../../../../../../lib/writer-workspace-api";
 import { manuscriptCommandKeyFromChoice } from "../../../../../../lib/writer-command-labels";
 import { decodeLocalDraft, encodeLocalDraft } from "../../../../../../lib/writer-local-draft";
@@ -641,20 +640,6 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       adoptDraftAction={adoptDraftAction}
       undoAdoptionAction={undoDraftAdoptionAction}
       cancelWriterRunAction={cancelWriterRunAction}
-      structureNav={
-        <Suspense fallback={<WriterStructureNavLoading />}>
-          <WriterStructureNavData
-            locale={locale}
-            projectId={projectId}
-            selectedBlockId={selectedBlockId}
-            selectedChapterId={selectedChapterId}
-            selectedDraftId={recoveredDraftId}
-            selectedSceneId={selectedSceneId}
-            tenantSlug={tenantSlug}
-            workspaceContext={workspaceContext}
-          />
-        </Suspense>
-      }
       productWorkspace={
         <Suspense fallback={<WriterProductWorkspaceLoading />}>
           <WriterProductWorkspaceData
@@ -708,22 +693,46 @@ type WriterProductWorkspaceDataProps = Pick<
   workspaceContext: WriterWebContext;
 };
 
+const MANUSCRIPT_FLOW_CONTENT_LIMIT = 20;
+
 async function WriterProductWorkspaceData({
   selectedPlanningRunId,
   workflowEvents,
   workspaceContext,
   ...props
 }: WriterProductWorkspaceDataProps) {
-  const [chapters, scenes, chapterVersions, sceneVersions, outlines, bookPlans, presets, lexicon, reviews, blocks, selectedBlock, blockVersions, dedupPatterns, command, exports, planningRun, proposals, distillationSettings] = await Promise.all([
-    listChapters(workspaceContext), listScenes(workspaceContext, props.selectedChapterId),
-    props.selectedChapterId ? listChapterVersions(workspaceContext, props.selectedChapterId) : emptyResult<WritingVersion>(),
-    props.selectedSceneId ? listSceneVersions(workspaceContext, props.selectedSceneId) : emptyResult<WritingVersion>(),
+  const [chapters, blocks, outlines, bookPlans, presets, lexicon, reviews, dedupPatterns, command, exports, planningRun, proposals, distillationSettings] = await Promise.all([
+    listChapters(workspaceContext),
+    listManuscriptBlocks(workspaceContext, true),
     listOutlines(workspaceContext), listBookPlans(workspaceContext), listPresets(workspaceContext), listLexicon(workspaceContext),
-    listDraftReviews(workspaceContext, props.selectedDraftId), listManuscriptBlocks(workspaceContext, true),
-    getPrivateBlock(workspaceContext, props.selectedBlockId), listManuscriptVersions(workspaceContext, props.selectedBlockId),
+    listDraftReviews(workspaceContext, props.selectedDraftId),
     listDedupPatterns(workspaceContext), getManuscriptCommand(workspaceContext, props.selectedCommandId), listWorkspaceExports(workspaceContext), getWriterPlanningRun(workspaceContext, selectedPlanningRunId),
     listAssetProposals(workspaceContext, "pending"), getAssetDistillationSettings(workspaceContext),
   ]);
+
+  const effectiveChapterId =
+    props.selectedChapterId
+    || (chapters.ok && chapters.value[0] ? chapters.value[0].chapter_id : "");
+
+  const chapterBlocks = pickChapterFlowBlocks(blocks, effectiveChapterId);
+  const effectiveBlockId =
+    props.selectedBlockId
+    || (chapterBlocks[0]?.block_id ?? "");
+
+  const [scenes, chapterVersions, sceneVersions, selectedBlock, blockVersions, privateResults] = await Promise.all([
+    listScenes(workspaceContext, effectiveChapterId),
+    effectiveChapterId ? listChapterVersions(workspaceContext, effectiveChapterId) : emptyResult<WritingVersion>(),
+    props.selectedSceneId ? listSceneVersions(workspaceContext, props.selectedSceneId) : emptyResult<WritingVersion>(),
+    getPrivateBlock(workspaceContext, effectiveBlockId),
+    listManuscriptVersions(workspaceContext, effectiveBlockId),
+    Promise.all(chapterBlocks.map((block) => getPrivateBlock(workspaceContext, block.block_id))),
+  ]);
+
+  const blockContents: PrivateManuscriptBlock[] = chapterBlocks.map((meta, index) => {
+    const priv = privateResults[index];
+    if (priv?.ok && priv.value) return priv.value;
+    return { ...meta, content_text: "" };
+  });
 
   const pendingRevision =
     selectedBlock.ok && selectedBlock.value
@@ -737,6 +746,7 @@ async function WriterProductWorkspaceData({
   return (
     <WriterProductWorkspace
       {...props}
+      blockContents={blockContents}
       blocks={blocks}
       blockVersions={blockVersions}
       bookPlans={bookPlans}
@@ -756,48 +766,26 @@ async function WriterProductWorkspaceData({
       scenes={scenes}
       sceneVersions={sceneVersions}
       selectedBlock={selectedBlock}
+      selectedBlockId={effectiveBlockId}
+      selectedChapterId={effectiveChapterId}
     />
   );
 }
 
-async function WriterStructureNavData({
-  locale,
-  projectId,
-  selectedBlockId,
-  selectedChapterId,
-  selectedDraftId,
-  selectedSceneId,
-  tenantSlug,
-  workspaceContext,
-}: {
-  locale: Awaited<ReturnType<typeof currentRequestLocale>>;
-  projectId: string;
-  selectedBlockId: string;
-  selectedChapterId: string;
-  selectedDraftId: string;
-  selectedSceneId: string;
-  tenantSlug: string;
-  workspaceContext: WriterWebContext;
-}) {
-  const [chapters, scenes, blocks] = await Promise.all([
-    listChapters(workspaceContext),
-    listScenes(workspaceContext, selectedChapterId),
-    listManuscriptBlocks(workspaceContext, true),
-  ]);
-  return (
-    <WriterStructureNav
-      blocks={blocks}
-      chapters={chapters}
-      locale={locale}
-      projectId={projectId}
-      scenes={scenes}
-      selectedBlockId={selectedBlockId}
-      selectedChapterId={selectedChapterId}
-      selectedDraftId={selectedDraftId}
-      selectedSceneId={selectedSceneId}
-      tenantSlug={tenantSlug}
-    />
-  );
+function pickChapterFlowBlocks(
+  blocks: WriterWebResult<ManuscriptBlock[]>,
+  chapterId: string,
+): ManuscriptBlock[] {
+  if (!blocks.ok) return [];
+  return blocks.value
+    .filter((block) => block.status !== "deleted")
+    .filter((block) => {
+      if (chapterId) return (block.chapter_id ?? "") === chapterId;
+      return !block.chapter_id;
+    })
+    .slice()
+    .sort((a, b) => a.block_order - b.block_order)
+    .slice(0, MANUSCRIPT_FLOW_CONTENT_LIMIT);
 }
 
 function writerActionHeaders(context: Awaited<ReturnType<typeof webApiContext>>) {

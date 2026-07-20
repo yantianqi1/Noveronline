@@ -1,6 +1,6 @@
 # SaaS Current Development Progress
 
-更新时间：`2026-07-13`
+更新时间：`2026-07-19`
 
 ## 文档职责
 
@@ -64,6 +64,7 @@
 |---|---|
 | Seed upload/retry/reclaim/refresh | passed |
 | Story Graph 1010-node build/inspect/candidate/adoption | passed |
+| Story Graph 力导向交互画布（2026-07-19） | passed；`lib/story-graph-force.ts`（d3-force 实时物理：链接/斥力/碰撞/锚定，tick 直驱 SVG 不经 React 渲染）+ explore 画布重写（节点拖拽全图联动、滚轮以光标为中心缩放、空白平移、minimap 跳转、悬停/选中邻居高亮与非邻居淡出、聚类概览↔节点视图）。106 节点 / 42 边真实项目浏览器实测：拖拽期间 106/106 节点被物理牵动、viewBox 1424→836（173%）、minimap 重定位、搜索过滤 2/106 后复原、仿真期间 rAF ≈60fps；聚类标识 `type:*` / `network:asset:<uuid>` 已换为友好显示名；desktop 画布恢复墨色底（此前 transparent 使节点浮在纸色页面上）；工具栏 select 加 `max-width` 防长 option 撑爆 |
 | Asset detail/version/restore/collection/viewer privacy | passed |
 | Worldline -> Character -> Pi candidate | `1 passed, 0 failed`; desktop/mobile；零 pageerror/privacy finding |
 | Writer -> Reviewer -> adoption -> planning -> manuscript/export | 功能与隐私旅程原证据 `1 passed, 0 failed`, `18.8s`；book plan 保持 draft v2，dedup 保持 disabled candidate，artifact download/privacy passed。旧蓝色长页截图已撤销，不代表 Agent-first 视觉验收 |
@@ -75,6 +76,7 @@
 - `/tmp/mirofish-platform-browser-0013/platform-desktop.png` (`337425 B`)
 - `/tmp/mirofish-platform-browser-0013/platform-mobile.png` (`194598 B`)
 - `/tmp/mirofish-worldline-character-certification/` 下四张 Worldline/Character desktop/mobile 截图
+- `/tmp/mirofish-story-graph-certification/story-graph-desktop-verify.png` 与 `story-graph-zoomed-verify.png`（力导向画布全景与 173% 聚焦高亮态）
 
 旧 Writer 蓝色长页截图目录已删除并撤销；新 Agent-first Writer 必须生成 fresh desktop/mobile browser evidence 后才能恢复视觉认证。
 
@@ -174,17 +176,18 @@ Synthetic inspect/plan/apply/verify/rollback 与 MinIO version ownership 已通�
 
 **Phase 2–6 完整实现蓝图见 `30-writer-agentification-and-editor-plan.md`**（编辑器方向已定为 TipTap + PE 回退 + 动态加载；含前后端工作流、组件与视觉规范、验收策略）。用户指示：先落方案文档、后续全按推荐的美观方案开发、后端可较大改动、唯一要求是效果要好。
 
-**设计原则调和（2026-07-13）**：原「Agent-first（thread 占主区）」重新定义为 **manuscript-primary（手稿主导）+ 常驻 Agent dock**。手稿工作区是主导画布；Writer Agent 作为常驻协作者（连续 thread + 常驻 composer + 选区驱动调用）位于右侧 dock，不占半屏。`CLAUDE.md` / `AGENTS.md` 已同步。退役基线不变：`writer-studio-grid`、`writer-agent-rail`、折叠 composer、旧蓝色长页不得恢复。
+**设计原则调和（2026-07-13 → 2026-07-19）**：原「Agent-first（thread 占主区）」重新定义为 **manuscript-primary（手稿主导原则）+ conversation-first IA + 常驻 Agent dock**。手稿工作区是主导画布（连续稿件文档，章节内片段按序渲染、选中就地编辑）；画布头可见视图分段（稿件/章节/审校/工具）；Writer Agent 作为常驻协作者（连续 thread + 常驻 composer + 选区驱动调用）位于右侧 dock，不占半屏。`data-layout="conversation-first"` 为现行契约；`CLAUDE.md` / `AGENTS.md` 已校准。退役基线不变：`writer-studio-grid`、`writer-agent-rail`、折叠 composer、旧蓝色长页不得恢复。
 
 | 阶段 | 状态 | 证据 |
 |---|---|---|
 | 0 传输底座 | `verified_current` | 增量事件轮询（`lib/writer-event-store.ts` + `/api/writer-events/[tenantId]/[projectId]` route + `components/writer-live-draft.tsx`）替换假串流全页刷新；normalized store 去重/排序/terminal（completed/failed/cancelled）；连接横幅（reconnecting/interrupted + retry）；创建 run 带 `Idempotency-Key`；窄化 aria-live。store 11/11、recovery 6/6、ux-completion 19/19、typecheck/build passed |
-| 1.1 版面反转 | `verified_current` | shell 主画布 `writer-artifact-canvas`（`<main>` 主导）+ Agent `writer-agent-dock`（`<aside>` 常驻副）；`data-layout="manuscript-primary"`；CSS grid 反转（canvas 1.62fr / dock 0.82fr）+ 两处响应式断点更新；契约演进（data-layout、顺序断言反转、新结构类锁定）「Writer is manuscript-primary with a persistent Agent dock」passed；当前 Web full/typecheck/build passed |
-| 1.2 左侧结构导航（真三区） | `verified_current` | 新增 `components/writer-structure-nav.tsx`（纯导航 GET 表单，渐进增强；选章重置场景、块选择独立保留）+ loading skeleton；shell 加 `structureNav` slot / `writer-structure-rail` 单元格 / `data-has-structure` 属性，形成 左结构 / 中手稿 / 右 Agent dock 三列；page 以独立 Suspense 注入 `WriterStructureNavData`（listChapters/listScenes/listManuscriptBlocks）；CSS 三列 grid + 属性选择器覆盖两处响应式（≤960 隐藏左栏，structure tab 仍可编辑）；契约锁定 writer-structure-rail/structureNav/data-has-structure + 导航组件 method="get"；当前 Web full/typecheck/build passed |
+| 1.1 版面反转 | `verified_current` | shell 主画布 `writer-artifact-canvas`（`<main>` 主导）+ Agent `writer-agent-dock`（`<aside>` 常驻副）；现行 `data-layout="conversation-first"`（产物主导原则保留）；CSS grid（canvas 1.62fr / dock 0.82fr）；契约「Writer is conversation-first with a persistent Agent dock and canvas」 |
+| 1.2 左侧结构导航 | `superseded` | 左结构轨已由章节切换器 + 可见「章节」视图替代；`writer-structure-nav.tsx` 组件保留可复用，page/shell 不再注入 `structureNav`；`data-has-structure="false"` |
+| 1.5 连续稿件画布 | `verified_current` (2026-07-19) | `writer-manuscript-flow.tsx`：章节内片段连续渲染为文档；选中片段内联 TipTap；分隔条管理菜单（重排/标签/移动/归档/版本）；空章「开始写这一章」；文末次级「添加空白片段」；page 并行 `getPrivateBlock`（上限 20）+ 默认第一章；画布头 `WriterArtifactTabChrome` 可见 tabs；文案「正文块」→「片段」；structureNav 死取数已删 |
 | 1.3 ⌘K 命令面板 | `verified_current` | 新增 `writer-workbench-context.tsx`（共享 activeTab + 面板开合 + ⌘K/Ctrl+K window keydown）与 `writer-command-palette.tsx`（role=dialog 面板 + 可见触发按钮 + 5 条命令：切四个 tab / 聚焦 Agent 对话框；方向键/回车/Esc/背景关闭）；`writer-artifact-tabs.tsx` 改为「有 provider 用 context、无则本地 state」；shell 用 provider 包裹并在 header 放触发按钮；契约锁定 WriterCommandPalette/WriterWorkbenchProvider/role=dialog/metaKey/useWriterWorkbench；writer 路由 6.04→7.79 kB；当前 Web full/typecheck/build passed |
 | 1.4 顶栏 breadcrumb / save-state | `verified_current` | header eyebrow → 面包屑（项目总览链接 › 写作 Agent，沿用页面内部路由风格，非公钥深链）；meta → `WriterRunStateChip`（idle/active/error 状态点，active 脉冲，`prefers-reduced-motion` 降级）；actions 加 `已同步/Synced` 指示（诚实反映 server-action 即时持久化，Phase 2 接入实时 save-state）；契约锁定 writer-breadcrumb/WriterRunStateChip/writer-sync-chip；Web 串行 full `250` 项 `241 passed, 9 skipped`、typecheck、build passed |
 
-**Phase 1（四区布局）收口：** 1.1–1.4 全部 `verified_current`。写作台已是 manuscript-primary 三区编辑室：左结构导航 / 中手稿画布（四 artifact tabs）/ 右常驻 Agent dock，顶栏含面包屑 + run-state + sync，⌘K 命令面板驱动 tabs。
+**Phase 1（四区布局）收口后演进：** 写作台现行为 conversation-first 双栏：中手稿连续文档画布（可见 tabs：稿件/章节/审校/工具）+ 右常驻 Agent dock；章节切换器负责日常换章；⌘K 仍可驱动 tabs。2026-07-19 已落地连续稿件流与可见 tab chrome。
 | 2 TipTap 编辑器 | `connected` | TipTap + PE textarea；空白 manuscript block 创建；scene 结构元数据不再承载正文（CONN-001） |
 | 3 选区驱动调用 + 行内 diff | `connected` | `writer.revision.proposed` → `pendingRevision` 行内 diff；accept 走块级 optimistic patch，禁止普通整块 adoption（CONN-007）；并发 OPTIMISTIC_CONFLICT 保留 localDraft compare/merge/另存（CONN-006） |
 | 4 持久 thread + activity timeline + context chips | `connected` | SQLWriterThreadStore 中央挂载；user 指令与 Pi agent 完成消息均写入 `writer_thread_messages`；approval create/decide 路径具备；Writer page 传 `threadMessages` + `decideApprovalAction`（CONN-009） |

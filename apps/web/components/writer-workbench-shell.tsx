@@ -67,7 +67,6 @@ type WriterWorkbenchShellProps = {
   cancelWriterRunAction?: (formData: FormData) => Promise<void>;
   decideApprovalAction?: (formData: FormData) => Promise<void>;
   productWorkspace?: ReactNode;
-  structureNav?: ReactNode;
   /** Persistent thread messages when backend thread store is available. */
   threadMessages?: { role: string; body: string; created_at?: string }[];
 };
@@ -121,7 +120,6 @@ export function WriterWorkbenchShell({
   cancelWriterRunAction,
   decideApprovalAction,
   productWorkspace,
-  structureNav: _structureNav,
   threadMessages = [],
 }: WriterWorkbenchShellProps) {
   const traceId = runSummary?.ok === true ? runSummary.trace_id : "";
@@ -189,7 +187,14 @@ export function WriterWorkbenchShell({
                     <WriterCommandPaletteTrigger locale={locale} />
                     <TechnicalDetailsDrawer
                       description={<Bi zh="恢复、回放与支持信息" en="Recovery, replay, and support information" />}
-                      label={<><Activity aria-hidden="true" size={16} /><Bi zh="技术详情" en="Technical details" /></>}
+                      label={
+                        <>
+                          <Activity aria-hidden="true" size={15} />
+                          <span className="writer-canvas-tool-label">
+                            <Bi zh="技术详情" en="Technical details" />
+                          </span>
+                        </>
+                      }
                     >
                       <WriterDiagnostics
                         afterEventId={afterEventId}
@@ -402,7 +407,7 @@ function recentItemsFromManuscript(
   const href = `/${tenantSlug}/projects/${projectId}/writer`;
   return manuscript.blocks.slice(0, 3).map((block, index) => ({
     href: `${href}?blockId=${encodeURIComponent(block.block_id)}`,
-    title: tx(locale, `正文块 ${index + 1}`, `Manuscript block ${index + 1}`),
+    title: tx(locale, `片段 ${index + 1}`, `Section ${index + 1}`),
     meta: tx(locale, `${block.word_count} 字`, `${block.word_count} words`),
     kind: "manuscript" as const,
   }));
@@ -522,7 +527,7 @@ function ManuscriptMetadataPanel({ locale, manuscript }: { locale: Locale; manus
       <div className="compact-action-list">
         {manuscript.blocks.slice(0, 8).map((block, index) => (
           <article className="tool-result-item" key={block.block_id} data-block-id={block.block_id} data-chapter-id={block.chapter_id || ""} data-source-draft-id={block.source_draft_id || ""}>
-            <strong><Bi zh={`正文块 ${index + 1}`} en={`Manuscript block ${index + 1}`} /></strong>
+            <strong><Bi zh={`片段 ${index + 1}`} en={`Section ${index + 1}`} /></strong>
             <span>
               <Bi zh="顺序 " en="Order " />{block.block_order} / <StatusValue value={block.status || "unknown"} />
             </span>
@@ -576,7 +581,7 @@ function ManuscriptExportManifestPanel({
         <div className="compact-action-list">
           {manifest.blocks.slice(0, 8).map((manifestBlock, index) => (
             <article className="tool-result-item" key={`${manifestBlock.block_id}-${manifestBlock.block_order}`}>
-              <strong><Bi zh={`正文块 ${index + 1}`} en={`Manuscript block ${index + 1}`} /></strong>
+              <strong><Bi zh={`片段 ${index + 1}`} en={`Section ${index + 1}`} /></strong>
               <span><Bi zh="顺序 " en="Order " />{manifestBlock.block_order}</span>
               <small><Bi zh="字数 " en="Words " />{manifestBlock.word_count}</small>
             </article>

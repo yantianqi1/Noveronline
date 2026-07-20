@@ -1,16 +1,39 @@
 "use client";
 
-import { Lock, Maximize2, Minus, Network, Plus, RotateCcw, Search, Unlock } from "lucide-react";
+import { Lock, Maximize2, Minus, Network, PanelRightClose, PanelRightOpen, Plus, RotateCcw, Scan, Search, Unlock } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { type Locale, tx } from "../lib/locale";
+import {
+  boundsAroundPoints,
+  clientPointToGraph,
+  GRAPH_ZOOM_MAX,
+  GRAPH_ZOOM_MIN,
+  graphUnitsPerPixel,
+  panViewBounds,
+  type GraphViewBounds,
+  type StoryGraphForceField,
+  useStoryGraphForce,
+  viewBoxAttribute,
+  zoomViewBounds,
+} from "../lib/story-graph-force";
 import type {
   AssetListSummary,
   StoryGraphClustersSummary,
   StoryGraphCurrentSummary,
+  StoryGraphEdgeRecord,
   StoryGraphEvidenceSummary,
   StoryGraphLayoutSummary,
+  StoryGraphNodeRecord,
   StoryGraphViewSummary,
   WorkflowRunEventsSummary,
   WorkflowRunSummary,
@@ -668,48 +691,83 @@ function InteractiveGraphCanvas({
   const [nodeType, setNodeType] = useState("all");
   const [clusterId, setClusterId] = useState("all");
   const [inspectorTab, setInspectorTab] = useState<"node" | "evidence" | "stats">("node");
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [zoomLocked, setZoomLocked] = useState(false);
   const [internalSelectedNodeId, setInternalSelectedNodeId] = useState(view.nodes[0]?.node_id ?? "");
   const selectedNodeId = controlledSelectedNodeId ?? internalSelectedNodeId;
-  const setSelectedNodeId = (nodeId: string) => {
+  const setSelectedNodeId = (nodeId: string, options?: { openInspector?: boolean }) => {
     setInternalSelectedNodeId(nodeId);
     onSelectNodeId?.(nodeId);
+    if (options?.openInspector !== false && nodeId) {
+      setInspectorCollapsed(false);
+      setInspectorTab("node");
+    }
   };
-  const [zoom, setZoom] = useState(1);
+  const [hoveredNodeId, setHoveredNodeId] = useState("");
+  const [viewBounds, setViewBounds] = useState<GraphViewBounds | null>(null);
+  const [frameVersion, setFrameVersion] = useState(0);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const gestureRef = useRef<
+    | { kind: "node"; pointerId: number; nodeId: string; startX: number; startY: number; moved: boolean }
+    | { kind: "pan"; pointerId: number; startX: number; startY: number; startBounds: GraphViewBounds; moved: boolean }
+    | null
+  >(null);
 
-  const positionedNodes = useMemo(() => {
-    const layoutByNodeId = new Map(model.nodes.map((node) => [node.nodeId, node]));
-    return view.nodes.flatMap((node) => {
-      const position = layoutByNodeId.get(node.node_id);
-      return position ? [{ node, position }] : [];
-    });
-  }, [model.nodes, view.nodes]);
+  const seededNodes = useMemo(() => seedGraphNodes(view.nodes, view.edges, model), [view.nodes, view.edges, model]);
   const nodeTypes = useMemo(
     () => [...new Set(view.nodes.map((node) => node.node_type))].sort(),
     [view.nodes],
   );
   const filteredNodes = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return positionedNodes.filter(({ node, position }) => {
+    return seededNodes.filter(({ node, layoutClusterId }) => {
       if (nodeType !== "all" && node.node_type !== nodeType) {
         return false;
       }
-      if (clusterId !== "all" && position.clusterId !== clusterId && node.cluster_id !== clusterId) {
+      if (clusterId !== "all" && layoutClusterId !== clusterId && node.cluster_id !== clusterId) {
         return false;
       }
       return !normalizedQuery || [node.title, node.summary, node.node_id, node.node_type]
         .some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
     });
-  }, [clusterId, nodeType, positionedNodes, query]);
-  const positionByNodeId = useMemo(
-    () => new Map(filteredNodes.map(({ node, position }) => [node.node_id, position])),
+  }, [clusterId, nodeType, seededNodes, query]);
+  const filteredNodeIds = useMemo(
+    () => new Set(filteredNodes.map(({ node }) => node.node_id)),
+    [filteredNodes],
+  );
+  const seedByNodeId = useMemo(
+    () => new Map(filteredNodes.map(({ node, seedX, seedY }) => [node.node_id, { x: seedX, y: seedY }])),
     [filteredNodes],
   );
   const visibleEdges = useMemo(
-    () => view.edges.filter((edge) => positionByNodeId.has(edge.source_node_id) && positionByNodeId.has(edge.target_node_id)),
-    [positionByNodeId, view.edges],
+    () => view.edges.filter((edge) => filteredNodeIds.has(edge.source_node_id) && filteredNodeIds.has(edge.target_node_id)),
+    [filteredNodeIds, view.edges],
   );
+
+  const forceNodes = useMemo(
+    () => filteredNodes.map(({ node, seedX, seedY, radius }) => ({ id: node.node_id, seedX, seedY, radius })),
+    [filteredNodes],
+  );
+  const forceLinks = useMemo(
+    () => visibleEdges.map((edge) => ({
+      id: edge.edge_id,
+      sourceId: edge.source_node_id,
+      targetId: edge.target_node_id,
+      weight: edge.weight,
+    })),
+    [visibleEdges],
+  );
+  const bumpFrame = useCallback(() => {
+    setFrameVersion((value) => value + 1);
+  }, []);
+  const field = useStoryGraphForce({
+    nodes: forceNodes,
+    links: forceLinks,
+    active: mode === "nodes",
+    onFrame: bumpFrame,
+  });
+
   const selectedNode = view.nodes.find((node) => node.node_id === selectedNodeId) ?? filteredNodes[0]?.node;
   const selectedNodeIndex = selectedNode ? view.nodes.findIndex((node) => node.node_id === selectedNode.node_id) : -1;
   const selectedNodeLabel = selectedNode
@@ -718,35 +776,207 @@ function InteractiveGraphCanvas({
   const selectedRelations = selectedNode
     ? view.edges.filter((edge) => edge.source_node_id === selectedNode.node_id || edge.target_node_id === selectedNode.node_id)
     : [];
-  const bounds = graphBounds(mode === "clusters" ? model.clusters : filteredNodes.map(({ position }) => position));
-  const viewBox = zoomedViewBox(bounds, zoom);
-  const missingLayoutCount = view.nodes.length - positionedNodes.length;
   const viewportOmitted = Math.max(model.viewport.omittedNodeCount, currentNodeCount - view.nodes.length, 0);
   const legendTypes = nodeTypes.length > 0 ? nodeTypes.slice(0, 6) : ["character", "concept"];
-  const zoomPercent = Math.round(zoom * 100);
   const selectedNeighborIds = useMemo(() => {
     if (!selectedNode) {
       return new Set<string>();
     }
     const ids = new Set<string>([selectedNode.node_id]);
-    for (const edge of selectedRelations) {
-      ids.add(edge.source_node_id);
-      ids.add(edge.target_node_id);
+    for (const edge of visibleEdges) {
+      if (edge.source_node_id === selectedNode.node_id || edge.target_node_id === selectedNode.node_id) {
+        ids.add(edge.source_node_id);
+        ids.add(edge.target_node_id);
+      }
     }
     return ids;
-  }, [selectedNode, selectedRelations]);
+  }, [selectedNode, visibleEdges]);
+  const hoveredNeighborIds = useMemo(() => {
+    if (!hoveredNodeId) {
+      return new Set<string>();
+    }
+    const ids = new Set<string>([hoveredNodeId]);
+    for (const edge of visibleEdges) {
+      if (edge.source_node_id === hoveredNodeId || edge.target_node_id === hoveredNodeId) {
+        ids.add(edge.source_node_id);
+        ids.add(edge.target_node_id);
+      }
+    }
+    return ids;
+  }, [hoveredNodeId, visibleEdges]);
+
+  const fitBounds = useMemo(() => {
+    void frameVersion;
+    return field.extent(96)
+      ?? boundsAroundPoints(filteredNodes.map(({ seedX, seedY }) => ({ x: seedX, y: seedY })), 96);
+  }, [field, filteredNodes, frameVersion]);
+  const clusterBounds = useMemo(
+    () => boundsAroundPoints(
+      model.clusters.flatMap((cluster) => [
+        { x: cluster.x, y: cluster.y },
+        { x: cluster.x + cluster.width, y: cluster.y + cluster.height },
+      ]),
+      56,
+    ),
+    [model.clusters],
+  );
+  const effectiveBounds = mode === "clusters" ? clusterBounds : viewBounds ?? fitBounds;
+  const zoomPercent = mode === "nodes"
+    ? Math.max(1, Math.round((fitBounds.width / Math.max(effectiveBounds.width, 1)) * 100))
+    : 100;
+  const cameraStateRef = useRef({ effectiveBounds, fitBounds, zoomLocked, mode });
+  cameraStateRef.current = { effectiveBounds, fitBounds, zoomLocked, mode };
+
+  const applyZoom = useCallback((factor: number, client?: { clientX: number; clientY: number }) => {
+    const camera = cameraStateRef.current;
+    if (camera.zoomLocked || camera.mode !== "nodes") {
+      return;
+    }
+    const currentZoom = camera.fitBounds.width / Math.max(camera.effectiveBounds.width, 1);
+    const nextZoom = Math.max(GRAPH_ZOOM_MIN, Math.min(GRAPH_ZOOM_MAX, currentZoom * factor));
+    const actualFactor = nextZoom / currentZoom;
+    if (Math.abs(actualFactor - 1) < 0.001) {
+      return;
+    }
+    const svg = svgRef.current;
+    const focus = svg && client
+      ? clientPointToGraph(svg, camera.effectiveBounds, client.clientX, client.clientY)
+      : undefined;
+    setViewBounds(zoomViewBounds(camera.effectiveBounds, actualFactor, focus));
+  }, []);
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) {
+      return;
+    }
+    // React registers wheel listeners passively, so zoom-to-cursor needs a
+    // native non-passive listener to stop the page from scrolling.
+    const handleWheel = (event: WheelEvent) => {
+      if (cameraStateRef.current.mode !== "nodes") {
+        return;
+      }
+      event.preventDefault();
+      applyZoom(Math.pow(2, -event.deltaY * 0.0016), { clientX: event.clientX, clientY: event.clientY });
+    };
+    svg.addEventListener("wheel", handleWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", handleWheel);
+  }, [applyZoom]);
 
   function chooseCluster(value: string) {
     setClusterId(value);
     setMode(value === "all" && largeGraph ? "clusters" : "nodes");
     setSelectedNodeId("");
+    setViewBounds(null);
   }
 
-  function adjustZoom(next: number) {
-    if (zoomLocked) {
+  function focusNode(nodeId: string) {
+    const position = field.positionOf(nodeId);
+    if (!position) {
       return;
     }
-    setZoom(Math.max(0.7, Math.min(2, next)));
+    const width = Math.max(cameraStateRef.current.fitBounds.width / 1.9, 340);
+    const height = Math.max(cameraStateRef.current.fitBounds.height / 1.9, 240);
+    setViewBounds({ x: position.x - width / 2, y: position.y - height / 2, width, height });
+  }
+
+  function handleCanvasPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
+    if (mode !== "nodes" || event.button !== 0) {
+      return;
+    }
+    const svg = svgRef.current;
+    if (!svg) {
+      return;
+    }
+    const nodeGroup = (event.target as Element).closest?.("[data-graph-node-id]");
+    svg.setPointerCapture(event.pointerId);
+    if (nodeGroup) {
+      const nodeId = nodeGroup.getAttribute("data-graph-node-id") ?? "";
+      gestureRef.current = {
+        kind: "node",
+        pointerId: event.pointerId,
+        nodeId,
+        startX: event.clientX,
+        startY: event.clientY,
+        moved: false,
+      };
+      if (!viewBounds) {
+        // Freeze the auto-fit camera so dragging never fights the viewport.
+        setViewBounds(effectiveBounds);
+      }
+      field.beginDrag(nodeId);
+    } else {
+      gestureRef.current = {
+        kind: "pan",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startBounds: effectiveBounds,
+        moved: false,
+      };
+    }
+  }
+
+  function handleCanvasPointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+    const gesture = gestureRef.current;
+    const svg = svgRef.current;
+    if (!gesture || !svg || gesture.pointerId !== event.pointerId) {
+      return;
+    }
+    const camera = cameraStateRef.current;
+    if (gesture.kind === "node") {
+      if (!gesture.moved && Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 4) {
+        return;
+      }
+      gesture.moved = true;
+      const point = clientPointToGraph(svg, camera.effectiveBounds, event.clientX, event.clientY);
+      field.moveDrag(gesture.nodeId, point.x, point.y);
+      return;
+    }
+    if (!gesture.moved && Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 4) {
+      return;
+    }
+    gesture.moved = true;
+    const unit = graphUnitsPerPixel(svg, gesture.startBounds);
+    const dx = (gesture.startX - event.clientX) * unit;
+    const dy = (gesture.startY - event.clientY) * unit;
+    setViewBounds(panViewBounds(gesture.startBounds, dx, dy));
+  }
+
+  function handleCanvasPointerUp(event: ReactPointerEvent<SVGSVGElement>) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) {
+      return;
+    }
+    gestureRef.current = null;
+    const svg = svgRef.current;
+    if (svg?.hasPointerCapture(event.pointerId)) {
+      svg.releasePointerCapture(event.pointerId);
+    }
+    if (gesture.kind === "node") {
+      field.endDrag(gesture.nodeId);
+      if (!gesture.moved) {
+        setSelectedNodeId(gesture.nodeId);
+      }
+    }
+  }
+
+  function handleCanvasPointerOver(event: ReactPointerEvent<SVGSVGElement>) {
+    if (gestureRef.current) {
+      return;
+    }
+    const nodeGroup = (event.target as Element).closest?.("[data-graph-node-id]");
+    const nodeId = nodeGroup?.getAttribute("data-graph-node-id") ?? "";
+    setHoveredNodeId((currentId) => (currentId === nodeId ? currentId : nodeId));
+  }
+
+  function handleCanvasDoubleClick(event: { target: EventTarget }) {
+    const nodeGroup = (event.target as Element).closest?.("[data-graph-node-id]");
+    const nodeId = nodeGroup?.getAttribute("data-graph-node-id") ?? "";
+    if (nodeId) {
+      setSelectedNodeId(nodeId);
+      focusNode(nodeId);
+    }
   }
 
   async function toggleFullscreen() {
@@ -761,96 +991,102 @@ function InteractiveGraphCanvas({
     await stage.requestFullscreen();
   }
 
+  const canvasFocused = Boolean(selectedNode) || Boolean(hoveredNodeId);
+
   return (
     <div className="story-graph-stage" ref={stageRef}>
-      <div className="story-graph-floating-toolbar" role="toolbar" aria-label={tx(locale, "图谱画布工具", "Graph canvas tools")}>
-        <div className="story-graph-view-toggle" role="group" aria-label={tx(locale, "图谱视图控制", "Graph view controls")}>
-          <button type="button" aria-pressed={mode === "clusters"} onClick={() => setMode("clusters")}>
-            <Bi zh="聚类概览" en="Cluster overview" />
+      <div className="story-graph-canvas" aria-label={tx(locale, "故事图谱交互画布", "Interactive story graph canvas")}>
+        <div className="story-graph-floating-toolbar" role="toolbar" aria-label={tx(locale, "图谱画布工具", "Graph canvas tools")}>
+          <div className="story-graph-view-toggle" role="group" aria-label={tx(locale, "图谱视图控制", "Graph view controls")}>
+            <button type="button" aria-pressed={mode === "clusters"} onClick={() => setMode("clusters")}>
+              <Bi zh="聚类概览" en="Cluster overview" />
+            </button>
+            <button type="button" aria-pressed={mode === "nodes"} onClick={() => setMode("nodes")}>
+              <Bi zh="节点视图" en="Node view" />
+            </button>
+          </div>
+          <span className="story-graph-search-field">
+            <Search size={15} aria-hidden="true" />
+            <input
+              id="story-graph-search"
+              aria-label={tx(locale, "搜索节点", "Search nodes")}
+              placeholder={tx(locale, "搜索节点...", "Search nodes...")}
+              value={query}
+              onChange={(event) => { setQuery(event.target.value); setMode("nodes"); }}
+            />
+          </span>
+          <select
+            id="story-graph-node-type"
+            aria-label={tx(locale, "节点类型", "Node type")}
+            value={nodeType}
+            onChange={(event) => { setNodeType(event.target.value); setMode("nodes"); }}
+          >
+            <option value="all">{tx(locale, "全部类型", "All types")}</option>
+            {nodeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+          </select>
+          <select
+            id="story-graph-cluster"
+            aria-label={tx(locale, "聚类", "Cluster")}
+            value={clusterId}
+            onChange={(event) => chooseCluster(event.target.value)}
+          >
+            <option value="all">{tx(locale, "全部聚类", "All clusters")}</option>
+            {model.clusters.map((cluster, index) => (
+              <option key={cluster.clusterId} value={cluster.clusterId}>
+                {clusterDisplayLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`))}
+              </option>
+            ))}
+          </select>
+          <span id="graph-canvas-heading" className="story-graph-canvas-title">
+            <Bi zh="图谱画布" en="Graph canvas" />
+          </span>
+          <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} title={tx(locale, "缩小", "Zoom out")} onClick={() => applyZoom(1 / 1.25)}>
+            <Minus size={15} aria-hidden="true" />
           </button>
-          <button type="button" aria-pressed={mode === "nodes"} onClick={() => setMode("nodes")}>
-            <Bi zh="节点视图" en="Node view" />
+          <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} title={tx(locale, "放大", "Zoom in")} onClick={() => applyZoom(1.25)}>
+            <Plus size={15} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label={tx(locale, "重置图谱视图", "Reset graph view")}
+            title={tx(locale, "重置视图", "Reset view")}
+            onClick={() => { setQuery(""); setNodeType("all"); chooseCluster("all"); setHoveredNodeId(""); }}
+          >
+            <RotateCcw size={15} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label={tx(locale, "全屏画布", "Fullscreen canvas")}
+            title={tx(locale, "全屏", "Fullscreen")}
+            onClick={() => { void toggleFullscreen(); }}
+          >
+            <Maximize2 size={15} aria-hidden="true" />
           </button>
         </div>
-        <span className="story-graph-search-field">
-          <Search size={15} aria-hidden="true" />
-          <input
-            id="story-graph-search"
-            aria-label={tx(locale, "搜索节点", "Search nodes")}
-            placeholder={tx(locale, "搜索节点...", "Search nodes...")}
-            value={query}
-            onChange={(event) => { setQuery(event.target.value); setMode("nodes"); }}
-          />
-        </span>
-        <select
-          id="story-graph-node-type"
-          aria-label={tx(locale, "节点类型", "Node type")}
-          value={nodeType}
-          onChange={(event) => { setNodeType(event.target.value); setMode("nodes"); }}
-        >
-          <option value="all">{tx(locale, "全部类型", "All types")}</option>
-          {nodeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
-        </select>
-        <select
-          id="story-graph-cluster"
-          aria-label={tx(locale, "聚类", "Cluster")}
-          value={clusterId}
-          onChange={(event) => chooseCluster(event.target.value)}
-        >
-          <option value="all">{tx(locale, "全部聚类", "All clusters")}</option>
-          {model.clusters.map((cluster, index) => (
-            <option key={cluster.clusterId} value={cluster.clusterId}>
-              {publicGraphLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`))}
-            </option>
-          ))}
-        </select>
-        <span id="graph-canvas-heading" className="story-graph-canvas-title">
-          <Bi zh="图谱画布" en="Graph canvas" />
-        </span>
-        <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} title={tx(locale, "缩小", "Zoom out")} onClick={() => adjustZoom(zoom - 0.15)}>
-          <Minus size={15} aria-hidden="true" />
-        </button>
-        <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} title={tx(locale, "放大", "Zoom in")} onClick={() => adjustZoom(zoom + 0.15)}>
-          <Plus size={15} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label={tx(locale, "重置图谱视图", "Reset graph view")}
-          title={tx(locale, "重置视图", "Reset view")}
-          onClick={() => { setZoom(1); setQuery(""); setNodeType("all"); chooseCluster("all"); }}
-        >
-          <RotateCcw size={15} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label={tx(locale, "全屏画布", "Fullscreen canvas")}
-          title={tx(locale, "全屏", "Fullscreen")}
-          onClick={() => { void toggleFullscreen(); }}
-        >
-          <Maximize2 size={15} aria-hidden="true" />
-        </button>
-      </div>
 
-      <p className="story-graph-filter-status" role="status">
-        {mode === "clusters"
-          ? tx(locale, `${model.clusters.length} 个聚类代表 ${currentNodeCount} 个节点`, `${model.clusters.length} clusters represent ${currentNodeCount} nodes`)
-          : tx(locale, `当前窗口显示 ${filteredNodes.length}/${currentNodeCount} 个节点、${visibleEdges.length} 条关系`, `Viewport shows ${filteredNodes.length}/${currentNodeCount} nodes and ${visibleEdges.length} edges`)}
-        {viewportOmitted > 0 ? tx(locale, `；其余 ${viewportOmitted} 个节点由聚类概览表示`, `; ${viewportOmitted} remaining nodes are represented by cluster overview`) : ""}
-      </p>
-      {missingLayoutCount > 0 ? (
-        <p className="story-graph-stage-alert form-hint error-box" role="alert">
-          {tx(locale, `${missingLayoutCount} 个视图节点缺少持久化布局坐标。`, `${missingLayoutCount} viewport nodes are missing persisted layout coordinates.`)}
+        <p className="story-graph-filter-status" role="status">
+          {mode === "clusters"
+            ? tx(locale, `${model.clusters.length} 个聚类代表 ${currentNodeCount} 个节点`, `${model.clusters.length} clusters represent ${currentNodeCount} nodes`)
+            : tx(locale, `当前窗口显示 ${filteredNodes.length}/${currentNodeCount} 个节点、${visibleEdges.length} 条关系`, `Viewport shows ${filteredNodes.length}/${currentNodeCount} nodes and ${visibleEdges.length} edges`)}
+          {viewportOmitted > 0 ? tx(locale, `；其余 ${viewportOmitted} 个节点由聚类概览表示`, `; ${viewportOmitted} remaining nodes are represented by cluster overview`) : ""}
         </p>
-      ) : null}
 
-      <div className="story-graph-canvas" aria-label={tx(locale, "故事图谱交互画布", "Interactive story graph canvas")}>
         <svg
+          ref={svgRef}
           className="story-graph-svg"
           data-graph-canvas="true"
+          data-graph-mode={mode}
           role="img"
           aria-label={mode === "clusters" ? tx(locale, "故事图谱聚类概览", "Story graph cluster overview") : tx(locale, "故事图谱节点与关系", "Story graph nodes and edges")}
-          viewBox={viewBox}
+          viewBox={viewBoxAttribute(effectiveBounds)}
           preserveAspectRatio="xMidYMid meet"
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerUp}
+          onPointerOver={handleCanvasPointerOver}
+          onPointerLeave={() => setHoveredNodeId("")}
+          onDoubleClick={handleCanvasDoubleClick}
         >
           <defs>
             <filter id="story-graph-node-glow" x="-80%" y="-80%" width="260%" height="260%">
@@ -869,7 +1105,7 @@ function InteractiveGraphCanvas({
             </filter>
           </defs>
           {mode === "clusters" ? model.clusters.map((cluster, index) => {
-            const clusterLabel = publicGraphLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`));
+            const clusterLabel = clusterDisplayLabel(cluster.clusterKey, tx(locale, `聚类 ${index + 1}`, `Cluster ${index + 1}`));
             return (
               <g
                 key={cluster.clusterId}
@@ -894,85 +1130,105 @@ function InteractiveGraphCanvas({
             );
           }) : (
             <>
-              {visibleEdges.map((edge) => {
-                const source = positionByNodeId.get(edge.source_node_id);
-                const target = positionByNodeId.get(edge.target_node_id);
-                if (!source || !target) {
-                  return null;
-                }
-                const linkedToSelected = Boolean(
-                  selectedNode
-                  && (edge.source_node_id === selectedNode.node_id || edge.target_node_id === selectedNode.node_id),
-                );
-                return (
-                  <line
-                    key={edge.edge_id}
-                    data-graph-edge-id={edge.edge_id}
-                    className={linkedToSelected ? "story-graph-edge-selected" : "story-graph-edge"}
-                    x1={source.x + 36}
-                    y1={source.y + 36}
-                    x2={target.x + 36}
-                    y2={target.y + 36}
-                    stroke={linkedToSelected ? "#c43b35" : "#6b7280"}
-                    strokeOpacity={linkedToSelected ? 0.92 : 0.32}
-                    strokeWidth={linkedToSelected ? Math.max(2, Math.min(4, edge.weight + 0.8)) : Math.max(1, Math.min(2.2, edge.weight))}
-                    filter={linkedToSelected ? "url(#story-graph-selected-glow)" : undefined}
-                  >
-                    <title>{edge.label || edge.edge_type}</title>
-                  </line>
-                );
-              })}
-              {filteredNodes.map(({ node, position }) => {
-                const selected = selectedNode?.node_id === node.node_id;
-                const neighbor = selectedNeighborIds.has(node.node_id);
-                const color = selected ? "#c43b35" : nodeTypeColor(node.node_type);
-                const radius = selected ? 32 : Math.max(18, Math.min(26, 16 + Number(node.importance || 0) * 2.2));
-                const nodeLabel = graphNodeLabel(node.title, view.nodes.findIndex((item) => item.node_id === node.node_id), locale);
-                return (
-                  <g
-                    key={node.node_id}
-                    data-graph-node-id={node.node_id}
-                    className={selected ? "story-graph-node-selected" : neighbor ? "story-graph-node-neighbor" : "story-graph-node"}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={selected}
-                    aria-label={tx(locale, `查看节点 ${nodeLabel}`, `Inspect node ${nodeLabel}`)}
-                    transform={`translate(${position.x} ${position.y})`}
-                    onClick={() => setSelectedNodeId(node.node_id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setSelectedNodeId(node.node_id);
-                      }
-                    }}
-                    style={{ cursor: "pointer" }}
-                  >
-                    {selected ? <circle cx={36} cy={36} r={radius + 20} fill="#c43b35" fillOpacity={0.2} /> : null}
-                    <circle
-                      cx={36}
-                      cy={36}
-                      r={radius}
-                      fill={selected ? "#c43b35" : "rgba(14, 16, 18, 0.94)"}
-                      stroke={color}
-                      strokeWidth={selected ? 3.8 : neighbor ? 2.6 : 2}
-                      filter={selected ? "url(#story-graph-selected-glow)" : "url(#story-graph-node-glow)"}
-                      opacity={selected || !selectedNode || neighbor ? 1 : 0.55}
-                    />
+              <g className="story-graph-edge-layer">
+                {visibleEdges.map((edge) => {
+                  const linkedToSelected = Boolean(
+                    selectedNode
+                    && (edge.source_node_id === selectedNode.node_id || edge.target_node_id === selectedNode.node_id),
+                  );
+                  const linkedToHovered = Boolean(
+                    hoveredNodeId
+                    && (edge.source_node_id === hoveredNodeId || edge.target_node_id === hoveredNodeId),
+                  );
+                  const sourceSeed = seedByNodeId.get(edge.source_node_id);
+                  const targetSeed = seedByNodeId.get(edge.target_node_id);
+                  return (
+                    <line
+                      key={edge.edge_id}
+                      ref={(element) => field.attachEdge(edge.edge_id, element)}
+                      data-graph-edge-id={edge.edge_id}
+                      x1={sourceSeed?.x}
+                      y1={sourceSeed?.y}
+                      x2={targetSeed?.x}
+                      y2={targetSeed?.y}
+                      className={linkedToSelected ? "story-graph-edge-selected" : linkedToHovered ? "story-graph-edge-hover" : "story-graph-edge"}
+                      stroke={linkedToSelected ? "#c43b35" : linkedToHovered ? "#d8a75a" : "#6f7d8a"}
+                      strokeOpacity={linkedToSelected ? 0.9 : linkedToHovered ? 0.85 : 0.3}
+                      strokeWidth={linkedToSelected || linkedToHovered ? Math.max(2, Math.min(4, edge.weight + 0.8)) : Math.max(1, Math.min(2.2, edge.weight))}
+                      strokeLinecap="round"
+                    >
+                      <title>{edge.label || edge.edge_type}</title>
+                    </line>
+                  );
+                })}
+              </g>
+              <g className="story-graph-node-layer">
+                {filteredNodes.map(({ node, radius, seedX, seedY }) => {
+                  const selected = selectedNode?.node_id === node.node_id;
+                  const neighbor = selectedNeighborIds.has(node.node_id)
+                    || hoveredNodeId === node.node_id
+                    || hoveredNeighborIds.has(node.node_id);
+                  const color = selected ? "#c43b35" : nodeTypeColor(node.node_type);
+                  const renderRadius = selected ? radius + 4 : radius;
+                  const nodeLabel = graphNodeLabel(node.title, view.nodes.findIndex((item) => item.node_id === node.node_id), locale);
+                  return (
+                    <g
+                      key={node.node_id}
+                      ref={(element) => field.attachNode(node.node_id, element)}
+                      data-graph-node-id={node.node_id}
+                      transform={`translate(${seedX} ${seedY})`}
+                      className={selected ? "story-graph-node-selected" : neighbor ? "story-graph-node-neighbor" : canvasFocused ? "story-graph-node story-graph-node-dimmed" : "story-graph-node"}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selected}
+                      aria-label={tx(locale, `查看节点 ${nodeLabel}`, `Inspect node ${nodeLabel}`)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setSelectedNodeId(node.node_id);
+                        }
+                      }}
+                    >
+                      {selected ? (
+                        <circle className="story-graph-node-halo" r={renderRadius + 16} fill="#c43b35" fillOpacity={0.18} />
+                      ) : null}
+                      <circle
+                        className="story-graph-node-dot"
+                        r={renderRadius}
+                        fill={selected ? "#c43b35" : "rgba(14, 16, 18, 0.94)"}
+                        stroke={color}
+                        strokeWidth={selected ? 3.4 : neighbor ? 2.6 : 2}
+                        filter={selected ? "url(#story-graph-selected-glow)" : "url(#story-graph-node-glow)"}
+                      />
+                      <title>{`${nodeLabel} (${node.node_type})`}</title>
+                    </g>
+                  );
+                })}
+              </g>
+              <g className="story-graph-label-layer" aria-hidden="true">
+                {filteredNodes.map(({ node, radius, seedX, seedY }) => {
+                  const selected = selectedNode?.node_id === node.node_id;
+                  const neighbor = selectedNeighborIds.has(node.node_id)
+                    || hoveredNodeId === node.node_id
+                    || hoveredNeighborIds.has(node.node_id);
+                  const nodeLabel = graphNodeLabel(node.title, view.nodes.findIndex((item) => item.node_id === node.node_id), locale);
+                  return (
                     <text
-                      x={36}
-                      y={36 + radius + 16}
+                      key={`label-${node.node_id}`}
+                      ref={(element) => field.attachLabel(node.node_id, element)}
+                      transform={`translate(${seedX} ${seedY})`}
+                      className={selected ? "story-graph-label story-graph-label-selected" : neighbor ? "story-graph-label" : canvasFocused ? "story-graph-label story-graph-label-dimmed" : "story-graph-label"}
+                      y={(selected ? radius + 4 : radius) + 17}
                       textAnchor="middle"
                       fill={selected ? "#ffd7d2" : "#efe8dc"}
-                      fontSize={selected ? 12 : 11}
+                      fontSize={selected ? 12.5 : 11}
                       fontWeight={selected ? 700 : 500}
-                      opacity={selected || !selectedNode || neighbor ? 1 : 0.55}
                     >
-                      {shortGraphLabel(nodeLabel, selected ? 14 : 10)}
+                      {shortGraphLabel(nodeLabel, selected ? 16 : 12)}
                     </text>
-                    <title>{`${nodeLabel} (${node.node_type})`}</title>
-                  </g>
-                );
-              })}
+                  );
+                })}
+              </g>
             </>
           )}
         </svg>
@@ -990,36 +1246,63 @@ function InteractiveGraphCanvas({
         </aside>
 
         <div className="story-graph-minimap" aria-hidden="true">
-          <svg viewBox={`${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}`} preserveAspectRatio="xMidYMid meet">
-            {filteredNodes.map(({ node, position }) => (
-              <circle
-                key={`mini-${node.node_id}`}
-                cx={position.x + 36}
-                cy={position.y + 36}
-                r={8}
-                fill={selectedNode?.node_id === node.node_id ? "#c43b35" : nodeTypeColor(node.node_type)}
-                fillOpacity={0.85}
-              />
-            ))}
+          <svg
+            viewBox={viewBoxAttribute(mode === "clusters" ? clusterBounds : fitBounds)}
+            preserveAspectRatio="xMidYMid meet"
+            onPointerDown={(event) => {
+              if (mode !== "nodes") {
+                return;
+              }
+              const camera = cameraStateRef.current;
+              const point = clientPointToGraph(event.currentTarget, fitBounds, event.clientX, event.clientY);
+              setViewBounds({
+                x: point.x - camera.effectiveBounds.width / 2,
+                y: point.y - camera.effectiveBounds.height / 2,
+                width: camera.effectiveBounds.width,
+                height: camera.effectiveBounds.height,
+              });
+            }}
+          >
+            {filteredNodes.map(({ node, seedX, seedY }) => {
+              const position = field.positionOf(node.node_id) ?? { x: seedX, y: seedY };
+              return (
+                <circle
+                  key={`mini-${node.node_id}`}
+                  cx={position.x}
+                  cy={position.y}
+                  r={Math.max(6, fitBounds.width / 130)}
+                  fill={selectedNode?.node_id === node.node_id ? "#c43b35" : nodeTypeColor(node.node_type)}
+                  fillOpacity={0.85}
+                />
+              );
+            })}
             <rect
-              x={Number(viewBox.split(" ")[0])}
-              y={Number(viewBox.split(" ")[1])}
-              width={Number(viewBox.split(" ")[2])}
-              height={Number(viewBox.split(" ")[3])}
-              fill="none"
+              x={effectiveBounds.x}
+              y={effectiveBounds.y}
+              width={effectiveBounds.width}
+              height={effectiveBounds.height}
+              fill="rgba(196, 59, 53, 0.08)"
               stroke="#c43b35"
-              strokeWidth={Math.max(4, bounds.width / 40)}
+              strokeWidth={Math.max(3, fitBounds.width / 60)}
             />
           </svg>
         </div>
 
         <div className="story-graph-zoom-bar" role="group" aria-label={tx(locale, "缩放控制", "Zoom controls")}>
-          <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} onClick={() => adjustZoom(zoom - 0.15)}>
+          <button type="button" aria-label={tx(locale, "缩小图谱", "Zoom out")} onClick={() => applyZoom(1 / 1.25)}>
             <Minus size={14} aria-hidden="true" />
           </button>
           <span>{zoomPercent}%</span>
-          <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} onClick={() => adjustZoom(zoom + 0.15)}>
+          <button type="button" aria-label={tx(locale, "放大图谱", "Zoom in")} onClick={() => applyZoom(1.25)}>
             <Plus size={14} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label={tx(locale, "适应视图", "Fit view")}
+            title={tx(locale, "适应视图", "Fit view")}
+            onClick={() => setViewBounds(null)}
+          >
+            <Scan size={14} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -1036,69 +1319,116 @@ function InteractiveGraphCanvas({
         ) : null}
       </div>
 
-      <aside className="story-graph-floating-inspector" aria-label={tx(locale, "图谱检视", "Graph inspector")}>
-        <div className="story-graph-inspector-tabs" role="tablist" aria-label={tx(locale, "检视分区", "Inspector sections")}>
-          {([
-            ["node", tx(locale, "当前节点", "Current node")],
-            ["evidence", tx(locale, "公开证据", "Public evidence")],
-            ["stats", tx(locale, "统计", "Stats")],
-          ] as const).map(([tab, label]) => (
+      {inspectorCollapsed ? (
+        <button
+          type="button"
+          className="story-graph-inspector-reopen"
+          aria-expanded={false}
+          aria-controls="story-graph-inspector-panel"
+          onClick={() => setInspectorCollapsed(false)}
+        >
+          <PanelRightOpen size={15} aria-hidden="true" />
+          <span>{selectedNodeLabel || tx(locale, "检视面板", "Inspector")}</span>
+        </button>
+      ) : (
+        <aside
+          id="story-graph-inspector-panel"
+          className="story-graph-floating-inspector"
+          data-inspector-collapsed="false"
+          aria-label={tx(locale, "图谱检视", "Graph inspector")}
+        >
+          <div className="story-graph-inspector-chrome">
+            <div className="story-graph-inspector-tabs" role="tablist" aria-label={tx(locale, "检视分区", "Inspector sections")}>
+              {([
+                ["node", tx(locale, "当前节点", "Current node")],
+                ["evidence", tx(locale, "公开证据", "Public evidence")],
+                ["stats", tx(locale, "统计", "Stats")],
+              ] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  aria-selected={inspectorTab === tab}
+                  onClick={() => setInspectorTab(tab)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <button
-              key={tab}
               type="button"
-              role="tab"
-              aria-selected={inspectorTab === tab}
-              onClick={() => setInspectorTab(tab)}
+              className="story-graph-inspector-collapse"
+              aria-expanded={true}
+              aria-controls="story-graph-inspector-panel"
+              aria-label={tx(locale, "折叠检视面板", "Collapse inspector")}
+              title={tx(locale, "折叠", "Collapse")}
+              onClick={() => setInspectorCollapsed(true)}
             >
-              {label}
+              <PanelRightClose size={15} aria-hidden="true" />
             </button>
-          ))}
-        </div>
+          </div>
 
-        {inspectorTab === "node" ? (
-          <section className="story-graph-paper-section" aria-labelledby="graph-selected-heading">
-            <h2 id="graph-selected-heading"><Bi zh="当前节点" en="Current node" /></h2>
-            {selectedNode ? (
-              <dl className="story-graph-node-fields">
-                <dt><Bi zh="名称" en="Name" /></dt>
-                <dd>{selectedNodeLabel || <Bi zh="未命名节点" en="Untitled node" />}</dd>
-                <dt><Bi zh="类型" en="Type" /></dt>
-                <dd>{publicGraphLabel(selectedNode.node_type, selectedNode.node_type)}</dd>
-                <dt><Bi zh="摘要" en="Summary" /></dt>
-                <dd>{selectedNode.summary || <Bi zh="暂无公开摘要。" en="No public summary." />}</dd>
-              </dl>
-            ) : (
-              <p className="form-hint"><Bi zh="在画布上选择一个节点。" en="Select a node on the canvas." /></p>
-            )}
-            {selectedNode ? (
-              <details className="story-graph-node-meta-disclosure">
-                <summary><Bi zh="节点检查器" en="Node inspector" /></summary>
-                <section className="story-graph-node-inspector" aria-labelledby="story-graph-inspector-heading" aria-live="polite">
-                  <h3 id="story-graph-inspector-heading">{selectedNodeLabel}</h3>
-                  <dl>
-                    <dt><Bi zh="生命周期" en="Lifecycle" /></dt><dd><StatusValue value={selectedNode.lifecycle} /></dd>
-                    <dt><Bi zh="聚类" en="Cluster" /></dt>
-                    <dd>{publicGraphLabel(selectedNode.cluster_id, tx(locale, "未分配", "Unassigned"))}</dd>
-                    <dt><Bi zh="重要度" en="Importance" /></dt><dd>{selectedNode.importance}</dd>
-                    <dt><Bi zh="公开证据" en="Public evidence" /></dt><dd>{selectedNode.evidence_count}</dd>
-                    <dt><Bi zh="当前窗口关系" en="Viewport relations" /></dt><dd>{selectedRelations.length}</dd>
-                  </dl>
-                </section>
+          {inspectorTab === "node" ? (
+            <section className="story-graph-paper-section" aria-labelledby="graph-selected-heading">
+              <h2 id="graph-selected-heading"><Bi zh="当前节点" en="Current node" /></h2>
+              {selectedNode ? (
+                <dl className="story-graph-node-fields">
+                  <dt><Bi zh="名称" en="Name" /></dt>
+                  <dd>{selectedNodeLabel || <Bi zh="未命名节点" en="Untitled node" />}</dd>
+                  <dt><Bi zh="类型" en="Type" /></dt>
+                  <dd>{publicGraphLabel(selectedNode.node_type, selectedNode.node_type)}</dd>
+                  <dt><Bi zh="摘要" en="Summary" /></dt>
+                  <dd>{selectedNode.summary || <Bi zh="暂无公开摘要。" en="No public summary." />}</dd>
+                </dl>
+              ) : (
+                <p className="form-hint"><Bi zh="在画布上选择一个节点。" en="Select a node on the canvas." /></p>
+              )}
+              {selectedNode ? (
+                <details className="story-graph-node-meta-disclosure">
+                  <summary><Bi zh="节点检查器" en="Node inspector" /></summary>
+                  <section className="story-graph-node-inspector" aria-labelledby="story-graph-inspector-heading" aria-live="polite">
+                    <h3 id="story-graph-inspector-heading">{selectedNodeLabel}</h3>
+                    <dl>
+                      <dt><Bi zh="生命周期" en="Lifecycle" /></dt><dd><StatusValue value={selectedNode.lifecycle} /></dd>
+                      <dt><Bi zh="聚类" en="Cluster" /></dt>
+                      <dd>{publicGraphLabel(selectedNode.cluster_id, tx(locale, "未分配", "Unassigned"))}</dd>
+                      <dt><Bi zh="重要度" en="Importance" /></dt><dd>{selectedNode.importance}</dd>
+                      <dt><Bi zh="公开证据" en="Public evidence" /></dt><dd>{selectedNode.evidence_count}</dd>
+                      <dt><Bi zh="当前窗口关系" en="Viewport relations" /></dt><dd>{selectedRelations.length}</dd>
+                    </dl>
+                  </section>
+                </details>
+              ) : null}
+            </section>
+          ) : null}
+
+          {inspectorTab === "evidence" ? (
+            <section className={`story-graph-paper-section ${evidence.ok ? "" : "error-box"}`} aria-labelledby="graph-evidence-heading-tab">
+              <h2 id="graph-evidence-heading-tab"><Bi zh="公开证据" en="Public evidence" /></h2>
+              <GraphEvidence evidence={evidence} selectedNodeId={selectedNode?.node_id} />
+            </section>
+          ) : null}
+
+          {inspectorTab === "stats" ? (
+            <div className="story-graph-stats-pane">
+              <details className="story-graph-stats-disclosure" open>
+                <summary>
+                  <span><Bi zh="布局与聚类统计" en="Layout and cluster stats" /></span>
+                  <small><Bi zh="次要信息" en="Secondary" /></small>
+                </summary>
+                <div className="story-graph-stats-content">
+                  <GraphLayoutSummary layout={layout} locale={locale} />
+                  <GraphClusters clusters={clusters} />
+                  <p className="form-hint">
+                    {model.viewport.strategyBasis || tx(locale, "布局来自已持久化的确定性力导向坐标。", "Layout uses persisted deterministic force-directed coordinates.")}
+                  </p>
+                </div>
               </details>
-            ) : null}
-          </section>
-        ) : null}
+            </div>
+          ) : null}
 
-        {inspectorTab === "evidence" ? (
-          <section className={`story-graph-paper-section ${evidence.ok ? "" : "error-box"}`} aria-labelledby="graph-evidence-heading-tab">
-            <h2 id="graph-evidence-heading-tab"><Bi zh="公开证据" en="Public evidence" /></h2>
-            <GraphEvidence evidence={evidence} selectedNodeId={selectedNode?.node_id} />
-          </section>
-        ) : null}
-
-        {inspectorTab === "stats" ? (
-          <div className="story-graph-stats-pane">
-            <details className="story-graph-stats-disclosure" open>
+          {inspectorTab !== "stats" ? (
+            <details className="story-graph-stats-disclosure">
               <summary>
                 <span><Bi zh="布局与聚类统计" en="Layout and cluster stats" /></span>
                 <small><Bi zh="次要信息" en="Secondary" /></small>
@@ -1106,27 +1436,11 @@ function InteractiveGraphCanvas({
               <div className="story-graph-stats-content">
                 <GraphLayoutSummary layout={layout} locale={locale} />
                 <GraphClusters clusters={clusters} />
-                <p className="form-hint">
-                  {model.viewport.strategyBasis || tx(locale, "布局来自已持久化的确定性力导向坐标。", "Layout uses persisted deterministic force-directed coordinates.")}
-                </p>
               </div>
             </details>
-          </div>
-        ) : null}
-
-        {inspectorTab !== "stats" ? (
-          <details className="story-graph-stats-disclosure">
-            <summary>
-              <span><Bi zh="布局与聚类统计" en="Layout and cluster stats" /></span>
-              <small><Bi zh="次要信息" en="Secondary" /></small>
-            </summary>
-            <div className="story-graph-stats-content">
-              <GraphLayoutSummary layout={layout} locale={locale} />
-              <GraphClusters clusters={clusters} />
-            </div>
-          </details>
-        ) : null}
-      </aside>
+          ) : null}
+        </aside>
+      )}
 
       <details className="story-graph-snapshot-disclosure">
         <summary>
@@ -1214,23 +1528,63 @@ function derivedLayoutClusters(nodes: LayoutNode[]): LayoutCluster[] {
   });
 }
 
-function graphBounds(items: Array<LayoutNode | LayoutCluster>) {
-  if (items.length === 0) {
-    return { x: 0, y: 0, width: 900, height: 520 };
+type SeededGraphNode = {
+  node: StoryGraphNodeRecord;
+  seedX: number;
+  seedY: number;
+  radius: number;
+  layoutClusterId: string;
+};
+
+/**
+ * Gives every viewport node a physics seed and visual weight. Persisted layout
+ * coordinates act as stable starting hints; nodes without persisted positions
+ * seed near their cluster centroid or on a deterministic ring, and the force
+ * simulation takes over from there.
+ */
+function seedGraphNodes(
+  nodes: StoryGraphNodeRecord[],
+  edges: StoryGraphEdgeRecord[],
+  model: ReturnType<typeof graphLayoutModel>,
+): SeededGraphNode[] {
+  const layoutByNodeId = new Map(model.nodes.map((node) => [node.nodeId, node]));
+  const clusterById = new Map(model.clusters.map((cluster) => [cluster.clusterId, cluster]));
+  const degreeByNodeId = new Map<string, number>();
+  for (const edge of edges) {
+    degreeByNodeId.set(edge.source_node_id, (degreeByNodeId.get(edge.source_node_id) ?? 0) + 1);
+    degreeByNodeId.set(edge.target_node_id, (degreeByNodeId.get(edge.target_node_id) ?? 0) + 1);
   }
-  const minX = Math.min(...items.map((item) => item.x));
-  const minY = Math.min(...items.map((item) => item.y));
-  const maxX = Math.max(...items.map((item) => item.x + ("width" in item ? item.width : 72)));
-  const maxY = Math.max(...items.map((item) => item.y + ("height" in item ? item.height : 72)));
-  return { x: minX - 56, y: minY - 56, width: Math.max(320, maxX - minX + 112), height: Math.max(220, maxY - minY + 128) };
+  const total = Math.max(nodes.length, 1);
+  return nodes.map((node, index) => {
+    const persisted = layoutByNodeId.get(node.node_id);
+    const cluster = clusterById.get(persisted?.clusterId || node.cluster_id);
+    const hash = stableGraphHash(node.node_id);
+    let seedX: number;
+    let seedY: number;
+    if (persisted) {
+      seedX = persisted.x + 36;
+      seedY = persisted.y + 36;
+    } else if (cluster) {
+      seedX = cluster.x + cluster.width / 2 + ((hash % 121) - 60);
+      seedY = cluster.y + cluster.height / 2 + ((Math.floor(hash / 121) % 91) - 45);
+    } else {
+      const angle = (index / total) * Math.PI * 2 + ((hash % 41) / 41) * 0.55;
+      const ring = 220 + (hash % 180);
+      seedX = Math.cos(angle) * ring;
+      seedY = Math.sin(angle) * ring;
+    }
+    const connections = degreeByNodeId.get(node.node_id) ?? 0;
+    const radius = Math.max(15, Math.min(30, 14 + connections * 1.5 + Number(node.importance || 0) * 1.4));
+    return { node, seedX, seedY, radius, layoutClusterId: persisted?.clusterId ?? "" };
+  });
 }
 
-function zoomedViewBox(bounds: { x: number; y: number; width: number; height: number }, zoom: number) {
-  const width = bounds.width / zoom;
-  const height = bounds.height / zoom;
-  const x = bounds.x + (bounds.width - width) / 2;
-  const y = bounds.y + (bounds.height - height) / 2;
-  return `${x} ${y} ${width} ${height}`;
+function stableGraphHash(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash);
 }
 
 function arrayRecords(value: unknown): Record<string, unknown>[] {
@@ -1272,6 +1626,19 @@ function publicGraphLabel<T extends ReactNode>(value: string, fallback: T): stri
   const normalized = value.trim();
   const technicalIdentifier = /^(?:[0-9a-f]{8}-[0-9a-f-]{27,}|(?:asset|cluster|edge|evt|event|graph|node|run|view)[_-][a-z0-9_-]+)$/i;
   return normalized && !technicalIdentifier.test(normalized) ? normalized : fallback;
+}
+
+/** Cluster keys such as `type:character` or `network:asset:<uuid>` are storage identifiers, not display copy. */
+function clusterDisplayLabel<T extends ReactNode>(clusterKey: string, fallback: T): string | T {
+  const normalized = clusterKey.trim();
+  const typeMatch = normalized.match(/^type:([a-z0-9_-]+)$/i);
+  if (typeMatch) {
+    return typeMatch[1];
+  }
+  if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(normalized) || /^(?:network|community|component):/i.test(normalized)) {
+    return fallback;
+  }
+  return publicGraphLabel(normalized, fallback);
 }
 
 function nodeTypeColor(nodeType: string) {
@@ -1433,7 +1800,7 @@ function GraphClusters({ clusters }: { clusters: StoryGraphClustersSummary }) {
           <tbody>
             {clusters.items.map((cluster, index) => (
               <tr key={cluster.cluster_id}>
-                <td>{publicGraphLabel(cluster.title || cluster.cluster_key, <Bi zh={`聚类 ${index + 1}`} en={`Cluster ${index + 1}`} />)}</td>
+                <td>{clusterDisplayLabel(cluster.title || cluster.cluster_key, <Bi zh={`聚类 ${index + 1}`} en={`Cluster ${index + 1}`} />)}</td>
                 <td>{cluster.node_count}</td>
               </tr>
             ))}
