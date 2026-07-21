@@ -51,6 +51,8 @@ type WriterWorkbenchShellProps = {
   selectedDraftId?: string;
   selectedChapterId?: string;
   selectedSceneId?: string;
+  /** When true, the technical-details drawer is shown (developer debugging). */
+  showDebug?: boolean;
   writerRunAction?: (formData: FormData) => Promise<WriterRunActionResult>;
   exportTraceAction?: (formData: FormData) => Promise<void>;
   cancelWriterRunAction?: (formData: FormData) => Promise<void>;
@@ -89,6 +91,7 @@ export function WriterWorkbenchShell({
   selectedDraftId = "",
   selectedChapterId = "",
   selectedSceneId = "",
+  showDebug = false,
   writerRunAction,
   exportTraceAction,
   cancelWriterRunAction,
@@ -156,38 +159,40 @@ export function WriterWorkbenchShell({
                 data-mobile-view="conversation"
               >
                 <main className="writer-artifact-canvas" aria-label={tx(locale, "稿件工作区", "Manuscript workspace")}>
-                  <aside className="writer-canvas-tools" aria-label={tx(locale, "写作工具", "Writer tools")}>
-                    <WriterCommandPaletteTrigger locale={locale} />
-                    <TechnicalDetailsDrawer
-                      description={<Bi zh="恢复、回放与支持信息" en="Recovery, replay, and support information" />}
-                      label={
-                        <>
-                          <Activity aria-hidden="true" size={15} />
-                          <span className="writer-canvas-tool-label">
-                            <Bi zh="技术详情" en="Technical details" />
-                          </span>
-                        </>
-                      }
-                    >
-                      <WriterDiagnostics
-                        afterEventId={afterEventId}
-                        draftId={recoveredDraftId}
-                        exportTraceAction={exportTraceAction}
-                        latestEvent={latestRecoveredEvent}
-                        locale={locale}
-                        replayRunId={replayRunId}
-                        replayTraceId={replayTraceId}
-                        runSummary={runSummary}
-                        selectedRunId={selectedRunId}
-                        selectedTraceId={selectedTraceId}
-                        tenantSlug={tenantSlug}
-                        projectId={projectId}
-                        traceEvents={traceEvents}
-                        traceExportStatus={traceExportStatus}
-                        workflowEvents={workflowEvents}
-                      />
-                    </TechnicalDetailsDrawer>
-                  </aside>
+                  {showDebug ? (
+                    <aside className="writer-canvas-tools" aria-label={tx(locale, "写作工具", "Writer tools")}>
+                      <WriterCommandPaletteTrigger locale={locale} />
+                      <TechnicalDetailsDrawer
+                        description={<Bi zh="恢复、回放与支持信息" en="Recovery, replay, and support information" />}
+                        label={
+                          <>
+                            <Activity aria-hidden="true" size={15} />
+                            <span className="writer-canvas-tool-label">
+                              <Bi zh="技术详情" en="Technical details" />
+                            </span>
+                          </>
+                        }
+                      >
+                        <WriterDiagnostics
+                          afterEventId={afterEventId}
+                          draftId={recoveredDraftId}
+                          exportTraceAction={exportTraceAction}
+                          latestEvent={latestRecoveredEvent}
+                          locale={locale}
+                          replayRunId={replayRunId}
+                          replayTraceId={replayTraceId}
+                          runSummary={runSummary}
+                          selectedRunId={selectedRunId}
+                          selectedTraceId={selectedTraceId}
+                          tenantSlug={tenantSlug}
+                          projectId={projectId}
+                          traceEvents={traceEvents}
+                          traceExportStatus={traceExportStatus}
+                          workflowEvents={workflowEvents}
+                        />
+                      </TechnicalDetailsDrawer>
+                    </aside>
+                  ) : null}
                   <div className="writer-canvas-stage">
                     {productWorkspace}
                   </div>

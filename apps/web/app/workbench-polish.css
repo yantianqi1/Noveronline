@@ -1504,40 +1504,22 @@
   color: #4d4a43;
 }
 
-/* ── In-paper draft block: generated prose streams into the paper itself ── */
-.writer-draft-block {
-  margin: 8px 0 4px;
-  padding: 12px 16px 14px;
-  border: 1px solid rgba(177, 138, 78, 0.35);
-  border-left: 3px solid #b18a4e;
-  border-radius: 10px;
-  background: rgba(177, 138, 78, 0.06);
-}
-
-.writer-draft-block[data-draft-state="error"] {
-  border-color: rgba(148, 72, 48, 0.4);
-  border-left-color: #944830;
-  background: rgba(148, 72, 48, 0.05);
-}
-
-.writer-draft-block[data-draft-state="withdrawn"] {
-  border-color: rgba(65, 57, 47, 0.16);
-  border-left-color: rgba(65, 57, 47, 0.4);
-  background: rgba(65, 57, 47, 0.03);
-}
-
-.writer-draft-block-head {
+/* ── In-paper draft block: new prose streams in as "wet ink" on the same page.
+   No card, no box — same section geometry and typography as authored prose;
+   only a soft gold highlight marks what is not yet saved into the manuscript. ── */
+.writer-draft-note {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  font-size: 0.8rem;
-  color: #5a5347;
+  min-height: 20px;
+  font-size: 0.76rem;
+  color: #8a6d3b;
 }
 
 .writer-draft-block-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: #b18a4e;
   flex-shrink: 0;
@@ -1546,48 +1528,43 @@
 
 .writer-draft-block-label {
   font-weight: 600;
-  color: #3d3830;
 }
 
-.writer-draft-block[data-draft-state="error"] .writer-draft-block-label {
+.writer-draft-block[data-draft-state="error"] .writer-draft-note {
   color: #7a3a28;
 }
 
-.writer-draft-block[data-draft-state="withdrawn"] .writer-draft-block-label {
-  color: #6d685f;
-  font-weight: 500;
+.writer-draft-block[data-draft-state="withdrawn"] .writer-draft-note {
+  color: #9a958a;
 }
 
 .writer-draft-block-hint {
   margin-left: auto;
-  color: #8b867a;
-  font-size: 0.76rem;
+  color: #a89b7e;
+  font-size: 0.72rem;
 }
 
-.writer-draft-prose {
-  font-family: var(--font-serif, "Noto Serif SC", "Songti SC", serif);
-  font-size: 1.02rem;
-  line-height: 1.9;
-  color: #24211c;
-  letter-spacing: 0.015em;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+/* Freshly generated prose keeps manuscript typography; the gold wash is the
+   "wet ink" that dries (fades) once the text becomes a real section. */
+.writer-draft-ink p {
+  background-color: rgba(177, 138, 78, 0.13);
+  border-radius: 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
-.writer-draft-prose p {
-  text-indent: 2em;
-  margin: 0 0 0.85em;
-  white-space: pre-wrap;
+.writer-draft-block[data-draft-state="withdrawn"] .writer-draft-ink {
+  color: #9a958a;
 }
 
-.writer-draft-prose p:last-child {
-  margin-bottom: 0;
+.writer-draft-block[data-draft-state="withdrawn"] .writer-draft-ink p {
+  background-color: transparent;
 }
 
 .writer-draft-placeholder {
-  text-indent: 0 !important;
   color: #8b867a;
   font-style: italic;
+  background-color: transparent !important;
 }
 
 .writer-draft-cursor {
@@ -1732,24 +1709,24 @@
   color: #4d4a43;
 }
 
-/* Freshly landed section flashes once so the save has a visible anchor. */
-.writer-manuscript-section.is-flash {
-  border-radius: 12px;
-  animation: writer-section-flash 1.8s ease-out;
+/* Freshly landed section: the ink dries into the page, then it is indistinguishable
+   from authored prose — because it is. */
+.writer-manuscript-section.is-flash .writer-manuscript-section-prose p {
+  border-radius: 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  animation: writer-ink-dry 1.8s ease-out;
 }
 
-@keyframes writer-section-flash {
-  0% { background: rgba(74, 122, 78, 0.18); }
-  100% { background: transparent; }
+@keyframes writer-ink-dry {
+  from { background-color: rgba(177, 138, 78, 0.2); }
+  to { background-color: rgba(177, 138, 78, 0); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .writer-draft-block-dot,
-  .writer-draft-cursor {
-    animation: none;
-  }
-
-  .writer-manuscript-section.is-flash {
+  .writer-draft-cursor,
+  .writer-manuscript-section.is-flash .writer-manuscript-section-prose p {
     animation: none;
   }
 }
@@ -1917,10 +1894,10 @@
 }
 
 .writer-canvas-head {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
   margin: 0;
   min-height: 52px;
@@ -1930,7 +1907,6 @@
 }
 
 .writer-canvas-head-primary {
-  justify-self: start;
   min-width: 0;
 }
 
@@ -1939,7 +1915,6 @@
 }
 
 .writer-canvas-head-side {
-  justify-self: end;
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -3397,11 +3372,7 @@
     min-height: 44px;
   }
 
-  .writer-draft-block {
-    padding: 12px 12px;
-  }
-
-  .writer-draft-prose {
+  .writer-draft-ink {
     font-size: 1rem;
     line-height: 1.85;
   }

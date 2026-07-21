@@ -212,25 +212,25 @@ export function WriterDraftBlock({
       data-draft-state={ghostState}
       id="writer-draft-block"
     >
-      <div className="writer-draft-block-head" role="status">
+      <div className="writer-draft-note" role="status">
         {ghostState === "streaming" ? (
           <>
             <span aria-hidden="true" className="writer-draft-block-dot" />
             <span className="writer-draft-block-label">
               {draftText ? (
-                <Bi zh={`Writer 正在创作… ${charCount} 字`} en={`Writer is drafting… ${charCount} chars`} />
+                <Bi zh={`Writer 正在书写… ${charCount} 字`} en={`Writer is writing… ${charCount} chars`} />
               ) : (
-                <Bi zh="Writer 正在创作…" en="Writer is drafting…" />
+                <Bi zh="Writer 正在书写…" en="Writer is writing…" />
               )}
             </span>
             <span className="writer-draft-block-hint">
-              <Bi zh="写完后自动存入手稿" en="Will be saved automatically" />
+              <Bi zh="墨迹干后自动存入手稿" en="Saved automatically when the ink dries" />
             </span>
           </>
         ) : null}
         {ghostState === "saving" ? (
           <>
-            <Loader2 aria-hidden="true" size={14} className="writer-save-spin" />
+            <Loader2 aria-hidden="true" size={13} className="writer-save-spin" />
             <span className="writer-draft-block-label">
               <Bi zh="正在存入手稿…" en="Saving into your manuscript…" />
             </span>
@@ -248,7 +248,7 @@ export function WriterDraftBlock({
         ) : null}
       </div>
 
-      <div className="writer-draft-prose">
+      <div className="writer-manuscript-section-prose writer-draft-ink">
         {draftText ? (
           splitCandidateParagraphs(draftText).map((paragraph, index) => (
             <p key={`p-${index}`}>{paragraph}</p>

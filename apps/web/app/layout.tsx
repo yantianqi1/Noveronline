@@ -4,6 +4,7 @@ import { currentRequestLocale } from "../lib/request-locale";
 import "./auth-marketing.css";
 import "./globals.css";
 import "./workbench-polish.css";
+import "./writer-redesign.css";
 import "./mobile-chrome.css";
 
 export const metadata: Metadata = {

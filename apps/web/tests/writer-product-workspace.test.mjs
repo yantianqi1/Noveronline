@@ -85,7 +85,7 @@ test("writer manuscript empty state explains sections and create falls back on s
   assert.match(flow, /data-manuscript-flow/);
   assert.match(flow, /这一章还没有正文|This chapter has no prose yet/);
   assert.match(flow, /开始写这一章|Start writing this chapter/);
-  assert.match(flow, /添加空白片段|Add blank section/);
+  assert.match(flow, /写一段|Write a section/);
   assert.match(workspace, /ActionToast/);
   const toast = await source("components/writer-action-toast.tsx");
   assert.match(toast, /humanizeFailure/);
@@ -105,48 +105,51 @@ test("writer product workspace exposes manuscript asset proposal review rail", a
     source("lib/writer-workspace-api.ts"),
   ]);
   assert.match(workspace, /data-asset-proposal-rail|ProposalReviewPanel/);
-  assert.match(workspace, /accept_create|接受为正典/);
+  assert.match(workspace, /accept_create|存进资料库/);
   assert.match(workspace, /after_adoption|正文采用后/);
   assert.match(page, /startDistillationAction|decideProposalAction|patchDistillationSettingsAction/);
   assert.match(client, /startManuscriptAssetDistillation|listAssetProposals|decideAssetProposal|getAssetDistillationSettings/);
 });
 
-test("writer artifact views are mutually exclusive and the obsolete long-page layout stays retired", async () => {
-  const [workspace, tabs, polish] = await Promise.all([
+test("writer redesigned layout: paper + TOC rail + three bottom drawers, obsolete tabs retired", async () => {
+  const [workspace, drawers, handlebar, toc, redesign] = await Promise.all([
     source("components/writer-product-workspace.tsx"),
-    source("components/writer-artifact-tabs.tsx"),
-    source("app/workbench-polish.css"),
+    source("components/writer-drawers.tsx"),
+    source("components/writer-handlebar.tsx"),
+    source("components/writer-toc-rail.tsx"),
+    source("app/writer-redesign.css"),
   ]);
-  assert.match(workspace, /WriterArtifactTabs/);
-  assert.match(workspace, /WriterArtifactTabChrome/);
-  assert.match(workspace, /chromeInHeader/);
-  assert.match(workspace, /WriterChapterSwitcher/);
-  assert.match(tabs, /role="tablist"/);
-  assert.match(tabs, /role="tab"/);
-  assert.match(tabs, /role="tabpanel"/);
-  assert.match(tabs, /WriterArtifactTabChrome/);
-  assert.match(tabs, /chromeInHeader/);
-  assert.match(tabs, /aria-selected=\{selected\}/);
-  assert.match(tabs, /hidden=\{activeTab !== tab\.id\}/);
-  assert.match(polish, /\.writer-agent-layout/);
-  assert.match(polish, /\.writer-artifact-tabpanel\[hidden\]/);
-  assert.match(polish, /data-mobile-view="conversation"|conversation.*artifact/);
-  // Canvas is tools-rail + stage grid; the stage stays column-flex so
-  // display:contents head/body + candidate + meta share space without a dead band.
-  assert.match(polish, /\.writer-artifact-workspace\s*\{[^}]*display:\s*contents/s);
-  assert.match(polish, /\.writer-artifact-canvas\s*\{[^}]*display:\s*grid/s);
-  assert.match(polish, /\.writer-canvas-stage\s*\{[^}]*display:\s*flex/s);
-  assert.doesNotMatch(
-    polish,
-    /\.writer-artifact-canvas\s*\{[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/s,
-  );
-  assert.match(
-    polish,
-    /\.app-frame\.app-frame-unified:has\(\.writer-root\)\s+\.writer-agent-layout[\s\S]*?flex:\s*1\s+1\s+auto/s,
-  );
+  // Paper-first workspace with permanent left TOC rail.
+  assert.match(workspace, /WriterTocRail/);
+  assert.match(workspace, /WriterManuscriptFlow/);
+  assert.match(workspace, /WriterHandlebar/);
+  assert.match(workspace, /WriterDrawers/);
+  assert.match(toc, /writer-toc/);
+  assert.match(toc, /is-collapsed/);
+  // Three on-demand drawers replace the old mutually-exclusive tabs.
+  assert.match(handlebar, /toggleDrawer/);
+  assert.match(drawers, /structure/);
+  assert.match(drawers, /tools/);
+  assert.match(drawers, /library/);
+  assert.match(drawers, /writer-drawer-sheet/);
+  // New design system is present.
+  assert.match(redesign, /\.writer-redesign-stage/);
+  assert.match(redesign, /\.writer-toc/);
+  assert.match(redesign, /\.writer-handlebar/);
+  assert.match(redesign, /\.writer-drawer/);
+  assert.match(redesign, /\.writer-toolcard/);
+  // Stage is toc | paper only; agent dock stays a shell sibling.
+  assert.match(redesign, /grid-template-columns:\s*auto minmax\(0, 1fr\)/);
+  assert.doesNotMatch(redesign, /minmax\(0,\s*340px\)/);
+  // Review strip stays mounted so authors can start a pass with zero open issues.
+  assert.match(workspace, /<ReviewStrip count=\{pendingReviews\}/);
+  assert.doesNotMatch(workspace, /pendingReviews > 0 \? <ReviewStrip/);
+  // The retired tab chrome is gone from the workspace.
+  assert.doesNotMatch(workspace, /WriterArtifactTabs/);
+  assert.doesNotMatch(workspace, /WriterArtifactTabChrome/);
   for (const retiredClass of ["writer-studio-grid", "writer-workbench-prose-first", "writer-composer-disclosure", "writer-agent-rail"]) {
     const pattern = new RegExp(retiredClass);
-    assert.doesNotMatch(`${workspace}\n${tabs}\n${polish}`, pattern);
+    assert.doesNotMatch(`${workspace}\n${drawers}\n${redesign}`, pattern);
   }
 });
 
@@ -168,8 +171,8 @@ test("writer product page wires all domain actions and keeps review outside comp
   assert.match(workspace, /exportId=/);
   assert.match(workspace, /<a className="nav-link" download href=/);
   assert.doesNotMatch(workspace, /<form[^>]+manuscript-export/);
-  assert.match(workspace, /Generate candidate plan/);
-  assert.match(workspace, /Extract candidate patterns/);
+  assert.match(workspace, /生成候选计划|Generate candidate plan/);
+  assert.match(workspace, /找出重复的句子|Find repeated sentences/);
   assert.match(page, /block_ids: sourceKind === "block"/);
   assert.match(page, /chapter_id: sourceKind === "chapter"/);
   assert.match(page, /manuscriptCommandKeyFromChoice/);

@@ -73,6 +73,7 @@ type WriterPageProps = {
     reviewActionCode?: string;
     reviewActionStatus?: string;
     planningRunId?: string;
+    debug?: string;
   }>;
 };
 
@@ -97,6 +98,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
   const selectedBlockId = query.blockId ?? "";
   const selectedCommandId = query.commandId ?? "";
   const selectedPlanningRunId = query.planningRunId ?? "";
+  const showDebug = query.debug === "1" || query.debug === "true";
   const apiContext = webReadApiContext({ tenantId: tenantSlug });
   const runSummary = selectedRunId
     ? await getWriterRunSummary({
@@ -606,6 +608,7 @@ async function WriterPageData({ params, searchParams }: WriterPageProps) {
       selectedDraftId={selectedDraftId}
       selectedChapterId={selectedChapterId}
       selectedSceneId={selectedSceneId}
+      showDebug={showDebug}
       threadMessages={threadMessages}
       decideApprovalAction={decideApprovalAction}
       draftAdoptionStatus={

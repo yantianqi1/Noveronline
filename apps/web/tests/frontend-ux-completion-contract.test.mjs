@@ -264,15 +264,11 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   const product = await source("components/writer-product-workspace.tsx");
   const shell = await source("components/writer-workbench-shell.tsx");
   const polish = await source("app/workbench-polish.css");
-  assert.match(product, /WriterArtifactTabs/);
-  assert.match(product, /WriterArtifactTabChrome/);
-  assert.match(product, /chromeInHeader/);
+  assert.match(product, /WriterTocRail/);
   assert.match(product, /WriterChapterSwitcher/);
   assert.match(product, /WriterManuscriptFlow/);
-  assert.match(product, /manuscript={/);
-  assert.match(product, /structure={/);
-  assert.match(product, /review={/);
-  assert.match(product, /studio={/);
+  assert.match(product, /WriterHandlebar/);
+  assert.match(product, /WriterDrawers/);
   assert.match(shell, /writer-agent-layout/);
   assert.match(shell, /data-layout="conversation-first"/);
   assert.match(shell, /writer-artifact-canvas/);
@@ -287,50 +283,36 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   assert.match(agentThread, /WriterLiveDraft/);
   const liveDraft = await source("components/writer-live-draft.tsx");
   assert.match(liveDraft, /writerDraftText|connectWriterEventStream|useWriterRunStream/);
-  // Chapter switcher replaces the left rail for everyday nav; structure nav component retained for reuse.
+  // Left TOC rail is the permanent everyday nav; chapter switcher offers a dropdown too.
+  const tocRail = await source("components/writer-toc-rail.tsx");
+  assert.match(tocRail, /writer-toc/);
+  assert.match(tocRail, /method="get"/);
   const chapterSwitcher = await source("components/writer-chapter-switcher.tsx");
   assert.match(chapterSwitcher, /WriterChapterSwitcher/);
   assert.match(chapterSwitcher, /method="get"/);
-  const structureNav = await source("components/writer-structure-nav.tsx");
-  assert.match(structureNav, /WriterStructureNav/);
-  // Visible header tab chrome + ⌘K command palette drive canvas panels.
-  assert.match(shell, /WriterCommandPalette/);
-  assert.match(shell, /WriterWorkbenchProvider/);
-  const palette = await source("components/writer-command-palette.tsx");
-  assert.match(palette, /writer-command-palette/);
-  assert.match(palette, /role="dialog"/);
+  // Three bottom drawers (structure/tools/library) driven by the workbench drawer state.
+  const drawers = await source("components/writer-drawers.tsx");
+  assert.match(drawers, /writer-drawer-sheet/);
+  assert.match(drawers, /toggleDrawer|setDrawer/);
+  const handlebar = await source("components/writer-handlebar.tsx");
+  assert.match(handlebar, /writer-handlebar/);
+  assert.match(handlebar, /toggleDrawer/);
   const workbenchContext = await source("components/writer-workbench-context.tsx");
   assert.match(workbenchContext, /metaKey|ctrlKey/);
-  const artifactTabs = await source("components/writer-artifact-tabs.tsx");
-  assert.match(artifactTabs, /useWriterWorkbench/);
-  assert.match(artifactTabs, /WriterArtifactTabChrome/);
-  assert.match(polish, /\.writer-artifact-tabchrome/);
+  assert.match(workbenchContext, /toggleDrawer/);
   assert.match(polish, /\.writer-manuscript-flow/);
   const manuscriptFlow = await source("components/writer-manuscript-flow.tsx");
   assert.match(manuscriptFlow, /data-manuscript-flow/);
-  assert.match(manuscriptFlow, /添加空白片段|Add blank section/);
-  // No page header strip: commands + technical details live in the canvas tools rail.
+  assert.match(manuscriptFlow, /写一段|Write a section/);
+  assert.match(manuscriptFlow, /writer-section-menu/);
+  // No page header strip; technical details are gated behind ?debug=1, off the author canvas.
   assert.doesNotMatch(shell, /WorkspaceHeader|writer-breadcrumb|WriterRunStateChip|writer-sync-chip|writer-header/);
-  assert.match(shell, /writer-canvas-tools/);
-  assert.match(shell, /WriterCommandPaletteTrigger/);
+  assert.match(shell, /showDebug/);
   assert.match(shell, /TechnicalDetailsDrawer/);
-  const toolsStart = shell.indexOf('className="writer-canvas-tools"');
-  const toolsEnd = shell.indexOf("</aside>", toolsStart);
-  const tools = shell.slice(toolsStart, toolsEnd);
-  assert.ok(tools.includes("WriterCommandPaletteTrigger"));
-  assert.ok(tools.includes("TechnicalDetailsDrawer"));
-  assert.ok(tools.indexOf("WriterCommandPaletteTrigger") < tools.indexOf("TechnicalDetailsDrawer"));
-  assert.match(polish, /\.writer-canvas-tools/);
-  assert.match(polish, /\.writer-canvas-stage/);
-  assert.match(polish, /\.app-frame\.app-frame-unified:has\(\.writer-root\)\s*\{\s*--workspace-header-height:\s*0px;/s);
   // Manuscript canvas is the dominant primary; the Agent dock is persistent but secondary.
   const productIndex = shell.indexOf("{productWorkspace}");
   const threadIndex = shell.indexOf("<WriterAgentThread");
   assert.ok(productIndex >= 0 && threadIndex > productIndex);
-  // Tools rail sits left of the manuscript stage inside the artifact canvas.
-  const canvasToolsIndex = shell.indexOf("writer-canvas-tools");
-  const canvasStageIndex = shell.indexOf("writer-canvas-stage");
-  assert.ok(canvasToolsIndex >= 0 && canvasStageIndex > canvasToolsIndex);
   for (const retiredClass of ["writer-studio-grid", "writer-workbench-prose-first", "writer-composer-disclosure", "writer-agent-rail", "writer-candidate-sheet", "writer-artifact-meta", "data-has-structure"]) {
     assert.doesNotMatch(`${product}\n${shell}`, new RegExp(retiredClass));
   }

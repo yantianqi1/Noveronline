@@ -31,9 +31,9 @@ export function WriterCanvasStatus({ locale }: { locale: Locale }) {
         <span className="writer-status-pill" data-state="drafting" role="status">
           <span aria-hidden="true" className="writer-status-pill-dot" />
           {draftText ? (
-            <Bi zh={`正在创作… ${charCount} 字`} en={`Drafting… ${charCount} chars`} />
+            <Bi zh={`正在书写… ${charCount} 字`} en={`Writing… ${charCount} chars`} />
           ) : (
-            <Bi zh="正在创作…" en="Drafting…" />
+            <Bi zh="正在书写…" en="Writing…" />
           )}
         </span>
       ) : null}

@@ -17,10 +17,12 @@ import { ConfirmSubmitButton } from "./confirm-submit-button";
 import { SubmitButton } from "./submit-button";
 import type { PendingRevision } from "./writer-manuscript-editor";
 import { ActionToast } from "./writer-action-toast";
-import { WriterArtifactTabChrome, WriterArtifactTabs } from "./writer-artifact-tabs";
 import { WriterCanvasStatus } from "./writer-canvas-status";
 import { WriterChapterSwitcher } from "./writer-chapter-switcher";
+import { WriterDrawers } from "./writer-drawers";
+import { WriterHandlebar } from "./writer-handlebar";
 import { WriterManuscriptFlow } from "./writer-manuscript-flow";
+import { WriterTocRail } from "./writer-toc-rail";
 
 type Action = (formData: FormData) => Promise<void>;
 type Actions = {
@@ -74,8 +76,12 @@ export type WriterProductWorkspaceProps = {
   actions: Actions;
 };
 
+/**
+ * Redesigned writer workspace: the paper is the permanent primary surface,
+ * with the chapter TOC rail on the left and three on-demand bottom drawers
+ * (structure / tools / library). Review + proposals become a quiet strip.
+ */
 export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
-  const isEmptyStructure = props.chapters.ok && props.chapters.value.length === 0;
   const blockCount = props.blocks.ok ? props.blocks.value.length : 0;
   const wordCount = props.blocks.ok
     ? props.blocks.value.reduce((sum, block) => sum + (block.word_count ?? 0), 0)
@@ -86,41 +92,59 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
   );
   const flowSectionCount = props.blockContents?.length ?? blockCount;
 
+  const pendingReviews =
+    (props.reviews.ok ? props.reviews.value.reviews.reduce((n, r) => n + r.issues.filter((i) => i.status === "open").length, 0) : 0)
+    + (props.proposals?.ok ? props.proposals.value.filter((p) => p.review_status === "pending" || p.review_status === "conflict").length : 0);
+
   return (
-    <div className="writer-product-modules writer-artifact-workspace" data-nav="conversation-first">
-      <header className="writer-canvas-head">
-        <div className="writer-canvas-head-primary">
-          <WriterChapterSwitcher
-            chapters={props.chapters}
-            locale={props.locale}
-            projectId={props.projectId}
-            scenes={props.scenes}
-            selectedChapterId={props.selectedChapterId}
-            selectedDraftId={props.selectedDraftId}
-            selectedSceneId={props.selectedSceneId}
-            tenantSlug={props.tenantSlug}
-          />
-        </div>
-        <WriterArtifactTabChrome locale={props.locale} />
-        <div className="writer-canvas-head-side">
-          <WriterCanvasStatus locale={props.locale} />
-          <p className="writer-canvas-meta" aria-label={tx(props.locale, "稿件统计", "Manuscript stats")}>
-            <span>
-              {flowWordCount || wordCount} <Bi zh="字" en="words" />
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>
-              {flowSectionCount} <Bi zh="片段" en="sections" />
-            </span>
-          </p>
-        </div>
-      </header>
-      <div className="writer-canvas-body">
-        {props.actionStatus ? <ActionToast code={props.actionStatus.code} locale={props.locale} status={props.actionStatus.status} /> : null}
-        <WriterArtifactTabs
-          chromeInHeader
+    <div className="writer-redesign" data-nav="conversation-first">
+      <div className="writer-redesign-stage">
+        <WriterTocRail
+          chapters={props.chapters}
           locale={props.locale}
-          manuscript={
+          projectId={props.projectId}
+          scenes={props.scenes}
+          selectedChapterId={props.selectedChapterId}
+          selectedDraftId={props.selectedDraftId}
+          selectedSceneId={props.selectedSceneId}
+          tenantSlug={props.tenantSlug}
+        />
+
+        <div className="writer-redesign-paper-scroll">
+          <header className="writer-canvas-head">
+            <div className="writer-canvas-head-primary">
+              <WriterChapterSwitcher
+                chapters={props.chapters}
+                locale={props.locale}
+                projectId={props.projectId}
+                scenes={props.scenes}
+                selectedChapterId={props.selectedChapterId}
+                selectedDraftId={props.selectedDraftId}
+                selectedSceneId={props.selectedSceneId}
+                tenantSlug={props.tenantSlug}
+              />
+            </div>
+            <div className="writer-canvas-head-side">
+              <WriterCanvasStatus locale={props.locale} />
+              <p className="writer-canvas-meta" aria-label={tx(props.locale, "稿件统计", "Manuscript stats")}>
+                <span>
+                  {flowWordCount || wordCount} <Bi zh="字" en="words" />
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>
+                  {flowSectionCount} <Bi zh="片段" en="sections" />
+                </span>
+              </p>
+            </div>
+          </header>
+
+          {props.actionStatus ? <ActionToast code={props.actionStatus.code} locale={props.locale} status={props.actionStatus.status} /> : null}
+
+          {/* Always mount review/distillation controls so authors can start a pass
+              after a finished run even when no open issues remain. */}
+          <ReviewStrip count={pendingReviews} locale={props.locale} props={props} />
+
+          <div className="writer-redesign-paper">
             <WriterManuscriptFlow
               actionStatus={props.actionStatus}
               actions={{
@@ -150,28 +174,51 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
               selectedSceneId={props.selectedSceneId}
               tenantSlug={props.tenantSlug}
             />
-          }
-          structure={
-            <div className="writer-artifact-stack">
-              {isEmptyStructure ? <EmptyWriterBootstrap props={props} /> : null}
-              <ChapterScenePanel {...props} />
-            </div>
-          }
-          review={
-            <div className="writer-artifact-stack">
-              <ReviewerPanel {...props} />
-              <ProposalReviewPanel {...props} />
-            </div>
-          }
-          studio={
-            <div className="writer-artifact-stack writer-studio-tools">
-              <PlanningPanel {...props} />
-              <CommandDedupExportPanel {...props} />
-            </div>
-          }
-        />
+          </div>
+        </div>
       </div>
+
+      <WriterHandlebar locale={props.locale} />
+      <WriterDrawers
+        library={<LibraryDrawer locale={props.locale} />}
+        locale={props.locale}
+        structure={<StructureDrawer {...props} />}
+        tools={<ToolsDrawer {...props} />}
+      />
     </div>
+  );
+}
+
+/** Quiet review entry on the paper — reachable without becoming a tab. */
+function ReviewStrip({ count, locale, props }: { count: number; locale: Locale; props: WriterProductWorkspaceProps }) {
+  return (
+    <div className={`writer-review-strip${count > 0 ? " is-pending" : ""}`} role="status">
+      <span>
+        {count > 0 ? (
+          <Bi
+            zh={`有 ${count} 条待处理的审校与新设定`}
+            en={`${count} review notes and new settings pending`}
+          />
+        ) : (
+          <Bi zh="审校与设定提取" en="Review and setting extraction" />
+        )}
+      </span>
+      <ReviewStripBody locale={locale} props={props} />
+    </div>
+  );
+}
+
+function ReviewStripBody({ locale, props }: { locale: Locale; props: WriterProductWorkspaceProps }) {
+  return (
+    <details style={{ marginLeft: "auto" }}>
+      <summary style={{ cursor: "pointer", color: "var(--cinnabar, #8f211b)", fontWeight: 600 }}>
+        <Bi zh="查看" en="Review" />
+      </summary>
+      <div style={{ paddingTop: 12 }}>
+        <ReviewerPanel {...props} />
+        <ProposalReviewPanel {...props} />
+      </div>
+    </details>
   );
 }
 
@@ -189,27 +236,143 @@ export function WriterProductWorkspaceLoading() {
   );
 }
 
+/* ============================ 结构抽屉 ============================ */
+
+function StructureDrawer(props: WriterProductWorkspaceProps) {
+  return (
+    <div className="writer-artifact-stack">
+      {props.chapters.ok && props.chapters.value.length === 0 ? <EmptyWriterBootstrap props={props} /> : null}
+      <ChapterScenePanel {...props} />
+    </div>
+  );
+}
+
+/* ============================ 工具抽屉 ============================ */
+
+function ToolsDrawer(props: WriterProductWorkspaceProps) {
+  const { locale } = props;
+  return (
+    <div className="writer-toolgrid">
+      <ToolCard
+        desc={tx(locale, "大纲 · 书籍计划 · 写作预设", "Outlines, plans and presets")}
+        icon="🗺"
+        title={tx(locale, "规划", "Plan")}
+        tone="plan"
+      >
+        <PlanningPanel {...props} />
+      </ToolCard>
+
+      <ToolCard
+        desc={tx(locale, "重复的句子 · 禁用词", "Repeated sentences and banned words")}
+        icon="✓"
+        title={tx(locale, "检查", "Check")}
+        tone="check"
+      >
+        <DedupPanel {...props} />
+        <LexiconPanel {...props} />
+      </ToolCard>
+
+      <ToolCard
+        desc={tx(locale, "一键命令 · 从正文提取设定", "One-click commands and setting extraction")}
+        icon="✦"
+        title={tx(locale, "AI 命令", "AI commands")}
+        tone="ai"
+      >
+        <CommandPanel {...props} />
+      </ToolCard>
+
+      <ToolCard
+        desc={tx(locale, "生成 TXT / 下载", "Generate TXT and download")}
+        icon="⤓"
+        title={tx(locale, "导出", "Export")}
+        tone="export"
+      >
+        <ExportPanel {...props} />
+      </ToolCard>
+    </div>
+  );
+}
+
+function ToolCard({
+  children,
+  desc,
+  icon,
+  title,
+  tone,
+}: {
+  children: ReactNode;
+  desc: string;
+  icon: string;
+  title: string;
+  tone: "plan" | "check" | "ai" | "export";
+}) {
+  return (
+    <details className="writer-toolcard">
+      <summary>
+        <span className={`writer-tool-ico writer-tone-${tone}`}>{icon}</span>
+        <div>
+          <h3>{title}</h3>
+          <div className="writer-tool-desc">{desc}</div>
+        </div>
+        <span className="writer-tool-chev">▾</span>
+      </summary>
+      <div className="writer-tool-body">{children}</div>
+    </details>
+  );
+}
+
+/* ============================ 资料抽屉 ============================ */
+
+/**
+ * The context checkboxes belong to the writer-run composer form, so they stay
+ * attached there. This drawer orients the author: what the library is and how
+ * to feed it (accept extracted settings, save worldline paths).
+ */
+function LibraryDrawer({ locale }: { locale: Locale }) {
+  return (
+    <div className="writer-artifact-stack">
+      <section className="panel">
+        <p className="eyebrow"><Bi zh="资料" en="Library" /></p>
+        <h2><Bi zh="写作参考资料" en="Writing references" /></h2>
+        <p className="form-hint">
+          <Bi
+            zh="人物、场景、设定和世界线路径会作为 AI 写作时的参考。在右侧输入框上方的「添加创作上下文」里勾选本次要用的资料。"
+            en="Characters, scenes, settings and worldline paths act as references when the AI writes. Pick what to use this run from “Add story context” above the composer on the right."
+          />
+        </p>
+        <ol className="writer-empty-bootstrap-steps">
+          <li><Bi zh="在「工具 → AI 命令」里从正文提取设定" en="Extract settings from prose under Tools → AI commands" /></li>
+          <li><Bi zh="在审校条里把新设定「存进资料库」" en="Save new settings to the library from the review strip" /></li>
+          <li><Bi zh="发起写作时勾选要用的人物 / 场景 / 路径" en="Check the characters / scenes / paths to use when you start a run" /></li>
+        </ol>
+      </section>
+    </div>
+  );
+}
+
+/* ============================ 审校 / 设定候选 ============================ */
+
 function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
   const { locale, proposals, distillationSettings, selectedBlockId } = props;
   return (
     <section className="panel" aria-labelledby="asset-proposal-heading" data-asset-proposal-rail="true">
-      <p className="eyebrow"><Bi zh="蒸馏" en="Distillation" /></p>
-      <h2 id="asset-proposal-heading"><Bi zh="正文资产候选" en="Manuscript asset proposals" /></h2>
+      <p className="eyebrow"><Bi zh="设定提取" en="Setting extraction" /></p>
+      <h2 id="asset-proposal-heading"><Bi zh="新发现的设定" en="New settings found" /></h2>
       <p className="form-hint">
         <Bi
-          zh="自动模式只生成 disabled 候选，不会改写正史。接受后才会进入 Writer 检索。"
-          en="Automatic mode only creates disabled candidates and never rewrites canon. Accepted assets enter Writer retrieval."
+          zh="自动模式只生成候选，不会改动正文。接受后才会进入写作参考。"
+          en="Automatic mode only creates candidates and never rewrites the manuscript. Accepted settings enter writing references."
         />
       </p>
       {distillationSettings?.ok && distillationSettings.value ? (
         <p className="form-hint">
-          <Bi zh="触发策略：" en="Trigger mode: " />
+          <Bi zh="什么时候自动提取：" en="When to extract automatically: " />
           <StatusValue value={distillationSettings.value.trigger_mode} />
         </p>
       ) : null}
       {props.actions.patchDistillationSettings ? (
         <form action={props.actions.patchDistillationSettings} className="inline-controls">
-          <label htmlFor="distill-trigger"><Bi zh="触发策略" en="Trigger mode" /></label>
+          <label htmlFor="distill-trigger"><Bi zh="什么时候自动提取" en="Auto-extract" /></label>
           <select id="distill-trigger" name="triggerMode" defaultValue={distillationSettings?.ok ? distillationSettings.value?.trigger_mode : "manual"}>
             <option value="off">{tx(locale, "关闭", "Off")}</option>
             <option value="manual">{tx(locale, "仅手动", "Manual only")}</option>
@@ -223,7 +386,7 @@ function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
         <form action={props.actions.startDistillation} className="inline-action-form">
           {selectedBlockId ? <input name="blockId" type="hidden" value={selectedBlockId} /> : null}
           <SubmitButton
-            idleLabel={<><Play size={14} /><Bi zh="蒸馏所选片段" en="Distill selected section" /></>}
+            idleLabel={<><Play size={14} /><Bi zh="从这段提取设定" en="Extract settings from this section" /></>}
             pendingLabel={<Bi zh="提交中…" en="Submitting…" />}
             disabled={!selectedBlockId}
           />
@@ -232,7 +395,7 @@ function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
       <ResultBoundary
         locale={locale}
         result={proposals ?? { ok: true, value: [] }}
-        empty={tx(locale, "暂无待审候选。", "No pending proposals.")}
+        empty={tx(locale, "暂无待审设定。", "No pending settings.")}
         render={(items) => (
           <div className="compact-action-list">
             {items.map((item) => (
@@ -247,7 +410,7 @@ function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
                         <input name="candidateAssetId" type="hidden" value={item.candidate_asset_id} />
                         <input name="decision" type="hidden" value="accept_create" />
                         <input name="targetLifecycle" type="hidden" value="canon" />
-                        <button type="submit"><Check size={14} /><Bi zh="接受为正典" en="Accept as canon" /></button>
+                        <button type="submit"><Check size={14} /><Bi zh="存进资料库" en="Save to library" /></button>
                       </form>
                     ) : null}
                     {item.operation === "update" && item.target_asset_id ? (
@@ -257,13 +420,13 @@ function ProposalReviewPanel(props: WriterProductWorkspaceProps) {
                         <input name="targetAssetId" type="hidden" value={item.target_asset_id} />
                         <input name="expectedTargetVersion" type="hidden" value={String(item.expected_target_version ?? 1)} />
                         <input name="targetLifecycle" type="hidden" value="canon" />
-                        <button type="submit"><Check size={14} /><Bi zh="合并到已有资产" en="Merge into existing" /></button>
+                        <button type="submit"><Check size={14} /><Bi zh="更新已有的设定" en="Update existing setting" /></button>
                       </form>
                     ) : null}
                     <form action={props.actions.decideProposal}>
                       <input name="candidateAssetId" type="hidden" value={item.candidate_asset_id} />
                       <input name="decision" type="hidden" value="reject" />
-                      <button type="submit"><X size={14} /><Bi zh="拒绝" en="Reject" /></button>
+                      <button type="submit"><X size={14} /><Bi zh="忽略" en="Dismiss" /></button>
                     </form>
                   </div>
                 ) : null}
@@ -311,7 +474,7 @@ function ReviewerPanel(props: WriterProductWorkspaceProps) {
       {!selectedDraftId ? <p className="form-hint"><Bi zh="完成写作任务后选择候选草稿。" en="Select a candidate draft after a writer run completes." /></p> : (
         <form action={props.actions.startReview} className="inline-action-form">
           <input name="draftId" type="hidden" value={selectedDraftId} />
-          <SubmitButton idleLabel={<><Play size={16} aria-hidden="true" /><Bi zh="开始独立审校" en="Start reviewer" /></>} pendingLabel={<Bi zh="提交中…" en="Submitting…" />} />
+          <SubmitButton idleLabel={<><Play size={16} aria-hidden="true" /><Bi zh="开始审校" en="Start review" /></>} pendingLabel={<Bi zh="提交中…" en="Submitting…" />} />
         </form>
       )}
       <ResultBoundary locale={locale} result={reviews} empty={tx(locale, "暂无审校记录。", "No reviews yet.")} render={(value) => (
@@ -387,7 +550,7 @@ function ChapterScenePanel({ compact = false, ...props }: WriterProductWorkspace
                       <textarea name="outline" defaultValue={chapter.private?.outline ?? ""} placeholder={tx(locale, "章节大纲（可选）", "Chapter outline (optional)")} rows={2} />
                       <button type="submit"><Save size={14} /><Bi zh="保存" en="Save" /></button>
                     </form>
-                    <DeleteForm action={props.actions.deleteChapter} idName="chapterId" id={chapter.chapter_id} version={chapter.optimistic_version} label={tx(locale, "归档章节", "Archive chapter")} />
+                    <DeleteForm action={props.actions.deleteChapter} idName="chapterId" id={chapter.chapter_id} version={chapter.optimistic_version} label={tx(locale, "删除这一章", "Delete this chapter")} />
                   </div>
                 </details>
               ) : null}
@@ -427,7 +590,7 @@ function ChapterScenePanel({ compact = false, ...props }: WriterProductWorkspace
                           <textarea name="outline" defaultValue={scene.private?.outline ?? ""} placeholder={tx(locale, "场景大纲（可选）", "Scene outline (optional)")} rows={2} />
                           <button type="submit"><Save size={14} /><Bi zh="保存" en="Save" /></button>
                         </form>
-                        <DeleteForm action={props.actions.deleteScene} idName="sceneId" id={scene.scene_id} version={scene.optimistic_version} label={tx(locale, "归档场景", "Archive scene")} />
+                        <DeleteForm action={props.actions.deleteScene} idName="sceneId" id={scene.scene_id} version={scene.optimistic_version} label={tx(locale, "删除这个场景", "Delete this scene")} />
                       </div>
                     </details>
                   ) : null}
@@ -453,8 +616,7 @@ function ChapterScenePanel({ compact = false, ...props }: WriterProductWorkspace
 function PlanningPanel(props: WriterProductWorkspaceProps) {
   const { locale } = props;
   return (
-    <section className="panel" aria-labelledby="planning-workspace-heading">
-      <p className="eyebrow"><Bi zh="规划" en="Planning" /></p><h2 id="planning-workspace-heading"><Bi zh="大纲、书籍计划与规则" en="Outline, plans and rules" /></h2>
+    <div>
       <form action={props.actions.createOutline} className="binding-form">
         <input name="scopeType" type="hidden" value="project" /><input name="title" required placeholder={tx(locale, "大纲版本标题", "Outline version title")} />
         <textarea name="outlineText" required rows={3} placeholder={tx(locale, "大纲正文", "Outline text")} />
@@ -467,54 +629,78 @@ function PlanningPanel(props: WriterProductWorkspaceProps) {
       <h3><Bi zh="写作预设" en="Writer presets" /></h3>
       <form action={props.actions.createPreset} className="binding-form"><select name="scope" defaultValue="project"><option value="project">{tx(locale, "项目", "Project")}</option><option value="tenant">{tx(locale, "工作区 owner/admin", "Workspace owner/admin")}</option></select><input name="name" required placeholder={tx(locale, "预设名称", "Preset name")} /><textarea name="settings" required defaultValue="{}" rows={2} /><button type="submit"><Save size={14} /><Bi zh="保存预设" en="Save preset" /></button></form>
       <SimpleDeleteList locale={locale} result={props.presets} idKey="writer_preset_id" action={props.actions.deletePreset} idName="presetId" empty={tx(locale, "暂无预设。", "No presets.")} label={(item) => `${item.name} / ${item.scope}`} />
-      <h3><Bi zh="禁用词库" en="Forbidden lexicon" /></h3>
-      <form action={props.actions.createLexicon} className="binding-form"><input name="term" required placeholder={tx(locale, "词语", "Term")} /><input name="guidance" placeholder={tx(locale, "替换建议", "Replacement guidance")} /><select name="severity" defaultValue="warning"><option value="warning">warning</option><option value="error">error</option></select><button type="submit"><Save size={14} /><Bi zh="添加词语" en="Add term" /></button></form>
-      <SimpleDeleteList locale={locale} result={props.lexicon} idKey="lexicon_entry_id" action={props.actions.deleteLexicon} idName="entryId" empty={tx(locale, "词库为空。", "Lexicon is empty.")} label={(item) => `${item.term} / ${item.severity}`} />
-    </section>
+    </div>
   );
 }
 
-function CommandDedupExportPanel(props: WriterProductWorkspaceProps) {
+function LexiconPanel(props: WriterProductWorkspaceProps) {
+  const { locale } = props;
+  return (
+    <div>
+      <h3><Bi zh="禁用词" en="Banned words" /></h3>
+      <form action={props.actions.createLexicon} className="binding-form"><input name="term" required placeholder={tx(locale, "词语", "Term")} /><input name="guidance" placeholder={tx(locale, "替换建议", "Replacement guidance")} /><select name="severity" defaultValue="warning"><option value="warning">warning</option><option value="error">error</option></select><button type="submit"><Save size={14} /><Bi zh="添加词语" en="Add term" /></button></form>
+      <SimpleDeleteList locale={locale} result={props.lexicon} idKey="lexicon_entry_id" action={props.actions.deleteLexicon} idName="entryId" empty={tx(locale, "词库为空。", "Lexicon is empty.")} label={(item) => `${item.term} / ${item.severity}`} />
+    </div>
+  );
+}
+
+function DedupPanel(props: WriterProductWorkspaceProps) {
+  const { locale } = props;
+  return (
+    <div>
+      <h3><Bi zh="重复的句子" en="Repeated sentences" /></h3>
+      <form action={props.actions.startDedup} className="binding-form">
+        <label htmlFor="dedup-source-kind"><Bi zh="从正文里找" en="Search in manuscript" /></label>
+        <select id="dedup-source-kind" name="sourceKind" defaultValue={props.selectedBlockId ? "block" : "chapter"}>
+          <option value="block">{tx(locale, "所选片段", "Selected section")}</option>
+          <option value="chapter">{tx(locale, "所选章节", "Selected chapter")}</option>
+        </select>
+        <label htmlFor="dedup-block"><Bi zh="片段" en="Section" /></label>
+        <BlockSelect id="dedup-block" blocks={props.blocks} locale={locale} name="blockId" selectedId={props.selectedBlockId} />
+        <label htmlFor="dedup-chapter"><Bi zh="章节" en="Chapter" /></label>
+        <ChapterSelect id="dedup-chapter" locale={locale} chapters={props.chapters} name="chapterId" selectedId={props.selectedChapterId} />
+        <button type="submit" disabled={!props.selectedBlockId && !props.selectedChapterId}><Play size={14} /><Bi zh="找出重复的句子" en="Find repeated sentences" /></button>
+      </form>
+      {props.planningRun.ok && props.planningRun.value ? <div className="tool-result-item"><strong>{planningRunLabel(props.planningRun.value.workflow_type, locale)}</strong><span><StatusValue value={props.planningRun.value.status} /> / {props.planningRun.value.progress}%</span><WriterRefreshForm props={props} extra={{ planningRunId: props.planningRun.value.run_id }}><button type="submit"><FileClock size={14} /> <Bi zh="刷新进度" en="Refresh progress" /></button></WriterRefreshForm></div> : null}
+      <ResultBoundary locale={locale} result={props.dedupPatterns} empty={tx(locale, "暂无重复候选。", "No repeated candidates.")} render={(patterns) => <div className="compact-action-list">{patterns.map((pattern) => <article className="tool-result-item" key={pattern.pattern_id}><strong>{pattern.pattern_text}</strong><small>{pattern.occurrence_count} occurrences / <StatusValue value={pattern.lifecycle} /></small><div className="inline-controls">{(["accept", "reject"] as const).map((decision) => <form action={props.actions.decideDedup} key={decision}><input name="patternId" type="hidden" value={pattern.pattern_id} /><input name="decision" type="hidden" value={decision} /><button type="submit">{decision === "accept" ? <Check size={14} /> : <X size={14} />}<StatusValue value={decision} /></button></form>)}</div></article>)}</div>} />
+    </div>
+  );
+}
+
+function CommandPanel(props: WriterProductWorkspaceProps) {
+  const { locale } = props;
+  return (
+    <div>
+      <form action={props.actions.startCommand} className="binding-form">
+        <label htmlFor="writer-command-choice"><Bi zh="命令" en="Command" /></label>
+        <select id="writer-command-choice" name="commandChoice" defaultValue="complete-outline">
+          {MANUSCRIPT_COMMAND_CHOICES.map((command) => (
+            <option key={command.choice} value={command.choice}>{tx(locale, command.zh, command.en)}</option>
+          ))}
+        </select>
+        <label htmlFor="writer-command-chapter"><Bi zh="目标章节" en="Target chapter" /></label>
+        <ChapterSelect id="writer-command-chapter" locale={locale} chapters={props.chapters} name="targetChapterId" selectedId={props.selectedChapterId} />
+        <label htmlFor="writer-command-scene"><Bi zh="目标场景" en="Target scene" /></label>
+        <SceneSelect id="writer-command-scene" locale={locale} name="targetSceneId" scenes={props.scenes} selectedId={props.selectedSceneId} />
+        <label htmlFor="writer-command-block"><Bi zh="目标片段" en="Target section" /></label>
+        <BlockSelect id="writer-command-block" blocks={props.blocks} locale={locale} name="targetBlockId" selectedId={props.selectedBlockId} />
+        <button type="submit"><Play size={14} /><Bi zh="运行命令" en="Run command" /></button>
+      </form>
+      {props.command.ok && props.command.value ? <div className="tool-result-item"><strong>{manuscriptCommandLabel(props.command.value.command_type, locale)}</strong><span><StatusValue value={props.command.value.status} /></span><WriterRefreshForm props={props} extra={{ commandId: props.command.value.command_run_id }}><button type="submit"><FileClock size={14} /> <Bi zh="刷新进度" en="Refresh progress" /></button></WriterRefreshForm></div> : null}
+    </div>
+  );
+}
+
+function ExportPanel(props: WriterProductWorkspaceProps) {
   const { locale } = props;
   const completedExport = props.exports.ok ? props.exports.value.find((item) => item.status === "completed" && item.export_id && item.artifact_sha256) : undefined;
-  return <section className="panel" aria-labelledby="writer-command-tools-heading">
-    <p className="eyebrow"><Bi zh="命令" en="Commands" /></p><h2 id="writer-command-tools-heading"><Bi zh="一键命令、去重与导出" en="Commands, dedup and export" /></h2>
-    <form action={props.actions.startCommand} className="binding-form">
-      <label htmlFor="writer-command-choice"><Bi zh="命令" en="Command" /></label>
-      <select id="writer-command-choice" name="commandChoice" defaultValue="complete-outline">
-        {MANUSCRIPT_COMMAND_CHOICES.map((command) => (
-          <option key={command.choice} value={command.choice}>{tx(locale, command.zh, command.en)}</option>
-        ))}
-      </select>
-      <label htmlFor="writer-command-chapter"><Bi zh="目标章节" en="Target chapter" /></label>
-      <ChapterSelect id="writer-command-chapter" locale={locale} chapters={props.chapters} name="targetChapterId" selectedId={props.selectedChapterId} />
-      <label htmlFor="writer-command-scene"><Bi zh="目标场景" en="Target scene" /></label>
-      <SceneSelect id="writer-command-scene" locale={locale} name="targetSceneId" scenes={props.scenes} selectedId={props.selectedSceneId} />
-      <label htmlFor="writer-command-block"><Bi zh="目标片段" en="Target section" /></label>
-      <BlockSelect id="writer-command-block" blocks={props.blocks} locale={locale} name="targetBlockId" selectedId={props.selectedBlockId} />
-      <button type="submit"><Play size={14} /><Bi zh="运行命令" en="Run command" /></button>
-    </form>
-    {props.command.ok && props.command.value ? <div className="tool-result-item"><strong>{manuscriptCommandLabel(props.command.value.command_type, locale)}</strong><span><StatusValue value={props.command.value.status} /></span><WriterRefreshForm props={props} extra={{ commandId: props.command.value.command_run_id }}><button type="submit"><FileClock size={14} /> <Bi zh="刷新命令状态" en="Refresh command status" /></button></WriterRefreshForm></div> : null}
-    <h3><Bi zh="去重候选" en="Dedup candidates" /></h3>
-    <form action={props.actions.startDedup} className="binding-form">
-      <label htmlFor="dedup-source-kind"><Bi zh="从已采纳正文提取" en="Extract from adopted manuscript" /></label>
-      <select id="dedup-source-kind" name="sourceKind" defaultValue={props.selectedBlockId ? "block" : "chapter"}>
-        <option value="block">{tx(locale, "所选片段", "Selected section")}</option>
-        <option value="chapter">{tx(locale, "所选章节", "Selected chapter")}</option>
-      </select>
-      <label htmlFor="dedup-block"><Bi zh="片段" en="Section" /></label>
-      <BlockSelect id="dedup-block" blocks={props.blocks} locale={locale} name="blockId" selectedId={props.selectedBlockId} />
-      <label htmlFor="dedup-chapter"><Bi zh="章节" en="Chapter" /></label>
-      <ChapterSelect id="dedup-chapter" locale={locale} chapters={props.chapters} name="chapterId" selectedId={props.selectedChapterId} />
-      <button type="submit" disabled={!props.selectedBlockId && !props.selectedChapterId}><Play size={14} /><Bi zh="提取候选模式" en="Extract candidate patterns" /></button>
-    </form>
-    {props.planningRun.ok && props.planningRun.value ? <div className="tool-result-item"><strong>{planningRunLabel(props.planningRun.value.workflow_type, locale)}</strong><span><StatusValue value={props.planningRun.value.status} /> / {props.planningRun.value.progress}%</span><WriterRefreshForm props={props} extra={{ planningRunId: props.planningRun.value.run_id }}><button type="submit"><FileClock size={14} /> <Bi zh="刷新生成状态" en="Refresh generation status" /></button></WriterRefreshForm></div> : null}
-    <ResultBoundary locale={locale} result={props.dedupPatterns} empty={tx(locale, "暂无待处理候选。", "No pending candidates.")} render={(patterns) => <div className="compact-action-list">{patterns.map((pattern) => <article className="tool-result-item" key={pattern.pattern_id}><strong>{pattern.pattern_text}</strong><small>{pattern.occurrence_count} occurrences / <StatusValue value={pattern.lifecycle} /></small><div className="inline-controls">{(["accept", "reject"] as const).map((decision) => <form action={props.actions.decideDedup} key={decision}><input name="patternId" type="hidden" value={pattern.pattern_id} /><input name="decision" type="hidden" value={decision} /><button type="submit">{decision === "accept" ? <Check size={14} /> : <X size={14} />}<StatusValue value={decision} /></button></form>)}</div></article>)}</div>} />
-    <h3><Bi zh="导出产物" en="Export artifact" /></h3>
-    <form action={props.actions.createExport} className="inline-action-form"><input name="format" type="hidden" value="txt" /><button type="submit"><Play size={14} /><Bi zh="生成 TXT 产物" en="Generate TXT artifact" /></button></form>
-    <ResultBoundary locale={locale} result={props.exports} empty={tx(locale, "暂无导出记录。", "No export records.")} render={(records) => <div className="compact-action-list">{records.map((record, index) => <div className="tool-result-item" key={record.export_id}><strong><Bi zh="导出" en="Export" /> {index + 1}</strong><span><StatusValue value={record.status} /> / {record.block_count} blocks</span></div>)}</div>} />
-    {completedExport ? <a className="nav-link" download href={`/api/manuscript-export/${encodeURIComponent(props.tenantSlug)}/${encodeURIComponent(props.projectId)}?exportId=${encodeURIComponent(completedExport.export_id)}`}><Check size={14} /><Bi zh="下载已完成的 TXT" en="Download completed TXT" /></a> : null}
-  </section>;
+  return (
+    <div>
+      <form action={props.actions.createExport} className="inline-action-form"><input name="format" type="hidden" value="txt" /><button type="submit"><Play size={14} /><Bi zh="生成 TXT" en="Generate TXT" /></button></form>
+      <ResultBoundary locale={locale} result={props.exports} empty={tx(locale, "暂无导出记录。", "No export records.")} render={(records) => <div className="compact-action-list">{records.map((record, index) => <div className="tool-result-item" key={record.export_id}><strong><Bi zh="导出" en="Export" /> {index + 1}</strong><span><StatusValue value={record.status} /> / {record.block_count} blocks</span></div>)}</div>} />
+      {completedExport ? <a className="nav-link" download href={`/api/manuscript-export/${encodeURIComponent(props.tenantSlug)}/${encodeURIComponent(props.projectId)}?exportId=${encodeURIComponent(completedExport.export_id)}`}><Check size={14} /><Bi zh="下载已完成的 TXT" en="Download completed TXT" /></a> : null}
+    </div>
+  );
 }
 
 function ResultBoundary<T>({ locale, result, empty, render }: { locale: Locale; result: WriterWebResult<T[]> | WriterWebResult<T>; empty: string; render: (value: T[] & T) => React.ReactNode }) {
@@ -533,9 +719,9 @@ function DeleteForm({ action, idName, id, version, label }: { action: Action; id
       <input name="expectedVersion" type="hidden" value={version} />
       <ConfirmSubmitButton
         cancelLabel={<Bi zh="取消" en="Cancel" />}
-        confirmDescription={<Bi zh="此操作会归档该条目。确认继续？" en="This archives the item. Continue?" />}
-        confirmLabel={<Bi zh="确认归档" en="Confirm archive" />}
-        confirmTitle={<Bi zh="确认归档" en="Confirm archive" />}
+        confirmDescription={<Bi zh="此操作会删除该条目（可找回）。确认继续？" en="This deletes the item (recoverable). Continue?" />}
+        confirmLabel={<Bi zh="确认删除" en="Confirm delete" />}
+        confirmTitle={<Bi zh="确认删除" en="Confirm delete" />}
         idleLabel={<><Trash2 size={14} />{label}</>}
         pendingLabel={<Bi zh="处理中…" en="Working…" />}
         tone="danger"

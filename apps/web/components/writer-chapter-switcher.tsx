@@ -124,7 +124,7 @@ export function WriterChapterSwitcher(props: WriterChapterSwitcherProps) {
           <button
             className="writer-chapter-switcher-manage"
             onClick={() => {
-              workbench?.setActiveTab("structure");
+              workbench?.setDrawer("structure");
               setOpen(false);
             }}
             type="button"

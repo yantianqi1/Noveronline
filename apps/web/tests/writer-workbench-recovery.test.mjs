@@ -51,11 +51,11 @@ test("writer candidate recovery is metadata-only and adoption is automatic with 
   assert.match(candidate, /重试存入手稿|Retry saving/);
 });
 
-test("writer export controls live in the studio tools tab with a real download link", async () => {
+test("writer export controls live in the export tool card with a real download link", async () => {
   const workspace = await readFile(path.join(root, "components/writer-product-workspace.tsx"), "utf8");
 
   assert.match(workspace, /createExport/);
-  assert.match(workspace, /生成 TXT 产物|Generate TXT artifact/);
+  assert.match(workspace, /生成 TXT|Generate TXT/);
   assert.match(workspace, /artifact_sha256/);
   assert.match(workspace, /\/api\/manuscript-export\//);
   assert.match(workspace, /下载已完成的 TXT|Download completed TXT/);
@@ -90,7 +90,7 @@ test("writer reviewer UI is explicit, recoverable, and issue actions remain meta
   assert.match(page, /startDraftReview\(/);
   assert.match(page, /updateReviewIssue\(/);
   assert.match(workspace, /function ReviewerPanel/);
-  assert.match(workspace, /Start reviewer/);
+  assert.match(workspace, /开始审校|Start review/);
   assert.match(workspace, /issue\.status === "open" && issue\.updated_at/);
   assert.match(workspace, /name="status"/);
   assert.match(workspace, /name="draftId"/);

@@ -1,5 +1,7 @@
-import { ArchiveRestore, ArrowDown, ArrowUp, ListRestart, Plus, Save } from "lucide-react";
-import type { ReactNode } from "react";
+"use client";
+
+import { ArchiveRestore, GripVertical, ListRestart, MoreHorizontal, Plus, Save, Sparkles, Tags } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
   Chapter,
@@ -14,6 +16,7 @@ import { Bi, StatusValue } from "./bilingual-text";
 import { ConfirmSubmitButton } from "./confirm-submit-button";
 import type { PendingRevision } from "./writer-manuscript-editor";
 import { WriterManuscriptPanelClient } from "./writer-manuscript-panel-client";
+import { useWriterWorkbench } from "./writer-workbench-context";
 
 type Action = (formData: FormData) => Promise<void>;
 
@@ -49,8 +52,9 @@ export type WriterManuscriptFlowProps = {
 };
 
 /**
- * Continuous manuscript document: sections render as prose in order;
- * the selected section expands into the TipTap editor in-place.
+ * Continuous manuscript document, redesigned: each section renders as pure
+ * prose; its management lives behind a single hover ⋯ menu instead of a
+ * permanently-mounted disclosure full of forms.
  */
 export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
   const { locale, blockContents, selectedBlock } = props;
@@ -107,7 +111,7 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
         <Bi zh="手稿正文" en="Manuscript prose" />
       </h2>
 
-      <div className="writer-manuscript-document writer-manuscript-paper">
+      <div className="writer-manuscript-document">
         {blockContents.map((block, index) => {
           const selected = props.selectedBlockId === block.block_id;
           const content =
@@ -124,104 +128,365 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
               : block.status;
 
           return (
-            <article
-              className={`writer-manuscript-section ${selected ? "is-selected" : ""}`}
-              data-block-id={block.block_id}
-              data-section-index={index + 1}
+            <ManuscriptSection
+              block={block}
+              content={content}
+              index={index}
               key={block.block_id}
-            >
-              <div className="writer-section-divider">
-                <span className="writer-section-divider-meta">
-                  <strong>
-                    <Bi zh={`片段 ${index + 1}`} en={`Section ${index + 1}`} />
-                  </strong>
-                  {!selected ? (
-                    <>
-                      <span>
-                        · {block.word_count} <Bi zh="字" en="words" />
-                      </span>
-                      <span>
-                        · <StatusValue value={status} />
-                      </span>
-                    </>
-                  ) : null}
-                  {block.tags.length > 0 ? (
-                    <span className="writer-section-tags">· {block.tags.join(", ")}</span>
-                  ) : null}
-                </span>
-                <details className="writer-section-manage">
-                  <summary>
-                    <Bi zh="管理" en="Manage" />
-                  </summary>
-                  <div className="writer-section-manage-panel">
-                    <SectionManageForms
-                      actions={props.actions}
-                      block={block}
-                      chapters={props.chapters}
-                      index={index}
-                      locale={locale}
-                      orderedIds={orderedIds}
-                      scenes={props.scenes}
-                      sectionCount={blockContents.length}
-                      versions={selected ? props.blockVersions : { ok: true, value: [] }}
-                    />
-                  </div>
-                </details>
-              </div>
-
-              {selected ? (
-                <div className="writer-manuscript-section-editor">
-                  <WriterManuscriptPanelClient
-                    locale={locale}
-                    blockId={block.block_id}
-                    expectedVersion={version}
-                    content={content}
-                    status={status}
-                    chapterId={block.chapter_id ?? props.selectedChapterId}
-                    sceneId={block.scene_id ?? props.selectedSceneId}
-                    updateBlockAction={props.actions.updateBlock}
-                    createBlockAction={props.actions.createBlock}
-                    reviseAction={props.actions.reviseSelection}
-                    pendingRevision={props.pendingRevision ?? null}
-                    conflictLocalDraft={props.localDraft ?? null}
-                    workspaceStatus={props.actionStatus?.status ?? null}
-                    workspaceCode={props.actionStatus?.code ?? null}
-                  />
-                </div>
-              ) : (
-                <SectionNavigateForm
-                  blockId={block.block_id}
-                  label={
-                    <div className="writer-manuscript-section-prose">
-                      {content.trim() ? (
-                        <p>{content}</p>
-                      ) : (
-                        <p className="writer-manuscript-section-empty">
-                          <Bi zh="（空白片段 — 点击开始写）" en="(Empty section — click to write)" />
-                        </p>
-                      )}
-                    </div>
-                  }
-                  props={props}
-                />
-              )}
-            </article>
+              locale={locale}
+              orderedIds={orderedIds}
+              props={props}
+              sectionCount={blockContents.length}
+              selected={selected}
+              status={status}
+              version={version}
+            />
           );
         })}
         {props.draftBlock}
       </div>
 
-      <form action={props.actions.createBlock} className="writer-add-section-form">
+      <AddSectionRow props={props} />
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* One section: prose + a single hover ⋯ menu                          */
+/* ------------------------------------------------------------------ */
+
+function ManuscriptSection({
+  block,
+  content,
+  index,
+  locale,
+  orderedIds,
+  props,
+  sectionCount,
+  selected,
+  status,
+  version,
+}: {
+  block: PrivateManuscriptBlock;
+  content: string;
+  index: number;
+  locale: Locale;
+  orderedIds: string[];
+  props: WriterManuscriptFlowProps;
+  sectionCount: number;
+  selected: boolean;
+  status: string;
+  version: number;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onPointer(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenuOpen(false);
+    }
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  return (
+    <article
+      className={`writer-manuscript-section ${selected ? "is-selected" : ""}`}
+      data-block-id={block.block_id}
+      data-section-index={index + 1}
+    >
+      <div className="writer-section-divider">
+        <span className="writer-section-divider-meta">
+          <strong>
+            <Bi zh={`片段 ${index + 1}`} en={`Section ${index + 1}`} />
+          </strong>
+          {!selected ? (
+            <>
+              <span>
+                · {block.word_count} <Bi zh="字" en="words" />
+              </span>
+              <span>
+                · <StatusValue value={status} />
+              </span>
+            </>
+          ) : null}
+          {block.tags.length > 0 ? (
+            <span className="writer-section-tags">· {block.tags.join(", ")}</span>
+          ) : null}
+        </span>
+
+        {/* single ⋯ menu replaces the old always-mounted manage disclosure */}
+        <div ref={menuRef} style={{ position: "relative" }}>
+          <button
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-label={tx(locale, "管理这一段", "Manage this section")}
+            className="writer-section-menu-button"
+            onClick={() => setMenuOpen((value) => !value)}
+            type="button"
+          >
+            <MoreHorizontal aria-hidden="true" size={18} />
+          </button>
+          {menuOpen ? (
+            <SectionMenu
+              actions={props.actions}
+              block={block}
+              chapters={props.chapters}
+              close={() => setMenuOpen(false)}
+              index={index}
+              locale={locale}
+              orderedIds={orderedIds}
+              scenes={props.scenes}
+              sectionCount={sectionCount}
+              version={version}
+              versions={selected ? props.blockVersions : { ok: true, value: [] }}
+            />
+          ) : null}
+        </div>
+      </div>
+
+      {selected ? (
+        <div className="writer-manuscript-section-editor">
+          <WriterManuscriptPanelClient
+            locale={locale}
+            blockId={block.block_id}
+            expectedVersion={version}
+            content={content}
+            status={status}
+            chapterId={block.chapter_id ?? props.selectedChapterId}
+            sceneId={block.scene_id ?? props.selectedSceneId}
+            updateBlockAction={props.actions.updateBlock}
+            createBlockAction={props.actions.createBlock}
+            reviseAction={props.actions.reviseSelection}
+            pendingRevision={props.pendingRevision ?? null}
+            conflictLocalDraft={props.localDraft ?? null}
+            workspaceStatus={props.actionStatus?.status ?? null}
+            workspaceCode={props.actionStatus?.code ?? null}
+          />
+        </div>
+      ) : (
+        <SectionNavigateForm
+          blockId={block.block_id}
+          label={
+            <div className="writer-manuscript-section-prose">
+              {content.trim() ? (
+                <p>{content}</p>
+              ) : (
+                <p className="writer-manuscript-section-empty">
+                  <Bi zh="（空白片段 — 点击开始写）" en="(Empty section — click to write)" />
+                </p>
+              )}
+            </div>
+          }
+          props={props}
+        />
+      )}
+    </article>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* The ⋯ popover menu                                                   */
+/* ------------------------------------------------------------------ */
+
+function SectionMenu({
+  actions,
+  block,
+  chapters,
+  close,
+  index,
+  locale,
+  orderedIds,
+  scenes,
+  sectionCount,
+  version,
+  versions,
+}: {
+  actions: WriterManuscriptFlowProps["actions"];
+  block: PrivateManuscriptBlock;
+  chapters: WriterWebResult<Chapter[]>;
+  close: () => void;
+  index: number;
+  locale: Locale;
+  orderedIds: string[];
+  scenes: WriterWebResult<Scene[]>;
+  sectionCount: number;
+  version: number;
+  versions: WriterWebResult<ManuscriptVersion[]>;
+}) {
+  const [panel, setPanel] = useState<null | "tags" | "move" | "history">(null);
+
+  return (
+    <div className="writer-section-menu" role="menu">
+      {/* reorder */}
+      <div style={{ display: "flex", gap: 4 }}>
+        <form action={actions.reorderBlocks} style={{ flex: 1 }}>
+          {reorderedIds(orderedIds, index, -1).map((item) => (
+            <input key={item} name="orderedBlockItems" type="hidden" value={item} />
+          ))}
+          <button disabled={index <= 0} onClick={close} type="submit">
+            <span className="writer-menu-ico"><GripVertical size={15} /></span>
+            <Bi zh="上移" en="Move up" />
+          </button>
+        </form>
+        <form action={actions.reorderBlocks} style={{ flex: 1 }}>
+          {reorderedIds(orderedIds, index, 1).map((item) => (
+            <input key={item} name="orderedBlockItems" type="hidden" value={item} />
+          ))}
+          <button disabled={index >= sectionCount - 1} onClick={close} type="submit">
+            <span className="writer-menu-ico"><GripVertical size={15} /></span>
+            <Bi zh="下移" en="Move down" />
+          </button>
+        </form>
+      </div>
+
+      <button onClick={() => setPanel(panel === "tags" ? null : "tags")} type="button">
+        <span className="writer-menu-ico"><Tags size={15} /></span>
+        <Bi zh="加标签" en="Add tags" />
+      </button>
+      <button onClick={() => setPanel(panel === "move" ? null : "move")} type="button">
+        <span className="writer-menu-ico"><ListRestart size={15} /></span>
+        <Bi zh="移动到…" en="Move to…" />
+      </button>
+      <button onClick={() => setPanel(panel === "history" ? null : "history")} type="button">
+        <span className="writer-menu-ico"><ArchiveRestore size={15} /></span>
+        <Bi zh="历史版本" en="Version history" />
+      </button>
+
+      <div className="writer-menu-sep" />
+
+      <form action={actions.deleteBlock}>
+        <input name="blockId" type="hidden" value={block.block_id} />
+        <input name="expectedVersion" type="hidden" value={version} />
+        <ConfirmSubmitButton
+          cancelLabel={<Bi zh="取消" en="Cancel" />}
+          confirmDescription={<Bi zh="此操作会删除这一段（可找回）。确认继续？" en="This deletes the section (recoverable). Continue?" />}
+          confirmLabel={<Bi zh="确认删除" en="Confirm delete" />}
+          confirmTitle={<Bi zh="删除这一段" en="Delete this section" />}
+          idleLabel={<Bi zh="删除这一段" en="Delete this section" />}
+          pendingLabel={<Bi zh="处理中…" en="Working…" />}
+          tone="danger"
+        />
+      </form>
+
+      {/* expandable sub-panels */}
+      {panel === "tags" ? (
+        <div className="writer-menu-panel">
+          <strong style={{ fontSize: "0.8rem" }}><Bi zh="标签" en="Tags" /></strong>
+          <form action={actions.tagBlock}>
+            <input name="blockId" type="hidden" value={block.block_id} />
+            <input name="expectedVersion" type="hidden" value={version} />
+            <input
+              aria-label={tx(locale, "标签", "Tags")}
+              defaultValue={block.tags.join(",")}
+              name="tags"
+              placeholder={tx(locale, "标签，逗号分隔", "Tags, comma-separated")}
+            />
+            <button onClick={close} type="submit">
+              <Save size={13} />
+              <Bi zh="保存标签" en="Save tags" />
+            </button>
+          </form>
+        </div>
+      ) : null}
+
+      {panel === "move" ? (
+        <div className="writer-menu-panel">
+          <strong style={{ fontSize: "0.8rem" }}><Bi zh="移动到章节 / 场景" en="Move to chapter / scene" /></strong>
+          <form action={actions.moveBlock}>
+            <input name="blockId" type="hidden" value={block.block_id} />
+            <input name="expectedVersion" type="hidden" value={version} />
+            <ChapterSelect chapters={chapters} id={`move-ch-${block.block_id}`} locale={locale} name="chapterId" selectedId={block.chapter_id ?? ""} />
+            <SceneSelect id={`move-sc-${block.block_id}`} locale={locale} name="sceneId" scenes={scenes} selectedId={block.scene_id ?? ""} />
+            <button onClick={close} type="submit">
+              <ListRestart size={13} />
+              <Bi zh="移动" en="Move" />
+            </button>
+          </form>
+        </div>
+      ) : null}
+
+      {panel === "history" ? (
+        <div className="writer-menu-panel">
+          <strong style={{ fontSize: "0.8rem" }}><Bi zh="历史版本" en="Version history" /></strong>
+          {versions.ok && versions.value.length > 0 ? (
+            versions.value.map((entry) => (
+              <form action={actions.restoreBlock} key={entry.version_id}>
+                <input name="blockId" type="hidden" value={block.block_id} />
+                <input name="versionId" type="hidden" value={entry.version_id} />
+                <input name="expectedVersion" type="hidden" value={version} />
+                <span style={{ fontSize: "0.78rem", color: "var(--ink-3, #776b5c)" }}>
+                  v{entry.version_number} / {entry.snapshot_reason}
+                </span>
+                <button onClick={close} type="submit">
+                  <ArchiveRestore size={13} />
+                  <Bi zh="恢复" en="Restore" />
+                </button>
+              </form>
+            ))
+          ) : (
+            <p style={{ fontSize: "0.78rem", color: "var(--ink-3, #776b5c)", margin: "6px 0 0" }}>
+              <Bi zh="暂无历史版本。" en="No versions yet." />
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 段尾: 写一段 / 让 AI 写                                              */
+/* ------------------------------------------------------------------ */
+
+function AddSectionRow({ props }: { props: WriterManuscriptFlowProps }) {
+  const workbench = useWriterWorkbench();
+  const { locale } = props;
+  return (
+    <div className="writer-paper-addrow">
+      <form action={props.actions.createBlock}>
         <input name="chapterId" type="hidden" value={props.selectedChapterId} />
         <input name="sceneId" type="hidden" value={props.selectedSceneId} />
         <button type="submit">
           <Plus size={14} />
-          <Bi zh="添加空白片段" en="Add blank section" />
+          <Bi zh="写一段" en="Write a section" />
         </button>
       </form>
-    </section>
+      <button
+        className="writer-add-ai"
+        onClick={() => {
+          workbench?.setMobileView("conversation");
+          // Desktop keeps the agent dock visible; still move focus into the composer.
+          requestAnimationFrame(() => {
+            const composer = document.querySelector<HTMLTextAreaElement>(
+              ".writer-agent-composer textarea, .writer-composer-input-row textarea",
+            );
+            composer?.focus();
+          });
+        }}
+        title={tx(locale, "在右侧让 AI 接着写", "Ask the AI to continue on the right")}
+        type="button"
+      >
+        <Sparkles size={14} />
+        <Bi zh="让 AI 接着写" en="Let AI continue" />
+      </button>
+    </div>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* helpers                                                             */
+/* ------------------------------------------------------------------ */
 
 function SectionNavigateForm({
   blockId,
@@ -249,175 +514,6 @@ function SectionNavigateForm({
       <input name="blockId" type="hidden" value={blockId} />
       <button className="writer-section-select-button" type="submit">
         {label}
-      </button>
-    </form>
-  );
-}
-
-function SectionManageForms({
-  actions,
-  block,
-  chapters,
-  index,
-  locale,
-  orderedIds,
-  scenes,
-  sectionCount,
-  versions,
-}: {
-  actions: WriterManuscriptFlowProps["actions"];
-  block: PrivateManuscriptBlock;
-  chapters: WriterWebResult<Chapter[]>;
-  index: number;
-  locale: Locale;
-  orderedIds: string[];
-  scenes: WriterWebResult<Scene[]>;
-  sectionCount: number;
-  versions: WriterWebResult<ManuscriptVersion[]>;
-}) {
-  return (
-    <div className="writer-section-manage-body">
-      <div className="inline-controls writer-section-reorder">
-        <ReorderButton
-          action={actions.reorderBlocks}
-          ariaLabel={tx(locale, "上移片段", "Move section up")}
-          direction={-1}
-          disabled={index <= 0}
-          orderedBlockItems={reorderedIds(orderedIds, index, -1)}
-        />
-        <ReorderButton
-          action={actions.reorderBlocks}
-          ariaLabel={tx(locale, "下移片段", "Move section down")}
-          direction={1}
-          disabled={index >= sectionCount - 1}
-          orderedBlockItems={reorderedIds(orderedIds, index, 1)}
-        />
-      </div>
-
-      <form action={actions.updateBlock} className="inline-controls">
-        <input name="blockId" type="hidden" value={block.block_id} />
-        <input name="expectedVersion" type="hidden" value={block.version} />
-        <input name="content" type="hidden" value={block.content_text ?? ""} />
-        <label htmlFor={`section-status-${block.block_id}`}>
-          <Bi zh="状态" en="Status" />
-        </label>
-        <select
-          defaultValue={block.status}
-          id={`section-status-${block.block_id}`}
-          name="status"
-        >
-          <option value="active">{tx(locale, "进行中", "Active")}</option>
-          <option value="deleted">{tx(locale, "已删除", "Deleted")}</option>
-        </select>
-        <button type="submit">
-          <Save size={14} />
-          <Bi zh="保存状态" en="Save status" />
-        </button>
-      </form>
-
-      <form action={actions.tagBlock} className="inline-controls">
-        <input name="blockId" type="hidden" value={block.block_id} />
-        <input name="expectedVersion" type="hidden" value={block.version} />
-        <input
-          aria-label={tx(locale, "标签", "Tags")}
-          defaultValue={block.tags.join(",")}
-          name="tags"
-          placeholder={tx(locale, "标签，逗号分隔", "Tags, comma-separated")}
-        />
-        <button type="submit">
-          <Save size={14} />
-          <Bi zh="保存标签" en="Save tags" />
-        </button>
-      </form>
-
-      <form action={actions.moveBlock} className="binding-form">
-        <input name="blockId" type="hidden" value={block.block_id} />
-        <input name="expectedVersion" type="hidden" value={block.version} />
-        <label htmlFor={`move-section-chapter-${block.block_id}`}>
-          <Bi zh="目标章节" en="Target chapter" />
-        </label>
-        <ChapterSelect
-          chapters={chapters}
-          id={`move-section-chapter-${block.block_id}`}
-          locale={locale}
-          name="chapterId"
-          selectedId={block.chapter_id ?? ""}
-        />
-        <label htmlFor={`move-section-scene-${block.block_id}`}>
-          <Bi zh="目标场景" en="Target scene" />
-        </label>
-        <SceneSelect
-          id={`move-section-scene-${block.block_id}`}
-          locale={locale}
-          name="sceneId"
-          scenes={scenes}
-          selectedId={block.scene_id ?? ""}
-        />
-        <button type="submit">
-          <ListRestart size={14} />
-          <Bi zh="移动片段" en="Move section" />
-        </button>
-      </form>
-
-      <form action={actions.deleteBlock} className="inline-action-form">
-        <input name="blockId" type="hidden" value={block.block_id} />
-        <input name="expectedVersion" type="hidden" value={block.version} />
-        <ConfirmSubmitButton
-          cancelLabel={<Bi zh="取消" en="Cancel" />}
-          confirmDescription={<Bi zh="此操作会归档该片段。确认继续？" en="This archives the section. Continue?" />}
-          confirmLabel={<Bi zh="确认归档" en="Confirm archive" />}
-          confirmTitle={<Bi zh="确认归档" en="Confirm archive" />}
-          idleLabel={<Bi zh="归档片段" en="Archive section" />}
-          pendingLabel={<Bi zh="处理中…" en="Working…" />}
-          tone="danger"
-        />
-      </form>
-
-      {versions.ok && versions.value.length > 0 ? (
-        <div className="compact-action-list">
-          <strong>
-            <Bi zh="历史版本" en="Version history" />
-          </strong>
-          {versions.value.map((version) => (
-            <form action={actions.restoreBlock} className="inline-controls" key={version.version_id}>
-              <input name="blockId" type="hidden" value={block.block_id} />
-              <input name="versionId" type="hidden" value={version.version_id} />
-              <input name="expectedVersion" type="hidden" value={block.version} />
-              <span>
-                v{version.version_number} / {version.snapshot_reason}
-              </span>
-              <button type="submit">
-                <ArchiveRestore size={14} />
-                <Bi zh="恢复" en="Restore" />
-              </button>
-            </form>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ReorderButton({
-  action,
-  ariaLabel,
-  direction,
-  disabled,
-  orderedBlockItems,
-}: {
-  action: Action;
-  ariaLabel: string;
-  direction: -1 | 1;
-  disabled: boolean;
-  orderedBlockItems: string[];
-}) {
-  return (
-    <form action={action} className="inline-action-form">
-      {orderedBlockItems.map((item) => (
-        <input key={item} name="orderedBlockItems" type="hidden" value={item} />
-      ))}
-      <button aria-label={ariaLabel} disabled={disabled} type="submit">
-        {direction === -1 ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
       </button>
     </form>
   );

@@ -1,10 +1,10 @@
 "use client";
 
-import { BookOpenText, ListTree, MessageSquare, Search, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { BookOpenText, Library, ListTree, MessageSquare, Search, Layers } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { type Locale, tx } from "../lib/locale";
-import { useWriterWorkbench, type WriterArtifactTab } from "./writer-workbench-context";
+import { useWriterWorkbench, type WriterDrawer } from "./writer-workbench-context";
 
 type PaletteCommand = {
   id: string;
@@ -42,11 +42,11 @@ export function WriterCommandPalette({ locale }: { locale: Locale }) {
 
   const open = workbench?.paletteOpen ?? false;
   const close = workbench?.closePalette ?? (() => {});
-  const setActiveTab = workbench?.setActiveTab ?? (() => {});
+  const setDrawer = workbench?.setDrawer ?? (() => {});
 
   const commands = useMemo<PaletteCommand[]>(() => {
-    const gotoTab = (tab: WriterArtifactTab) => () => {
-      setActiveTab(tab);
+    const gotoDrawer = (drawer: Exclude<WriterDrawer, null>) => () => {
+      setDrawer(drawer);
       close();
     };
     const focusComposer = () => {
@@ -60,13 +60,12 @@ export function WriterCommandPalette({ locale }: { locale: Locale }) {
     const nav = tx(locale, "跳转", "Navigate");
     const agent = tx(locale, "Agent", "Agent");
     return [
-      { id: "tab-manuscript", label: tx(locale, "打开稿件正文", "Open manuscript"), group: nav, keywords: "manuscript prose 稿件 正文", icon: BookOpenText, run: gotoTab("manuscript") },
-      { id: "tab-structure", label: tx(locale, "章节管理", "Chapter management"), group: nav, keywords: "structure chapters scenes 章节 场景 结构 管理", icon: ListTree, run: gotoTab("structure") },
-      { id: "tab-review", label: tx(locale, "打开审校", "Open review"), group: nav, keywords: "review reviewer proposals 审校 候选", icon: ShieldCheck, run: gotoTab("review") },
-      { id: "tab-studio", label: tx(locale, "打开工具", "Open tools"), group: nav, keywords: "studio tools planning commands dedup export 工作室 工具 规划 命令 去重 导出", icon: SlidersHorizontal, run: gotoTab("studio") },
+      { id: "drawer-structure", label: tx(locale, "章节结构", "Chapter structure"), group: nav, keywords: "structure chapters scenes 章节 场景 结构 管理", icon: ListTree, run: gotoDrawer("structure") },
+      { id: "drawer-tools", label: tx(locale, "打开工具", "Open tools"), group: nav, keywords: "studio tools planning commands dedup export 工作室 工具 规划 命令 去重 导出", icon: Layers, run: gotoDrawer("tools") },
+      { id: "drawer-library", label: tx(locale, "打开资料", "Open library"), group: nav, keywords: "library assets context worldline 资料 资产 上下文 参考", icon: Library, run: gotoDrawer("library") },
       { id: "focus-agent", label: tx(locale, "聚焦对话输入", "Focus conversation composer"), group: agent, keywords: "agent chat composer write 对话 写作 输入", icon: MessageSquare, run: focusComposer },
     ];
-  }, [close, locale, setActiveTab]);
+  }, [close, locale, setDrawer]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

@@ -1,0 +1,453 @@
+/* ==========================================================================
+   Writer redesign — "稿纸 + AI 常驻 + 左侧目录 + 底部三抽屉"
+   Design tokens come from globals.css (paper / ink / cinnabar / gold).
+   This file owns ONLY the new layout chrome. Reuses existing paper,
+   agent-dock, composer and draft styles from workbench-polish.css.
+   ========================================================================== */
+
+.writer-redesign {
+  --paper-max: 880px;
+  --toc-w: 218px;
+  --toc-w-collapsed: 36px;
+  --handlebar-h: 48px;
+  --drawer-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --cinnabar: #8f211b;
+  --cinnabar-soft: rgba(143, 33, 27, 0.08);
+  --gold: #a9854f;
+  --gold-soft: rgba(169, 133, 79, 0.14);
+  --agent: #5c4d7a;
+  --agent-soft: rgba(92, 77, 122, 0.12);
+  --line: rgba(86, 69, 45, 0.22);
+  --line-strong: rgba(75, 61, 43, 0.34);
+  --paper-bg: #fbf8f1;
+  --panel-bg: #f7f2e9;
+  --panel-solid: #fbf7ef;
+  --ink-2: #5a5146;
+  --ink-3: #776b5c;
+  --shadow-raise: 0 14px 30px rgba(46, 39, 31, 0.12), 0 4px 12px rgba(46, 39, 31, 0.07);
+  --shadow-drawer: 0 -18px 48px rgba(46, 39, 31, 0.18);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- overall stage: toc | paper (agent dock is a shell sibling) ---------- */
+.writer-redesign-stage {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #eeebe4;
+}
+
+/* ---------- left table-of-contents rail ---------- */
+.writer-toc {
+  width: var(--toc-w);
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--panel-bg);
+  border-right: 1px solid var(--line);
+  padding: 16px 10px 24px;
+  transition: width 220ms var(--drawer-ease), padding 220ms var(--drawer-ease);
+}
+.writer-toc.is-collapsed {
+  width: var(--toc-w-collapsed);
+  padding: 16px 4px 24px;
+}
+.writer-toc-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 12px;
+  color: var(--ink-3);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.writer-toc-fold {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-3);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.writer-toc-fold:hover { background: rgba(86, 69, 45, 0.1); color: var(--ink-2); }
+.writer-toc.is-collapsed .writer-toc-fold { margin: 0 auto; transform: rotate(180deg); }
+.writer-toc.is-collapsed .writer-toc-head span,
+.writer-toc.is-collapsed .writer-toc-item { display: none; }
+
+.writer-toc-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font-family: var(--font-serif, "Songti SC", "Noto Serif SC", Georgia, serif);
+  cursor: pointer;
+}
+.writer-toc-item:hover { background: rgba(86, 69, 45, 0.07); }
+.writer-toc-item.is-current {
+  background: var(--cinnabar-soft);
+  box-shadow: inset 2px 0 0 var(--cinnabar);
+}
+.writer-toc-item .writer-toc-title {
+  font-size: 0.9rem;
+  color: #24211d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.writer-toc-item .writer-toc-words {
+  margin-left: auto;
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  color: var(--ink-3);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- paper column ---------- */
+.writer-redesign-paper-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 32px 32px 96px;
+}
+.writer-redesign-paper {
+  width: 100%;
+  max-width: var(--paper-max);
+  min-height: calc(100% - 8px);
+  margin: 0 auto;
+  background: var(--paper-bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 10px 24px rgba(46, 39, 31, 0.07), 0 2px 8px rgba(46, 39, 31, 0.04);
+  padding: 56px clamp(44px, 6vw, 88px) 80px;
+  font-family: var(--font-serif, "Songti SC", "Noto Serif SC", Georgia, serif);
+  position: relative;
+}
+.writer-redesign-paper > .writer-paper-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.04em;
+  margin: 0 0 6px;
+}
+.writer-redesign-paper > .writer-paper-sub {
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+  margin: 0 0 36px;
+}
+
+/* section hover affordance */
+.writer-redesign-paper .writer-manuscript-section {
+  position: relative;
+  border-bottom: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  transition: background 140ms ease;
+}
+.writer-redesign-paper .writer-manuscript-section:hover { background: rgba(169, 133, 79, 0.06); }
+.writer-redesign-paper .writer-manuscript-section.is-selected {
+  background: var(--cinnabar-soft);
+  box-shadow: inset 2px 0 0 var(--cinnabar);
+}
+.writer-redesign-paper .writer-section-divider { opacity: 0; }
+.writer-redesign-paper .writer-manuscript-section:hover .writer-section-divider,
+.writer-redesign-paper .writer-manuscript-section.is-selected .writer-section-divider,
+.writer-redesign-paper .writer-manuscript-section:focus-within .writer-section-divider { opacity: 1; }
+
+/* the per-section ⋯ trigger (replaces the old "manage" disclosure) */
+.writer-section-menu-button {
+  position: absolute;
+  right: 2px;
+  top: 6px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-3);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.writer-manuscript-section:hover .writer-section-menu-button,
+.writer-manuscript-section.is-selected .writer-section-menu-button,
+.writer-manuscript-section:focus-within .writer-section-menu-button { opacity: 1; }
+.writer-section-menu-button:hover { background: rgba(86, 69, 45, 0.1); color: var(--ink-2); }
+
+/* floating ⋯ popover menu */
+.writer-section-menu {
+  position: absolute;
+  z-index: 40;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-raise);
+  font-family: var(--font-sans);
+  animation: writer-pop 140ms var(--drawer-ease);
+}
+@keyframes writer-pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+.writer-section-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font-size: 0.86rem;
+  color: #24211d;
+  text-align: left;
+  cursor: pointer;
+}
+.writer-section-menu button:hover { background: rgba(86, 69, 45, 0.08); }
+.writer-section-menu button .writer-menu-ico { width: 16px; text-align: center; color: var(--ink-3); display: inline-flex; }
+.writer-section-menu .writer-menu-sep { height: 1px; background: var(--line); margin: 5px 8px; }
+.writer-section-menu button.is-danger { color: var(--cinnabar); }
+.writer-section-menu button.is-danger .writer-menu-ico { color: var(--cinnabar); }
+/* expanded sub-panels inside the ⋯ menu */
+.writer-section-menu .writer-menu-panel { padding: 6px 10px 10px; border-top: 1px solid var(--line); }
+.writer-section-menu .writer-menu-panel form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+
+/* 段尾: 写一段 / 让 AI 写 */
+.writer-paper-addrow {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 30px;
+  font-family: var(--font-sans);
+}
+.writer-paper-addrow button,
+.writer-paper-addrow .writer-add-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  border: 1px dashed var(--line-strong);
+  color: var(--ink-2);
+  background: transparent;
+  cursor: pointer;
+}
+.writer-paper-addrow button:hover { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--cinnabar-soft); }
+.writer-paper-addrow .writer-add-ai { color: #8a6a38; border-color: rgba(169, 133, 79, 0.5); }
+.writer-paper-addrow .writer-add-ai:hover { color: #8a6a38; border-color: var(--gold); background: var(--gold-soft); }
+
+/* ---------- bottom handlebar ---------- */
+.writer-handlebar {
+  height: var(--handlebar-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 4px;
+  background: var(--panel-bg);
+  border-top: 1px solid var(--line);
+  position: relative;
+  z-index: 30;
+}
+.writer-handle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+  border: 0;
+  border-top: 2px solid transparent;
+  background: transparent;
+  font-size: 0.88rem;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.writer-handle:hover { color: #24211d; background: rgba(86, 69, 45, 0.06); }
+.writer-handle.is-active { color: var(--cinnabar); border-top-color: var(--cinnabar); background: rgba(86, 69, 45, 0.06); }
+.writer-handle .writer-handle-badge {
+  background: var(--cinnabar);
+  color: #fff;
+  font-size: 0.64rem;
+  min-width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+}
+
+/* ---------- slide-up drawers ---------- */
+.writer-drawer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 0;
+  padding-top: 8vh;
+  background: rgba(23, 26, 27, 0.28);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+}
+.writer-drawer.is-open { opacity: 1; pointer-events: auto; }
+.writer-drawer-sheet {
+  background: var(--panel-bg);
+  border-top: 1px solid var(--line-strong);
+  border-radius: 16px 16px 0 0;
+  box-shadow: var(--shadow-drawer);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(102%);
+  transition: transform 280ms var(--drawer-ease);
+  overflow: hidden;
+}
+.writer-drawer.is-open .writer-drawer-sheet { transform: translateY(0); }
+.writer-drawer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 20px 28px 0;
+  flex-shrink: 0;
+}
+.writer-drawer-head h2 { font-size: 1.2rem; font-family: var(--font-serif, "Songti SC", serif); margin: 0; }
+.writer-drawer-head p { color: var(--ink-3); font-size: 0.82rem; margin: 0; }
+.writer-drawer-close {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.writer-drawer-close:hover { background: rgba(86, 69, 45, 0.08); color: #24211d; }
+.writer-drawer-body { flex: 1; overflow-y: auto; padding: 18px 28px 64px; min-height: 0; }
+
+/* ---------- structure drawer: tree ---------- */
+.writer-tree { max-width: 620px; }
+.writer-tree-create { display: flex; gap: 8px; margin-bottom: 14px; }
+.writer-tree-node { margin-bottom: 3px; }
+.writer-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+}
+.writer-tree-row:hover { background: rgba(86, 69, 45, 0.06); }
+.writer-tree-row.is-current { background: var(--cinnabar-soft); box-shadow: inset 2px 0 0 var(--cinnabar); }
+.writer-tree-row .writer-tree-grip { color: #cfc3ab; cursor: grab; user-select: none; }
+.writer-tree-row .writer-tree-title { font-family: var(--font-serif, "Songti SC", serif); font-size: 0.96rem; color: #24211d; border: 0; background: transparent; cursor: pointer; padding: 0; text-align: left; }
+.writer-tree-row .writer-tree-words { color: var(--ink-3); font-size: 0.74rem; font-variant-numeric: tabular-nums; }
+.writer-tree-row .writer-tree-dots { margin-left: auto; color: var(--ink-3); opacity: 0; border: 0; background: transparent; cursor: pointer; padding: 4px; border-radius: 6px; }
+.writer-tree-row:hover .writer-tree-dots { opacity: 1; }
+.writer-tree-children { margin-left: 28px; border-left: 1px solid var(--line); padding-left: 8px; }
+.writer-tree-edit { margin: 6px 0 8px 40px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-solid); }
+
+/* ---------- tools drawer: grouped cards ---------- */
+.writer-toolgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; align-items: start; }
+.writer-toolcard {
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.writer-toolcard > summary {
+  list-style: none;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+.writer-toolcard > summary::-webkit-details-marker { display: none; }
+.writer-toolcard .writer-tool-ico {
+  width: 34px; height: 34px; border-radius: 8px;
+  display: grid; place-items: center; font-size: 16px; flex-shrink: 0;
+}
+.writer-toolcard h3 { font-size: 0.92rem; font-weight: 600; margin: 0; }
+.writer-toolcard .writer-tool-desc { font-size: 0.74rem; color: var(--ink-3); }
+.writer-toolcard .writer-tool-chev { margin-left: auto; color: var(--ink-3); transition: transform 200ms; }
+.writer-toolcard[open] .writer-tool-chev { transform: rotate(180deg); }
+.writer-toolcard .writer-tool-body { padding: 4px 16px 16px; border-top: 1px solid var(--line); }
+.writer-toolcard .writer-tool-body > * + * { margin-top: 10px; }
+/* tone variants for the group icon chip */
+.writer-tone-plan { background: var(--cinnabar-soft); color: var(--cinnabar); }
+.writer-tone-check { background: var(--gold-soft); color: #9a6b1f; }
+.writer-tone-ai { background: var(--agent-soft); color: var(--agent); }
+.writer-tone-export { background: rgba(47, 107, 58, 0.1); color: #2f6b3a; }
+
+/* ---------- library drawer ---------- */
+.writer-libgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
+.writer-libcol h4 { font-size: 0.82rem; color: var(--ink-2); margin: 0 0 10px; display: flex; align-items: center; gap: 7px; }
+.writer-libitem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+.writer-libitem input { margin-top: 3px; accent-color: var(--cinnabar); }
+.writer-libitem .writer-lib-title { font-size: 0.86rem; color: #24211d; }
+.writer-libitem .writer-lib-meta { font-size: 0.72rem; color: var(--ink-3); display: block; }
+
+/* ---------- review strip (reachable but not a shouting tab) ---------- */
+.writer-review-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  margin: 0 auto 18px;
+  max-width: var(--paper-max);
+  background: rgba(86, 69, 45, 0.04);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 0.84rem;
+  color: var(--ink-2);
+}
+.writer-review-strip.is-pending {
+  background: var(--gold-soft);
+  border-color: rgba(169, 133, 79, 0.4);
+  color: #6d5a33;
+}
+
+/* ---------- responsive: collapse toc & stack on narrow ---------- */
+@media (max-width: 1080px) {
+  .writer-redesign { --toc-w: 190px; }
+}
+@media (max-width: 960px) {
+  .writer-redesign { --toc-w: var(--toc-w-collapsed); }
+  .writer-toc { width: var(--toc-w-collapsed); padding: 16px 4px 24px; }
+  .writer-toc .writer-toc-head span,
+  .writer-toc .writer-toc-item { display: none; }
+  .writer-toc .writer-toc-fold { margin: 0 auto; transform: rotate(180deg); }
+}

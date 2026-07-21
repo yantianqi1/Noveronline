@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 export type WriterArtifactTab = "manuscript" | "structure" | "review" | "studio";
+export type WriterDrawer = "structure" | "tools" | "library" | null;
 export type WriterMobileView = "conversation" | "artifact";
 export type WriterSaveState = "idle" | "dirty" | "saving" | "saved";
 export type WriterSaveStatus = { state: WriterSaveState; at: number };
@@ -24,6 +25,10 @@ type WriterWorkbenchContextValue = {
   /** Latest manuscript edit save state, surfaced in the canvas header. */
   saveStatus: WriterSaveStatus;
   setSaveStatus: (state: WriterSaveState) => void;
+  /** Bottom drawer system (structure / tools / library). */
+  drawer: WriterDrawer;
+  setDrawer: (drawer: WriterDrawer) => void;
+  toggleDrawer: (drawer: Exclude<WriterDrawer, null>) => void;
 };
 
 const WriterWorkbenchContext = createContext<WriterWorkbenchContextValue | null>(null);
@@ -55,11 +60,15 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
   const [mobileView, setMobileViewState] = useState<WriterMobileView>("conversation");
   const [artifactBadge, setArtifactBadge] = useState(false);
   const [saveStatus, setSaveStatusState] = useState<WriterSaveStatus>({ state: "idle", at: 0 });
+  const [drawer, setDrawer] = useState<WriterDrawer>(null);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const clearArtifactBadge = useCallback(() => setArtifactBadge(false), []);
   const setSaveStatus = useCallback((state: WriterSaveState) => {
     setSaveStatusState({ state, at: Date.now() });
+  }, []);
+  const toggleDrawer = useCallback((target: Exclude<WriterDrawer, null>) => {
+    setDrawer((current) => (current === target ? null : target));
   }, []);
 
   useEffect(() => {
@@ -102,6 +111,9 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
       }
+      if (event.key === "Escape") {
+        setDrawer(null);
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -122,6 +134,9 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       revealArtifact,
       saveStatus,
       setSaveStatus,
+      drawer,
+      setDrawer,
+      toggleDrawer,
     }),
     [
       activeTab,
@@ -135,6 +150,8 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       revealArtifact,
       saveStatus,
       setSaveStatus,
+      drawer,
+      toggleDrawer,
     ],
   );
 

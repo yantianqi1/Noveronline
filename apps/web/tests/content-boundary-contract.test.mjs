@@ -110,8 +110,7 @@ test("author creative shells stay within content boundary", async () => {
       }
       assert.match(text, /MANUSCRIPT_COMMAND_CHOICES/);
       assert.match(text, /commandChoice/);
-      assert.match(text, /Refresh command status/);
-      assert.match(text, /Refresh generation status/);
+      assert.match(text, /刷新进度|Refresh progress/);
     }
   }
 });

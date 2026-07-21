@@ -109,7 +109,7 @@ test("writer page loads manuscript summaries alongside picker data", async () =>
   assert.match(page, /threadMessages=\{threadMessages\}/);
 });
 
-test("Writer shell stays metadata-only; export UI lives in the studio tools tab", async () => {
+test("Writer shell stays metadata-only; export UI lives in the export tool card", async () => {
   const shell = await fileText("components/writer-workbench-shell.tsx");
   const workspace = await fileText("components/writer-product-workspace.tsx");
 
@@ -124,9 +124,9 @@ test("Writer shell stays metadata-only; export UI lives in the studio tools tab"
   assert.doesNotMatch(shell, /exported_at/);
   assert.doesNotMatch(shell, /credential_ref|encrypted_api_key|api_key/i);
   assert.doesNotMatch(shell, /PDF|DOCX|TXT/);
-  // The only manuscript export surface is the studio tab's TXT artifact panel.
+  // The only manuscript export surface is the export tool card's TXT panel.
   assert.match(workspace, /createExport/);
-  assert.match(workspace, /生成 TXT 产物|Generate TXT artifact/);
+  assert.match(workspace, /生成 TXT|Generate TXT/);
   assert.match(workspace, /\/api\/manuscript-export\//);
 });
 
