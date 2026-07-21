@@ -1,32 +1,19 @@
 {
   "name": "@mirofish/web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "test": "node --test tests/*.test.mjs",
-    "test:live-seed": "node scripts/run-live-seed-harness.mjs --mode both",
-    "test:live-seed:api": "node scripts/run-live-seed-harness.mjs --mode api",
-    "test:live-seed:browser": "node scripts/run-live-seed-harness.mjs --mode browser",
-    "test:live-assets": "node --test tests/asset-library-browser-live.test.mjs",
-    "test:live-story-graph": "node --test tests/story-graph-browser-live.test.mjs",
     "typecheck": "tsc --noEmit",
     "build": "next build"
   },
   "dependencies": {
-    "@tiptap/extension-placeholder": "^3.27.3",
-    "@tiptap/pm": "^3.27.3",
-    "@tiptap/react": "^3.27.3",
-    "@tiptap/starter-kit": "^3.27.3",
-    "d3-force": "^3.0.0",
-    "lucide-react": "^0.468.0",
     "next": "^15.5.9",
     "react": "^19.2.1",
     "react-dom": "^19.2.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
-    "@types/d3-force": "^3.0.10",
     "@types/node": "^24.10.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",

@@ -1,8 +1,0 @@
-"use client";
-import { KeyRound } from "lucide-react";
-import { useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { Bi } from "../../../components/bilingual-text";
-import { completePasswordReset } from "../../../lib/auth-recovery-api";
-
-export default function ResetPasswordPage(){const params=useSearchParams();const[status,setStatus]=useState("");async function submit(event:React.FormEvent<HTMLFormElement>){event.preventDefault();const formElement=event.currentTarget;const form=new FormData(formElement);const password=String(form.get("password")??"");const confirmation=String(form.get("confirmation")??"");if(password!==confirmation){setStatus("VALIDATION_FAILED");return}const result=await completePasswordReset(params.get("token")??"",password);setStatus(result.ok?"PASSWORD_RESET_COMPLETE":result.code);if(result.ok)formElement.reset()}return <main className="app-main login-main"><section className="panel login-panel"><KeyRound aria-hidden="true" size={24}/><p className="eyebrow"><Bi zh="账户恢复" en="Account recovery"/></p><h1><Bi zh="设置新密码" en="Set a new password"/></h1>{status?<p role="status">{status}</p>:null}<form onSubmit={submit}><label htmlFor="reset-password"><Bi zh="新密码" en="New password"/></label><input id="reset-password" name="password" type="password" autoComplete="new-password" minLength={12} maxLength={72} required/><label htmlFor="reset-confirmation"><Bi zh="确认密码" en="Confirm password"/></label><input id="reset-confirmation" name="confirmation" type="password" autoComplete="new-password" minLength={12} maxLength={72} required/><button type="submit"><Bi zh="更新密码" en="Update password"/></button></form></section></main>}

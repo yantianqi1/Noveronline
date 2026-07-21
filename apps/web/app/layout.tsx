@@ -1,33 +1,17 @@
-import type { Metadata, Viewport } from "next";
-import { LocaleProvider } from "../components/locale-provider";
-import { currentRequestLocale } from "../lib/request-locale";
-import "./auth-marketing.css";
+import type { Metadata } from "next";
+import type { ReactNode } from "react";
+
 import "./globals.css";
-import "./workbench-polish.css";
-import "./writer-redesign.css";
-import "./mobile-chrome.css";
 
 export const metadata: Metadata = {
   title: "MiroFish Novel",
-  description: "长篇小说创作工作台 / Long-form fiction workspace.",
+  description: "Novel writing workspace — frontend rewrite in progress",
 };
 
-export const viewport: Viewport = {
-  colorScheme: "light",
-  initialScale: 1,
-  themeColor: "#f3eee4",
-  width: "device-width",
-  viewportFit: "cover",
-};
-
-export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  const locale = await currentRequestLocale();
-
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html data-scroll-behavior="smooth" lang={locale} suppressHydrationWarning>
-      <body>
-        <LocaleProvider initialLocale={locale}>{children}</LocaleProvider>
-      </body>
+    <html lang="zh-CN">
+      <body>{children}</body>
     </html>
   );
 }
