@@ -69,27 +69,6 @@ func NewTemporalHelloAgentStarter(config TemporalHelloAgentConfig) *TemporalHell
 	return &TemporalHelloAgentStarter{client: config.Client, taskQueue: taskQueue}
 }
 
-func NewTemporalHelloAgentStarterFromAddress(ctx context.Context, address string, namespace string, taskQueue string) (*TemporalHelloAgentStarter, client.Client, error) {
-	address = strings.TrimSpace(address)
-	if address == "" {
-		return nil, nil, fmt.Errorf("temporal address is required")
-	}
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		namespace = "default"
-	}
-	temporalClient, err := client.DialContext(ctx, client.Options{
-		HostPort:  address,
-		Namespace: namespace,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return NewTemporalHelloAgentStarter(TemporalHelloAgentConfig{
-		Client:    temporalClient,
-		TaskQueue: taskQueue,
-	}), temporalClient, nil
-}
 
 func (s *TemporalHelloAgentStarter) StartHelloAgent(ctx context.Context, input StartHelloAgentInput) (HelloAgentRun, error) {
 	if input.TenantID == "" || input.ProjectID == "" {

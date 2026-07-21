@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   effectiveModelCapabilities,
-  effectiveSupportsTools,
   inferModelCapabilities,
   normalizeModelId,
 } from "./model-capabilities.js";
@@ -33,11 +32,12 @@ describe("model-capabilities", () => {
     const caps = effectiveModelCapabilities("deepseek-v4-flash", false, false);
     expect(caps.supports_tools).toBe(true);
     expect(caps.supports_json).toBe(true);
-    expect(effectiveSupportsTools("deepseek-v4-flash", false)).toBe(true);
   });
 
   it("keeps stored true", () => {
-    expect(effectiveSupportsTools("anything", true)).toBe(true);
+    const caps = effectiveModelCapabilities("anything", true, true);
+    expect(caps.supports_tools).toBe(true);
+    expect(caps.supports_json).toBe(true);
   });
 
   it("rejects reasoning-only and non-chat models", () => {
@@ -52,7 +52,7 @@ describe("model-capabilities", () => {
       const caps = inferModelCapabilities(modelId);
       expect(caps.supports_tools, modelId).toBe(false);
       expect(caps.supports_json, modelId).toBe(false);
-      expect(effectiveSupportsTools(modelId, false), modelId).toBe(false);
+      expect(effectiveModelCapabilities(modelId, false, false).supports_tools, modelId).toBe(false);
     }
   });
 });

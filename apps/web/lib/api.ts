@@ -2229,42 +2229,6 @@ export async function listWriterThreads(
   }
 }
 
-export async function ensureWriterThread(
-  input: ApiContext & { projectId: string; title?: string },
-): Promise<WriterThreadSummary> {
-  try {
-    const response = await apiFetch(`${apiBaseUrl()}/v1/projects/${input.projectId}/writer-threads`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...contextHeaders(input),
-      },
-      body: JSON.stringify({ title: input.title ?? "Writer thread" }),
-      cache: "no-store",
-    });
-    const payload = (await response.json()) as Record<string, unknown>;
-    if (!response.ok) {
-      return decodeError(payload, response.status, "WRITER_THREAD_QUERY_FAILED");
-    }
-    const threadId = requiredString(payload, "thread_id");
-    const projectId = requiredString(payload, "project_id");
-    const status = requiredString(payload, "status");
-    if (!threadId || !projectId || !status) {
-      return invalidApiResponse("writer thread response missing required fields");
-    }
-    return {
-      ok: true,
-      thread_id: threadId,
-      project_id: projectId,
-      title: typeof payload.title === "string" ? payload.title : undefined,
-      status,
-      updated_at: typeof payload.updated_at === "string" ? payload.updated_at : undefined,
-    };
-  } catch (error) {
-    return networkFailure(error, "WRITER_THREAD_QUERY_FAILED");
-  }
-}
-
 export async function listWriterThreadMessages(
   input: ApiContext & { projectId: string; threadId: string },
 ): Promise<WriterThreadMessagesSummary> {

@@ -1,22 +1,6 @@
 import type { AnalysisRunInput } from "./analysis-run.js";
 
 export const ANALYSIS_TASK_QUEUE = "analysis-streaming";
-export const PI_ANALYSIS_WORKFLOW_NAME = "PiAnalysisRunWorkflow";
-export const PI_ANALYSIS_ACTIVITY_NAME = "runPiAnalysisRunActivity";
-
-export interface PiAnalysisWorkerSpec {
-  taskQueue: string;
-  workflows: string[];
-  activities: string[];
-}
-
-export function piAnalysisWorkerSpec(): PiAnalysisWorkerSpec {
-  return {
-    taskQueue: ANALYSIS_TASK_QUEUE,
-    workflows: [PI_ANALYSIS_WORKFLOW_NAME],
-    activities: [PI_ANALYSIS_ACTIVITY_NAME]
-  };
-}
 
 export function validateAnalysisWorkflowPayload(payload: unknown): AnalysisRunInput {
   const value = payload as Partial<AnalysisRunInput> & Record<string, unknown> | null;

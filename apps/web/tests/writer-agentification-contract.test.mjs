@@ -54,8 +54,7 @@ test("Phase 3: selection toolbar + revision diff + pure writer-diff", async () =
   assert.match(diffLib, /applyHunkDecisions/);
 });
 
-test("Phase 4: activity timeline + context chips + thread helpers", async () => {
-  const timeline = await source("components/writer-activity-timeline.tsx");
+test("Phase 4: task status line + context chips + thread helpers", async () => {
   const chip = await source("components/writer-context-chip.tsx");
   const thread = await source("lib/writer-thread.ts");
   const shell = await source("components/writer-workbench-shell.tsx");
@@ -65,14 +64,6 @@ test("Phase 4: activity timeline + context chips + thread helpers", async () => 
   const authorCopy = await source("lib/author-copy.ts");
   const taskStatus = await source("lib/writer-task-status.ts");
   const statusLine = await source("components/writer-task-status-line.tsx");
-  assert.match(timeline, /writer-activity-timeline/);
-  assert.match(timeline, /activityItemsFromEvents/);
-  // One run lifecycle row: started is updated by failed/completed (no dual spinner+fail).
-  assert.match(timeline, /writer-run-lifecycle|RUN_LIFECYCLE_ID/);
-  assert.match(timeline, /writer\.run\.failed/);
-  assert.match(timeline, /humanizeFailure/);
-  assert.match(timeline, /authorToolLabel/);
-  assert.doesNotMatch(timeline, /正在调用 \$\{toolName\}|Calling \$\{toolName\}/);
   assert.match(chip, /writer-context-chip/);
   assert.match(chip, /assets|graph|worldline/);
   assert.match(thread, /sortThreadMessages/);
@@ -210,7 +201,7 @@ test("Phase 6: visual polish classes for manuscript paper and a11y", async () =>
   assert.match(css, /#fbf8f1/);
   assert.match(css, /\.writer-selection-toolbar/);
   assert.match(css, /\.writer-revision-diff/);
-  assert.match(css, /\.writer-activity-timeline/);
+  assert.doesNotMatch(css, /\.writer-activity-timeline/);
   assert.match(css, /\.writer-approval-card/);
   assert.match(css, /prefers-reduced-motion/);
 });

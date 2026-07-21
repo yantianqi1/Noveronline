@@ -36,8 +36,9 @@ test("global app shell uses paper navigation and compact context bar", async () 
   assert.match(css, /\.workflow-progress\s*\{/);
   assert.match(css, /\.submit-button\s*\{/);
   assert.match(css, /\.confirm-dialog\s*\{/);
-  assert.match(css, /\.overflow-menu\s*\{/);
   assert.match(css, /\.public-error-notice\s*\{/);
+  assert.doesNotMatch(css, /\.overflow-menu\s*\{/);
+  assert.doesNotMatch(css, /\.workspace-disclosure\s*\{/);
   assert.match(css, /@media\s*\(max-width:\s*860px\)/);
   assert.match(css, /min-height:\s*44px/);
 

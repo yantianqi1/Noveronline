@@ -2,15 +2,12 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-export type WriterArtifactTab = "manuscript" | "structure" | "review" | "studio";
 export type WriterDrawer = "structure" | "tools" | "library" | null;
 export type WriterMobileView = "conversation" | "artifact";
 export type WriterSaveState = "idle" | "dirty" | "saving" | "saved";
 export type WriterSaveStatus = { state: WriterSaveState; at: number };
 
 type WriterWorkbenchContextValue = {
-  activeTab: WriterArtifactTab;
-  setActiveTab: (tab: WriterArtifactTab) => void;
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
   openPalette: () => void;
@@ -51,11 +48,10 @@ function readStoredMobileView(): WriterMobileView {
 }
 
 /**
- * Shared client state for conversation-first Writer: canvas panels, ⌘K palette,
- * and the phone conversation|artifact pane (doc 36 W4/W5).
+ * Shared client state for conversation-first Writer: ⌘K palette, phone
+ * conversation|artifact pane, save status, and bottom drawers.
  */
 export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
-  const [activeTab, setActiveTab] = useState<WriterArtifactTab>("manuscript");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [mobileView, setMobileViewState] = useState<WriterMobileView>("conversation");
   const [artifactBadge, setArtifactBadge] = useState(false);
@@ -121,8 +117,6 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<WriterWorkbenchContextValue>(
     () => ({
-      activeTab,
-      setActiveTab,
       paletteOpen,
       setPaletteOpen,
       openPalette,
@@ -139,7 +133,6 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       toggleDrawer,
     }),
     [
-      activeTab,
       paletteOpen,
       openPalette,
       closePalette,

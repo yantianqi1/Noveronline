@@ -691,68 +691,7 @@ WHERE p.tenant_id=$1::uuid AND p.project_id=$2::uuid AND p.review_status IN ('pe
 	return err
 }
 
-// ResolveActiveBlockSource loads a single active manuscript block as a distillation source.
-func (s *SQLStore) ResolveActiveBlockSource(ctx context.Context, scope Scope, blockID string) (SourceBlock, error) {
-	if err := requireProjectScope(scope); err != nil {
-		return SourceBlock{}, err
-	}
-	blockID = strings.TrimSpace(blockID)
-	if blockID == "" {
-		return SourceBlock{}, appError(CodeValidationFailed, "block_id is required")
-	}
-	var src SourceBlock
-	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `SELECT block_id::text, version, encode(digest(content_text, 'sha256'), 'hex'),
-  COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
-FROM manuscript_blocks
-WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND block_id=$3::uuid AND status='active'`,
-			scope.TenantID, scope.ProjectID, blockID).Scan(
-			&src.BlockID, &src.BlockVersion, &src.ContentSHA, &src.ChapterID, &src.SceneID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return appError(CodeNotFound, "active manuscript sources were not found")
-		}
-		return err
-	})
-	if err != nil {
-		if _, ok := err.(*AppError); ok {
-			return SourceBlock{}, err
-		}
-		if strings.Contains(err.Error(), "digest") || strings.Contains(err.Error(), "function") {
-			return s.resolveActiveBlockSourceAppHash(ctx, scope, blockID)
-		}
-		return SourceBlock{}, storeFailed(err)
-	}
-	return src, nil
-}
 
-func (s *SQLStore) resolveActiveBlockSourceAppHash(ctx context.Context, scope Scope, blockID string) (SourceBlock, error) {
-	var src SourceBlock
-	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
-		var content string
-		err := tx.QueryRowContext(ctx, `SELECT block_id::text, version, content_text,
-  COALESCE(chapter_id::text,''), COALESCE(scene_id::text,'')
-FROM manuscript_blocks
-WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND block_id=$3::uuid AND status='active'`,
-			scope.TenantID, scope.ProjectID, blockID).Scan(
-			&src.BlockID, &src.BlockVersion, &content, &src.ChapterID, &src.SceneID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return appError(CodeNotFound, "active manuscript sources were not found")
-		}
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256([]byte(content))
-		src.ContentSHA = hex.EncodeToString(sum[:])
-		return nil
-	})
-	if err != nil {
-		if _, ok := err.(*AppError); ok {
-			return SourceBlock{}, err
-		}
-		return SourceBlock{}, storeFailed(err)
-	}
-	return src, nil
-}
 
 func (s *SQLStore) LookupProposalProject(ctx context.Context, tenantID, candidateAssetID string) (string, error) {
 	if s == nil || s.db == nil {

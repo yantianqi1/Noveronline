@@ -110,9 +110,6 @@ func ErrorCode(err error) string {
 	return "RATE_LIMIT_BACKEND_UNAVAILABLE"
 }
 
-func RequiredProductionClasses() []Class {
-	return append([]Class(nil), productionClasses...)
-}
 
 func ParseProductionPolicies(raw string) (map[Class]Policy, error) {
 	decoder := json.NewDecoder(strings.NewReader(raw))

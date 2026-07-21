@@ -266,18 +266,6 @@ export function providerHealthSummary(
   return [status, latency, tools, json].filter(Boolean).join(" · ");
 }
 
-export function formatDiagnosticsPayload(parts: {
-  code?: string;
-  requestId?: string;
-  detail?: string;
-}): string {
-  return [
-    parts.code ? `code=${parts.code}` : "",
-    parts.requestId ? `request_id=${parts.requestId}` : "",
-    parts.detail ? `detail=${parts.detail}` : "",
-  ].filter(Boolean).join("\n");
-}
-
 function looksLikeInternalCode(value: string): boolean {
   const text = value.trim();
   if (!text) {

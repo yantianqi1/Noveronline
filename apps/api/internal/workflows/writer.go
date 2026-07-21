@@ -510,27 +510,6 @@ func NewTemporalWriterStarter(config TemporalWriterConfig) *TemporalWriterStarte
 	}
 }
 
-func NewTemporalWriterStarterFromAddress(ctx context.Context, address string, namespace string, taskQueue string) (*TemporalWriterStarter, client.Client, error) {
-	address = strings.TrimSpace(address)
-	if address == "" {
-		return nil, nil, fmt.Errorf("temporal address is required")
-	}
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		namespace = "default"
-	}
-	temporalClient, err := client.DialContext(ctx, client.Options{
-		HostPort:  address,
-		Namespace: namespace,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return NewTemporalWriterStarter(TemporalWriterConfig{
-		Client:    temporalClient,
-		TaskQueue: taskQueue,
-	}), temporalClient, nil
-}
 
 func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartWriterRunInput) (WriterRun, error) {
 	if input.TenantID == "" || input.ProjectID == "" || input.Mode == "" || input.Instruction == "" {

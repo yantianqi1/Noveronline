@@ -46,12 +46,6 @@ def effective_supports_json(*, model_id: str | None, stored: bool) -> bool:
     return infer_model_capabilities(model_id).supports_json
 
 
-def effective_supports_tools(*, model_id: str | None, stored: bool) -> bool:
-    if stored:
-        return True
-    return infer_model_capabilities(model_id).supports_tools
-
-
 def _is_reasoning_only_model(normalized: str) -> bool:
     if "deepseek" in normalized and (
         "reasoner" in normalized

@@ -25,10 +25,8 @@ const AUTHOR_SHELLS = [
   "components/submit-button.tsx",
   "components/confirm-dialog.tsx",
   "components/confirm-submit-button.tsx",
-  "components/overflow-menu.tsx",
   "components/technical-details-drawer.tsx",
   "components/workspace-mode-switcher.tsx",
-  "components/workspace-disclosure.tsx",
   "app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx",
   "app/(app)/[tenantSlug]/projects/[projectId]/overview/page.tsx",
   "app/(app)/[tenantSlug]/projects/[projectId]/assets/page.tsx",
@@ -146,9 +144,7 @@ test("shared foundation components exist for progressive disclosure", async () =
     "components/public-error-notice.tsx",
     "components/submit-button.tsx",
     "components/confirm-dialog.tsx",
-    "components/overflow-menu.tsx",
     "components/technical-details-drawer.tsx",
-    "components/workspace-disclosure.tsx",
   ];
 
   for (const relativePath of required) {

@@ -53,20 +53,6 @@ export function effectiveModelCapabilities(
   };
 }
 
-export function effectiveSupportsTools(modelId: string | null | undefined, stored: boolean): boolean {
-  if (stored) {
-    return true;
-  }
-  return inferModelCapabilities(modelId).supports_tools;
-}
-
-export function effectiveSupportsJson(modelId: string | null | undefined, stored: boolean): boolean {
-  if (stored) {
-    return true;
-  }
-  return inferModelCapabilities(modelId).supports_json;
-}
-
 function isReasoningOnlyModel(normalized: string): boolean {
   if (
     normalized.includes("deepseek") &&

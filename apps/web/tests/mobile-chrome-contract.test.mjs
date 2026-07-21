@@ -116,9 +116,10 @@ test("writer mobile hides status header and reclaims writing canvas height", asy
   const shell = await fileText("components/writer-workbench-shell.tsx");
   const agentThreadSource = await fileText("components/writer-agent-thread.tsx");
   const composerInput = await fileText("components/writer-composer-input.tsx");
-  const timeline = await fileText("components/writer-activity-timeline.tsx");
   const toast = await fileText("components/writer-transient-toast.tsx");
   const mode = await fileText("components/writer-mode-picker.tsx");
+  const taskStatus = await fileText("lib/writer-task-status.ts");
+  const statusLine = await fileText("components/writer-task-status-line.tsx");
 
   // Phone must not show the desktop tools rail (命令 / 技术详情).
   assert.match(
@@ -202,10 +203,10 @@ test("writer mobile hides status header and reclaims writing canvas height", asy
   assert.match(polish, /opacity:\s*1/);
   assert.doesNotMatch(composerInput, /rows=\{3\}/);
 
-  // Run lifecycle is one reconciled row (started never stays spinning after fail).
-  assert.match(timeline, /RUN_LIFECYCLE_ID|writer-run-lifecycle/);
-  assert.match(timeline, /写作任务失败/);
-  assert.match(timeline, /error_code|message/);
+  // Run lifecycle is summarized by the live task status line (retired activity timeline).
+  assert.match(taskStatus, /summarizeWriterTaskStatus/);
+  assert.match(statusLine, /writer-task-status/);
+  assert.match(taskStatus, /failed|completed|error_code|message/);
 });
 
 test("workspace route aliases include materials and me", async () => {
@@ -343,11 +344,9 @@ test("phone density: compact materials headers, short artifact tabs, no aside cl
     /\.asset-library-root \.asset-search-ops[\s\S]*?max-height:\s*none\s*!important/s,
   );
 
-  // Writer artifact tabs stay one short row on full phone band (≤860).
-  assert.match(
-    polish,
-    /@media \(max-width:\s*860px\)\s*\{[\s\S]*?\.writer-artifact-tab\s*\{[\s\S]*?min-height:\s*36px\s*!important/s,
-  );
+  // Writer bottom handlebar stays reachable on phone; retired artifact tabs stay gone.
+  assert.match(await fileText("app/writer-redesign.css"), /\.writer-handlebar/);
+  assert.doesNotMatch(polish, /\.writer-artifact-tab\b/);
 
   // Writer home fills flex parent instead of a second 100dvh calc.
   assert.match(

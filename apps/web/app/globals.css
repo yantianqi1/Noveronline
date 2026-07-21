@@ -6375,7 +6375,6 @@ dd {
   background: linear-gradient(var(--primary), var(--accent));
 }
 
-
 @media (max-width: 1180px) {
   .app-frame {
     grid-template-columns: minmax(228px, 252px) minmax(0, 1fr);
@@ -11718,99 +11717,6 @@ button.asset-workspace-close:hover {
   margin-top: 4px;
 }
 
-.overflow-menu {
-  position: relative;
-  display: inline-flex;
-}
-
-.overflow-menu-trigger {
-  display: inline-grid;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  background: rgba(255, 253, 248, 0.55);
-  color: var(--text-primary);
-}
-
-.overflow-menu-list {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 4px);
-  right: 0;
-  min-width: 180px;
-  margin: 0;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-panel);
-  background: var(--surface-panel);
-  box-shadow: var(--shadow-raised);
-  list-style: none;
-  padding: 6px;
-}
-
-.overflow-menu-item {
-  display: flex;
-  width: 100%;
-  min-height: 40px;
-  align-items: center;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-  padding: 8px 10px;
-  text-align: left;
-}
-
-.overflow-menu-item:hover,
-.overflow-menu-item:focus-visible {
-  background: rgba(143, 33, 27, 0.08);
-  outline: none;
-}
-
-.technical-details-drawer,
-.workspace-disclosure {
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-panel);
-  background: rgba(255, 253, 248, 0.35);
-}
-
-.workspace-disclosure > summary {
-  display: grid;
-  min-height: 44px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  list-style: none;
-  padding: 10px 12px;
-}
-
-.workspace-disclosure > summary::-webkit-details-marker {
-  display: none;
-}
-
-.workspace-disclosure > summary small {
-  color: var(--text-muted);
-  font-size: 0.78rem;
-}
-
-.workspace-disclosure-content {
-  border-top: 1px solid var(--border-default);
-  padding: 12px;
-}
-
-.workspace-disclosure[data-tone="technical"] {
-  background: rgba(23, 26, 27, 0.03);
-}
-
-.workspace-disclosure[data-tone="ink"] {
-  border-color: rgba(190, 157, 103, 0.28);
-  background: rgba(23, 26, 27, 0.92);
-  color: #e9e2d7;
-}
-
 @media (max-width: 860px) {
   .app-frame {
     grid-template-columns: minmax(0, 1fr);
@@ -11834,13 +11740,6 @@ button.asset-workspace-close:hover {
   .compact-filter-row > * {
     min-width: 0;
     flex: 1 1 100%;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .submit-button,
-  .workspace-disclosure-content {
-    transition: none;
   }
 }
 

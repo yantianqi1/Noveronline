@@ -354,19 +354,17 @@ test("Story Graph explore is canvas-primary with floating chrome", async () => {
   assert.doesNotMatch(polish, /story-graph-explore-grid/);
 });
 
-test("Wave B/C: compact header, list row, polish CSS, context bar", async () => {
+test("Wave B/C: compact header, polish CSS, context bar", async () => {
   const header = await source("components/workspace-header.tsx");
-  const listRow = await source("components/list-row.tsx");
   const polish = await source("app/workbench-polish.css");
   const layout = await source("app/(app)/[tenantSlug]/projects/[projectId]/layout.tsx");
   const root = await source("app/layout.tsx");
   const overview = await source("components/overview-seed-shell.tsx");
   assert.match(header, /workspace-header-compact/);
-  assert.match(listRow, /list-row-title-link/);
   assert.match(polish, /\.writer-agent-layout/);
-  assert.match(polish, /\.writer-artifact-tabs/);
-  assert.doesNotMatch(polish, /\.writer-studio-grid|\.writer-agent-rail/);
-  assert.match(polish, /\.list-row/);
+  assert.match(await source("app/writer-redesign.css"), /\.writer-handlebar|\.writer-toc/);
+  assert.doesNotMatch(polish, /\.writer-artifact-tabs|\.writer-studio-grid|\.writer-agent-rail/);
+  assert.doesNotMatch(polish, /\.list-row\b/);
   assert.match(layout, /WorkspaceContextBar/);
   assert.match(root, /workbench-polish\.css/);
   assert.doesNotMatch(overview, /PROJECT OVERVIEW \/ 07/);

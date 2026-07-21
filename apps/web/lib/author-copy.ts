@@ -36,11 +36,6 @@ export function authorToolLabel(locale: Locale, toolName: string): string {
   return tx(locale, "处理写作请求", "Working on the request");
 }
 
-/** Author-facing progress label for the in-flight tool phase. */
-export function authorToolRunningLabel(locale: Locale, toolName: string): string {
-  return authorToolLabel(locale, toolName);
-}
-
 /** Author-facing run status label. Unknown statuses fall back to a safe value. */
 export function authorRunStatusLabel(locale: Locale, status: string): string {
   switch (status) {

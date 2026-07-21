@@ -6,7 +6,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type Locale, tx } from "../lib/locale";
 import { humanizeFailure } from "../lib/user-facing-copy";
-import { Bi } from "./bilingual-text";
 
 const HOLD_MS = 3200;
 const STATUS_KEYS = ["writerRunStatus", "writerRunCode", "writerRunMessage"] as const;
@@ -113,18 +112,5 @@ export function WriterTransientToast({ locale, status }: WriterTransientToastPro
         <X size={14} />
       </button>
     </div>
-  );
-}
-
-/** Fallback copy helper for non-client call sites. */
-export function writerAdmissionSuccessCopy(locale: Locale) {
-  return tx(locale, "已开始处理", "Started");
-}
-
-export function WriterTransientToastFallback() {
-  return (
-    <p className="sr-only">
-      <Bi zh="状态提示" en="Status notice" />
-    </p>
   );
 }

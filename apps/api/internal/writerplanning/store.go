@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strings"
 
 	"github.com/google/uuid"
 )
@@ -229,4 +228,3 @@ func admissionFailed() *AppError {
 	return appError("WRITER_PLANNING_ADMISSION_FAILED", "writer planning admission failed")
 }
 
-func trim(value string) string { return strings.TrimSpace(value) }

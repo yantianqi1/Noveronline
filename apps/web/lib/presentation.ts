@@ -15,11 +15,3 @@ export function publicActionFailure(locale: Locale) {
 export function publicUnavailableTitle(locale: Locale) {
   return locale === "zh-CN" ? "内容暂不可用" : "Content unavailable";
 }
-
-export function humanResourceLabel(locale: Locale, kind: "run" | "snapshot" | "trace", index?: number) {
-  const suffix = index === undefined ? "" : ` ${index + 1}`;
-  const labels = locale === "zh-CN"
-    ? { run: "任务", snapshot: "项目快照", trace: "技术记录" }
-    : { run: "Task", snapshot: "Project snapshot", trace: "Technical record" };
-  return `${labels[kind]}${suffix}`;
-}
