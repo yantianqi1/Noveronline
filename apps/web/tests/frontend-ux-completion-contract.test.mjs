@@ -283,13 +283,13 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   assert.match(agentThread, /WriterLiveDraft/);
   const liveDraft = await source("components/writer-live-draft.tsx");
   assert.match(liveDraft, /writerDraftText|connectWriterEventStream|useWriterRunStream/);
-  // Left TOC rail is the permanent everyday nav; chapter switcher offers a dropdown too.
+  // Left TOC rail + chapter switcher navigate via client selection (no page reload).
   const tocRail = await source("components/writer-toc-rail.tsx");
   assert.match(tocRail, /writer-toc/);
-  assert.match(tocRail, /method="get"/);
+  assert.match(tocRail, /useWriterSelection|selectChapter/);
   const chapterSwitcher = await source("components/writer-chapter-switcher.tsx");
   assert.match(chapterSwitcher, /WriterChapterSwitcher/);
-  assert.match(chapterSwitcher, /method="get"/);
+  assert.match(chapterSwitcher, /useWriterSelection|selectChapter/);
   // Three bottom drawers (structure/tools/library) driven by the workbench drawer state.
   const drawers = await source("components/writer-drawers.tsx");
   assert.match(drawers, /writer-drawer-sheet/);
@@ -300,12 +300,15 @@ test("Writer is conversation-first with a persistent Agent dock and canvas", asy
   const workbenchContext = await source("components/writer-workbench-context.tsx");
   assert.match(workbenchContext, /metaKey|ctrlKey/);
   assert.match(workbenchContext, /toggleDrawer/);
+  assert.match(workbenchContext, /setFocus|WriterFocus/);
   assert.match(polish, /\.writer-manuscript-flow/);
   const manuscriptFlow = await source("components/writer-manuscript-flow.tsx");
   assert.match(manuscriptFlow, /data-manuscript-flow/);
   assert.match(manuscriptFlow, /写一段|Write a section/);
   assert.match(manuscriptFlow, /writer-section-menu/);
-  // No page header strip; technical details are gated behind ?debug=1, off the author canvas.
+  assert.match(manuscriptFlow, /fetchBlockVersions/);
+  assert.match(manuscriptFlow, /pendingRevision\?\.blockId === block\.block_id/);
+  assert.match(agentThread, /workbench\?\.focus\.chapterId/);
   assert.doesNotMatch(shell, /WorkspaceHeader|writer-breadcrumb|WriterRunStateChip|writer-sync-chip|writer-header/);
   assert.match(shell, /showDebug/);
   assert.match(shell, /TechnicalDetailsDrawer/);

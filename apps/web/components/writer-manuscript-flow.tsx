@@ -16,7 +16,9 @@ import { Bi, StatusValue } from "./bilingual-text";
 import { ConfirmSubmitButton } from "./confirm-submit-button";
 import type { PendingRevision } from "./writer-manuscript-editor";
 import { WriterManuscriptPanelClient } from "./writer-manuscript-panel-client";
+import { useWriterSelection } from "./writer-selection";
 import { useWriterWorkbench } from "./writer-workbench-context";
+import { fetchBlockVersions } from "./writer-workspace-client";
 
 type Action = (formData: FormData) => Promise<void>;
 
@@ -57,10 +59,18 @@ export type WriterManuscriptFlowProps = {
  * permanently-mounted disclosure full of forms.
  */
 export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
-  const { locale, blockContents, selectedBlock } = props;
+  const { locale } = props;
+  const selection = useWriterSelection();
+
+  // Live client selection wins once the provider is mounted; the server-seeded
+  // props are the first-paint fallback so there's no loading flash on load.
+  const blockContents = selection ? selection.blocks : (props.blockContents ?? []);
+  const selectedBlockId = selection ? selection.blockId : props.selectedBlockId;
+  const selectedChapterId = selection ? selection.chapterId : props.selectedChapterId;
+  const selectedSceneId = selection ? selection.sceneId : props.selectedSceneId;
+
   const hasSections = blockContents.length > 0;
-  const selectedPrivate =
-    selectedBlock.ok && selectedBlock.value ? selectedBlock.value : null;
+  const selectedBlock = blockContents.find((block) => block.block_id === selectedBlockId) ?? null;
 
   if (!hasSections) {
     return (
@@ -87,8 +97,8 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
             />
           </p>
           <form action={props.actions.createBlock} className="writer-create-block-form">
-            <input name="chapterId" type="hidden" value={props.selectedChapterId} />
-            <input name="sceneId" type="hidden" value={props.selectedSceneId} />
+            <input name="chapterId" type="hidden" value={selectedChapterId} />
+            <input name="sceneId" type="hidden" value={selectedSceneId} />
             <button type="submit">
               <Plus size={14} />
               <Bi zh="开始写这一章" en="Start writing this chapter" />
@@ -106,6 +116,7 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
       aria-labelledby="manuscript-workspace-heading"
       className="writer-prose-panel writer-manuscript-flow"
       data-manuscript-flow="true"
+      data-loading={selection?.loadingChapter ? "true" : "false"}
     >
       <h2 className="sr-only" id="manuscript-workspace-heading">
         <Bi zh="手稿正文" en="Manuscript prose" />
@@ -113,24 +124,11 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
 
       <div className="writer-manuscript-document">
         {blockContents.map((block, index) => {
-          const selected = props.selectedBlockId === block.block_id;
-          const content =
-            selected && selectedPrivate && selectedPrivate.block_id === block.block_id
-              ? selectedPrivate.content_text
-              : block.content_text;
-          const version =
-            selected && selectedPrivate && selectedPrivate.block_id === block.block_id
-              ? selectedPrivate.version
-              : block.version;
-          const status =
-            selected && selectedPrivate && selectedPrivate.block_id === block.block_id
-              ? selectedPrivate.status
-              : block.status;
-
+          const selected = selectedBlockId === block.block_id;
           return (
             <ManuscriptSection
               block={block}
-              content={content}
+              content={block.content_text}
               index={index}
               key={block.block_id}
               locale={locale}
@@ -138,15 +136,18 @@ export function WriterManuscriptFlow(props: WriterManuscriptFlowProps) {
               props={props}
               sectionCount={blockContents.length}
               selected={selected}
-              status={status}
-              version={version}
+              selectedBlock={selected ? selectedBlock : null}
+              selectedChapterId={selectedChapterId}
+              selectedSceneId={selectedSceneId}
+              status={block.status}
+              version={block.version}
             />
           );
         })}
         {props.draftBlock}
       </div>
 
-      <AddSectionRow props={props} />
+      <AddSectionRow props={props} selectedChapterId={selectedChapterId} selectedSceneId={selectedSceneId} />
     </section>
   );
 }
@@ -164,6 +165,9 @@ function ManuscriptSection({
   props,
   sectionCount,
   selected,
+  selectedBlock,
+  selectedChapterId,
+  selectedSceneId,
   status,
   version,
 }: {
@@ -175,11 +179,15 @@ function ManuscriptSection({
   props: WriterManuscriptFlowProps;
   sectionCount: number;
   selected: boolean;
+  selectedBlock: PrivateManuscriptBlock | null;
+  selectedChapterId: string;
+  selectedSceneId: string;
   status: string;
   version: number;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const selection = useWriterSelection();
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -198,6 +206,11 @@ function ManuscriptSection({
       window.removeEventListener("keydown", onKey);
     };
   }, [menuOpen]);
+
+  const openEditor = () => {
+    if (selected) return;
+    selection?.selectBlock(block.block_id);
+  };
 
   return (
     <article
@@ -249,7 +262,9 @@ function ManuscriptSection({
               scenes={props.scenes}
               sectionCount={sectionCount}
               version={version}
-              versions={selected ? props.blockVersions : { ok: true, value: [] }}
+              versionsBlockId={selected ? block.block_id : ""}
+              projectId={props.projectId}
+              tenantSlug={props.tenantSlug}
             />
           ) : null}
         </div>
@@ -263,33 +278,35 @@ function ManuscriptSection({
             expectedVersion={version}
             content={content}
             status={status}
-            chapterId={block.chapter_id ?? props.selectedChapterId}
-            sceneId={block.scene_id ?? props.selectedSceneId}
+            chapterId={block.chapter_id ?? selectedChapterId}
+            sceneId={block.scene_id ?? selectedSceneId}
             updateBlockAction={props.actions.updateBlock}
             createBlockAction={props.actions.createBlock}
             reviseAction={props.actions.reviseSelection}
-            pendingRevision={props.pendingRevision ?? null}
+            pendingRevision={
+              props.pendingRevision?.blockId === block.block_id ? props.pendingRevision : null
+            }
             conflictLocalDraft={props.localDraft ?? null}
             workspaceStatus={props.actionStatus?.status ?? null}
             workspaceCode={props.actionStatus?.code ?? null}
           />
         </div>
       ) : (
-        <SectionNavigateForm
-          blockId={block.block_id}
-          label={
-            <div className="writer-manuscript-section-prose">
-              {content.trim() ? (
-                <p>{content}</p>
-              ) : (
-                <p className="writer-manuscript-section-empty">
-                  <Bi zh="（空白片段 — 点击开始写）" en="(Empty section — click to write)" />
-                </p>
-              )}
-            </div>
-          }
-          props={props}
-        />
+        <button
+          className="writer-section-select-form writer-section-select-button"
+          onClick={openEditor}
+          type="button"
+        >
+          <div className="writer-manuscript-section-prose">
+            {content.trim() ? (
+              <p>{content}</p>
+            ) : (
+              <p className="writer-manuscript-section-empty">
+                <Bi zh="（空白片段 — 点击开始写）" en="(Empty section — click to write)" />
+              </p>
+            )}
+          </div>
+        </button>
       )}
     </article>
   );
@@ -307,10 +324,12 @@ function SectionMenu({
   index,
   locale,
   orderedIds,
+  projectId,
   scenes,
   sectionCount,
+  tenantSlug,
   version,
-  versions,
+  versionsBlockId,
 }: {
   actions: WriterManuscriptFlowProps["actions"];
   block: PrivateManuscriptBlock;
@@ -319,12 +338,33 @@ function SectionMenu({
   index: number;
   locale: Locale;
   orderedIds: string[];
+  projectId: string;
   scenes: WriterWebResult<Scene[]>;
   sectionCount: number;
+  tenantSlug: string;
   version: number;
-  versions: WriterWebResult<ManuscriptVersion[]>;
+  versionsBlockId: string;
 }) {
   const [panel, setPanel] = useState<null | "tags" | "move" | "history">(null);
+  const [liveVersions, setLiveVersions] = useState<WriterWebResult<ManuscriptVersion[]>>({ ok: true, value: [] });
+
+  useEffect(() => {
+    if (panel !== "history" || !versionsBlockId) return;
+    let cancelled = false;
+    setLiveVersions({ ok: true, value: [] });
+    void fetchBlockVersions(tenantSlug, projectId, versionsBlockId)
+      .then((items) => {
+        if (!cancelled) setLiveVersions({ ok: true, value: items });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLiveVersions({ ok: false, code: "WRITER_WORKSPACE_UNAVAILABLE", message: "unavailable" });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [panel, versionsBlockId, tenantSlug, projectId]);
 
   return (
     <div className="writer-section-menu" role="menu">
@@ -419,8 +459,8 @@ function SectionMenu({
       {panel === "history" ? (
         <div className="writer-menu-panel">
           <strong style={{ fontSize: "0.8rem" }}><Bi zh="历史版本" en="Version history" /></strong>
-          {versions.ok && versions.value.length > 0 ? (
-            versions.value.map((entry) => (
+          {liveVersions.ok && liveVersions.value.length > 0 ? (
+            liveVersions.value.map((entry) => (
               <form action={actions.restoreBlock} key={entry.version_id}>
                 <input name="blockId" type="hidden" value={block.block_id} />
                 <input name="versionId" type="hidden" value={entry.version_id} />
@@ -436,7 +476,10 @@ function SectionMenu({
             ))
           ) : (
             <p style={{ fontSize: "0.78rem", color: "var(--ink-3, #776b5c)", margin: "6px 0 0" }}>
-              <Bi zh="暂无历史版本。" en="No versions yet." />
+              <Bi
+                zh={liveVersions.ok ? "暂无历史版本。" : "暂时无法加载历史版本。"}
+                en={liveVersions.ok ? "No versions yet." : "Could not load version history."}
+              />
             </p>
           )}
         </div>
@@ -449,14 +492,22 @@ function SectionMenu({
 /* 段尾: 写一段 / 让 AI 写                                              */
 /* ------------------------------------------------------------------ */
 
-function AddSectionRow({ props }: { props: WriterManuscriptFlowProps }) {
+function AddSectionRow({
+  props,
+  selectedChapterId,
+  selectedSceneId,
+}: {
+  props: WriterManuscriptFlowProps;
+  selectedChapterId: string;
+  selectedSceneId: string;
+}) {
   const workbench = useWriterWorkbench();
   const { locale } = props;
   return (
     <div className="writer-paper-addrow">
       <form action={props.actions.createBlock}>
-        <input name="chapterId" type="hidden" value={props.selectedChapterId} />
-        <input name="sceneId" type="hidden" value={props.selectedSceneId} />
+        <input name="chapterId" type="hidden" value={selectedChapterId} />
+        <input name="sceneId" type="hidden" value={selectedSceneId} />
         <button type="submit">
           <Plus size={14} />
           <Bi zh="写一段" en="Write a section" />
@@ -487,37 +538,6 @@ function AddSectionRow({ props }: { props: WriterManuscriptFlowProps }) {
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
-
-function SectionNavigateForm({
-  blockId,
-  label,
-  props,
-}: {
-  blockId: string;
-  label: ReactNode;
-  props: Pick<
-    WriterManuscriptFlowProps,
-    | "tenantSlug"
-    | "projectId"
-    | "selectedDraftId"
-    | "selectedChapterId"
-    | "selectedSceneId"
-    | "selectedBlockId"
-  >;
-}) {
-  const href = `/${props.tenantSlug}/projects/${props.projectId}/writer`;
-  return (
-    <form action={href} className="writer-section-select-form" method="get">
-      {props.selectedDraftId ? <input name="draftId" type="hidden" value={props.selectedDraftId} /> : null}
-      {props.selectedChapterId ? <input name="chapterId" type="hidden" value={props.selectedChapterId} /> : null}
-      {props.selectedSceneId ? <input name="sceneId" type="hidden" value={props.selectedSceneId} /> : null}
-      <input name="blockId" type="hidden" value={blockId} />
-      <button className="writer-section-select-button" type="submit">
-        {label}
-      </button>
-    </form>
-  );
-}
 
 function reorderedIds<T>(items: T[], index: number, direction: -1 | 1): T[] {
   const next = [...items];

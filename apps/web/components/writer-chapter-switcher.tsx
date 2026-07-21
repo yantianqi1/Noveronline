@@ -6,6 +6,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { Chapter, Scene, WriterWebResult } from "../lib/writer-workspace-api";
 import { type Locale, tx } from "../lib/locale";
 import { Bi } from "./bilingual-text";
+import { useWriterSelection } from "./writer-selection";
 import { useWriterWorkbench } from "./writer-workbench-context";
 
 export type WriterChapterSwitcherProps = {
@@ -28,12 +29,15 @@ export function WriterChapterSwitcher(props: WriterChapterSwitcherProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const workbench = useWriterWorkbench();
-  const href = `/${props.tenantSlug}/projects/${props.projectId}/writer`;
   const chapters = props.chapters.ok ? props.chapters.value : [];
-  const selected = chapters.find((chapter) => chapter.chapter_id === props.selectedChapterId);
+  const selection = useWriterSelection();
+  const currentChapterId = selection?.chapterId ?? props.selectedChapterId;
+  const currentSceneId = selection?.sceneId ?? props.selectedSceneId;
+  const selected = chapters.find((chapter) => chapter.chapter_id === currentChapterId);
   const label = selected
     ? tx(props.locale, `第 ${selected.chapter_order} 章 · ${selected.title}`, `Ch. ${selected.chapter_order} · ${selected.title}`)
     : tx(props.locale, "选择章节", "Select chapter");
+  const liveScenes = selection?.scenes ?? (props.scenes.ok ? props.scenes.value : []);
 
   useEffect(() => {
     if (!open) return;
@@ -75,43 +79,40 @@ export function WriterChapterSwitcher(props: WriterChapterSwitcherProps) {
           ) : (
             <ul className="writer-chapter-switcher-list">
               {chapters.map((chapter) => {
-                const active = chapter.chapter_id === props.selectedChapterId;
+                const active = chapter.chapter_id === currentChapterId;
                 return (
                   <li key={chapter.chapter_id}>
-                    <form action={href} method="get">
-                      <input name="chapterId" type="hidden" value={chapter.chapter_id} />
-                      {props.selectedDraftId ? <input name="draftId" type="hidden" value={props.selectedDraftId} /> : null}
-                      <button
-                        aria-selected={active}
-                        className="writer-chapter-switcher-item"
-                        data-active={active ? "true" : "false"}
-                        type="submit"
-                      >
-                        <span>
-                          {tx(props.locale, `第 ${chapter.chapter_order} 章`, `Ch. ${chapter.chapter_order}`)}
-                        </span>
-                        <strong>{chapter.title}</strong>
-                      </button>
-                    </form>
-                    {active && props.scenes.ok && props.scenes.value.length > 0 ? (
+                    <button
+                      aria-selected={active}
+                      className="writer-chapter-switcher-item"
+                      data-active={active ? "true" : "false"}
+                      onClick={() => {
+                        selection?.selectChapter(chapter.chapter_id);
+                        setOpen(false);
+                      }}
+                      type="button"
+                    >
+                      <span>
+                        {tx(props.locale, `第 ${chapter.chapter_order} 章`, `Ch. ${chapter.chapter_order}`)}
+                      </span>
+                      <strong>{chapter.title}</strong>
+                    </button>
+                    {active && liveScenes.length > 0 ? (
                       <ul className="writer-chapter-switcher-scenes">
-                        {props.scenes.value.map((scene) => (
+                        {liveScenes.map((scene) => (
                           <li key={scene.scene_id}>
-                            <form action={href} method="get">
-                              <input name="chapterId" type="hidden" value={chapter.chapter_id} />
-                              <input name="sceneId" type="hidden" value={scene.scene_id} />
-                              {props.selectedDraftId ? (
-                                <input name="draftId" type="hidden" value={props.selectedDraftId} />
-                              ) : null}
-                              <button
-                                className="writer-chapter-switcher-item is-scene"
-                                data-active={props.selectedSceneId === scene.scene_id ? "true" : "false"}
-                                type="submit"
-                              >
-                                <span>{scene.scene_order}</span>
-                                <strong>{scene.title}</strong>
-                              </button>
-                            </form>
+                            <button
+                              className="writer-chapter-switcher-item is-scene"
+                              data-active={currentSceneId === scene.scene_id ? "true" : "false"}
+                              onClick={() => {
+                                selection?.selectScene(chapter.chapter_id, scene.scene_id);
+                                setOpen(false);
+                              }}
+                              type="button"
+                            >
+                              <span>{scene.scene_order}</span>
+                              <strong>{scene.title}</strong>
+                            </button>
                           </li>
                         ))}
                       </ul>

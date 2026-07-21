@@ -19,6 +19,7 @@ import { WriterLiveDraft } from "./writer-live-draft";
 import { useWriterRunSession } from "./writer-run-session";
 import { useWriterRunStream } from "./writer-run-stream";
 import { WriterTransientToast } from "./writer-transient-toast";
+import { useWriterWorkbench } from "./writer-workbench-context";
 
 export type WriterThreadMessageView = {
   role: string;
@@ -78,6 +79,10 @@ export function WriterAgentThread({
   const run = runSummary?.ok === true ? runSummary : null;
   const session = useWriterRunSession();
   const stream = useWriterRunStream();
+  const workbench = useWriterWorkbench();
+  // Prefer the live paper focus when the author has switched chapters in-place.
+  const chapterId = workbench?.focus.chapterId || selectedChapterId;
+  const sceneId = workbench?.focus.sceneId || selectedSceneId;
   const scrollRef = useRef<HTMLDivElement>(null);
   const pendingInstruction = session?.pendingInstruction ?? null;
   const optimisticRunId = session?.optimisticRunId ?? null;
@@ -249,8 +254,8 @@ export function WriterAgentThread({
         {writerRunAction ? (
           <WriterAgentComposer
             locale={locale}
-            selectedChapterId={selectedChapterId}
-            selectedSceneId={selectedSceneId}
+            selectedChapterId={chapterId}
+            selectedSceneId={sceneId}
             writerRunAction={writerRunAction}
           >
             {contextPickers}

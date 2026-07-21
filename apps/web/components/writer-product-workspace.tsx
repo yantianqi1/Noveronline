@@ -22,6 +22,7 @@ import { WriterChapterSwitcher } from "./writer-chapter-switcher";
 import { WriterDrawers } from "./writer-drawers";
 import { WriterHandlebar } from "./writer-handlebar";
 import { WriterManuscriptFlow } from "./writer-manuscript-flow";
+import { WriterSelectionProvider, WriterCanvasStats } from "./writer-selection";
 import { WriterTocRail } from "./writer-toc-rail";
 
 type Action = (formData: FormData) => Promise<void>;
@@ -98,93 +99,99 @@ export function WriterProductWorkspace(props: WriterProductWorkspaceProps) {
 
   return (
     <div className="writer-redesign" data-nav="conversation-first">
-      <div className="writer-redesign-stage">
-        <WriterTocRail
-          chapters={props.chapters}
-          locale={props.locale}
-          projectId={props.projectId}
-          scenes={props.scenes}
-          selectedChapterId={props.selectedChapterId}
-          selectedDraftId={props.selectedDraftId}
-          selectedSceneId={props.selectedSceneId}
-          tenantSlug={props.tenantSlug}
-        />
+      <WriterSelectionProvider
+        initialBlockId={props.selectedBlockId}
+        initialBlocks={props.blockContents ?? []}
+        initialChapterId={props.selectedChapterId}
+        initialSceneId={props.selectedSceneId}
+        initialScenes={props.scenes.ok ? props.scenes.value : []}
+        projectId={props.projectId}
+        tenantSlug={props.tenantSlug}
+      >
+        <div className="writer-redesign-stage">
+          <WriterTocRail
+            chapters={props.chapters}
+            locale={props.locale}
+            projectId={props.projectId}
+            scenes={props.scenes}
+            selectedChapterId={props.selectedChapterId}
+            selectedDraftId={props.selectedDraftId}
+            selectedSceneId={props.selectedSceneId}
+            tenantSlug={props.tenantSlug}
+          />
 
-        <div className="writer-redesign-paper-scroll">
-          <header className="writer-canvas-head">
-            <div className="writer-canvas-head-primary">
-              <WriterChapterSwitcher
+          <div className="writer-redesign-paper-scroll">
+            <header className="writer-canvas-head">
+              <div className="writer-canvas-head-primary">
+                <WriterChapterSwitcher
+                  chapters={props.chapters}
+                  locale={props.locale}
+                  projectId={props.projectId}
+                  scenes={props.scenes}
+                  selectedChapterId={props.selectedChapterId}
+                  selectedDraftId={props.selectedDraftId}
+                  selectedSceneId={props.selectedSceneId}
+                  tenantSlug={props.tenantSlug}
+                />
+              </div>
+              <div className="writer-canvas-head-side">
+                <WriterCanvasStatus locale={props.locale} />
+                <WriterCanvasStats
+                  fallbackSectionCount={flowSectionCount}
+                  fallbackWordCount={flowWordCount || wordCount}
+                  locale={props.locale}
+                />
+              </div>
+            </header>
+
+            {props.actionStatus ? <ActionToast code={props.actionStatus.code} locale={props.locale} status={props.actionStatus.status} /> : null}
+
+            {/* Always mount review/distillation controls so authors can start a pass
+                after a finished run even when no open issues remain. */}
+            <ReviewStrip count={pendingReviews} locale={props.locale} props={props} />
+
+            <div className="writer-redesign-paper">
+              <WriterManuscriptFlow
+                actionStatus={props.actionStatus}
+                actions={{
+                  createBlock: props.actions.createBlock,
+                  updateBlock: props.actions.updateBlock,
+                  deleteBlock: props.actions.deleteBlock,
+                  reorderBlocks: props.actions.reorderBlocks,
+                  moveBlock: props.actions.moveBlock,
+                  tagBlock: props.actions.tagBlock,
+                  restoreBlock: props.actions.restoreBlock,
+                  reviseSelection: props.actions.reviseSelection,
+                }}
+                blockContents={props.blockContents ?? []}
+                blocks={props.blocks}
+                blockVersions={props.blockVersions}
                 chapters={props.chapters}
+                draftBlock={props.draftBlock}
                 locale={props.locale}
+                localDraft={props.localDraft}
+                pendingRevision={props.pendingRevision}
                 projectId={props.projectId}
                 scenes={props.scenes}
+                selectedBlock={props.selectedBlock}
+                selectedBlockId={props.selectedBlockId}
                 selectedChapterId={props.selectedChapterId}
                 selectedDraftId={props.selectedDraftId}
                 selectedSceneId={props.selectedSceneId}
                 tenantSlug={props.tenantSlug}
               />
             </div>
-            <div className="writer-canvas-head-side">
-              <WriterCanvasStatus locale={props.locale} />
-              <p className="writer-canvas-meta" aria-label={tx(props.locale, "稿件统计", "Manuscript stats")}>
-                <span>
-                  {flowWordCount || wordCount} <Bi zh="字" en="words" />
-                </span>
-                <span aria-hidden="true">·</span>
-                <span>
-                  {flowSectionCount} <Bi zh="片段" en="sections" />
-                </span>
-              </p>
-            </div>
-          </header>
-
-          {props.actionStatus ? <ActionToast code={props.actionStatus.code} locale={props.locale} status={props.actionStatus.status} /> : null}
-
-          {/* Always mount review/distillation controls so authors can start a pass
-              after a finished run even when no open issues remain. */}
-          <ReviewStrip count={pendingReviews} locale={props.locale} props={props} />
-
-          <div className="writer-redesign-paper">
-            <WriterManuscriptFlow
-              actionStatus={props.actionStatus}
-              actions={{
-                createBlock: props.actions.createBlock,
-                updateBlock: props.actions.updateBlock,
-                deleteBlock: props.actions.deleteBlock,
-                reorderBlocks: props.actions.reorderBlocks,
-                moveBlock: props.actions.moveBlock,
-                tagBlock: props.actions.tagBlock,
-                restoreBlock: props.actions.restoreBlock,
-                reviseSelection: props.actions.reviseSelection,
-              }}
-              blockContents={props.blockContents ?? []}
-              blocks={props.blocks}
-              blockVersions={props.blockVersions}
-              chapters={props.chapters}
-              draftBlock={props.draftBlock}
-              locale={props.locale}
-              localDraft={props.localDraft}
-              pendingRevision={props.pendingRevision}
-              projectId={props.projectId}
-              scenes={props.scenes}
-              selectedBlock={props.selectedBlock}
-              selectedBlockId={props.selectedBlockId}
-              selectedChapterId={props.selectedChapterId}
-              selectedDraftId={props.selectedDraftId}
-              selectedSceneId={props.selectedSceneId}
-              tenantSlug={props.tenantSlug}
-            />
           </div>
         </div>
-      </div>
 
-      <WriterHandlebar locale={props.locale} />
-      <WriterDrawers
-        library={<LibraryDrawer locale={props.locale} />}
-        locale={props.locale}
-        structure={<StructureDrawer {...props} />}
-        tools={<ToolsDrawer {...props} />}
-      />
+        <WriterHandlebar locale={props.locale} />
+        <WriterDrawers
+          library={<LibraryDrawer locale={props.locale} />}
+          locale={props.locale}
+          structure={<StructureDrawer {...props} />}
+          tools={<ToolsDrawer {...props} />}
+        />
+      </WriterSelectionProvider>
     </div>
   );
 }

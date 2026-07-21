@@ -6,6 +6,11 @@ export type WriterDrawer = "structure" | "tools" | "library" | null;
 export type WriterMobileView = "conversation" | "artifact";
 export type WriterSaveState = "idle" | "dirty" | "saving" | "saved";
 export type WriterSaveStatus = { state: WriterSaveState; at: number };
+export type WriterFocus = {
+  chapterId: string;
+  sceneId: string;
+  blockId: string;
+};
 
 type WriterWorkbenchContextValue = {
   paletteOpen: boolean;
@@ -26,6 +31,12 @@ type WriterWorkbenchContextValue = {
   drawer: WriterDrawer;
   setDrawer: (drawer: WriterDrawer) => void;
   toggleDrawer: (drawer: Exclude<WriterDrawer, null>) => void;
+  /**
+   * Live paper focus mirrored from WriterSelectionProvider so the agent dock
+   * (a shell sibling) admits runs against the chapter the author is viewing.
+   */
+  focus: WriterFocus;
+  setFocus: (next: WriterFocus) => void;
 };
 
 const WriterWorkbenchContext = createContext<WriterWorkbenchContextValue | null>(null);
@@ -57,6 +68,7 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
   const [artifactBadge, setArtifactBadge] = useState(false);
   const [saveStatus, setSaveStatusState] = useState<WriterSaveStatus>({ state: "idle", at: 0 });
   const [drawer, setDrawer] = useState<WriterDrawer>(null);
+  const [focus, setFocusState] = useState<WriterFocus>({ chapterId: "", sceneId: "", blockId: "" });
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const clearArtifactBadge = useCallback(() => setArtifactBadge(false), []);
@@ -65,6 +77,15 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
   }, []);
   const toggleDrawer = useCallback((target: Exclude<WriterDrawer, null>) => {
     setDrawer((current) => (current === target ? null : target));
+  }, []);
+  const setFocus = useCallback((next: WriterFocus) => {
+    setFocusState((current) =>
+      current.chapterId === next.chapterId &&
+      current.sceneId === next.sceneId &&
+      current.blockId === next.blockId
+        ? current
+        : next,
+    );
   }, []);
 
   useEffect(() => {
@@ -131,6 +152,8 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       drawer,
       setDrawer,
       toggleDrawer,
+      focus,
+      setFocus,
     }),
     [
       paletteOpen,
@@ -145,6 +168,8 @@ export function WriterWorkbenchProvider({ children }: { children: ReactNode }) {
       setSaveStatus,
       drawer,
       toggleDrawer,
+      focus,
+      setFocus,
     ],
   );
 
