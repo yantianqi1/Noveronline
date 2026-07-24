@@ -1281,6 +1281,50 @@ def test_persist_runtime_facts_activity_writes_structured_canon_without_public_e
     assert "雨夜开场" not in str(workflow_writer.events)
 
 
+def test_persist_runtime_facts_activity_marks_run_failed_on_write_error() -> None:
+    # A fact-write failure must advance workflow_runs.status to failed (not leave
+    # the run stuck at "running", which blocks retry and stalls the UI).
+    workflow_writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+
+    class ExplodingFactsWriter:
+        def record_runtime_facts(self, *, context: AgentContext, reading_notes: object) -> dict[str, int]:
+            raise RuntimeError("db connection lost")
+
+    result = persist_runtime_facts_activity(
+        {
+            "context": _context().model_dump(),
+            "reading_notes": [
+                {
+                    "segment_id": "11111111-1111-1111-1111-111111111111",
+                    "summary": "雨夜开场。",
+                    "payload_jsonb": {
+                        "characters": [], "organizations": [], "relationships": [],
+                        "plot_threads": [], "world_rules": [], "events": [], "consistency_notes": [],
+                    },
+                }
+            ],
+        },
+        runtime_facts_writer=ExplodingFactsWriter(),
+        workflow_event_writer=workflow_writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "RUNTIME_FACTS_WRITE_FAILED"
+    assert result["workflow_status_persisted"] is True
+    assert status_writer.failed == [
+        {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "run_id": "run-1",
+            "code": "RUNTIME_FACTS_WRITE_FAILED",
+            "message": "runtime facts write failed",
+        }
+    ]
+    assert workflow_writer.events[-1]["event_type"] == "seed.stage.failed"
+
+
 def test_global_aggregation_activity_fails_closed_without_aggregator() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
 
@@ -8322,6 +8366,48 @@ def test_postgres_runtime_facts_writer_rolls_back_on_database_failure() -> None:
     assert connection.rolled_back is True
     assert connection.committed is False
     assert connection.closed is True
+
+
+def test_postgres_runtime_facts_writer_skips_malformed_facts_and_records_them() -> None:
+    # A chapter with one bad fact (relationship missing source, a non-list field)
+    # must not abort the whole book's fact write: bad items are skipped, good ones
+    # persist, and the skips are surfaced as consistency_notes.
+    connection = FakeConnection()
+    writer = PostgresRuntimeFactsWriter(connect=lambda: connection)
+
+    counts = writer.record_runtime_facts(
+        context=_context(),
+        reading_notes=[
+            {
+                "segment_id": "segment-1",
+                "summary": "段落概要",
+                "payload_jsonb": {
+                    "characters": [{"name": "阿澜"}],
+                    "organizations": [],
+                    "relationships": [
+                        {"source": "阿澜", "target": "北盟", "type": "member_of"},  # good
+                        {"target": "无源之人", "type": "unknown"},  # missing source -> skip
+                    ],
+                    "plot_threads": [{"title": "复仇"}, {"status": "open"}],  # second missing title -> skip
+                    "world_rules": "not-a-list",  # whole field malformed -> skip
+                    "events": [],
+                    "consistency_notes": [],
+                },
+            }
+        ],
+    )
+
+    # Good facts persisted; bad ones skipped.
+    assert counts["entity_count"] == 1
+    assert counts["relationship_count"] == 1
+    assert counts["plot_thread_count"] == 1
+    assert counts["world_rule_count"] == 0
+    # The skips are visible: one summary consistency_note records the skipped facts.
+    consistency_inserts = [
+        item for item in connection.cursor_instance.executed if "INSERT INTO consistency_notes" in item[0]
+    ]
+    assert any("已跳过" in str(params) for _, params in consistency_inserts)
+    assert connection.committed is True
 
 
 def test_seed_worker_spec_registers_temporal_workflow_and_activity() -> None:

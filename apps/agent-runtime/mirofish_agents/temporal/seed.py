@@ -3131,7 +3131,14 @@ class PostgresRuntimeFactsWriter:
                 self._upsert_segment_summary(cursor, context, segment_id, segment_summary.strip())
                 segment_summary_count += 1
             payload = _runtime_note_payload(note)
-            for entity in _runtime_entities_from_payload(payload):
+            # Tolerate malformed individual facts: a chapter whose LLM output has
+            # one bad relationship/thread/rule must not fail the WHOLE book's fact
+            # write. Each parser runs per-item; bad items are skipped and counted,
+            # then surfaced on consistency_notes so the degradation is visible.
+            skipped: list[str] = []
+
+            for entity in _iter_tolerated(payload, "characters", lambda v: _runtime_entity(v, entity_type="character"), "characters", skipped) \
+                    + _iter_tolerated(payload, "organizations", lambda v: _runtime_entity(v, entity_type="organization"), "organizations", skipped):
                 entity_id = self._upsert_entity(cursor, context, segment_id, entity)
                 for alias in entity["aliases"]:
                     self._upsert_entity_alias(cursor, context, entity_id, alias)
@@ -3141,35 +3148,47 @@ class PostgresRuntimeFactsWriter:
                 if entity["evidence"]:
                     self._upsert_entity_evidence(cursor, context, entity_id, segment_id, entity["evidence"])
                 entity_count += 1
-            for relationship in _runtime_relationships_from_payload(payload):
+            for relationship in _iter_tolerated(payload, "relationships", _runtime_relationship, "relationships", skipped):
                 self._upsert_relationship(cursor, context, segment_id, relationship)
                 relationship_count += 1
-            for thread in _runtime_plot_threads_from_payload(payload):
+            for thread in _iter_tolerated(payload, "plot_threads", _runtime_plot_thread, "plot_threads", skipped):
                 thread_id = self._upsert_plot_thread(cursor, context, segment_id, thread)
                 self._upsert_thread_lifecycle(cursor, context, thread_id, segment_id, thread)
                 plot_thread_count += 1
                 thread_lifecycle_count += 1
-            for arc in _runtime_narrative_arcs_from_payload(payload):
+            for arc in _iter_tolerated(payload, "narrative_arcs", _runtime_narrative_arc, "narrative_arcs", skipped):
                 self._upsert_narrative_arc(cursor, context, segment_id, arc)
                 narrative_arc_count += 1
-            for volume_summary in _runtime_volume_summaries_from_payload(payload):
+            for volume_summary in _iter_tolerated(payload, "volume_summaries", _runtime_volume_summary, "volume_summaries", skipped):
                 self._upsert_volume_summary(cursor, context, segment_id, volume_summary)
                 volume_summary_count += 1
-            for rule in _runtime_world_rules_from_payload(payload):
+            for rule in _iter_tolerated(payload, "world_rules", _runtime_world_rule, "world_rules", skipped):
                 self._upsert_world_rule(cursor, context, segment_id, rule)
                 world_rule_count += 1
-            for event in _runtime_character_events_from_payload(payload):
+            for event in _iter_tolerated(payload, "events", _runtime_character_event, "character_events", skipped, category="character"):
                 self._upsert_character_event(cursor, context, segment_id, event)
                 character_event_count += 1
-            for event in _runtime_world_events_from_payload(payload):
+            for event in _iter_tolerated(payload, "events", _runtime_world_event, "world_events", skipped, category="world"):
                 self._upsert_world_event(cursor, context, segment_id, event)
                 world_event_count += 1
-            for event in _runtime_relationship_events_from_payload(payload):
+            for event in _iter_tolerated(payload, "events", _runtime_relationship_event, "relationship_events", skipped, category="relationship"):
                 self._upsert_relationship_event(cursor, context, segment_id, event)
                 relationship_event_count += 1
-            for note_value in _runtime_consistency_notes_from_payload(payload):
+            for note_value in _iter_tolerated(payload, "consistency_notes", _runtime_consistency_note, "consistency_notes", skipped):
                 self._upsert_consistency_note(cursor, context, segment_id, note_value)
                 consistency_note_count += 1
+            if skipped:
+                self._upsert_consistency_note(
+                    cursor,
+                    context,
+                    segment_id,
+                    {
+                        "note_type": "fact_skipped",
+                        "severity": "warning",
+                        "summary": f"本章 {len(skipped)} 条事实格式无效已跳过: {'; '.join(skipped[:6])}",
+                        "evidence": None,
+                    },
+                )
         return {
             "entity_count": entity_count,
             "entity_label_count": entity_label_count,
@@ -6433,6 +6452,7 @@ def _persist_runtime_facts_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     _record_failed_runtime_facts_event(
         context=context,
@@ -6440,11 +6460,27 @@ def _persist_runtime_facts_failed_result(
         error_message=public_message,
         workflow_event_writer=workflow_event_writer,
     )
+    # Advance workflow_runs.status to failed so the run does not stall at
+    # "running" (which blocks retry and leaves the UI stuck mid-pipeline).
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=code,
+            message=public_message,
+        )
+    except Exception:
+        return _error_result(
+            base=base,
+            code="WORKFLOW_STATUS_WRITE_FAILED",
+            message="seed workflow status write failed",
+            extra={"stage": "persist_runtime_facts"},
+        )
     return _error_result(
         base=base,
         code=code,
         message=message,
-        extra={"stage": "persist_runtime_facts"},
+        extra={"stage": "persist_runtime_facts", "workflow_status_persisted": workflow_status_persisted},
     )
 
 
@@ -7377,6 +7413,7 @@ def persist_runtime_facts_activity(
     payload: dict[str, Any],
     runtime_facts_writer: RuntimeFactsWriter | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -7394,6 +7431,16 @@ def persist_runtime_facts_activity(
             base=base,
             stage="persist_runtime_facts",
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            return _error_result(
+                base=base,
+                code="WORKFLOW_STATUS_WRITE_FAILED",
+                message="seed workflow status write failed",
+                extra={"stage": "persist_runtime_facts"},
+            )
     try:
         reading_notes = _optional_runtime_fact_notes(payload.get("reading_notes"))
     except ValueError as exc:
@@ -7404,6 +7451,7 @@ def persist_runtime_facts_activity(
             message=str(exc),
             public_message="runtime fact input schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     writer = runtime_facts_writer if runtime_facts_writer is not None else _runtime_facts_writer_from_env()
     if writer is None:
@@ -7414,6 +7462,7 @@ def persist_runtime_facts_activity(
             message="runtime facts writer is required to persist structured canon",
             public_message="runtime facts writer is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         counts = writer.record_runtime_facts(context=context, reading_notes=reading_notes)
@@ -7461,6 +7510,7 @@ def persist_runtime_facts_activity(
             message=str(exc),
             public_message="runtime facts write failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     return {
         **base,
@@ -9460,6 +9510,38 @@ def _runtime_note_payload(note: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("payload_jsonb must be an object")
     return payload
+
+
+def _iter_tolerated(
+    payload: dict[str, Any],
+    field: str,
+    parser: Any,
+    label: str,
+    skipped: list[str],
+    *,
+    category: str | None = None,
+) -> list[dict[str, Any]]:
+    """Parse each fact item individually, skipping (and recording) malformed ones.
+
+    A single bad fact (e.g. a relationship with no source) must not abort the
+    whole book's fact persistence, so the parser runs per-item inside a try; any
+    item that raises is dropped and noted on `skipped` for a visible consistency
+    note. When `category` is given, only events of that runtime category are
+    parsed (the events[] array feeds character/world/relationship parsers).
+    """
+    items = payload.get(field, [])
+    if not isinstance(items, list):
+        skipped.append(f"{label} 字段不是数组")
+        return []
+    parsed: list[dict[str, Any]] = []
+    for item in items:
+        if category is not None and _runtime_event_category(item) != category:
+            continue
+        try:
+            parsed.append(parser(item))
+        except Exception as exc:  # noqa: BLE001 - tolerate and record per-item failures
+            skipped.append(f"{label} 一条无效({exc})")
+    return parsed
 
 
 def _runtime_entities_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
