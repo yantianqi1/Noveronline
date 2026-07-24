@@ -316,6 +316,7 @@ export interface RecordWorkflowEventRequest {
     | "writer.retrieval_plan.completed"
     | "writer.retrieval_plan.degraded"
     | "writer.retrieval_plan.skipped"
+    | "writer.context_budget.trimmed"
     | "writer.revision.proposed"
     | "writer.approval.required"
     | "writer.approval.resolved"
@@ -1028,6 +1029,10 @@ async function runDualStagePiWriterActivity(
         "query_manuscript_context"
       ];
       const runtimeContext = runtimeContextFromInput(input);
+      // Token-budget context packer (doc 41 §4.4): bound what the retrieval tools
+      // hand the orchestrator so recall can't flood the writing context.
+      const retrievalBudget = resolveRetrievalTokenBudget(retrievalPlan);
+      const packed = { remainingTokens: retrievalBudget, dropped: 0, channels: new Set<string>() };
       const result = await deps.orchestrateWritingBrief!({
         ...composeRequest(input, orchestrator, apiKey, providerCallID, deps.cancellationSignal?.()),
         mode: input.mode,
@@ -1043,18 +1048,21 @@ async function runDualStagePiWriterActivity(
           ...runtimeContext,
           permissions: { tools: toolNames, can_write_draft: false }
         },
-        executeTool: async (toolName, toolCallId, args) => deps.executeWriterTool!({
-          tenant_id: input.tenant_id,
-          project_id: input.project_id,
-          run_id: input.run_id,
-          chapter_id: input.chapter_id,
-          scene_id: input.scene_id,
-          selected_asset_ids: input.selected_asset_ids,
-          graph_node_ids: input.graph_node_ids,
-          worldline_path_ids: input.worldline_path_ids,
-          tool_name: toolName,
-          tool_args: args
-        }),
+        executeTool: async (toolName, toolCallId, args) => {
+          const raw = await deps.executeWriterTool!({
+            tenant_id: input.tenant_id,
+            project_id: input.project_id,
+            run_id: input.run_id,
+            chapter_id: input.chapter_id,
+            scene_id: input.scene_id,
+            selected_asset_ids: input.selected_asset_ids,
+            graph_node_ids: input.graph_node_ids,
+            worldline_path_ids: input.worldline_path_ids,
+            tool_name: toolName,
+            tool_args: args
+          });
+          return packRetrievalToolResult(toolName, raw, packed);
+        },
         onAgentEvent: (event) => {
           eventWriteChain = eventWriteChain.then(async () => {
           if (event.type === "tool_execution_start") {
@@ -1090,6 +1098,13 @@ async function runDualStagePiWriterActivity(
         }
       });
       await eventWriteChain;
+      if (packed.dropped > 0) {
+        await recordWorkflow("writer.context_budget.trimmed", {
+          dropped_items: packed.dropped,
+          budget_tokens: retrievalBudget,
+          channels: [...packed.channels]
+        }, "context_budget:trimmed");
+      }
       return result;
       }
     );
@@ -1329,6 +1344,72 @@ function recordArray(value: unknown): Record<string, unknown>[] {
 
 function pickFields(source: Record<string, unknown>, fields: string[]): Record<string, unknown> {
   return Object.fromEntries(fields.filter((field) => source[field] !== undefined).map((field) => [field, source[field]]));
+}
+
+// ── Token-budget context packer (doc 41 §4.4) ────────────────────────────
+
+const DEFAULT_RETRIEVAL_TOKEN_BUDGET = 12000;
+
+interface RetrievalPackState {
+  remainingTokens: number;
+  dropped: number;
+  channels: Set<string>;
+}
+
+function resolveRetrievalTokenBudget(plan: RetrievalPlan | undefined): number {
+  const value = plan?.budget?.max_context_tokens;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : DEFAULT_RETRIEVAL_TOKEN_BUDGET;
+}
+
+// Rough token estimate: ~1 token per 4 latin chars, ~1.5 per CJK char.
+function estimateTokens(value: unknown): number {
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+  let tokens = 0;
+  for (const ch of text) {
+    tokens += ch.charCodeAt(0) > 0xff ? 1.5 : 0.25;
+  }
+  return Math.max(1, Math.ceil(tokens));
+}
+
+// Cap a recall result (search_assets / search_manuscript) to the shared budget.
+// Lower-ranked items (the tools return best-first) are trimmed first — never the
+// deterministic structural context (rules, chapter, scene), which other tools
+// supply and the composer must always see. Budget exhaustion degrades visibly:
+// the orchestrator and the workflow log both see what was dropped.
+function packRetrievalToolResult(
+  toolName: WriterToolName,
+  result: Record<string, unknown>,
+  state: RetrievalPackState
+): Record<string, unknown> {
+  if (toolName !== "search_assets" && toolName !== "search_manuscript") {
+    return result;
+  }
+  const itemKey = toolName === "search_assets" ? "assets" : "manuscript_blocks";
+  const items = Array.isArray(result[itemKey]) ? (result[itemKey] as Record<string, unknown>[]) : null;
+  if (!items) return result;
+
+  const kept: Record<string, unknown>[] = [];
+  let droppedHere = 0;
+  for (const item of items) {
+    const cost = estimateTokens(item.content_preview ?? item.snippet ?? item.title ?? "");
+    if (state.remainingTokens - cost < 0) {
+      droppedHere += 1;
+      continue;
+    }
+    state.remainingTokens -= cost;
+    kept.push(item);
+  }
+  if (droppedHere > 0) {
+    state.dropped += droppedHere;
+    const channel = toolName === "search_assets" ? "search_assets" : "search_manuscript";
+    state.channels.add(channel);
+  }
+  return {
+    ...result,
+    [itemKey]: kept,
+    count: kept.length,
+    ...(droppedHere > 0 ? { budget_trimmed: droppedHere } : {})
+  };
 }
 
 async function resolveRequiredModule(

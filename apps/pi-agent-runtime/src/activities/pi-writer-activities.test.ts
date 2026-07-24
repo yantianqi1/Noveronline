@@ -536,6 +536,65 @@ describe("runPiWriterRunActivity", () => {
     expect(workflows.some((w) => w.type === "writer.retrieval_plan.skipped")).toBe(true);
   });
 
+  it("trims over-budget recall and records context_budget.trimmed", async () => {
+    const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let packedAssets: unknown;
+    const big = "很长的设定内容".repeat(40); // heavy CJK content to blow a tiny budget
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+      }),
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      planRetrieval: async () => ({
+        plan: { intent: "continue_scene", coverage: [], queries: [{ channel: "hybrid", text: "x" }], budget: { max_context_tokens: 30 } },
+        usage: { prompt_tokens: 1, completion_tokens: 1 }
+      }),
+      executeWriterTool: async ({ tool_name }) => {
+        if (tool_name === "search_assets") {
+          return {
+            mode_used: "hybrid", degraded: false,
+            assets: [
+              { asset_id: "a1", title: "规则一", content_preview: big },
+              { asset_id: "a2", title: "规则二", content_preview: big },
+              { asset_id: "a3", title: "规则三", content_preview: big }
+            ],
+            citations: []
+          };
+        }
+        return {};
+      },
+      orchestrateWritingBrief: async (request) => {
+        const packedResult = await request.executeTool("search_assets", "call-search");
+        packedAssets = (packedResult as { assets: unknown }).assets;
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type, payload: request.payload }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed" });
+    // Budget of 30 tokens cannot hold three ~600-token items; only some survive.
+    expect((packedAssets as unknown[]).length).toBeLessThan(3);
+    const trimEvent = workflows.find((w) => w.type === "writer.context_budget.trimmed");
+    expect(trimEvent?.payload.budget_tokens).toBe(30);
+    expect(Number(trimEvent?.payload.dropped_items)).toBeGreaterThan(0);
+  });
+
   it("fails the dual-stage run explicitly when writer_orchestrator is unbound", async () => {
     const activity = createPiWriterRunActivity({
       resolveModuleBinding: async ({ module_key }) => { throw new Error(`LLM_MODULE_UNBOUND: ${module_key} module is not bound`); },
