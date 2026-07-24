@@ -1470,6 +1470,72 @@ describe("createPostgresPiWriterDeps", () => {
     // Pure function — no DB access.
     expect(db.queries).toHaveLength(0);
   });
+
+  it("fuse_recall reranks the fused list via the cross-encoder and degrades on failure", async () => {
+    // Rerank path: reranker promotes a3 above the RRF order.
+    const db = new RecordingDb();
+    db.enqueue([{ // rerank binding
+      module_key: "writer_retrieval_rerank",
+      channel_id: "channel-rr",
+      model_id: "rerank-model",
+      provider: "openai-compatible",
+      base_url: "https://llm.example.test/v1",
+      credential_ref: "channel-rr",
+      supports_tools: false,
+      supports_json: true,
+      settings_jsonb: {}
+    }]);
+    db.enqueue([{ encrypted_api_key: "cipher" }]); // rerank credential
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" }),
+      rerankRecall: async (req) => ({ ranked_ids: ["a3", "a1", "a2"] })
+    });
+    const result = await deps.executeWriterTool!({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      tool_name: "fuse_recall",
+      tool_args: {
+        rerank: true,
+        query: "师门复命",
+        channels: [
+          { channel: "keyed", items: [{ asset_id: "a1", title: "师门戒律", content_preview: "戒律" }] },
+          { channel: "hybrid", items: [{ asset_id: "a2", title: "师父", content_preview: "师父" }, { asset_id: "a3", title: "旧事件", content_preview: "复命旧事" }] }
+        ]
+      }
+    });
+    const fused = result.fused as Array<Record<string, unknown>>;
+    expect(result.reranked).toBe(true);
+    expect(fused.map((f) => f.id)).toEqual(["a3", "a1", "a2"]);
+
+    // Degraded path: reranker throws -> falls back to RRF order, flagged.
+    const failDb = new RecordingDb();
+    failDb.enqueue([{ module_key: "writer_retrieval_rerank", channel_id: "c", model_id: "m", provider: "openai-compatible", base_url: "https://x/v1", credential_ref: "c", supports_tools: false, supports_json: true, settings_jsonb: {} }]);
+    failDb.enqueue([{ encrypted_api_key: "cipher" }]);
+    const failDeps = createPostgresPiWriterDeps({
+      db: failDb,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" }),
+      rerankRecall: async () => { throw new Error("reranker unavailable"); }
+    });
+    const degraded = await failDeps.executeWriterTool!({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      tool_name: "fuse_recall",
+      tool_args: {
+        rerank: true, query: "x",
+        channels: [
+          { channel: "keyed", items: [{ asset_id: "b1", title: "甲" }] },
+          { channel: "hybrid", items: [{ asset_id: "b1", title: "甲" }, { asset_id: "b2", title: "乙" }] }
+        ]
+      }
+    });
+    expect(degraded.reranked).toBe(false);
+    expect(degraded.rerank_degraded).toMatch(/reranker unavailable/);
+    // RRF order preserved: b1 (both channels) first.
+    expect((degraded.fused as Array<Record<string, unknown>>)[0]?.id).toBe("b1");
+  });
 });
 
 function encryptCredential(plaintext: string, key: Buffer): string {

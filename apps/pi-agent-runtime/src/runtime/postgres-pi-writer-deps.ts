@@ -23,6 +23,8 @@ import type {
   AppendWriterThreadMessageRequest,
   CreateWriterApprovalRequest,
   SaveDraftRevisionRequest,
+  RerankRecallRequest,
+  RerankRecallResult,
   SearchAssetsArgs,
   SearchAssetsMode,
   SearchManuscriptArgs,
@@ -30,7 +32,7 @@ import type {
 } from "../activities/pi-writer-activities.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
 import { createPostgresQuotaStore } from "../llm/quota/postgres-quota-store.js";
-import { reciprocalRankFusion, type FusionItem } from "./recall-fusion.js";
+import { reciprocalRankFusion, type FusionItem, type FusedItem } from "./recall-fusion.js";
 
 export interface QueryExecutor {
   query<T extends Record<string, unknown>>(
@@ -75,6 +77,15 @@ export interface PostgresPiWriterDepsOptions {
   composeDraft(request: ComposeDraftRequest): Promise<ComposeDraftResult>;
   leaseTtlSeconds?: number;
   fetchEmbedding?: QueryEmbeddingFetcher;
+  /** Cross-encoder rerank execution (writer_retrieval_rerank); wired by the worker. */
+  rerankRecall?: (request: RerankRecallRequest) => Promise<RerankRecallResult>;
+}
+
+interface RerankCandidateInput {
+  id: string;
+  title?: string;
+  text: string;
+  channels?: string[];
 }
 
 export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions): PiWriterRunActivityDeps {
@@ -306,7 +317,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
     case "search_manuscript":
       return executeSearchManuscript(options, request);
     case "fuse_recall":
-      return executeFuseRecall(request);
+      return executeFuseRecall(options, request, buildRerankCallback(options, request));
     case "query_project_context": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT title, description, genre, language, status
@@ -895,10 +906,59 @@ function gatedResult(currentChapterOrder: number | null): Record<string, unknown
   return { spoiler_gated: true, current_chapter_order: currentChapterOrder };
 }
 
+const WRITER_RETRIEVAL_RERANK_MODULE_KEY = "writer_retrieval_rerank";
+
+// Build a rerank callback bound to this run's credential/binding, or undefined
+// when no rerank execution is wired. The callback resolves the writer_retrieval_rerank
+// module and calls the cross-encoder; failures propagate so the caller can degrade.
+function buildRerankCallback(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest
+): ((query: string, candidates: RerankCandidateInput[]) => Promise<string[]>) | undefined {
+  if (!options.rerankRecall) return undefined;
+  return async (query, candidates) => {
+    const binding = await resolveModuleBinding(options.db, {
+      tenant_id: request.tenant_id,
+      project_id: request.project_id,
+      run_id: request.run_id,
+      module_key: WRITER_RETRIEVAL_RERANK_MODULE_KEY
+    });
+    const { apiKey } = await resolveCredential(options, {
+      tenant_id: request.tenant_id,
+      project_id: request.project_id,
+      run_id: request.run_id,
+      module_key: WRITER_RETRIEVAL_RERANK_MODULE_KEY,
+      channel_id: binding.channel_id,
+      credential_ref: binding.credential_ref
+    });
+    const result = await options.rerankRecall!({
+      tenant_id: request.tenant_id,
+      project_id: request.project_id,
+      run_id: request.run_id,
+      module_key: binding.module_key,
+      channel_id: binding.channel_id,
+      model_id: binding.model_id,
+      provider: binding.provider,
+      base_url: binding.base_url,
+      query,
+      candidates,
+      apiKey,
+      settings: binding.settings
+    });
+    return result.ranked_ids;
+  };
+}
+
 // P2 (doc 41 §4.6): fuse the run's multi-channel recall (keyed / hybrid /
-// manuscript) into one RRF-ranked list. The orchestrator passes each channel's
-// results (ordered best-first) after it has gathered them; no LLM or DB needed.
-async function executeFuseRecall(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>> {
+// manuscript) into one RRF-ranked list. When the caller passes rerank:true with a
+// query and the activity has wired a reranker, the writer_retrieval_rerank
+// cross-encoder re-orders the fused list; reranker unavailable/failed degrades to
+// the RRF order explicitly.
+async function executeFuseRecall(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest,
+  rerank?: (query: string, candidates: RerankCandidateInput[]) => Promise<string[]>
+): Promise<Record<string, unknown>> {
   const raw = (request.tool_args ?? {}) as Record<string, unknown>;
   const lists = Array.isArray(raw.channels) ? raw.channels : [];
   const channelLists: FusionItem[][] = lists.map((entry) => {
@@ -922,10 +982,33 @@ async function executeFuseRecall(request: ExecuteWriterToolRequest): Promise<Rec
       .filter((x): x is FusionItem => x !== null);
   });
   const fused = reciprocalRankFusion(channelLists);
+  const byId = new Map(fused.map((item) => [item.id, item]));
+
+  // Optional cross-encoder rerank of the wide fused list (doc 41 §4.6 second half).
+  let rerankedIds: string[] | null = null;
+  let rerankDegraded: string | null = null;
+  if (raw.rerank === true && typeof raw.query === "string" && raw.query.trim() && rerank && fused.length > 0) {
+    try {
+      const wide = fused.slice(0, 50).map((item) => ({
+        id: item.id,
+        title: item.title,
+        text: rerankTextFor(item),
+        channels: item.channels
+      }));
+      const ids = await rerank(raw.query.trim(), wide);
+      rerankedIds = ids.filter((id) => byId.has(id));
+    } catch (error) {
+      rerankDegraded = errorMessage(error);
+    }
+  }
+
+  const ordered: FusedItem[] = rerankedIds
+    ? [...rerankedIds.map((id) => byId.get(id)!), ...fused.filter((item) => !rerankedIds!.includes(item.id))]
+    : fused;
   const topK = typeof raw.top_k === "number" && Number.isInteger(raw.top_k) && raw.top_k > 0
     ? Math.min(25, raw.top_k)
-    : fused.length;
-  const results = fused.slice(0, topK).map((item) => ({
+    : ordered.length;
+  const results = ordered.slice(0, topK).map((item) => ({
     id: item.id,
     title: item.title,
     channels: item.channels,
@@ -936,6 +1019,8 @@ async function executeFuseRecall(request: ExecuteWriterToolRequest): Promise<Rec
   return {
     count: results.length,
     fused: results,
+    reranked: rerankedIds !== null,
+    ...(rerankDegraded ? { rerank_degraded: rerankDegraded } : {}),
     citations: results.map((item) => ({
       asset_id: item.id,
       title: item.title,
@@ -944,6 +1029,12 @@ async function executeFuseRecall(request: ExecuteWriterToolRequest): Promise<Rec
       channel: "fuse_recall"
     }))
   };
+}
+
+function rerankTextFor(item: FusionItem): string {
+  const payload = (item.payload ?? {}) as Record<string, unknown>;
+  const text = payload.content_preview ?? payload.snippet ?? payload.summary ?? item.title ?? "";
+  return typeof text === "string" ? text.slice(0, 280) : "";
 }
 
 async function executeSearchAssets(

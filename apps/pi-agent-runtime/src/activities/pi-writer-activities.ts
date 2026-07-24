@@ -206,6 +206,43 @@ export interface PlanRetrievalResult {
   usage?: PiWriterUsage;
 }
 
+// ── Cross-encoder rerank (P2, doc 41 §4.6) ───────────────────────────────
+
+/** One recalled candidate to be reranked (from fused recall). */
+export interface RerankCandidate {
+  id: string;
+  title?: string;
+  /** Short text the reranker scores for relevance to the passage. */
+  text: string;
+  channels?: string[];
+}
+
+export interface RerankRecallRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  module_key: string;
+  channel_id: string;
+  model_id: string;
+  provider: string;
+  base_url: string;
+  /** The retrieval intent / passage description to score candidates against. */
+  query: string;
+  candidates: RerankCandidate[];
+  top_k?: number;
+  thinking_level?: WriterRunInput["options"]["thinking_level"];
+  apiKey: string;
+  settings: Record<string, unknown>;
+  provider_call_id?: string;
+  abort_signal?: AbortSignal;
+}
+
+export interface RerankRecallResult {
+  /** Candidate ids, best-first. */
+  ranked_ids: string[];
+  usage?: PiWriterUsage;
+}
+
 export interface AcquireLLMLeaseRequest {
   tenant_id: string;
   project_id: string;
@@ -406,6 +443,7 @@ export interface PiWriterRunActivityDeps {
   saveProviderStageCheckpoint?(checkpoint: ProviderStageCheckpoint): Promise<void>;
   resolveModuleBinding?(request: ResolveModuleBindingRequest): Promise<ResolvedLLMModule>;
   planRetrieval?(request: PlanRetrievalRequest): Promise<PlanRetrievalResult>;
+  rerankRecall?(request: RerankRecallRequest): Promise<RerankRecallResult>;
   orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
   executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;

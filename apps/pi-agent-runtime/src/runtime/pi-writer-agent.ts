@@ -15,6 +15,8 @@ import type {
   OrchestrateWritingBriefResult,
   PlanRetrievalRequest,
   PlanRetrievalResult,
+  RerankRecallRequest,
+  RerankRecallResult,
   RetrievalPlan,
   RetrievalQuery,
   WriterToolName
@@ -57,7 +59,9 @@ const fuseRecallArguments = ObjectSchema(
         required: ["channel", "items"]
       }
     },
-    top_k: { type: "number", description: "Cap the fused list (default: all, max 25)." }
+    top_k: { type: "number", description: "Cap the fused list (default: all, max 25)." },
+    rerank: { type: "boolean", description: "Re-order the fused list with the writer_retrieval_rerank cross-encoder (degrades to RRF order if unavailable)." },
+    query: { type: "string", description: "The writing intent to rerank against; required when rerank is true." }
   },
   { additionalProperties: false }
 );
@@ -144,6 +148,27 @@ export function createPiWriterExecution() {
         plan: parseRetrievalPlan(content),
         usage: messageUsage(message)
       } satisfies PlanRetrievalResult;
+    },
+    rerankRecall: async (request: RerankRecallRequest) => {
+      const runtime = createRuntime(request);
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: rerankSystemPrompt(),
+          model: runtime.model,
+          thinkingLevel: request.thinking_level ?? "off"
+        },
+        streamFn: runtime.streamFn,
+        getApiKey: (provider) => provider === runtime.providerId ? request.apiKey : undefined,
+        sessionId: request.run_id
+      });
+      await promptWithAbort(agent, rerankPrompt(request), request.abort_signal);
+      const message = finalAssistantMessage(agent.state.messages);
+      const content = assistantText(message);
+      if (!content.trim()) throw new Error("Pi writer reranker returned an empty ranking");
+      return {
+        ranked_ids: parseRerankIds(content, request.candidates),
+        usage: messageUsage(message)
+      } satisfies RerankRecallResult;
     }
   };
 }
@@ -232,6 +257,54 @@ function positiveInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+// ── Cross-encoder rerank (P2, doc 41 §4.6) ───────────────────────────────
+
+function rerankSystemPrompt(): string {
+  return [
+    "You are the MiroFish writer retrieval reranker. Given a writing intent and a list of recalled canon/prose candidates, order them by how useful each is for writing the passage consistently.",
+    "Respond with ONLY a JSON object — no prose, no markdown — of the form:",
+    '{"ranked_ids": ["<candidate id>", "..."], "kept": <number>}',
+    "Rank most-useful first. Drop candidates that are irrelevant to the intent. Preserve every id exactly as given; never invent ids."
+  ].join(" ");
+}
+
+function rerankPrompt(request: RerankRecallRequest): string {
+  return JSON.stringify({
+    task: "Rank these recalled candidates by usefulness for the writing intent.",
+    intent: request.query,
+    candidates: request.candidates.map((c) => ({
+      id: c.id,
+      title: c.title,
+      text: c.text,
+      channels: c.channels
+    }))
+  });
+}
+
+/** Parse the reranker's JSON into an ordered id list, validated against the candidates. */
+function parseRerankIds(content: string, candidates: RerankRecallRequest["candidates"]): string[] {
+  const cleaned = content.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("reranker returned no JSON object");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    throw new Error("reranker returned invalid JSON");
+  }
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  const validIds = new Set(candidates.map((c) => c.id));
+  const ranked = Array.isArray(record.ranked_ids)
+    ? record.ranked_ids.filter((id): id is string => typeof id === "string" && validIds.has(id))
+    : [];
+  // Any candidate the reranker dropped off the list is appended at the end so we
+  // never silently lose recall — it just ranks low.
+  const seen = new Set(ranked);
+  for (const c of candidates) if (!seen.has(c.id)) ranked.push(c.id);
+  return ranked;
+}
+
 function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments | typeof fuseRecallArguments> {
   const parameters =
     name === "search_assets" ? searchAssetsArguments
@@ -255,7 +328,7 @@ function writerTool(name: WriterToolName, request: OrchestrateWritingBriefReques
   };
 }
 
-function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefRequest) {
+function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest) {
   const parentProviderCallID = request.provider_call_id?.trim();
   if (!parentProviderCallID) {
     throw new Error("LLM_PROVIDER_CALL_ID_INVALID: Pi writer provider call identity is required");
@@ -285,7 +358,7 @@ function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefReq
   return { providerId, model: resolved, models, streamFn };
 }
 
-function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWritingBriefRequest, providerId: string): Model<"openai-completions"> {
+function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest, providerId: string): Model<"openai-completions"> {
   return {
     id: request.model_id,
     name: request.model_id,
@@ -306,7 +379,7 @@ function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWriting
   };
 }
 
-function providerRequestHeaders(request: ComposeDraftRequest | OrchestrateWritingBriefRequest): Record<string, string> {
+function providerRequestHeaders(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest): Record<string, string> {
   const providerCallID = request.provider_call_id?.trim();
   if (!providerCallID) {
     throw new Error("LLM_PROVIDER_CALL_ID_INVALID: Pi writer provider call identity is required");

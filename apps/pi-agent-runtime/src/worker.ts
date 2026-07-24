@@ -49,7 +49,8 @@ export async function createWorkerActivityBundle(options: WorkerActivityBundleOp
   const deps = createPostgresPiWriterDeps({
     db,
     decryptCredential,
-    composeDraft: options.composeDraft ?? writerExecution.composeDraft
+    composeDraft: options.composeDraft ?? writerExecution.composeDraft,
+    rerankRecall: options.composeDraft ? undefined : writerExecution.rerankRecall
   });
   deps.cancellationSignal = options.cancellationSignal;
   deps.loadProviderStageCheckpoint = options.loadProviderStageCheckpoint;
@@ -57,6 +58,7 @@ export async function createWorkerActivityBundle(options: WorkerActivityBundleOp
   if (!options.composeDraft) {
     deps.orchestrateWritingBrief = writerExecution.orchestrateWritingBrief;
     deps.planRetrieval = writerExecution.planRetrieval;
+    deps.rerankRecall = writerExecution.rerankRecall;
     deps.composeDraft = writerExecution.composeDraft;
   }
   return {
