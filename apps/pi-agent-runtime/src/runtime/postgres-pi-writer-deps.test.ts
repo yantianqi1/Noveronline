@@ -1068,6 +1068,193 @@ describe("createPostgresPiWriterDeps", () => {
       })
     ).rejects.toThrow("LLM_CONCURRENCY_LIMITED");
   });
+
+  it("search_assets runs keyword mode without touching embedding resolution and enforces the lifecycle gate", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{
+      asset_id: "asset-1",
+      asset_type: "world_rule",
+      category: "magic",
+      lifecycle: "canon",
+      title: "Magic costs",
+      summary: "Magic always has a cost.",
+      content_text: "All magic exacts a price from the caster.",
+      tags_jsonb: "[\"magic\"]",
+      keyword_score: 0.5,
+      vector_score: 0,
+      recency_boost: 0.01,
+      lifecycle_boost: 0.08,
+      pinned_boost: 0,
+      final_score: 0.59
+    }]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const request = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: []
+    };
+
+    const result = await deps.executeWriterTool!({
+      ...request,
+      tool_name: "search_assets",
+      tool_args: { query: "magic cost", mode: "keyword" }
+    });
+
+    expect(result.mode_used).toBe("keyword");
+    expect(result.degraded).toBe(false);
+    expect(result.count).toBe(1);
+    const assets = result.assets as Array<Record<string, unknown>>;
+    const citations = result.citations as Array<Record<string, unknown>>;
+    expect(assets[0]?.asset_id).toBe("asset-1");
+    expect(assets[0]?.content_preview).toBe("All magic exacts a price from the caster.");
+    expect(citations[0]).toMatchObject({ asset_id: "asset-1", channel: "search_assets" });
+
+    // Exactly one DB query (the search) — no embedding binding/credential lookups.
+    expect(db.queries).toHaveLength(1);
+    const search = db.queries[0]!;
+    expect(search.text).toContain("search_doc.source = 'asset'");
+    expect(search.text).toContain("asset.lifecycle = ANY(input.lifecycles)");
+    expect(search.text).toContain("asset.enabled = TRUE");
+    expect(search.values[3]).toBe("keyword");          // mode
+    expect(search.values[4]).toBeNull();                // embedding literal
+    expect(search.values[7]).toEqual(["seed", "canon", "material"]); // lifecycle gate
+    expect(search.values[8]).toBe(10);                  // default top_k
+  });
+
+  it("search_assets explicitly degrades to keyword when the embedding module is unbound", async () => {
+    const db = new RecordingDb();
+    db.enqueue([]);            // binding lookup returns no row -> LLM_MODULE_UNBOUND
+    db.enqueue([]);            // keyword search returns no rows
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const request = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: []
+    };
+
+    const result = await deps.executeWriterTool!({
+      ...request,
+      tool_name: "search_assets",
+      tool_args: { query: "师门 复命" }
+    });
+
+    expect(result.mode_used).toBe("keyword");
+    expect(result.degraded).toBe(true);
+    expect(result.degrade_reason).toMatch(/asset_search_embedding module is not bound/);
+    expect(result.assets).toEqual([]);
+    // binding lookup + search, but no credential lookup and no embedding fetch.
+    expect(db.queries).toHaveLength(2);
+    expect(db.queries[1]?.values[3]).toBe("keyword");
+  });
+
+  it("search_assets runs hybrid mode through the embedding binding and credential", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{
+      module_key: "asset_search_embedding",
+      channel_id: "channel-emb",
+      model_id: "text-embedding-3-small",
+      provider: "openai-compatible",
+      base_url: "https://llm.example.test/v1",
+      credential_ref: "channel-emb",
+      supports_tools: false,
+      supports_json: false,
+      settings_jsonb: {}
+    }]);
+    db.enqueue([{ encrypted_api_key: "cipher" }]);
+    db.enqueue([{
+      asset_id: "asset-9",
+      asset_type: "world_rule",
+      category: "sect",
+      lifecycle: "canon",
+      title: "师门戒律",
+      summary: "回山须复命。",
+      content_text: "弟子回山必须向掌门复命。",
+      tags_jsonb: "[]",
+      keyword_score: 0.4,
+      vector_score: 0.9,
+      recency_boost: 0.01,
+      lifecycle_boost: 0.08,
+      pinned_boost: 0,
+      final_score: 0.76
+    }]);
+    const fetchCalls: { url: string; init: { headers: Record<string, string>; body: string } }[] = [];
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" }),
+      fetchEmbedding: async (url, init) => {
+        fetchCalls.push({ url, init });
+        return { ok: true, status: 200, json: async () => ({ data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }] }) };
+      }
+    });
+    const request = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: []
+    };
+
+    const result = await deps.executeWriterTool!({
+      ...request,
+      tool_name: "search_assets",
+      tool_args: { query: "师门 复命", top_k: 5 }
+    });
+
+    expect(result.mode_used).toBe("hybrid");
+    expect(result.degraded).toBe(false);
+    const hybridAssets = result.assets as Array<Record<string, unknown>>;
+    expect(hybridAssets[0]?.asset_id).toBe("asset-9");
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.url).toBe("https://llm.example.test/v1/embeddings");
+    expect(fetchCalls[0]?.init.headers.Authorization).toBe("Bearer sk-live");
+    expect(JSON.parse(fetchCalls[0]?.init.body)).toEqual({ model: "text-embedding-3-small", input: ["师门 复命"] });
+
+    const search = db.queries[2]!;
+    expect(search.values[3]).toBe("hybrid");                 // mode
+    expect(search.values[4]).toBe("[0.1,0.2,0.3]");          // embedding literal
+    expect(search.values[5]).toBe("text-embedding-3-small"); // embedding model
+    expect(search.values[8]).toBe(5);                         // top_k honored
+  });
+
+  it("search_assets rejects an empty query before any retrieval", async () => {
+    const db = new RecordingDb();
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    await expect(
+      deps.executeWriterTool!({
+        tenant_id: "ten_1",
+        project_id: "proj_1",
+        run_id: "run_1",
+        selected_asset_ids: [],
+        graph_node_ids: [],
+        worldline_path_ids: [],
+        tool_name: "search_assets",
+        tool_args: { query: "   " }
+      })
+    ).rejects.toThrow("search_assets requires a non-empty query");
+    expect(db.queries).toHaveLength(0);
+  });
 });
 
 function encryptCredential(plaintext: string, key: Buffer): string {

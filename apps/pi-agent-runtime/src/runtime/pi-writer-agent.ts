@@ -19,6 +19,18 @@ import { assertToolAllowed, ToolPermissionDenied } from "../tools/permissions.js
 
 const noArguments = ObjectSchema({}, { additionalProperties: false });
 
+// The one retrieval tool that takes planning input from the orchestrator: a
+// query string plus optional narrowing. All other tools stay argument-free.
+const searchAssetsArguments = ObjectSchema(
+  {
+    query: { type: "string", description: "Retrieval intent describing the settings, prior scenes, or canon needed for this passage." },
+    asset_types: { type: "array", items: { type: "string" }, description: "Optional asset_type filter such as world_rule, relationship, character." },
+    top_k: { type: "number", description: "How many assets to return (default 10, max 25)." },
+    mode: { type: "string", enum: ["keyword", "vector", "hybrid"], description: "Retrieval mode; defaults to hybrid and degrades to keyword when embeddings are unavailable." }
+  },
+  { additionalProperties: false }
+);
+
 export function createPiWriterExecution() {
   return {
     orchestrateWritingBrief: async (request: OrchestrateWritingBriefRequest) => {
@@ -84,16 +96,17 @@ export function createPiWriterExecution() {
   };
 }
 
-function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments> {
+function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments> {
+  const parameters = name === "search_assets" ? searchAssetsArguments : noArguments;
   return {
     name,
     label: name,
     description: toolDescription(name),
-    parameters: noArguments,
+    parameters,
     executionMode: name === "save_draft_revision" ? "sequential" : "parallel",
-    execute: async (toolCallId, _params, signal) => {
+    execute: async (toolCallId, params, signal) => {
       if (signal?.aborted) throw new Error("writer tool execution aborted");
-      const details = await request.executeTool(name, toolCallId);
+      const details = await request.executeTool(name, toolCallId, params as Record<string, unknown>);
       return {
         content: [{ type: "text", text: JSON.stringify(details) }],
         details
@@ -278,6 +291,7 @@ function toolDescription(name: WriterToolName): string {
     query_project_context: "Read project title, genre, language, and status.",
     query_chapter_scene: "Read the requested chapter and scene identifiers plus existing draft metadata.",
     query_assets: "Read selected or relevant enabled project assets and their private writing context.",
+    search_assets: "Semantic recall over project canon/seed/material assets. Supply a query describing what this passage needs (settings, rules, relationships, prior scenes). Returns ranked matches with citations; degrades to keyword when embeddings are unavailable.",
     query_world_rules: "Read extracted project world rules as private writing context.",
     query_character_profile: "Read project character identities, aliases, and current state as private writing context.",
     query_graph_neighbors: "Read explicitly selected story graph nodes and their direct relationships.",

@@ -23,6 +23,8 @@ import type {
   AppendWriterThreadMessageRequest,
   CreateWriterApprovalRequest,
   SaveDraftRevisionRequest,
+  SearchAssetsArgs,
+  SearchAssetsMode,
   UpdateWriterRunStatusRequest
 } from "../activities/pi-writer-activities.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
@@ -58,18 +60,26 @@ export interface CredentialDecryptContext {
 
 export type CredentialDecryptor = (ciphertext: string, context: CredentialDecryptContext) => Promise<string>;
 
+// Minimal HTTP contract for the asset query-embedding provider (OpenAI-compatible).
+// Injectable so tests can stub the network and assert the degradation path.
+export type QueryEmbeddingFetcher = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string }
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
 export interface PostgresPiWriterDepsOptions {
   db: QueryExecutor;
   decryptCredential: CredentialDecryptor;
   composeDraft(request: ComposeDraftRequest): Promise<ComposeDraftResult>;
   leaseTtlSeconds?: number;
+  fetchEmbedding?: QueryEmbeddingFetcher;
 }
 
 export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions): PiWriterRunActivityDeps {
   const quota = createPostgresQuotaStore(options.db);
   return {
     resolveModuleBinding: async (request) => resolveModuleBinding(options.db, request),
-    executeWriterTool: async (request) => executeWriterTool(options.db, request),
+    executeWriterTool: async (request) => executeWriterTool(options, request),
     resolveCredential: async (request) => resolveCredential(options, request),
     reserveLLMQuota: async (request) => quota.reserve(request),
     finalizeLLMQuota: async (request) => quota.finalize(request),
@@ -286,8 +296,11 @@ async function resolveModuleBinding(db: QueryExecutor, request: ResolveModuleBin
   };
 }
 
-async function executeWriterTool(db: QueryExecutor, request: ExecuteWriterToolRequest): Promise<Record<string, unknown>> {
+async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: ExecuteWriterToolRequest): Promise<Record<string, unknown>> {
+  const db = options.db;
   switch (request.tool_name) {
+    case "search_assets":
+      return executeSearchAssets(options, request);
     case "query_project_context": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT title, description, genre, language, status
@@ -586,6 +599,348 @@ async function queryManuscriptContext(
     target: { chapter_id: chapterId, scene_id: sceneId },
     manuscript_blocks: fallback.rows.reverse()
   };
+}
+
+const ASSET_SEARCH_EMBEDDING_MODULE_KEY = "asset_search_embedding";
+const SEARCH_ASSETS_DEFAULT_TOP_K = 10;
+const SEARCH_ASSETS_MAX_TOP_K = 25;
+const ASSET_QUERY_PREVIEW_MAX = 280;
+// Writer-side safety gate: only author-sovereign canon may be recalled. Candidate,
+// draft, and simulation assets never enter the writing context (mirrors query_assets).
+const SEARCH_ASSETS_LIFECYCLES = ["seed", "canon", "material"] as const;
+
+interface QueryEmbeddingResult {
+  embedding: number[];
+  modelId: string;
+}
+
+interface SearchAssetsResolution {
+  mode: SearchAssetsMode;
+  degraded: boolean;
+  degradeReason?: string;
+  embedding?: QueryEmbeddingResult;
+}
+
+function parseSearchAssetsArgs(raw: Record<string, unknown> | undefined): SearchAssetsArgs {
+  const args = (raw ?? {}) as Record<string, unknown>;
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  if (!query) {
+    throw new Error("VALIDATION_FAILED: search_assets requires a non-empty query");
+  }
+  const mode: SearchAssetsMode =
+    args.mode === "keyword" || args.mode === "vector" || args.mode === "hybrid" ? args.mode : "hybrid";
+  let topK = SEARCH_ASSETS_DEFAULT_TOP_K;
+  if (typeof args.top_k === "number" && Number.isFinite(args.top_k)) {
+    topK = Math.min(SEARCH_ASSETS_MAX_TOP_K, Math.max(1, Math.floor(args.top_k)));
+  }
+  const assetTypes = Array.isArray(args.asset_types)
+    ? args.asset_types.filter((value): value is string => typeof value === "string" && value.trim() !== "")
+    : undefined;
+  return {
+    query,
+    mode,
+    top_k: topK,
+    ...(assetTypes && assetTypes.length > 0 ? { asset_types: assetTypes } : {})
+  };
+}
+
+async function resolveSearchAssetsMode(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest,
+  args: SearchAssetsArgs
+): Promise<SearchAssetsResolution> {
+  const requested = args.mode ?? "hybrid";
+  if (requested === "keyword") {
+    return { mode: "keyword", degraded: false };
+  }
+  try {
+    const embedding = await resolveQueryEmbedding(options, request, args.query);
+    return { mode: requested, degraded: false, embedding };
+  } catch (error) {
+    // Explicit, visible degradation — never pretend hybrid when embeddings are unavailable.
+    return { mode: "keyword", degraded: true, degradeReason: errorMessage(error) };
+  }
+}
+
+async function resolveQueryEmbedding(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest,
+  query: string
+): Promise<QueryEmbeddingResult> {
+  const binding = await resolveModuleBinding(options.db, {
+    tenant_id: request.tenant_id,
+    project_id: request.project_id,
+    run_id: request.run_id,
+    module_key: ASSET_SEARCH_EMBEDDING_MODULE_KEY
+  });
+  const provider = binding.provider.trim().toLowerCase();
+  if (provider !== "openai" && provider !== "openai-compatible") {
+    throw new Error(`asset_search_embedding provider ${binding.provider} is not OpenAI-compatible`);
+  }
+  const { apiKey } = await resolveCredential(options, {
+    tenant_id: request.tenant_id,
+    project_id: request.project_id,
+    run_id: request.run_id,
+    module_key: ASSET_SEARCH_EMBEDDING_MODULE_KEY,
+    channel_id: binding.channel_id,
+    credential_ref: binding.credential_ref
+  });
+  const embedding = await requestQueryEmbedding(options, request, binding, apiKey, query);
+  return { embedding, modelId: binding.model_id };
+}
+
+async function requestQueryEmbedding(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest,
+  binding: ResolvedLLMModule,
+  apiKey: string,
+  query: string
+): Promise<number[]> {
+  const body: Record<string, unknown> = { model: binding.model_id, input: [query] };
+  const dimensions = positiveIntSetting(binding.settings, "embedding_dimensions");
+  if (dimensions !== undefined) body.dimensions = dimensions;
+  const fetcher: QueryEmbeddingFetcher =
+    options.fetchEmbedding ??
+    (async (url, init) => {
+      const response = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+      return { ok: response.ok, status: response.status, json: () => response.json() as Promise<unknown> };
+    });
+  const base = binding.base_url.trim().replace(/\/+$/, "");
+  const url = base.endsWith("/embeddings") ? base : `${base}/embeddings`;
+  const response = await fetcher(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "X-MiroFish-Tenant-Id": request.tenant_id,
+      "X-MiroFish-Project-Id": request.project_id,
+      "X-MiroFish-Module-Key": ASSET_SEARCH_EMBEDDING_MODULE_KEY
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw new Error(`asset query embedding provider request failed (status ${response.status})`);
+  }
+  const payload = (await response.json()) as { data?: Array<{ index?: number; embedding?: unknown }> };
+  const first = payload.data?.[0];
+  if (!payload.data || payload.data.length !== 1 || first?.index !== 0 || !Array.isArray(first.embedding)) {
+    throw new Error("asset query embedding provider returned an invalid response");
+  }
+  return first.embedding as number[];
+}
+
+function positiveIntSetting(settings: Record<string, unknown>, key: string): number | undefined {
+  const value = settings[key];
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  return undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncateAssetPreview(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.length > ASSET_QUERY_PREVIEW_MAX ? `${trimmed.slice(0, ASSET_QUERY_PREVIEW_MAX)}…` : trimmed;
+}
+
+function toVectorLiteral(embedding: number[]): string {
+  return `[${embedding.join(",")}]`;
+}
+
+async function executeSearchAssets(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest
+): Promise<Record<string, unknown>> {
+  const db = options.db;
+  const args = parseSearchAssetsArgs(request.tool_args);
+  const resolution = await resolveSearchAssetsMode(options, request, args);
+  const useVector = resolution.mode !== "keyword" && resolution.embedding !== undefined;
+  const assetTypes = args.asset_types ?? [];
+  // Hybrid ranking SQL mirrors SQLReader.SearchAssets (apps/api/internal/assets/assets.go:770):
+  // same tsvector + ILIKE keyword score, cosine vector score, and recency/lifecycle/pinned boosts,
+  // with the Writer lifecycle/enable gate enforced here as parameters.
+  const rows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `WITH search_input AS (
+         SELECT
+           $1::text AS tenant_id,
+           $2::text AS project_id,
+           $3::text AS query_text,
+           ('%' || $3::text || '%') AS keyword_pattern,
+           $4::text AS search_mode,
+           CASE WHEN $4::text = 'keyword' THEN NULL::vector ELSE $5::vector END AS query_embedding,
+           $6::text AS embedding_model,
+           $7::text[] AS asset_types,
+           $8::text[] AS lifecycles
+       ),
+       candidate_scores AS (
+         SELECT
+           asset.asset_id,
+           asset.asset_type,
+           asset.category,
+           asset.lifecycle,
+           asset.title,
+           asset.summary,
+           asset.content_text,
+           asset.tags_jsonb,
+           asset.updated_at,
+           asset.pinned,
+           GREATEST(
+             ts_rank_cd(search_doc.search_vector, websearch_to_tsquery('simple'::regconfig, input.query_text)),
+             CASE
+               WHEN search_doc.title ILIKE input.keyword_pattern
+                 OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern THEN 0.5
+               ELSE 0.0
+             END
+           )::float8 AS keyword_score,
+           CASE
+             WHEN input.search_mode = 'keyword' THEN 0.0
+             ELSE GREATEST(0.0, LEAST(1.0, 1.0 - (embedding.embedding <=> input.query_embedding)))
+           END::float8 AS vector_score
+         FROM search_input input
+         JOIN global_search_index search_doc
+           ON search_doc.source = 'asset'
+          AND search_doc.tenant_id::text = input.tenant_id
+          AND search_doc.project_id::text = input.project_id
+         JOIN assets asset
+           ON asset.tenant_id = search_doc.tenant_id
+          AND asset.project_id = search_doc.project_id
+          AND asset.asset_id::text = search_doc.source_ref
+          AND asset.enabled = TRUE
+         LEFT JOIN asset_embeddings embedding
+           ON embedding.tenant_id = asset.tenant_id
+          AND embedding.project_id = asset.project_id
+          AND embedding.asset_id = asset.asset_id
+          AND embedding.embedding_model = input.embedding_model
+          AND embedding.dimensions = vector_dims(input.query_embedding)
+         WHERE (cardinality(input.asset_types) = 0 OR asset.asset_type = ANY(input.asset_types))
+           AND asset.lifecycle = ANY(input.lifecycles)
+           AND (
+             (
+               input.search_mode = 'keyword'
+               AND (
+                 search_doc.search_vector @@ websearch_to_tsquery('simple'::regconfig, input.query_text)
+                 OR search_doc.title ILIKE input.keyword_pattern
+                 OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
+               )
+             )
+             OR (
+               input.search_mode IN ('vector', 'hybrid')
+               AND embedding.embedding_id IS NOT NULL
+             )
+           )
+       ),
+       boosted_scores AS (
+         SELECT
+           candidate.*,
+           (0.05 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - candidate.updated_at)) / 86400.0, 0.0) / 365.0))::float8 AS recency_boost,
+           CASE candidate.lifecycle
+             WHEN 'canon' THEN 0.08
+             WHEN 'manuscript' THEN 0.08
+             WHEN 'seed' THEN 0.04
+             WHEN 'material' THEN 0.04
+             WHEN 'candidate' THEN 0.01
+             ELSE 0.0
+           END::float8 AS lifecycle_boost,
+           CASE WHEN candidate.pinned THEN 0.05 ELSE 0.0 END::float8 AS pinned_boost
+         FROM candidate_scores candidate
+       ),
+       final_scores AS (
+         SELECT
+           boosted.*,
+           CASE input.search_mode
+             WHEN 'keyword' THEN boosted.keyword_score
+             WHEN 'vector' THEN boosted.vector_score
+             ELSE (0.45 * boosted.keyword_score) + (0.55 * boosted.vector_score)
+           END + boosted.recency_boost + boosted.lifecycle_boost + boosted.pinned_boost AS final_score
+         FROM boosted_scores boosted
+         CROSS JOIN search_input input
+       )
+       SELECT
+         final_scores.asset_id::text,
+         final_scores.asset_type,
+         final_scores.category,
+         final_scores.lifecycle,
+         final_scores.title,
+         final_scores.summary,
+         final_scores.content_text,
+         final_scores.tags_jsonb::text AS tags_jsonb,
+         final_scores.keyword_score,
+         final_scores.vector_score,
+         final_scores.recency_boost,
+         final_scores.lifecycle_boost,
+         final_scores.pinned_boost,
+         final_scores.final_score
+       FROM final_scores
+       ORDER BY final_scores.final_score DESC, final_scores.keyword_score DESC, final_scores.vector_score DESC, final_scores.asset_id ASC
+       LIMIT $9`,
+      [
+        request.tenant_id,
+        request.project_id,
+        args.query,
+        resolution.mode,
+        useVector ? toVectorLiteral(resolution.embedding!.embedding) : null,
+        useVector ? resolution.embedding!.modelId : "",
+        assetTypes,
+        [...SEARCH_ASSETS_LIFECYCLES],
+        args.top_k ?? SEARCH_ASSETS_DEFAULT_TOP_K
+      ]
+    )
+  ).rows;
+
+  const assets = rows.map((row) => {
+    const contentText = typeof row.content_text === "string" ? row.content_text : "";
+    return {
+      asset_id: row.asset_id,
+      asset_type: row.asset_type,
+      category: row.category,
+      lifecycle: row.lifecycle,
+      title: row.title,
+      summary: row.summary,
+      content_preview: truncateAssetPreview(contentText),
+      tags: safeParseJsonArray(row.tags_jsonb),
+      score: row.final_score,
+      scores: {
+        keyword: row.keyword_score,
+        vector: useVector ? row.vector_score : null,
+        recency_boost: row.recency_boost,
+        lifecycle_boost: row.lifecycle_boost,
+        pinned_boost: row.pinned_boost
+      }
+    };
+  });
+
+  return {
+    query: args.query,
+    mode_used: resolution.mode,
+    degraded: resolution.degraded,
+    ...(resolution.degradeReason ? { degrade_reason: resolution.degradeReason } : {}),
+    count: assets.length,
+    assets,
+    citations: assets.map((asset) => ({
+      asset_id: asset.asset_id,
+      title: asset.title,
+      lifecycle: asset.lifecycle,
+      score: asset.score,
+      channel: "search_assets"
+    }))
+  };
+}
+
+function safeParseJsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 async function acquireLLMLease(db: QueryExecutor, request: AcquireLLMLeaseRequest, ttlSeconds: number): Promise<LLMLease> {

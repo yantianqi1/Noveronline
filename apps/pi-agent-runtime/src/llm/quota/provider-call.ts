@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export type PiWriterProviderModule = "writer_orchestrator" | "writer_composer";
+export type PiWriterProviderModule = string;
 export type PiWriterProviderStage = "orchestrator" | "composer";
 export type PricingStatus = "billing_ready" | "pricing_unavailable";
 

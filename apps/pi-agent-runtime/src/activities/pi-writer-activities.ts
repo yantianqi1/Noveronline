@@ -75,6 +75,7 @@ export type WriterToolName =
   | "query_project_context"
   | "query_chapter_scene"
   | "query_assets"
+  | "search_assets"
   | "query_world_rules"
   | "query_character_profile"
   | "query_graph_neighbors"
@@ -82,8 +83,18 @@ export type WriterToolName =
   | "query_manuscript_context"
   | "save_draft_revision";
 
+export type SearchAssetsMode = "keyword" | "vector" | "hybrid";
+
+export interface SearchAssetsArgs {
+  query: string;
+  asset_types?: string[];
+  top_k?: number;
+  mode?: SearchAssetsMode;
+}
+
 export interface ResolvedLLMModule {
-  module_key: "writer_orchestrator" | "writer_composer";
+  // Any registry module key — writer prose modules or asset_search_embedding.
+  module_key: string;
   channel_id: string;
   model_id: string;
   provider: string;
@@ -98,7 +109,9 @@ export interface ResolveModuleBindingRequest {
   tenant_id: string;
   project_id: string;
   run_id: string;
-  module_key: ResolvedLLMModule["module_key"];
+  // Any registry module key — writer composer/orchestrator for prose, and
+  // asset_search_embedding for retrieval embeddings. Mirrors the Go resolver.
+  module_key: string;
 }
 
 export interface ExecuteWriterToolRequest {
@@ -111,6 +124,7 @@ export interface ExecuteWriterToolRequest {
   graph_node_ids: string[];
   worldline_path_ids: string[];
   tool_name: WriterToolName;
+  tool_args?: Record<string, unknown>;
 }
 
 export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest, "writing_brief" | "onToken"> {
@@ -123,7 +137,7 @@ export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest
   tool_execution?: ToolExecutionMode;
   tool_names: WriterToolName[];
   runtime_context: RuntimeContext;
-  executeTool(toolName: WriterToolName, toolCallId: string): Promise<Record<string, unknown>>;
+  executeTool(toolName: WriterToolName, toolCallId: string, args?: Record<string, unknown>): Promise<Record<string, unknown>>;
   onAgentEvent?(event: AgentEvent): Promise<void>;
 }
 
@@ -889,7 +903,7 @@ async function runDualStagePiWriterActivity(
           ...runtimeContext,
           permissions: { tools: toolNames, can_write_draft: false }
         },
-        executeTool: async (toolName, toolCallId) => deps.executeWriterTool!({
+        executeTool: async (toolName, toolCallId, args) => deps.executeWriterTool!({
           tenant_id: input.tenant_id,
           project_id: input.project_id,
           run_id: input.run_id,
@@ -898,7 +912,8 @@ async function runDualStagePiWriterActivity(
           selected_asset_ids: input.selected_asset_ids,
           graph_node_ids: input.graph_node_ids,
           worldline_path_ids: input.worldline_path_ids,
-          tool_name: toolName
+          tool_name: toolName,
+          tool_args: args
         }),
         onAgentEvent: (event) => {
           eventWriteChain = eventWriteChain.then(async () => {
