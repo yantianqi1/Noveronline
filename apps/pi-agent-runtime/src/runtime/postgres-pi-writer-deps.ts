@@ -361,12 +361,18 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
       };
     }
     case "query_assets": {
+      // Author-sovereign path only: return the explicitly selected assets. When
+      // nothing is selected, on-demand semantic recall is search_assets' job — the
+      // old top-50-by-recency dump is gone (doc 41 §3.2).
+      if (!Array.isArray(request.selected_asset_ids) || request.selected_asset_ids.length === 0) {
+        return { assets: [], selection: "none", recall: "search_assets" };
+      }
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT asset_id::text, asset_type, category, lifecycle, title, summary, content_text, tags_jsonb
            FROM assets
           WHERE tenant_id = $1 AND project_id = $2 AND enabled = TRUE
             AND lifecycle IN ('seed', 'canon', 'material')
-            AND ($3::uuid[] = '{}'::uuid[] OR asset_id = ANY($3::uuid[]))
+            AND asset_id = ANY($3::uuid[])
           ORDER BY pinned DESC, updated_at DESC LIMIT 50`,
         [request.tenant_id, request.project_id, request.selected_asset_ids]);
       return { assets: result.rows };

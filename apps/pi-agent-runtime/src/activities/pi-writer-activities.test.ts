@@ -380,6 +380,7 @@ describe("runPiWriterRunActivity", () => {
       "query_project_context",
       "query_chapter_scene",
       "query_assets",
+      "search_assets",
       "query_world_rules",
       "query_character_profile",
       "query_graph_neighbors",

@@ -882,6 +882,7 @@ async function runDualStagePiWriterActivity(
         "query_project_context",
         "query_chapter_scene",
         "query_assets",
+        "search_assets",
         "query_world_rules",
         "query_character_profile",
         "query_graph_neighbors",
@@ -1128,6 +1129,13 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
   const source = objectRecord(value);
   if (toolName === "query_assets") {
     return { items: recordArray(source.assets).map((item) => pickFields(item, ["asset_id", "asset_type", "category", "lifecycle", "title", "summary"])) };
+  }
+  if (toolName === "search_assets") {
+    return {
+      mode_used: typeof source.mode_used === "string" ? source.mode_used : "keyword",
+      degraded: source.degraded === true,
+      items: recordArray(source.citations).map((item) => pickFields(item, ["asset_id", "title", "lifecycle", "score", "channel"]))
+    };
   }
   if (toolName === "query_world_rules") {
     return {

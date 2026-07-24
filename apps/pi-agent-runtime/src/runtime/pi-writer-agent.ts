@@ -290,7 +290,7 @@ function toolDescription(name: WriterToolName): string {
   const descriptions: Record<WriterToolName, string> = {
     query_project_context: "Read project title, genre, language, and status.",
     query_chapter_scene: "Read the requested chapter and scene identifiers plus existing draft metadata.",
-    query_assets: "Read selected or relevant enabled project assets and their private writing context.",
+    query_assets: "Read the author's explicitly selected project assets (by id) and their private writing context. Returns nothing when the author selected none — use search_assets for on-demand recall instead.",
     search_assets: "Semantic recall over project canon/seed/material assets. Supply a query describing what this passage needs (settings, rules, relationships, prior scenes). Returns ranked matches with citations; degrades to keyword when embeddings are unavailable.",
     query_world_rules: "Read extracted project world rules as private writing context.",
     query_character_profile: "Read project character identities, aliases, and current state as private writing context.",
