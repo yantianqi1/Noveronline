@@ -618,6 +618,28 @@ const ASSET_QUERY_PREVIEW_MAX = 280;
 // draft, and simulation assets never enter the writing context (mirrors query_assets).
 const SEARCH_ASSETS_LIFECYCLES = ["seed", "canon", "material"] as const;
 
+// Resolve the chapter_order the author is writing at, for the spoiler gate
+// (doc 41 §4.5). Assets with reveal_after_chapter_order greater than this are
+// withheld from recall. NULL (no target chapter) means only always-visible
+// (gated-NULL) assets are recalled — the safe default.
+async function resolveCurrentChapterOrder(
+  db: QueryExecutor,
+  request: ExecuteWriterToolRequest
+): Promise<number | null> {
+  const chapterId = request.chapter_id ?? null;
+  if (!chapterId) return null;
+  const result = await queryWithTenantContext<{ chapter_order?: number | string }>(
+    db,
+    request,
+    `SELECT chapter_order FROM chapters
+      WHERE tenant_id = $1 AND project_id = $2 AND chapter_id = $3::uuid LIMIT 1`,
+    [request.tenant_id, request.project_id, chapterId]
+  );
+  const value = result.rows[0]?.chapter_order;
+  const order = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isInteger(order) && order >= 0 ? order : null;
+}
+
 interface QueryEmbeddingResult {
   embedding: number[];
   modelId: string;
@@ -766,9 +788,12 @@ async function executeSearchAssets(
   const resolution = await resolveSearchAssetsMode(options, request, args);
   const useVector = resolution.mode !== "keyword" && resolution.embedding !== undefined;
   const assetTypes = args.asset_types ?? [];
+  // Spoiler gate (doc 41 §4.5): withhold assets revealed only after the chapter
+  // being written. NULL current order => only always-visible assets are recalled.
+  const currentChapterOrder = await resolveCurrentChapterOrder(db, request);
   // Hybrid ranking SQL mirrors SQLReader.SearchAssets (apps/api/internal/assets/assets.go:770):
   // same tsvector + ILIKE keyword score, cosine vector score, and recency/lifecycle/pinned boosts,
-  // with the Writer lifecycle/enable gate enforced here as parameters.
+  // with the Writer lifecycle/enable/spoiler gate enforced here as parameters.
   const rows = (
     await queryWithTenantContext<Record<string, unknown>>(
       db,
@@ -827,6 +852,7 @@ async function executeSearchAssets(
           AND embedding.dimensions = vector_dims(input.query_embedding)
          WHERE (cardinality(input.asset_types) = 0 OR asset.asset_type = ANY(input.asset_types))
            AND asset.lifecycle = ANY(input.lifecycles)
+           AND (asset.reveal_after_chapter_order IS NULL OR asset.reveal_after_chapter_order <= $10)
            AND (
              (
                input.search_mode = 'keyword'
@@ -895,7 +921,8 @@ async function executeSearchAssets(
         useVector ? resolution.embedding!.modelId : "",
         assetTypes,
         [...SEARCH_ASSETS_LIFECYCLES],
-        args.top_k ?? SEARCH_ASSETS_DEFAULT_TOP_K
+        args.top_k ?? SEARCH_ASSETS_DEFAULT_TOP_K,
+        currentChapterOrder
       ]
     )
   ).rows;

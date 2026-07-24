@@ -1339,6 +1339,60 @@ describe("createPostgresPiWriterDeps", () => {
     expect(vectorQuery.values[5]).toBe("scene-1");
     expect(vectorQuery.values[6]).toBe(3);
   });
+
+  it("search_assets applies the spoiler gate with the current chapter order", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{ chapter_order: 12 }]); // resolveCurrentChapterOrder
+    db.enqueue([]);                       // keyword search -> no rows
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    await deps.executeWriterTool!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      chapter_id: "chapter-1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      tool_name: "search_assets",
+      tool_args: { query: "凶手 动机", mode: "keyword" }
+    });
+
+    // Chapter order resolved first, then the gated search.
+    expect(db.queries[0]?.text).toContain("FROM chapters");
+    const search = db.queries[1]!;
+    expect(search.text).toContain("reveal_after_chapter_order IS NULL OR asset.reveal_after_chapter_order <= $10");
+    expect(search.values[9]).toBe(12);
+  });
+
+  it("search_assets recalls only always-visible assets when no chapter is targeted", async () => {
+    const db = new RecordingDb();
+    db.enqueue([]); // keyword search -> no rows; no chapter-order query (no chapter_id)
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    await deps.executeWriterTool!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      tool_name: "search_assets",
+      tool_args: { query: "凶手 动机", mode: "keyword" }
+    });
+
+    // No chapters lookup; the gate predicate gets NULL (only NULL-reveal assets pass).
+    expect(db.queries).toHaveLength(1);
+    expect(db.queries[0]?.values[9]).toBeNull();
+  });
 });
 
 function encryptCredential(plaintext: string, key: Buffer): string {
