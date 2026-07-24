@@ -1,7 +1,7 @@
 # 41. 写作台内容召回增强设计：从固定 SQL 到按需语义召回
 
 更新时间：`2026-07-24`
-状态：实现中（P0 `search_assets` 已按 Route A 落地，详见 §3.1 修订注记）
+状态：P0 + P1 已实现（Route A)。已落地：`search_assets` 混合语义召回（§3.1）、`query_assets` 收窄为勾选驱动（§3.2）、citations 全链路（§3.4）、`writer_retrieval_planner` 规划层（§4.1）、键触发召回（§4.2，复用 `entity_aliases`）、`search_manuscript` 前文语义召回（§4.3，含 `manuscript_block_embeddings` + reindex 流水线）、token 预算装配器（§4.4）、`reveal_after_chapter_order` 防剧透门（§4.5）。待做：Rerank（§4.6）、Consistency Agent（§4.7）、P2/P3（§5）。
 关联文档：`08-asset-library.md`、`11-writer-workbench.md`、`28-zero-start-writer-and-manuscript-asset-distillation.md`、`40-writer-content-retrieval-research.md`
 作者判断：本文以代码核查结论为主，`40` 号调研报告为参考。目标是把「内容召回」从当前的「固定 SQL 列表」升级为「按需的、多通道的、可预算的语义召回」，并给出可直接落地的接入路径。
 
