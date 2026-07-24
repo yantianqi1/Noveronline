@@ -17,8 +17,8 @@ func TestStaticModuleRegistryListsAllDocumentedModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list modules: %v", err)
 	}
-	if len(modules) != 31 {
-		t.Fatalf("expected 31 documented modules, got %d: %#v", len(modules), modules)
+	if len(modules) != 33 {
+		t.Fatalf("expected 33 documented modules, got %d: %#v", len(modules), modules)
 	}
 	byKey := map[string]ModuleRecord{}
 	for _, module := range modules {

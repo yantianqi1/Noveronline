@@ -52,7 +52,7 @@ func TestSQLSettingsReaderReturnsSanitizedTenantSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if len(snapshot.Modules) != 31 {
+	if len(snapshot.Modules) != 33 {
 		t.Fatalf("expected documented modules in settings snapshot, got %d", len(snapshot.Modules))
 	}
 	if len(snapshot.Channels) != 1 || snapshot.Channels[0].ChannelID != "channel-1" {
