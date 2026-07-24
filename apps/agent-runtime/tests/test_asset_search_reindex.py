@@ -81,8 +81,15 @@ class RecordingEmbeddingClient:
 
 
 class ReindexCursor:
-    def __init__(self, *, asset_rows: list[tuple[Any, ...]] | None = None, source_changed: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        asset_rows: list[tuple[Any, ...]] | None = None,
+        manuscript_rows: list[tuple[Any, ...]] | None = None,
+        source_changed: bool = False,
+    ) -> None:
         self.asset_rows = asset_rows or []
+        self.manuscript_rows = manuscript_rows or []
         self.source_changed = source_changed
         self.executed: list[tuple[str, tuple[Any, ...] | None]] = []
         self._last_query = ""
@@ -98,6 +105,8 @@ class ReindexCursor:
         self.executed.append((query, params))
 
     def fetchall(self) -> list[tuple[Any, ...]]:
+        if "FROM manuscript_blocks" in self._last_query:
+            return self.manuscript_rows
         return self.asset_rows
 
     def fetchone(self) -> Any:
@@ -201,11 +210,15 @@ def test_hybrid_reindex_embeds_full_enabled_assets_and_commits_atomic_swap() -> 
     asset_rows = [
         ("asset-1", "Rule", "Summary", "Private full content", "2026-07-10 00:00:00+00"),
     ]
-    load_connection = ReindexConnection(ReindexCursor(asset_rows=asset_rows))
-    swap_cursor = ReindexCursor(asset_rows=asset_rows)
+    manuscript_rows = [
+        ("block-1", "前文章节正文片段", "2026-07-09 00:00:00+00"),
+    ]
+    load_connection = ReindexConnection(ReindexCursor(asset_rows=asset_rows, manuscript_rows=manuscript_rows))
+    manuscript_load_connection = ReindexConnection(ReindexCursor(asset_rows=asset_rows, manuscript_rows=manuscript_rows))
+    swap_cursor = ReindexCursor(asset_rows=asset_rows, manuscript_rows=manuscript_rows)
     swap_connection = ReindexConnection(swap_cursor)
-    connections = iter([load_connection, swap_connection])
-    embedding_client = RecordingEmbeddingClient([[1.0, 0.0, 0.0]])
+    connections = iter([load_connection, manuscript_load_connection, swap_connection])
+    embedding_client = RecordingEmbeddingClient([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     reindexer = PostgresAssetReindexer(
         connect=lambda: next(connections),
         binding_resolver=StaticBindingResolver(),
@@ -217,14 +230,17 @@ def test_hybrid_reindex_embeds_full_enabled_assets_and_commits_atomic_swap() -> 
 
     assert result["status"] == "completed"
     assert result["embedding_count"] == 1
+    assert result["manuscript_embedding_count"] == 1
     assert result["embedding_model"] == "embedding-model-1"
-    assert embedding_client.calls[0]["texts"] == ["Rule\nSummary\nPrivate full content"]
+    assert embedding_client.calls[0]["texts"] == ["Rule\nSummary\nPrivate full content", "前文章节正文片段"]
     assert swap_connection.committed is True
     assert swap_connection.rolled_back is False
     joined_queries = "\n".join(query for query, _ in swap_cursor.executed)
     assert "INSERT INTO global_search_index" in joined_queries
     assert "DELETE FROM asset_embeddings" in joined_queries
     assert "INSERT INTO asset_embeddings" in joined_queries
+    assert "DELETE FROM manuscript_block_embeddings" in joined_queries
+    assert "INSERT INTO manuscript_block_embeddings" in joined_queries
 
 
 def test_hybrid_reindex_rolls_back_when_source_changes_before_swap() -> None:
@@ -232,8 +248,9 @@ def test_hybrid_reindex_rolls_back_when_source_changes_before_swap() -> None:
         ("asset-1", "Rule", "Summary", "Private full content", "2026-07-10 00:00:00+00"),
     ]
     load_connection = ReindexConnection(ReindexCursor(asset_rows=asset_rows))
+    manuscript_load_connection = ReindexConnection(ReindexCursor(asset_rows=asset_rows))
     swap_connection = ReindexConnection(ReindexCursor(asset_rows=asset_rows, source_changed=True))
-    connections = iter([load_connection, swap_connection])
+    connections = iter([load_connection, manuscript_load_connection, swap_connection])
     reindexer = PostgresAssetReindexer(
         connect=lambda: next(connections),
         binding_resolver=StaticBindingResolver(),

@@ -76,6 +76,7 @@ export type WriterToolName =
   | "query_chapter_scene"
   | "query_assets"
   | "search_assets"
+  | "search_manuscript"
   | "query_world_rules"
   | "query_character_profile"
   | "query_graph_neighbors"
@@ -90,6 +91,11 @@ export interface SearchAssetsArgs {
   asset_types?: string[];
   top_k?: number;
   mode?: SearchAssetsMode;
+}
+
+export interface SearchManuscriptArgs {
+  query: string;
+  top_k?: number;
 }
 
 export interface ResolvedLLMModule {
@@ -1014,6 +1020,7 @@ async function runDualStagePiWriterActivity(
         "query_chapter_scene",
         "query_assets",
         "search_assets",
+        "search_manuscript",
         "query_world_rules",
         "query_character_profile",
         "query_graph_neighbors",
@@ -1267,6 +1274,13 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
       mode_used: typeof source.mode_used === "string" ? source.mode_used : "keyword",
       degraded: source.degraded === true,
       items: recordArray(source.citations).map((item) => pickFields(item, ["asset_id", "title", "lifecycle", "score", "channel"]))
+    };
+  }
+  if (toolName === "search_manuscript") {
+    return {
+      mode_used: typeof source.mode_used === "string" ? source.mode_used : "unavailable",
+      degraded: source.degraded === true,
+      items: recordArray(source.citations).map((item) => pickFields(item, ["block_id", "chapter_id", "block_order", "score", "channel"]))
     };
   }
   if (toolName === "query_world_rules") {

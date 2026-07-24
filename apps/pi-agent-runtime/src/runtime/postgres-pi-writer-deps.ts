@@ -25,6 +25,7 @@ import type {
   SaveDraftRevisionRequest,
   SearchAssetsArgs,
   SearchAssetsMode,
+  SearchManuscriptArgs,
   UpdateWriterRunStatusRequest
 } from "../activities/pi-writer-activities.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
@@ -301,6 +302,8 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
   switch (request.tool_name) {
     case "search_assets":
       return executeSearchAssets(options, request);
+    case "search_manuscript":
+      return executeSearchManuscript(options, request);
     case "query_project_context": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT title, description, genre, language, status
@@ -947,6 +950,143 @@ function safeParseJsonArray(value: unknown): unknown[] {
     }
   }
   return [];
+}
+
+const SEARCH_MANUSCRIPT_DEFAULT_TOP_K = 5;
+const SEARCH_MANUSCRIPT_MAX_TOP_K = 12;
+const MANUSCRIPT_SNIPPET_MAX = 240;
+
+function parseSearchManuscriptArgs(raw: Record<string, unknown> | undefined): SearchManuscriptArgs {
+  const args = (raw ?? {}) as Record<string, unknown>;
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  if (!query) {
+    throw new Error("VALIDATION_FAILED: search_manuscript requires a non-empty query");
+  }
+  let topK = SEARCH_MANUSCRIPT_DEFAULT_TOP_K;
+  if (typeof args.top_k === "number" && Number.isFinite(args.top_k)) {
+    topK = Math.min(SEARCH_MANUSCRIPT_MAX_TOP_K, Math.max(1, Math.floor(args.top_k)));
+  }
+  return { query, top_k: topK };
+}
+
+// P1 (doc 41 §4.3): semantic recall over NON-adjacent prior prose — foreshadowing
+// and callbacks the immediate scene window can't reach. Vector-only (no keyword
+// fallback: full-text over prose is noisy); degrades explicitly when embeddings
+// are unavailable. Timeline-gated to blocks at or before the current scene so the
+// agent never recalls prose written after the point being written.
+async function executeSearchManuscript(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest
+): Promise<Record<string, unknown>> {
+  const db = options.db;
+  const args = parseSearchManuscriptArgs(request.tool_args);
+  const runTarget = await queryWithTenantContext<Record<string, unknown>>(
+    db,
+    request,
+    `SELECT chapter_id::text, scene_id::text
+       FROM writer_runs
+      WHERE tenant_id = $1 AND project_id = $2 AND run_id = $3
+      LIMIT 1`,
+    [request.tenant_id, request.project_id, request.run_id]
+  );
+  const chapterId = stringOrNull(runTarget.rows[0]?.chapter_id) ?? request.chapter_id ?? null;
+  const sceneId = stringOrNull(runTarget.rows[0]?.scene_id) ?? request.scene_id ?? null;
+
+  let embedding: QueryEmbeddingResult;
+  try {
+    embedding = await resolveQueryEmbedding(options, request, args.query);
+  } catch (error) {
+    return {
+      query: args.query,
+      mode_used: "unavailable",
+      degraded: true,
+      degrade_reason: errorMessage(error),
+      count: 0,
+      manuscript_blocks: [],
+      citations: []
+    };
+  }
+
+  // Current cursor = highest block_order of the target scene; recall is limited to
+  // strictly earlier prose plus other scenes, never blocks after the cursor.
+  const cursorResult = await queryWithTenantContext<Record<string, unknown>>(
+    db,
+    request,
+    sceneId
+      ? `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
+           FROM manuscript_blocks
+          WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND scene_id = $3::uuid`
+      : `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
+           FROM manuscript_blocks
+          WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND chapter_id = $3::uuid`,
+    [request.tenant_id, request.project_id, sceneId ?? chapterId ?? ""]
+  );
+  const cursorOrder = Number(cursorResult.rows[0]?.cursor_order ?? -1);
+
+  const rows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT
+         block.block_id::text,
+         block.chapter_id::text,
+         block.scene_id::text,
+         block.block_order,
+         block.content_text,
+         block.word_count,
+         (1 - (embedding.embedding <=> $4::vector))::float8 AS score
+       FROM manuscript_block_embeddings embedding
+       JOIN manuscript_blocks block
+         ON block.tenant_id = embedding.tenant_id
+        AND block.project_id = embedding.project_id
+        AND block.block_id = embedding.block_id
+        AND block.status = 'active'
+       WHERE embedding.tenant_id::text = $1
+         AND embedding.project_id::text = $2
+         AND embedding.embedding_model = $3
+         AND embedding.dimensions = vector_dims($4::vector)
+         AND (
+           block.block_order < $5
+           OR ($6::uuid IS NOT NULL AND block.scene_id IS DISTINCT FROM $6::uuid)
+         )
+       ORDER BY embedding.embedding <=> $4::vector ASC
+       LIMIT $7`,
+      [
+        request.tenant_id,
+        request.project_id,
+        embedding.modelId,
+        toVectorLiteral(embedding.embedding),
+        cursorOrder,
+        sceneId,
+        args.top_k ?? SEARCH_MANUSCRIPT_DEFAULT_TOP_K
+      ]
+    )
+  ).rows;
+
+  const blocks = rows.map((row) => ({
+    block_id: row.block_id,
+    chapter_id: row.chapter_id,
+    scene_id: row.scene_id,
+    block_order: row.block_order,
+    snippet: truncateAssetPreview(typeof row.content_text === "string" ? row.content_text.slice(0, MANUSCRIPT_SNIPPET_MAX) : ""),
+    word_count: row.word_count,
+    score: row.score
+  }));
+
+  return {
+    query: args.query,
+    mode_used: "vector",
+    degraded: false,
+    count: blocks.length,
+    manuscript_blocks: blocks,
+    citations: blocks.map((block) => ({
+      block_id: block.block_id,
+      chapter_id: block.chapter_id,
+      block_order: block.block_order,
+      score: block.score,
+      channel: "search_manuscript"
+    }))
+  };
 }
 
 async function acquireLLMLease(db: QueryExecutor, request: AcquireLLMLeaseRequest, ttlSeconds: number): Promise<LLMLease> {

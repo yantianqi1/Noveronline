@@ -35,6 +35,14 @@ const searchAssetsArguments = ObjectSchema(
   { additionalProperties: false }
 );
 
+const searchManuscriptArguments = ObjectSchema(
+  {
+    query: { type: "string", description: "What prior (non-adjacent) scene or foreshadowing to recall, in the novel's language." },
+    top_k: { type: "number", description: "How many prior prose snippets to return (default 5, max 12)." }
+  },
+  { additionalProperties: false }
+);
+
 export function createPiWriterExecution() {
   return {
     orchestrateWritingBrief: async (request: OrchestrateWritingBriefRequest) => {
@@ -205,8 +213,11 @@ function positiveInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments> {
-  const parameters = name === "search_assets" ? searchAssetsArguments : noArguments;
+function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments> {
+  const parameters =
+    name === "search_assets" ? searchAssetsArguments
+      : name === "search_manuscript" ? searchManuscriptArguments
+        : noArguments;
   return {
     name,
     label: name,
@@ -415,6 +426,7 @@ function toolDescription(name: WriterToolName): string {
     query_chapter_scene: "Read the requested chapter and scene identifiers plus existing draft metadata.",
     query_assets: "Read the author's explicitly selected project assets (by id) and their private writing context. Returns nothing when the author selected none — use search_assets for on-demand recall instead.",
     search_assets: "Semantic recall over project canon/seed/material assets. Supply a query describing what this passage needs (settings, rules, relationships, prior scenes). Returns ranked matches with citations; degrades to keyword when embeddings are unavailable.",
+    search_manuscript: "Semantic recall over prior manuscript prose that is NOT adjacent to the current scene — foreshadowing and callbacks. Supply a query in the novel's language. Returns prior snippets with citations; unavailable when prose embeddings are not indexed.",
     query_world_rules: "Read extracted project world rules as private writing context.",
     query_character_profile: "Read project character identities, aliases, and current state as private writing context.",
     query_graph_neighbors: "Read explicitly selected story graph nodes and their direct relationships.",

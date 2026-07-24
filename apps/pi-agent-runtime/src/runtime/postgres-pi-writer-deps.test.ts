@@ -1255,6 +1255,90 @@ describe("createPostgresPiWriterDeps", () => {
     ).rejects.toThrow("search_assets requires a non-empty query");
     expect(db.queries).toHaveLength(0);
   });
+
+  it("search_manuscript recalls non-adjacent prior prose via vector and degrades explicitly without embeddings", async () => {
+    const base = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      chapter_id: "chapter-1",
+      scene_id: "scene-1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: []
+    };
+
+    // Degraded path: embedding module unbound -> empty, mode_used unavailable.
+    const degradedDb = new RecordingDb();
+    degradedDb.enqueue([{ chapter_id: "chapter-1", scene_id: "scene-1" }]); // run target
+    degradedDb.enqueue([]); // binding lookup -> unbound
+    const degradedDeps = createPostgresPiWriterDeps({
+      db: degradedDb,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const degraded = await degradedDeps.executeWriterTool!({
+      ...base,
+      tool_name: "search_manuscript",
+      tool_args: { query: "夜探医院的伏笔" }
+    });
+    expect(degraded.mode_used).toBe("unavailable");
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.manuscript_blocks).toEqual([]);
+    expect(degraded.citations).toEqual([]);
+
+    // Vector path: binding + credential + embedding, returns a prior block.
+    const db = new RecordingDb();
+    db.enqueue([{ chapter_id: "chapter-1", scene_id: "scene-1" }]);           // run target
+    db.enqueue([{                                                              // binding
+      module_key: "asset_search_embedding",
+      channel_id: "channel-emb",
+      model_id: "text-embedding-3-small",
+      provider: "openai-compatible",
+      base_url: "https://llm.example.test/v1",
+      credential_ref: "channel-emb",
+      supports_tools: false,
+      supports_json: false,
+      settings_jsonb: {}
+    }]);
+    db.enqueue([{ encrypted_api_key: "cipher" }]);                             // credential
+    db.enqueue([{ cursor_order: 7 }]);                                         // cursor
+    db.enqueue([{                                                              // vector hits
+      block_id: "block-9",
+      chapter_id: "chapter-3",
+      scene_id: "scene-30",
+      block_order: 3,
+      content_text: "她在雨夜潜入医院,揭开了三年前的秘密。",
+      word_count: 18,
+      score: 0.88
+    }]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" }),
+      fetchEmbedding: async () => ({ ok: true, status: 200, json: async () => ({ data: [{ index: 0, embedding: [0.1, 0.2] }] }) })
+    });
+    const result = await deps.executeWriterTool!({
+      ...base,
+      tool_name: "search_manuscript",
+      tool_args: { query: "夜探医院的伏笔", top_k: 3 }
+    });
+    expect(result.mode_used).toBe("vector");
+    expect(result.degraded).toBe(false);
+    expect(result.count).toBe(1);
+    const blocks = result.manuscript_blocks as Array<Record<string, unknown>>;
+    expect(blocks[0]?.block_id).toBe("block-9");
+    expect(String(blocks[0]?.snippet)).toContain("雨夜潜入医院");
+    const citations = result.citations as Array<Record<string, unknown>>;
+    expect(citations[0]).toMatchObject({ block_id: "block-9", channel: "search_manuscript" });
+    // Timeline gate: vector query passes cursor order and scene id.
+    const vectorQuery = db.queries[4]!;
+    expect(vectorQuery.text).toContain("manuscript_block_embeddings");
+    expect(vectorQuery.text).toContain("block_order < $5");
+    expect(vectorQuery.values[4]).toBe(7);
+    expect(vectorQuery.values[5]).toBe("scene-1");
+    expect(vectorQuery.values[6]).toBe(3);
+  });
 });
 
 function encryptCredential(plaintext: string, key: Buffer): string {

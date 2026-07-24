@@ -636,35 +636,42 @@ class PostgresAssetReindexer:
         embedding_model: str | None = None
         embedding_assets: list[dict[str, str]] = []
         embeddings: list[list[float]] = []
+        manuscript_blocks: list[dict[str, str]] = []
+        manuscript_embeddings: list[list[float]] = []
         if normalized_mode in {"vector", "hybrid"}:
             resolution, api_key = self._resolve_embedding_provider(context)
             embedding_model = resolution.model_id
             embedding_assets = self._load_embedding_assets(context)
+            manuscript_blocks = self._load_embedding_manuscript_blocks(context)
             embedding_texts = [asset["embedding_text"] for asset in embedding_assets]
-            if embedding_texts and self._quota_gate is not None:
-                embeddings = self._quota_gate.execute_embedding(
+            manuscript_texts = [block["embedding_text"] for block in manuscript_blocks]
+            all_texts = embedding_texts + manuscript_texts
+            if all_texts and self._quota_gate is not None:
+                all_vectors = self._quota_gate.execute_embedding(
                     context=context,
                     resolution=resolution,
                     stage="reindex_embedding",
                     call_index=0,
-                    input_texts=embedding_texts,
+                    input_texts=all_texts,
                     provider=lambda provider_call_id: _embedding_provider_payload(
                         self._embedding_client,
                         context=context,
                         resolution=resolution,
                         api_key=api_key,
-                        texts=embedding_texts,
+                        texts=all_texts,
                         provider_call_id=provider_call_id,
                     ),
-                    validate=lambda response: _quota_embedding_vectors(response, expected_count=len(embedding_texts)),
+                    validate=lambda response: _quota_embedding_vectors(response, expected_count=len(all_texts)),
                 )
             else:
-                embeddings = self._embedding_client.embed_texts(
+                all_vectors = self._embedding_client.embed_texts(
                     context=context,
                     resolution=resolution,
                     api_key=api_key,
-                    texts=embedding_texts,
-                ) if embedding_texts else []
+                    texts=all_texts,
+                ) if all_texts else []
+            embeddings = all_vectors[: len(embedding_texts)]
+            manuscript_embeddings = all_vectors[len(embedding_texts):]
         reindex_batch_id = f"asset-reindex:{context.run_id}"
         connection = self._connect()
         try:
@@ -774,6 +781,14 @@ class PostgresAssetReindexer:
                         assets=embedding_assets,
                         embeddings=embeddings,
                     )
+                    self._replace_manuscript_embeddings(
+                        cursor=cursor,
+                        context=context,
+                        embedding_model=embedding_model or "",
+                        reindex_batch_id=reindex_batch_id,
+                        blocks=manuscript_blocks,
+                        embeddings=manuscript_embeddings,
+                    )
             connection.commit()
         except LLMFacilityError:
             _rollback_quietly(connection)
@@ -793,6 +808,7 @@ class PostgresAssetReindexer:
                 "search_document_count",
             ),
             "embedding_count": len(embeddings),
+            "manuscript_embedding_count": len(manuscript_embeddings),
             "scope": normalized_scope,
             "mode": normalized_mode,
         }
@@ -917,6 +933,100 @@ class PostgresAssetReindexer:
             )
             if cursor.fetchone() is None:
                 raise LLMFacilityError("ASSET_REINDEX_SOURCE_CHANGED", "asset source changed during reindex")
+
+    def _load_embedding_manuscript_blocks(self, context: AgentContext) -> list[dict[str, str]]:
+        connection = self._connect()
+        try:
+            set_postgres_tenant_context(connection, context=context)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT
+                         block_id::text,
+                         COALESCE(content_text, ''),
+                         updated_at::text
+                       FROM manuscript_blocks
+                       WHERE tenant_id::text = %s
+                         AND project_id::text = %s
+                         AND status = 'active'
+                       ORDER BY block_order ASC""",
+                    (context.tenant_id, context.project_id),
+                )
+                rows = cursor.fetchall()
+            connection.commit()
+        except LLMFacilityError:
+            _rollback_quietly(connection)
+            raise
+        except Exception as exc:
+            _rollback_quietly(connection)
+            raise LLMFacilityError("ASSET_REINDEX_FAILED", "asset reindex failed") from exc
+        finally:
+            connection.close()
+        return [
+            {
+                "block_id": str(_row_value(row, "block_id", 0)),
+                "embedding_text": str(_row_value(row, "content_text", 1)).strip(),
+                "source_updated_at": str(_row_value(row, "updated_at", 2)),
+            }
+            for row in rows
+            if str(_row_value(row, "content_text", 1)).strip()
+        ]
+
+    @staticmethod
+    def _replace_manuscript_embeddings(
+        *,
+        cursor: Any,
+        context: AgentContext,
+        embedding_model: str,
+        reindex_batch_id: str,
+        blocks: list[dict[str, str]],
+        embeddings: list[list[float]],
+    ) -> None:
+        if len(blocks) != len(embeddings):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "manuscript embedding count did not match blocks")
+        cursor.execute(
+            """DELETE FROM manuscript_block_embeddings
+               WHERE tenant_id::text = %s
+                 AND project_id::text = %s
+                 AND embedding_model = %s""",
+            (context.tenant_id, context.project_id, embedding_model),
+        )
+        for block, embedding in zip(blocks, embeddings, strict=True):
+            cursor.execute(
+                """INSERT INTO manuscript_block_embeddings (
+                     tenant_id, block_id, project_id, embedding_model, dimensions,
+                     embedding, content_sha256, reindex_batch_id, source_updated_at
+                   )
+                   SELECT
+                     block.tenant_id,
+                     block.block_id,
+                     block.project_id,
+                     %s,
+                     %s,
+                     %s::vector,
+                     %s,
+                     %s,
+                     block.updated_at
+                   FROM manuscript_blocks block
+                   WHERE block.tenant_id::text = %s
+                     AND block.project_id::text = %s
+                     AND block.block_id::text = %s
+                     AND block.updated_at::text = %s
+                     AND block.status = 'active'
+                   RETURNING embedding_id""",
+                (
+                    embedding_model,
+                    len(embedding),
+                    _vector_literal(embedding),
+                    hashlib.sha256(block["embedding_text"].encode("utf-8")).hexdigest(),
+                    reindex_batch_id,
+                    context.tenant_id,
+                    context.project_id,
+                    block["block_id"],
+                    block["source_updated_at"],
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise LLMFacilityError("ASSET_REINDEX_SOURCE_CHANGED", "manuscript source changed during reindex")
 
 
 class PostgresAssetReindexStatusWriter:
