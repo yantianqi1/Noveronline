@@ -48,12 +48,16 @@ type Asset struct {
 	Source         Source          `json:"source"`
 	Enabled        bool            `json:"enabled"`
 	Pinned         bool            `json:"pinned"`
-	CurrentVersion int             `json:"current_version"`
-	Collections    []CollectionRef `json:"collections"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	Private        *PrivateContent `json:"private,omitempty"`
-	Capabilities   Capabilities    `json:"capabilities"`
+	AlwaysOn       bool            `json:"always_on"`
+	// RevealAfterChapterOrder gates the asset out of writer recall until the
+	// author writes at or past that chapter (doc 41 §4.5). NULL = always visible.
+	RevealAfterChapterOrder *int           `json:"reveal_after_chapter_order"`
+	CurrentVersion          int            `json:"current_version"`
+	Collections             []CollectionRef `json:"collections"`
+	CreatedAt               time.Time      `json:"created_at"`
+	UpdatedAt               time.Time      `json:"updated_at"`
+	Private                 *PrivateContent `json:"private,omitempty"`
+	Capabilities            Capabilities   `json:"capabilities"`
 }
 
 type Capabilities struct {
@@ -99,6 +103,7 @@ type VersionSnapshot struct {
 	Source      Source   `json:"source"`
 	Enabled     bool     `json:"enabled"`
 	Pinned      bool     `json:"pinned"`
+	AlwaysOn    bool     `json:"always_on"`
 	ContentText *string  `json:"content_text,omitempty"`
 }
 
@@ -114,6 +119,10 @@ type AssetPatch struct {
 	ContentText     *string   `json:"content_text,omitempty"`
 	Enabled         *bool     `json:"enabled,omitempty"`
 	Pinned          *bool     `json:"pinned,omitempty"`
+	AlwaysOn        *bool     `json:"always_on,omitempty"`
+	// Pointer-to-pointer would be needed to distinguish "clear" from "unset";
+	// instead a negative value clears the gate (sets it back to NULL).
+	RevealAfterChapterOrder *int `json:"reveal_after_chapter_order,omitempty"`
 }
 
 type RestoreInput struct {

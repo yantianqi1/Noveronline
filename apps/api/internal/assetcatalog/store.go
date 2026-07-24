@@ -44,7 +44,8 @@ func (s *SQLStore) tenantTx(ctx context.Context, scope RequestScope, readOnly bo
 const assetSelect = `
 SELECT a.asset_id::text, a.project_id::text, a.asset_type, a.category, a.lifecycle,
        a.title, a.summary, a.content_text, a.payload_jsonb::text, a.tags_jsonb::text,
-       a.source_kind, a.source_ref, a.enabled, a.pinned, a.created_at, a.updated_at,
+       a.source_kind, a.source_ref, a.enabled, a.pinned, a.always_on, a.reveal_after_chapter_order,
+       a.created_at, a.updated_at,
        COALESCE((SELECT max(v.version_number) + 1 FROM asset_versions v
                  WHERE v.tenant_id=a.tenant_id AND v.project_id=a.project_id AND v.asset_id=a.asset_id), 1)
 FROM assets a WHERE a.tenant_id=$1 AND a.project_id=$2 AND a.asset_id=$3`
@@ -52,9 +53,10 @@ FROM assets a WHERE a.tenant_id=$1 AND a.project_id=$2 AND a.asset_id=$3`
 func scanAsset(row interface{ Scan(...any) error }, includePrivate bool) (Asset, error) {
 	var a Asset
 	var content, payload, tags sql.NullString
+	var revealGate sql.NullInt64
 	if err := row.Scan(&a.AssetID, &a.ProjectID, &a.AssetType, &a.Category, &a.Lifecycle,
 		&a.Title, &a.Summary, &content, &payload, &tags, &a.Source.Kind, &a.Source.Ref,
-		&a.Enabled, &a.Pinned, &a.CreatedAt, &a.UpdatedAt, &a.CurrentVersion); err != nil {
+		&a.Enabled, &a.Pinned, &a.AlwaysOn, &revealGate, &a.CreatedAt, &a.UpdatedAt, &a.CurrentVersion); err != nil {
 		if err == sql.ErrNoRows {
 			return Asset{}, ErrNotFound
 		}
@@ -67,6 +69,10 @@ func scanAsset(row interface{ Scan(...any) error }, includePrivate bool) (Asset,
 	a.Tags = []string{}
 	if tags.Valid {
 		_ = json.Unmarshal([]byte(tags.String), &a.Tags)
+	}
+	if revealGate.Valid {
+		order := int(revealGate.Int64)
+		a.RevealAfterChapterOrder = &order
 	}
 	a.Collections = []CollectionRef{}
 	if includePrivate {
@@ -120,7 +126,7 @@ type snapshotEnvelope struct {
 
 func envelopeFromAsset(a Asset, content *string) snapshotEnvelope {
 	return snapshotEnvelope{Schema: 1, Snapshot: VersionSnapshot{AssetType: a.AssetType, Category: a.Category, Title: a.Title, Summary: a.Summary,
-		Payload: a.Payload, Tags: a.Tags, Source: a.Source, Enabled: a.Enabled, Pinned: a.Pinned, ContentText: content}}
+		Payload: a.Payload, Tags: a.Tags, Source: a.Source, Enabled: a.Enabled, Pinned: a.Pinned, AlwaysOn: a.AlwaysOn, ContentText: content}}
 }
 
 func decodeVersionPayload(raw string, v Version, includePrivate bool) Version {
@@ -225,13 +231,30 @@ func applyPatch(a *Asset, content **string, p AssetPatch) {
 	if p.Pinned != nil {
 		a.Pinned = *p.Pinned
 	}
+	if p.AlwaysOn != nil {
+		a.AlwaysOn = *p.AlwaysOn
+	}
+	if p.RevealAfterChapterOrder != nil {
+		// A negative value clears the gate (back to always-visible); the DB CHECK
+		// constraint requires NULL or >= 0.
+		if *p.RevealAfterChapterOrder < 0 {
+			a.RevealAfterChapterOrder = nil
+		} else {
+			order := *p.RevealAfterChapterOrder
+			a.RevealAfterChapterOrder = &order
+		}
+	}
 }
 
 func updateAssetRow(ctx context.Context, tx *sql.Tx, scope RequestScope, a Asset, content *string) error {
 	payload, _ := json.Marshal(a.Payload)
 	tags, _ := json.Marshal(a.Tags)
-	_, err := tx.ExecContext(ctx, `UPDATE assets SET title=$4,summary=$5,category=$6,content_text=$7,payload_jsonb=$8::jsonb,tags_jsonb=$9::jsonb,source_kind=$10,source_ref=$11,enabled=$12,pinned=$13,asset_type=$14,updated_at=now()
-WHERE tenant_id=$1 AND project_id=$2 AND asset_id=$3`, scope.TenantID, scope.ProjectID, a.AssetID, a.Title, a.Summary, a.Category, content, string(payload), string(tags), a.Source.Kind, a.Source.Ref, a.Enabled, a.Pinned, a.AssetType)
+	var revealGate any
+	if a.RevealAfterChapterOrder != nil {
+		revealGate = *a.RevealAfterChapterOrder
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE assets SET title=$4,summary=$5,category=$6,content_text=$7,payload_jsonb=$8::jsonb,tags_jsonb=$9::jsonb,source_kind=$10,source_ref=$11,enabled=$12,pinned=$13,asset_type=$14,always_on=$15,reveal_after_chapter_order=$16,updated_at=now()
+WHERE tenant_id=$1 AND project_id=$2 AND asset_id=$3`, scope.TenantID, scope.ProjectID, a.AssetID, a.Title, a.Summary, a.Category, content, string(payload), string(tags), a.Source.Kind, a.Source.Ref, a.Enabled, a.Pinned, a.AssetType, a.AlwaysOn, revealGate)
 	return err
 }
 
@@ -306,6 +329,7 @@ func (s *SQLStore) RestoreAsset(ctx context.Context, scope RequestScope, assetID
 	a.Source = restored.Source
 	a.Enabled = restored.Enabled
 	a.Pinned = restored.Pinned
+	a.AlwaysOn = restored.AlwaysOn
 	content = restored.ContentText
 	a.Lifecycle = lifecycle
 	if err = updateAssetRow(ctx, tx, scope, a, content); err != nil {
