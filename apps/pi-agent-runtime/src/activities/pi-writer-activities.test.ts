@@ -596,6 +596,102 @@ describe("runPiWriterRunActivity", () => {
     expect(Number(trimEvent?.payload.dropped_items)).toBeGreaterThan(0);
   });
 
+  it("injects always_on canon as fuse_recall's top channel, untrimmed by the budget", async () => {
+    const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let fusedChannels: unknown;
+    let loadCalled = false;
+    const big = "很长的设定内容".repeat(60); // heavy recall that would blow a tiny budget
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+      }),
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      planRetrieval: async () => ({
+        plan: { intent: "continue_scene", coverage: [], queries: [{ channel: "hybrid", text: "x" }], budget: { max_context_tokens: 10 } },
+        usage: { prompt_tokens: 1, completion_tokens: 1 }
+      }),
+      loadAlwaysOnAssets: async () => {
+        loadCalled = true;
+        return {
+          assets: [
+            { asset_id: "law-1", asset_type: "world_rule", lifecycle: "canon", title: "世界铁律", content_preview: big }
+          ]
+        };
+      },
+      executeWriterTool: async ({ tool_name, tool_args }) => {
+        if (tool_name === "fuse_recall") {
+          fusedChannels = (tool_args as { channels?: unknown }).channels;
+          return { fused: [], citations: [] };
+        }
+        return {};
+      },
+      orchestrateWritingBrief: async (request) => {
+        // Tiny budget (10) + a heavy always_on asset: it must still reach fuse_recall
+        // untrimmed, because constant canon never counts against the recall budget.
+        await request.executeTool("fuse_recall", "call-fuse", { channels: [] });
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type, payload: request.payload }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed" });
+    expect(loadCalled).toBe(true);
+    // always_on is prepended as the first (highest-priority) channel, content intact.
+    const channels = fusedChannels as Array<{ channel: string; items: Array<{ asset_id: string; content_preview: string }> }>;
+    expect(channels[0]?.channel).toBe("always_on");
+    expect(channels[0]?.items[0]?.asset_id).toBe("law-1");
+    expect(channels[0]?.items[0]?.content_preview).toBe(big);
+  });
+
+  it("treats always_on load failure as a visible no-op, not a run failure", async () => {
+    const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+      }),
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      loadAlwaysOnAssets: async () => { throw new Error("assets table unreachable"); },
+      executeWriterTool: async () => ({}),
+      orchestrateWritingBrief: async () => ({ writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type, payload: request.payload }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed" });
+    expect(workflows.some((w) => w.type === "writer.context_budget.trimmed" && typeof w.payload.always_on_error === "string")).toBe(true);
+  });
+
   it("runs the consistency check and surfaces violations without failing the run", async () => {
     const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const canonUsed: string[] = [];

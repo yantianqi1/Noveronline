@@ -94,6 +94,7 @@ export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions)
     resolveModuleBinding: async (request) => resolveModuleBinding(options.db, request),
     executeWriterTool: async (request) => executeWriterTool(options, request),
     loadConsistencyCanon: async (request) => loadConsistencyCanon(options, request),
+    loadAlwaysOnAssets: async (request) => loadAlwaysOnAssets(options, request),
     resolveCredential: async (request) => resolveCredential(options, request),
     reserveLLMQuota: async (request) => quota.reserve(request),
     finalizeLLMQuota: async (request) => quota.finalize(request),
@@ -905,6 +906,48 @@ async function executeKeyedAssets(
 
 function gatedResult(currentChapterOrder: number | null): Record<string, unknown> {
   return { spoiler_gated: true, current_chapter_order: currentChapterOrder };
+}
+
+// P1 (doc 41 §4.2 always_on): the constant-injection channel. Core world laws
+// and style/ban constraints must be present on every writing run whether or not
+// the retrieval context names them. This is NOT scored like recall — the
+// activity loads it unconditionally and injects it as fuse_recall's top channel.
+// It still respects the safety gates (enabled + lifecycle whitelist + spoiler
+// gate): an always_on asset revealed only later must not leak early. Capped
+// small so the constant prefix can't flood the writing context.
+const ALWAYS_ON_MAX = 8;
+async function loadAlwaysOnAssets(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest
+): Promise<{ assets: import("../activities/pi-writer-activities.js").AlwaysOnAssetItem[] }> {
+  const db = options.db;
+  const currentChapterOrder = await resolveCurrentChapterOrder(db, request);
+  const rows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT asset_id::text, asset_type, category, lifecycle, title, summary, content_text
+         FROM assets
+        WHERE tenant_id = $1 AND project_id = $2 AND enabled = TRUE
+          AND always_on = TRUE
+          AND lifecycle = ANY($3::text[])
+          AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $4)
+        ORDER BY pinned DESC, updated_at DESC
+        LIMIT $5`,
+      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder, ALWAYS_ON_MAX]
+    )
+  ).rows;
+  const assets = rows.map((row) => ({
+    asset_id: String(row.asset_id),
+    asset_type: String(row.asset_type),
+    category: typeof row.category === "string" ? row.category : undefined,
+    lifecycle: String(row.lifecycle),
+    title: typeof row.title === "string" ? row.title : "",
+    summary: typeof row.summary === "string" ? row.summary : undefined,
+    content_preview: truncateAssetPreview(typeof row.content_text === "string" ? row.content_text : ""),
+    channel: "always_on"
+  }));
+  return { assets };
 }
 
 const WRITER_RETRIEVAL_RERANK_MODULE_KEY = "writer_retrieval_rerank";

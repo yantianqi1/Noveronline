@@ -1,7 +1,7 @@
 # 41. 写作台内容召回增强设计：从固定 SQL 到按需语义召回
 
 更新时间：`2026-07-24`
-状态：P0 + P1 + P2(RRF/rerank)已实现(Route A)。已落地：`search_assets` 混合语义召回（§3.1）、`query_assets` 收窄为勾选驱动（§3.2）、citations 全链路（§3.4）、`writer_retrieval_planner` 规划层（§4.1）、键触发召回（§4.2，复用 `entity_aliases`）、`search_manuscript` 前文语义召回（§4.3，含 `manuscript_block_embeddings` + reindex 流水线）、token 预算装配器（§4.4）、`reveal_after_chapter_order` 防剧透门（§4.5）、`fuse_recall` RRF 融合 + `writer_retrieval_rerank` cross-encoder 精排（§4.6）。待做：Consistency Agent（§4.7）、P3（§5）、以及可选深化（键触发 always_on 通道、防剧透降权/eyeball-hide、装配器三因子槽位）。
+状态：P0 + P1 + P2(RRF/rerank + Consistency)已实现(Route A)。已落地：`search_assets` 混合语义召回（§3.1）、`query_assets` 收窄为勾选驱动（§3.2）、citations 全链路（§3.4）、`writer_retrieval_planner` 规划层（§4.1）、键触发召回（§4.2 keyword 类，复用 `entity_aliases`）、`always_on` 恒定注入通道（§4.2 always_on 类，`assets.always_on` 列，编排器前无条件加载、作 `fuse_recall` 顶级 channel、不占召回预算）、`search_manuscript` 前文语义召回（§4.3，含 `manuscript_block_embeddings` + reindex 流水线）、token 预算装配器（§4.4）、`reveal_after_chapter_order` 防剧透门（§4.5）、`fuse_recall` RRF 融合 + `writer_retrieval_rerank` cross-encoder 精排（§4.6）、Consistency Agent 生成后校验（§4.7，`writer_consistency`）。待做：P3（§5）、可选深化（防剧透降权/eyeball-hide、装配器三因子槽位）。注：资产编辑 API 目前不接受 `always_on`/`reveal_after_chapter_order` 的写入（仅能 SQL 设置），打通写入路径是独立待办。
 关联文档：`08-asset-library.md`、`11-writer-workbench.md`、`28-zero-start-writer-and-manuscript-asset-distillation.md`、`40-writer-content-retrieval-research.md`
 作者判断：本文以代码核查结论为主，`40` 号调研报告为参考。目标是把「内容召回」从当前的「固定 SQL 列表」升级为「按需的、多通道的、可预算的语义召回」，并给出可直接落地的接入路径。
 

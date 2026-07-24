@@ -216,9 +216,14 @@ function CitationsRow({ citations, degraded }: { citations: RunCitation[]; degra
       {citations.slice(0, 8).map((c) => (
         <span
           key={c.assetId}
-          title={c.lifecycle ? `设定 · ${c.lifecycle}` : "设定"}
-          className="rounded-full border border-line-soft bg-panel px-2 py-0.5 text-[11px] text-ink/80"
+          title={c.channel === "always_on" ? "常驻设定 · 每次写作都在场" : c.lifecycle ? `设定 · ${c.lifecycle}` : "设定"}
+          className={
+            c.channel === "always_on"
+              ? "rounded-full border border-gold/60 bg-gold/10 px-2 py-0.5 text-[11px] text-ink"
+              : "rounded-full border border-line-soft bg-panel px-2 py-0.5 text-[11px] text-ink/80"
+          }
         >
+          {c.channel === "always_on" ? "常驻 · " : ""}
           {c.title}
         </span>
       ))}

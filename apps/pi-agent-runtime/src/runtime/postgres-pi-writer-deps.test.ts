@@ -1536,6 +1536,63 @@ describe("createPostgresPiWriterDeps", () => {
     // RRF order preserved: b1 (both channels) first.
     expect((degraded.fused as Array<Record<string, unknown>>)[0]?.id).toBe("b1");
   });
+
+  it("loadAlwaysOnAssets returns only always_on canon inside the safety gates", async () => {
+    const db = new RecordingDb();
+    db.enqueue([{ chapter_order: 7 }]); // resolveCurrentChapterOrder
+    db.enqueue([ // the always_on query (already filtered by the SQL WHERE clause)
+      { asset_id: "a-law", asset_type: "world_rule", category: "law", lifecycle: "canon", title: "铁律", summary: "世界铁律", content_text: "不可违背。" },
+      { asset_id: "a-style", asset_type: "style", category: "ban", lifecycle: "canon", title: "禁词", summary: "风格禁词", content_text: "禁用词汇表。" }
+    ]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    const result = await deps.loadAlwaysOnAssets!({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
+      chapter_id: "chapter-1",
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      tool_name: "search_assets",
+      tool_args: { channel: "always_on" }
+    });
+
+    expect(result.assets).toHaveLength(2);
+    expect(result.assets[0]).toMatchObject({ asset_id: "a-law", title: "铁律", channel: "always_on" });
+    expect(result.assets[0]?.content_preview).toContain("不可违背");
+    // The query enforces always_on + lifecycle whitelist + spoiler gate as SQL params.
+    const query = db.queries.find((q) => q.text.includes("always_on = TRUE"));
+    expect(query).toBeDefined();
+    expect(query!.text).toContain("enabled = TRUE");
+    expect(query!.text).toContain("reveal_after_chapter_order");
+    expect(query!.values).toContain(7); // current chapter order passed to the spoiler gate
+    // Deterministic channel: no embedding/LLM resolution.
+    expect(db.queries.some((q) => q.text.includes("llm_module_bindings"))).toBe(false);
+  });
+
+  it("loadAlwaysOnAssets returns empty when no chapter is targeted (only always-visible)", async () => {
+    const db = new RecordingDb();
+    db.enqueue([]); // resolveCurrentChapterOrder -> no chapter -> NULL order
+    db.enqueue([]); // always_on query: spoiler gate with NULL order returns nothing unrevealed
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    const result = await deps.loadAlwaysOnAssets!({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      tool_name: "search_assets",
+      tool_args: { channel: "always_on" }
+    });
+
+    expect(result.assets).toEqual([]);
+    const query = db.queries.find((q) => q.text.includes("always_on = TRUE"));
+    expect(query).toBeDefined();
+    expect(query!.values).toContain(null); // NULL current order => only always-visible rows
+  });
 });
 
 function encryptCredential(plaintext: string, key: Buffer): string {

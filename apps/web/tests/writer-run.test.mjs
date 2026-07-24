@@ -140,6 +140,32 @@ test("search_assets keyword fallback marks citationsDegraded", () => {
   assert.equal(state.citations.length, 1);
 });
 
+test("fuse_recall always_on items surface as 常驻 citations, deduped against recall", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.tool.completed", {
+      tool_call_id: "s1",
+      tool_name: "search_assets",
+      result: { mode_used: "hybrid", degraded: false, items: [{ asset_id: "a2", title: "师父", lifecycle: "canon", channel: "search_assets" }] },
+    }),
+    ev("writer.tool.completed", {
+      tool_call_id: "f1",
+      tool_name: "fuse_recall",
+      result: {
+        items: [
+          { asset_id: "law-1", title: "世界铁律", channel: "always_on" },
+          { asset_id: "a2", title: "师父", channel: "fuse_recall" }, // duplicate of recall, not always_on
+        ],
+      },
+    }),
+  ]);
+  // a2 already cited via search_assets; only the always_on law-1 is added, marked 常驻.
+  assert.equal(state.citations.length, 2);
+  const alwaysOn = state.citations.find((c) => c.channel === "always_on");
+  assert.equal(alwaysOn.assetId, "law-1");
+  assert.equal(alwaysOn.lifecycle, "常驻");
+});
+
 test("consistency violation events are collected for the author notice", () => {
   const state = reduceWriterRun([
     ev("writer.run.started"),

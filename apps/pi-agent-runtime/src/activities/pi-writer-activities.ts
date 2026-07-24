@@ -134,6 +134,17 @@ export interface ExecuteWriterToolRequest {
   tool_args?: Record<string, unknown>;
 }
 
+/** One constant-injected (always_on) canon asset — core law or style/ban rule. */
+export interface AlwaysOnAssetItem {
+  asset_id: string;
+  asset_type: string;
+  category?: string;
+  lifecycle: string;
+  title: string;
+  summary?: string;
+  content_preview: string;
+}
+
 export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest, "writing_brief" | "onToken"> {
   mode: WriterRunInput["mode"];
   chapter_id?: string;
@@ -491,6 +502,8 @@ export interface PiWriterRunActivityDeps {
   checkConsistency?(request: CheckConsistencyRequest): Promise<CheckConsistencyResult>;
   /** Load the canon (world rules + character states) a draft is checked against. */
   loadConsistencyCanon?(request: ExecuteWriterToolRequest): Promise<{ canon: ConsistencyCanonItem[] }>;
+  /** Load the constant-injection (always_on) canon present on every run. */
+  loadAlwaysOnAssets?(request: ExecuteWriterToolRequest): Promise<{ assets: AlwaysOnAssetItem[] }>;
   orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
   executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;
@@ -1085,6 +1098,35 @@ async function runDualStagePiWriterActivity(
       }
     }
 
+    // P1 (doc 41 §4.2 always_on): constant injection of core world laws and
+    // style/ban constraints. This is NOT a tool the orchestrator might forget to
+    // call — the activity loads it unconditionally, before the loop, and injects
+    // it as the top-priority channel of every fuse_recall (never relevance-ranked,
+    // never budget-trimmed). Absence is a silent no-op (no always_on canon yet).
+    let alwaysOnAssets: AlwaysOnAssetItem[] = [];
+    if (deps.loadAlwaysOnAssets) {
+      try {
+        const loaded = await deps.loadAlwaysOnAssets({
+          tenant_id: input.tenant_id,
+          project_id: input.project_id,
+          run_id: input.run_id,
+          chapter_id: input.chapter_id,
+          scene_id: input.scene_id,
+          selected_asset_ids: input.selected_asset_ids,
+          graph_node_ids: input.graph_node_ids,
+          worldline_path_ids: input.worldline_path_ids,
+          tool_name: "search_assets",
+          tool_args: { channel: "always_on" }
+        });
+        alwaysOnAssets = loaded.assets;
+      } catch (error) {
+        await recordWorkflow("writer.context_budget.trimmed", {
+          dropped_items: 0,
+          always_on_error: errorMessageText(error)
+        }, "always_on:load_failed");
+      }
+    }
+
     const orchestrator = await resolveRequiredModule(deps, input, "writer_orchestrator");
     if (!orchestrator.supports_tools) {
       throw runtimeFailure(
@@ -1136,6 +1178,29 @@ async function runDualStagePiWriterActivity(
           permissions: { tools: toolNames, can_write_draft: false }
         },
         executeTool: async (toolName, toolCallId, args) => {
+          let toolArgs = args;
+          // always_on canon rides every fuse_recall as the first, highest-priority
+          // channel. RRF gives it top rank by position (rank 1 in its own list), and
+          // it bypasses packRetrievalToolResult, so it is never budget-trimmed.
+          if (toolName === "fuse_recall" && alwaysOnAssets.length > 0) {
+            const existing = (args ?? {}) as Record<string, unknown>;
+            const channels = Array.isArray(existing.channels) ? existing.channels : [];
+            toolArgs = {
+              ...existing,
+              channels: [
+                {
+                  channel: "always_on",
+                  items: alwaysOnAssets.map((asset) => ({
+                    asset_id: asset.asset_id,
+                    title: asset.title,
+                    lifecycle: asset.lifecycle,
+                    content_preview: asset.content_preview
+                  }))
+                },
+                ...channels
+              ]
+            };
+          }
           const raw = await deps.executeWriterTool!({
             tenant_id: input.tenant_id,
             project_id: input.project_id,
@@ -1146,8 +1211,11 @@ async function runDualStagePiWriterActivity(
             graph_node_ids: input.graph_node_ids,
             worldline_path_ids: input.worldline_path_ids,
             tool_name: toolName,
-            tool_args: args
+            tool_args: toolArgs
           });
+          // always_on is constant context, not relevance recall — it never counts
+          // against the retrieval token budget.
+          if (toolName === "fuse_recall") return raw;
           return packRetrievalToolResult(toolName, raw, packed);
         },
         onAgentEvent: (event) => {
@@ -1451,6 +1519,19 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
       mode_used: typeof source.mode_used === "string" ? source.mode_used : "unavailable",
       degraded: source.degraded === true,
       items: recordArray(source.citations).map((item) => pickFields(item, ["block_id", "chapter_id", "block_order", "score", "channel"]))
+    };
+  }
+  if (toolName === "fuse_recall") {
+    // Surface the fused citations (always_on constant canon + recalled assets).
+    // An item is constant-injected when any of its channels is always_on.
+    return {
+      items: recordArray(source.citations).map((item) => {
+        const channels = Array.isArray(item.channels) ? item.channels.filter((c): c is string => typeof c === "string") : [];
+        return {
+          ...pickFields(item, ["asset_id", "title"]),
+          channel: channels.includes("always_on") ? "always_on" : "fuse_recall"
+        };
+      })
     };
   }
   if (toolName === "query_world_rules") {

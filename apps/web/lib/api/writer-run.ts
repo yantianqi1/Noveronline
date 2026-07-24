@@ -122,6 +122,25 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
             });
           }
         }
+        // Constant-injection (always_on) canon rides the fused recall. Collect it
+        // as a citation so the rail can mark it as 常驻 (always present), distinct
+        // from relevance-recalled assets.
+        if (type === "writer.tool.completed" && payload.tool_name === "fuse_recall") {
+          const result = (payload.result ?? {}) as Record<string, unknown>;
+          for (const item of Array.isArray(result.items) ? result.items : []) {
+            const c = item as Record<string, unknown>;
+            if (c.channel !== "always_on") continue;
+            const assetId = typeof c.asset_id === "string" ? c.asset_id : "";
+            if (!assetId || seenCitationIds.has(assetId)) continue;
+            seenCitationIds.add(assetId);
+            citations.push({
+              assetId,
+              title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
+              lifecycle: "常驻",
+              channel: "always_on",
+            });
+          }
+        }
         break;
       }
       case "writer.token":
