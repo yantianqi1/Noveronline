@@ -779,11 +779,118 @@ function toVectorLiteral(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
+const KEYED_MAX_MATCHES = 12;
+const KEYED_ALIAS_MIN_LEN = 2;
+
+// P1 (doc 41 §4.2): keyed/alias-triggered recall — the deterministic complement
+// to vector search. Proper names (characters, places, techniques) defeat pure
+// embeddings, so any asset whose title — or a character alias — appears in the
+// current retrieval context is force-injected, bypassing relevance scoring.
+// Drives the planner's "keyed" channel queries.
+async function executeKeyedAssets(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest,
+  contextTexts: string[]
+): Promise<Record<string, unknown>> {
+  const db = options.db;
+  const haystack = contextTexts.join("\n").toLowerCase();
+  const currentChapterOrder = await resolveCurrentChapterOrder(db, request);
+  if (!haystack.trim()) {
+    return { count: 0, assets: [], citations: [], gated: gatedResult(currentChapterOrder) };
+  }
+
+  const assetRows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT asset_id::text, asset_type, category, lifecycle, title, summary, content_text, pinned
+         FROM assets
+        WHERE tenant_id = $1 AND project_id = $2 AND enabled = TRUE
+          AND lifecycle = ANY($3::text[])
+          AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $4)`,
+      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder]
+    )
+  ).rows;
+
+  const aliasRows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT a.asset_id::text AS asset_id, ea.alias AS alias
+         FROM entity_aliases ea
+         JOIN entities e
+           ON e.tenant_id = ea.tenant_id AND e.project_id = ea.project_id AND e.entity_id = ea.entity_id
+         JOIN assets a
+           ON a.tenant_id = ea.tenant_id AND a.project_id = ea.project_id AND a.source_ref = ea.entity_id::text
+        WHERE ea.tenant_id = $1 AND ea.project_id = $2
+          AND a.enabled = TRUE
+          AND a.lifecycle = ANY($3::text[])
+          AND (a.reveal_after_chapter_order IS NULL OR a.reveal_after_chapter_order <= $4)`,
+      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder]
+    )
+  ).rows;
+
+  const matched = new Map<string, { row: Record<string, unknown>; key: string }>();
+  for (const row of assetRows) {
+    const title = typeof row.title === "string" ? row.title.trim() : "";
+    if (title.length >= KEYED_ALIAS_MIN_LEN && haystack.includes(title.toLowerCase())) {
+      matched.set(String(row.asset_id), { row, key: title });
+    }
+  }
+  for (const aliasRow of aliasRows) {
+    const alias = typeof aliasRow.alias === "string" ? aliasRow.alias.trim() : "";
+    if (alias.length < KEYED_ALIAS_MIN_LEN || !haystack.includes(alias.toLowerCase())) continue;
+    const assetId = String(aliasRow.asset_id);
+    if (matched.has(assetId)) continue;
+    const assetRow = assetRows.find((row) => String(row.asset_id) === assetId);
+    if (assetRow) matched.set(assetId, { row: assetRow, key: alias });
+  }
+
+  const assets = [...matched.values()]
+    .sort((a, b) => Number(b.row.pinned === true) - Number(a.row.pinned === true))
+    .slice(0, KEYED_MAX_MATCHES)
+    .map(({ row, key }) => ({
+      asset_id: row.asset_id,
+      asset_type: row.asset_type,
+      category: row.category,
+      lifecycle: row.lifecycle,
+      title: row.title,
+      summary: row.summary,
+      content_preview: truncateAssetPreview(typeof row.content_text === "string" ? row.content_text : ""),
+      matched_key: key,
+      channel: "keyed"
+    }));
+
+  return {
+    count: assets.length,
+    assets,
+    citations: assets.map((asset) => ({
+      asset_id: asset.asset_id,
+      title: asset.title,
+      lifecycle: asset.lifecycle,
+      matched_key: asset.matched_key,
+      channel: "keyed"
+    })),
+    ...gatedResult(currentChapterOrder)
+  };
+}
+
+function gatedResult(currentChapterOrder: number | null): Record<string, unknown> {
+  return { spoiler_gated: true, current_chapter_order: currentChapterOrder };
+}
+
 async function executeSearchAssets(
   options: PostgresPiWriterDepsOptions,
   request: ExecuteWriterToolRequest
 ): Promise<Record<string, unknown>> {
   const db = options.db;
+  const rawArgs = (request.tool_args ?? {}) as Record<string, unknown>;
+  // Keyed channel (planner "keyed" queries): deterministic alias/name-triggered
+  // force-injection, bypassing relevance scoring entirely.
+  if (rawArgs.channel === "keyed") {
+    const queryText = typeof rawArgs.query === "string" ? rawArgs.query : "";
+    return executeKeyedAssets(options, request, [queryText]);
+  }
   const args = parseSearchAssetsArgs(request.tool_args);
   const resolution = await resolveSearchAssetsMode(options, request, args);
   const useVector = resolution.mode !== "keyword" && resolution.embedding !== undefined;
