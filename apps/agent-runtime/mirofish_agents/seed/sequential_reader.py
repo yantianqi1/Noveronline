@@ -676,6 +676,26 @@ def _optional_text_safe(value: Any) -> str | None:
     return trimmed[:80]
 
 
+# Sequential-reading batch sizing. Modern long-context models comfortably read
+# tens of thousands of tokens at once, so batch by ESTIMATED TOKENS (not raw
+# chars) with a generous default. Chinese text runs ~1.5 tokens per character;
+# other scripts ~0.25 per character, so the estimator walks characters rather
+# than trusting a single chars-per-token ratio.
+DEFAULT_BATCH_MAX_TOKENS = 60_000
+# Output budget for a full batch's structured notes. Must comfortably exceed the
+# largest batch's note JSON, or the provider truncates mid-JSON and the read fails.
+DEFAULT_MAX_OUTPUT_TOKENS = 30_000
+_TOKENS_PER_WIDE_CHAR = 1.5
+_TOKENS_PER_NARROW_CHAR = 0.25
+
+
+def _estimate_tokens(text: str) -> int:
+    tokens = 0.0
+    for ch in text:
+        tokens += _TOKENS_PER_WIDE_CHAR if ord(ch) > 0xFF else _TOKENS_PER_NARROW_CHAR
+    return max(1, int(tokens) + 1)
+
+
 def _segment_batches(
     segments: list[dict[str, Any]],
     *,
@@ -684,31 +704,67 @@ def _segment_batches(
 ) -> list[list[dict[str, Any]]]:
     if not segments:
         raise LLMFacilityError("VALIDATION_FAILED", "segments are required for sequential_reading")
-    max_segments = _positive_int_setting(settings, "batch_max_segments", default=4)
-    max_chars = _positive_int_setting(settings, "batch_max_chars", default=24_000)
+    max_segments = _positive_int_setting(settings, "batch_max_segments", default=48)
+    max_tokens = _positive_int_setting(settings, "batch_max_tokens", default=DEFAULT_BATCH_MAX_TOKENS)
+    # Legacy char-based cap still honoured when explicitly configured, but no
+    # longer defaults (token budget supersedes it).
+    legacy_max_chars = settings.get("batch_max_chars")
+    max_chars = legacy_max_chars if isinstance(legacy_max_chars, int) and not isinstance(legacy_max_chars, bool) and legacy_max_chars > 0 else None
+
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
+    current_tokens = 0
     current_chars = 0
+    current_chapter: str | None = None
+
+    def flush() -> None:
+        nonlocal current, current_tokens, current_chars, current_chapter
+        if current:
+            batches.append(current)
+        current = []
+        current_tokens = 0
+        current_chars = 0
+        current_chapter = None
+
     for segment in segments:
         # Estimate text size without mutating the public segment dict.
         object_key = _required_text(segment.get("object_key"), "object_key")
         try:
-            text_len = len(segment_text_store.read_bytes(object_key).decode("utf-8"))
+            text = segment_text_store.read_bytes(object_key).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise LLMFacilityError("TEXT_SEGMENT_DECODE_FAILED", "segment text was not valid UTF-8") from exc
         except Exception as exc:
             raise LLMFacilityError("TEXT_SEGMENT_READ_FAILED", "segment text read failed") from exc
-        would_exceed = current and (
-            len(current) >= max_segments or current_chars + text_len > max_chars
-        )
-        if would_exceed:
-            batches.append(current)
-            current = []
-            current_chars = 0
+        text_tokens = _estimate_tokens(text)
+        text_chars = len(text)
+        chapter = segment.get("chapter_guess") if isinstance(segment.get("chapter_guess"), str) else None
+
+        # A single segment larger than the whole budget must go in its own batch.
+        if not current:
+            current.append(segment)
+            current_tokens = text_tokens
+            current_chars = text_chars
+            current_chapter = chapter
+            if text_tokens >= max_tokens:
+                flush()
+            continue
+
+        over_count = len(current) >= max_segments
+        over_tokens = current_tokens + text_tokens > max_tokens
+        over_chars = max_chars is not None and current_chars + text_chars > max_chars
+        # Keep whole chapters together: a new chapter always starts a new batch
+        # once the current one holds anything, so one chapter is never split
+        # across two LLM calls (better whole-chapter comprehension).
+        new_chapter = chapter is not None and current_chapter is not None and chapter != current_chapter
+        if over_count or over_tokens or over_chars or new_chapter:
+            flush()
+
         current.append(segment)
-        current_chars += text_len
-    if current:
-        batches.append(current)
+        current_tokens += text_tokens
+        current_chars += text_chars
+        current_chapter = chapter if chapter is not None else current_chapter
+
+    flush()
     return batches
 
 
@@ -799,9 +855,14 @@ def _chat_request_body(resolution: ModuleBindingResolution, messages: list[dict[
     temperature = _number_setting(resolution.settings, "temperature")
     if temperature is not None:
         body["temperature"] = temperature
+    # Large token-batched reads (default 60k input tokens) produce large JSON
+    # outputs. Without an explicit max_tokens the provider caps output far below
+    # what a full batch needs and the JSON gets truncated -> SCHEMA_VALIDATION_FAILED.
+    # Default to a generous output budget; a module setting always overrides.
     max_tokens = _number_setting(resolution.settings, "max_tokens")
-    if max_tokens is not None:
-        body["max_tokens"] = max_tokens
+    if max_tokens is None:
+        max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+    body["max_tokens"] = max_tokens
     return body
 
 

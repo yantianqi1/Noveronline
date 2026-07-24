@@ -13,6 +13,9 @@ from mirofish_agents.seed.sequential_reader import (
     OpenAICompatibleJSONClient,
     PostgresCredentialProvider,
     PostgresModuleBindingResolver,
+    _chat_request_body,
+    _estimate_tokens,
+    _segment_batches,
 )
 
 
@@ -857,3 +860,62 @@ class FailingQueryConnection(QueryConnection):
     def __init__(self, error: Exception) -> None:
         self.cursor_instance = FailingQueryCursor(error)
         self.closed = False
+
+
+# ── Token-aware batching + output budget (seed read robustness) ──────────────
+
+
+def test_estimate_tokens_counts_cjk_heavier_than_latin() -> None:
+    # ~1.5 tokens per CJK char, ~0.25 per latin char, plus a small +1 safety margin.
+    assert _estimate_tokens("甲乙丙丁") == 7  # int(4 * 1.5) + 1
+    assert _estimate_tokens("abcd") == 2  # int(4 * 0.25) + 1
+    assert _estimate_tokens("") >= 1
+    assert _estimate_tokens("甲乙丙丁") > _estimate_tokens("abcd")
+
+
+def test_segment_batches_default_token_budget_packs_chapters_together() -> None:
+    # 4 small chapters (~1200 chars each ≈ 1800 tokens) all fit under the 60k
+    # default token budget and share chapters, so they must batch into ONE call,
+    # but a new chapter never splits mid-chapter.
+    store = InMemoryObjectStore({f"segments/{i:04d}.txt": ("正文" * 600).encode("utf-8") for i in range(4)})
+    segments = [
+        {"segment_id": f"segment-{i}", "segment_order": i, "object_key": f"segments/{i:04d}.txt", "chapter_guess": f"第{i}章"}
+        for i in range(4)
+    ]
+    batches = _segment_batches(segments, segment_text_store=store, settings={})
+    # Default budget 60k tokens >> these; but chapter boundaries force one batch
+    # per chapter (whole-chapter reads), so 4 chapters -> 4 batches, never split.
+    assert len(batches) == 4
+    assert all(len(batch) == 1 for batch in batches)
+
+
+def test_segment_batches_respects_configured_token_budget() -> None:
+    # A tight token budget forces packing: each ~1800-token chapter, budget 4000
+    # -> two chapters per batch until the budget would overflow.
+    store = InMemoryObjectStore({f"segments/{i:04d}.txt": ("正文" * 600).encode("utf-8") for i in range(4)})
+    segments = [
+        {"segment_id": f"segment-{i}", "segment_order": i, "object_key": f"segments/{i:04d}.txt"}
+        for i in range(4)  # no chapter_guess -> chapter rule inert, token budget governs
+    ]
+    batches = _segment_batches(segments, segment_text_store=store, settings={"batch_max_tokens": 4000})
+    # 4 chapters * ~1800 tokens, budget 4000 -> 2 per batch -> 2 batches.
+    assert [len(batch) for batch in batches] == [2, 2]
+
+
+def test_chat_request_body_defaults_max_tokens_for_large_batches() -> None:
+    # No explicit max_tokens in settings -> a generous default output budget is
+    # sent so a 60k-token batch's notes are not truncated mid-JSON.
+    base = _resolution()
+    resolution = ModuleBindingResolution(
+        tenant_id=base.tenant_id, project_id=base.project_id, module_key=base.module_key,
+        channel_id=base.channel_id, model_id=base.model_id, provider=base.provider,
+        base_url=base.base_url, credential_ref=base.credential_ref, supports_json=base.supports_json,
+        settings={"temperature": 0.1},  # no max_tokens
+    )
+    body = _chat_request_body(resolution, [{"role": "user", "content": "x"}])
+    assert body["max_tokens"] == 30_000
+    assert body["response_format"] == {"type": "json_object"}
+    # Explicit setting still wins.
+    base2 = _resolution()
+    body2 = _chat_request_body(base2, [{"role": "user", "content": "x"}])
+    assert body2["max_tokens"] == 1200

@@ -9401,12 +9401,23 @@ def _validated_reading_note(note: Any, *, known_segment_ids: set[str]) -> dict[s
     sanitized_payload = _sanitize_workflow_event_payload(payload)
     if not isinstance(sanitized_payload, dict):
         raise ValueError("payload_jsonb must be an object")
+    # Tolerate a chapter whose LLM output dropped one structured field: default
+    # any missing/non-list required field to [] so that single chapter persists
+    # with partial information instead of failing the WHOLE novel. The repair is
+    # recorded on consistency_notes so the degradation is visible, never silent.
+    repaired: list[str] = []
     for field_name in SEQUENTIAL_READING_PAYLOAD_LIST_FIELDS:
         if not isinstance(sanitized_payload.get(field_name), list):
-            raise ValueError(f"payload_jsonb.{field_name} must be a list")
+            sanitized_payload[field_name] = []
+            repaired.append(field_name)
     for field_name in OPTIONAL_SEQUENTIAL_READING_PAYLOAD_LIST_FIELDS:
         if field_name in sanitized_payload and not isinstance(sanitized_payload.get(field_name), list):
-            raise ValueError(f"payload_jsonb.{field_name} must be a list")
+            sanitized_payload[field_name] = []
+            repaired.append(field_name)
+    if repaired:
+        consistency = sanitized_payload.setdefault("consistency_notes", [])
+        if isinstance(consistency, list):
+            consistency.append(f"本章召回字段缺失已留空: {', '.join(repaired)}")
     return {
         "segment_id": segment_id,
         "summary": _optional_text(note, "summary"),
@@ -9460,9 +9471,67 @@ def _runtime_entities_from_payload(payload: dict[str, Any]) -> list[dict[str, An
     return entities
 
 
+def _split_fact_string(text: str) -> tuple[str, str | None]:
+    """Split a free-form "name：description" fact into (name, summary).
+
+    Chat models frequently return entity/relationship facts as plain strings
+    ("苍兰：主角，十年后重返……") rather than objects. The leading segment up to
+    the first full/half-width colon (or comma) is the name; the remainder, if
+    any, is the summary. Mirrors the tolerant shape the other runtime-fact
+    parsers (plot threads, world rules, arcs) already accept.
+    """
+    normalized = _required_text_value(text, "fact")
+    for separator in ("：", ":", "，", ","):
+        if separator in normalized:
+            head, _, tail = normalized.partition(separator)
+            head = head.strip()
+            tail = tail.strip()
+            if head:
+                return head, (tail or None)
+    return normalized, None
+
+
+def _split_relationship_parties(text: str) -> tuple[str, str]:
+    """Split "苍兰与师父" into ("苍兰", "师父") on a conjunction; fall back to a
+    single party paired with itself only when no conjunction is present."""
+    for conjunction in ("与", "和", "、", "/", "→", "-", ",", "，"):
+        if conjunction in text:
+            left, _, right = text.partition(conjunction)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                return left, right
+    return text, text
+
+
+def _relationship_type_from_text(summary: str | None) -> str | None:
+    """Pull a short relationship label ("师徒关系") out of a free-form summary."""
+    if not summary:
+        return None
+    head, _, _ = summary.partition("；")
+    head, _, _ = head.partition(";")
+    head, _, _ = head.partition("，")
+    head, _, _ = head.partition(",")
+    head = head.strip()
+    if head and len(head) <= 12:
+        return head
+    return None
+
+
 def _runtime_entity(value: Any, *, entity_type: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        name, summary = _split_fact_string(value)
+        return {
+            "name": name,
+            "entity_type": entity_type,
+            "aliases": [],
+            "labels": [],
+            "importance": None,
+            "state_summary": summary,
+            "evidence": None,
+        }
     if not isinstance(value, dict):
-        raise ValueError(f"{entity_type} facts must be objects")
+        raise ValueError(f"{entity_type} facts must be objects or strings")
     name = _required_text_value(value.get("name"), "entity.name")
     return {
         "name": name,
@@ -9503,8 +9572,23 @@ def _runtime_relationships_from_payload(payload: dict[str, Any]) -> list[dict[st
 
 
 def _runtime_relationship(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        # Free-form "苍兰与师父：师徒关系；……" → split into parties and detail.
+        normalized = _required_text_value(value, "relationship")
+        parties, _, detail = normalized.partition("：")
+        if not detail:
+            parties, _, detail = normalized.partition(":")
+        source, target = _split_relationship_parties(parties.strip() or normalized)
+        summary = detail.strip() or None
+        return {
+            "source_entity_name": source,
+            "target_entity_name": target,
+            "relationship_type": _relationship_type_from_text(summary) or "相关",
+            "summary": summary,
+            "evidence": None,
+        }
     if not isinstance(value, dict):
-        raise ValueError("relationships entries must be objects")
+        raise ValueError("relationships entries must be objects or strings")
     source = (
         _optional_fact_text(value, "source")
         or _optional_fact_text(value, "source_entity")
@@ -9662,8 +9746,12 @@ def _runtime_relationship_events_from_payload(payload: dict[str, Any]) -> list[d
 
 
 def _runtime_event_category(value: Any) -> str:
+    if isinstance(value, str):
+        # A free-form event line has no structure to key on; treat it as a
+        # character-level beat so it is persisted rather than dropped.
+        return "character"
     if not isinstance(value, dict):
-        raise ValueError("events entries must be objects")
+        raise ValueError("events entries must be objects or strings")
     event_type = _optional_fact_text(value, "event_type") or _optional_fact_text(value, "type")
     scope = _optional_fact_text(value, "scope")
     if event_type == "relationship" or _has_any_fact_text(value, ("source", "source_entity", "source_entity_name", "from")):
@@ -9674,8 +9762,15 @@ def _runtime_event_category(value: Any) -> str:
 
 
 def _runtime_character_event(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {
+            "entity_name": "未指明",
+            "event_summary": _required_text_value(value, "event"),
+            "event_kind": None,
+            "evidence": None,
+        }
     if not isinstance(value, dict):
-        raise ValueError("events entries must be objects")
+        raise ValueError("events entries must be objects or strings")
     entity_name = (
         _optional_fact_text(value, "entity_name")
         or _optional_fact_text(value, "character")
@@ -9693,8 +9788,14 @@ def _runtime_character_event(value: Any) -> dict[str, Any]:
 
 
 def _runtime_world_event(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {
+            "event_summary": _required_text_value(value, "event"),
+            "event_kind": None,
+            "evidence": None,
+        }
     if not isinstance(value, dict):
-        raise ValueError("events entries must be objects")
+        raise ValueError("events entries must be objects or strings")
     return {
         "event_summary": _runtime_event_summary(value),
         "event_kind": _optional_fact_text(value, "event_kind") or _optional_fact_text(value, "kind"),
@@ -9703,8 +9804,17 @@ def _runtime_world_event(value: Any) -> dict[str, Any]:
 
 
 def _runtime_relationship_event(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        source, target = _split_relationship_parties(_required_text_value(value, "event"))
+        return {
+            "source_entity_name": source,
+            "target_entity_name": target,
+            "relationship_type": "相关",
+            "event_summary": _required_text_value(value, "event"),
+            "evidence": None,
+        }
     if not isinstance(value, dict):
-        raise ValueError("events entries must be objects")
+        raise ValueError("events entries must be objects or strings")
     source = (
         _optional_fact_text(value, "source")
         or _optional_fact_text(value, "source_entity")

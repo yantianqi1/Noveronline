@@ -6443,7 +6443,10 @@ def test_sequential_reading_activity_persists_schema_validated_notes() -> None:
     assert "object_key" not in workflow_writer.events[-1]["payload"]
 
 
-def test_sequential_reading_activity_rejects_invalid_reader_schema_without_persisting_notes() -> None:
+def test_sequential_reading_activity_repairs_missing_list_field_and_persists_partial_note() -> None:
+    # A chapter whose LLM output dropped/corrupted one structured field must NOT
+    # fail the whole novel: the field is defaulted to [] and the note persists
+    # with partial information, the repair recorded on consistency_notes.
     workflow_writer = RecordingWorkflowEventWriter()
     notes_writer = RecordingReadingNotesWriter()
 
@@ -6464,12 +6467,17 @@ def test_sequential_reading_activity_rejects_invalid_reader_schema_without_persi
         workflow_event_writer=workflow_writer,
     )
 
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "SCHEMA_VALIDATION_FAILED"
-    assert notes_writer.passes == []
-    assert workflow_writer.events[-1]["event_type"] == "seed.stage.failed"
-    assert workflow_writer.events[-1]["payload"]["error_code"] == "SCHEMA_VALIDATION_FAILED"
-    assert "object_key" not in workflow_writer.events[-1]["payload"]
+    assert result["status"] == "completed"
+    assert result["note_count"] == 1
+    # The chapter persisted (not dropped): its missing fields were defaulted to [].
+    persisted = notes_writer.passes[0]["notes"][0]
+    assert persisted["segment_id"] == "segment-1"
+    payload = persisted["payload_jsonb"]
+    for field in ("characters", "organizations", "relationships", "plot_threads", "world_rules", "events"):
+        assert payload[field] == []
+    # The repair is visible on consistency_notes — never a silent degradation.
+    assert any("字段缺失已留空" in note for note in payload["consistency_notes"])
+    assert workflow_writer.events[-1]["event_type"] == "seed.stage.completed"
 
 
 def test_sequential_reading_activity_marks_workflow_failed_when_notes_writer_unconfigured() -> None:
