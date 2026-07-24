@@ -67,6 +67,7 @@ export function runtimeContextFromInput(input: WriterRunInput): RuntimeContext {
         "query_assets",
         "search_assets",
         "search_manuscript",
+        "fuse_recall",
         "query_world_rules",
         "query_character_profile",
         "query_graph_neighbors",

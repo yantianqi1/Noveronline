@@ -43,6 +43,25 @@ const searchManuscriptArguments = ObjectSchema(
   { additionalProperties: false }
 );
 
+const fuseRecallArguments = ObjectSchema(
+  {
+    channels: {
+      type: "array",
+      description: "One entry per recall channel you already ran (keyed/hybrid/manuscript), each with its best-first items.",
+      items: {
+        type: "object",
+        properties: {
+          channel: { type: "string" },
+          items: { type: "array", items: { type: "object", additionalProperties: true } }
+        },
+        required: ["channel", "items"]
+      }
+    },
+    top_k: { type: "number", description: "Cap the fused list (default: all, max 25)." }
+  },
+  { additionalProperties: false }
+);
+
 export function createPiWriterExecution() {
   return {
     orchestrateWritingBrief: async (request: OrchestrateWritingBriefRequest) => {
@@ -213,11 +232,12 @@ function positiveInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments> {
+function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments | typeof fuseRecallArguments> {
   const parameters =
     name === "search_assets" ? searchAssetsArguments
       : name === "search_manuscript" ? searchManuscriptArguments
-        : noArguments;
+        : name === "fuse_recall" ? fuseRecallArguments
+          : noArguments;
   return {
     name,
     label: name,
@@ -427,6 +447,7 @@ function toolDescription(name: WriterToolName): string {
     query_assets: "Read the author's explicitly selected project assets (by id) and their private writing context. Returns nothing when the author selected none — use search_assets for on-demand recall instead.",
     search_assets: "Semantic recall over project canon/seed/material assets. Supply a query describing what this passage needs (settings, rules, relationships, prior scenes). Returns ranked matches with citations; degrades to keyword when embeddings are unavailable.",
     search_manuscript: "Semantic recall over prior manuscript prose that is NOT adjacent to the current scene — foreshadowing and callbacks. Supply a query in the novel's language. Returns prior snippets with citations; unavailable when prose embeddings are not indexed.",
+    fuse_recall: "Fuse several recall channels you already ran (keyed/hybrid/manuscript) into one RRF-ranked list. Pass each channel's best-first items; returns the merged ranking with per-item channels. Use before composing when you gathered recall from more than one channel.",
     query_world_rules: "Read extracted project world rules as private writing context.",
     query_character_profile: "Read project character identities, aliases, and current state as private writing context.",
     query_graph_neighbors: "Read explicitly selected story graph nodes and their direct relationships.",

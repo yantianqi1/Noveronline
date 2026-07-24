@@ -169,6 +169,7 @@ const TOOL_LABELS: Record<string, string> = {
   query_assets: "查阅勾选资产",
   search_assets: "语义召回设定",
   search_manuscript: "召回前文呼应",
+  fuse_recall: "融合多路召回",
   query_world_rules: "查阅世界规则",
   query_character_profile: "查阅角色档案",
   query_graph_neighbors: "查阅故事图谱",

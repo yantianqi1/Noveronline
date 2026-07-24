@@ -30,6 +30,7 @@ import type {
 } from "../activities/pi-writer-activities.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
 import { createPostgresQuotaStore } from "../llm/quota/postgres-quota-store.js";
+import { reciprocalRankFusion, type FusionItem } from "./recall-fusion.js";
 
 export interface QueryExecutor {
   query<T extends Record<string, unknown>>(
@@ -304,6 +305,8 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
       return executeSearchAssets(options, request);
     case "search_manuscript":
       return executeSearchManuscript(options, request);
+    case "fuse_recall":
+      return executeFuseRecall(request);
     case "query_project_context": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT title, description, genre, language, status
@@ -816,17 +819,14 @@ async function executeKeyedAssets(
     await queryWithTenantContext<Record<string, unknown>>(
       db,
       request,
-      `SELECT a.asset_id::text AS asset_id, ea.alias AS alias
+      `SELECT e.entity_id::text AS entity_id, e.canonical_name AS canonical_name,
+              e.state_summary AS state_summary, ea.alias AS alias
          FROM entity_aliases ea
          JOIN entities e
            ON e.tenant_id = ea.tenant_id AND e.project_id = ea.project_id AND e.entity_id = ea.entity_id
-         JOIN assets a
-           ON a.tenant_id = ea.tenant_id AND a.project_id = ea.project_id AND a.source_ref = ea.entity_id::text
         WHERE ea.tenant_id = $1 AND ea.project_id = $2
-          AND a.enabled = TRUE
-          AND a.lifecycle = ANY($3::text[])
-          AND (a.reveal_after_chapter_order IS NULL OR a.reveal_after_chapter_order <= $4)`,
-      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder]
+          AND e.entity_type = 'character'`,
+      [request.tenant_id, request.project_id]
     )
   ).rows;
 
@@ -837,13 +837,29 @@ async function executeKeyedAssets(
       matched.set(String(row.asset_id), { row, key: title });
     }
   }
+  // Alias/name matches inject the character entity profile (the aliases live on
+  // entities, not assets). Keyed by entity id so a character can't double-inject.
   for (const aliasRow of aliasRows) {
-    const alias = typeof aliasRow.alias === "string" ? aliasRow.alias.trim() : "";
-    if (alias.length < KEYED_ALIAS_MIN_LEN || !haystack.includes(alias.toLowerCase())) continue;
-    const assetId = String(aliasRow.asset_id);
-    if (matched.has(assetId)) continue;
-    const assetRow = assetRows.find((row) => String(row.asset_id) === assetId);
-    if (assetRow) matched.set(assetId, { row: assetRow, key: alias });
+    const names = [aliasRow.canonical_name, aliasRow.alias]
+      .map((n) => (typeof n === "string" ? n.trim() : ""))
+      .filter((n) => n.length >= KEYED_ALIAS_MIN_LEN);
+    const hit = names.find((n) => haystack.includes(n.toLowerCase()));
+    if (!hit) continue;
+    const key = `entity:${String(aliasRow.entity_id)}`;
+    if (matched.has(key)) continue;
+    matched.set(key, {
+      key: hit,
+      row: {
+        asset_id: aliasRow.entity_id,
+        asset_type: "character",
+        category: "cast",
+        lifecycle: "canon",
+        title: aliasRow.canonical_name,
+        summary: aliasRow.state_summary,
+        content_text: aliasRow.state_summary,
+        pinned: false
+      }
+    });
   }
 
   const assets = [...matched.values()]
@@ -877,6 +893,57 @@ async function executeKeyedAssets(
 
 function gatedResult(currentChapterOrder: number | null): Record<string, unknown> {
   return { spoiler_gated: true, current_chapter_order: currentChapterOrder };
+}
+
+// P2 (doc 41 §4.6): fuse the run's multi-channel recall (keyed / hybrid /
+// manuscript) into one RRF-ranked list. The orchestrator passes each channel's
+// results (ordered best-first) after it has gathered them; no LLM or DB needed.
+async function executeFuseRecall(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>> {
+  const raw = (request.tool_args ?? {}) as Record<string, unknown>;
+  const lists = Array.isArray(raw.channels) ? raw.channels : [];
+  const channelLists: FusionItem[][] = lists.map((entry) => {
+    const record = (entry ?? {}) as Record<string, unknown>;
+    const channel = typeof record.channel === "string" ? record.channel : "unknown";
+    const items = Array.isArray(record.items) ? record.items : [];
+    return items
+      .map((item): FusionItem | null => {
+        const r = (item ?? {}) as Record<string, unknown>;
+        const id = typeof r.asset_id === "string" ? r.asset_id
+          : typeof r.block_id === "string" ? r.block_id
+            : typeof r.id === "string" ? r.id : null;
+        if (!id) return null;
+        return {
+          id,
+          title: typeof r.title === "string" ? r.title : undefined,
+          channel,
+          payload: r
+        };
+      })
+      .filter((x): x is FusionItem => x !== null);
+  });
+  const fused = reciprocalRankFusion(channelLists);
+  const topK = typeof raw.top_k === "number" && Number.isInteger(raw.top_k) && raw.top_k > 0
+    ? Math.min(25, raw.top_k)
+    : fused.length;
+  const results = fused.slice(0, topK).map((item) => ({
+    id: item.id,
+    title: item.title,
+    channels: item.channels,
+    rrf_score: Math.round(item.rrf_score * 10000) / 10000,
+    best_rank: item.best_rank,
+    payload: item.payload
+  }));
+  return {
+    count: results.length,
+    fused: results,
+    citations: results.map((item) => ({
+      asset_id: item.id,
+      title: item.title,
+      channels: item.channels,
+      rrf_score: item.rrf_score,
+      channel: "fuse_recall"
+    }))
+  };
 }
 
 async function executeSearchAssets(

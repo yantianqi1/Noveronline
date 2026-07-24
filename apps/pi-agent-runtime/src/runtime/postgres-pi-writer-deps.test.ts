@@ -1397,13 +1397,12 @@ describe("createPostgresPiWriterDeps", () => {
   it("search_assets keyed channel force-injects title and alias matches", async () => {
     const db = new RecordingDb();
     db.enqueue([{ chapter_order: 5 }]); // resolveCurrentChapterOrder
-    db.enqueue([ // candidate assets
+    db.enqueue([ // candidate assets (title matching)
       { asset_id: "a-shifu", asset_type: "character", category: "cast", lifecycle: "canon", title: "师父", summary: "掌门", content_text: "师门掌门。", pinned: false },
-      { asset_id: "a-yunfeng", asset_type: "character", category: "cast", lifecycle: "canon", title: "云锋", summary: "大师兄", content_text: "云锋师兄。", pinned: true },
-      { asset_id: "a-other", asset_type: "world_rule", category: "magic", lifecycle: "canon", title: "不相关规则", summary: "", content_text: "", pinned: false }
+      { asset_id: "a-rule", asset_type: "world_rule", category: "magic", lifecycle: "canon", title: "不相关规则", summary: "", content_text: "", pinned: false }
     ]);
-    db.enqueue([ // alias rows (entity alias "云峰" -> asset a-yunfeng)
-      { asset_id: "a-yunfeng", alias: "云峰" }
+    db.enqueue([ // character entity with alias "云峰" (canonical 云锋)
+      { entity_id: "ent-yunfeng", canonical_name: "云锋", state_summary: "大师兄", alias: "云峰" }
     ]);
     const deps = createPostgresPiWriterDeps({
       db,
@@ -1424,16 +1423,52 @@ describe("createPostgresPiWriterDeps", () => {
     });
 
     const assets = result.assets as Array<Record<string, unknown>>;
-    // Title "师父" matches; alias "云峰" matches a-yunfeng (variant of 云锋); "不相关规则" does not.
+    // Asset title "师父" matches; entity alias "云峰" matches 云锋; "不相关规则" does not.
     expect(result.count).toBe(2);
-    // pinned first: a-yunfeng before a-shifu.
-    expect(assets.map((a) => a.asset_id)).toEqual(["a-yunfeng", "a-shifu"]);
-    expect(assets[0]?.matched_key).toBe("云峰");
-    expect(assets[1]?.matched_key).toBe("师父");
+    const byId = new Map(assets.map((a) => [String(a.asset_id), a]));
+    expect(byId.get("a-shifu")?.matched_key).toBe("师父");
+    expect(byId.get("ent-yunfeng")?.matched_key).toBe("云峰");
+    expect(byId.get("ent-yunfeng")?.title).toBe("云锋");
     expect(result.spoiler_gated).toBe(true);
     expect(result.current_chapter_order).toBe(5);
     // No embedding resolution on the keyed path (deterministic).
     expect(db.queries.some((q) => q.text.includes("llm_module_bindings"))).toBe(false);
+  });
+
+  it("fuse_recall merges channels via RRF without touching the DB", async () => {
+    const db = new RecordingDb();
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    const result = await deps.executeWriterTool!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      tool_name: "fuse_recall",
+      tool_args: {
+        channels: [
+          { channel: "keyed", items: [{ asset_id: "a1", title: "师门戒律" }, { asset_id: "a2", title: "师父" }] },
+          { channel: "hybrid", items: [{ asset_id: "a2", title: "师父" }, { asset_id: "a3", title: "旧事件" }] }
+        ],
+        top_k: 5
+      }
+    });
+
+    const fused = result.fused as Array<Record<string, unknown>>;
+    // a2 appears in both channels -> highest RRF score.
+    expect(fused[0]?.id).toBe("a2");
+    expect(fused[0]?.channels).toEqual(["keyed", "hybrid"]);
+    expect(result.count).toBe(3);
+    const citations = result.citations as Array<Record<string, unknown>>;
+    expect(citations[0]?.channel).toBe("fuse_recall");
+    // Pure function — no DB access.
+    expect(db.queries).toHaveLength(0);
   });
 });
 

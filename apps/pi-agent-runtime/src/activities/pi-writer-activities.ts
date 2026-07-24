@@ -77,6 +77,7 @@ export type WriterToolName =
   | "query_assets"
   | "search_assets"
   | "search_manuscript"
+  | "fuse_recall"
   | "query_world_rules"
   | "query_character_profile"
   | "query_graph_neighbors"
@@ -1022,6 +1023,7 @@ async function runDualStagePiWriterActivity(
         "query_assets",
         "search_assets",
         "search_manuscript",
+        "fuse_recall",
         "query_world_rules",
         "query_character_profile",
         "query_graph_neighbors",

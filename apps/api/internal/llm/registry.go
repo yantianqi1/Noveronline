@@ -64,6 +64,7 @@ func documentedModules() []ModuleRecord {
 		{ModuleKey: "worldline_agent_action", Group: "Worldline", Label: "Worldline Agent Action", Description: "Generate worldline agent actions."},
 		{ModuleKey: "worldline_goal_evaluator", Group: "Worldline", Label: "Worldline Goal Evaluator", Description: "Evaluate worldline run goals."},
 		{ModuleKey: "writer_retrieval_planner", Group: "Writer", Label: "Writer Retrieval Planner", Description: "Plan retrieval before writing."},
+		{ModuleKey: "writer_retrieval_rerank", Group: "Writer", Label: "Writer Retrieval Rerank", Description: "Rerank recalled candidates for relevance before composing."},
 		{ModuleKey: "writer_orchestrator", Group: "Writer", Label: "Writer Orchestrator", Description: "Call tools and assemble writing context."},
 		{ModuleKey: "writer_composer", Group: "Writer", Label: "Writer Composer", Description: "Write draft prose from a writing brief."},
 		{ModuleKey: "writer_dedup_extractor", Group: "Writer", Label: "Writer Dedup Extractor", Description: "Extract repeated-risk patterns from adopted manuscript."},
