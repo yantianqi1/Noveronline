@@ -13,6 +13,10 @@ import type {
   ComposeDraftResult,
   OrchestrateWritingBriefRequest,
   OrchestrateWritingBriefResult,
+  PlanRetrievalRequest,
+  PlanRetrievalResult,
+  RetrievalPlan,
+  RetrievalQuery,
   WriterToolName
 } from "../activities/pi-writer-activities.js";
 import { assertToolAllowed, ToolPermissionDenied } from "../tools/permissions.js";
@@ -92,8 +96,113 @@ export function createPiWriterExecution() {
       const content = assistantText(message);
       if (!content.trim()) throw new Error("Pi writer composer returned an empty draft");
       return { content, usage: messageUsage(message) } satisfies ComposeDraftResult;
+    },
+    planRetrieval: async (request: PlanRetrievalRequest) => {
+      const runtime = createRuntime(request);
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: retrievalPlannerSystemPrompt(),
+          model: runtime.model,
+          thinkingLevel: request.thinking_level ?? "off"
+        },
+        streamFn: runtime.streamFn,
+        getApiKey: (provider) => provider === runtime.providerId ? request.apiKey : undefined,
+        sessionId: request.run_id
+      });
+      await promptWithAbort(agent, retrievalPlannerPrompt(request), request.abort_signal);
+      const message = finalAssistantMessage(agent.state.messages);
+      const content = assistantText(message);
+      if (!content.trim()) throw new Error("Pi writer retrieval planner returned an empty plan");
+      return {
+        plan: parseRetrievalPlan(content),
+        usage: messageUsage(message)
+      } satisfies PlanRetrievalResult;
     }
   };
+}
+
+const RETRIEVAL_QUERY_CHANNELS = new Set(["keyed", "hybrid", "graph", "manuscript"]);
+
+function retrievalPlannerSystemPrompt(): string {
+  return [
+    "You are the MiroFish writer retrieval planner. Before any prose is written, decide what canon the writer must recall to keep a long novel consistent.",
+    "Respond with ONLY a JSON object — no prose, no markdown fence — of the form:",
+    '{"intent": "<continue_scene | rewrite_span | payoff_foreshadow | new_scene | ...>",',
+    ' "coverage": ["characters:...", "world_rules:...", "plot_threads:...", "prior_scenes:..."],',
+    ' "queries": [{"channel": "hybrid|keyed|graph|manuscript", "text": "<retrieval intent in the novel\'s language>", "asset_types": ["..."], "top_k": 8}],',
+    ' "budget": {"max_context_tokens": 24000}}',
+    "Rules: 2-5 queries. Use channel hybrid for settings/rules/relationships, keyed for proper names (characters, places, techniques), manuscript for prior scenes, graph for relationships. Write query text in the novel's own language (Chinese for Chinese novels). Never invent canon."
+  ].join(" ");
+}
+
+function retrievalPlannerPrompt(request: PlanRetrievalRequest): string {
+  return JSON.stringify({
+    task: "Plan retrieval for this writing request.",
+    mode: request.mode,
+    instruction: request.instruction,
+    chapter_id: request.chapter_id,
+    scene_id: request.scene_id,
+    author_selected_asset_ids: request.selected_asset_ids,
+    target_words: request.target_words
+  });
+}
+
+/** Parse + validate the planner's JSON into a RetrievalPlan; tolerant of fences. */
+function parseRetrievalPlan(content: string): RetrievalPlan {
+  const cleaned = content
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("retrieval planner returned no JSON object");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    throw new Error("retrieval planner returned invalid JSON");
+  }
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  const queries = normalizeRetrievalQueries(record.queries);
+  if (queries.length === 0) throw new Error("retrieval planner returned no usable queries");
+  return {
+    intent: typeof record.intent === "string" && record.intent.trim() ? record.intent.trim() : "continue_scene",
+    coverage: Array.isArray(record.coverage) ? record.coverage.filter((c): c is string => typeof c === "string") : [],
+    queries,
+    ...(record.budget && typeof record.budget === "object" && !Array.isArray(record.budget)
+      ? { budget: { max_context_tokens: positiveInt((record.budget as Record<string, unknown>).max_context_tokens) } }
+      : {})
+  };
+}
+
+function normalizeRetrievalQueries(value: unknown): RetrievalQuery[] {
+  if (!Array.isArray(value)) return [];
+  const queries: RetrievalQuery[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const text = typeof record.text === "string" ? record.text.trim() : "";
+    if (!text) continue;
+    const channel = typeof record.channel === "string" && RETRIEVAL_QUERY_CHANNELS.has(record.channel)
+      ? record.channel as RetrievalQuery["channel"]
+      : "hybrid";
+    const topK = positiveInt(record.top_k);
+    const assetTypes = Array.isArray(record.asset_types)
+      ? record.asset_types.filter((t): t is string => typeof t === "string" && t.trim() !== "")
+      : undefined;
+    queries.push({
+      channel,
+      text,
+      ...(topK !== undefined ? { top_k: Math.min(25, Math.max(1, topK)) } : {}),
+      ...(assetTypes && assetTypes.length > 0 ? { asset_types: assetTypes } : {})
+    });
+    if (queries.length >= 6) break;
+  }
+  return queries;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments> {
@@ -194,7 +303,21 @@ function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
     selected_asset_ids: request.selected_asset_ids,
     graph_node_ids: request.graph_node_ids,
     worldline_path_ids: request.worldline_path_ids,
-    target_words: request.target_words
+    target_words: request.target_words,
+    ...(request.retrieval_plan
+      ? {
+          retrieval_plan: {
+            intent: request.retrieval_plan.intent,
+            coverage: request.retrieval_plan.coverage,
+            guidance: "A retrieval planner already analysed this request. For each planned query below, call search_assets with its text and asset_types. You may add calls for anything the plan missed, and use query_manuscript_context for the immediate scene. Cite what you use.",
+            queries: request.retrieval_plan.queries.map((q) => ({
+              text: q.text,
+              asset_types: q.asset_types,
+              top_k: q.top_k
+            }))
+          }
+        }
+      : {})
   });
 }
 

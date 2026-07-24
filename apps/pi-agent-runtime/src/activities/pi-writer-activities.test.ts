@@ -427,6 +427,114 @@ describe("runPiWriterRunActivity", () => {
     expect(traces).toContain("writer_composer:assistant_message:full");
   });
 
+  it("runs the retrieval planner stage and steers the orchestrator with the plan", async () => {
+    const bindings: string[] = [];
+    const workflows: Array<{ type: string; payload: Record<string, unknown>; key?: string }> = [];
+    const plans: Array<Record<string, unknown>> = [];
+    let orchestratorPlan: unknown;
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => {
+        bindings.push(module_key);
+        return {
+          module_key,
+          channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+          base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+          supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+        };
+      },
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({
+        reservation_id: `reservation-${request.module_key}`,
+        provider_call_id: request.provider_call_id,
+        status: "reserved",
+        expires_at: "2026-07-10T12:05:00.000Z"
+      }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      planRetrieval: async (request) => {
+        plans.push({ module_key: request.module_key, instruction: request.instruction });
+        return {
+          plan: {
+            intent: "continue_scene",
+            coverage: ["characters:沈翠花", "world_rules:师门戒律"],
+            queries: [
+              { channel: "hybrid", text: "师门 复命 戒律", asset_types: ["world_rule"], top_k: 8 },
+              { channel: "keyed", text: "沈翠花 师父" }
+            ]
+          },
+          usage: { prompt_tokens: 2, completion_tokens: 3 }
+        };
+      },
+      executeWriterTool: async () => ({}),
+      orchestrateWritingBrief: async (request) => {
+        orchestratorPlan = request.retrieval_plan;
+        return { writing_brief: "planned brief", usage: { prompt_tokens: 3, completion_tokens: 5 } };
+      },
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 7, completion_tokens: 11 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type, payload: request.payload, key: request.idempotency_key }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed", draft_id: "draft-1" });
+    // Planner binding resolved before orchestrator/composer.
+    expect(bindings[0]).toBe("writer_retrieval_planner");
+    expect(plans[0]?.instruction).toBe("写下一场雨夜谈判");
+    // The plan steered the orchestrator.
+    expect(orchestratorPlan).toMatchObject({ intent: "continue_scene" });
+    expect((orchestratorPlan as { queries: unknown[] }).queries).toHaveLength(2);
+    // And it was persisted as a retrieval_plan.completed event.
+    const planEvent = workflows.find((w) => w.type === "writer.retrieval_plan.completed");
+    expect(planEvent?.payload.intent).toBe("continue_scene");
+    expect(planEvent?.payload.queries).toHaveLength(2);
+  });
+
+  it("records retrieval_plan.skipped and proceeds when the planner is unbound", async () => {
+    const workflows: Array<{ type: string }> = [];
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => {
+        if (module_key === "writer_retrieval_planner") throw new Error("LLM_MODULE_UNBOUND: writer_retrieval_planner module is not bound");
+        return {
+          module_key,
+          channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+          base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+          supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+        };
+      },
+      planRetrieval: async () => { throw new Error("should not be called"); },
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      executeWriterTool: async () => ({}),
+      orchestrateWritingBrief: async (request) => {
+        expect(request.retrieval_plan).toBeUndefined();
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed" });
+    expect(workflows.some((w) => w.type === "writer.retrieval_plan.skipped")).toBe(true);
+  });
+
   it("fails the dual-stage run explicitly when writer_orchestrator is unbound", async () => {
     const activity = createPiWriterRunActivity({
       resolveModuleBinding: async ({ module_key }) => { throw new Error(`LLM_MODULE_UNBOUND: ${module_key} module is not bound`); },

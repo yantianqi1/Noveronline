@@ -56,6 +56,7 @@ export async function createWorkerActivityBundle(options: WorkerActivityBundleOp
   deps.saveProviderStageCheckpoint = options.saveProviderStageCheckpoint;
   if (!options.composeDraft) {
     deps.orchestrateWritingBrief = writerExecution.orchestrateWritingBrief;
+    deps.planRetrieval = writerExecution.planRetrieval;
     deps.composeDraft = writerExecution.composeDraft;
   }
   return {

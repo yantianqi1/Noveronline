@@ -137,12 +137,65 @@ export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest
   tool_execution?: ToolExecutionMode;
   tool_names: WriterToolName[];
   runtime_context: RuntimeContext;
+  /** Structured retrieval plan from writer_retrieval_planner; steers the loop. */
+  retrieval_plan?: RetrievalPlan;
   executeTool(toolName: WriterToolName, toolCallId: string, args?: Record<string, unknown>): Promise<Record<string, unknown>>;
   onAgentEvent?(event: AgentEvent): Promise<void>;
 }
 
 export interface OrchestrateWritingBriefResult {
   writing_brief: string;
+  usage?: PiWriterUsage;
+}
+
+// ── Retrieval planning (P1, doc 41 §4.1) ────────────────────────────────
+
+/** One retrieval channel the planner can route a query through. */
+export type RetrievalQueryChannel = "keyed" | "hybrid" | "graph" | "manuscript";
+
+export interface RetrievalQuery {
+  channel: RetrievalQueryChannel;
+  text: string;
+  asset_types?: string[];
+  top_k?: number;
+}
+
+export interface RetrievalBudget {
+  max_context_tokens?: number;
+}
+
+/** The structured retrieval plan produced by writer_retrieval_planner. */
+export interface RetrievalPlan {
+  intent: string;
+  coverage: string[];
+  queries: RetrievalQuery[];
+  budget?: RetrievalBudget;
+}
+
+export interface PlanRetrievalRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  module_key: string;
+  channel_id: string;
+  model_id: string;
+  provider: string;
+  base_url: string;
+  mode: WriterRunInput["mode"];
+  instruction: string;
+  chapter_id?: string;
+  scene_id?: string;
+  selected_asset_ids: string[];
+  target_words?: number;
+  thinking_level?: WriterRunInput["options"]["thinking_level"];
+  apiKey: string;
+  settings: Record<string, unknown>;
+  provider_call_id?: string;
+  abort_signal?: AbortSignal;
+}
+
+export interface PlanRetrievalResult {
+  plan: RetrievalPlan;
   usage?: PiWriterUsage;
 }
 
@@ -254,6 +307,9 @@ export interface RecordWorkflowEventRequest {
     | "writer.tool.started"
     | "writer.tool.completed"
     | "writer.draft.saved"
+    | "writer.retrieval_plan.completed"
+    | "writer.retrieval_plan.degraded"
+    | "writer.retrieval_plan.skipped"
     | "writer.revision.proposed"
     | "writer.approval.required"
     | "writer.approval.resolved"
@@ -341,6 +397,7 @@ export interface PiWriterRunActivityDeps {
   loadProviderStageCheckpoint?(providerCallID: string): Promise<ProviderStageCheckpoint | undefined>;
   saveProviderStageCheckpoint?(checkpoint: ProviderStageCheckpoint): Promise<void>;
   resolveModuleBinding?(request: ResolveModuleBindingRequest): Promise<ResolvedLLMModule>;
+  planRetrieval?(request: PlanRetrievalRequest): Promise<PlanRetrievalResult>;
   orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
   executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;
@@ -862,6 +919,79 @@ async function runDualStagePiWriterActivity(
       worldline_path_ids: input.worldline_path_ids
     }, "full");
 
+    // P1 (doc 41 §4.1): an independent retrieval-planner stage runs BEFORE the
+    // orchestrator. It analyses the request and emits a structured RetrievalPlan
+    // that steers the orchestrator's search_assets calls. Planner failure degrades
+    // to free recall (never blocks writing) but is always recorded so the
+    // degradation is visible.
+    let retrievalPlan: RetrievalPlan | undefined;
+    let plannerUsage: PiWriterUsage | undefined;
+    if (deps.planRetrieval && deps.resolveModuleBinding) {
+      let planner: ResolvedLLMModule | undefined;
+      try {
+        planner = await resolveRequiredModule(deps, input, "writer_retrieval_planner");
+      } catch (error) {
+        await recordWorkflow("writer.retrieval_plan.skipped", {
+          reason: errorCode(error) === "LLM_MODULE_UNBOUND" ? "planner_unbound" : "planner_binding_failed"
+        }, "retrieval_plan:skipped");
+      }
+      if (planner) {
+        try {
+          const plannerCall = await executeLLMStage(
+            deps,
+            input,
+            planner,
+            "planner",
+            0,
+            async (apiKey, providerCallID) => {
+              await recordTrace(planner!.module_key, "llm_call_started", resolutionSummary(planner!));
+              const result = await deps.planRetrieval!({
+                tenant_id: input.tenant_id,
+                project_id: input.project_id,
+                run_id: input.run_id,
+                module_key: planner!.module_key,
+                channel_id: planner!.channel_id,
+                model_id: planner!.model_id,
+                provider: planner!.provider,
+                base_url: planner!.base_url,
+                mode: input.mode,
+                instruction: input.instruction,
+                chapter_id: input.chapter_id,
+                scene_id: input.scene_id,
+                selected_asset_ids: input.selected_asset_ids,
+                target_words: input.options.target_words,
+                thinking_level: input.options.thinking_level,
+                apiKey,
+                settings: planner!.settings,
+                provider_call_id: providerCallID,
+                abort_signal: deps.cancellationSignal?.()
+              });
+              return result;
+            }
+          );
+          retrievalPlan = plannerCall.result.plan;
+          plannerUsage = plannerCall.result.usage;
+          await recordTrace(planner.module_key, "llm_call_completed", {
+            intent: retrievalPlan.intent,
+            coverage: retrievalPlan.coverage,
+            query_count: retrievalPlan.queries.length
+          }, "summary", "completed");
+          await recordWorkflow("writer.retrieval_plan.completed", {
+            intent: retrievalPlan.intent,
+            coverage: retrievalPlan.coverage,
+            queries: retrievalPlan.queries,
+            budget: retrievalPlan.budget
+          }, "retrieval_plan:completed");
+        } catch (error) {
+          await recordTrace("writer_retrieval_planner", "error", { message: errorMessageText(error) }, "summary", "failed");
+          await recordWorkflow("writer.retrieval_plan.degraded", {
+            reason: "planner_call_failed",
+            message: errorMessageText(error)
+          }, "retrieval_plan:degraded");
+        }
+      }
+    }
+
     const orchestrator = await resolveRequiredModule(deps, input, "writer_orchestrator");
     if (!orchestrator.supports_tools) {
       throw runtimeFailure(
@@ -869,6 +999,7 @@ async function runDualStagePiWriterActivity(
         "writer_orchestrator binding must support tools",
       );
     }
+
     const orchestratorCall = await executeLLMStage(
       deps,
       input,
@@ -900,6 +1031,7 @@ async function runDualStagePiWriterActivity(
         worldline_path_ids: input.worldline_path_ids,
         tool_execution: input.options.tool_execution,
         tool_names: toolNames,
+        retrieval_plan: retrievalPlan,
         runtime_context: {
           ...runtimeContext,
           permissions: { tools: toolNames, can_write_draft: false }
@@ -1217,7 +1349,7 @@ async function executeLLMStage<T extends { usage?: PiWriterUsage }>(
   deps: PiWriterRunActivityDeps,
   input: WriterRunInput,
   resolution: ResolvedLLMModule,
-  stage: "orchestrator" | "composer",
+  stage: "orchestrator" | "composer" | "planner",
   callIndex: number,
   execute: (apiKey: string, providerCallID: string) => Promise<T>
 ): Promise<ExecutedLLMStage<T>> {
@@ -1492,6 +1624,10 @@ function errorCode(error: unknown): string {
   if (!(error instanceof Error)) return "";
   const match = /^([A-Z][A-Z0-9_]+):/.exec(error.message);
   return match?.[1] ?? "";
+}
+
+function errorMessageText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function combineUsage(first?: PiWriterUsage, second?: PiWriterUsage): PiWriterUsage {
