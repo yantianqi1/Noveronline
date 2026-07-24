@@ -596,6 +596,93 @@ describe("runPiWriterRunActivity", () => {
     expect(Number(trimEvent?.payload.dropped_items)).toBeGreaterThan(0);
   });
 
+  it("runs the consistency check and surfaces violations without failing the run", async () => {
+    const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const canonUsed: string[] = [];
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+      }),
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      executeWriterTool: async () => ({}),
+      orchestrateWritingBrief: async () => ({ writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      composeDraft: async () => ({ content: "沈翠花一剑斩了师父。", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      loadConsistencyCanon: async () => ({
+        canon: [
+          { kind: "world_rule", label: "师父不可杀", text: "师门戒律:不得伤害师长。" },
+          { kind: "character_state", label: "师父", text: "健在,掌门。" }
+        ]
+      }),
+      checkConsistency: async (request) => {
+        canonUsed.push(...request.canon.map((c) => c.label));
+        return {
+          violations: [{ canon_label: "师父不可杀", conflict: "草稿写沈翠花斩了师父", severity: "major" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 }
+        };
+      },
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type, payload: request.payload }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    // Run still completes; the violation is surfaced as an event, not an error.
+    expect(result).toMatchObject({ status: "completed", draft_id: "draft-1" });
+    expect(canonUsed).toContain("师父不可杀");
+    const violationEvent = workflows.find((w) => w.type === "writer.consistency.violations");
+    expect(violationEvent?.payload.major_count).toBe(1);
+    expect((violationEvent?.payload.violations as unknown[]).length).toBe(1);
+  });
+
+  it("skips the consistency check visibly when the checker is unbound", async () => {
+    const workflows: Array<{ type: string }> = [];
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => {
+        if (module_key === "writer_consistency") throw new Error("LLM_MODULE_UNBOUND: writer_consistency module is not bound");
+        return {
+          module_key,
+          channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+          base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+          supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+        };
+      },
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      executeWriterTool: async () => ({}),
+      orchestrateWritingBrief: async () => ({ writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      loadConsistencyCanon: async () => { throw new Error("should not be called"); },
+      checkConsistency: async () => { throw new Error("should not be called"); },
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed" });
+    expect(workflows.some((w) => w.type === "writer.consistency.skipped")).toBe(true);
+  });
+
   it("fails the dual-stage run explicitly when writer_orchestrator is unbound", async () => {
     const activity = createPiWriterRunActivity({
       resolveModuleBinding: async ({ module_key }) => { throw new Error(`LLM_MODULE_UNBOUND: ${module_key} module is not bound`); },

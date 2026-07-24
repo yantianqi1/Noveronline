@@ -5,7 +5,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 
 import type { WriterSelection } from "@/lib/api/writer-client";
-import type { RunCitation, RunStep } from "@/lib/api/writer-run";
+import type { ConsistencyViolation, RunCitation, RunStep } from "@/lib/api/writer-run";
 
 import { useWriterRun, type LiveRun } from "./use-writer-run";
 
@@ -164,6 +164,7 @@ function TaskTurn({
   return (
     <div className="flex flex-col gap-3">
       <TaskCard liveRun={liveRun} onCancel={() => onCancelRun(runId)} />
+      <ConsistencyNotice violations={state.consistencyViolations} />
       <CitationsRow citations={state.citations} degraded={state.citationsDegraded} />
       {candidate ? (
         <CandidateCard
@@ -172,6 +173,36 @@ function TaskTurn({
           onAdopt={() => candidate.draftId && onAdopt(runId, candidate.draftId)}
         />
       ) : null}
+    </div>
+  );
+}
+
+/** A canon-contradiction warning — surfaced, never silent (doc 41 §4.7). */
+function ConsistencyNotice({ violations }: { violations: ConsistencyViolation[] }) {
+  if (violations.length === 0) return null;
+  const major = violations.filter((v) => v.severity === "major").length;
+  return (
+    <div
+      role="alert"
+      className="rounded-[10px] border border-gold/50 bg-gold/10 px-3 py-2.5"
+      aria-label="一致性提醒"
+    >
+      <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+        <span className="grid size-4 place-items-center rounded-full bg-gold text-[10px] text-white">!</span>
+        与设定可能有出入{major > 0 ? ` · ${major} 处较严重` : ""}
+      </div>
+      <ul className="mt-1.5 flex flex-col gap-1">
+        {violations.slice(0, 4).map((v, i) => (
+          <li key={i} className="text-[11.5px] leading-relaxed text-muted">
+            <span className="text-ink/80">{v.canonLabel}</span>
+            <span className="mx-1">·</span>
+            {v.conflict}
+          </li>
+        ))}
+        {violations.length > 4 ? (
+          <li className="text-[11px] text-muted">另 {violations.length - 4} 处…</li>
+        ) : null}
+      </ul>
     </div>
   );
 }

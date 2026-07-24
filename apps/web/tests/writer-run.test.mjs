@@ -139,3 +139,34 @@ test("search_assets keyword fallback marks citationsDegraded", () => {
   assert.equal(state.citationsDegraded, true);
   assert.equal(state.citations.length, 1);
 });
+
+test("consistency violation events are collected for the author notice", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.token", { token: "沈翠花一剑斩了师父。" }),
+    ev("writer.consistency.violations", {
+      count: 2,
+      major_count: 1,
+      violations: [
+        { canon_label: "师父不可杀", conflict: "草稿写沈翠花斩了师父", severity: "major" },
+        { canon_label: "云峰已断臂", conflict: "草稿写云峰挥剑", severity: "minor" },
+      ],
+    }),
+    ev("writer.draft.saved", { draft_id: "d1" }),
+    ev("writer.run.completed"),
+  ]);
+  assert.equal(state.phase, "completed");
+  assert.equal(state.consistencyViolations.length, 2);
+  assert.equal(state.consistencyViolations[0].canonLabel, "师父不可杀");
+  assert.equal(state.consistencyViolations[0].severity, "major");
+  assert.equal(state.consistencyViolations[1].severity, "minor");
+});
+
+test("a clean run has no consistency violations", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.consistency.clean", { canon_count: 5 }),
+    ev("writer.run.completed"),
+  ]);
+  assert.equal(state.consistencyViolations.length, 0);
+});

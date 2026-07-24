@@ -31,6 +31,13 @@ export type RunCitation = {
   channel: string;
 };
 
+/** A canon contradiction the consistency checker found in the draft. */
+export type ConsistencyViolation = {
+  canonLabel: string;
+  conflict: string;
+  severity: "minor" | "major";
+};
+
 export type WriterRunState = {
   phase: RunPhase;
   /** Human-legible current-step label, author-facing (no UUID/tool ids). */
@@ -43,6 +50,8 @@ export type WriterRunState = {
   citations: RunCitation[];
   /** True when semantic recall degraded to keyword-only (embeddings unavailable). */
   citationsDegraded: boolean;
+  /** Post-generation consistency violations (canon contradictions), if any. */
+  consistencyViolations: ConsistencyViolation[];
   /** Concatenated candidate prose from writer.token events. */
   candidateText: string;
   /** Set when the run saved a draft (writer.draft.saved). */
@@ -66,6 +75,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
   const citations: RunCitation[] = [];
   const seenCitationIds = new Set<string>();
   let citationsDegraded = false;
+  const consistencyViolations: ConsistencyViolation[] = [];
 
   // Process in stream order.
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
@@ -121,6 +131,21 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
       case "writer.draft.saved":
         if (typeof payload.draft_id === "string") draftId = payload.draft_id;
         break;
+      case "writer.consistency.violations": {
+        const items = Array.isArray(payload.violations) ? payload.violations : [];
+        for (const item of items) {
+          const v = item as Record<string, unknown>;
+          const label = typeof v.canon_label === "string" ? v.canon_label : "";
+          const conflict = typeof v.conflict === "string" ? v.conflict : "";
+          if (!label || !conflict) continue;
+          consistencyViolations.push({
+            canonLabel: label,
+            conflict,
+            severity: v.severity === "major" ? "major" : "minor",
+          });
+        }
+        break;
+      }
       case "writer.run.completed":
         phase = "completed";
         break;
@@ -144,6 +169,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
     steps,
     citations,
     citationsDegraded,
+    consistencyViolations,
     candidateText,
     draftId,
     terminalMessage,

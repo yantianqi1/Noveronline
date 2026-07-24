@@ -59,6 +59,7 @@ export async function createWorkerActivityBundle(options: WorkerActivityBundleOp
     deps.orchestrateWritingBrief = writerExecution.orchestrateWritingBrief;
     deps.planRetrieval = writerExecution.planRetrieval;
     deps.rerankRecall = writerExecution.rerankRecall;
+    deps.checkConsistency = writerExecution.checkConsistency;
     deps.composeDraft = writerExecution.composeDraft;
   }
   return {

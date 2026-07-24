@@ -93,6 +93,7 @@ export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions)
   return {
     resolveModuleBinding: async (request) => resolveModuleBinding(options.db, request),
     executeWriterTool: async (request) => executeWriterTool(options, request),
+    loadConsistencyCanon: async (request) => loadConsistencyCanon(options, request),
     resolveCredential: async (request) => resolveCredential(options, request),
     reserveLLMQuota: async (request) => quota.reserve(request),
     finalizeLLMQuota: async (request) => quota.finalize(request),
@@ -907,6 +908,61 @@ function gatedResult(currentChapterOrder: number | null): Record<string, unknown
 }
 
 const WRITER_RETRIEVAL_RERANK_MODULE_KEY = "writer_retrieval_rerank";
+
+// Load the canon a draft is checked against for consistency (doc 41 §4.7):
+// hard world rules + current character states, gated to author-sovereign canon
+// and the same spoiler gate as recall (never check against unrevealed canon).
+async function loadConsistencyCanon(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest
+): Promise<{ canon: import("../activities/pi-writer-activities.js").ConsistencyCanonItem[] }> {
+  const db = options.db;
+  const currentChapterOrder = await resolveCurrentChapterOrder(db, request);
+  const ruleRows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT title, COALESCE(NULLIF(content_text, ''), summary, title) AS rule_text
+         FROM assets
+        WHERE tenant_id = $1 AND project_id = $2 AND enabled = TRUE
+          AND lifecycle = ANY($3::text[])
+          AND asset_type IN ('world_rule', 'worldview')
+          AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $4)
+        ORDER BY pinned DESC, updated_at DESC
+        LIMIT 40`,
+      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder]
+    )
+  ).rows;
+  const characterRows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT canonical_name, COALESCE(state_summary, '') AS state_summary
+         FROM entities
+        WHERE tenant_id = $1 AND project_id = $2 AND entity_type = 'character'
+        ORDER BY updated_at DESC
+        LIMIT 40`,
+      [request.tenant_id, request.project_id]
+    )
+  ).rows;
+  const canon: import("../activities/pi-writer-activities.js").ConsistencyCanonItem[] = [];
+  for (const row of ruleRows) {
+    const text = typeof row.rule_text === "string" ? row.rule_text.trim() : "";
+    if (!text) continue;
+    canon.push({
+      kind: "world_rule",
+      label: typeof row.title === "string" && row.title.trim() ? row.title.trim() : text.slice(0, 24),
+      text: text.slice(0, 400)
+    });
+  }
+  for (const row of characterRows) {
+    const name = typeof row.canonical_name === "string" ? row.canonical_name.trim() : "";
+    const state = typeof row.state_summary === "string" ? row.state_summary.trim() : "";
+    if (!name || !state) continue;
+    canon.push({ kind: "character_state", label: name, text: state.slice(0, 400) });
+  }
+  return { canon };
+}
 
 // Build a rerank callback bound to this run's credential/binding, or undefined
 // when no rerank execution is wired. The callback resolves the writer_retrieval_rerank

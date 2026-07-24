@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export type PiWriterProviderModule = string;
-export type PiWriterProviderStage = "orchestrator" | "composer" | "planner";
+export type PiWriterProviderStage = "orchestrator" | "composer" | "planner" | "rerank" | "consistency";
 export type PricingStatus = "billing_ready" | "pricing_unavailable";
 
 export interface ProviderCallIdentityInput {

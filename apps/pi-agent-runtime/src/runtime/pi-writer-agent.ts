@@ -9,8 +9,11 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { Object as ObjectSchema } from "typebox";
 
 import type {
+  CheckConsistencyRequest,
+  CheckConsistencyResult,
   ComposeDraftRequest,
   ComposeDraftResult,
+  ConsistencyViolation,
   OrchestrateWritingBriefRequest,
   OrchestrateWritingBriefResult,
   PlanRetrievalRequest,
@@ -169,6 +172,27 @@ export function createPiWriterExecution() {
         ranked_ids: parseRerankIds(content, request.candidates),
         usage: messageUsage(message)
       } satisfies RerankRecallResult;
+    },
+    checkConsistency: async (request: CheckConsistencyRequest) => {
+      const runtime = createRuntime(request);
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: consistencySystemPrompt(),
+          model: runtime.model,
+          thinkingLevel: request.thinking_level ?? "off"
+        },
+        streamFn: runtime.streamFn,
+        getApiKey: (provider) => provider === runtime.providerId ? request.apiKey : undefined,
+        sessionId: request.run_id
+      });
+      await promptWithAbort(agent, consistencyPrompt(request), request.abort_signal);
+      const message = finalAssistantMessage(agent.state.messages);
+      const content = assistantText(message);
+      if (!content.trim()) throw new Error("Pi writer consistency checker returned an empty verdict");
+      return {
+        violations: parseConsistencyViolations(content, request.canon),
+        usage: messageUsage(message)
+      } satisfies CheckConsistencyResult;
     }
   };
 }
@@ -305,6 +329,65 @@ function parseRerankIds(content: string, candidates: RerankRecallRequest["candid
   return ranked;
 }
 
+// ── Consistency check (P2, doc 41 §4.7) ──────────────────────────────────
+
+function consistencySystemPrompt(): string {
+  return [
+    "You are the MiroFish writer consistency checker. Given a draft and the canon it must respect (world rules and character states), find contradictions — 'broken canon' (吃书).",
+    "Respond with ONLY a JSON object — no prose, no markdown — of the form:",
+    '{"violations": [{"canon_label": "<the canon fact>", "conflict": "<what the draft wrongly claims>", "severity": "minor|major"}]}',
+    "Only report genuine contradictions, not stylistic choices or things canon is silent about. An empty violations array means the draft is consistent."
+  ].join(" ");
+}
+
+function consistencyPrompt(request: CheckConsistencyRequest): string {
+  return JSON.stringify({
+    task: "Find contradictions between this draft and canon.",
+    draft: request.draft_text,
+    canon: request.canon.map((c) => ({ kind: c.kind, label: c.label, text: c.text }))
+  });
+}
+
+/** Parse + validate the consistency verdict against the supplied canon labels. */
+function parseConsistencyViolations(
+  content: string,
+  canon: CheckConsistencyRequest["canon"]
+): ConsistencyViolation[] {
+  const cleaned = content.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("consistency checker returned no JSON object");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    throw new Error("consistency checker returned invalid JSON");
+  }
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  if (!Array.isArray(record.violations)) return [];
+  const knownLabels = new Set(canon.map((c) => c.label));
+  const violations: ConsistencyViolation[] = [];
+  for (const entry of record.violations) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const v = entry as Record<string, unknown>;
+    const label = typeof v.canon_label === "string" ? v.canon_label.trim() : "";
+    const conflict = typeof v.conflict === "string" ? v.conflict.trim() : "";
+    if (!label || !conflict) continue;
+    violations.push({
+      canon_label: label,
+      conflict,
+      severity: v.severity === "major" ? "major" : "minor"
+    });
+    // Keep the check honest: cap reported violations and prefer known canon labels.
+    if (violations.length >= 20) break;
+  }
+  // Stable order: known-canon violations first, then by severity.
+  return violations.sort((a, b) =>
+    Number(knownLabels.has(b.canon_label)) - Number(knownLabels.has(a.canon_label)) ||
+    (a.severity === b.severity ? 0 : a.severity === "major" ? -1 : 1)
+  );
+}
+
 function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments | typeof fuseRecallArguments> {
   const parameters =
     name === "search_assets" ? searchAssetsArguments
@@ -328,7 +411,7 @@ function writerTool(name: WriterToolName, request: OrchestrateWritingBriefReques
   };
 }
 
-function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest) {
+function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest | CheckConsistencyRequest) {
   const parentProviderCallID = request.provider_call_id?.trim();
   if (!parentProviderCallID) {
     throw new Error("LLM_PROVIDER_CALL_ID_INVALID: Pi writer provider call identity is required");
@@ -358,7 +441,7 @@ function createRuntime(request: ComposeDraftRequest | OrchestrateWritingBriefReq
   return { providerId, model: resolved, models, streamFn };
 }
 
-function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest, providerId: string): Model<"openai-completions"> {
+function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest | CheckConsistencyRequest, providerId: string): Model<"openai-completions"> {
   return {
     id: request.model_id,
     name: request.model_id,
@@ -379,7 +462,7 @@ function openAICompatibleModel(request: ComposeDraftRequest | OrchestrateWriting
   };
 }
 
-function providerRequestHeaders(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest): Record<string, string> {
+function providerRequestHeaders(request: ComposeDraftRequest | OrchestrateWritingBriefRequest | PlanRetrievalRequest | RerankRecallRequest | CheckConsistencyRequest): Record<string, string> {
   const providerCallID = request.provider_call_id?.trim();
   if (!providerCallID) {
     throw new Error("LLM_PROVIDER_CALL_ID_INVALID: Pi writer provider call identity is required");

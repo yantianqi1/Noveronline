@@ -243,6 +243,46 @@ export interface RerankRecallResult {
   usage?: PiWriterUsage;
 }
 
+// ── Consistency check (P2, doc 41 §4.7) ──────────────────────────────────
+
+/** One canon fact the draft must not contradict (rule or character state). */
+export interface ConsistencyCanonItem {
+  kind: "world_rule" | "character_state";
+  label: string;
+  text: string;
+}
+
+export interface ConsistencyViolation {
+  /** The canon label the draft contradicts. */
+  canon_label: string;
+  /** What the draft claims that conflicts. */
+  conflict: string;
+  severity: "minor" | "major";
+}
+
+export interface CheckConsistencyRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  module_key: string;
+  channel_id: string;
+  model_id: string;
+  provider: string;
+  base_url: string;
+  draft_text: string;
+  canon: ConsistencyCanonItem[];
+  thinking_level?: WriterRunInput["options"]["thinking_level"];
+  apiKey: string;
+  settings: Record<string, unknown>;
+  provider_call_id?: string;
+  abort_signal?: AbortSignal;
+}
+
+export interface CheckConsistencyResult {
+  violations: ConsistencyViolation[];
+  usage?: PiWriterUsage;
+}
+
 export interface AcquireLLMLeaseRequest {
   tenant_id: string;
   project_id: string;
@@ -355,6 +395,10 @@ export interface RecordWorkflowEventRequest {
     | "writer.retrieval_plan.degraded"
     | "writer.retrieval_plan.skipped"
     | "writer.context_budget.trimmed"
+    | "writer.consistency.violations"
+    | "writer.consistency.clean"
+    | "writer.consistency.skipped"
+    | "writer.consistency.degraded"
     | "writer.revision.proposed"
     | "writer.approval.required"
     | "writer.approval.resolved"
@@ -444,6 +488,9 @@ export interface PiWriterRunActivityDeps {
   resolveModuleBinding?(request: ResolveModuleBindingRequest): Promise<ResolvedLLMModule>;
   planRetrieval?(request: PlanRetrievalRequest): Promise<PlanRetrievalResult>;
   rerankRecall?(request: RerankRecallRequest): Promise<RerankRecallResult>;
+  checkConsistency?(request: CheckConsistencyRequest): Promise<CheckConsistencyResult>;
+  /** Load the canon (world rules + character states) a draft is checked against. */
+  loadConsistencyCanon?(request: ExecuteWriterToolRequest): Promise<{ canon: ConsistencyCanonItem[] }>;
   orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
   executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;
@@ -1190,6 +1237,74 @@ async function runDualStagePiWriterActivity(
     });
     await recordTrace(composer.module_key, "assistant_message", { content: draft.content }, "full");
 
+    // P2 (doc 41 §4.7): post-generation consistency check — the recall → compose →
+    // verify loop. The draft is checked against canon (world rules + character
+    // states); violations surface as an explicit event (never silent), and the run
+    // still completes — the author decides whether to adopt. Checker unbound skips
+    // visibly; checker failure degrades visibly.
+    if (deps.checkConsistency && deps.loadConsistencyCanon && deps.resolveModuleBinding) {
+      let checker: ResolvedLLMModule | undefined;
+      try {
+        checker = await resolveRequiredModule(deps, input, "writer_consistency");
+      } catch {
+        await recordWorkflow("writer.consistency.skipped", { reason: "checker_unbound" }, "consistency:skipped");
+      }
+      if (checker) {
+        try {
+          const { canon } = await deps.loadConsistencyCanon({
+            tenant_id: input.tenant_id,
+            project_id: input.project_id,
+            run_id: input.run_id,
+            chapter_id: input.chapter_id,
+            scene_id: input.scene_id,
+            selected_asset_ids: input.selected_asset_ids,
+            graph_node_ids: input.graph_node_ids,
+            worldline_path_ids: input.worldline_path_ids,
+            tool_name: "query_world_rules"
+          });
+          if (canon.length > 0) {
+            const checkCall = await executeLLMStage(deps, input, checker, "consistency", 0, async (apiKey, providerCallID) => {
+              await recordTrace(checker!.module_key, "llm_call_started", resolutionSummary(checker!));
+              return deps.checkConsistency!({
+                tenant_id: input.tenant_id,
+                project_id: input.project_id,
+                run_id: input.run_id,
+                module_key: checker!.module_key,
+                channel_id: checker!.channel_id,
+                model_id: checker!.model_id,
+                provider: checker!.provider,
+                base_url: checker!.base_url,
+                draft_text: draft.content,
+                canon,
+                thinking_level: input.options.thinking_level,
+                apiKey,
+                settings: checker!.settings,
+                provider_call_id: providerCallID,
+                abort_signal: deps.cancellationSignal?.()
+              });
+            });
+            const violations = checkCall.result.violations;
+            const major = violations.filter((v) => v.severity === "major");
+            await recordTrace(checker.module_key, "llm_call_completed", { violations: violations.length, major: major.length }, "summary", "completed");
+            if (violations.length > 0) {
+              await recordWorkflow("writer.consistency.violations", {
+                count: violations.length,
+                major_count: major.length,
+                violations: violations.map((v) => ({ canon_label: v.canon_label, conflict: v.conflict, severity: v.severity }))
+              }, "consistency:violations");
+            } else {
+              await recordWorkflow("writer.consistency.clean", { canon_count: canon.length }, "consistency:clean");
+            }
+          } else {
+            await recordWorkflow("writer.consistency.skipped", { reason: "no_canon" }, "consistency:skipped");
+          }
+        } catch (error) {
+          await recordTrace("writer_consistency", "error", { message: errorMessageText(error) }, "summary", "failed");
+          await recordWorkflow("writer.consistency.degraded", { message: errorMessageText(error) }, "consistency:degraded");
+        }
+      }
+    }
+
     if (input.mode === "revise" && input.options.revise) {
       await recordWorkflow("writer.revision.proposed", {
         block_id: input.options.revise.block_id,
@@ -1484,7 +1599,7 @@ async function executeLLMStage<T extends { usage?: PiWriterUsage }>(
   deps: PiWriterRunActivityDeps,
   input: WriterRunInput,
   resolution: ResolvedLLMModule,
-  stage: "orchestrator" | "composer" | "planner",
+  stage: "orchestrator" | "composer" | "planner" | "rerank" | "consistency",
   callIndex: number,
   execute: (apiKey: string, providerCallID: string) => Promise<T>
 ): Promise<ExecutedLLMStage<T>> {
