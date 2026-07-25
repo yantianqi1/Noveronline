@@ -155,6 +155,11 @@ export function toResponse(result: ProxyResult): Response {
   // one of these statuses, which would turn a successful delete into a 500.
   if (result.status === 204 || result.status === 205 || result.status === 304) {
     headers.delete("Content-Type");
+    // A bare 204 with no declared length can leave undici waiting on a body
+    // that never arrives and surface as net::ERR_ABORTED in the browser, even
+    // though the mutation already succeeded. Pin an explicit empty length so
+    // the response terminates cleanly and the client treats it as success.
+    headers.set("Content-Length", "0");
     return new Response(null, { status: result.status, headers });
   }
   return new Response(result.body, { status: result.status, headers });

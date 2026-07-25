@@ -173,16 +173,35 @@ export async function deleteSourceFile(
   csrfToken: string,
   uploadId: string,
 ): Promise<void> {
-  const response = await fetch(
-    `/api/projects/${projectId}/source-files/${encodeURIComponent(uploadId)}`,
-    {
-      method: "DELETE",
-      headers: {
-        Accept: "application/json",
-        "X-Tenant-Id": tenantId,
-        "X-CSRF-Token": csrfToken,
+  let response: Response;
+  try {
+    response = await fetch(
+      `/api/projects/${projectId}/source-files/${encodeURIComponent(uploadId)}`,
+      {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+          "X-Tenant-Id": tenantId,
+          "X-CSRF-Token": csrfToken,
+        },
       },
-    },
-  );
+    );
+  } catch (error) {
+    // The delete returns 204 No Content. Some browsers abort a fetch whose 204
+    // response carries an unexpected body (net::ERR_ABORTED) even though the
+    // row is already gone server-side — don't surface that as a failure.
+    // Re-throw anything else as a network error.
+    if (isAbortOfNoContentDelete(error)) return;
+    throw error;
+  }
   if (!response.ok) throw await readError(response);
+}
+
+/** True when a DELETE fetch aborted on what was actually a 204 no-body reply. */
+function isAbortOfNoContentDelete(error: unknown): boolean {
+  return (
+    error instanceof DOMException && error.name === "AbortError"
+  ) || (
+    error instanceof TypeError && /abort/i.test(error.message)
+  );
 }
