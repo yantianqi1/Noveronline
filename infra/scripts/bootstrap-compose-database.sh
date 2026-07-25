@@ -290,6 +290,43 @@ migration_marker_present() {
 	      AND has_table_privilege('mirofish_app', 'worldline_goal_starts', 'SELECT')
 	      AND has_table_privilege('mirofish_app', 'worldline_goal_starts', 'INSERT')
 	      AND has_table_privilege('mirofish_app', 'worldline_goal_starts', 'UPDATE')" ;;
+	    0023_*) marker="
+	      to_regclass('public.manuscript_block_embeddings') IS NOT NULL
+	      AND to_regclass('public.idx_manuscript_block_embeddings_reindex_batch') IS NOT NULL
+	      AND EXISTS (
+	        SELECT 1 FROM pg_policies
+	        WHERE schemaname = 'public'
+	          AND tablename = 'manuscript_block_embeddings'
+	          AND policyname = 'tenant_isolation_manuscript_block_embeddings'
+	      )
+	      AND EXISTS (
+	        SELECT 1 FROM pg_class
+	        WHERE relname = 'manuscript_block_embeddings'
+	          AND relrowsecurity AND relforcerowsecurity
+	      )" ;;
+	    0024_*) marker="
+	      to_regclass('public.idx_assets_reveal_gate') IS NOT NULL
+	      AND EXISTS (
+	        SELECT 1 FROM information_schema.columns
+	        WHERE table_schema = 'public'
+	          AND table_name = 'assets'
+	          AND column_name = 'reveal_after_chapter_order'
+	      )" ;;
+	    0025_*) marker="
+	      to_regclass('public.idx_assets_always_on') IS NOT NULL
+	      AND EXISTS (
+	        SELECT 1 FROM information_schema.columns
+	        WHERE table_schema = 'public'
+	          AND table_name = 'assets'
+	          AND column_name = 'always_on'
+	      )" ;;
+	    0026_*) marker="
+	      EXISTS (
+	        SELECT 1 FROM information_schema.columns
+	        WHERE table_schema = 'public'
+	          AND table_name = 'entities'
+	          AND column_name = 'description'
+	      )" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]
