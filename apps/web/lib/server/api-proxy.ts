@@ -150,6 +150,13 @@ export function toResponse(result: ProxyResult): Response {
   for (const cookie of result.setCookies) {
     headers.append("set-cookie", cookie);
   }
+  // 204/205/304 carry no body by definition — undici throws "Invalid response
+  // status code" if you hand `new Response()` a (even empty-string) body with
+  // one of these statuses, which would turn a successful delete into a 500.
+  if (result.status === 204 || result.status === 205 || result.status === 304) {
+    headers.delete("Content-Type");
+    return new Response(null, { status: result.status, headers });
+  }
   return new Response(result.body, { status: result.status, headers });
 }
 
