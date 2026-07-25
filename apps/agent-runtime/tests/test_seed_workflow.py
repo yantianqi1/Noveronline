@@ -2153,6 +2153,7 @@ def test_llm_facility_archive_candidate_runner_persists_schema_valid_archive_ass
         "candidate_count": 2,
         "archive_entity_candidate_count": 1,
         "memory_candidate_count": 1,
+        "batch_count": 1,
     }
     assert resolver.calls == ["narrative_archives"]
     assert credentials.calls == ["channel-archive"]
@@ -2323,6 +2324,124 @@ def test_llm_facility_archive_candidate_runner_fails_closed_when_module_unbound_
     assert credentials.calls == []
     assert chat_client.calls == []
     assert writer.calls == []
+
+
+def _archive_response_for(batch_names: list[str]) -> dict[str, object]:
+    return {
+        "archive_entities": [
+            {
+                "title": f"{name} 档案",
+                "summary": f"{name} 的档案摘要。",
+                "category": "character",
+                "tags": ["seed"],
+                "memories": [{"memory_type": "note", "summary": f"{name} 的记忆。"}],
+            }
+            for name in batch_names
+        ]
+    }
+
+
+def _batched_archive_runner(
+    *,
+    canonical_names: list[str],
+    batch_responder: object | None = None,
+    batch_size: int = 5,
+) -> tuple[LLMFacilityArchiveCandidateRunner, RecordingJSONChatClient, RecordingArchiveCandidateWriter]:
+    resolution = ModuleBindingResolution(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        module_key="narrative_archives",
+        channel_id="channel-archive",
+        model_id="model-archive",
+        provider="openai-compatible",
+        base_url="https://llm.example/v1",
+        credential_ref="channel-archive",
+        supports_json=True,
+        settings={"batch_size": batch_size},
+    )
+    writer = RecordingArchiveCandidateWriter()
+    chat_client = (
+        RecordingJSONChatClient(batch_responder=batch_responder)
+        if batch_responder is not None
+        else RecordingJSONChatClient(response_json=_archive_response_for(canonical_names))
+    )
+    loader = RecordingAgentProfileContextLoader(_entity_loader_payload(canonical_names))
+    runner = LLMFacilityArchiveCandidateRunner(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-archive"),
+        chat_client=chat_client,
+        archive_candidate_writer=writer,
+        archive_context_loader=loader,
+    )
+    return runner, chat_client, writer
+
+
+def test_archive_candidate_runner_batches_and_persists_each_batch_progressively() -> None:
+    names = [f"角色{index:02d}" for index in range(12)]
+    runner, chat_client, writer = _batched_archive_runner(
+        canonical_names=names,
+        batch_responder=lambda batch_names, _call: _archive_response_for(batch_names or []),
+        batch_size=5,
+    )
+
+    result = runner.generate(context=_context(), module_key="narrative_archives")
+
+    assert result["status"] == "completed"
+    assert result["batch_count"] == 3  # ceil(12 / 5)
+    assert result["expected_entity_count"] == 12
+    assert result["archive_entity_candidate_count"] == 12
+    # Per-batch writes (progressive asset growth) rather than one end-of-stage write.
+    assert len(writer.calls) == 3
+    assert len(chat_client.calls) == 3
+    # entity_offset keeps source_refs unique across batches.
+    offsets = [call["entity_offset"] for call in writer.calls]
+    assert offsets == [0, 5, 10]
+
+
+def test_archive_candidate_runner_skips_irrecoverable_batch_without_failing() -> None:
+    names = ["甲", "乙", "丙", "丁"]
+
+    def responder(batch_names: list[str] | None, _call: int) -> dict[str, object]:
+        batch = batch_names or []
+        if "丙" in batch:
+            raise LLMFacilityError("LLM_PROVIDER_ERROR", "transient provider outage")
+        return _archive_response_for(batch)
+
+    runner, _chat_client, writer = _batched_archive_runner(
+        canonical_names=names,
+        batch_responder=responder,
+        batch_size=2,
+    )
+
+    result = runner.generate(context=_context(), module_key="narrative_archives")
+
+    # The 丙-containing batch is skipped after recovery; the rest persist.
+    assert result["status"] == "completed"
+    persisted_titles = [
+        entity["title"]
+        for call in writer.calls
+        for entity in call["archive_entities"]
+    ]
+    assert any("甲" in title for title in persisted_titles)
+    assert all("丙" not in title for title in persisted_titles)
+
+
+def test_archive_candidate_runner_includes_source_context_in_batch_messages() -> None:
+    names = ["林舟", "陆晚"]
+    runner, chat_client, _writer = _batched_archive_runner(
+        canonical_names=names,
+        batch_responder=lambda batch_names, _call: _archive_response_for(batch_names or []),
+        batch_size=5,
+    )
+
+    result = runner.generate(context=_context(), module_key="narrative_archives")
+
+    assert result["status"] == "completed"
+    user_message = json.loads(chat_client.calls[0]["messages"][1]["content"])
+    assert user_message["batch_entities"] == ["林舟", "陆晚"]
+    assert "source_context" in user_message
+    entity_names = [e["canonical_name"] for e in user_message["source_context"]["canon"]["entities"]]
+    assert entity_names == ["林舟", "陆晚"]
 
 
 def test_index_assets_activity_fails_closed_without_indexer() -> None:
@@ -3669,6 +3788,7 @@ class RecordingArchiveCandidateWriter:
         archive_candidate_batch_id: str,
         model_id: str | None,
         archive_entities: list[dict[str, object]],
+        entity_offset: int = 0,
     ) -> dict[str, object]:
         self.calls.append(
             {
@@ -3676,6 +3796,7 @@ class RecordingArchiveCandidateWriter:
                 "archive_candidate_batch_id": archive_candidate_batch_id,
                 "model_id": model_id,
                 "archive_entities": archive_entities,
+                "entity_offset": entity_offset,
             }
         )
         if self.error is not None:

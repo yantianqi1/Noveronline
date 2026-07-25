@@ -523,6 +523,7 @@ class ArchiveCandidateWriter(Protocol):
         archive_candidate_batch_id: str,
         model_id: str | None,
         archive_entities: list[dict[str, Any]],
+        entity_offset: int = 0,
     ) -> dict[str, Any]:
         """Persist archive entity and memory candidates for explicit review."""
 
@@ -2719,11 +2720,13 @@ class LLMFacilityArchiveCandidateRunner:
         credential_provider: Any,
         chat_client: Any,
         archive_candidate_writer: ArchiveCandidateWriter,
+        archive_context_loader: AgentProfileContextLoader | None = None,
     ) -> None:
         self._binding_resolver = binding_resolver
         self._credential_provider = credential_provider
         self._chat_client = chat_client
         self._archive_candidate_writer = archive_candidate_writer
+        self._archive_context_loader = archive_context_loader
 
     def generate(
         self,
@@ -2737,6 +2740,30 @@ class LLMFacilityArchiveCandidateRunner:
                 f"LLMFacilityArchiveCandidateRunner only supports {NARRATIVE_ARCHIVES_MODULE_KEY}",
             )
         try:
+            source_context: dict[str, Any] | None = None
+            expected_names: list[str] = []
+            if self._archive_context_loader is not None:
+                try:
+                    loaded_context = self._archive_context_loader.load_context(context=context)
+                except LLMFacilityError:
+                    raise
+                except Exception as exc:
+                    raise LLMFacilityError(
+                        "ARCHIVE_CONTEXT_LOAD_FAILED",
+                        "archive candidate source context load failed",
+                    ) from exc
+                sanitized = _sanitize_agent_profile_context_value(loaded_context)
+                if isinstance(sanitized, dict) and _agent_profile_context_has_content(sanitized):
+                    source_context = sanitized
+                    canon = sanitized.get("canon")
+                    canon_entities = canon.get("entities") if isinstance(canon, dict) else None
+                    expected_names = sorted(
+                        {
+                            name
+                            for name in (_agent_profile_entity_name(item) for item in canon_entities or [])
+                            if name is not None
+                        }
+                    )
             resolution = self._binding_resolver.resolve_module_binding(
                 context=context,
                 module_key=module_key,
@@ -2748,40 +2775,181 @@ class LLMFacilityArchiveCandidateRunner:
             )
             if not isinstance(api_key, str) or not api_key.strip():
                 raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
-            response_json = self._chat_client.complete_json(
-                context=context,
-                resolution=resolution,
-                api_key=api_key.strip(),
-                messages=_archive_candidate_messages(context=context),
-            )
-            archive_entities = _archive_entity_candidates(response_json)
+            api_key = api_key.strip()
             archive_candidate_batch_id = f"narrative-archives:{context.run_id}"
-            persisted = self._archive_candidate_writer.write_archive_candidates(
-                context=context,
-                archive_candidate_batch_id=archive_candidate_batch_id,
-                model_id=resolution.model_id,
-                archive_entities=archive_entities,
-            )
+
+            if not expected_names:
+                # No entity canon to batch over: single-shot over whatever context exists.
+                response_json = self._chat_client.complete_json(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    messages=_archive_candidate_messages(context=context, source_context=source_context),
+                )
+                archive_entities = _archive_entity_candidates(response_json)
+                persisted = self._archive_candidate_writer.write_archive_candidates(
+                    context=context,
+                    archive_candidate_batch_id=archive_candidate_batch_id,
+                    model_id=resolution.model_id,
+                    archive_entities=archive_entities,
+                )
+                candidate_count = persisted.get("candidate_count", _archive_candidate_count(archive_entities))
+                archive_entity_candidate_count = persisted.get(
+                    "archive_entity_candidate_count", len(archive_entities)
+                )
+                memory_candidate_count = persisted.get(
+                    "memory_candidate_count", _archive_memory_candidate_count(archive_entities)
+                )
+                batch_count = 1
+            else:
+                candidate_count = 0
+                archive_entity_candidate_count = 0
+                memory_candidate_count = 0
+                batch_count = 0
+                batch_size = _enrichment_batch_size(getattr(resolution, "settings", None))
+                entity_offset = 0
+                for batch_names in _agent_profile_batches(expected_names, batch_size):
+                    batch_count += 1
+                    try:
+                        batch_entities = self._run_archive_batch_with_recovery(
+                            context=context,
+                            resolution=resolution,
+                            api_key=api_key,
+                            batch_names=batch_names,
+                            source_context=source_context,
+                            entity_offset=entity_offset,
+                        )
+                    except LLMFacilityError as exc:
+                        if exc.code not in _TRANSIENT_BATCH_CODES:
+                            raise
+                        # Skip this batch's candidates; the run stays partially covered.
+                        entity_offset += len(batch_names)
+                        continue
+                    # Persist each batch immediately so archive candidate assets
+                    # appear progressively (readiness tiles slam-in per batch).
+                    persisted = self._archive_candidate_writer.write_archive_candidates(
+                        context=context,
+                        archive_candidate_batch_id=archive_candidate_batch_id,
+                        model_id=resolution.model_id,
+                        archive_entities=batch_entities,
+                        entity_offset=entity_offset,
+                    )
+                    candidate_count += persisted.get(
+                        "candidate_count", _archive_candidate_count(batch_entities)
+                    )
+                    archive_entity_candidate_count += persisted.get(
+                        "archive_entity_candidate_count", len(batch_entities)
+                    )
+                    memory_candidate_count += persisted.get(
+                        "memory_candidate_count", _archive_memory_candidate_count(batch_entities)
+                    )
+                    entity_offset += len(batch_names)
         except LLMFacilityError as exc:
             return _archive_runner_failed(exc.code, exc.message)
         except Exception as exc:
             return _archive_runner_failed("LLM_PROVIDER_ERROR", str(exc))
 
-        return {
+        result: dict[str, Any] = {
             "status": "completed",
             "module_key": NARRATIVE_ARCHIVES_MODULE_KEY,
             "model_id": resolution.model_id,
             "archive_candidate_batch_id": archive_candidate_batch_id,
-            "candidate_count": persisted.get("candidate_count", _archive_candidate_count(archive_entities)),
-            "archive_entity_candidate_count": persisted.get(
-                "archive_entity_candidate_count",
-                len(archive_entities),
-            ),
-            "memory_candidate_count": persisted.get(
-                "memory_candidate_count",
-                _archive_memory_candidate_count(archive_entities),
-            ),
+            "candidate_count": candidate_count,
+            "archive_entity_candidate_count": archive_entity_candidate_count,
+            "memory_candidate_count": memory_candidate_count,
+            "batch_count": batch_count,
         }
+        if expected_names:
+            result["expected_entity_count"] = len(expected_names)
+        return result
+
+    def _run_archive_batch_with_recovery(
+        self,
+        *,
+        context: AgentContext,
+        resolution: Any,
+        api_key: str,
+        batch_names: list[str],
+        source_context: dict[str, Any] | None,
+        entity_offset: int,
+        attempt: int = 0,
+    ) -> list[dict[str, Any]]:
+        try:
+            batch_context = self._load_archive_batch_context(
+                context=context,
+                batch_names=batch_names,
+                fallback=source_context,
+            )
+            response_json = self._chat_client.complete_json(
+                context=context,
+                resolution=resolution,
+                api_key=api_key,
+                messages=_archive_candidate_batch_messages(
+                    context=context,
+                    batch_canonical_names=batch_names,
+                    source_context=batch_context,
+                    entity_offset=entity_offset,
+                ),
+            )
+            return _archive_entity_candidates(response_json)
+        except LLMFacilityError as exc:
+            if exc.code not in _TRANSIENT_BATCH_CODES:
+                raise
+            if attempt == 0:
+                return self._run_archive_batch_with_recovery(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    batch_names=batch_names,
+                    source_context=source_context,
+                    entity_offset=entity_offset,
+                    attempt=1,
+                )
+            if len(batch_names) > 1:
+                mid = max(1, len(batch_names) // 2)
+                left = self._run_archive_batch_with_recovery(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    batch_names=batch_names[:mid],
+                    source_context=source_context,
+                    entity_offset=entity_offset,
+                    attempt=0,
+                )
+                right = self._run_archive_batch_with_recovery(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    batch_names=batch_names[mid:],
+                    source_context=source_context,
+                    entity_offset=entity_offset + mid,
+                    attempt=0,
+                )
+                return [*left, *right]
+            raise
+
+    def _load_archive_batch_context(
+        self,
+        *,
+        context: AgentContext,
+        batch_names: list[str],
+        fallback: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        loader = self._archive_context_loader
+        if loader is not None and hasattr(loader, "load_batch_context"):
+            try:
+                loaded = loader.load_batch_context(context=context, batch_canonical_names=batch_names)
+            except LLMFacilityError:
+                raise
+            except Exception as exc:
+                raise LLMFacilityError(
+                    "ARCHIVE_CONTEXT_LOAD_FAILED",
+                    "archive candidate source context load failed",
+                ) from exc
+            sanitized = _sanitize_agent_profile_context_value(loaded)
+            if isinstance(sanitized, dict) and sanitized:
+                return sanitized
+        return fallback
 
 
 class PostgresArchiveCandidateWriter:
@@ -2810,22 +2978,25 @@ class PostgresArchiveCandidateWriter:
         archive_candidate_batch_id: str,
         model_id: str | None,
         archive_entities: list[dict[str, Any]],
+        entity_offset: int = 0,
     ) -> dict[str, Any]:
         if context.project_id is None:
             raise LLMFacilityError("VALIDATION_FAILED", "project_id is required to write archive candidates")
         normalized_batch_id = _required_text_value(archive_candidate_batch_id, "archive_candidate_batch_id")
         normalized_entities = _archive_entity_list(archive_entities)
+        base_offset = entity_offset if isinstance(entity_offset, int) and entity_offset >= 0 else 0
         connection = self._connect()
         try:
             with connection.cursor() as cursor:
                 _set_postgres_tenant_context(cursor, context)
                 for entity_index, entity in enumerate(normalized_entities):
+                    global_index = base_offset + entity_index
                     asset_id = self._upsert_archive_asset(
                         cursor=cursor,
                         context=context,
                         archive_candidate_batch_id=normalized_batch_id,
                         model_id=model_id,
-                        entity_index=entity_index,
+                        entity_index=global_index,
                         entity=entity,
                     )
                     for memory_index, memory in enumerate(entity.get("memories", [])):
@@ -2834,7 +3005,7 @@ class PostgresArchiveCandidateWriter:
                             context=context,
                             asset_id=asset_id,
                             archive_candidate_batch_id=normalized_batch_id,
-                            entity_index=entity_index,
+                            entity_index=global_index,
                             memory_index=memory_index,
                             memory=memory,
                         )
@@ -4901,7 +5072,20 @@ def _validate_archive_candidate_resolution(resolution: Any) -> None:
             raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
 
 
-def _archive_candidate_messages(*, context: AgentContext) -> list[dict[str, str]]:
+def _archive_candidate_messages(
+    *,
+    context: AgentContext,
+    source_context: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    user_payload: dict[str, Any] = {
+        "tenant_id": context.tenant_id,
+        "project_id": context.project_id,
+        "run_id": context.run_id,
+        "module_key": NARRATIVE_ARCHIVES_MODULE_KEY,
+        "task": "Generate archive entity and archive memory candidates for explicit user review.",
+    }
+    if source_context:
+        user_payload["source_context"] = source_context
     return [
         {
             "role": "system",
@@ -4916,13 +5100,53 @@ def _archive_candidate_messages(*, context: AgentContext) -> list[dict[str, str]
         {
             "role": "user",
             "content": json.dumps(
-                {
-                    "tenant_id": context.tenant_id,
-                    "project_id": context.project_id,
-                    "run_id": context.run_id,
-                    "module_key": NARRATIVE_ARCHIVES_MODULE_KEY,
-                    "task": "Generate archive entity and archive memory candidates for explicit user review.",
-                },
+                user_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+
+
+def _archive_candidate_batch_messages(
+    *,
+    context: AgentContext,
+    batch_canonical_names: list[str],
+    source_context: dict[str, Any] | None,
+    entity_offset: int,
+) -> list[dict[str, str]]:
+    user_payload: dict[str, Any] = {
+        "tenant_id": context.tenant_id,
+        "project_id": context.project_id,
+        "run_id": context.run_id,
+        "module_key": NARRATIVE_ARCHIVES_MODULE_KEY,
+        "task": (
+            "Generate archive entity and archive memory candidates for explicit user review, "
+            f"focused on the {len(batch_canonical_names)} entities listed in batch_entities."
+        ),
+        "batch_entities": list(batch_canonical_names),
+        "entity_offset": entity_offset,
+    }
+    if source_context:
+        user_payload["source_context"] = source_context
+    listed = "、".join(batch_canonical_names)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the MiroFish narrative_archives module. Return one JSON object with an "
+                "archive_entities array. Each archive entity must include title, summary, optional "
+                "category, tags, payload, and optional memories. Each memory must include memory_type "
+                "and summary, with optional private body_text and payload. Focus the candidates on the "
+                f"{len(batch_canonical_names)} entities named in batch_entities ({listed}); give each "
+                "real depth. Do not include prompt bodies, raw source material copies, API keys, "
+                "credentials, or provider metadata in payload fields."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                user_payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -5873,6 +6097,7 @@ def _archive_candidate_runner_from_env() -> ArchiveCandidateRunner | None:
         ),
         chat_client=_seed_chat_client(database_url=database_url),
         archive_candidate_writer=PostgresArchiveCandidateWriter.from_database_url(database_url),
+        archive_context_loader=PostgresAgentProfileContextLoader.from_database_url(database_url),
     )
 
 
