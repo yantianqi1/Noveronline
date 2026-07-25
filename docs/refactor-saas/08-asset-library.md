@@ -47,6 +47,8 @@
 
 Archive Memory read/review side 已补齐最小 skeleton：`infra/postgres/migrations/0001_core_saas.sql` 新增 `archive_memories` 与 `archive_memory_events`、tenant RLS 和 project/asset 查询索引；Python Seed `archive_candidate_activity` 在配置 `DATABASE_URL` 与显式 `LLM_CREDENTIAL_ENCRYPTION_KEY` 时可通过 `narrative_archives` module binding 持久化 candidate archive assets、candidate memories 和 candidate memory events；Go API 新增 `GET /v1/archive-assets/{assetId}/memories?project_id={projectId}` 与 `/memory-events`，只返回 tenant/project/asset-scoped 公开摘要和 sanitized payload，并新增 explicit memory adoption/rejection mutation；Next Asset Library 新增 Archive Memory review panel 和 Adopt / Reject memory 表单。公开 API / workflow result 不返回 `body_text`、`content_text`、source material、archive candidate body、memory body、prompt/response、API key、encrypted credential 或 `credential_ref`；live provider E2E 和 full reviewer workflow 仍待后续实现。
 
+Pi 候选式故事分析（`PiAnalysisRunWorkflow`，`analysis-streaming` 队列，详见文档 21）也是一条资产来源：模型 agent loop 读源分段、写 workspace 笔记与候选 JSON，产出先落 `analysis_candidates` 表（migration `0020_analysis_workspace`，`candidate` 状态，非 canon），再由 Go `SQLAnalysisAssetImporter` 把候选投影为 `source_kind = pi_analysis` 的资产。candidate→asset 映射在 TS（`apps/pi-agent-runtime/src/runtime/analysis-asset-mapping.ts`）与 Go（`apps/api/internal/workflows/analysis_asset_import.go`）各一份，需手工保持同步；模块绑定用 `analysis_planner` / `analysis_worker`。这条候选路径与 Python Seed `index_assets`（lifecycle=`seed` canon）互补，不替代它。
+
 ## 资产类型
 
 ### Canon Assets

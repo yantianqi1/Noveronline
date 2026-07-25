@@ -20,6 +20,7 @@ Pi 只替代 Writer Agent 的通用执行循环和 provider 抽象。小说领�
 - Writer Agent loop 使用 Pi SDK。
 - Seed / Graph / Asset ingestion / Worldline 第一阶段继续保留 Python 领域逻辑。
 - Worldline Cast Planner（`worldline_cast_planner`）已作为独立 Pi 域接入：只负责目标驱动选角与上下文提交，随后仍调用 Python `worldline_preparation` / director；director 与 canon 写入不迁到 Pi。
+- 候选式故事分析（`PiAnalysisRunWorkflow`，`analysis-streaming` 队列）已作为独立 Pi 域接入：见下文「Pi Analysis（候选提取）」。
 - 后续再评估 Character Console 与更广的 Worldline interactive layer 是否也迁到 Pi。
 
 收益：
@@ -379,6 +380,18 @@ Pi trace 可能包含用户小说原文。
 - legacy service extraction。
 
 Pi Writer Runtime 只负责 writer agent loop。
+
+### Pi Analysis（候选提取）
+
+除 writer 与 worldline-cast 外，Pi Runtime 还承载一条**候选式故事分析**业务线，与 Python Seed pipeline 并行、不替代它：
+
+- Go 通过 `PiAnalysisRunWorkflow`（workflow type `analysis_run`）把分析任务投递到 `analysis-streaming` 队列，由 `pi-agent-runtime-analysis` worker 消费。
+- 单 activity 内部跑一条 agent loop：bootstrap workspace → preprocess 分段 → `analysis_planner` → `analysis_worker` 两个 LLM 阶段 → finalize 候选抽取。
+- 模型经工具（`list_source_segments` / `read_source_segment` / `write_workspace_file` / `save_analysis_candidates` 等）自主读源分段、写 workspace 笔记与候选 JSON。
+- 产出落 `analysis_candidates` 表（migration `0020_analysis_workspace`，非 canon、`candidate` 状态），随后由 Go `SQLAnalysisAssetImporter` 投影进资产库（`source_kind = pi_analysis`）；candidate→asset 映射在 TS（`analysis-asset-mapping.ts`）与 Go（`analysis_asset_import.go`）各一份，需手工保持同步。
+- 模块绑定使用 `analysis_planner` / `analysis_worker` 两个 LLM module key， admission 前由 `EnsureAnalysisModuleBindings` 解析/补绑。
+
+**与 Seed 的边界：** 这条候选路径只覆盖「阅读理解 → 人物/关系/世界规则/时间线候选」。story ontology、entity resolution、agent profile、index_assets 等直接建 canon 的阶段仍**只在 Python Seed pipeline**；下文评估顺序第 4 条不变。
 
 后续评估顺序：
 

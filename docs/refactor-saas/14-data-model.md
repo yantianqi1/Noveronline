@@ -245,9 +245,13 @@ archive_memories
 archive_memory_events
 classification_rules
 global_search_index
+analysis_runs
+analysis_candidates
 ```
 
 当前 Phase 5 schema baseline 已在 `infra/postgres/migrations/0001_core_saas.sql` 中创建 `assets`、`asset_versions`、`asset_collections`、`asset_collection_items`、`archive_memories`、`archive_memory_events` 与 `global_search_index`，并补充 tenant RLS、项目/source/type 查询索引、collection/version 查询索引和 Seed projection / archive memory read/review side 所需唯一键。`PostgresSeedAssetIndexer` 目前只从 Seed canon 表投射 lifecycle=`seed` 的资产和 keyword search 文档；`PostgresAssetReindexer` 已可在 DB-backed `AssetReindexWorkflow` 中从 tenant/project scoped `assets` 重建 project/keyword `global_search_index` 的 `asset` 文档，公开 result/event 只暴露 batch/count metadata 与 `embedding_count = 0`；Go Asset Search read side 会在 app-role/RLS path 下设置 tenant context 后读取 `global_search_index`、`asset_versions`、`asset_collections` 和 `asset_collection_items`，公开返回 sanitized search document metadata 以及 public `version` summary / `collections` refs；`LLMFacilityArchiveCandidateRunner` / `PostgresArchiveCandidateWriter` 已可通过 `narrative_archives` module binding 将 schema-valid archive entity 与 memory 输出持久化为 candidate `assets` / `archive_memories` / `archive_memory_events`，writer 在 app-role/RLS path 下先设置 tenant context，失败时 rollback 并只返回稳定 write failure，公开 workflow result/event 只暴露 batch/count/model metadata；`archive_memories` / `archive_memory_events` 已有 Go read API 和显式 adopt/reject mutation，会写 review event 与 audit log；`asset_embeddings` 与完整 hybrid/vector search 仍待后续阶段落地。
+
+Pi 候选式故事分析（文档 21，`PiAnalysisRunWorkflow`）的表由 `infra/postgres/migrations/0020_analysis_workspace.sql` 创建：`analysis_runs`（分析 run 元数据）与 `analysis_candidates`（候选故事资产，`candidate` 状态、非 canon，带 tenant RLS 与 `idx_analysis_candidates_run_type` 索引）；另有 `0021_analysis_candidates_delete.sql` 授权 delete。模型 agent loop 写候选后，由 Go `SQLAnalysisAssetImporter` 把 `analysis_candidates` 投影为 `source_kind = pi_analysis` 的 `assets`；candidate→asset 映射在 TS 与 Go 各一份需手工同步。该路径与 Python Seed `index_assets`（lifecycle=`seed`）互补，不替代它。
 
 Phase 5 Go HTTP request decode failure 同样是公开错误边界：asset create/search/bulk/adoption/patch、archive memory review、asset ingestion、style extraction、asset reindex、story graph build/bond generation 写入口的无效 JSON 或类型错误只返回稳定 `VALIDATION_FAILED` message 和空 details，不回显 decoder 字符串、unknown field 名称、Go struct field 名称，或 `api_key` / prompt / `credential_ref` / draft / manuscript / raw body/content 等敏感词。
 

@@ -90,6 +90,7 @@ Go 是公网入口的主后端。它必须是无状态可横向扩展服务。
 - `CharacterInteractionToChapterWorkflow`
 - `WriterRunWorkflow`
 - `ReviewerWorkflow`
+- `PiAnalysisRunWorkflow`
 - `ProjectImportWorkflow`
 
 ### Python Agent Workers
@@ -115,6 +116,14 @@ Python worker 不直接暴露公网。它通过 Temporal task queue 接收任务
 - `@earendil-works/pi-ai` provider/model 抽象，但必须通过 LLM Facility adapter 获取模块绑定和 API key。
 - writer token stream、tool event、draft revision 保存。
 - writer tools 的权限、trace 和 event wrapper。
+
+Pi Runtime 当前以三个独立 worker 进程部署（同一 build，不同 Temporal task queue）：
+
+- `pi-agent-runtime`（`writer-streaming`）：Writer Agent loop。
+- `pi-agent-runtime-analysis`（`analysis-streaming`）：候选式故事分析（见下）。
+- `pi-agent-runtime-worldline-cast`（`worldline-cast-streaming`）：Worldline Cast Planner 目标驱动选角。
+
+**候选式故事分析（`PiAnalysisRunWorkflow`）。** 它是与 Seed pipeline 并行的**候选路径**，不替代 Seed：模型经 agent loop 读源分段、写 workspace 笔记与候选 JSON，产出落 `analysis_candidates`（非 canon、`candidate` 状态），再由 Go `SQLAnalysisAssetImporter` 投影进资产库（`source_kind = pi_analysis`）。它覆盖「阅读理解 → 人物/关系/世界规则/时间线候选」这一段；story ontology、entity resolution、agent profile、index_assets 等 canon 阶段仍只在 Python Seed pipeline。模块绑定使用 `analysis_planner` / `analysis_worker` 两个 LLM module key。
 
 Pi Writer Runtime 是 Node/TypeScript worker，不直接暴露公网。它通过 writer run API 或 Temporal workflow 接收任务，并且不能绕过 tenant/project/run context。
 
