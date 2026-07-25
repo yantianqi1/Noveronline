@@ -13,8 +13,12 @@ test("clean-slate web keeps compose login health route and API config", async ()
   const login = await source("app/login/page.tsx");
   const config = await source("lib/config.ts");
   const pkg = await source("package.json");
-  assert.match(login, /LoginPage|login stub|前端正在按后端契约重写/);
+  assert.match(login, /LoginForm|LoginPage|登录/);
   assert.match(config, /MIROFISH_API_BASE_URL/);
   assert.match(pkg, /"next"/);
-  assert.doesNotMatch(pkg, /@tiptap|d3-force|lucide-react/);
+  // Foundation libraries for the rewrite's design system + data layer are
+  // expected; the ban below guards against re-importing the retired heavy
+  // editor stack, not against building a UI at all.
+  assert.match(pkg, /tailwindcss/);
+  assert.doesNotMatch(pkg, /@tiptap/);
 });
