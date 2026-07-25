@@ -3435,10 +3435,16 @@ class PostgresSeedAssetIndexer:
                    'relationship',
                    'relationship',
                    'seed',
-                   source_entity_name || ' -> ' || target_entity_name || ' / ' || relationship_type,
-                   summary,
+                   source_entity_name || ' → ' || target_entity_name || '（' || relationship_type || '）',
+                   COALESCE(
+                     NULLIF(btrim(summary), ''),
+                     NULLIF(btrim(metadata_jsonb->>'description'), ''),
+                     NULLIF(btrim(evidence_text), ''),
+                     source_entity_name || ' 与 ' || target_entity_name || '：' || relationship_type
+                   ),
                    concat_ws(
                      E'\n',
+                     NULLIF(btrim(metadata_jsonb->>'description'), ''),
                      NULLIF(btrim(summary), ''),
                      NULLIF(E'证据：' || btrim(evidence_text), '证据：')
                    ),
@@ -3447,7 +3453,8 @@ class PostgresSeedAssetIndexer:
                      'source_run_id', source_run_id::text,
                      'source_entity_name', source_entity_name,
                      'target_entity_name', target_entity_name,
-                     'relationship_type', relationship_type
+                     'relationship_type', relationship_type,
+                     'description', metadata_jsonb->>'description'
                    ),
                    '[]'::jsonb,
                    'seed_pipeline',
@@ -3499,11 +3506,17 @@ class PostgresSeedAssetIndexer:
                    'world_rule',
                    COALESCE(category, 'world'),
                    'seed',
-                   left(btrim(rule_text), 40),
-                   rule_text,
+                   COALESCE(
+                     NULLIF(btrim(metadata_jsonb->>'title'), ''),
+                     left(btrim(rule_text), 40)
+                   ),
+                   COALESCE(
+                     NULLIF(btrim(metadata_jsonb->>'summary'), ''),
+                     rule_text
+                   ),
                    concat_ws(
                      E'\n',
-                     NULLIF(btrim(rule_text), ''),
+                     NULLIF(btrim(COALESCE(metadata_jsonb->>'detail', metadata_jsonb->>'summary', rule_text)), ''),
                      NULLIF(E'证据：' || btrim(evidence_text), '证据：'),
                      NULLIF(
                        btrim(concat_ws(
@@ -3518,7 +3531,10 @@ class PostgresSeedAssetIndexer:
                      'rule_evidence_id', rule_evidence_id::text,
                      'source_run_id', run_id::text,
                      'category', category,
-                     'confidence', confidence
+                     'confidence', confidence,
+                     'title', metadata_jsonb->>'title',
+                     'summary', metadata_jsonb->>'summary',
+                     'detail', metadata_jsonb->>'detail'
                    ),
                    '[]'::jsonb,
                    'seed_pipeline',
@@ -3571,9 +3587,13 @@ class PostgresSeedAssetIndexer:
                    'plot',
                    'seed',
                    title,
-                   summary,
+                   COALESCE(
+                     NULLIF(btrim(summary), ''),
+                     left(btrim(metadata_jsonb->>'description'), 60)
+                   ),
                    concat_ws(
                      E'\n',
+                     NULLIF(btrim(metadata_jsonb->>'description'), ''),
                      NULLIF(btrim(summary), ''),
                      NULLIF(E'证据：' || btrim(evidence_text), '证据：')
                    ),
@@ -3581,7 +3601,8 @@ class PostgresSeedAssetIndexer:
                      'thread_id', thread_id::text,
                      'source_run_id', source_run_id::text,
                      'status', status,
-                     'first_seen_segment_id', first_seen_segment_id::text
+                     'first_seen_segment_id', first_seen_segment_id::text,
+                     'description', metadata_jsonb->>'description'
                    ),
                    '[]'::jsonb,
                    'seed_pipeline',
@@ -4118,7 +4139,12 @@ class PostgresRuntimeFactsWriter:
                 context.run_id,
                 segment_id,
                 relationship["evidence"],
-                _json_object({"observed_source_run_ids": [context.run_id]}),
+                _json_object(
+                    {
+                        "observed_source_run_ids": [context.run_id],
+                        "description": relationship["description"],
+                    }
+                ),
             ),
         )
 
@@ -4134,13 +4160,14 @@ class PostgresRuntimeFactsWriter:
                  tenant_id, project_id, source_run_id, title, status,
                  summary, first_seen_segment_id, evidence_text, metadata_jsonb
                )
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '{}'::jsonb)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                ON CONFLICT (tenant_id, project_id, title)
                DO UPDATE SET
                  status = COALESCE(EXCLUDED.status, plot_threads.status),
                  summary = COALESCE(EXCLUDED.summary, plot_threads.summary),
                  first_seen_segment_id = COALESCE(plot_threads.first_seen_segment_id, EXCLUDED.first_seen_segment_id),
                  evidence_text = COALESCE(EXCLUDED.evidence_text, plot_threads.evidence_text),
+                 metadata_jsonb = plot_threads.metadata_jsonb || EXCLUDED.metadata_jsonb,
                  updated_at = now()
                RETURNING thread_id""",
             (
@@ -4152,6 +4179,7 @@ class PostgresRuntimeFactsWriter:
                 thread["summary"],
                 segment_id,
                 thread["evidence"],
+                _json_object({"description": thread["description"]}),
             ),
         )
         row = cursor.fetchone()
@@ -4262,12 +4290,13 @@ class PostgresRuntimeFactsWriter:
                  tenant_id, project_id, run_id, segment_id, rule_text,
                  evidence_text, category, confidence, metadata_jsonb
                )
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '{}'::jsonb)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                ON CONFLICT (tenant_id, project_id, run_id, segment_id, rule_text)
                DO UPDATE SET
                  evidence_text = COALESCE(EXCLUDED.evidence_text, world_rule_evidence.evidence_text),
                  category = COALESCE(EXCLUDED.category, world_rule_evidence.category),
                  confidence = COALESCE(EXCLUDED.confidence, world_rule_evidence.confidence),
+                 metadata_jsonb = world_rule_evidence.metadata_jsonb || EXCLUDED.metadata_jsonb,
                  updated_at = now()""",
             (
                 context.tenant_id,
@@ -4278,6 +4307,13 @@ class PostgresRuntimeFactsWriter:
                 rule["evidence"],
                 rule["category"],
                 rule["confidence"],
+                _json_object(
+                    {
+                        "title": rule["title"],
+                        "summary": rule["summary"],
+                        "detail": rule["detail"],
+                    }
+                ),
             ),
         )
 
@@ -10823,7 +10859,7 @@ def _split_fact_string(text: str) -> tuple[str, str | None]:
 def _split_relationship_parties(text: str) -> tuple[str, str]:
     """Split "苍兰与师父" into ("苍兰", "师父") on a conjunction; fall back to a
     single party paired with itself only when no conjunction is present."""
-    for conjunction in ("与", "和", "、", "/", "→", "-", ",", "，"):
+    for conjunction in ("与", "和", "、", "/", "→", "->", "-", ",", "，"):
         if conjunction in text:
             left, _, right = text.partition(conjunction)
             left = left.strip()
@@ -10916,6 +10952,7 @@ def _runtime_relationship(value: Any) -> dict[str, Any]:
             "target_entity_name": target,
             "relationship_type": _relationship_type_from_text(summary) or "相关",
             "summary": summary,
+            "description": None,
             "evidence": None,
         }
     if not isinstance(value, dict):
@@ -10937,18 +10974,37 @@ def _runtime_relationship(value: Any) -> dict[str, Any]:
         or _optional_fact_text(value, "relationship_type")
         or _optional_fact_text(value, "relation")
     )
+    summary = _optional_fact_text(value, "summary")
+    description = (
+        _optional_fact_text(value, "description")
+        or _optional_fact_text(value, "detail")
+        or _optional_fact_text(value, "body")
+    )
+    evidence = _optional_fact_text(value, "evidence")
+    if (source is None or target is None) and summary:
+        # Models sometimes collapse the whole fact into one sentence
+        # ("王捕头 -> 朱县令为上下级。") and leave parties empty; recover the
+        # pair from the sentence instead of dropping the row.
+        recovered_source, recovered_target = _split_relationship_parties(summary)
+        if source is None:
+            source = recovered_source
+        if target is None:
+            target = recovered_target
     if source is None:
         raise ValueError("relationship.source is required")
     if target is None:
         raise ValueError("relationship.target is required")
     if relationship_type is None:
-        raise ValueError("relationship.type is required")
+        relationship_type = _relationship_type_from_text(summary) or "相关"
+    if summary is None:
+        summary = description or evidence
     return {
         "source_entity_name": source,
         "target_entity_name": target,
         "relationship_type": relationship_type,
-        "summary": _optional_fact_text(value, "summary") or _optional_fact_text(value, "description"),
-        "evidence": _optional_fact_text(value, "evidence"),
+        "summary": summary,
+        "description": description,
+        "evidence": evidence,
     }
 
 
@@ -10958,7 +11014,13 @@ def _runtime_plot_threads_from_payload(payload: dict[str, Any]) -> list[dict[str
 
 def _runtime_plot_thread(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
-        return {"title": _required_text_value(value, "plot_thread"), "status": "open", "summary": None, "evidence": None}
+        return {
+            "title": _required_text_value(value, "plot_thread"),
+            "status": "open",
+            "summary": None,
+            "description": None,
+            "evidence": None,
+        }
     if not isinstance(value, dict):
         raise ValueError("plot_threads entries must be objects or strings")
     title = _optional_fact_text(value, "title") or _optional_fact_text(value, "name")
@@ -10967,7 +11029,12 @@ def _runtime_plot_thread(value: Any) -> dict[str, Any]:
     return {
         "title": title,
         "status": _optional_fact_text(value, "status") or "open",
-        "summary": _optional_fact_text(value, "summary") or _optional_fact_text(value, "description"),
+        "summary": _optional_fact_text(value, "summary"),
+        "description": (
+            _optional_fact_text(value, "description")
+            or _optional_fact_text(value, "detail")
+            or _optional_fact_text(value, "body")
+        ),
         "evidence": _optional_fact_text(value, "evidence"),
     }
 
@@ -11037,19 +11104,35 @@ def _runtime_world_rules_from_payload(payload: dict[str, Any]) -> list[dict[str,
 
 def _runtime_world_rule(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
-        return {"rule_text": _required_text_value(value, "world_rule"), "evidence": None, "category": None, "confidence": None}
+        return {
+            "rule_text": _required_text_value(value, "world_rule"),
+            "title": None,
+            "summary": None,
+            "detail": None,
+            "evidence": None,
+            "category": None,
+            "confidence": None,
+        }
     if not isinstance(value, dict):
         raise ValueError("world_rules entries must be objects or strings")
     rule_text = (
         _optional_fact_text(value, "rule")
         or _optional_fact_text(value, "rule_text")
         or _optional_fact_text(value, "text")
+        or _optional_fact_text(value, "summary")
         or _optional_fact_text(value, "description")
     )
     if rule_text is None:
         raise ValueError("world_rule.rule is required")
     return {
         "rule_text": rule_text,
+        "title": _optional_fact_text(value, "title") or _optional_fact_text(value, "name"),
+        "summary": _optional_fact_text(value, "summary"),
+        "detail": (
+            _optional_fact_text(value, "detail")
+            or _optional_fact_text(value, "description")
+            or _optional_fact_text(value, "body")
+        ),
         "evidence": _optional_fact_text(value, "evidence"),
         "category": _optional_fact_text(value, "category"),
         "confidence": _optional_number(value.get("confidence")),
