@@ -69,6 +69,7 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
 
   const [assets, setAssets] = useState<AssetRecord[]>([]);
   const [facets, setFacets] = useState<Facets | null>(null);
+  const [facetsUnavailable, setFacetsUnavailable] = useState(false);
   const [capabilities, setCapabilities] = useState<SearchCapabilities | null>(null);
   const [collections, setCollections] = useState<Collection[]>([]);
 
@@ -90,13 +91,21 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
   // ── Initial load ─────────────────────────────────────────────────────────
 
   const reload = useCallback(async (sel: { tenant_id: string; project_id: string }) => {
+    // Track facet failure separately from "loaded but empty": the type/source
+    // dropdowns must show an error hint when the facets request itself failed,
+    // not silently render as if the project had no categories.
+    let facetsFailed = false;
     const [assetList, facetData, collectionList] = await Promise.all([
       fetchAssets(sel.project_id, sel.tenant_id),
-      fetchAssetFacets(sel.project_id, sel.tenant_id).catch(() => null),
+      fetchAssetFacets(sel.project_id, sel.tenant_id).catch(() => {
+        facetsFailed = true;
+        return null;
+      }),
       fetchCollections(sel.project_id, sel.tenant_id).catch(() => [] as Collection[]),
     ]);
     setAssets(assetList);
     setFacets(facetData);
+    setFacetsUnavailable(facetsFailed);
     setCollections(collectionList);
     return assetList;
   }, []);
@@ -523,6 +532,7 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
               capabilities={capabilities}
               collections={collections}
               lifecycles={lifecycleFacet}
+              facetsUnavailable={facetsUnavailable}
               onChange={setFilters}
             />
             <div className="min-h-0 flex-1 overflow-y-auto">

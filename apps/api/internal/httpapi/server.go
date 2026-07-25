@@ -1939,7 +1939,10 @@ func singleAssetPathPart(path string) string {
 
 func isReservedAssetPathPart(assetID string) bool {
 	switch assetID {
-	case "search", "bulk-actions":
+	// These are fixed sub-resource/action routes under /v1/assets/, never asset
+	// ids. Without them here, singleAssetPathPart would parse e.g.
+	// /v1/assets/facets as "get asset with id=facets" and 404.
+	case "search", "bulk-actions", "facets", "search-capabilities":
 		return true
 	default:
 		return false

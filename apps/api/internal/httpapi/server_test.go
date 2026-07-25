@@ -12410,6 +12410,28 @@ func TestListAssetFacetsUsesTenantProjectScopeAndSanitizedCounts(t *testing.T) {
 	}
 }
 
+// The type/source filter dropdowns are powered by /v1/assets/facets. A routing
+// regression once let singleAssetPathPart treat "facets"/"search-capabilities"
+// as asset ids, so the detail handler 404'd them and the dropdowns went empty.
+// These reserved segments must never parse as asset ids, while a real id must.
+func TestSingleAssetPathPartTreatsSubRoutesAsReserved(t *testing.T) {
+	for _, reserved := range []string{"search", "bulk-actions", "facets", "search-capabilities"} {
+		if got := singleAssetPathPart("/v1/assets/" + reserved); got != "" {
+			t.Fatalf("reserved sub-route %q parsed as asset id %q", reserved, got)
+		}
+		if isAssetDetailPath("/v1/assets/" + reserved) {
+			t.Fatalf("reserved sub-route %q matched asset detail path", reserved)
+		}
+	}
+	// A real asset id still resolves as a detail path.
+	if got := singleAssetPathPart("/v1/assets/0009eb54-e51f-482c-8083-59b0d343537e"); got != "0009eb54-e51f-482c-8083-59b0d343537e" {
+		t.Fatalf("real asset id did not parse, got %q", got)
+	}
+	if !isAssetDetailPath("/v1/assets/0009eb54-e51f-482c-8083-59b0d343537e") {
+		t.Fatal("real asset id did not match asset detail path")
+	}
+}
+
 func TestSearchAssetsUsesTenantProjectQueryScopeAndSanitizedRows(t *testing.T) {
 	reader := &recordingAssetReader{
 		searchResults: []assets.SearchRecord{{

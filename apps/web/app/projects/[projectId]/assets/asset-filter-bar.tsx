@@ -40,6 +40,7 @@ export function AssetFilterBar({
   capabilities,
   collections,
   lifecycles,
+  facetsUnavailable,
   onChange,
 }: {
   value: AssetFilterState;
@@ -48,6 +49,8 @@ export function AssetFilterBar({
   collections?: Collection[];
   /** Lifecycle facet buckets; falls back to facets.lifecycles when omitted. */
   lifecycles?: { value: string; count: number }[];
+  /** True when the facets request failed (distinct from "loaded but empty"). */
+  facetsUnavailable?: boolean;
   onChange: (next: AssetFilterState) => void;
 }) {
   const types = facets?.asset_types ?? [];
@@ -130,6 +133,16 @@ export function AssetFilterBar({
             }))}
             onChange={(next) => set({ collectionId: next })}
           />
+        ) : null}
+
+        {/* facets request failed — surface it instead of pretending there are no types/sources */}
+        {facetsUnavailable ? (
+          <span
+            role="status"
+            className="inline-flex h-10 items-center rounded-[10px] border border-gold/50 bg-gold/10 px-3 text-[12px] text-[#8a6a33]"
+          >
+            分类加载失败，请刷新重试
+          </span>
         ) : null}
       </div>
 
