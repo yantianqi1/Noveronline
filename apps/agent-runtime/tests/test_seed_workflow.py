@@ -1689,6 +1689,73 @@ def test_llm_facility_ontology_runner_persists_schema_valid_snapshot_without_pub
     assert "credential_ref" not in json.dumps(writer.calls, ensure_ascii=False)
 
 
+def test_llm_facility_ontology_runner_accepts_concise_string_type_arrays() -> None:
+    # Real models (gpt-5.5, deepseek) honor "keep entries concise" by returning
+    # string arrays instead of the object form. The runner must normalize these
+    # to the canonical object shape rather than reject them — downstream only
+    # persists the snapshot and counts; nothing consumes per-entry structure.
+    resolver = RecordingBindingResolver(_ontology_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-ontology")
+    chat_client = RecordingJSONChatClient(
+        response_json={
+            "seed_ontology": {
+                "entity_types": ["character", "location", "event"],
+                "relationship_types": ["is_friend_of", "lives_in"],
+                "world_rule_types": ["physical_law"],
+            }
+        }
+    )
+    writer = RecordingOntologySnapshotWriter()
+    runner = seed_module.LLMFacilityOntologyRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        ontology_snapshot_writer=writer,
+    )
+
+    result = runner.generate(context=_context(), module_key="story_ontology")
+
+    assert result["status"] == "completed"
+    assert result["entity_type_count"] == 3
+    assert result["relationship_type_count"] == 2
+    assert result["world_rule_type_count"] == 1
+    persisted = writer.calls[0]["seed_ontology"]
+    assert persisted["entity_types"] == [
+        {"name": "character"},
+        {"name": "location"},
+        {"name": "event"},
+    ]
+    assert persisted["relationship_types"] == [{"name": "is_friend_of"}, {"name": "lives_in"}]
+    assert persisted["world_rule_types"] == [{"name": "physical_law"}]
+
+
+def test_llm_facility_ontology_runner_still_rejects_non_string_non_object_entries() -> None:
+    resolver = RecordingBindingResolver(_ontology_resolution())
+    credentials = RecordingCredentialProvider(api_key="sk-ontology")
+    chat_client = RecordingJSONChatClient(
+        response_json={
+            "seed_ontology": {
+                "entity_types": [123],
+                "relationship_types": [],
+                "world_rule_types": [],
+            }
+        }
+    )
+    writer = RecordingOntologySnapshotWriter()
+    runner = seed_module.LLMFacilityOntologyRunner(
+        binding_resolver=resolver,
+        credential_provider=credentials,
+        chat_client=chat_client,
+        ontology_snapshot_writer=writer,
+    )
+
+    result = runner.generate(context=_context(), module_key="story_ontology")
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "SCHEMA_VALIDATION_FAILED"
+    assert writer.calls == []
+
+
 def test_entity_resolution_activity_fails_closed_without_runner() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
 
@@ -3321,6 +3388,7 @@ class RecordingAgentProfileSnapshotWriter:
     def __init__(self, error: LLMFacilityError | None = None) -> None:
         self.error = error
         self.calls: list[dict[str, object]] = []
+        self.batch_calls: list[dict[str, object]] = []
 
     def record_agent_profile_snapshot(
         self,
@@ -3344,6 +3412,28 @@ class RecordingAgentProfileSnapshotWriter:
                 "profile_count": profile_count,
                 "memory_seed_count": memory_seed_count,
                 "relationship_view_count": relationship_view_count,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return "profile-snapshot-1"
+
+    def record_agent_profile_batch(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        model_id: str | None,
+        batch_agent_profiles: dict[str, object],
+    ) -> str:
+        self.batch_calls.append(
+            {
+                "tenant_id": context.tenant_id,
+                "project_id": context.project_id,
+                "run_id": context.run_id,
+                "module_key": module_key,
+                "model_id": model_id,
+                "batch_agent_profiles": batch_agent_profiles,
             }
         )
         if self.error is not None:
@@ -3386,7 +3476,18 @@ class RecordingAgentProfileContextLoader:
         self.context_payload = context_payload if context_payload is not None else {
             "entity_resolution": {
                 "merged_entities": [{"canonical_name": "林舟", "entity_type": "character"}],
-            }
+            },
+            "canon": {
+                "entities": [
+                    {
+                        "entity_id": "entity-1",
+                        "entity_type": "character",
+                        "canonical_name": "林舟",
+                        "importance": 8,
+                        "state_summary": "守住雨港秘密。",
+                    }
+                ],
+            },
         }
         self.error = error
         self.calls: list[dict[str, object]] = []
@@ -3402,6 +3503,48 @@ class RecordingAgentProfileContextLoader:
         if self.error is not None:
             raise self.error
         return self.context_payload
+
+    def load_batch_context(self, *, context: AgentContext, batch_canonical_names: list[str]) -> dict[str, object]:
+        if self.error is not None:
+            raise self.error
+        return _batch_scoped_context(self.context_payload, batch_canonical_names)
+
+
+def _batch_scoped_context(payload: dict[str, object], batch_canonical_names: list[str]) -> dict[str, object]:
+    """Filter a full canon context payload down to the requested batch's entities."""
+    names = set(batch_canonical_names)
+    canon = payload.get("canon")
+    if not isinstance(canon, dict):
+        return payload
+    scoped: dict[str, object] = {}
+    entities = canon.get("entities")
+    if isinstance(entities, list):
+        kept = [
+            entity
+            for entity in entities
+            if isinstance(entity, dict) and entity.get("canonical_name") in names
+        ]
+        if kept:
+            scoped["entities"] = kept
+    relationships = canon.get("relationships")
+    if isinstance(relationships, list):
+        kept_rel = [
+            rel
+            for rel in relationships
+            if isinstance(rel, dict)
+            and (rel.get("source_entity_name") in names or rel.get("target_entity_name") in names)
+        ]
+        if kept_rel:
+            scoped["relationships"] = kept_rel
+    summaries = canon.get("segment_summaries")
+    if isinstance(summaries, list) and summaries:
+        scoped["segment_summaries"] = summaries
+    result: dict[str, object] = {}
+    if isinstance(payload.get("entity_resolution"), dict):
+        result["entity_resolution"] = payload["entity_resolution"]
+    if scoped:
+        result["canon"] = scoped
+    return result
 
 
 class RecordingArchiveCandidateRunner:
@@ -3462,8 +3605,14 @@ class RecordingCredentialProvider:
 
 
 class RecordingJSONChatClient:
-    def __init__(self, response_json: dict[str, object]) -> None:
-        self.response_json = response_json
+    def __init__(
+        self,
+        response_json: dict[str, object] | None = None,
+        *,
+        batch_responder: object | None = None,
+    ) -> None:
+        self.response_json = response_json if response_json is not None else {}
+        self.batch_responder = batch_responder
         self.calls: list[dict[str, object]] = []
 
     def complete_json(
@@ -3482,7 +3631,30 @@ class RecordingJSONChatClient:
                 "messages": messages,
             }
         )
+        if self.batch_responder is not None:
+            batch_names = _message_batch_entities(messages)
+            result = self.batch_responder(batch_names, len(self.calls))
+            if isinstance(result, Exception):
+                raise result
+            return result
         return self.response_json
+
+
+def _message_batch_entities(messages: list[dict[str, str]]) -> list[str] | None:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except ValueError:
+            continue
+        batch = payload.get("batch_entities")
+        if isinstance(batch, list):
+            return [name for name in batch if isinstance(name, str)]
+    return None
 
 
 class RecordingArchiveCandidateWriter:
@@ -4145,20 +4317,28 @@ class AgentProfileContextCursor:
         self.params = params
         self.executed.append((query, params))
 
+    def _row_set_for(self, query: str) -> list[dict[str, object]]:
+        lowered = query.lower()
+        if "from entities" in lowered:
+            return self._row_sets[1]
+        if "from relationships" in lowered:
+            return self._row_sets[2]
+        if "from segment_summaries" in lowered:
+            return self._row_sets[3]
+        return self._row_sets[0]
+
     def fetchone(self) -> dict[str, object] | None:
-        if len(self.executed) != 2:
+        if not self.executed:
             raise AssertionError("unexpected fetchone call")
-        rows = self._row_sets[0]
+        query, _params = self.executed[-1]
+        rows = self._row_set_for(query)
         return rows[0] if rows else None
 
     def fetchall(self) -> list[dict[str, object]]:
-        if len(self.executed) == 3:
-            return self._row_sets[1]
-        if len(self.executed) == 4:
-            return self._row_sets[2]
-        if len(self.executed) == 5:
-            return self._row_sets[3]
-        raise AssertionError("unexpected fetchall call")
+        if not self.executed:
+            raise AssertionError("unexpected fetchall call")
+        query, _params = self.executed[-1]
+        return self._row_set_for(query)
 
 
 class AgentProfileContextConnection:
@@ -7419,7 +7599,7 @@ def test_llm_facility_agent_profile_runner_loads_context_before_binding_credenti
         chat_client=OrderedChatClient(
             response_json={
                 "agent_profiles": {
-                    "profiles": [],
+                    "profiles": [{"canonical_name": "林舟"}],
                     "memory_seeds": [],
                     "relationship_views": [],
                 }
@@ -7754,6 +7934,366 @@ def test_llm_facility_agent_profile_runner_fails_closed_when_context_loader_erro
         assert forbidden not in encoded
 
 
+def _entity_loader_payload(canonical_names: list[str]) -> dict[str, object]:
+    return {
+        "entity_resolution": {
+            "merged_entities": [{"canonical_name": name} for name in canonical_names],
+        },
+        "canon": {
+            "entities": [
+                {
+                    "entity_id": f"entity-{index}",
+                    "entity_type": "character",
+                    "canonical_name": name,
+                    "importance": 5,
+                    "state_summary": f"{name} 的状态。",
+                }
+                for index, name in enumerate(canonical_names)
+            ],
+        },
+    }
+
+
+def _profiles_response(names: list[str]) -> dict[str, object]:
+    return {
+        "agent_profiles": {
+            "profiles": [{"canonical_name": name, "voice": "冷静"} for name in names],
+            "memory_seeds": [],
+            "relationship_views": [],
+        }
+    }
+
+
+def _batched_runner(
+    *,
+    canonical_names: list[str],
+    batch_responder: object | None = None,
+    batch_size: int | None = None,
+    snapshot_writer: RecordingAgentProfileSnapshotWriter | None = None,
+) -> tuple[seed_module.LLMFacilityAgentProfileRunner, RecordingJSONChatClient, RecordingAgentProfileSnapshotWriter]:
+    resolution = _agent_profile_resolution()
+    if batch_size is not None:
+        resolution = ModuleBindingResolution(
+            tenant_id=resolution.tenant_id,
+            project_id=resolution.project_id,
+            module_key=resolution.module_key,
+            channel_id=resolution.channel_id,
+            model_id=resolution.model_id,
+            provider=resolution.provider,
+            base_url=resolution.base_url,
+            credential_ref=resolution.credential_ref,
+            supports_json=resolution.supports_json,
+            settings={"batch_size": batch_size},
+        )
+    writer = snapshot_writer or RecordingAgentProfileSnapshotWriter()
+    chat_client = (
+        RecordingJSONChatClient(batch_responder=batch_responder)
+        if batch_responder is not None
+        else RecordingJSONChatClient(response_json=_profiles_response(canonical_names))
+    )
+    runner = seed_module.LLMFacilityAgentProfileRunner(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-profile"),
+        chat_client=chat_client,
+        agent_profile_snapshot_writer=writer,
+        agent_profile_context_loader=RecordingAgentProfileContextLoader(_entity_loader_payload(canonical_names)),
+    )
+    return runner, chat_client, writer
+
+
+def test_agent_profile_batches_split_sorted_names_by_size() -> None:
+    names = [f"角色{index:02d}" for index in range(60)]
+    batches = seed_module._agent_profile_batches(names, 5)
+    assert len(batches) == 12
+    assert all(len(batch) == 5 for batch in batches)
+    assert [name for batch in batches for name in batch] == names
+    # Uneven tail: 60 / 7 -> 8 full batches of 7 plus a final batch of 4.
+    tail = seed_module._agent_profile_batches(names, 7)
+    assert len(tail) == 9
+    assert tail[-1] == names[56:]
+    # Deterministic ordering is preserved per batch.
+    for batch in tail:
+        assert batch == sorted(batch)
+
+
+def test_enrichment_batch_size_defaults_and_clamps() -> None:
+    assert seed_module._enrichment_batch_size({}) == 5
+    assert seed_module._enrichment_batch_size(None) == 5
+    assert seed_module._enrichment_batch_size({"batch_size": 3}) == 3
+    assert seed_module._enrichment_batch_size({"batch_size": 0}) == 1
+    assert seed_module._enrichment_batch_size({"batch_size": 500}) == 20
+    assert seed_module._enrichment_batch_size({"batch_size": True}) == 5
+
+
+def test_agent_profile_runner_batches_by_canonical_name_and_persists_each_batch() -> None:
+    names = [f"角色{index:02d}" for index in range(12)]
+    runner, chat_client, writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=lambda batch_names, _call: _profiles_response(batch_names or []),
+        batch_size=5,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    assert result["profile_count"] == 12
+    assert result["expected_entity_count"] == 12
+    assert result["batch_count"] == 3  # ceil(12 / 5)
+    assert "missing_entities" not in result
+    # One LLM call per batch; each message scopes to its batch subset.
+    assert len(chat_client.calls) == 3
+    seen: list[str] = []
+    for call in chat_client.calls:
+        batch_names = _message_batch_entities(call["messages"])
+        assert batch_names is not None and len(batch_names) <= 5
+        seen.extend(batch_names)
+    assert sorted(seen) == sorted(names)
+    # Per-batch idempotent persistence: writer invoked once per batch.
+    assert len(writer.batch_calls) == 3
+
+
+def test_agent_profile_runner_uncaps_expected_entity_list_beyond_200() -> None:
+    names = [f"角色{index:03d}" for index in range(205)]
+    runner, chat_client, _writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=lambda batch_names, _call: _profiles_response(batch_names or []),
+        batch_size=20,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    assert result["expected_entity_count"] == 205
+    assert result["profile_count"] == 205
+    assert "missing_entities" not in result
+
+
+def test_agent_profile_runner_retries_transient_batch_then_recovers_by_split() -> None:
+    names = ["甲", "乙", "丙", "丁"]
+    failures: dict[str, int] = {"丁": 2}  # first two attempts on 丁 fail
+
+    def responder(batch_names: list[str] | None, _call: int) -> dict[str, object]:
+        batch = batch_names or []
+        if batch == ["丁"] and failures["丁"] > 0:
+            failures["丁"] -= 1
+            raise LLMFacilityError("LLM_PROVIDER_ERROR", "transient provider blip")
+        return _profiles_response(batch)
+
+    runner, _chat_client, writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=responder,
+        batch_size=4,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    assert result["profile_count"] == 4
+    assert "missing_entities" not in result
+    # Whole batch failed once, retried once, then split into [甲乙]/[丙丁] which succeeded.
+    persisted = [name for call in writer.batch_calls for name in _batch_profile_names(call)]
+    assert sorted(persisted) == sorted(names)
+
+
+def _batch_profile_names(call: dict[str, object]) -> list[str]:
+    payload = call.get("batch_agent_profiles")
+    if not isinstance(payload, dict):
+        return []
+    return [
+        item["canonical_name"]
+        for item in payload.get("profiles", [])
+        if isinstance(item, dict) and isinstance(item.get("canonical_name"), str)
+    ]
+
+
+def test_agent_profile_runner_records_irrecoverable_single_entity_as_missing() -> None:
+    names = ["甲", "乙"]
+
+    def responder(batch_names: list[str] | None, _call: int) -> dict[str, object]:
+        batch = batch_names or []
+        # 乙 fails whenever a call targets it alone (irrecoverable even after bisect).
+        if batch and all(name == "乙" for name in batch):
+            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "model returned malformed JSON")
+        # Drop 乙 from any mixed batch (the model could not enrich it).
+        return _profiles_response([name for name in batch if name != "乙"])
+
+    runner, _chat_client, writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=responder,
+        batch_size=2,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    # Partial coverage beats full failure: 甲 persists, 乙 surfaces as missing (no fail).
+    assert result["status"] == "completed"
+    assert result["profile_count"] == 1
+    assert result["missing_entities"] == ["乙"]
+    assert result["missing_count"] == 1
+    persisted = [name for call in writer.batch_calls for name in _batch_profile_names(call)]
+    assert persisted == ["甲"]
+
+
+def test_agent_profile_runner_reconciles_missing_entities_in_refill_pass() -> None:
+    names = ["甲", "乙", "丙"]
+    first_pass_done = {"done": False}
+
+    def responder(batch_names: list[str] | None, _call: int) -> dict[str, object]:
+        batch = batch_names or []
+        if not first_pass_done["done"]:
+            # First pass: silently drop 丙 from an otherwise successful batch.
+            first_pass_done["done"] = True
+            return _profiles_response([name for name in batch if name != "丙"])
+        return _profiles_response(batch)
+
+    runner, _chat_client, _writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=responder,
+        batch_size=3,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    assert result["profile_count"] == 3
+    assert "missing_entities" not in result
+    assert result["reconciled_count"] == 1
+
+
+def test_agent_profile_runner_drops_out_of_batch_hallucinated_profiles() -> None:
+    names = ["甲", "乙"]
+
+    def responder(batch_names: list[str] | None, _call: int) -> dict[str, object]:
+        batch = batch_names or []
+        payload = _profiles_response(batch)
+        # Model hallucinates an entity that was not requested in this batch.
+        payload["agent_profiles"]["profiles"].append({"canonical_name": "幽灵", "voice": "虚"})
+        return payload
+
+    runner, _chat_client, writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=responder,
+        batch_size=5,
+    )
+
+    result = runner.generate(context=_context(), module_key="character_agent_profile")
+
+    assert result["status"] == "completed"
+    persisted = [name for call in writer.batch_calls for name in _batch_profile_names(call)]
+    assert "幽灵" not in persisted
+    # The hallucinated entity is not part of the expected set, so coverage is the real entities.
+    assert result["profile_count"] == 2
+
+
+def test_merge_agent_profile_batch_dedupes_profiles_by_canonical_name() -> None:
+    accumulated = {
+        "profiles": [{"canonical_name": "甲", "voice": "旧"}, {"canonical_name": "乙", "voice": "稳"}],
+        "memory_seeds": [{"summary": "旧记忆"}],
+        "relationship_views": [],
+    }
+    batch = {
+        "profiles": [{"canonical_name": "甲", "voice": "新"}, {"canonical_name": "丙", "voice": "淡"}],
+        "memory_seeds": [{"summary": "新记忆"}],
+        "relationship_views": [{"source": "甲", "target": "丙"}],
+    }
+
+    merged = seed_module._merge_agent_profile_batch(accumulated, batch)
+
+    by_name = {profile["canonical_name"]: profile for profile in merged["profiles"]}
+    assert set(by_name) == {"甲", "乙", "丙"}
+    assert by_name["甲"]["voice"] == "新"  # later write wins
+    assert merged["memory_seeds"] == [{"summary": "旧记忆"}, {"summary": "新记忆"}]
+    assert merged["relationship_views"] == [{"source": "甲", "target": "丙"}]
+    # Re-merging the same batch is idempotent.
+    remerged = seed_module._merge_agent_profile_batch(merged, batch)
+    assert {p["canonical_name"] for p in remerged["profiles"]} == {"甲", "乙", "丙"}
+
+
+def test_postgres_agent_profile_context_loader_scopes_batch_to_subset() -> None:
+    connection = AgentProfileContextConnection(
+        resolution_rows=[
+            {
+                "seed_entity_resolution_snapshot_id": "resolution-snapshot-1",
+                "model_id": "model-resolution",
+                "merged_entity_count": 2,
+                "alias_count": 0,
+                "conflict_count": 0,
+                "resolution_jsonb": {"merged_entities": [{"canonical_name": "林舟"}]},
+            }
+        ],
+        entity_rows=[
+            {"entity_id": "entity-1", "entity_type": "character", "canonical_name": "林舟", "importance": 8, "state_summary": "守住秘密。"},
+        ],
+        relationship_rows=[
+            {
+                "relationship_id": "rel-1",
+                "source_entity_name": "林舟",
+                "target_entity_name": "陆晚",
+                "relationship_type": "ally",
+                "summary": "互相试探。",
+            }
+        ],
+        segment_rows=[{"segment_id": "segment-1", "segment_order": 0, "summary": "雨夜相遇。"}],
+    )
+    loader = seed_module.PostgresAgentProfileContextLoader(connect=lambda: connection)
+
+    batch_context = loader.load_batch_context(context=_context(), batch_canonical_names=["林舟"])
+
+    assert batch_context["canon"]["entities"] == [
+        {"entity_id": "entity-1", "entity_type": "character", "canonical_name": "林舟", "importance": 8, "state_summary": "守住秘密。"}
+    ]
+    assert batch_context["canon"]["segment_summaries"] == [
+        {"segment_id": "segment-1", "segment_order": 0, "summary": "雨夜相遇。"}
+    ]
+    # The entity query is subset-filtered by canonical name (no LIMIT truncation).
+    entity_queries = [query for query, _ in connection.cursor_instance.executed if "FROM entities" in query]
+    assert entity_queries and "canonical_name = ANY" in entity_queries[0]
+    assert "LIMIT 200" not in entity_queries[0]
+    relationship_queries = [query for query, _ in connection.cursor_instance.executed if "FROM relationships" in query]
+    assert relationship_queries and "source_entity_name = ANY" in relationship_queries[0]
+
+
+def test_postgres_agent_profile_snapshot_writer_merges_batch_via_single_upsert() -> None:
+    connection = FakeOntologySnapshotConnection([{"seed_agent_profile_snapshot_id": "profile-snapshot-1"}])
+    writer = seed_module.PostgresAgentProfileSnapshotWriter(connect=lambda: connection)
+
+    snapshot_id = writer.record_agent_profile_batch(
+        context=_context(),
+        module_key="character_agent_profile",
+        model_id="model-profile",
+        batch_agent_profiles={
+            "profiles": [{"canonical_name": "林舟", "voice": "冷静"}],
+            "memory_seeds": [],
+            "relationship_views": [],
+        },
+    )
+
+    assert snapshot_id == "profile-snapshot-1"
+    query = connection.cursor_instance.query
+    assert "INSERT INTO seed_agent_profile_snapshots" in query
+    assert "ON CONFLICT (tenant_id, project_id, run_id, module_key)" in query
+    assert "jsonb_build_object" in query
+    assert connection.committed is True
+    assert connection.closed is True
+
+
+def test_postgres_agent_profile_context_loader_queries_have_no_limit_200() -> None:
+    connection = AgentProfileContextConnection(
+        resolution_rows=[],
+        entity_rows=[],
+        relationship_rows=[],
+        segment_rows=[],
+    )
+    loader = seed_module.PostgresAgentProfileContextLoader(connect=lambda: connection)
+
+    loader.load_context(context=_context())
+
+    # Entity and relationship loads must be uncapped (the 200-row truncation is gone).
+    for query, _ in connection.cursor_instance.executed:
+        if "FROM entities" in query or "FROM relationships" in query:
+            assert "LIMIT 200" not in query
+
+
 def test_postgres_agent_profile_context_loader_loads_sanitized_scoped_context_without_raw_fields() -> None:
     connection = AgentProfileContextConnection(
         resolution_rows=[
@@ -7920,7 +8460,15 @@ def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
                         "resolution_jsonb": {"merged_entities": [{"canonical_name": "林舟"}]},
                     }
                 ],
-                entity_rows=[],
+                entity_rows=[
+                    {
+                        "entity_id": "entity-1",
+                        "entity_type": "character",
+                        "canonical_name": "林舟",
+                        "importance": 8,
+                        "state_summary": "守住雨港秘密。",
+                    }
+                ],
                 relationship_rows=[],
                 segment_rows=[],
             ),
@@ -7949,6 +8497,29 @@ def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
                     }
                 ]
             ),
+            AgentProfileContextConnection(
+                resolution_rows=[
+                    {
+                        "seed_entity_resolution_snapshot_id": "resolution-snapshot-1",
+                        "model_id": "model-resolution",
+                        "merged_entity_count": 1,
+                        "alias_count": 1,
+                        "conflict_count": 0,
+                        "resolution_jsonb": {"merged_entities": [{"canonical_name": "林舟"}]},
+                    }
+                ],
+                entity_rows=[
+                    {
+                        "entity_id": "entity-1",
+                        "entity_type": "character",
+                        "canonical_name": "林舟",
+                        "importance": 8,
+                        "state_summary": "守住雨港秘密。",
+                    }
+                ],
+                relationship_rows=[],
+                segment_rows=[],
+            ),
             FakeOntologySnapshotConnection([{"seed_agent_profile_snapshot_id": "profile-snapshot-1"}]),
         ]
     )
@@ -7969,6 +8540,8 @@ def test_agent_profile_runner_from_env_builds_db_backed_llm_facility_runner(
         "profile_count": 1,
         "memory_seed_count": 1,
         "relationship_view_count": 1,
+        "batch_count": 1,
+        "expected_entity_count": 1,
     }
     request = transport.requests[0]
     assert request.headers["Authorization"] == "Bearer sk-seed-live"

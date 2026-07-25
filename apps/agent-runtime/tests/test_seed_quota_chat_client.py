@@ -159,3 +159,62 @@ def test_seed_production_chat_factory_enables_quota_gate() -> None:
     client = _seed_chat_client(database_url="postgresql://seed-runtime.invalid/app")
 
     assert isinstance(client, SeedQuotaAwareJSONChatClient)
+
+
+def test_seed_quota_chat_client_gives_distinct_call_identity_per_enrichment_batch() -> None:
+    """Batched enrichment must not collide on one idempotency key (doc 42 R4).
+
+    The quota gate keys idempotency on stable_provider_call_id(context, module,
+    stage, call_index) where stage embeds a digest of the input text. Two batches
+    over different entity subsets produce different user payloads, hence distinct
+    stages and distinct provider call identities — so batch 2 is a real LLM call,
+    not a replay of batch 1.
+    """
+    from mirofish_agents.llm_quota.gate import stable_provider_call_id
+
+    gate = RecordingQuotaGate()
+    provider = RecordingProviderClient()
+    client = SeedQuotaAwareJSONChatClient(quota_gate=gate, provider_client=provider)
+    context = AgentContext(
+        tenant_id="11111111-1111-4111-8111-111111111111",
+        project_id="22222222-2222-4222-8222-222222222222",
+        run_id="33333333-3333-4333-8333-333333333333",
+        workflow_type="seed_pipeline",
+        actor_user_id=None,
+        trace_id="55555555-5555-4555-8555-555555555555",
+        permissions={"seed_pipeline": ["run"]},
+    )
+    resolution = ModuleBindingResolution(
+        tenant_id=context.tenant_id,
+        project_id=context.project_id,
+        module_key="character_agent_profile",
+        channel_id="66666666-6666-4666-8666-666666666666",
+        model_id="77777777-7777-4777-8777-777777777777",
+        provider="openai-compatible",
+        base_url="https://provider.invalid/v1",
+        credential_ref="private-ref",
+        supports_json=True,
+        settings={},
+    )
+    batch_one = [{"role": "user", "content": '{"batch_entities":["甲","乙"],"source_context":{}}'}]
+    batch_two = [{"role": "user", "content": '{"batch_entities":["丙","丁"],"source_context":{}}'}]
+
+    for messages in (batch_one, batch_two):
+        client.complete_json(
+            context=context,
+            resolution=resolution,
+            api_key="sk-private",
+            messages=messages,
+        )
+
+    assert len(gate.calls) == 2
+    first_stage = gate.calls[0]["stage"]
+    second_stage = gate.calls[1]["stage"]
+    assert first_stage != second_stage
+    first_call_id = stable_provider_call_id(
+        context, "character_agent_profile", first_stage, gate.calls[0]["call_index"]
+    )
+    second_call_id = stable_provider_call_id(
+        context, "character_agent_profile", second_stage, gate.calls[1]["call_index"]
+    )
+    assert first_call_id != second_call_id

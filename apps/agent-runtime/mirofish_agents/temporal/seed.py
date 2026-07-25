@@ -22,7 +22,7 @@ from mirofish_agents.seed.pdf_ocr import (
     PdfOcrProviderError,
     configured_pdf_ocr_backend,
 )
-from mirofish_agents.seed.sequential_reader import LLMFacilityError
+from mirofish_agents.seed.sequential_reader import _TRANSIENT_BATCH_CODES, LLMFacilityError
 
 
 with workflow.unsafe.imports_passed_through():
@@ -437,6 +437,16 @@ class AgentProfileSnapshotWriter(Protocol):
     ) -> str:
         """Persist a private character-agent profile snapshot and return its public id."""
 
+    def record_agent_profile_batch(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        model_id: str | None,
+        batch_agent_profiles: dict[str, Any],
+    ) -> str:
+        """Idempotently merge one enrichment batch into the cumulative run snapshot."""
+
 
 class AgentProfileContextLoader(Protocol):
     def load_context(
@@ -445,6 +455,14 @@ class AgentProfileContextLoader(Protocol):
         context: AgentContext,
     ) -> dict[str, Any]:
         """Load sanitized Seed canon context for character agent profile generation."""
+
+    def load_batch_context(
+        self,
+        *,
+        context: AgentContext,
+        batch_canonical_names: list[str],
+    ) -> dict[str, Any]:
+        """Load sanitized Seed canon context scoped to one enrichment batch of entities."""
 
 
 class GlobalAggregationRunner(Protocol):
@@ -1943,6 +1961,135 @@ class PostgresAgentProfileSnapshotWriter:
         finally:
             connection.close()
 
+    def record_agent_profile_batch(
+        self,
+        *,
+        context: AgentContext,
+        module_key: str,
+        model_id: str | None,
+        batch_agent_profiles: dict[str, Any],
+    ) -> str:
+        """Merge one enrichment batch into the cumulative run snapshot (idempotent).
+
+        A single atomic ``INSERT ... ON CONFLICT`` merges the batch into the
+        existing ``profiles_jsonb`` in the database: profiles are deduplicated by
+        canonical_name (later write wins), memory_seeds/relationship_views are
+        appended, and the denormalized counts are recomputed from the merged
+        arrays. Re-running the same batch converges to the same snapshot, and
+        concurrent batches cannot lose each other's writes. Runs under the
+        app-role/RLS tenant context like every writer.
+        """
+        if context.project_id is None:
+            raise ValueError("project_id is required to persist agent profile batches")
+        normalized_module_key = _required_text_value(module_key, "module_key")
+        if model_id is not None and not isinstance(model_id, str):
+            raise ValueError("model_id must be a string")
+        if not isinstance(batch_agent_profiles, dict):
+            raise ValueError("agent profile batch must be an object")
+        # Validate the batch payload shape (arrays of objects) before persisting.
+        for field_name in ("profiles", "memory_seeds", "relationship_views"):
+            value = batch_agent_profiles.get(field_name, [])
+            if not isinstance(value, list):
+                raise ValueError(f"agent profile batch {field_name} must be an array")
+        profiles_json = _json_agent_profile_object(batch_agent_profiles)
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                cursor.execute(
+                    """WITH batch AS (
+                         SELECT %s::jsonb AS doc
+                       ),
+                       current_doc AS (
+                         SELECT COALESCE(
+                           (SELECT profiles_jsonb
+                            FROM seed_agent_profile_snapshots
+                            WHERE tenant_id = %s
+                              AND project_id = %s
+                              AND run_id = %s
+                              AND module_key = %s),
+                           '{"profiles":[],"memory_seeds":[],"relationship_views":[]}'::jsonb
+                         ) AS doc
+                       ),
+                       merged AS (
+                         SELECT jsonb_build_object(
+                           'profiles', COALESCE((
+                             SELECT jsonb_agg(elem ORDER BY ord)
+                             FROM (
+                               SELECT elem, MIN(ord) AS ord
+                               FROM (
+                                 SELECT 0 AS seq, ord, elem
+                                 FROM jsonb_array_elements(current_doc.doc->'profiles')
+                                   WITH ORDINALITY AS old_profiles(elem, ord)
+                                 UNION ALL
+                                 SELECT 1 AS seq, ord, elem
+                                 FROM jsonb_array_elements(batch.doc->'profiles')
+                                   WITH ORDINALITY AS new_profiles(elem, ord)
+                               ) AS combined
+                               GROUP BY elem
+                             ) AS deduped
+                           ), '[]'::jsonb),
+                           'memory_seeds', COALESCE(
+                             (current_doc.doc->'memory_seeds') || COALESCE(batch.doc->'memory_seeds', '[]'::jsonb),
+                             '[]'::jsonb
+                           ),
+                           'relationship_views', COALESCE(
+                             (current_doc.doc->'relationship_views') || COALESCE(batch.doc->'relationship_views', '[]'::jsonb),
+                             '[]'::jsonb
+                           )
+                         ) AS doc
+                         FROM current_doc, batch
+                       )
+                       INSERT INTO seed_agent_profile_snapshots (
+                         tenant_id, project_id, run_id, module_key, model_id,
+                         profiles_jsonb, profile_count, memory_seed_count,
+                         relationship_view_count, metadata_jsonb
+                       )
+                       SELECT
+                         %s, %s, %s, %s, %s,
+                         merged.doc,
+                         jsonb_array_length(merged.doc->'profiles'),
+                         jsonb_array_length(merged.doc->'memory_seeds'),
+                         jsonb_array_length(merged.doc->'relationship_views'),
+                         '{}'::jsonb
+                       FROM merged
+                       ON CONFLICT (tenant_id, project_id, run_id, module_key)
+                       DO UPDATE SET
+                         model_id = EXCLUDED.model_id,
+                         profiles_jsonb = EXCLUDED.profiles_jsonb,
+                         profile_count = EXCLUDED.profile_count,
+                         memory_seed_count = EXCLUDED.memory_seed_count,
+                         relationship_view_count = EXCLUDED.relationship_view_count,
+                         updated_at = now()
+                       RETURNING seed_agent_profile_snapshot_id::text AS seed_agent_profile_snapshot_id""",
+                    (
+                        profiles_json,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        normalized_module_key,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        normalized_module_key,
+                        model_id.strip() if isinstance(model_id, str) and model_id.strip() else None,
+                    ),
+                )
+                upsert_row = cursor.fetchone()
+            connection.commit()
+            return _row_value(upsert_row, "seed_agent_profile_snapshot_id")
+        except LLMFacilityError:
+            _rollback_postgres_connection(connection)
+            raise
+        except Exception as exc:
+            _rollback_postgres_connection(connection)
+            raise LLMFacilityError(
+                "AGENT_PROFILE_SNAPSHOT_WRITE_FAILED",
+                "agent profile batch write failed",
+            ) from exc
+        finally:
+            connection.close()
+
 
 class PostgresAgentProfileContextLoader:
     def __init__(self, *, connect: Callable[[], Any]) -> None:
@@ -2046,8 +2193,7 @@ class PostgresAgentProfileContextLoader:
                WHERE tenant_id = %s
                  AND project_id = %s
                  AND source_run_id::text = %s
-               ORDER BY canonical_name ASC
-               LIMIT 200""",
+               ORDER BY canonical_name ASC""",
             (context.tenant_id, context.project_id, context.run_id),
         )
         return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
@@ -2064,9 +2210,113 @@ class PostgresAgentProfileContextLoader:
                WHERE tenant_id = %s
                  AND project_id = %s
                  AND source_run_id::text = %s
-               ORDER BY source_entity_name ASC, target_entity_name ASC, relationship_type ASC
-               LIMIT 200""",
+               ORDER BY source_entity_name ASC, target_entity_name ASC, relationship_type ASC""",
             (context.tenant_id, context.project_id, context.run_id),
+        )
+        return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
+
+    def load_batch_context(
+        self,
+        *,
+        context: AgentContext,
+        batch_canonical_names: list[str],
+    ) -> dict[str, Any]:
+        """Load canon context scoped to one enrichment batch of entities.
+
+        Unlike ``load_context`` (which carries the whole book for a single-shot
+        call), this returns only the given batch's entities plus the
+        relationships touching them, alongside the book-wide segment summaries
+        and the entity-resolution snapshot. Used by the batched enrichment loop.
+        """
+        if context.project_id is None:
+            raise LLMFacilityError(
+                "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+                "agent profile source context load failed",
+            )
+        names = [name for name in batch_canonical_names if isinstance(name, str) and name.strip()]
+        if not names:
+            return {}
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                _set_postgres_tenant_context(cursor, context)
+                resolution = self._load_resolution(cursor, context)
+                entities = self._load_entities_subset(cursor, context, names)
+                relationships = self._load_relationships_subset(cursor, context, names)
+                segment_summaries = self._load_segment_summaries(cursor, context)
+            context_payload: dict[str, Any] = {}
+            if resolution:
+                context_payload["entity_resolution"] = resolution
+            canon: dict[str, Any] = {}
+            if entities:
+                canon["entities"] = entities
+            if relationships:
+                canon["relationships"] = relationships
+            if segment_summaries:
+                canon["segment_summaries"] = segment_summaries
+            if canon:
+                context_payload["canon"] = canon
+            sanitized = _sanitize_agent_profile_context_value(context_payload)
+            return sanitized if isinstance(sanitized, dict) else {}
+        except LLMFacilityError:
+            raise
+        except Exception as exc:
+            raise LLMFacilityError(
+                "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+                "agent profile source context load failed",
+            ) from exc
+        finally:
+            connection.close()
+
+    def _load_entities_subset(
+        self,
+        cursor: Any,
+        context: AgentContext,
+        canonical_names: list[str],
+    ) -> list[dict[str, Any]]:
+        cursor.execute(
+            """SELECT
+                   entity_id::text AS entity_id,
+                   entity_type,
+                   canonical_name,
+                   importance,
+                   state_summary
+               FROM entities
+               WHERE tenant_id = %s
+                 AND project_id = %s
+                 AND source_run_id::text = %s
+                 AND canonical_name = ANY(%s)
+               ORDER BY canonical_name ASC""",
+            (context.tenant_id, context.project_id, context.run_id, canonical_names),
+        )
+        return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
+
+    def _load_relationships_subset(
+        self,
+        cursor: Any,
+        context: AgentContext,
+        canonical_names: list[str],
+    ) -> list[dict[str, Any]]:
+        cursor.execute(
+            """SELECT
+                   relationship_id::text AS relationship_id,
+                   source_entity_name,
+                   target_entity_name,
+                   relationship_type,
+                   summary
+               FROM relationships
+               WHERE tenant_id = %s
+                 AND project_id = %s
+                 AND source_run_id::text = %s
+                 AND (source_entity_name = ANY(%s) OR target_entity_name = ANY(%s))
+               ORDER BY source_entity_name ASC, target_entity_name ASC, relationship_type ASC""",
+            (
+                context.tenant_id,
+                context.project_id,
+                context.run_id,
+                canonical_names,
+                canonical_names,
+            ),
         )
         return [_compact_sanitized_context_row(row) for row in cursor.fetchall()]
 
@@ -2279,6 +2529,20 @@ class LLMFacilityAgentProfileRunner:
                     "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
                     "agent profile source context is unavailable",
                 )
+            canon = source_context.get("canon")
+            canon_entities = canon.get("entities") if isinstance(canon, dict) else None
+            expected_names = sorted(
+                {
+                    name
+                    for name in (_agent_profile_entity_name(item) for item in canon_entities or [])
+                    if name is not None
+                }
+            )
+            if not expected_names:
+                raise LLMFacilityError(
+                    "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+                    "agent profile source context has no entities to enrich",
+                )
             resolution = self._binding_resolver.resolve_module_binding(
                 context=context,
                 module_key=module_key,
@@ -2290,31 +2554,62 @@ class LLMFacilityAgentProfileRunner:
             )
             if not isinstance(api_key, str) or not api_key.strip():
                 raise LLMFacilityError("LLM_CREDENTIAL_UNAVAILABLE", "resolved credential was empty")
-            response_json = self._chat_client.complete_json(
-                context=context,
-                resolution=resolution,
-                api_key=api_key.strip(),
-                messages=_agent_profile_messages(context=context, source_context=source_context),
-            )
-            agent_profiles = _agent_profiles_payload(response_json)
-            profile_count = _agent_profile_item_count(agent_profiles, "profiles")
-            memory_seed_count = _agent_profile_item_count(agent_profiles, "memory_seeds")
-            relationship_view_count = _agent_profile_item_count(agent_profiles, "relationship_views")
-            profile_snapshot_id = self._agent_profile_snapshot_writer.record_agent_profile_snapshot(
-                context=context,
-                module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY,
-                model_id=resolution.model_id,
-                agent_profiles=agent_profiles,
-                profile_count=profile_count,
-                memory_seed_count=memory_seed_count,
-                relationship_view_count=relationship_view_count,
-            )
+            api_key = api_key.strip()
+
+            batch_size = _enrichment_batch_size(getattr(resolution, "settings", None))
+            covered: set[str] = set()
+            profile_snapshot_id: str | None = None
+            memory_seed_count = 0
+            relationship_view_count = 0
+            batch_count = 0
+            reconciled_count = 0
+
+            # Main pass + one reconciliation refill pass over whatever is still missing.
+            missing = list(expected_names)
+            for round_index in range(2):
+                if not missing:
+                    break
+                if round_index == 1:
+                    reconciled_count += 1
+                for batch_names in _agent_profile_batches(missing, batch_size):
+                    batch_count += 1
+                    try:
+                        batch_profiles = self._run_batch_with_recovery(
+                            context=context,
+                            resolution=resolution,
+                            api_key=api_key,
+                            batch_names=batch_names,
+                        )
+                    except LLMFacilityError as exc:
+                        if exc.code not in _TRANSIENT_BATCH_CODES:
+                            # Credential/binding/quota-style failures stay fail-closed.
+                            raise
+                        # Every entity in this batch failed irrecoverably; the
+                        # reconciler will surface them as missing (partial coverage).
+                        continue
+                    filtered, _dropped = _agent_profile_batch_allowed(
+                        batch_profiles,
+                        frozenset(batch_names),
+                    )
+                    profile_snapshot_id = self._agent_profile_snapshot_writer.record_agent_profile_batch(
+                        context=context,
+                        module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY,
+                        model_id=resolution.model_id,
+                        batch_agent_profiles=filtered,
+                    )
+                    covered.update(_covered_canonical_names(filtered))
+                    memory_seed_count += len(filtered.get("memory_seeds", []))
+                    relationship_view_count += len(filtered.get("relationship_views", []))
+                missing = [name for name in expected_names if name not in covered]
+
+            missing_entities = sorted(missing)
+            profile_count = len([name for name in expected_names if name in covered])
         except LLMFacilityError as exc:
             return _agent_profile_runner_failed(exc.code, exc.message)
         except Exception:
             return _agent_profile_runner_failed("LLM_PROVIDER_ERROR", "agent profile generation failed")
 
-        return {
+        result: dict[str, Any] = {
             "status": "completed",
             "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
             "model_id": resolution.model_id,
@@ -2322,7 +2617,98 @@ class LLMFacilityAgentProfileRunner:
             "profile_count": profile_count,
             "memory_seed_count": memory_seed_count,
             "relationship_view_count": relationship_view_count,
+            "batch_count": batch_count,
+            "expected_entity_count": len(expected_names),
         }
+        if reconciled_count:
+            result["reconciled_count"] = reconciled_count
+        if missing_entities:
+            result["missing_entities"] = missing_entities
+            result["missing_count"] = len(missing_entities)
+        return result
+
+    def _run_batch_with_recovery(
+        self,
+        *,
+        context: AgentContext,
+        resolution: Any,
+        api_key: str,
+        batch_names: list[str],
+        attempt: int = 0,
+    ) -> dict[str, Any]:
+        """Generate profiles for one batch; retry once, then bisect, then raise.
+
+        Mirrors the sequential_reading recovery skeleton: transient schema/provider
+        errors get one retry on the same batch, then a multi-entity batch is split
+        and recovered, and a single entity that still fails raises (the caller
+        records it as missing instead of failing the stage).
+        """
+        try:
+            batch_context = self._load_batch_context(context=context, batch_names=batch_names)
+            response_json = self._chat_client.complete_json(
+                context=context,
+                resolution=resolution,
+                api_key=api_key,
+                messages=_agent_profile_batch_messages(
+                    context=context,
+                    batch_canonical_names=batch_names,
+                    source_context=batch_context,
+                ),
+            )
+            return _agent_profiles_payload(response_json)
+        except LLMFacilityError as exc:
+            if exc.code not in _TRANSIENT_BATCH_CODES:
+                raise
+            if attempt == 0:
+                return self._run_batch_with_recovery(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    batch_names=batch_names,
+                    attempt=1,
+                )
+            if len(batch_names) > 1:
+                mid = max(1, len(batch_names) // 2)
+                left = self._run_batch_with_recovery(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    batch_names=batch_names[:mid],
+                    attempt=0,
+                )
+                right = self._run_batch_with_recovery(
+                    context=context,
+                    resolution=resolution,
+                    api_key=api_key,
+                    batch_names=batch_names[mid:],
+                    attempt=0,
+                )
+                return _merge_agent_profile_batch(left, right)
+            raise
+
+    def _load_batch_context(self, *, context: AgentContext, batch_names: list[str]) -> dict[str, Any]:
+        loader = self._agent_profile_context_loader
+        if loader is not None and hasattr(loader, "load_batch_context"):
+            try:
+                loaded = loader.load_batch_context(context=context, batch_canonical_names=batch_names)
+            except LLMFacilityError:
+                raise
+            except Exception as exc:
+                raise LLMFacilityError(
+                    "AGENT_PROFILE_CONTEXT_LOAD_FAILED",
+                    "agent profile source context load failed",
+                ) from exc
+            sanitized = _sanitize_agent_profile_context_value(loaded)
+            if isinstance(sanitized, dict) and sanitized:
+                return sanitized
+        # Fall back to the full canon context when no scoped loader is available.
+        if loader is None:
+            raise LLMFacilityError(
+                "AGENT_PROFILE_CONTEXT_UNAVAILABLE",
+                "agent profile source context is unavailable",
+            )
+        loaded_context = loader.load_context(context=context)
+        return _sanitize_agent_profile_context_value(loaded_context)
 
 
 class LLMFacilityArchiveCandidateRunner:
@@ -3972,8 +4358,50 @@ def _seed_ontology_payload(response_json: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(sanitized, dict):
         raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "seed_ontology must be an object")
     for field_name in ("entity_types", "relationship_types", "world_rule_types"):
+        # Normalize first so concise string entries become canonical objects,
+        # then count/validate the now-object array.
+        _normalize_ontology_types(sanitized, field_name)
         _ontology_type_count(sanitized, field_name)
     return sanitized
+
+
+def _normalize_ontology_type_item(item: Any, field_name: str, index: int) -> dict[str, Any]:
+    """Accept a real-model ontology entry and normalize it to an object.
+
+    Models frequently return concise string arrays ("character") instead of the
+    object form ({"name": "character"}) the taxonomy was specified as. Both are
+    valid taxonomy entries; normalize strings (and objects using a `type` key)
+    to the canonical object shape. Anything else stays fail-closed.
+    """
+    if isinstance(item, str):
+        name = item.strip()
+        if name:
+            return {"name": name}
+        raise LLMFacilityError(
+            "SCHEMA_VALIDATION_FAILED",
+            f"{field_name}[{index}] must be a non-empty string",
+        )
+    if isinstance(item, dict):
+        # Tolerate {"type": "..."} in addition to the canonical {"name": "..."}.
+        if "name" not in item and isinstance(item.get("type"), str) and item["type"].strip():
+            normalized = dict(item)
+            normalized["name"] = item["type"].strip()
+            return normalized
+        return item
+    raise LLMFacilityError(
+        "SCHEMA_VALIDATION_FAILED",
+        f"{field_name}[{index}] must be an object",
+    )
+
+
+def _normalize_ontology_types(seed_ontology: dict[str, Any], field_name: str) -> None:
+    value = seed_ontology.get(field_name)
+    if not isinstance(value, list):
+        raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", f"{field_name} must be an array")
+    seed_ontology[field_name] = [
+        _normalize_ontology_type_item(item, field_name, index)
+        for index, item in enumerate(value)
+    ]
 
 
 def _entity_resolution_payload(response_json: dict[str, Any]) -> dict[str, Any]:
@@ -4288,6 +4716,164 @@ def _agent_profile_item_count(agent_profiles: dict[str, Any], field_name: str) -
         if not isinstance(item, dict):
             raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", f"{field_name}[{index}] must be an object")
     return len(value)
+
+
+_AGENT_PROFILE_ENTITY_NAME_FIELDS = ("canonical_name", "name", "entity_name", "entity", "character")
+
+
+def _enrichment_batch_size(settings: Any) -> int:
+    """Resolve the per-batch entity count from module settings, clamped to [1, 20]."""
+    raw = settings.get("batch_size") if isinstance(settings, dict) else None
+    if isinstance(raw, bool):
+        size = 5
+    elif isinstance(raw, (int, float)):
+        size = int(raw)
+    else:
+        size = 5
+    return max(1, min(20, size))
+
+
+def _agent_profile_batches(canonical_names: list[str], batch_size: int) -> list[list[str]]:
+    """Deterministically split sorted canonical names into per-entity batches."""
+    size = max(1, batch_size)
+    return [list(canonical_names[index : index + size]) for index in range(0, len(canonical_names), size)]
+
+
+def _agent_profile_entity_name(item: Any) -> str | None:
+    """Best-effort extraction of the entity name from a generated profile object."""
+    if not isinstance(item, dict):
+        return None
+    for field in _AGENT_PROFILE_ENTITY_NAME_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _agent_profile_batch_allowed(
+    agent_profiles: dict[str, Any],
+    allowed_names: frozenset[str],
+) -> tuple[dict[str, Any], list[str]]:
+    """Filter a batch's profiles to those within the batch, returning (filtered, dropped).
+
+    Profiles whose entity name falls outside ``allowed_names`` (model hallucinated
+    an out-of-batch entity) are discarded and reported by name so the run stays
+    fail-visible rather than silently absorbing fabricated coverage.
+    """
+    profiles = agent_profiles.get("profiles")
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    if isinstance(profiles, list):
+        for item in profiles:
+            name = _agent_profile_entity_name(item)
+            if name is None:
+                # No resolvable entity name: keep the item (cannot attribute it
+                # out-of-batch), the reconciler will catch any resulting gap.
+                kept.append(item)
+            elif name in allowed_names:
+                kept.append(item)
+            else:
+                dropped.append(name)
+    return {
+        "profiles": kept,
+        "memory_seeds": agent_profiles.get("memory_seeds", []),
+        "relationship_views": agent_profiles.get("relationship_views", []),
+    }, dropped
+
+
+def _merge_agent_profile_batch(
+    accumulated: dict[str, Any],
+    batch: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge one batch into the cumulative snapshot, deduping profiles by entity name."""
+    merged_profiles: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    anonymous: list[dict[str, Any]] = []
+    for source in (accumulated, batch):
+        profiles = source.get("profiles") if isinstance(source, dict) else None
+        if not isinstance(profiles, list):
+            continue
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            name = _agent_profile_entity_name(item)
+            if name is None:
+                anonymous.append(item)
+                continue
+            if name not in merged_profiles:
+                order.append(name)
+            merged_profiles[name] = item
+    profiles_out = [merged_profiles[name] for name in order]
+    profiles_out.extend(anonymous)
+
+    def _merged_list(field: str) -> list[Any]:
+        combined: list[Any] = []
+        for source in (accumulated, batch):
+            value = source.get(field) if isinstance(source, dict) else None
+            if isinstance(value, list):
+                combined.extend(item for item in value if isinstance(item, dict))
+        return combined
+
+    return {
+        "profiles": profiles_out,
+        "memory_seeds": _merged_list("memory_seeds"),
+        "relationship_views": _merged_list("relationship_views"),
+    }
+
+
+def _covered_canonical_names(agent_profiles: dict[str, Any]) -> set[str]:
+    profiles = agent_profiles.get("profiles")
+    covered: set[str] = set()
+    if isinstance(profiles, list):
+        for item in profiles:
+            name = _agent_profile_entity_name(item)
+            if name is not None:
+                covered.add(name)
+    return covered
+
+
+def _agent_profile_batch_messages(
+    *,
+    context: AgentContext,
+    batch_canonical_names: list[str],
+    source_context: dict[str, Any],
+) -> list[dict[str, str]]:
+    user_payload: dict[str, Any] = {
+        "tenant_id": context.tenant_id,
+        "project_id": context.project_id,
+        "run_id": context.run_id,
+        "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
+        "task": (
+            "Generate a detailed character agent profile for EACH of the "
+            f"{len(batch_canonical_names)} entities listed in batch_entities."
+        ),
+        "batch_entities": list(batch_canonical_names),
+        "source_context": source_context,
+    }
+    listed = "、".join(batch_canonical_names)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the MiroFish character_agent_profile module. Return one JSON object with an "
+                "agent_profiles object containing profiles, memory_seeds, and relationship_views arrays. "
+                f"Generate a detailed, complete profile for EVERY one of the {len(batch_canonical_names)} "
+                f"entities named in batch_entities ({listed}); do not omit any, and do not generate profiles "
+                "for entities outside batch_entities. Each profile must identify its entity with the exact "
+                "canonical_name from batch_entities. Do not keep profiles concise; give each entity full "
+                "depth. Do not include prompt bodies, raw source material copies, API keys, credentials, or "
+                "provider metadata."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                user_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
 
 
 def _archive_runner_failed(code: str, message: str) -> dict[str, Any]:
@@ -6492,6 +7078,7 @@ def _global_aggregation_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     safe_code = _public_global_aggregation_error_code(code)
     safe_message = _public_global_aggregation_error_message(safe_code)
@@ -6501,11 +7088,28 @@ def _global_aggregation_failed_result(
         error_message=safe_message,
         workflow_event_writer=workflow_event_writer,
     )
+    # Advance workflow_runs.status to failed so the run does not stall at
+    # "running" (which blocks retry and leaves the UI stuck mid-pipeline). The
+    # stage error stays authoritative: a status-write problem only flips
+    # workflow_status_persisted to False, it never masks the real error code.
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=safe_code,
+            message=safe_message,
+        )
+    except Exception:
+        workflow_status_persisted = False
     return _error_result(
         base=base,
         code=safe_code,
         message=safe_message,
-        extra={"stage": "global_aggregation", "module_key": GLOBAL_AGGREGATION_MODULE_KEY},
+        extra={
+            "stage": "global_aggregation",
+            "module_key": GLOBAL_AGGREGATION_MODULE_KEY,
+            "workflow_status_persisted": workflow_status_persisted,
+        },
     )
 
 
@@ -6559,6 +7163,7 @@ def _entity_resolution_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     _record_failed_entity_resolution_event(
         context=context,
@@ -6566,11 +7171,26 @@ def _entity_resolution_failed_result(
         error_message=public_message,
         workflow_event_writer=workflow_event_writer,
     )
+    # Advance workflow_runs.status to failed so the run does not stall at
+    # "running" (which blocks retry and leaves the UI stuck mid-pipeline).
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=code,
+            message=public_message,
+        )
+    except Exception:
+        workflow_status_persisted = False
     return _error_result(
         base=base,
         code=code,
         message=message,
-        extra={"stage": "entity_resolution", "module_key": ENTITY_RESOLUTION_MODULE_KEY},
+        extra={
+            "stage": "entity_resolution",
+            "module_key": ENTITY_RESOLUTION_MODULE_KEY,
+            "workflow_status_persisted": workflow_status_persisted,
+        },
     )
 
 
@@ -6582,6 +7202,7 @@ def _agent_profile_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     _record_failed_agent_profile_event(
         context=context,
@@ -6589,11 +7210,26 @@ def _agent_profile_failed_result(
         error_message=public_message,
         workflow_event_writer=workflow_event_writer,
     )
+    # Advance workflow_runs.status to failed so the run does not stall at
+    # "running" (which blocks retry and leaves the UI stuck mid-pipeline).
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=code,
+            message=public_message,
+        )
+    except Exception:
+        workflow_status_persisted = False
     return _error_result(
         base=base,
         code=code,
         message=message,
-        extra={"stage": "agent_profiles", "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY},
+        extra={
+            "stage": "agent_profiles",
+            "module_key": CHARACTER_AGENT_PROFILE_MODULE_KEY,
+            "workflow_status_persisted": workflow_status_persisted,
+        },
     )
 
 
@@ -6605,6 +7241,7 @@ def _archive_candidate_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     _record_failed_archive_candidate_event(
         context=context,
@@ -6612,11 +7249,26 @@ def _archive_candidate_failed_result(
         error_message=public_message,
         workflow_event_writer=workflow_event_writer,
     )
+    # Advance workflow_runs.status to failed so the run does not stall at
+    # "running" (which blocks retry and leaves the UI stuck mid-pipeline).
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=code,
+            message=public_message,
+        )
+    except Exception:
+        workflow_status_persisted = False
     return _error_result(
         base=base,
         code=code,
         message=message,
-        extra={"stage": "archive_candidates", "module_key": NARRATIVE_ARCHIVES_MODULE_KEY},
+        extra={
+            "stage": "archive_candidates",
+            "module_key": NARRATIVE_ARCHIVES_MODULE_KEY,
+            "workflow_status_persisted": workflow_status_persisted,
+        },
     )
 
 
@@ -6628,6 +7280,7 @@ def _index_assets_failed_result(
     message: str,
     public_message: str,
     workflow_event_writer: WorkflowEventWriter | None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     _record_failed_index_assets_event(
         context=context,
@@ -6635,11 +7288,22 @@ def _index_assets_failed_result(
         error_message=public_message,
         workflow_event_writer=workflow_event_writer,
     )
+    # Advance workflow_runs.status to failed so the run does not stall at
+    # "running" (which blocks retry and leaves the UI stuck mid-pipeline).
+    try:
+        workflow_status_persisted = _mark_seed_workflow_failed(
+            workflow_status_writer,
+            context=context,
+            code=code,
+            message=public_message,
+        )
+    except Exception:
+        workflow_status_persisted = False
     return _error_result(
         base=base,
         code=code,
         message=message,
-        extra={"stage": "index_assets"},
+        extra={"stage": "index_assets", "workflow_status_persisted": workflow_status_persisted},
     )
 
 
@@ -7540,6 +8204,7 @@ def global_aggregation_activity(
     global_aggregator: GlobalAggregationRunner | None = None,
     seed_analysis_writer: SeedAnalysisWriter | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -7558,6 +8223,11 @@ def global_aggregation_activity(
             stage="global_aggregation",
             module_key=GLOBAL_AGGREGATION_MODULE_KEY,
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            workflow_status_writer = _UnavailableWorkflowRunStatusWriter()
     try:
         aggregator = global_aggregator if global_aggregator is not None else _global_aggregator_from_env()
     except Exception as exc:
@@ -7570,6 +8240,7 @@ def global_aggregation_activity(
             message=message,
             public_message=_public_global_aggregation_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if aggregator is None:
         return _global_aggregation_failed_result(
@@ -7582,6 +8253,7 @@ def global_aggregation_activity(
             ),
             public_message="global aggregator is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         aggregation_result = aggregator.aggregate(
@@ -7596,6 +8268,7 @@ def global_aggregation_activity(
             message=str(exc),
             public_message="global aggregation provider failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if aggregation_result.get("status") != "completed":
         error = aggregation_result.get("error") if isinstance(aggregation_result.get("error"), dict) else {}
@@ -7608,6 +8281,7 @@ def global_aggregation_activity(
             message=message,
             public_message=_public_global_aggregation_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         module_key = _optional_result_text(aggregation_result, "module_key") or GLOBAL_AGGREGATION_MODULE_KEY
@@ -7624,6 +8298,7 @@ def global_aggregation_activity(
             message=str(exc),
             public_message="global aggregation output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     seed_analysis_snapshot_id: str | None = None
     try:
@@ -7652,6 +8327,7 @@ def global_aggregation_activity(
             message=str(exc),
             public_message="seed analysis snapshot persistence failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     event_persisted = _record_completed_global_aggregation_event(
         context=context,
@@ -7805,6 +8481,7 @@ def entity_resolution_activity(
     payload: dict[str, Any],
     entity_resolution_runner: EntityResolutionRunner | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -7823,6 +8500,11 @@ def entity_resolution_activity(
             stage="entity_resolution",
             module_key=ENTITY_RESOLUTION_MODULE_KEY,
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            workflow_status_writer = _UnavailableWorkflowRunStatusWriter()
     runner = (
         entity_resolution_runner
         if entity_resolution_runner is not None
@@ -7839,6 +8521,7 @@ def entity_resolution_activity(
             ),
             public_message="entity resolution runner is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         resolution_result = runner.resolve(context=context, module_key=ENTITY_RESOLUTION_MODULE_KEY)
@@ -7850,6 +8533,7 @@ def entity_resolution_activity(
             message=str(exc),
             public_message="entity resolution failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if resolution_result.get("status") != "completed":
         error = resolution_result.get("error") if isinstance(resolution_result.get("error"), dict) else {}
@@ -7862,6 +8546,7 @@ def entity_resolution_activity(
             message=message,
             public_message=_public_entity_resolution_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         module_key = _optional_result_text(resolution_result, "module_key") or ENTITY_RESOLUTION_MODULE_KEY
@@ -7886,6 +8571,7 @@ def entity_resolution_activity(
             message=str(exc),
             public_message="entity resolution output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     event_persisted = _record_completed_entity_resolution_event(
         context=context,
@@ -7918,6 +8604,7 @@ def agent_profile_activity(
     payload: dict[str, Any],
     agent_profile_runner: AgentProfileRunner | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -7936,6 +8623,11 @@ def agent_profile_activity(
             stage="agent_profiles",
             module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY,
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            workflow_status_writer = _UnavailableWorkflowRunStatusWriter()
     runner = agent_profile_runner if agent_profile_runner is not None else _agent_profile_runner_from_env()
     if runner is None:
         return _agent_profile_failed_result(
@@ -7948,6 +8640,7 @@ def agent_profile_activity(
             ),
             public_message="agent profile runner is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         profile_result = runner.generate(context=context, module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY)
@@ -7959,6 +8652,7 @@ def agent_profile_activity(
             message=str(exc),
             public_message="agent profile generation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if profile_result.get("status") != "completed":
         error = profile_result.get("error") if isinstance(profile_result.get("error"), dict) else {}
@@ -7971,6 +8665,7 @@ def agent_profile_activity(
             message=message,
             public_message=_public_agent_profile_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         module_key = _optional_result_text(profile_result, "module_key") or CHARACTER_AGENT_PROFILE_MODULE_KEY
@@ -7995,6 +8690,7 @@ def agent_profile_activity(
             message=str(exc),
             public_message="agent profile output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     event_persisted = _record_completed_agent_profile_event(
         context=context,
@@ -8027,6 +8723,7 @@ def archive_candidate_activity(
     payload: dict[str, Any],
     archive_candidate_runner: ArchiveCandidateRunner | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -8045,6 +8742,11 @@ def archive_candidate_activity(
             stage="archive_candidates",
             module_key=NARRATIVE_ARCHIVES_MODULE_KEY,
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            workflow_status_writer = _UnavailableWorkflowRunStatusWriter()
     runner = (
         archive_candidate_runner
         if archive_candidate_runner is not None
@@ -8061,6 +8763,7 @@ def archive_candidate_activity(
             ),
             public_message="archive candidate runner is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         archive_result = runner.generate(context=context, module_key=NARRATIVE_ARCHIVES_MODULE_KEY)
@@ -8072,6 +8775,7 @@ def archive_candidate_activity(
             message=str(exc),
             public_message="archive candidate generation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if archive_result.get("status") != "completed":
         error = archive_result.get("error") if isinstance(archive_result.get("error"), dict) else {}
@@ -8084,6 +8788,7 @@ def archive_candidate_activity(
             message=message,
             public_message=_public_archive_candidate_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         module_key = _optional_result_text(archive_result, "module_key") or NARRATIVE_ARCHIVES_MODULE_KEY
@@ -8111,6 +8816,7 @@ def archive_candidate_activity(
             message=str(exc),
             public_message="archive candidate output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     event_persisted = _record_completed_archive_candidate_event(
         context=context,
@@ -8143,6 +8849,7 @@ def index_assets_activity(
     payload: dict[str, Any],
     asset_indexer: AssetIndexer | None = None,
     workflow_event_writer: WorkflowEventWriter | None = None,
+    workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
@@ -8160,6 +8867,11 @@ def index_assets_activity(
             base=base,
             stage="index_assets",
         )
+    if workflow_status_writer is None:
+        try:
+            workflow_status_writer = _workflow_status_writer_from_env()
+        except Exception:
+            workflow_status_writer = _UnavailableWorkflowRunStatusWriter()
     indexer = asset_indexer if asset_indexer is not None else _asset_indexer_from_env()
     if indexer is None:
         return _index_assets_failed_result(
@@ -8169,6 +8881,7 @@ def index_assets_activity(
             message="asset indexing requires a configured asset indexer",
             public_message="asset indexer is unconfigured",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         index_result = indexer.index(context=context)
@@ -8180,6 +8893,7 @@ def index_assets_activity(
             message=str(exc),
             public_message="asset indexing failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     if index_result.get("status") != "completed":
         error = index_result.get("error") if isinstance(index_result.get("error"), dict) else {}
@@ -8192,6 +8906,7 @@ def index_assets_activity(
             message=message,
             public_message=_public_index_assets_error_message(code),
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     try:
         asset_index_batch_id = _required_text_value(
@@ -8212,6 +8927,7 @@ def index_assets_activity(
             message=str(exc),
             public_message="asset index output schema validation failed",
             workflow_event_writer=workflow_event_writer,
+            workflow_status_writer=workflow_status_writer,
         )
     event_persisted = _record_completed_index_assets_event(
         context=context,
