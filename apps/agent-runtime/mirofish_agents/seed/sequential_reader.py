@@ -827,6 +827,9 @@ def _sequential_reading_messages(
                 "You are the MiroFish sequential reading module. Return one JSON object with a notes array. "
                 "Each note must include segment_id, summary, and payload_jsonb with characters, organizations, "
                 "relationships, plot_threads, world_rules, events, and consistency_notes arrays. "
+                "Each character or organization must be an object with name, a short one-line state_summary, "
+                "and a description: a detailed 2-4 sentence Chinese profile covering identity, temperament, "
+                "motivation, and relation to the main plot. Do not collapse description into a one-line gloss. "
                 "Do not include prompt, raw full text, API keys, credentials, or provider metadata in the output."
             ),
         },

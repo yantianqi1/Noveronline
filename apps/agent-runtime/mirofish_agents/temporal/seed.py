@@ -2561,6 +2561,11 @@ class LLMFacilityAgentProfileRunner:
 
             batch_size = _enrichment_batch_size(getattr(resolution, "settings", None))
             covered: set[str] = set()
+            # Distinct canonical names the model actually produced a profile for,
+            # including alias/variant names that never match an expected entity.
+            # Drives the settled terminal count so a last batch that yields the
+            # final profile under an unmatched name still reads complete.
+            generated: set[str] = set()
             profile_snapshot_id: str | None = None
             memory_seed_count = 0
             relationship_view_count = 0
@@ -2611,6 +2616,7 @@ class LLMFacilityAgentProfileRunner:
                         batch_agent_profiles=filtered,
                     )
                     covered.update(_covered_canonical_names(filtered))
+                    generated.update(_covered_canonical_names(batch_profiles))
                     memory_seed_count += len(filtered.get("memory_seeds", []))
                     relationship_view_count += len(filtered.get("relationship_views", []))
                     self._emit_agent_profile_progress(
@@ -2622,6 +2628,25 @@ class LLMFacilityAgentProfileRunner:
                         batch_label=batch_label,
                     )
                 missing = [name for name in expected_names if name not in covered]
+
+            # Terminal progress frame: the per-batch emitter reports genuinely-new
+            # canonical coverage, which can settle below total when the last batch
+            # produces the final profile under an alias/variant canonical_name that
+            # never matches an expected entity (the live run froze at 40/41). Settle
+            # on the count of profiles the model actually generated (matched or not),
+            # capped at total, so the last visible number reads complete instead of
+            # wedging one short. The stage-completed event that follows unmounts the
+            # strip, so this only governs the final rendered number.
+            if expected_names:
+                settled = min(total_entities, max(len(covered), len(generated)))
+                self._emit_agent_profile_progress(
+                    stage="agent_profiles",
+                    phase="settled",
+                    completed_entities=settled,
+                    total_entities=total_entities,
+                    batch_index=batch_count,
+                    batch_label=expected_names[-1],
+                )
 
             missing_entities = sorted(missing)
             profile_count = len([name for name in expected_names if name in covered])
@@ -3306,30 +3331,69 @@ class PostgresSeedAssetIndexer:
                    source_kind, source_ref, enabled, pinned
                  )
                  SELECT
-                   tenant_id,
-                   project_id,
+                   entities.tenant_id,
+                   entities.project_id,
                    'project',
-                   entity_type,
+                   entities.entity_type,
                    'entity',
                    'seed',
-                   canonical_name,
-                   state_summary,
-                   state_summary,
+                   entities.canonical_name,
+                   entities.state_summary,
+                   concat_ws(
+                     E'\n',
+                     NULLIF(btrim(COALESCE(entities.description, entities.state_summary)), ''),
+                     NULLIF(E'别名：' || aliases.aliases_text, '别名：'),
+                     NULLIF(E'标签：' || labels.labels_text, '标签：'),
+                     NULLIF(E'证据：' || evidence.evidence_text, '证据：')
+                   ),
                    jsonb_build_object(
-                     'entity_id', entity_id::text,
-                     'source_run_id', source_run_id::text,
-                     'importance', importance,
-                     'first_seen_segment_id', first_seen_segment_id::text
+                     'entity_id', entities.entity_id::text,
+                     'source_run_id', entities.source_run_id::text,
+                     'importance', entities.importance,
+                     'first_seen_segment_id', entities.first_seen_segment_id::text
                    ),
                    '[]'::jsonb,
                    'seed_pipeline',
-                   entity_id::text,
+                   entities.entity_id::text,
                    true,
                    false
                  FROM entities
-                 WHERE tenant_id = %s
-                   AND project_id = %s
-                   AND source_run_id::text = %s
+                 LEFT JOIN LATERAL (
+                   SELECT string_agg(a.alias, '、') AS aliases_text
+                   FROM (
+                     SELECT DISTINCT ea.alias
+                     FROM entity_aliases ea
+                     WHERE ea.tenant_id = entities.tenant_id
+                       AND ea.entity_id = entities.entity_id
+                     ORDER BY ea.alias
+                     LIMIT 12
+                   ) a
+                 ) aliases ON true
+                 LEFT JOIN LATERAL (
+                   SELECT string_agg(l.label, '、') AS labels_text
+                   FROM (
+                     SELECT DISTINCT el.label
+                     FROM entity_labels el
+                     WHERE el.tenant_id = entities.tenant_id
+                       AND el.entity_id = entities.entity_id
+                     ORDER BY el.label
+                     LIMIT 12
+                   ) l
+                 ) labels ON true
+                 LEFT JOIN LATERAL (
+                   SELECT string_agg(e.evidence_text, E'\n') AS evidence_text
+                   FROM (
+                     SELECT DISTINCT ee.evidence_text
+                     FROM entity_evidence ee
+                     WHERE ee.tenant_id = entities.tenant_id
+                       AND ee.entity_id = entities.entity_id
+                     ORDER BY ee.evidence_text
+                     LIMIT 5
+                   ) e
+                 ) evidence ON true
+                 WHERE entities.tenant_id = %s
+                   AND entities.project_id = %s
+                   AND entities.source_run_id::text = %s
                  ON CONFLICT (tenant_id, project_id, source_kind, source_ref, asset_type, title)
                  DO UPDATE SET
                    summary = CASE
@@ -3373,7 +3437,11 @@ class PostgresSeedAssetIndexer:
                    'seed',
                    source_entity_name || ' -> ' || target_entity_name || ' / ' || relationship_type,
                    summary,
-                   summary,
+                   concat_ws(
+                     E'\n',
+                     NULLIF(btrim(summary), ''),
+                     NULLIF(E'证据：' || btrim(evidence_text), '证据：')
+                   ),
                    jsonb_build_object(
                      'relationship_id', relationship_id::text,
                      'source_run_id', source_run_id::text,
@@ -3431,9 +3499,21 @@ class PostgresSeedAssetIndexer:
                    'world_rule',
                    COALESCE(category, 'world'),
                    'seed',
+                   left(btrim(rule_text), 40),
                    rule_text,
-                   rule_text,
-                   rule_text,
+                   concat_ws(
+                     E'\n',
+                     NULLIF(btrim(rule_text), ''),
+                     NULLIF(E'证据：' || btrim(evidence_text), '证据：'),
+                     NULLIF(
+                       btrim(concat_ws(
+                         E'　',
+                         NULLIF(E'分类：' || btrim(category), '分类：'),
+                         NULLIF(E'置信度：' || confidence::text, '置信度：')
+                       )),
+                       ''
+                     )
+                   ),
                    jsonb_build_object(
                      'rule_evidence_id', rule_evidence_id::text,
                      'source_run_id', run_id::text,
@@ -3492,7 +3572,11 @@ class PostgresSeedAssetIndexer:
                    'seed',
                    title,
                    summary,
-                   summary,
+                   concat_ws(
+                     E'\n',
+                     NULLIF(btrim(summary), ''),
+                     NULLIF(E'证据：' || btrim(evidence_text), '证据：')
+                   ),
                    jsonb_build_object(
                      'thread_id', thread_id::text,
                      'source_run_id', source_run_id::text,
@@ -3892,14 +3976,15 @@ class PostgresRuntimeFactsWriter:
         cursor.execute(
             """INSERT INTO entities (
                  tenant_id, project_id, source_run_id, canonical_name, entity_type,
-                 importance, state_summary, first_seen_segment_id, metadata_jsonb
+                 importance, state_summary, description, first_seen_segment_id, metadata_jsonb
                )
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                ON CONFLICT (tenant_id, project_id, canonical_name)
                DO UPDATE SET
                  entity_type = EXCLUDED.entity_type,
                  importance = COALESCE(EXCLUDED.importance, entities.importance),
                  state_summary = COALESCE(EXCLUDED.state_summary, entities.state_summary),
+                 description = COALESCE(EXCLUDED.description, entities.description),
                  first_seen_segment_id = COALESCE(entities.first_seen_segment_id, EXCLUDED.first_seen_segment_id),
                  metadata_jsonb = jsonb_set(
                    entities.metadata_jsonb || (EXCLUDED.metadata_jsonb - 'observed_source_run_ids'),
@@ -3922,6 +4007,7 @@ class PostgresRuntimeFactsWriter:
                 entity["entity_type"],
                 entity["importance"],
                 entity["state_summary"],
+                entity["description"],
                 segment_id,
                 _json_object(
                     {
@@ -10771,6 +10857,7 @@ def _runtime_entity(value: Any, *, entity_type: str) -> dict[str, Any]:
             "labels": [],
             "importance": None,
             "state_summary": summary,
+            "description": None,
             "evidence": None,
         }
     if not isinstance(value, dict):
@@ -10783,6 +10870,7 @@ def _runtime_entity(value: Any, *, entity_type: str) -> dict[str, Any]:
         "labels": _runtime_entity_labels(value.get("labels")),
         "importance": _optional_fact_text(value, "importance"),
         "state_summary": _optional_fact_text(value, "state_update") or _optional_fact_text(value, "state_summary"),
+        "description": _optional_fact_text(value, "description"),
         "evidence": _optional_fact_text(value, "evidence"),
     }
 

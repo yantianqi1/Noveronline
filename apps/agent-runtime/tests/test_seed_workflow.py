@@ -2029,10 +2029,16 @@ def test_agent_profile_activity_bridges_batched_progress_events() -> None:
 
     assert result["status"] == "completed"
     progress_events = [e for e in workflow_writer.events if e["event_type"] == "seed.agent_profiles.progress"]
-    assert len(progress_events) == 2  # ceil(7 / 5) batches
+    # ceil(7 / 5) batch frames + one settled terminal frame
+    assert len(progress_events) == 3
     assert progress_events[0]["payload"]["completed_entities"] == 5
     assert progress_events[0]["payload"]["total_entities"] == 7
     assert progress_events[1]["payload"]["completed_entities"] == 7
+    # The settled frame reports the full covered count so the last visible number
+    # reads complete even if a final batch surfaced no new canonical name.
+    assert progress_events[-1]["payload"]["completed_entities"] == 7
+    assert progress_events[-1]["payload"]["total_entities"] == 7
+    assert progress_events[-1]["payload"]["phase"] == "settled"
     for event in progress_events:
         payload = event["payload"]
         assert payload["stage"] == "agent_profiles"
@@ -2071,6 +2077,45 @@ def test_archive_candidate_activity_bridges_batched_progress_events() -> None:
         assert payload["activity"] == "archive_candidate_activity"
         assert payload["module_key"] == "narrative_archives"
         assert "正在生成叙事档案候选" in payload["message"]
+
+
+def test_agent_profile_activity_settles_count_when_last_batch_adds_no_new_name() -> None:
+    # Regression: the live run froze at 40/41 because the final batch produced the
+    # 41st profile under a variant/alias canonical_name (采薇姑娘 instead of the
+    # expected 陈汉光), so len(covered) never reached total. The settled frame must
+    # count those generated-but-unmatched profiles so the last visible number
+    # reads complete instead of wedging one short.
+    workflow_writer = RecordingWorkflowEventWriter()
+    names = [f"角色{index:02d}" for index in range(6)]
+
+    def responder(batch_names: list[str], _call: int) -> dict[str, object]:
+        # The first batch covers its names; the final batch produces its profile
+        # under an alias that never matches an expected canonical_name.
+        if _call == 1:
+            return _profiles_response(batch_names or [])
+        return _profiles_response(["采薇姑娘"])
+
+    runner, _chat_client, _writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=responder,
+        batch_size=5,
+    )
+
+    result = agent_profile_activity(
+        {"context": _context().model_dump()},
+        agent_profile_runner=runner,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result["status"] == "completed"
+    progress_events = [e for e in workflow_writer.events if e["event_type"] == "seed.agent_profiles.progress"]
+    # Batch frames stall below total; the settled terminal frame reads complete.
+    assert progress_events[-1]["payload"]["phase"] == "settled"
+    assert progress_events[-1]["payload"]["completed_entities"] == 6
+    assert progress_events[-1]["payload"]["total_entities"] == 6
+    # Intermediate (non-settled) frames must be monotonically non-decreasing.
+    counts = [e["payload"]["completed_entities"] for e in progress_events]
+    assert counts == sorted(counts)
 
 
 def test_archive_candidate_activity_fails_closed_without_runner() -> None:
@@ -10196,3 +10241,29 @@ def test_temporal_seed_worker_registers_parse_file_activity() -> None:
         "finalize_seed_activity",
         "seed_segment_retry_activity",
     ]
+
+
+def test_runtime_entity_parses_description_from_dict() -> None:
+    entity = seed_module._runtime_entity(
+        {
+            "name": "陈迹",
+            "state_summary": "军情司新人",
+            "description": "军情司新人，舅舅陈守一培养的刀客，性格隐忍。",
+            "aliases": ["小陈"],
+            "labels": [{"label": "刀客"}],
+            "evidence": "第三章：陈迹考入军情司。",
+        },
+        entity_type="character",
+    )
+
+    assert entity["description"] == "军情司新人，舅舅陈守一培养的刀客，性格隐忍。"
+    assert entity["state_summary"] == "军情司新人"
+    assert entity["aliases"] == ["小陈"]
+
+
+def test_runtime_entity_description_defaults_to_none() -> None:
+    entity = seed_module._runtime_entity({"name": "陈迹"}, entity_type="character")
+    assert entity["description"] is None
+
+    from_string = seed_module._runtime_entity("陈迹：军情司新人", entity_type="character")
+    assert from_string["description"] is None
