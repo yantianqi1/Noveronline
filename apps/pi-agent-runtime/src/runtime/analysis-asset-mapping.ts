@@ -8,6 +8,7 @@ const TYPE_KEY_TITLES = new Set([
   "relationship",
   "world_rule",
   "plot_thread",
+  "plot_event",
   "ontology",
   "note_summary",
   "note",
@@ -21,6 +22,7 @@ export function normalizeAnalysisCandidateType(value: string): string {
     case "relationship":
     case "world_rule":
     case "plot_thread":
+    case "plot_event":
     case "ontology":
     case "note_summary":
       return normalized;
@@ -107,6 +109,16 @@ export function composeAnalysisAssetTitle(
       if (thread) return thread.slice(0, 240);
       break;
     }
+    case "plot_event": {
+      // Timeline events: a Chinese title/summary always wins over a placeholder;
+      // otherwise fall back to a readable 未命名事件 · timeframe tag, never the
+      // bare "plot_event" key.
+      const eventTitle = firstString(payload, ["summary", "description"]);
+      if (eventTitle) return truncateText(eventTitle, 60);
+      const timeframe = firstString(payload, ["timeframe"]);
+      if (timeframe) return `未命名事件 · ${timeframe}`.slice(0, 240);
+      return "未命名事件";
+    }
     case "note_summary": {
       const note = firstString(payload, ["summary", "description", "content", "text", "body", "excerpt"]);
       if (note) return truncateText(note, 80);
@@ -119,7 +131,10 @@ export function composeAnalysisAssetTitle(
     }
   }
 
-  return (explicit || type).slice(0, 240);
+  if (explicit) return explicit.slice(0, 240);
+  // Never surface a bare machine type key as the title — fall back to a
+  // readable untitled label instead.
+  return "未命名条目";
 }
 
 export function composeAnalysisAssetContent(
@@ -129,36 +144,104 @@ export function composeAnalysisAssetContent(
   payload: Record<string, unknown>,
 ): string {
   const type = normalizeAnalysisCandidateType(candidateType);
+  // Rich body assembled from the preserved candidate payload so the detail
+  // "正文" carries real substance instead of a copy of the one-line summary.
+  switch (type) {
+    case "character":
+    case "ontology": {
+      const body = firstString(payload, ["body", "content", "text", "content_text", "note"]);
+      if (body) return body.slice(0, 20_000);
+      const parts: string[] = [];
+      if (summary) parts.push(summary);
+      const desc = firstString(payload, ["description", "blurb"]);
+      if (desc && desc !== summary) parts.push(desc);
+      if (parts.length > 0) return parts.join("\n").slice(0, 20_000);
+      break;
+    }
+    case "world_rule": {
+      const parts: string[] = [];
+      const rule = firstString(payload, ["rule_text", "rule", "statement"]);
+      if (rule) parts.push(rule);
+      else if (summary) parts.push(summary);
+      const evidence = firstString(payload, ["evidence", "evidence_text", "source_excerpt"]);
+      if (evidence) parts.push(`证据：${evidence}`);
+      const meta = [
+        firstString(payload, ["category"]) ? `分类：${firstString(payload, ["category"])}` : "",
+        firstString(payload, ["confidence"]) ? `置信度：${firstString(payload, ["confidence"])}` : "",
+      ].filter(Boolean).join("　");
+      if (meta) parts.push(meta);
+      if (parts.length > 0) return parts.join("\n").slice(0, 20_000);
+      break;
+    }
+    case "relationship": {
+      const source = firstString(payload, [
+        "source", "source_name", "source_entity", "source_entity_name", "from", "from_name", "a", "character_a",
+      ]);
+      const target = firstString(payload, [
+        "target", "target_name", "target_entity", "target_entity_name", "to", "to_name", "b", "character_b",
+      ]);
+      const relType = firstString(payload, [
+        "relationship_type", "relation_type", "type", "kind", "relation", "bond_type",
+      ]);
+      const desc = firstString(payload, ["description", "summary", "blurb"]);
+      const parts: string[] = [];
+      if (source || target) {
+        let line = `${source} → ${target}`.trim();
+        if (relType) line += `（${relType}）`;
+        parts.push(line);
+      }
+      if (desc) parts.push(desc);
+      const evidence = firstString(payload, ["evidence", "evidence_text", "source_excerpt"]);
+      if (evidence) parts.push(`证据：${evidence}`);
+      if (parts.length > 0) return parts.join("\n").slice(0, 20_000);
+      break;
+    }
+    case "plot_thread": {
+      const parts: string[] = [];
+      if (summary) parts.push(summary);
+      const status = firstString(payload, ["status"]);
+      if (status) parts.push(`状态：${status}`);
+      const evidence = firstString(payload, ["evidence", "evidence_text", "source_excerpt"]);
+      if (evidence) parts.push(`证据：${evidence}`);
+      if (parts.length > 0) return parts.join("\n").slice(0, 20_000);
+      break;
+    }
+    case "plot_event": {
+      const parts: string[] = [];
+      if (summary) parts.push(summary);
+      const desc = firstString(payload, ["description"]);
+      if (desc && desc !== summary) parts.push(desc);
+      const timeframe = firstString(payload, ["timeframe"]);
+      if (timeframe) parts.push(`时间：${timeframe}`);
+      const world = firstString(payload, ["world"]);
+      if (world) parts.push(`世界：${world}`);
+      const participants = firstStringList(payload, ["participants", "characters", "actors"]);
+      if (participants.length > 0) parts.push(`涉及：${participants.join("、")}`);
+      if (parts.length > 0) return parts.join("\n").slice(0, 20_000);
+      break;
+    }
+  }
+
+  // Generic fallback: any explicit long-form body, else the richest
+  // descriptive field, else the summary/title.
   const content = firstString(payload, ["content", "text", "body", "content_text", "note", "excerpt"]);
-  if (content) {
-    return content.slice(0, 20_000);
-  }
-  if (type === "relationship") {
-    const source = firstString(payload, [
-      "source", "source_name", "source_entity", "source_entity_name", "from", "from_name", "a", "character_a",
-    ]);
-    const target = firstString(payload, [
-      "target", "target_name", "target_entity", "target_entity_name", "to", "to_name", "b", "character_b",
-    ]);
-    const relType = firstString(payload, [
-      "relationship_type", "relation_type", "type", "kind", "relation", "bond_type",
-    ]);
-    const desc = firstString(payload, ["summary", "description", "blurb"]);
-    const parts: string[] = [];
-    if (source || target) {
-      let line = `${source} → ${target}`.trim();
-      if (relType) line += `（${relType}）`;
-      parts.push(line);
-    }
-    if (desc) parts.push(desc);
-    if (parts.length > 0) {
-      return parts.join("\n").slice(0, 20_000);
-    }
-  }
-  const desc = firstString(payload, ["summary", "description", "blurb", "rule_text"]);
+  if (content) return content.slice(0, 20_000);
+  const desc = firstString(payload, ["description", "blurb", "rule_text", "summary"]);
   if (desc) return desc.slice(0, 20_000);
   if (summary) return summary.slice(0, 20_000);
   return title.slice(0, 20_000);
+}
+
+export function firstStringList(payload: Record<string, unknown>, keys: string[]): string[] {
+  for (const key of keys) {
+    const raw = payload[key];
+    if (!Array.isArray(raw)) continue;
+    const items = raw
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+      .map((entry) => entry.trim());
+    if (items.length > 0) return items;
+  }
+  return [];
 }
 
 export function mapAnalysisCandidateToAsset(
@@ -187,14 +270,14 @@ export function mapAnalysisCandidateToAsset(
       ? "relationships"
       : type === "world_rule"
         ? "world"
-        : type === "plot_thread"
+        : type === "plot_thread" || type === "plot_event"
           ? "plot"
           : type === "ontology"
             ? "ontology"
             : "analysis";
 
   const title = composeAnalysisAssetTitle(type, name, payload);
-  const summaryFromPayload = firstString(payload, ["summary", "description", "blurb", "rule_text", "excerpt"]);
+  const summaryFromPayload = firstString(payload, ["summary", "blurb", "excerpt", "description", "rule_text"]);
   const summary = (summaryFromPayload || title).slice(0, 2000);
   const contentText = composeAnalysisAssetContent(type, title, summary, payload);
   const tags = Array.isArray(payload.tags)

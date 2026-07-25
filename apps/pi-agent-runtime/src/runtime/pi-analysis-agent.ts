@@ -180,7 +180,8 @@ function systemPrompt(request: AnalysisStageRequest): string {
     "- Write ALL author-facing text in Simplified Chinese (简体中文): plan docs, notes, review summary, candidate titles, summaries, descriptions, rule_text, and free-form fields.",
     "- Keep JSON field names / schema keys in English (e.g. name, summary, rule_text, items).",
     "- Preserve original proper names, book titles, and quoted source lines exactly as they appear; do not translate names into English unless the source already uses English.",
-    "- Do not produce English-only candidate bodies. If the source is Chinese, extracted content must be Chinese and detailed enough that no important setting is dropped."
+    "- Do not produce English-only candidate bodies. If the source is Chinese, extracted content must be Chinese and detailed enough that no important setting is dropped.",
+    "- Every candidate `title`/`name` must be Simplified Chinese (proper names keep their original form); never use a schema key, file name, or placeholder word (e.g. note_summary) as a title."
   ].join("\n");
 
   if (request.module_key === "analysis_planner") {
@@ -201,12 +202,19 @@ function systemPrompt(request: AnalysisStageRequest): string {
     "Follow 00-plan/task-pack.md and process source segments with tools.",
     "Required writes:",
     "- 20-notes/sequential/<index>.md detailed Chinese notes for each processed segment (events, characters, rules, foreshadowing; do not collapse into a one-line gloss)",
-    "- 30-candidates/characters.json MUST be {\"items\":[{\"name\":\"...\",\"summary\":\"...\",\"description\":\"...\"},...]} (do NOT wrap under a \"characters\" key)",
+    "- 30-candidates/characters.json MUST be {\"items\":[{\"name\":\"...\",\"summary\":\"...\",\"description\":\"...\",\"body\":\"...\"},...]} (do NOT wrap under a \"characters\" key). `summary` is one short line; `body` is a full multi-sentence Chinese profile (identity, temperament, motivation, arc, key relationships) — never a one-line gloss.",
     "- 30-candidates/relationships.json MUST be {\"items\":[{\"subject\":\"...\",\"object\":\"...\",\"type\":\"...\",\"description\":\"...\"},...]} (do NOT wrap under a \"relationships\" key)",
     "- 30-candidates/world_rules.json MUST be {\"items\":[{\"title\":\"...\",\"summary\":\"...\",\"rule_text\":\"...\"},...]} — one rule per item, each specific and complete (powers, constraints, costs, exceptions); never a single vague English sentence or a nested encyclopedia object",
+    "- 30-candidates/timeline.json MUST be {\"items\":[{\"title\":\"...\",\"summary\":\"...\",\"timeframe\":\"...\",\"world\":\"ancient|modern\",\"participants\":[\"...\",...]},...]} — one plot event per item, in story order",
+    "Timeline event rules (mandatory):",
+    "- Every timeline item MUST have a short Chinese noun-phrase `title` (e.g. \"沈翠花夜探青山医院\"), never a placeholder like \"note_summary\" or an English sentence.",
+    "- `summary` is one full Simplified-Chinese sentence describing what happens.",
+    "- `timeframe` locates the event (e.g. \"第1天·夜\" or the source's own day/phase marker); `world` is \"ancient\" or \"modern\".",
+    "- `participants` lists the exact original names of the characters, locations, or organizations involved, copied verbatim from the source so the graph can link the event to them.",
     "- 90-review/summary.md Chinese review summarizing coverage and gaps",
     "Update 00-plan/todo.json as you progress.",
     "Candidates are non-canon proposals, not adopted assets.",
+    "Every candidate item across all files MUST carry a Chinese `title` (or `name`) — never fall back to a schema key or an English placeholder as the title.",
     "Do not invent evidence outside the source segments you read.",
     "Prefer richer Chinese detail over short English paraphrases; omit only true duplicates, not content.",
     "When finished, reply with a short Chinese summary of what you extracted."

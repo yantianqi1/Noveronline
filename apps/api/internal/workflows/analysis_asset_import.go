@@ -178,7 +178,7 @@ func mapAnalysisCandidateToAsset(candidateType, name, workspacePath string, payl
 		category = "relationships"
 	case "world_rule":
 		category = "world"
-	case "plot_thread":
+	case "plot_thread", "plot_event":
 		category = "plot"
 	case "ontology":
 		category = "ontology"
@@ -189,7 +189,7 @@ func mapAnalysisCandidateToAsset(candidateType, name, workspacePath string, payl
 		title = title[:240]
 	}
 
-	summary := firstString(payload, "summary", "description", "blurb", "rule_text", "excerpt")
+	summary := firstString(payload, "summary", "blurb", "excerpt", "description", "rule_text")
 	if summary == "" {
 		summary = title
 	}
@@ -250,7 +250,7 @@ func mapAnalysisCandidateToAsset(candidateType, name, workspacePath string, payl
 
 func normalizeAnalysisCandidateType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "character", "relationship", "world_rule", "plot_thread", "ontology", "note_summary":
+	case "character", "relationship", "world_rule", "plot_thread", "plot_event", "ontology", "note_summary":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "note_summary"
@@ -259,7 +259,7 @@ func normalizeAnalysisCandidateType(value string) string {
 
 // typeKeyTitles are machine fallbacks that should never win over payload-derived names.
 var typeKeyTitles = map[string]struct{}{
-	"character": {}, "relationship": {}, "world_rule": {}, "plot_thread": {},
+	"character": {}, "relationship": {}, "world_rule": {}, "plot_thread": {}, "plot_event": {},
 	"ontology": {}, "note_summary": {}, "note": {}, "story_ontology": {},
 }
 
@@ -294,6 +294,17 @@ func composeAnalysisAssetTitle(candidateType, name string, payload map[string]an
 		if fromPayload := firstString(payload, "thread_title", "hook"); fromPayload != "" {
 			return fromPayload
 		}
+	case "plot_event":
+		// Timeline events: a Chinese title/summary always wins over a placeholder;
+		// otherwise fall back to a readable 未命名事件 · timeframe tag, never the
+		// bare "plot_event" key.
+		if fromPayload := firstString(payload, "summary", "description"); fromPayload != "" {
+			return truncateRunes(fromPayload, 60)
+		}
+		if timeframe := firstString(payload, "timeframe"); timeframe != "" {
+			return truncateRunes("未命名事件 · "+timeframe, 240)
+		}
+		return "未命名事件"
 	case "note_summary":
 		if fromPayload := firstString(payload, "summary", "description", "content", "text", "body", "excerpt"); fromPayload != "" {
 			return truncateRunes(fromPayload, 80)
@@ -307,7 +318,9 @@ func composeAnalysisAssetTitle(candidateType, name string, payload map[string]an
 	if explicit != "" {
 		return explicit
 	}
-	return candidateType
+	// Never surface a bare machine type key as the title — fall back to a
+	// readable untitled label instead.
+	return "未命名条目"
 }
 
 func composeRelationshipTitle(payload map[string]any) string {
@@ -338,10 +351,40 @@ func composeRelationshipTitle(payload map[string]any) string {
 }
 
 func composeAnalysisAssetContent(candidateType, title, summary string, payload map[string]any) string {
-	if content := firstString(payload, "content", "text", "body", "content_text", "note", "excerpt"); content != "" {
-		return content
-	}
-	if candidateType == "relationship" {
+	// Rich body assembled from the preserved candidate payload so the detail
+	// "正文" carries real substance instead of a copy of the one-line summary.
+	switch candidateType {
+	case "character", "ontology":
+		if body := firstString(payload, "body", "content", "text", "content_text", "note"); body != "" {
+			return body
+		}
+		parts := make([]string, 0, 3)
+		if summary != "" {
+			parts = append(parts, summary)
+		}
+		if desc := firstString(payload, "description", "blurb"); desc != "" && desc != summary {
+			parts = append(parts, desc)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	case "world_rule":
+		parts := make([]string, 0, 3)
+		if rule := firstString(payload, "rule_text", "rule", "statement"); rule != "" {
+			parts = append(parts, rule)
+		} else if summary != "" {
+			parts = append(parts, summary)
+		}
+		if evidence := firstString(payload, "evidence", "evidence_text", "source_excerpt"); evidence != "" {
+			parts = append(parts, "证据："+evidence)
+		}
+		if meta := joinNonEmpty("　", prefixNonEmpty("分类：", firstString(payload, "category")), prefixNonEmpty("置信度：", firstString(payload, "confidence"))); meta != "" {
+			parts = append(parts, meta)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	case "relationship":
 		source := firstString(payload,
 			"source", "source_name", "source_entity", "source_entity_name", "from", "from_name", "a", "character_a",
 		)
@@ -349,8 +392,8 @@ func composeAnalysisAssetContent(candidateType, title, summary string, payload m
 			"target", "target_name", "target_entity", "target_entity_name", "to", "to_name", "b", "character_b",
 		)
 		relType := firstString(payload, "relationship_type", "relation_type", "type", "kind", "relation", "bond_type")
-		desc := firstString(payload, "summary", "description", "blurb")
-		parts := make([]string, 0, 4)
+		desc := firstString(payload, "description", "summary", "blurb")
+		parts := make([]string, 0, 3)
 		if source != "" || target != "" {
 			line := strings.TrimSpace(source + " → " + target)
 			if relType != "" {
@@ -361,17 +404,98 @@ func composeAnalysisAssetContent(candidateType, title, summary string, payload m
 		if desc != "" {
 			parts = append(parts, desc)
 		}
+		if evidence := firstString(payload, "evidence", "evidence_text", "source_excerpt"); evidence != "" {
+			parts = append(parts, "证据："+evidence)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	case "plot_thread":
+		parts := make([]string, 0, 3)
+		if summary != "" {
+			parts = append(parts, summary)
+		}
+		if status := firstString(payload, "status"); status != "" {
+			parts = append(parts, "状态："+status)
+		}
+		if evidence := firstString(payload, "evidence", "evidence_text", "source_excerpt"); evidence != "" {
+			parts = append(parts, "证据："+evidence)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	case "plot_event":
+		parts := make([]string, 0, 5)
+		if summary != "" {
+			parts = append(parts, summary)
+		}
+		if desc := firstString(payload, "description"); desc != "" && desc != summary {
+			parts = append(parts, desc)
+		}
+		if timeframe := firstString(payload, "timeframe"); timeframe != "" {
+			parts = append(parts, "时间："+timeframe)
+		}
+		if world := firstString(payload, "world"); world != "" {
+			parts = append(parts, "世界："+world)
+		}
+		if participants := firstStringList(payload, "participants", "characters", "actors"); len(participants) > 0 {
+			parts = append(parts, "涉及："+strings.Join(participants, "、"))
+		}
 		if len(parts) > 0 {
 			return strings.Join(parts, "\n")
 		}
 	}
-	if desc := firstString(payload, "summary", "description", "blurb", "rule_text"); desc != "" {
+
+	// Generic fallback: any explicit long-form body, else the richest
+	// descriptive field, else the summary/title.
+	if content := firstString(payload, "content", "text", "body", "content_text", "note", "excerpt"); content != "" {
+		return content
+	}
+	if desc := firstString(payload, "description", "blurb", "rule_text", "summary"); desc != "" {
 		return desc
 	}
 	if summary != "" {
 		return summary
 	}
 	return title
+}
+
+func firstStringList(payload map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		raw, ok := payload[key].([]any)
+		if !ok {
+			continue
+		}
+		items := make([]string, 0, len(raw))
+		for _, entry := range raw {
+			if s, ok := entry.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					items = append(items, trimmed)
+				}
+			}
+		}
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+func prefixNonEmpty(prefix, value string) string {
+	if value == "" {
+		return ""
+	}
+	return prefix + value
+}
+
+func joinNonEmpty(sep string, parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 func firstString(payload map[string]any, keys ...string) string {

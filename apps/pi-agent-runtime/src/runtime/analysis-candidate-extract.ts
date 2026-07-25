@@ -23,11 +23,46 @@ function humanizeKey(key: string): string {
     .trim() || key;
 }
 
+/** Machine placeholder words that must never surface as a candidate name. */
+const PLACEHOLDER_NAMES = new Set([
+  "note_summary", "concept", "note", "analysis", "world_rule",
+  "plot_event", "plot_thread", "summary", "untitled", "item", "event",
+]);
+
+function cleanName(value: unknown): string {
+  const s = typeof value === "string" ? value.trim() : "";
+  if (!s) return "";
+  return PLACEHOLDER_NAMES.has(s.toLowerCase()) ? "" : s;
+}
+
+function truncateCn(value: string, max: number): string {
+  const t = value.trim();
+  return t.length <= max ? t : `${t.slice(0, max)}…`;
+}
+
+/**
+ * Resolve a display name for one candidate item. Prefers an explicit Chinese
+ * name/title/label; falls back to a truncated summary, then (for events) a
+ * readable 未命名事件 · timeframe tag — but never to a bare schema key literal.
+ */
+function candidateNameForItem(type: string, item: Record<string, unknown>): string {
+  const explicit = cleanName(item.name) || cleanName(item.title) || cleanName(item.label);
+  if (explicit) return explicit;
+  const summary = cleanName(item.summary) || cleanName(item.description);
+  if (summary) return truncateCn(summary, 24);
+  if (type === "plot_event") {
+    const timeframe = cleanName(item.timeframe);
+    return timeframe ? `未命名事件 · ${timeframe}` : "未命名事件";
+  }
+  return "";
+}
+
 function candidateTypeForPath(path: string): string {
   if (path.includes("characters")) return "character";
   if (path.includes("relationships")) return "relationship";
   if (path.includes("world_rules")) return "world_rule";
   if (path.includes("plot_threads")) return "plot_thread";
+  if (path.includes("timeline") || path.includes("events")) return "plot_event";
   if (path.includes("ontology")) return "ontology";
   return "note_summary";
 }
@@ -42,9 +77,11 @@ function arrayFromKnownKeys(parsed: Record<string, unknown>, type: string): Reco
           ? ["items", "world_rules", "rules", "settings"]
           : type === "plot_thread"
             ? ["items", "plot_threads", "threads", "foreshadowing"]
-            : type === "ontology"
-              ? ["items", "ontology", "types", "classes"]
-              : ["items", "notes", "summaries"];
+            : type === "plot_event"
+              ? ["items", "timeline", "events", "plot_events"]
+              : type === "ontology"
+                ? ["items", "ontology", "types", "classes"]
+                : ["items", "notes", "summaries"];
 
   for (const key of preferredKeys) {
     const value = parsed[key];
@@ -170,7 +207,7 @@ export function extractAnalysisCandidatesFromWorkspaceFiles(
     for (const item of items) {
       candidates.push({
         candidate_type: type,
-        name: String(item.name ?? item.title ?? type),
+        name: candidateNameForItem(type, item),
         payload: item,
         workspace_path: file.path,
       });
