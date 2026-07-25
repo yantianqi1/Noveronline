@@ -1,13 +1,65 @@
+@import "tailwindcss";
+
+/*
+ * Self-hosted brush-calligraphy face, subset to exactly the hanzi the chrome
+ * uses (~44KB instead of a multi-MB full font). Used only for the masthead,
+ * seal, and display headings via the `font-brush` utility.
+ */
+@font-face {
+  font-family: "Ma Shan Zheng";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ma-shan-zheng-subset.woff2") format("woff2");
+}
+
+/*
+ * Design tokens — MiroFish Novel "paper & vermilion" system.
+ * These are the single source of truth for the rewrite's visual language:
+ * warm manuscript paper, ink, and a vermilion seal accent. Map them onto
+ * Tailwind via @theme so utilities like bg-paper / text-ink / border-line
+ * stay consistent across every surface we rebuild.
+ */
+@theme {
+  --color-ink: #171a1b;
+  --color-ink-soft: #3c3a36;
+  --color-paper: #f7f2e9;
+  --color-paper-deep: #efe7d8;
+  --color-panel: #fffdf8;
+  --color-line: rgba(86, 69, 45, 0.22);
+  --color-line-soft: rgba(86, 69, 45, 0.12);
+  --color-accent: #8f211b;
+  --color-accent-strong: #7a1a15;
+  --color-accent-soft: #b04a42;
+  --color-accent-wash: rgba(143, 33, 27, 0.07);
+  --color-muted: #5a5146;
+  --color-gold: #b5854a;
+
+  --font-sans: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+  --font-serif: "Source Serif 4", "Songti SC", "Noto Serif SC", Georgia, serif;
+  --font-brush: "Ma Shan Zheng", "Songti SC", "Noto Serif SC", serif;
+
+  --radius-card: 14px;
+
+  --shadow-lift: 0 1px 2px rgba(23, 26, 27, 0.05), 0 12px 32px -12px rgba(23, 26, 27, 0.18);
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 20px 50px -24px rgba(23, 26, 27, 0.28);
+
+  --animate-fade-up: fade-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
 :root {
   color-scheme: light;
-  --ink: #171a1b;
-  --paper: #f7f2e9;
-  --panel: #fffdf8;
-  --line: rgba(86, 69, 45, 0.22);
-  --accent: #8f211b;
-  --muted: #5a5146;
-  --font-sans: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", sans-serif;
-  --font-serif: "Source Serif 4", "Songti SC", "Noto Serif SC", Georgia, serif;
 }
 
 * {
@@ -18,68 +70,207 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background: var(--paper);
-  color: var(--ink);
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 a {
   color: inherit;
 }
 
-.shell {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 32px 20px;
-}
-
-.panel {
-  width: min(440px, 100%);
-  padding: 28px 28px 24px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel);
-}
-
-.panel h1 {
-  margin: 0 0 8px;
-  font-family: var(--font-serif);
-  font-size: 1.6rem;
-  font-weight: 600;
-}
-
-.panel p {
-  margin: 0 0 20px;
-  color: var(--muted);
-  line-height: 1.5;
-}
-
-.panel code {
-  font-size: 0.85em;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: 0 16px;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  background: var(--accent);
+::selection {
+  background: var(--color-accent);
   color: #fff;
-  text-decoration: none;
-  font: inherit;
-  cursor: pointer;
 }
 
-.btn:hover {
-  filter: brightness(0.96);
+/*
+ * Story Graph constellation, light "paper & ink" edition.
+ * The canvas sits on warm manuscript paper with a faint vermilion-and-gold
+ * aurora; controls and the minimap are restyled as quiet paper cards so the
+ * whole surface reads like the rest of the workbench, not a separate dark app.
+ */
+.constellation-sky {
+  background:
+    radial-gradient(120% 90% at 50% 30%, rgba(143, 33, 27, 0.05), transparent 55%),
+    radial-gradient(90% 70% at 80% 10%, rgba(181, 133, 74, 0.06), transparent 60%),
+    radial-gradient(140% 120% at 50% 45%, #faf5ea 0%, #f5efe1 55%, #efe7d8 100%);
 }
 
-.meta {
-  margin-top: 18px;
-  font-size: 0.82rem;
-  color: var(--muted);
+.constellation-flow .react-flow__attribution {
+  display: none;
 }
+
+/* Quiet paper controls + minimap. */
+.constellation-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.constellation-controls button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(86, 69, 45, 0.18);
+  background: rgba(255, 253, 248, 0.9);
+  color: #5a5146;
+  border-radius: 9px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 8px rgba(23, 26, 27, 0.08);
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+.constellation-controls button:hover {
+  border-color: rgba(143, 33, 27, 0.5);
+  color: #8f211b;
+  background: #fffdf8;
+}
+.constellation-controls button svg {
+  fill: currentColor;
+}
+
+.constellation-minimap {
+  border: 1px solid rgba(86, 69, 45, 0.18);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 253, 248, 0.9);
+  box-shadow: 0 8px 24px -10px rgba(23, 26, 27, 0.25);
+}
+
+/* Nodes should never show the default React Flow chrome. */
+.constellation-flow .react-flow__node {
+  border: none;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+.constellation-flow .react-flow__node.selected {
+  outline: none;
+}
+.constellation-flow .react-flow__edge.selectable:focus {
+  outline: none;
+}
+
+/*
+ * Readiness "mahjong" tile drawers (Overview workbench).
+ * Each readiness category (人物 / 关系 / 世界规则) owns a horizontal drawer of
+ * carved tiles. As the analysis lands a new ready asset, a tile slams in from
+ * a random direction and settles; the drawer auto-scrolls to follow it.
+ */
+.asset-drawer {
+  mask-image: linear-gradient(90deg, #000 86%, transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, #000 86%, transparent 100%);
+}
+.asset-drawer .asset-drawer-track {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(86, 69, 45, 0.3) transparent;
+}
+.asset-drawer .asset-drawer-track::-webkit-scrollbar {
+  height: 5px;
+}
+.asset-drawer .asset-drawer-track::-webkit-scrollbar-thumb {
+  background: rgba(86, 69, 45, 0.22);
+  border-radius: 99px;
+}
+
+.asset-tile {
+  --rx: 0px;
+  --ry: 0px;
+  --rr: 0deg;
+  background: linear-gradient(165deg, #fffdf7, #f2ebd8);
+  box-shadow:
+    0 2px 0 rgba(86, 69, 45, 0.16),
+    0 7px 14px -10px rgba(23, 26, 27, 0.4),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+  animation: asset-tile-slam 0.55s cubic-bezier(0.2, 1.3, 0.32, 1) both;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.asset-tile:hover {
+  transform: translateY(-3px) rotate(-2deg);
+  box-shadow:
+    0 3px 0 rgba(86, 69, 45, 0.16),
+    0 14px 24px -12px rgba(23, 26, 27, 0.5),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+@keyframes asset-tile-slam {
+  0% {
+    transform: translate(var(--rx), var(--ry)) rotate(var(--rr)) scale(1.7);
+    opacity: 0;
+  }
+  55% {
+    transform: translate(0, 0) rotate(0) scale(0.93);
+    opacity: 1;
+  }
+  76% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+/* impact ring that flashes when the tile lands */
+.asset-tile::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 11px;
+  border: 2px solid rgba(143, 33, 27, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  animation: asset-tile-impact 0.55s ease-out 0.16s both;
+}
+@keyframes asset-tile-impact {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .asset-tile,
+  .asset-tile::after {
+    animation: none;
+  }
+}
+
+/*
+ * Seed run log modal — a terminal-style stream of the run's workflow events.
+ * Dark panel, monospace, one line per event: timestamp, level, [stage], message.
+ */
+.seed-log-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+.seed-log-scroll::-webkit-scrollbar-thumb {
+  background: rgba(247, 236, 210, 0.14);
+  border-radius: 9px;
+}
+.seed-log-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: #cdbf9f;
+  animation: seed-log-blink 1s steps(1) infinite;
+}
+@keyframes seed-log-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .seed-log-cursor {
+    animation: none;
+  }
+}
+
+
+
