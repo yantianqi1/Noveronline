@@ -2012,6 +2012,67 @@ def test_agent_profile_activity_records_sanitized_metadata_from_runner() -> None
     assert "private profile body" not in str(workflow_writer.events)
 
 
+def test_agent_profile_activity_bridges_batched_progress_events() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    names = [f"角色{index:02d}" for index in range(7)]
+    runner, _chat_client, _writer = _batched_runner(
+        canonical_names=names,
+        batch_responder=lambda batch_names, _call: _profiles_response(batch_names or []),
+        batch_size=5,
+    )
+
+    result = agent_profile_activity(
+        {"context": _context().model_dump()},
+        agent_profile_runner=runner,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result["status"] == "completed"
+    progress_events = [e for e in workflow_writer.events if e["event_type"] == "seed.agent_profiles.progress"]
+    assert len(progress_events) == 2  # ceil(7 / 5) batches
+    assert progress_events[0]["payload"]["completed_entities"] == 5
+    assert progress_events[0]["payload"]["total_entities"] == 7
+    assert progress_events[1]["payload"]["completed_entities"] == 7
+    for event in progress_events:
+        payload = event["payload"]
+        assert payload["stage"] == "agent_profiles"
+        assert payload["activity"] == "agent_profile_activity"
+        assert payload["module_key"] == "character_agent_profile"
+        assert "正在生成角色档案" in payload["message"]
+        # Public events carry metadata only, no source bodies or credentials.
+        joined = json.dumps(payload, ensure_ascii=False)
+        for forbidden in ("api_key", "credential", "prompt", "source_context", "raw"):
+            assert forbidden not in joined
+
+
+def test_archive_candidate_activity_bridges_batched_progress_events() -> None:
+    workflow_writer = RecordingWorkflowEventWriter()
+    names = [f"角色{index:02d}" for index in range(6)]
+    runner, _chat_client, _writer = _batched_archive_runner(
+        canonical_names=names,
+        batch_responder=lambda batch_names, _call: _archive_response_for(batch_names or []),
+        batch_size=4,
+    )
+
+    result = archive_candidate_activity(
+        {"context": _context().model_dump()},
+        archive_candidate_runner=runner,
+        workflow_event_writer=workflow_writer,
+    )
+
+    assert result["status"] == "completed"
+    progress_events = [e for e in workflow_writer.events if e["event_type"] == "seed.archive_candidates.progress"]
+    assert len(progress_events) == 2  # ceil(6 / 4) batches
+    assert progress_events[-1]["payload"]["completed_entities"] == 6
+    assert progress_events[-1]["payload"]["total_entities"] == 6
+    for event in progress_events:
+        payload = event["payload"]
+        assert payload["stage"] == "archive_candidates"
+        assert payload["activity"] == "archive_candidate_activity"
+        assert payload["module_key"] == "narrative_archives"
+        assert "正在生成叙事档案候选" in payload["message"]
+
+
 def test_archive_candidate_activity_fails_closed_without_runner() -> None:
     workflow_writer = RecordingWorkflowEventWriter()
 

@@ -2491,12 +2491,14 @@ class LLMFacilityAgentProfileRunner:
         chat_client: Any,
         agent_profile_snapshot_writer: AgentProfileSnapshotWriter,
         agent_profile_context_loader: AgentProfileContextLoader | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._binding_resolver = binding_resolver
         self._credential_provider = credential_provider
         self._chat_client = chat_client
         self._agent_profile_snapshot_writer = agent_profile_snapshot_writer
         self._agent_profile_context_loader = agent_profile_context_loader
+        self._progress_callback = progress_callback
 
     def generate(
         self,
@@ -2564,6 +2566,7 @@ class LLMFacilityAgentProfileRunner:
             relationship_view_count = 0
             batch_count = 0
             reconciled_count = 0
+            total_entities = len(expected_names)
 
             # Main pass + one reconciliation refill pass over whatever is still missing.
             missing = list(expected_names)
@@ -2574,6 +2577,7 @@ class LLMFacilityAgentProfileRunner:
                     reconciled_count += 1
                 for batch_names in _agent_profile_batches(missing, batch_size):
                     batch_count += 1
+                    batch_label = batch_names[0] if batch_names else ""
                     try:
                         batch_profiles = self._run_batch_with_recovery(
                             context=context,
@@ -2587,6 +2591,14 @@ class LLMFacilityAgentProfileRunner:
                             raise
                         # Every entity in this batch failed irrecoverably; the
                         # reconciler will surface them as missing (partial coverage).
+                        self._emit_agent_profile_progress(
+                            stage="agent_profiles",
+                            phase="batch_failed",
+                            completed_entities=len(covered),
+                            total_entities=total_entities,
+                            batch_index=batch_count,
+                            batch_label=batch_label,
+                        )
                         continue
                     filtered, _dropped = _agent_profile_batch_allowed(
                         batch_profiles,
@@ -2601,6 +2613,14 @@ class LLMFacilityAgentProfileRunner:
                     covered.update(_covered_canonical_names(filtered))
                     memory_seed_count += len(filtered.get("memory_seeds", []))
                     relationship_view_count += len(filtered.get("relationship_views", []))
+                    self._emit_agent_profile_progress(
+                        stage="agent_profiles",
+                        phase="batch_completed",
+                        completed_entities=len(covered),
+                        total_entities=total_entities,
+                        batch_index=batch_count,
+                        batch_label=batch_label,
+                    )
                 missing = [name for name in expected_names if name not in covered]
 
             missing_entities = sorted(missing)
@@ -2711,6 +2731,38 @@ class LLMFacilityAgentProfileRunner:
         loaded_context = loader.load_context(context=context)
         return _sanitize_agent_profile_context_value(loaded_context)
 
+    def _emit_agent_profile_progress(
+        self,
+        *,
+        stage: str,
+        phase: str,
+        completed_entities: int,
+        total_entities: int,
+        batch_index: int,
+        batch_label: str,
+    ) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        message = f"正在生成角色档案 {completed_entities}/{total_entities}"
+        if batch_label:
+            message = f"{message} · {batch_label}"
+        try:
+            callback(
+                {
+                    "stage": stage,
+                    "phase": phase,
+                    "message": message,
+                    "batch_index": batch_index,
+                    "completed_entities": completed_entities,
+                    "total_entities": total_entities,
+                    "entity_name": batch_label,
+                }
+            )
+        except Exception:
+            # Progress reporting must never break enrichment.
+            return
+
 
 class LLMFacilityArchiveCandidateRunner:
     def __init__(
@@ -2721,12 +2773,14 @@ class LLMFacilityArchiveCandidateRunner:
         chat_client: Any,
         archive_candidate_writer: ArchiveCandidateWriter,
         archive_context_loader: AgentProfileContextLoader | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._binding_resolver = binding_resolver
         self._credential_provider = credential_provider
         self._chat_client = chat_client
         self._archive_candidate_writer = archive_candidate_writer
         self._archive_context_loader = archive_context_loader
+        self._progress_callback = progress_callback
 
     def generate(
         self,
@@ -2808,8 +2862,10 @@ class LLMFacilityArchiveCandidateRunner:
                 batch_count = 0
                 batch_size = _enrichment_batch_size(getattr(resolution, "settings", None))
                 entity_offset = 0
+                total_entities = len(expected_names)
                 for batch_names in _agent_profile_batches(expected_names, batch_size):
                     batch_count += 1
+                    batch_label = batch_names[0] if batch_names else ""
                     try:
                         batch_entities = self._run_archive_batch_with_recovery(
                             context=context,
@@ -2824,6 +2880,13 @@ class LLMFacilityArchiveCandidateRunner:
                             raise
                         # Skip this batch's candidates; the run stays partially covered.
                         entity_offset += len(batch_names)
+                        self._emit_archive_progress(
+                            phase="batch_failed",
+                            completed_entities=entity_offset,
+                            total_entities=total_entities,
+                            batch_index=batch_count,
+                            batch_label=batch_label,
+                        )
                         continue
                     # Persist each batch immediately so archive candidate assets
                     # appear progressively (readiness tiles slam-in per batch).
@@ -2844,6 +2907,13 @@ class LLMFacilityArchiveCandidateRunner:
                         "memory_candidate_count", _archive_memory_candidate_count(batch_entities)
                     )
                     entity_offset += len(batch_names)
+                    self._emit_archive_progress(
+                        phase="batch_completed",
+                        completed_entities=entity_offset,
+                        total_entities=total_entities,
+                        batch_index=batch_count,
+                        batch_label=batch_label,
+                    )
         except LLMFacilityError as exc:
             return _archive_runner_failed(exc.code, exc.message)
         except Exception as exc:
@@ -2950,6 +3020,36 @@ class LLMFacilityArchiveCandidateRunner:
             if isinstance(sanitized, dict) and sanitized:
                 return sanitized
         return fallback
+
+    def _emit_archive_progress(
+        self,
+        *,
+        phase: str,
+        completed_entities: int,
+        total_entities: int,
+        batch_index: int,
+        batch_label: str,
+    ) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        message = f"正在生成叙事档案候选 {completed_entities}/{total_entities}"
+        if batch_label:
+            message = f"{message} · {batch_label}"
+        try:
+            callback(
+                {
+                    "stage": "archive_candidates",
+                    "phase": phase,
+                    "message": message,
+                    "batch_index": batch_index,
+                    "completed_entities": completed_entities,
+                    "total_entities": total_entities,
+                    "entity_name": batch_label,
+                }
+            )
+        except Exception:
+            return
 
 
 class PostgresArchiveCandidateWriter:
@@ -4815,6 +4915,49 @@ def _project_agent_profile_context_scalar(value: Any) -> Any:
     return None
 
 
+def _bump_enrichment_batch_progress(
+    *,
+    context: AgentContext,
+    stage: str,
+    completed_entities: int,
+    total_entities: int,
+    message: str,
+) -> None:
+    """Interpolate run progress across an enrichment stage from entity counters."""
+    try:
+        writer = _workflow_status_writer_from_env()
+    except Exception:
+        return
+    if writer is None or not hasattr(writer, "_update_status"):
+        return
+    try:
+        if total_entities <= 0:
+            return
+        completed = max(0, min(completed_entities, total_entities))
+        # agent_profiles: entity_resolution(80) -> agent_profiles(86)
+        # archive_candidates: agent_profiles(86) -> archive_candidates(92)
+        if stage == "agent_profiles":
+            start = _seed_stage_progress("entity_resolution")
+            end = _seed_stage_progress("agent_profiles")
+        elif stage == "archive_candidates":
+            start = _seed_stage_progress("agent_profiles")
+            end = _seed_stage_progress("archive_candidates")
+        else:
+            return
+        progress = start + int(round((end - start) * (completed / total_entities)))
+        progress = max(start, min(end - 1 if completed < total_entities else end, progress))
+        writer._update_status(  # noqa: SLF001
+            context=context,
+            status="running",
+            result=None,
+            code=None,
+            message=str(message)[:200],
+            progress=progress,
+        )
+    except Exception:
+        return
+
+
 def _row_dict(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return {str(key): value for key, value in row.items()}
@@ -6078,6 +6221,65 @@ def _agent_profile_runner_from_env(
         agent_profile_snapshot_writer=agent_profile_snapshot_writer,
         agent_profile_context_loader=agent_profile_context_loader,
     )
+
+
+def _attach_enrichment_progress(
+    *,
+    runner: Any,
+    context: AgentContext,
+    stage: str,
+    event_type: str,
+    activity: str,
+    module_key: str,
+    workflow_event_writer: WorkflowEventWriter | None,
+) -> None:
+    """Bridge a batched-enrichment runner's per-batch callback to events + progress.
+
+    Only the LLM-facility batched runners accept a progress callback; injected
+    test doubles do not, so this is a no-op for them. Each batch emits a public
+    metadata-only event and interpolates the run's overall progress.
+    """
+    if not isinstance(runner, (LLMFacilityAgentProfileRunner, LLMFacilityArchiveCandidateRunner)):
+        return
+
+    def _progress(payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        completed = payload.get("completed_entities")
+        total = payload.get("total_entities")
+        if isinstance(completed, int) and isinstance(total, int):
+            _bump_enrichment_batch_progress(
+                context=context,
+                stage=stage,
+                completed_entities=completed,
+                total_entities=total,
+                message=str(payload.get("message") or "")[:200],
+            )
+        if workflow_event_writer is None:
+            return
+        public_payload = {
+            key: value
+            for key, value in payload.items()
+            if key
+            in {
+                "stage",
+                "phase",
+                "message",
+                "batch_index",
+                "completed_entities",
+                "total_entities",
+                "entity_name",
+            }
+        }
+        public_payload["activity"] = activity
+        public_payload["module_key"] = module_key
+        workflow_event_writer.record_workflow_event(
+            context=context,
+            event_type=event_type,
+            payload=public_payload,
+        )
+
+    runner._progress_callback = _progress  # noqa: SLF001 - worker-side wiring seam
 
 
 def _archive_candidate_runner_from_env() -> ArchiveCandidateRunner | None:
@@ -8867,6 +9069,15 @@ def agent_profile_activity(
             workflow_event_writer=workflow_event_writer,
             workflow_status_writer=workflow_status_writer,
         )
+    _attach_enrichment_progress(
+        runner=runner,
+        context=context,
+        stage="agent_profiles",
+        event_type="seed.agent_profiles.progress",
+        activity="agent_profile_activity",
+        module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY,
+        workflow_event_writer=workflow_event_writer,
+    )
     try:
         profile_result = runner.generate(context=context, module_key=CHARACTER_AGENT_PROFILE_MODULE_KEY)
     except Exception as exc:
@@ -8990,6 +9201,15 @@ def archive_candidate_activity(
             workflow_event_writer=workflow_event_writer,
             workflow_status_writer=workflow_status_writer,
         )
+    _attach_enrichment_progress(
+        runner=runner,
+        context=context,
+        stage="archive_candidates",
+        event_type="seed.archive_candidates.progress",
+        activity="archive_candidate_activity",
+        module_key=NARRATIVE_ARCHIVES_MODULE_KEY,
+        workflow_event_writer=workflow_event_writer,
+    )
     try:
         archive_result = runner.generate(context=context, module_key=NARRATIVE_ARCHIVES_MODULE_KEY)
     except Exception as exc:
