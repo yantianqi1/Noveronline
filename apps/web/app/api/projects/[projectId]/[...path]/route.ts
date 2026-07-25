@@ -137,10 +137,14 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
     toGo: (_rest, query) => `/v1/assets/search${query}`,
   },
   // /api/projects/{id}/assets/{assetId}[/adoptions] → /v1/assets/{assetId}[/adoptions]
+  // The (?!facets|search-capabilities) guard keeps the project-scoped reserved
+  // reads (facets / search-capabilities) out of the asset-detail capture so they
+  // fall through to the PROJECT_PATHS project list below; otherwise "facets"
+  // would be swallowed as an asset id and the Go detail route would 404.
   {
-    prefix: /^assets\/([^/]+)(\/adoptions)?$/,
+    prefix: /^assets\/(?!facets$|search-capabilities$)([^/]+)(\/adoptions)?$/,
     toGo: (rest, query) => {
-      const m = rest.match(/^assets\/([^/]+)(\/adoptions)?$/)!;
+      const m = rest.match(/^assets\/(?!facets$|search-capabilities$)([^/]+)(\/adoptions)?$/)!;
       return `/v1/assets/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
     },
   },
