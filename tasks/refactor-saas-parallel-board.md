@@ -17,7 +17,7 @@
 | 目标 | 独占范围 |
 |---|---|
 | MAIN-100 | shared HTTP/main/worker/base compose、全局 Web shell、跨域 integration/E2E/release、最终文档 |
-| P6-003-A | Writer/Pi/Reviewer/Writer Workspace/Manuscript Workspace 领域实现与专属 Web/tests |
+| P6-003-A | Writer/Pi/Reviewer/Writer Workspace/Manuscript Workspace 领域实现与专属 Web/tests（含 Pi 已接入的候选式故事分析 `PiAnalysisRunWorkflow` 与 Worldline Cast Planner 两个独立 Pi 域；二者不写 canon，不改 Seed 归 Python） |
 | P5-005-B | Seed/Assets/Graph/Worldline/Character 领域实现与专属 Web/runtime/tests |
 | P8-002-C | Auth/Recovery/Collaboration/LLM Admin/Legacy/Ops/Security 领域实现、production overrides、migrations |
 | Z-028 | 空项目从零创作、0018 distillation schema、manuscript asset distillation workflow/API/UI、proposal review；集成切片才动中央 main/server/worker/readiness |
@@ -28,7 +28,7 @@
 |---|---|---|---|
 | MAIN-100 | `awaiting_legacy_authorization` | `019f4cad-2a6f-76e2-a0ec-b3d65b000e9b` | 本地 coverage/central/browser/regression、external provider、platform-default 与 Legacy complete plan 已闭合；等待 real cutover 写入授权 |
 | P6-003-A | `verified_current` | `019f4cad-4146-7a50-b20c-252b5f26d7b8` | dedup/book planning producer、Facility、candidate/draft 边界、中央挂载与 browser 认证通过；shared writer contract 与 world-rule/character-profile tools 已补证 |
-| P5-005-B | `verified_current` | `019f4cad-15a2-76e1-a6c1-7e49b2f3511c` | Seed trace/retry 与 Knowledge/Simulation full/live/browser 通过 |
+| P5-005-B | `verified_current` | `019f4cad-15a2-76e1-a6c1-7e49b2f3511c` | Seed trace/retry 与 Knowledge/Simulation full/live/browser 通过；2026-07-25 分批富化（doc 42：agent_profiles/archive_candidates 分批 + 逐批落库 + 进度事件 + Web 子进度）落地后重开验证通过——Go/Python/Pi/Web full regression 绿 + seed live e2e 8 passed（quota-gated 分批、idempotent） |
 | P8-002-C | `verified_current` | `019f4cac-fde5-71d1-b71f-090a037551af` | model-sync/retirement/Legacy/Ops/Security/matrix reviewer 通过 |
 | Z-028 | `in_progress` | current | Z0–Z6 `connected` + 2026-07-13 disposable app-role live 绿（distillation/manuscript/empty-writer/worldline/character）与 Pi local-provider live 2/2；Z7 仍缺：Docker socket 权限下的 `--app` 全栈重建、Playwright 浏览器安装、authenticated zero-start desktop/mobile journey |
 

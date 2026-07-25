@@ -31,7 +31,7 @@
 
 | 子目标 | 当前状态 | 当前证据 |
 |---|---|---|
-| P6-003-A Writer/Reviewer/Workspace/Manuscript | `verified_current` | `writer_dedup_extractor` 与 `writer_book_planner` 已经真实 Facility/Temporal producer、中央安全挂载、app-role SQL 和 browser 认证；只产出 disabled candidate/draft |
+| P6-003-A Writer/Reviewer/Workspace/Manuscript | `verified_current` | `writer_dedup_extractor` 与 `writer_book_planner` 已经真实 Facility/Temporal producer、中央安全挂载、app-role SQL 和 browser 认证；只产出 disabled candidate/draft；Pi 另承载候选式故事分析（`PiAnalysisRunWorkflow`）与 Worldline Cast Planner 两个独立域，不写 canon |
 | P5-005-B Knowledge/Simulation | `verified_current` | Seed unified private trace app-role live、same-run retry replacement、Seed/Assets/Graph/Worldline/Character browser 与 full regression 当前通过 |
 | P8-002-C Platform/Legacy/Ops | `verified_current` | model-sync app-role/live、retirement artifact、Legacy/Ops/Security、matrix closure 与 production override reviewer 当前通过 |
 
@@ -41,6 +41,7 @@
 - Phase 3 `packages/shared-contracts` 已以 Draft 2020-12 JSON Schema 冻结 Go -> Pi writer workflow input、Pi -> Go runtime event 与 Go -> Web public replay event；Go AST、Pi/Web TypeScript AST 和 Go/Python/Node serializer tests 会对实际消费者漂移 fail closed。
 - Pi Writer 已真实实现 `query_world_rules` 与 `query_character_profile`：执行前 `Agent.beforeToolCall` 权限门控，app-role 查询显式约束 tenant/project，公开 event 去除 rule text/evidence/alias/private metadata，private trace 仅含 owner-project 上下文；同租户跨项目和跨租户 live 隔离、canon/adoption/manuscript 零写入均通过。
 - `writer-planning` workflow/activity worker 已进入 base/staging/production compose、strict poller readiness 和 recovery force-recreate；book generation 与 dedup extraction 使用 exact POST route，中央 credential/CSRF 预检覆盖 malformed/method fail-closed。
+- Pi 候选式故事分析（文档 21）已实现并部署：`pi-agent-runtime-analysis` worker 监听 `analysis-streaming` 队列，消费 Go 投递的 `PiAnalysisRunWorkflow`（workflow type `analysis_run`），经 agent loop（`analysis_planner` / `analysis_worker` module）读源分段、写 workspace 候选，落 `analysis_candidates` 表（migration `0020`）后由 Go `SQLAnalysisAssetImporter` 投影为 `source_kind = pi_analysis` 资产；它是与 Python Seed 并行的候选路径，不替代 Seed canon 主流水线。
 - owner-aware resource routes 先解析真实 project owner，再做 project/tenant RBAC；不信任 body/header project identity。
 - 自助注册使用单事务创建 user、bcrypt credential、首次 hash-only session、personal 工作区、owner membership、首项目与 project owner；真实浏览器注册后直接进入空项目，单工作区只显示“我的工作区”且隐藏切换器。
 - development auth 默认关闭；只有显式 `local + MIROFISH_ENABLE_DEVELOPMENT_AUTH=1` 才启用。当前 Compose 无 Cookie 伪造 `X-User-Id` 返回 `401`，`/v1/auth/dev-sessions` 返回 `404`，API 端口只绑定 `127.0.0.1`。
@@ -112,6 +113,20 @@
 | `git diff --check` | full worktree passed |
 
 2026-07-13 仓库收口复验后，Web 串行 full 执行 `250` 项：`241 passed, 9 skipped`。旧 LLM Facility 对象字面量断言已校准到当前 settings helper，cookie-backed mid-flight abort 用例改为服务端接收后确定性中止；退役/Writer/content-boundary 契约、typecheck 和无告警 production build 均通过。
+
+## 并行：Seed 分批富化（doc 42，2026-07-25 落地）
+
+`docs/refactor-saas/42-seed-batched-enrichment.md` 全三切片已实现并重开 P5-005-B 域验证（规则：受影响 runtime 代码 + 公共契约变更）。
+
+| 切片 | 状态 | 证据 |
+|---|---|---|
+| 1 agent_profiles 分批 | `verified_current` | 解除 LIMIT 200；按 canonical_name 确定性分批（默认 5，clamp 1..20，module setting `batch_size`）；retry→bisect→missing 恢复；逐批 Route-A 累积快照（单条 CTE `ON CONFLICT` jsonb 按 canonical_name 合并，app-role/RLS 下原子执行）；期望 vs 实际对账 + 一次补漏；真实 `profile_count`；`missing_entities` 可见不静默 |
+| 2 archive_candidates 分批 | `verified_current` | 同骨架分批；接入 `source_context`（原为空）；逐批写 assets，`source_ref = {batch}:archive:{global_index}` 全局 offset 唯一；readiness 瓷砖经现有 2.5s 轮询逐块 slam-in（前端瓷砖零改动） |
+| 3 进度事件 + Web 子进度 | `verified_current` | runner `progress_callback` → `_attach_enrichment_progress` 桥接；公开事件 `seed.agent_profiles.progress` / `seed.archive_candidates.progress`（白名单 metadata-only，无正文/prompt/credential）；run 进度 80→86 / 86→92 插值；Web `reduceSeedProgress` 两个 case + `EnrichmentBlock` 子进度条（中文文案由后端发出） |
+
+**R4 quota 幂等键**：分批后每批唯一 call id 由 `stable_provider_call_id(context, module, stage, call_index)` 保证——`stage` 嵌入批输入 digest，批间消息不同 → digest 不同 → call id 唯一；以 `test_seed_quota_chat_client_gives_distinct_call_identity_per_enrichment_batch` 锁定。
+
+**回归证据（2026-07-25）**：Go API `go test ./...` 27 包全 ok；Python agent-runtime `484 passed, 30 skipped`（含 seed workflow 183 + ontology 11 + quota）；Pi `125 passed` + typecheck/build；Web `50 passed` + typecheck + production build。**live**：seed live e2e 对一次性 `mirofish_test_*` 库（全量 migration 链 + ledger）`8 passed`（quota-gated 分批落库、进度事件、隐私扫描、idempotent 重跑）。live fixtures 修正已提交：foundation 回填 tenant-scope quota policy（镜像 0017）、各 `llm_models` 补 `context_window`、entity_resolution 重试复用 trace_id 使命中 quota replay（单次真实 LLM 调用）、run progress 断言对齐阶段锚点 80。
 
 ## 最终 DoD 审计
 
