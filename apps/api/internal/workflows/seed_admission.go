@@ -51,7 +51,7 @@ func (s *SQLSeedAdmissionStore) AdmitSeedRun(ctx context.Context, input SeedAdmi
     AND project_id = $2::uuid
     AND upload_id = $10::uuid
     AND file_id = $11::uuid
-    AND parse_status = 'uploaded'
+    AND parse_status IN ('uploaded', 'parsed', 'failed', 'cancelled')
   RETURNING upload_id, file_id
 ),
 workflow_insert AS (

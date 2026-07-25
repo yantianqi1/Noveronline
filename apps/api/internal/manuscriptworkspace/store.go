@@ -106,7 +106,7 @@ RETURNING block_id::text, project_id::text, COALESCE(chapter_id::text, ''), COAL
 	if err != nil {
 		return PrivateBlock{}, mutationFailed()
 	}
-	if err := recordVersion(ctx, tx, input.Scope, created, "create", ""); err != nil {
+	if err := recordVersion(ctx, tx, input.Scope, created, "adopt", ""); err != nil {
 		return PrivateBlock{}, mutationFailed()
 	}
 	if err := tx.Commit(); err != nil {

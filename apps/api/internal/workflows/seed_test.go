@@ -858,7 +858,7 @@ func TestSQLSeedAdmissionStoreMarksUploadedSourceParsingBeforeWorkflowAdmission(
 	}
 	if !strings.Contains(execer.query, "UPDATE source_files") ||
 		!strings.Contains(execer.query, "parse_status = 'parsing'") ||
-		!strings.Contains(execer.query, "parse_status = 'uploaded'") ||
+		!strings.Contains(execer.query, "parse_status IN ('uploaded', 'parsed', 'failed', 'cancelled')") ||
 		!strings.Contains(execer.query, "INSERT INTO workflow_runs") ||
 		!strings.Contains(execer.query, "INSERT INTO workflow_events") {
 		t.Fatalf("seed admission must advance uploaded source to parsing before workflow admission, got %s", execer.query)

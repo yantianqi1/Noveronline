@@ -42,6 +42,12 @@ type GetUploadOwnerInput struct {
 	UploadID string
 }
 
+type DeleteInput struct {
+	TenantID  string
+	ProjectID string
+	UploadID  string
+}
+
 type UploadOwner struct {
 	ProjectID string
 }
@@ -116,6 +122,7 @@ type Store interface {
 	CompleteUpload(context.Context, CompleteInput) (Record, error)
 	ListSourceFiles(context.Context, ListInput) ([]Record, error)
 	ValidateSourceFile(context.Context, ValidateInput) (ValidatedSourceFile, error)
+	DeleteSourceFile(context.Context, DeleteInput) error
 }
 
 type AppError struct {
@@ -179,6 +186,10 @@ func (DisabledStore) ListSourceFiles(context.Context, ListInput) ([]Record, erro
 
 func (DisabledStore) ValidateSourceFile(context.Context, ValidateInput) (ValidatedSourceFile, error) {
 	return ValidatedSourceFile{}, &AppError{Code: "SOURCE_FILE_BACKEND_UNCONFIGURED", Message: "source file backend is not configured"}
+}
+
+func (DisabledStore) DeleteSourceFile(context.Context, DeleteInput) error {
+	return &AppError{Code: "SOURCE_FILE_BACKEND_UNCONFIGURED", Message: "source file backend is not configured"}
 }
 
 type SQLRow interface {
@@ -642,6 +653,38 @@ LIMIT $3`
 		return nil, sourceFileQueryFailed()
 	}
 	return items, nil
+}
+
+// DeleteSourceFile removes one source-file row, scoped by tenant + project +
+// upload id so a caller can never reach across tenant or project boundaries.
+// Deleting the row leaves any produced seed/graph data intact (it keys off
+// workflow runs, not the source file), per the product decision that any source
+// file may be removed. A missing row is reported as NOT_FOUND.
+func (s *SQLStore) DeleteSourceFile(ctx context.Context, input DeleteInput) error {
+	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.ProjectID) == "" || strings.TrimSpace(input.UploadID) == "" {
+		return &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, project_id, and upload_id are required"}
+	}
+	if s.queryer == nil {
+		return &AppError{Code: "SOURCE_FILE_BACKEND_UNCONFIGURED", Message: "source file backend is not configured"}
+	}
+	query := `DELETE FROM source_files
+WHERE tenant_id::text = $1
+  AND project_id::text = $2
+  AND upload_id::text = $3
+RETURNING file_id::text`
+	var fileID string
+	err := s.scanRow(ctx, strings.TrimSpace(input.TenantID), query, []any{
+		strings.TrimSpace(input.TenantID),
+		strings.TrimSpace(input.ProjectID),
+		strings.TrimSpace(input.UploadID),
+	}, &fileID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &AppError{Code: "NOT_FOUND", Message: "source file upload not found"}
+		}
+		return sourceFileQueryFailed()
+	}
+	return nil
 }
 
 func (s *SQLStore) ValidateSourceFile(ctx context.Context, input ValidateInput) (ValidatedSourceFile, error) {
