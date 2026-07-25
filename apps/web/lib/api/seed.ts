@@ -144,6 +144,13 @@ export function reduceSeedProgress(run: SeedRun | null, events: WorkflowEvent[])
         if (stage) {
           stageStatus.set(stage, "completed");
           failedStages.delete(stage);
+          // The stage is done: retire its live sub-progress so the strip
+          // unmounts. Panels only clear these while `running` (AnimatePresence
+          // exit), so on a fast terminal transition a never-cleared strip would
+          // freeze mid-flight (e.g. the reading bar stuck at 20/20).
+          if (stage === "sequential_reading") sequentialReading = null;
+          else if (stage === "agent_profiles") agentProfiles = null;
+          else if (stage === "archive_candidates") archiveCandidates = null;
         }
         break;
       case "seed.stage.failed":
