@@ -555,6 +555,14 @@ class PostgresStoryGraphBuilder:
                         node_by_name=name_index,
                     )
                 )
+                edges.extend(
+                    _build_edges_from_event_assets(
+                        graph_id=graph_id,
+                        rows=[row for row in node_assets if str(row.get("asset_type") or "").strip().lower() == "plot_event"],
+                        nodes=nodes,
+                        node_by_name=name_index,
+                    )
+                )
                 clusters = _assign_graph_clusters(graph_id=graph_id, nodes=nodes, edges=edges)
                 source_hash = _source_version_hash(
                     {
@@ -688,6 +696,7 @@ class PostgresStoryGraphBuilder:
                 "relationship",
                 "world_rule",
                 "plot_thread",
+                "plot_event",
                 "note",
                 "story_ontology",
                 "archive_entity",
@@ -2235,6 +2244,11 @@ def _merge_asset_nodes(*, graph_id: str, nodes: list[dict[str, Any]], rows: list
             continue
         stable_identity = f"asset:{asset_id}"
         node_type = _asset_node_type(row.get("asset_type"))
+        category = str(row.get("category") or "").strip().lower()
+        # Cluster by a meaningful dimension (world for timeline events, else the
+        # broad category) so same-world events / same-domain settings group into
+        # legible shelves instead of one flat "concept" blob.
+        cluster_key = _asset_cluster_key(node_type, category, payload)
         nodes.append(
             {
                 "node_id": _snapshot_graph_uuid(graph_id, "node", stable_identity),
@@ -2247,8 +2261,8 @@ def _merge_asset_nodes(*, graph_id: str, nodes: list[dict[str, Any]], rows: list
                 "title": _required_text(row.get("title"), "asset title"),
                 "summary": _optional_text(row.get("summary")),
                 "lifecycle": _graph_lifecycle(row.get("lifecycle")),
-                "importance": 0.4,
-                "cluster_key": node_type,
+                "importance": _asset_importance(node_type),
+                "cluster_key": cluster_key,
                 "cluster_id": None,
                 "attributes": _sanitize_graph_value(
                     {
@@ -2268,6 +2282,87 @@ def _merge_asset_nodes(*, graph_id: str, nodes: list[dict[str, Any]], rows: list
 def _more_canonical_lifecycle(left: str, right: str) -> str:
     rank = {"archived": 0, "candidate": 1, "seed": 2, "simulation": 3, "manuscript": 4, "canon": 5}
     return max((left, right), key=lambda item: rank.get(item, 0))
+
+
+def _build_edges_from_event_assets(
+    *,
+    graph_id: str,
+    rows: list[dict[str, Any]],
+    nodes: list[dict[str, Any]],
+    node_by_name: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Link each plot_event node to the entities named in its `participants`.
+
+    Events are otherwise isolated slips; wiring them to their characters /
+    locations / organizations turns the constellation from a flat scatter into a
+    connected story map. A participant that matches no node is skipped (the
+    event still stands alone), never fabricated.
+    """
+    # stable_identity "asset:<id>" → the plot_event node minted by _merge_asset_nodes.
+    event_node_by_identity = {
+        node["stable_identity"]: node for node in nodes if node.get("node_type") == "plot_event"
+    }
+    edges: list[dict[str, Any]] = []
+    edge_by_key: dict[str, dict[str, Any]] = {}
+    for row in sorted(rows, key=lambda item: str(item.get("asset_id") or "")):
+        asset_id = str(row.get("asset_id") or "")
+        event_node = event_node_by_identity.get(f"asset:{asset_id}")
+        if event_node is None:
+            continue
+        payload = row.get("payload_jsonb") if isinstance(row.get("payload_jsonb"), dict) else {}
+        participants = payload.get("participants")
+        if not isinstance(participants, list):
+            continue
+        for participant in participants:
+            participant_node = node_by_name.get(_semantic_text_key(participant))
+            if participant_node is None or participant_node["node_id"] == event_node["node_id"]:
+                continue
+            # Locations/orgs host the event (located_in); characters participate in it.
+            edge_type = "located_in" if participant_node.get("node_type") in {"location", "organization", "faction"} else "participates_in"
+            stable_key = ":".join(
+                (
+                    "asset_event",
+                    participant_node["stable_identity"],
+                    event_node["stable_identity"],
+                    edge_type,
+                    asset_id,
+                )
+            )
+            if stable_key in edge_by_key:
+                continue
+            evidence = {
+                "source_type": "asset",
+                "source_id": asset_id,
+                "segment_id": None,
+                "confidence": None,
+            }
+            edge = {
+                "edge_id": _snapshot_graph_uuid(graph_id, "edge", stable_key),
+                "graph_id": graph_id,
+                "source_node_id": participant_node["node_id"],
+                "target_node_id": event_node["node_id"],
+                "source_type": "asset",
+                "source_id": asset_id,
+                "source_ids": [asset_id],
+                "stable_identity": stable_key,
+                "edge_type": edge_type,
+                "label": "参与" if edge_type == "participates_in" else "所在",
+                "summary": _optional_text(row.get("summary")),
+                "weight": 0.8,
+                "lifecycle": _graph_lifecycle(row.get("lifecycle")),
+                "attributes": _sanitize_graph_value(
+                    {
+                        "source_type": "asset",
+                        "asset_type": "plot_event",
+                        "stable_identity": stable_key,
+                        "source_count": 1,
+                    }
+                ),
+                "evidence": [evidence],
+            }
+            edges.append(edge)
+            edge_by_key[stable_key] = edge
+    return sorted(edges, key=lambda edge: edge["stable_identity"])
 
 
 def _entity_name_index(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -2698,9 +2793,44 @@ def _asset_node_type(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in {"character", "organization", "faction", "location", "artifact", "concept"}:
         return normalized
-    if normalized in {"world_rule", "plot_thread", "note", "story_ontology", "ontology", "archive_entity"}:
+    # Timeline events and named structural assets keep their own node_type so the
+    # constellation can discriminate them (schema allows these enums); only truly
+    # generic material collapses to concept.
+    if normalized in {"plot_event", "plot_thread", "world_rule"}:
+        return normalized
+    if normalized in {"note", "story_ontology", "ontology", "archive_entity"}:
         return "concept"
     return "concept"
+
+
+def _asset_cluster_key(node_type: str, category: str, payload: dict[str, Any]) -> str:
+    """Group key for asset nodes. Timeline events split by their payload world
+    (modern/ancient) so the two timelines shelve separately; everything else
+    groups by its broad category (world/analysis/plot) or node_type."""
+    if node_type == "plot_event":
+        world = str(payload.get("world") or "").strip().lower()
+        if world in {"modern", "ancient"}:
+            return f"plot_event:{world}"
+        return "plot_event"
+    if category in {"world", "analysis", "plot", "characters", "relationships", "ontology"}:
+        return category
+    return node_type
+
+
+def _asset_importance(node_type: str) -> float:
+    """Layered importance: named entities sit highest, plot events carry the
+    narrative next, settings and generic concepts recede. Replaces the old
+    one-size 0.4 so the constellation has a readable hierarchy."""
+    return {
+        "character": 0.7,
+        "organization": 0.6,
+        "faction": 0.6,
+        "location": 0.55,
+        "artifact": 0.5,
+        "plot_event": 0.5,
+        "plot_thread": 0.6,
+        "world_rule": 0.45,
+    }.get(node_type, 0.35)
 
 
 def _graph_edge_type(value: Any) -> str:
@@ -2819,7 +2949,15 @@ def _cluster_title(cluster_key: str) -> str:
 
 
 def _source_version_hash(value: dict[str, Any]) -> str:
-    encoded = json.dumps(_sanitize_graph_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # default=str keeps UUID/datetime payload values hash-stable instead of
+    # raising TypeError; the hash only needs a deterministic fingerprint.
+    encoded = json.dumps(
+        _sanitize_graph_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

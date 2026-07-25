@@ -11,10 +11,13 @@ from mirofish_agents.temporal.graph import (
     PostgresStoryGraphBuilder,
     PostgresWorkflowRunStatusWriter,
     STORY_GRAPH_BUILD_MODULE_KEY,
+    _asset_cluster_key,
+    _asset_importance,
     _assign_graph_clusters,
     _deterministic_cluster_layout,
     _entity_name_index,
     _merge_entity_nodes,
+    _source_version_hash,
     _story_graph_builder_from_env,
     graph_bond_generation_activity,
     story_graph_build_activity,
@@ -293,6 +296,46 @@ def test_graph_bond_generation_activity_requires_module_permission() -> None:
     assert result["status"] == "failed"
     assert result["error"]["code"] == "FORBIDDEN"
     assert writer.events[0]["payload"]["error_code"] == "FORBIDDEN"
+
+
+def test_story_graph_build_activity_coerces_blank_actor_user_id_to_clean_result() -> None:
+    writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+    payload = _payload()
+    payload["context"] = _context().model_copy(update={"actor_user_id": ""}).model_dump()
+
+    result = story_graph_build_activity(
+        payload,
+        graph_builder=None,
+        workflow_event_writer=writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "STORY_GRAPH_BUILDER_UNCONFIGURED"
+    assert status_writer.failed != []
+    assert status_writer.failed[-1]["context"].actor_user_id is None
+    assert writer.events[-1]["event_type"] == "graph.stage.failed"
+
+
+def test_graph_bond_generation_activity_coerces_blank_actor_user_id_to_clean_result() -> None:
+    writer = RecordingWorkflowEventWriter()
+    status_writer = RecordingWorkflowRunStatusWriter()
+    payload = _bond_payload()
+    payload["context"] = _bond_context().model_copy(update={"actor_user_id": ""}).model_dump()
+
+    result = graph_bond_generation_activity(
+        payload,
+        bond_runner=None,
+        workflow_event_writer=writer,
+        workflow_status_writer=status_writer,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "GRAPH_BOND_RUNNER_UNCONFIGURED"
+    assert status_writer.failed != []
+    assert status_writer.failed[-1]["context"].actor_user_id is None
+    assert writer.events[-1]["event_type"] == "graph.stage.failed"
 
 
 def test_graph_bond_generation_activity_requires_admitted_bond_workflow_context() -> None:
@@ -1100,6 +1143,103 @@ def test_postgres_story_graph_builder_builds_from_selected_analysis_assets() -> 
     assert connection.committed is True
 
 
+def test_postgres_story_graph_builder_mints_plot_event_nodes_and_participant_edges() -> None:
+    rows = {
+        "fetch_assets": [
+            {
+                "asset_id": "asset-character-1",
+                "asset_type": "character",
+                "category": "characters",
+                "lifecycle": "material",
+                "title": "沈翠花",
+                "summary": "夜探者。",
+                "payload_jsonb": {"name": "沈翠花"},
+                "tags_jsonb": ["pi_analysis", "character"],
+            },
+            {
+                "asset_id": "asset-location-1",
+                "asset_type": "location",
+                "category": "world",
+                "lifecycle": "material",
+                "title": "青山医院",
+                "summary": "旧城区医院。",
+                "payload_jsonb": {"name": "青山医院"},
+                "tags_jsonb": ["pi_analysis", "location"],
+            },
+            {
+                "asset_id": "asset-event-1",
+                "asset_type": "plot_event",
+                "category": "plot",
+                "lifecycle": "material",
+                "title": "沈翠花夜探青山医院",
+                "summary": "沈翠花夜探青山医院，发现冰流异动。",
+                "payload_jsonb": {
+                    "title": "沈翠花夜探青山医院",
+                    "timeframe": "第1天·夜",
+                    "world": "modern",
+                    "participants": ["沈翠花", "青山医院"],
+                },
+                "tags_jsonb": ["pi_analysis", "plot_event"],
+            },
+        ],
+        "fetch_version": [{"next_version": 1}],
+    }
+    connection = FakeStoryGraphConnection(rows)
+    builder = PostgresStoryGraphBuilder(connect=lambda: connection)
+
+    result = builder.build(
+        context=_context(),
+        mode="full",
+        options={"source": "assets", "analysis_run_id": "analysis-run-1"},
+    )
+
+    assert result["status"] == "completed"
+    # 3 nodes: 沈翠花 (character), 青山医院 (location), 夜探 (plot_event — not flattened to concept).
+    assert result["node_count"] == 3
+    # 2 edges: 沈翠花 -[participates_in]-> event, 青山医院 -[located_in]-> event.
+    assert result["edge_count"] == 2
+
+    node_inserts = [
+        params
+        for query, params in connection.cursor_instance.executed
+        if "INSERT INTO story_graph_nodes" in query
+    ]
+    # INSERT column order: node_type idx 5, title idx 6, importance idx 9.
+    by_title = {params[6]: params for params in node_inserts}
+    event = by_title["沈翠花夜探青山医院"]
+    assert event[5] == "plot_event"  # not flattened to concept
+
+    character = by_title["沈翠花"]
+    assert character[5] == "character"
+    # Importance is layered (characters above events), not the old flat 0.4.
+    # _assign_graph_clusters adds a degree bonus, so assert the hierarchy holds.
+    assert character[9] > event[9] >= 0.5
+
+    edge_inserts = [
+        params
+        for query, params in connection.cursor_instance.executed
+        if "INSERT INTO story_graph_edges" in query
+    ]
+    # INSERT column order: source_node_id idx 4, target_node_id idx 5, edge_type idx 6.
+    edge_types = sorted(params[6] for params in edge_inserts)
+    assert edge_types == ["located_in", "participates_in"]
+    # Every event edge targets the plot_event node.
+    event_node_id = event[3]
+    assert all(params[5] == event_node_id for params in edge_inserts)
+    assert connection.committed is True
+
+
+def test_asset_cluster_key_splits_events_by_world() -> None:
+    # Timeline events shelve by their payload world; settings group by category.
+    assert _asset_cluster_key("plot_event", "plot", {"world": "modern"}) == "plot_event:modern"
+    assert _asset_cluster_key("plot_event", "plot", {"world": "ancient"}) == "plot_event:ancient"
+    assert _asset_cluster_key("plot_event", "plot", {}) == "plot_event"
+    assert _asset_cluster_key("concept", "world", {}) == "world"
+    assert _asset_cluster_key("concept", "analysis", {}) == "analysis"
+    # Importance layering keeps a readable hierarchy.
+    assert _asset_importance("character") > _asset_importance("plot_event") > _asset_importance("concept")
+
+
 def test_story_graph_semantic_merge_deduplicates_alias_entities_and_relationship_edges() -> None:
     graph_id = "80d8a69e-6be3-47e9-94d2-b144c96bde71"
     entities = [
@@ -1418,3 +1558,29 @@ class FakeWorkflowStatusConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_source_version_hash_tolerates_uuid_and_datetime_values() -> None:
+    """Regression: graph build crashed hashing node/edge records that carry UUID
+    or datetime payload values (TypeError: not JSON serializable). The hash only
+    needs a deterministic fingerprint, so non-JSON scalars coerce via str."""
+    import datetime
+    import uuid
+
+    value = {
+        "nodes": [
+            {
+                "stable_identity": uuid.uuid4(),
+                "node_type": "character",
+                "title": "阿黎",
+                "attributes": {"id": uuid.uuid4(), "created": datetime.datetime(2026, 7, 25, 8, 48, 42)},
+            }
+        ],
+        "edges": [],
+        "mode": "full",
+        "options": {},
+    }
+    digest = _source_version_hash(value)
+    assert isinstance(digest, str) and len(digest) == 64
+    # Same shape re-hashes deterministically (no crash, stable output).
+    assert _source_version_hash(value) == digest
