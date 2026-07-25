@@ -249,6 +249,11 @@ func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *test
 			SourceMimeType:  "text/plain",
 			SourceSizeBytes: 42,
 			SourceSHA256:    strings.Repeat("a", 64),
+			FailedStage:     "sequential_reading",
+			Segments: []SeedRetrySegment{{
+				SegmentID: "77777777-7777-4777-8777-777777777777", SegmentOrder: 0,
+				ObjectKey: "objects/private-segment.txt", ChapterGuess: "第一章", TitleGuess: "开端",
+			}},
 		},
 	}
 	retrier := NewTemporalWorkflowRetrier(TemporalWorkflowRetrierConfig{
@@ -294,8 +299,12 @@ func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *test
 	if payload["run_id"] != "33333333-3333-4333-8333-333333333333" ||
 		payload["workflow_type"] != SeedWorkflowType ||
 		payload["source_file_id"] != "66666666-6666-4666-8666-666666666666" ||
-		payload["source_mime_type"] != "text/plain" {
+		payload["source_mime_type"] != "text/plain" ||
+		payload["retry_from_stage"] != "sequential_reading" {
 		t.Fatalf("payload lost required seed retry metadata: %#v", payload)
+	}
+	if segments, ok := payload["segments"].([]map[string]any); !ok || len(segments) != 1 || segments[0]["segment_id"] != "77777777-7777-4777-8777-777777777777" {
+		t.Fatalf("payload lost sequential-reading checkpoint segments: %#v", payload["segments"])
 	}
 	publicPayload := strings.Join(argsAsStrings(store.admitInput.PublicPayload), "\n")
 	if strings.Contains(publicPayload, "objects/private-source.txt") ||
@@ -467,6 +476,8 @@ func TestSQLWorkflowRetryStoreGetsSeedRetryTargetWithTenantContext(t *testing.T)
 				"text/plain",
 				42,
 				strings.Repeat("a", 64),
+				"sequential_reading",
+				`[{"segment_id":"77777777-7777-4777-8777-777777777777","segment_order":0,"object_key":"private/segment.txt","chapter_guess":"第一章","title_guess":"开端"}]`,
 			}},
 		},
 	}
@@ -485,6 +496,9 @@ func TestSQLWorkflowRetryStoreGetsSeedRetryTargetWithTenantContext(t *testing.T)
 	}
 	if target.WorkflowType != SeedWorkflowType || target.Status != "failed" || target.SourceSizeBytes != 42 {
 		t.Fatalf("unexpected retry target: %#v", target)
+	}
+	if target.FailedStage != "sequential_reading" || len(target.Segments) != 1 || target.Segments[0].SegmentOrder != 0 {
+		t.Fatalf("retry target lost failed-stage checkpoint: %#v", target)
 	}
 	if !strings.Contains(queryer.query, "FROM workflow_runs") ||
 		!strings.Contains(queryer.query, "workflow.queued") ||
@@ -527,7 +541,7 @@ func TestSQLWorkflowRetryStoreAdmitsOnlyTerminalSeedRunAndSanitizesEvent(t *test
 		!strings.Contains(execer.query, "status IN ('failed', 'cancelled')") ||
 		!strings.Contains(execer.query, "workflow.retry_requested") ||
 		!strings.Contains(execer.query, "UPDATE source_files") ||
-		!strings.Contains(execer.query, "parse_status = 'parsing'") {
+		!strings.Contains(execer.query, "CASE WHEN $9 = 'sequential_reading'") {
 		t.Fatalf("retry admission query lost state-machine guards: %s", execer.query)
 	}
 	joinedArgs := strings.Join(argsAsStrings(execer.args), "\n")

@@ -61,6 +61,24 @@ def _context() -> AgentContext:
     )
 
 
+def test_seed_retry_checkpoint_accepts_persisted_sequential_segments() -> None:
+    payload = {
+        "retry_from_stage": "sequential_reading",
+        "segments": [
+            {
+                "segment_id": "77777777-7777-4777-8777-777777777777",
+                "segment_order": 0,
+                "object_key": "private/segments/0000.txt",
+                "chapter_guess": "第一章",
+                "title_guess": "开端",
+            }
+        ],
+    }
+
+    assert seed_module._seed_retry_from_stage(payload) == "sequential_reading"
+    assert seed_module._seed_retry_from_stage({**payload, "segments": []}) is None
+
+
 def _minimal_text_pdf(text: str) -> bytes:
     escaped_text = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
     objects = [

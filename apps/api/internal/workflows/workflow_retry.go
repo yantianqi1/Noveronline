@@ -69,6 +69,16 @@ type WorkflowRetryTarget struct {
 	SourceMimeType  string
 	SourceSizeBytes int64
 	SourceSHA256    string
+	FailedStage     string
+	Segments        []SeedRetrySegment
+}
+
+type SeedRetrySegment struct {
+	SegmentID    string `json:"segment_id"`
+	SegmentOrder int    `json:"segment_order"`
+	ObjectKey    string `json:"object_key"`
+	ChapterGuess string `json:"chapter_guess,omitempty"`
+	TitleGuess   string `json:"title_guess,omitempty"`
 }
 
 type WorkflowRetryAdmissionInput struct {
@@ -81,6 +91,7 @@ type WorkflowRetryAdmissionInput struct {
 	RequestID          string
 	UploadID           string
 	SourceFileID       string
+	ResumeStage        string
 	PublicPayload      []any
 }
 
@@ -514,6 +525,7 @@ func (r *TemporalWorkflowRetrier) RetryWorkflowRun(ctx context.Context, input Re
 		"trace_id", traceID,
 		"upload_id", strings.TrimSpace(target.UploadID),
 		"source_file_id", strings.TrimSpace(target.SourceFileID),
+		"retry_from_stage", retryFromStage(target),
 	}
 	temporalWorkflowID := "seed_run_" + runID + "_retry"
 	if err := r.store.AdmitWorkflowRetry(ctx, WorkflowRetryAdmissionInput{
@@ -526,6 +538,7 @@ func (r *TemporalWorkflowRetrier) RetryWorkflowRun(ctx context.Context, input Re
 		RequestID:          requestID,
 		UploadID:           strings.TrimSpace(target.UploadID),
 		SourceFileID:       strings.TrimSpace(target.SourceFileID),
+		ResumeStage:        retryFromStage(target),
 		PublicPayload:      publicPayload,
 	}); err != nil {
 		return WorkflowRunRetry{}, err
@@ -590,6 +603,32 @@ func (s *SQLWorkflowRetryStore) GetWorkflowRetryTarget(ctx context.Context, inpu
     AND event_type = 'workflow.queued'
   ORDER BY sequence ASC
   LIMIT 1
+),
+failed_stage AS (
+  SELECT payload_jsonb->>'stage' AS stage
+  FROM workflow_events
+  WHERE tenant_id::text = $1
+    AND run_id::text = $2
+    AND event_type = 'seed.stage.failed'
+  ORDER BY sequence DESC
+  LIMIT 1
+),
+retry_segments AS (
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'segment_id', segment_id::text,
+        'segment_order', segment_order,
+        'object_key', object_key,
+        'chapter_guess', chapter_guess,
+        'title_guess', title_guess
+      ) ORDER BY segment_order
+    ),
+    '[]'::jsonb
+  )::text AS segments_json
+  FROM text_segments
+  WHERE tenant_id::text = $1
+    AND run_id::text = $2
 )
 SELECT
   workflow_runs.run_id::text,
@@ -602,9 +641,13 @@ SELECT
   COALESCE(source_files.filename, ''),
   COALESCE(source_files.mime_type, ''),
   COALESCE(source_files.size_bytes, 0),
-  COALESCE(source_files.sha256, '')
+  COALESCE(source_files.sha256, ''),
+  COALESCE(failed_stage.stage, ''),
+  retry_segments.segments_json
 FROM workflow_runs
 LEFT JOIN seed_source ON true
+LEFT JOIN failed_stage ON true
+LEFT JOIN retry_segments ON true
 LEFT JOIN source_files
   ON source_files.tenant_id = workflow_runs.tenant_id
  AND source_files.project_id = workflow_runs.project_id
@@ -626,6 +669,7 @@ LIMIT 1`
 	}
 	var target WorkflowRetryTarget
 	var sourceSizeBytes sql.NullInt64
+	var segmentsJSON string
 	if err := rows.Scan(
 		&target.RunID,
 		&target.ProjectID,
@@ -638,11 +682,16 @@ LIMIT 1`
 		&target.SourceMimeType,
 		&sourceSizeBytes,
 		&target.SourceSHA256,
+		&target.FailedStage,
+		&segmentsJSON,
 	); err != nil {
 		return WorkflowRetryTarget{}, workflowRetryQueryFailed()
 	}
 	if sourceSizeBytes.Valid {
 		target.SourceSizeBytes = sourceSizeBytes.Int64
+	}
+	if err := json.Unmarshal([]byte(segmentsJSON), &target.Segments); err != nil {
+		return WorkflowRetryTarget{}, workflowRetryQueryFailed()
 	}
 	if err := rows.Err(); err != nil {
 		return WorkflowRetryTarget{}, workflowRetryQueryFailed()
@@ -658,19 +707,20 @@ func (s *SQLWorkflowRetryStore) AdmitWorkflowRetry(ctx context.Context, input Wo
 		return &AppError{Code: "WORKFLOW_RETRY_BACKEND_UNCONFIGURED", Message: "workflow retry backend is not configured"}
 	}
 	payload, err := retryPublicPayloadJSON(input.PublicPayload, map[string]any{
-		"status":         "retry_requested",
-		"workflow_type":  strings.TrimSpace(input.WorkflowType),
-		"request_id":     strings.TrimSpace(input.RequestID),
-		"actor_user_id":  strings.TrimSpace(input.ActorUserID),
-		"upload_id":      strings.TrimSpace(input.UploadID),
-		"source_file_id": strings.TrimSpace(input.SourceFileID),
+		"status":           "retry_requested",
+		"workflow_type":    strings.TrimSpace(input.WorkflowType),
+		"request_id":       strings.TrimSpace(input.RequestID),
+		"actor_user_id":    strings.TrimSpace(input.ActorUserID),
+		"upload_id":        strings.TrimSpace(input.UploadID),
+		"source_file_id":   strings.TrimSpace(input.SourceFileID),
+		"retry_from_stage": strings.TrimSpace(input.ResumeStage),
 	})
 	if err != nil {
 		return &AppError{Code: "VALIDATION_FAILED", Message: "workflow retry payload must be JSON serializable"}
 	}
 	query := `WITH source_update AS (
   UPDATE source_files
-  SET parse_status = 'parsing',
+  SET parse_status = CASE WHEN $9 = 'sequential_reading' THEN parse_status ELSE 'parsing' END,
       updated_at = now()
   WHERE tenant_id = $1::uuid
     AND project_id = $2::uuid
@@ -693,7 +743,7 @@ workflow_update AS (
   UPDATE workflow_runs
   SET
     status = 'queued',
-    progress = 0,
+    progress = CASE WHEN $9 = 'sequential_reading' THEN 24 ELSE 0 END,
     message = 'retry requested',
     error_code = NULL,
     error_message = NULL,
@@ -753,6 +803,7 @@ CROSS JOIN next_sequence`
 		strings.TrimSpace(input.SourceFileID),
 		strings.TrimSpace(input.TemporalWorkflowID),
 		string(payload),
+		strings.TrimSpace(input.ResumeStage),
 	)
 	if err != nil || result == nil {
 		return workflowRetryAdmissionFailed()
@@ -864,7 +915,7 @@ LEFT JOIN source_update ON TRUE`
 func seedRetryTemporalPayload(tenantID string, target WorkflowRetryTarget, actorUserID string, requestID string, traceID string) map[string]any {
 	projectID := strings.TrimSpace(target.ProjectID)
 	runID := strings.TrimSpace(target.RunID)
-	return map[string]any{
+	payload := map[string]any{
 		"context": map[string]any{
 			"tenant_id":     tenantID,
 			"project_id":    projectID,
@@ -895,6 +946,26 @@ func seedRetryTemporalPayload(tenantID string, target WorkflowRetryTarget, actor
 			"seed_pipeline": {"run"},
 		},
 	}
+	if retryFromStage(target) == "sequential_reading" {
+		payload["retry_from_stage"] = "sequential_reading"
+		segments := make([]map[string]any, 0, len(target.Segments))
+		for _, segment := range target.Segments {
+			segments = append(segments, map[string]any{
+				"segment_id": segment.SegmentID, "segment_order": segment.SegmentOrder,
+				"object_key": segment.ObjectKey, "chapter_guess": segment.ChapterGuess,
+				"title_guess": segment.TitleGuess,
+			})
+		}
+		payload["segments"] = segments
+	}
+	return payload
+}
+
+func retryFromStage(target WorkflowRetryTarget) string {
+	if strings.TrimSpace(target.FailedStage) == "sequential_reading" && len(target.Segments) > 0 {
+		return "sequential_reading"
+	}
+	return ""
 }
 
 func seedSegmentRetryTemporalPayload(

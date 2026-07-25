@@ -20,15 +20,30 @@ class RecordingQuotaGate:
 
 
 class RecordingProviderClient:
-    def __init__(self) -> None:
+    def __init__(self, response: dict[str, Any] | None = None) -> None:
         self.provider_call_ids: list[str] = []
+        self.response = response
 
     def complete_json(self, **kwargs: Any) -> dict[str, Any]:
         self.provider_call_ids.append(kwargs["provider_call_id"])
-        return {
+        return self.response or {
             "seed_analysis": {"summary": "public summary"},
             "__llm_usage": {"prompt_tokens": 3, "completion_tokens": 2},
         }
+
+
+def _sequential_messages(segment_ids: list[str]) -> list[dict[str, str]]:
+    import json
+
+    return [
+        {"role": "system", "content": "Return structured notes."},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {"segments": [{"segment_id": segment_id, "text": "private"} for segment_id in segment_ids]}
+            ),
+        },
+    ]
 
 
 def test_seed_quota_chat_client_routes_provider_call_through_gate() -> None:
@@ -153,6 +168,58 @@ def test_seed_quota_chat_client_uses_distinct_identity_for_changed_retry_input()
     assert gate.calls[0]["stage"] != gate.calls[1]["stage"]
     assert "first selected segments" not in gate.calls[0]["stage"]
     assert "changed retry segments" not in gate.calls[1]["stage"]
+
+
+def test_seed_quota_chat_client_rejects_wrong_sequential_segment_id_before_cache_finalize() -> None:
+    expected_id = "88888888-8888-4888-8888-888888888888"
+    provider = RecordingProviderClient(
+        response={
+            "notes": [
+                {
+                    "segment_id": "22222222-2222-4222-8222-222222222222",
+                    "summary": "wrong project id",
+                    "payload_jsonb": {},
+                }
+            ],
+            "__llm_usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        }
+    )
+    gate = RecordingQuotaGate()
+    client = SeedQuotaAwareJSONChatClient(quota_gate=gate, provider_client=provider)
+    context = AgentContext(
+        tenant_id="11111111-1111-4111-8111-111111111111",
+        project_id="22222222-2222-4222-8222-222222222222",
+        run_id="33333333-3333-4333-8333-333333333333",
+        workflow_type="seed_pipeline",
+        actor_user_id=None,
+        trace_id="55555555-5555-4555-8555-555555555555",
+        permissions={"seed_pipeline": ["run"]},
+    )
+    resolution = ModuleBindingResolution(
+        tenant_id=context.tenant_id,
+        project_id=context.project_id,
+        module_key="sequential_reading",
+        channel_id="66666666-6666-4666-8666-666666666666",
+        model_id="deepseek-v4-flash",
+        provider="openai-compatible",
+        base_url="https://provider.invalid/v1",
+        credential_ref="private-ref",
+        supports_json=True,
+        settings={},
+    )
+
+    try:
+        client.complete_json(
+            context=context,
+            resolution=resolution,
+            api_key="sk-private",
+            messages=_sequential_messages([expected_id]),
+        )
+    except LLMFacilityError as exc:
+        assert exc.code == "SCHEMA_VALIDATION_FAILED"
+        assert exc.message == "sequential reading note segment_id must reference its input batch"
+    else:
+        raise AssertionError("wrong sequential segment id reached the replay cache")
 
 
 def test_seed_production_chat_factory_enables_quota_gate() -> None:

@@ -10284,30 +10284,35 @@ class SeedSegmentRetryWorkflow:
 class SeedPipelineWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = await workflow.execute_activity(
-            seed_pipeline_activity,
-            payload,
-            start_to_close_timeout=timedelta(seconds=30),
-        )
-        if result.get("status") != "queued" or not _payload_has_parse_source(payload):
-            return result
-        parse_result = await workflow.execute_activity(
-            parse_file_activity,
-            payload,
-            start_to_close_timeout=timedelta(minutes=10),
-        )
-        if parse_result.get("status") != "completed":
-            return parse_result
-        segment_result = await workflow.execute_activity(
-            segment_text_activity,
-            _segment_payload_from_parse(payload, parse_result),
-            start_to_close_timeout=timedelta(minutes=10),
-        )
-        if segment_result.get("status") != "completed":
-            return segment_result
+        retry_from_stage = _seed_retry_from_stage(payload)
+        if retry_from_stage == "sequential_reading":
+            sequential_payload = payload
+        else:
+            result = await workflow.execute_activity(
+                seed_pipeline_activity,
+                payload,
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            if result.get("status") != "queued" or not _payload_has_parse_source(payload):
+                return result
+            parse_result = await workflow.execute_activity(
+                parse_file_activity,
+                payload,
+                start_to_close_timeout=timedelta(minutes=10),
+            )
+            if parse_result.get("status") != "completed":
+                return parse_result
+            segment_result = await workflow.execute_activity(
+                segment_text_activity,
+                _segment_payload_from_parse(payload, parse_result),
+                start_to_close_timeout=timedelta(minutes=10),
+            )
+            if segment_result.get("status") != "completed":
+                return segment_result
+            sequential_payload = _sequential_payload_from_segment(payload, segment_result)
         sequential_result = await workflow.execute_activity(
             sequential_reading_activity,
-            _sequential_payload_from_segment(payload, segment_result),
+            sequential_payload,
             start_to_close_timeout=timedelta(minutes=30),
         )
         if sequential_result.get("status") != "completed":
@@ -10366,6 +10371,22 @@ class SeedPipelineWorkflow:
             _finalize_payload_from_index_assets(payload, index_assets_result),
             start_to_close_timeout=timedelta(minutes=10),
         )
+
+
+def _seed_retry_from_stage(payload: dict[str, Any]) -> str | None:
+    stage = payload.get("retry_from_stage")
+    if stage != "sequential_reading":
+        return None
+    segments = payload.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return None
+    try:
+        sanitized = [_sanitize_segment_reference(segment) for segment in segments]
+    except Exception:
+        return None
+    if len(sanitized) != len(segments):
+        return None
+    return "sequential_reading"
 
 
 def run_seed_workflow_locally(
