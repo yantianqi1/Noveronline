@@ -4,7 +4,7 @@
 
 这份文档给后续 AI coding agent 快速接手 `MiroFish-Novel` 使用，并明确 legacy 应用与当前 SaaS 重构的边界。
 
-更新时间：`2026-07-13`
+更新时间：`2026-07-22`
 
 ## SaaS 开发真相源
 
@@ -104,6 +104,29 @@ env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 .venv/bin/python -m pytest 
 - 旧蓝色 Vite UI、旧蓝色 Writer 长页截图、`writer-studio-grid`、折叠 composer 和深色 `writer-agent-rail` 均已退役，不得恢复或作为验收基线。
 - `docs/plans/` 与 `docs/superpowers/` 中指向旧 `frontend/` 的内容只是历史记录，不是待执行任务。
 
+## 前端开发与验证约束
+
+`apps/web` 的 UI 必须在**真实后端**之上开发和验收，本条长期有效：
+
+- **前端测试/验收必须连接真实运行的 Go control plane**，默认地址
+  `http://127.0.0.1:3888`（即 `MIROFISH_API_BASE_URL` 的默认值）。开发前先用
+  `docker compose -f infra/docker-compose.yml up -d` 拉起完整栈（postgres、
+  redis、temporal、minio、api、worker 等），再启动 `apps/web` 的 dev server。
+- **禁止用 stub / mock 假后端替代真实 API 来做页面验收。** 不得为“让 UI 看起来
+  能跑”而伪造 `GET /v1/me`、登录、项目列表或任何领域数据的本地假服务、假数据
+  文件或写死的内存响应；这与「不添加 mock 成功路径、伪数据路径」的硬约束同源。
+  单元测试里对纯函数/组件做隔离测试可以，但页面级、跨进程的功能与视觉验收必须
+  打到真实 API。
+- **认证、CSRF、多租户一律走真实链路。** 浏览器只连同源 Next BFF 路由（`/api/*`），
+  由服务端转发 cookie、注入 `X-CSRF-Token`、代签 trusted-client proof；`X-Tenant-Id`
+  来自用户在 `GET /v1/me` 里的真实 `active_tenants`。不得在前端写死 token、租户 ID
+  或跳过 CSRF。
+- **数据契约以后端源码为准。** 字段名、错误信封、`role` 取值等以 `apps/api` 当前
+  worktree 为最终事实（例如项目标题字段是 `name`、登出是 `DELETE /v1/auth/session`
+  返回 204）；不要凭旧文档或记忆假设，存疑时读源码核实。
+- 修改 `apps/web` 后，在真实后端之上完整重启并走一遍对应用户路径验证；验收标准见
+  「质量基线」。
+
 ## Legacy 后端目录责任
 
 - `backend/app/api_fastapi/`：FastAPI 路由，统一挂载 `/api`。
@@ -139,6 +162,7 @@ Writer 工作台覆盖书籍计划、章节、场景、续写、正文生成、�
 ## 开发硬约束
 
 - 不添加 mock 成功、静默 fallback、吞错、隐式降级或伪数据路径。
+- 前端页面级开发与验收必须连真实 Go API（默认 `http://127.0.0.1:3888`，用 compose 拉起）；禁止用 stub/mock 假后端伪造 `GET /v1/me`、登录或领域数据来“跑通”页面。详见「前端开发与验证约束」。
 - 不为“跑通”新增随意边界、上限、硬截断；必要限制必须显式、可配置、可解释。
 - 不把 API Key、用户小说原文、数据库、上传产物或 LLM trace 泄露到 git。
 - 不直接拼接用户输入到 SQL 或 shell；数据库访问使用参数化查询和 repository。
