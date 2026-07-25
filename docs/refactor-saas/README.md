@@ -42,12 +42,14 @@ Git history 负责保存历史。当前工作树不再保留中途 handoff、追
 - `17-migration-roadmap.md`：目标迁移顺序、原则和最终验收清单；不是当前进度入口。
 - `18-legacy-coverage-matrix.md`：旧页面、路由、表、Agent 模块和功能的覆盖验收矩阵。
 - `19-parallel-development-orchestration.md`：不含固定任务的多 agent 并行协作规则。
-- `21-pi-writer-agent-runtime.md`：Writer-first Pi Agent Runtime、写作台最小闭环和分批接入方案。
+- `21-pi-writer-agent-runtime.md`：Writer-first Pi Agent Runtime、写作台最小闭环和分批接入方案；亦登记 Pi 已接入的候选式故事分析（`PiAnalysisRunWorkflow`）与 Worldline Cast Planner 两个独立域。
 - `24-current-development-progress.md`：截至当前 worktree 的 SaaS 重构总进度、完成定义审计、验证新鲜度、关键风险和下一步队列；当前接手状态以此文档为第二入口。
 - `29-seed-sse-live-progress-experience.md`：小说上传、真实 SSE 实时分析进度、动效、断线恢复和验收标准的设计提案；不代表当前实现已完成。
 - `31-overview-progress-visual-motion-design.md`：Overview 分析进度画布的视觉与动效升级设计（阶段播报、数字缓动、阶段轨道、终态编排）；P1 运行在现有轮询上，P2 对接文档 29 的 SSE。
 - `34-author-friendly-experience-plan.md`：面向产品负责人的作者友好优化说明，只描述作者可见变化、实施顺序和人工验收问题。
 - `35-author-friendly-implementation-plan.md`：与文档 34 逐项对应的 Agent 实施蓝图，包含安全边界、代码入口、测试 Gate 和最终完成定义。
+- `37-frontend-module-inventory.md`：前端必须具备的模块与产品面清单，供 Agent 确认范围；不规定实现顺序或编码步骤。
+- `42-seed-batched-enrichment.md`：Seed 富化阶段（agent_profiles / archive_candidates）从单发全量改为确定性分批喂料 + 完整性对账补漏 + 就绪度瓷砖流式的实施设计；状态 `proposal`，落地重开 P5-005-B 验证。
 
 ## 总体决策
 
@@ -56,7 +58,7 @@ Git history 负责保存历史。当前工作树不再保留中途 handoff、追
 采用 **Go Control Plane + Pi Writer Runtime + Python Agent Runtime** 的混合架构，并按 **Writer-first Pi Agent vertical slice** 的顺序开发。
 
 - Go 负责公网 SaaS 控制面：用户、租户、权限、项目、资产、图谱查询、任务提交、实时推送、计费、用量、审计。
-- Pi Writer Runtime 负责第一阶段写作台 Agent loop：writer run、tool calling、流式正文、draft 保存和采用。
+- Pi Writer Runtime 负责第一阶段写作台 Agent loop：writer run、tool calling、流式正文、draft 保存和采用。Pi 同时承载两条已接入的独立候选/agent 域：候选式故事分析（`PiAnalysisRunWorkflow`，候选→Go 导入资产）与 Worldline Cast Planner 选角；二者均不写 canon，不改变 Seed/Graph/Asset ingestion 归 Python 的边界。
 - Python 负责智能体和小说理解：seed pipeline、图谱构建、资产入库 Agent、worldline 推演、角色控制，以及暂不迁移到 Pi 的领域逻辑。
 - Temporal 负责长任务：seed、graph、asset ingestion、worldline prepare/auto-evolution、writer run、reviewer run。
 - Postgres 是主数据库，RLS 是租户隔离底线，pgvector 支撑长期语义检索。
