@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>世界线 × 角色控制 · 纸墨原型</title>
+<style>
+  @font-face {
+    font-family: "Ma Shan Zheng";
+    font-style: normal; font-weight: 400; font-display: swap;
+    src: url("/fonts/ma-shan-zheng-subset.woff2") format("woff2");
+  }
+
+  /* ───────────────────────── 设计令牌：纸感朱砂 ───────────────────────── */
+  :root {
+    --paper: #f7f2e9;          /* 暖纸底 */
+    --paper-deep: #efe7d8;
+    --panel: #fffdf8;          /* 手稿/卡片面 */
+    --line: rgba(86,69,45,.22);
+    --line-soft: rgba(86,69,45,.12);
+    --ink: #171a1b;            /* 深墨 */
+    --ink-soft: #3c3a36;
+    --muted: #5a5146;
+    --accent: #8f211b;         /* 朱砂 */
+    --accent-strong: #7a1a15;
+    --accent-soft: #b04a42;
+    --accent-wash: rgba(143,33,27,.07);
+    --gold: #b5854a;           /* 旧金 = 候选 */
+    --gold-deep: #a9854f;
+    --canon: #3f6b4f;          /* 正史绿 */
+    --radius: 14px;
+    --radius-sm: 9px;
+    --shadow: 0 1px 2px rgba(23,26,27,.05), 0 12px 32px -12px rgba(23,26,27,.14);
+    --shadow-panel: 0 1px 0 rgba(255,255,255,.6) inset, 0 20px 50px -24px rgba(23,26,27,.28);
+    --serif: "Source Serif 4", "Songti SC", "Noto Serif SC", Georgia, serif;
+    --sans: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+    --brush: "Ma Shan Zheng", "Songti SC", "Noto Serif SC", serif;
+    --ease: cubic-bezier(.22,1,.36,1);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    background:
+      radial-gradient(120% 90% at 50% 20%, rgba(143,33,27,.04), transparent 55%),
+      radial-gradient(90% 70% at 85% 0%, rgba(181,133,74,.05), transparent 60%),
+      var(--paper);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  ::selection { background: var(--accent); color:#fff; }
+  button { font-family: var(--sans); }
+
+  /* ───────────────────────── 顶部原型切换条 ───────────────────────── */
+  .proto-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 80;
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 18px; background: rgba(23,26,27,.92); color: #f3eee4;
+    font-size: 12.5px; backdrop-filter: blur(6px);
+  }
+  .proto-bar .tag {
+    font-size: 10.5px; letter-spacing: .18em; color: #c8b98f;
+    border: 1px solid rgba(200,185,143,.4); border-radius: 999px; padding: 2px 9px;
+  }
+  .proto-bar button {
+    font-size: 12.5px; cursor: pointer; border: 1px solid rgba(243,238,228,.25);
+    background: transparent; color: #e7dfcf; border-radius: 999px; padding: 4px 14px;
+    transition: all .22s var(--ease);
+  }
+  .proto-bar button:hover { border-color: rgba(243,238,228,.6); }
+  .proto-bar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .proto-bar .spacer { flex: 1; }
+  .proto-bar .hint { color: #9b917e; font-size: 11.5px; }
+
+  /* ───────────────────────── 应用壳 ───────────────────────── */
+  .shell { display: flex; height: 100vh; padding-top: 41px; }
+
+  /* 项目侧栏（极简，呼应现有壳） */
+  .rail {
+    width: 196px; flex-shrink: 0; background: var(--paper-deep);
+    border-right: 1px solid var(--line); padding: 18px 12px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .rail .brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px 16px; font-family: var(--serif); font-weight: 600; font-size: 15px; }
+  .rail .brand .seal {
+    width: 24px; height: 24px; border-radius: 6px; background: var(--accent);
+    color: #fff; display: grid; place-items: center; font-size: 13px; font-family: var(--brush);
+  }
+  .rail a {
+    display: flex; align-items: center; gap: 9px; padding: 8px 10px;
+    border-radius: var(--radius-sm); color: var(--ink-soft); text-decoration: none;
+    font-size: 13.5px; transition: background .2s var(--ease); position: relative;
+  }
+  .rail a:hover { background: rgba(255,253,248,.7); }
+  .rail a.on { background: var(--accent-wash); color: var(--accent-strong); font-weight: 500; }
+  .rail a.on::before { content:""; position:absolute; left:0; top:20%; bottom:20%; width:3px; border-radius:3px; background:var(--accent); }
+  .rail a svg { width: 16px; height: 16px; opacity: .8; }
+  .rail .foot { margin-top: auto; padding: 10px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  /* ───────────────────────── 栏目眉三段式 ───────────────────────── */
+  .masthead {
+    flex-shrink: 0; border-bottom: 1px solid var(--line-soft);
+    padding: 22px 30px 18px; background: rgba(255,253,248,.5);
+    display: flex; align-items: flex-end; gap: 18px;
+  }
+  .masthead .eyebrow { font-size: 11.5px; font-weight: 500; letter-spacing: .28em; color: var(--accent); margin-bottom: 6px; }
+  .masthead h1 { font-family: var(--serif); font-size: 26px; font-weight: 600; line-height: 1.15; color: var(--ink); }
+  .masthead .tagline { margin-top: 7px; font-size: 13.5px; color: var(--muted); max-width: 560px; line-height: 1.6; }
+  .masthead .meta { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+
+  /* 状态章（印章式 status） */
+  .stamp {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink-soft);
+  }
+  .stamp .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .stamp.live { border-color: rgba(143,33,27,.35); color: var(--accent-strong); background: var(--accent-wash); }
+  .stamp.live .dot { background: var(--accent); animation: pulse 1.6s var(--ease) infinite; }
+  .stamp.idle .dot { background: var(--gold); }
+  @keyframes pulse { 0%,100%{opacity:1; transform:scale(1);} 50%{opacity:.4; transform:scale(.8);} }
+
+  /* 通用按钮 */
+  .btn {
+    cursor: pointer; border-radius: 10px; font-size: 13px; font-weight: 500;
+    padding: 8px 16px; transition: all .2s var(--ease); border: 1px solid transparent;
+  }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-strong); }
+  .btn.ghost { border-color: var(--line); background: var(--panel); color: var(--ink); }
+  .btn.ghost:hover { border-color: var(--accent-soft); color: var(--accent); }
+  .btn.sm { padding: 5px 11px; font-size: 12px; border-radius: 8px; }
+
+  /* 角色印章（首字书法 + 方底） */
+  .seal {
+    flex-shrink: 0; display: grid; place-items: center;
+    font-family: var(--brush); border-radius: 3px; line-height: 1;
+    background: var(--accent-wash); color: var(--accent-strong);
+    border: 1px solid rgba(143,33,27,.18);
+  }
+  .seal.ink { background: rgba(23,26,27,.06); color: var(--ink-soft); border-color: rgba(23,26,27,.12); }
+  .seal.s22 { width: 22px; height: 22px; font-size: 13px; }
+  .seal.s28 { width: 28px; height: 28px; font-size: 16px; }
+  .seal.s34 { width: 34px; height: 34px; font-size: 20px; }
+  .seal.s56 { width: 56px; height: 56px; font-size: 34px; border-radius: 5px; }
+
+  /* ───────────────────────── 三栏骨架 ───────────────────────── */
+  .bench { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+  .col-side { flex-shrink: 0; background: var(--paper); border-right: 1px solid var(--line-soft); overflow-y: auto; }
+  .col-side.right { border-right: none; border-left: 1px solid var(--line-soft); background: var(--panel); }
+  .col-main { flex: 1; min-width: 0; background: var(--panel); display: flex; flex-direction: column; overflow: hidden; }
+  .col-main .scroll { flex: 1; overflow-y: auto; }
+
+  .side-label {
+    font-size: 11px; font-weight: 600; letter-spacing: .12em; color: var(--muted);
+    padding: 16px 18px 8px; display: flex; align-items: center; gap: 7px;
+  }
+  .side-label .n { font-variant-numeric: tabular-nums; color: var(--gold-deep); }
+
+  .view { display: none; height: 100%; }
+  .view.show { display: flex; flex-direction: column; animation: fadeup .5s var(--ease); }
+  @keyframes fadeup { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* ════════════════════════ 世界线 ════════════════════════ */
+
+  /* 左·整备轨 */
+  .prepare-card {
+    margin: 0 14px 12px; padding: 13px 14px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .prepare-card .t { font-family: var(--serif); font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .prepare-card .bar { margin-top: 10px; height: 5px; border-radius: 3px; background: var(--paper-deep); overflow: hidden; }
+  .prepare-card .bar i { display: block; height: 100%; width: 82%; border-radius: 3px; background: linear-gradient(90deg, var(--accent-soft), var(--accent)); }
+  .prepare-card .s { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+
+  .roster { padding: 2px 8px; }
+  .roster-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border-radius: var(--radius-sm); cursor: pointer; transition: background .18s var(--ease);
+  }
+  .roster-item:hover { background: rgba(255,253,248,.8); }
+  .roster-item.on { background: var(--accent-wash); }
+  .roster-item .nm { font-family: var(--serif); font-size: 13.5px; font-weight: 600; }
+  .roster-item .rl { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .roster-item .st { margin-left: auto; font-size: 10.5px; color: var(--gold-deep); }
+
+  .varlock { padding: 2px 14px; display: flex; flex-direction: column; gap: 7px; }
+  .var {
+    display: flex; align-items: center; gap: 9px; padding: 8px 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  }
+  .var .nm { font-size: 12.5px; font-weight: 500; }
+  .var .ax { font-size: 10.5px; color: var(--muted); }
+  .var .lock { margin-left: auto; font-size: 12px; color: var(--gold-deep); }
+  .var.locked { border-color: rgba(181,133,74,.5); background: rgba(181,133,74,.06); }
+
+  /* 中·演化时间线 */
+  .worldline-state {
+    margin: 18px 26px 4px; padding: 16px 20px; border-radius: var(--radius);
+    background: linear-gradient(180deg, #fffdf8, #fbf6ec);
+    border: 1px solid var(--line); box-shadow: var(--shadow); position: relative; overflow: hidden;
+  }
+  .worldline-state::before {
+    content: "推演"; position: absolute; right: 14px; top: 10px;
+    font-family: var(--brush); font-size: 34px; color: rgba(143,33,27,.08); pointer-events: none;
+  }
+  .worldline-state .step-line { display: flex; align-items: baseline; gap: 12px; }
+  .worldline-state .step-no { font-family: var(--brush); font-size: 30px; color: var(--accent); line-height: 1; }
+  .worldline-state .goal { font-family: var(--serif); font-size: 15px; font-weight: 600; }
+  .worldline-state .chips { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft);
+  }
+  .chip.gold { border-color: rgba(181,133,74,.45); color: var(--gold-deep); background: rgba(181,133,74,.06); }
+
+  /* 导演思考 overlay */
+  .director {
+    margin: 14px 26px 0; padding: 13px 18px; border-radius: var(--radius);
+    background: var(--ink); color: #efe7d8; box-shadow: var(--shadow-panel);
+    display: flex; align-items: center; gap: 14px;
+  }
+  .director .think { font-family: var(--brush); font-size: 17px; color: #e7c873; letter-spacing: .04em; }
+  .director .line { font-size: 12.5px; color: #cfc6b4; line-height: 1.5; }
+  .director .dots { margin-left: auto; display: flex; gap: 4px; }
+  .director .dots i { width: 5px; height: 5px; border-radius: 50%; background: #e7c873; animation: pulse 1.2s var(--ease) infinite; }
+  .director .dots i:nth-child(2) { animation-delay: .2s; }
+  .director .dots i:nth-child(3) { animation-delay: .4s; }
+
+  /* 时间线本体 */
+  .timeline { padding: 18px 26px 30px; position: relative; }
+  .timeline::before {
+    content: ""; position: absolute; left: 40px; top: 0; bottom: 0; width: 2px;
+    background: linear-gradient(180deg, transparent, var(--line) 6%, var(--line) 94%, transparent);
+  }
+  .tl-item { position: relative; padding: 0 0 22px 40px; }
+  .tl-item .node {
+    position: absolute; left: 6px; top: 4px; width: 30px; height: 30px; border-radius: 50%;
+    display: grid; place-items: center; font-family: var(--brush); font-size: 15px;
+    background: var(--panel); border: 2px solid var(--line); color: var(--muted); z-index: 1;
+  }
+  .tl-item.canon .node { border-color: var(--ink-soft); color: var(--ink); background: #fff; }
+  .tl-item.now .node {
+    border-color: var(--accent); color: var(--accent); background: var(--accent-wash);
+    box-shadow: 0 0 0 4px rgba(143,33,27,.08);
+  }
+  .tl-item .step-tag { font-size: 10.5px; letter-spacing: .14em; color: var(--muted); margin-bottom: 4px; }
+  .event-card {
+    background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 18px; box-shadow: var(--shadow); transition: transform .2s var(--ease), box-shadow .2s var(--ease);
+  }
+  .event-card:hover { transform: translateY(-1px); box-shadow: var(--shadow-panel); }
+  .tl-item.now .event-card { border-color: rgba(143,33,27,.4); }
+  .event-card .eh { display: flex; align-items: center; gap: 9px; }
+  .event-card .et { font-family: var(--serif); font-size: 15.5px; font-weight: 600; }
+  .event-card .ek { margin-left: auto; font-size: 10.5px; padding: 2px 9px; border-radius: 999px; }
+  .ek.canon { background: rgba(63,107,79,.1); color: var(--canon); }
+  .ek.now { background: var(--accent-wash); color: var(--accent-strong); }
+  .event-card .es { margin-top: 7px; font-size: 13px; line-height: 1.75; color: var(--ink-soft); font-family: var(--serif); }
+  .event-card .cast { margin-top: 10px; display: flex; align-items: center; gap: 6px; }
+  .event-card .cast .lb { font-size: 10.5px; color: var(--muted); margin-right: 2px; }
+
+  /* 底部运行控制条 */
+  .runbar {
+    flex-shrink: 0; border-top: 1px solid var(--line-soft); background: rgba(255,253,248,.8);
+    padding: 12px 26px; display: flex; align-items: center; gap: 12px;
+  }
+  .seg { display: inline-flex; background: var(--paper-deep); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { border: none; background: transparent; font-size: 12px; padding: 5px 12px; border-radius: 8px; cursor: pointer; color: var(--muted); transition: all .18s var(--ease); }
+  .seg button.on { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); font-weight: 500; }
+  .runbar .spacer { flex: 1; }
+  .runbar .stat { font-size: 11.5px; color: var(--muted); }
+
+  /* 右·候选列表 */
+  .cand-list { padding: 4px 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .cand {
+    background: #fff; border: 1px dashed rgba(181,133,74,.6); border-radius: var(--radius);
+    padding: 13px 15px; position: relative; transition: box-shadow .2s var(--ease);
+  }
+  .cand:hover { box-shadow: var(--shadow); }
+  .cand .flag {
+    position: absolute; top: -8px; left: 12px; font-size: 10px; letter-spacing: .1em;
+    background: var(--gold); color: #fff; padding: 2px 8px; border-radius: 999px;
+  }
+  .cand .ct { font-family: var(--serif); font-size: 14px; font-weight: 600; margin-top: 3px; }
+  .cand .cs { margin-top: 6px; font-size: 12.5px; line-height: 1.7; color: var(--ink-soft); font-family: var(--serif); }
+  .cand .cmeta { margin-top: 9px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .src-tag { font-size: 10.5px; padding: 2px 8px; border-radius: 999px; background: var(--paper); border: 1px solid var(--line); color: var(--muted); }
+  .conf { font-size: 10.5px; color: var(--gold-deep); font-variant-numeric: tabular-nums; }
+  .cand .acts { margin-top: 11px; display: flex; gap: 7px; }
+
+  /* ════════════════════════ 角色控制 ════════════════════════ */
+
+  /* 场景流（剧本） */
+  .scene { flex: 1; overflow-y: auto; padding: 26px 30px 24px; }
+  .scene-inner { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+  .stage-note { text-align: center; font-size: 12px; color: var(--muted); letter-spacing: .04em; display: flex; align-items: center; gap: 14px; }
+  .stage-note::before, .stage-note::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+
+  .turn { display: flex; gap: 12px; animation: fadeup .5s var(--ease); }
+  .turn .body { max-width: 86%; }
+  .turn.me { flex-direction: row-reverse; }
+  .turn .who { font-size: 11px; color: var(--muted); margin-bottom: 5px; display: flex; align-items: center; gap: 6px; }
+  .turn.me .who { justify-content: flex-end; }
+  .turn .who .kind {
+    font-size: 10px; font-weight: 600; letter-spacing: .08em; padding: 1px 7px; border-radius: 999px;
+  }
+  .kind.say { background: var(--accent-wash); color: var(--accent-strong); }
+  .kind.do { background: rgba(63,107,79,.12); color: var(--canon); }
+  .kind.think { background: rgba(181,133,74,.14); color: var(--gold-deep); }
+
+  .bubble { padding: 11px 16px; border-radius: 14px; font-size: 13.5px; line-height: 1.75; }
+  .turn.me .bubble { background: var(--accent-wash); color: var(--accent-strong); border: 1px solid rgba(143,33,27,.2); border-bottom-right-radius: 4px; }
+  .turn.world .bubble {
+    background: transparent; border: none; padding: 2px 4px;
+    font-family: var(--serif); font-size: 14.5px; line-height: 1.9; color: var(--ink);
+  }
+  .turn.world .bubble .cursor { display: inline-block; width: 2px; height: 1em; background: var(--accent); vertical-align: -2px; animation: pulse 1s step-end infinite; }
+
+  /* 候选提案（贴条） */
+  .proposal {
+    max-width: 86%; margin: 0 auto; width: 100%;
+    background: rgba(181,133,74,.05); border: 1px dashed rgba(181,133,74,.55);
+    border-radius: var(--radius); padding: 13px 16px; position: relative; animation: fadeup .5s var(--ease);
+  }
+  .proposal .flag { position: absolute; top: -8px; left: 14px; font-size: 10px; letter-spacing: .1em; background: var(--gold); color: #fff; padding: 2px 8px; border-radius: 999px; }
+  .proposal .pt { font-size: 12.5px; font-weight: 600; color: var(--gold-deep); margin-top: 2px; }
+  .proposal .ps { margin-top: 5px; font-size: 12.5px; line-height: 1.7; color: var(--ink-soft); font-family: var(--serif); }
+  .proposal .acts { margin-top: 10px; display: flex; gap: 7px; }
+
+  /* composer */
+  .composer { flex-shrink: 0; border-top: 1px solid var(--line-soft); background: rgba(255,253,248,.85); padding: 13px 26px 14px; }
+  .composer .chips { display: flex; gap: 7px; margin-bottom: 10px; max-width: 640px; margin-left: auto; margin-right: auto; }
+  .mode-chip {
+    font-size: 11.5px; padding: 4px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink-soft); transition: all .18s var(--ease);
+  }
+  .mode-chip:hover { border-color: var(--accent-soft); color: var(--accent); }
+  .mode-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+  .composer .row { display: flex; gap: 10px; align-items: flex-end; max-width: 640px; margin: 0 auto; }
+  .composer .input {
+    flex: 1; min-height: 44px; max-height: 132px; resize: none; border: 1px solid var(--line);
+    border-radius: 12px; background: #fff; padding: 11px 14px; font-family: var(--sans);
+    font-size: 13.5px; line-height: 1.6; color: var(--ink); outline: none; transition: border-color .2s var(--ease);
+  }
+  .composer .input:focus { border-color: var(--accent-soft); }
+  .composer .input::placeholder { color: var(--muted); }
+  .composer .send { width: 44px; height: 44px; border-radius: 12px; border: none; background: var(--accent); color: #fff; cursor: pointer; font-size: 16px; display: grid; place-items: center; transition: background .2s var(--ease); flex-shrink: 0; }
+  .composer .send:hover { background: var(--accent-strong); }
+  .composer .hint { max-width: 640px; margin: 8px auto 0; font-size: 11px; color: var(--muted); }
+
+  /* 角色控制底部动作条 */
+  .cc-actionbar {
+    flex-shrink: 0; border-top: 1px solid var(--line-soft); background: var(--paper);
+    padding: 10px 26px; display: flex; align-items: center; gap: 12px;
+  }
+  .cc-actionbar .note { font-size: 11.5px; color: var(--muted); }
+  .cc-actionbar .spacer { flex: 1; }
+
+  /* 角色档案（右栏） */
+  .dossier { padding: 18px 20px; }
+  .dossier .head { display: flex; flex-direction: column; align-items: center; text-align: center; padding-bottom: 16px; border-bottom: 1px solid var(--line-soft); }
+  .dossier .nm { font-family: var(--serif); font-size: 19px; font-weight: 600; margin-top: 12px; }
+  .dossier .role { font-size: 11.5px; color: var(--gold-deep); margin-top: 3px; letter-spacing: .06em; }
+  .dossier .sum { margin-top: 10px; font-size: 12.5px; line-height: 1.75; color: var(--ink-soft); font-family: var(--serif); }
+  .dossier .sec { margin-top: 18px; }
+  .dossier .sec-t { font-size: 11px; font-weight: 600; letter-spacing: .12em; color: var(--muted); margin-bottom: 9px; }
+  .mem { font-size: 12.5px; line-height: 1.7; color: var(--ink-soft); padding: 8px 11px; background: var(--paper); border-left: 2px solid var(--gold); border-radius: 0 8px 8px 0; margin-bottom: 7px; font-family: var(--serif); }
+  .rel { display: flex; align-items: center; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+  .rel:last-child { border-bottom: none; }
+  .rel .nm { font-size: 12.5px; font-weight: 500; }
+  .rel .val { margin-left: auto; font-size: 10.5px; color: var(--muted); }
+  .rel .meter { width: 60px; height: 4px; border-radius: 2px; background: var(--paper-deep); overflow: hidden; }
+  .rel .meter i { display: block; height: 100%; background: var(--accent-soft); }
+
+  /* 会话轨（角色控制左栏） */
+  .sess { padding: 2px 10px; display: flex; flex-direction: column; gap: 5px; }
+  .sess-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: background .18s var(--ease); }
+  .sess-item:hover { background: rgba(255,253,248,.8); }
+  .sess-item.on { background: var(--accent-wash); }
+  .sess-item .tt { font-size: 12.5px; font-weight: 500; }
+  .sess-item .mt { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
+  .sess-item .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-left: auto; }
+
+  /* 空态 */
+  .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px; }
+  .empty .ic { width: 60px; height: 60px; border-radius: var(--radius); background: var(--accent-wash); color: var(--accent); display: grid; place-items: center; font-family: var(--brush); font-size: 30px; }
+  .empty h2 { font-family: var(--serif); font-size: 21px; font-weight: 600; margin-top: 20px; }
+  .empty p { font-size: 13px; color: var(--muted); max-width: 340px; line-height: 1.7; margin-top: 9px; }
+
+  @media (max-width: 1180px) {
+    .col-side.right { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ 顶部原型切换条 ═══════════ -->
+<div class="proto-bar">
+  <span class="tag">设计原型</span>
+  <button id="tabWorldline" class="on" onclick="switchView('worldline')">世界线 · 导演监视器</button>
+  <button id="tabCharacter" onclick="switchView('character')">角色控制 · 第一人称舞台</button>
+  <div class="spacer"></div>
+  <span class="hint">纸感朱砂 · 候选=旧金 / 正史=墨 · 角色=印章</span>
+</div>
+
+<div class="shell">
+  <!-- ═══════════ 项目侧栏 ═══════════ -->
+  <nav class="rail">
+    <div class="brand"><span class="seal">墨</span>MiroFish</div>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>总览</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5 10.5 16M16 7.5 13.5 16M8.5 6h7"/></svg>故事图谱</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8 12 3 3 8v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>资产库</a>
+    <a href="#" id="navWorldline" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="19" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="19" cy="15" r="2"/><path d="M6.5 17.5 10.5 6.8M13.5 6.5l4 7"/></svg>世界线</a>
+    <a href="#" id="navCharacter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>角色控制</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><path d="m16 8-9.5 9.5"/></svg>写作台</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>设置</a>
+    <div class="foot">《长风渡》<br/>纸墨书房 · 设计原型</div>
+  </nav>
+
+  <!-- ═══════════ 主区 ═══════════ -->
+  <div class="main">
+
+    <!-- ──────────── 世界线视图 ──────────── -->
+    <div class="view show" id="view-worldline">
+      <div class="masthead">
+        <div>
+          <div class="eyebrow">世 界 线</div>
+          <h1>演化时间线</h1>
+          <p class="tagline">单世界剧情推演：启动、变量注入与事件流。时间线只沉淀已确认的正史，候选事件在右侧待你采纳。</p>
+        </div>
+        <div class="meta">
+          <span class="stamp live"><span class="dot"></span>自动演化中 · STEP 7</span>
+          <button class="btn ghost sm">已存路径</button>
+        </div>
+      </div>
+
+      <div class="bench">
+        <!-- 左·整备轨 -->
+        <aside class="col-side" style="width:250px">
+          <div class="prepare-card">
+            <div class="t">整备状态<span class="stamp idle" style="margin-left:auto;padding:2px 9px;font-size:10.5px"><span class="dot"></span>就绪</span></div>
+            <div class="bar"><i></i></div>
+            <div class="s">9 位演员已就位 · 由 Pi Cast Planner 选定</div>
+          </div>
+          <div class="side-label">演员名册 <span class="n">9</span></div>
+          <div class="roster">
+            <div class="roster-item on"><span class="seal s28">顾</span><div><div class="nm">顾九思</div><div class="rl">主角 · 佯州纨绔</div></div><span class="st">驱动·强</span></div>
+            <div class="roster-item"><span class="seal s28 ink">柳</span><div><div class="nm">柳玉茹</div><div class="rl">主角 · 布商之女</div></div><span class="st">驱动·强</span></div>
+            <div class="roster-item"><span class="seal s28">江</span><div><div class="nm">江柔</div><div class="rl">顾母 · 当家主母</div></div><span class="st">驱动·中</span></div>
+            <div class="roster-item"><span class="seal s28 ink">洛</span><div><div class="nm">洛子商</div><div class="rl">反派 · 幽州少主</div></div><span class="st">驱动·强</span></div>
+            <div class="roster-item"><span class="seal s28">叶</span><div><div class="nm">叶世安</div><div class="rl">盟友 · 清流士子</div></div><span class="st">驱动·中</span></div>
+            <div class="roster-item"><span class="seal s28 ink">周</span><div><div class="nm">周烨</div><div class="rl">盟友 · 幽州将领</div></div><span class="st">驱动·中</span></div>
+          </div>
+          <div class="side-label" style="margin-top:8px">变量锁 <span class="n">2/4</span></div>
+          <div class="varlock">
+            <div class="var locked"><span style="font-size:13px">🔒</span><div><div class="nm">佯州粮价暴涨</div><div class="ax">影响轴 · 民生/商路</div></div><span class="lock">已锁</span></div>
+            <div class="var locked"><span style="font-size:13px">🔒</span><div><div class="nm">洛子商暗中入城</div><div class="ax">影响轴 · 权谋/威胁</div></div><span class="lock">已锁</span></div>
+            <div class="var"><span style="font-size:13px">🔓</span><div><div class="nm">朝廷漕运改制</div><div class="ax">影响轴 · 朝堂/时局</div></div><span class="lock">未锁</span></div>
+            <div class="var"><span style="font-size:13px">🔓</span><div><div class="nm">柳家布庄失火</div><div class="ax">影响轴 · 家宅/财产</div></div><span class="lock">未锁</span></div>
+          </div>
+        </aside>
+
+        <!-- 中·演化时间线 -->
+        <div class="col-main">
+          <div class="scroll">
+            <div class="worldline-state">
+              <div class="step-line">
+                <span class="step-no">第七步</span>
+                <span class="goal">推演目标：佯州围城之下，顾柳两家如何自处</span>
+              </div>
+              <div class="chips">
+                <span class="chip gold">🔒 佯州粮价暴涨</span>
+                <span class="chip gold">🔒 洛子商暗中入城</span>
+                <span class="chip">目标达成度 · 渐近</span>
+                <span class="chip">当前世界 · current_world</span>
+              </div>
+            </div>
+
+            <div class="director">
+              <span class="think">导演思量</span>
+              <span class="line">围城日久，粮价与人心皆紧。洛子商既已入城，下一步当试顾九思之抉择——是守家，还是破局。</span>
+              <span class="dots"><i></i><i></i><i></i></span>
+            </div>
+
+            <div class="timeline">
+              <div class="tl-item canon">
+                <div class="node">伍</div>
+                <div class="step-tag">STEP 5 · 正史</div>
+                <div class="event-card">
+                  <div class="eh"><span class="et">粮商闭门，市价一日三跳</span><span class="ek canon">正史</span></div>
+                  <div class="es">城中粮商闻讯闭门惜售，米价一日三跳。柳玉茹当机立断，开仓平粜，以柳家信誉稳住半城人心，也因此耗去大半存粮。</div>
+                  <div class="cast"><span class="lb">涉及</span><span class="seal s22 ink">柳</span><span class="seal s22">江</span></div>
+                </div>
+              </div>
+              <div class="tl-item canon">
+                <div class="node">陆</div>
+                <div class="step-tag">STEP 6 · 正史</div>
+                <div class="event-card">
+                  <div class="eh"><span class="et">叶世安深夜造访顾府</span><span class="ek canon">正史</span></div>
+                  <div class="es">叶世安携城中布防图夜访，直言守城兵力不足三日。顾九思首次收起玩世之态，与叶世安彻夜推演守城之策。</div>
+                  <div class="cast"><span class="lb">涉及</span><span class="seal s22">顾</span><span class="seal s22 ink">叶</span></div>
+                </div>
+              </div>
+              <div class="tl-item now">
+                <div class="node">柒</div>
+                <div class="step-tag">STEP 7 · 当前步</div>
+                <div class="event-card">
+                  <div class="eh"><span class="et">洛子商遣人递来密信</span><span class="ek now">推演中</span></div>
+                  <div class="es">一封无署名的密信送入顾府，许以满城生路，条件是顾家开城献粮。导演正在裁决顾九思的回应——候选事件已落入右栏，等你定夺。</div>
+                  <div class="cast"><span class="lb">涉及</span><span class="seal s22">顾</span><span class="seal s22 ink">洛</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 底部运行控制条 -->
+          <div class="runbar">
+            <div class="seg">
+              <button>手动</button>
+              <button class="on">首轮自动</button>
+              <button>持续自动</button>
+            </div>
+            <button class="btn ghost sm">注入变量</button>
+            <div class="spacer"></div>
+            <span class="stat">已演化 7 步 · 候选 3 条待审</span>
+            <button class="btn primary">推进一步</button>
+          </div>
+        </div>
+
+        <!-- 右·候选列表 -->
+        <aside class="col-side right" style="width:340px">
+          <div class="side-label">候选事件 <span class="n">3</span> · 待采纳</div>
+          <div class="cand-list">
+            <div class="cand">
+              <span class="flag">候选</span>
+              <div class="ct">顾九思焚信拒降</div>
+              <div class="cs">顾九思当众焚毁密信，扬言与佯州共存亡。城中士气为之一振，但也彻底断了与洛子商周旋的余地。</div>
+              <div class="cmeta"><span class="src-tag">角色主动</span><span class="conf">置信 0.82</span><span class="seal s22">顾</span></div>
+              <div class="acts"><button class="btn primary sm">采纳</button><button class="btn ghost sm">编辑</button><button class="btn ghost sm">拒绝</button></div>
+            </div>
+            <div class="cand">
+              <span class="flag">候选</span>
+              <div class="ct">柳玉茹主张诈降筹粮</div>
+              <div class="cs">柳玉茹献计假意应允，借献粮之名探清洛子商虚实，再图后计。险中求胜，需顾九思配合演一场决裂。</div>
+              <div class="cmeta"><span class="src-tag">目标驱动</span><span class="conf">置信 0.74</span><span class="seal s22 ink">柳</span></div>
+              <div class="acts"><button class="btn primary sm">采纳</button><button class="btn ghost sm">编辑</button><button class="btn ghost sm">拒绝</button></div>
+            </div>
+            <div class="cand">
+              <span class="flag">候选</span>
+              <div class="ct">江柔出面稳住内宅</div>
+              <div class="cs">江柔以当家主母之身约束族人，平息府中投降之议，为顾九思争取决断的时间。伏线：族中已有二心。</div>
+              <div class="cmeta"><span class="src-tag">档案驱动</span><span class="conf">置信 0.67</span><span class="seal s22">江</span></div>
+              <div class="acts"><button class="btn primary sm">采纳</button><button class="btn ghost sm">编辑</button><button class="btn ghost sm">拒绝</button></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- ──────────── 角色控制视图 ──────────── -->
+    <div class="view" id="view-character">
+      <div class="masthead">
+        <div>
+          <div class="eyebrow">角 色 控 制</div>
+          <h1>互动舞台</h1>
+          <p class="tagline">以第一人称进入角色，在当前世界节点互动写作。你的每一句话都会成为世界的一部分。</p>
+        </div>
+        <div class="meta">
+          <div class="seg">
+            <button class="on">第一人称</button>
+            <button>导演辅助</button>
+            <button>对话</button>
+            <button>回放</button>
+          </div>
+          <span class="stamp"><span class="dot" style="background:var(--gold)"></span>降临节点 · 雨夜谈判前 ▾</span>
+        </div>
+      </div>
+
+      <div class="bench">
+        <!-- 左·会话轨 -->
+        <aside class="col-side" style="width:230px">
+          <div class="side-label">会话 <span class="n">3</span></div>
+          <div class="sess">
+            <div class="sess-item on"><div><div class="tt">雨夜谈判前</div><div class="mt">进行中 · 顾九思</div></div><span class="live-dot"></span></div>
+            <div class="sess-item"><div><div class="tt">开城献粮之议</div><div class="mt">已保存 · 柳玉茹</div></div></div>
+            <div class="sess-item"><div><div class="tt">布防图夜谈</div><div class="mt">已归档 · 顾九思</div></div></div>
+          </div>
+          <div class="side-label" style="margin-top:10px">已存路径</div>
+          <div class="sess">
+            <div class="sess-item"><div><div class="tt">围城求生线</div><div class="mt">12 事件 · 可引用</div></div></div>
+            <div class="sess-item"><div><div class="tt">诈降筹粮线</div><div class="mt">8 事件 · 可引用</div></div></div>
+          </div>
+        </aside>
+
+        <!-- 中·场景流 + composer -->
+        <div class="col-main">
+          <div class="scene">
+            <div class="scene-inner">
+              <div class="stage-note">你降临在「雨夜谈判前」· 你是顾九思</div>
+
+              <div class="turn world">
+                <span class="seal s34 ink">景</span>
+                <div class="body">
+                  <div class="who">世界 · 旁白</div>
+                  <div class="bubble">雨敲打着顾府的飞檐，已经连续下了三天。你立在书房窗前，那封无署名的密信就摊在案上，墨迹被潮气浸得微微发晕。</div>
+                </div>
+              </div>
+
+              <div class="turn me">
+                <span class="seal s34">顾</span>
+                <div class="body">
+                  <div class="who">我<span class="kind think">我内心</span></div>
+                  <div class="bubble">满城人的性命压在一句话上。洛子商这是要我顾九思做自己的罪人。</div>
+                </div>
+              </div>
+
+              <div class="turn me">
+                <span class="seal s34">顾</span>
+                <div class="body">
+                  <div class="who">我<span class="kind say">我说</span></div>
+                  <div class="bubble">「回去告诉你家主子，佯州的粮，一粒都不会从我顾家手里流出去。」</div>
+                </div>
+              </div>
+
+              <div class="turn world">
+                <span class="seal s34 ink">柳</span>
+                <div class="body">
+                  <div class="who">柳玉茹 · 反应</div>
+                  <div class="bubble">门帘一挑，柳玉茹端着一盏热茶进来，闻言脚步一顿。她没有劝你，只把茶盏轻轻放在案上，轻声道：「信烧了容易，人怎么活，才是难事。」<span class="cursor"></span></div>
+                </div>
+              </div>
+
+              <div class="proposal">
+                <span class="flag">提案</span>
+                <div class="pt">角色记忆候选 · 待采纳</div>
+                <div class="ps">顾九思对洛子商的敌意公开化；顾柳二人在「守城」上立场一致，但柳玉茹更看重「活人」而非「名节」。</div>
+                <div class="acts"><button class="btn primary sm">采纳入正典</button><button class="btn ghost sm">暂不</button></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- composer -->
+          <div class="composer">
+            <div class="chips">
+              <button class="mode-chip on">我说</button>
+              <button class="mode-chip">我做</button>
+              <button class="mode-chip">我内心</button>
+              <button class="mode-chip">我想影响</button>
+            </div>
+            <div class="row">
+              <textarea class="input" rows="1" placeholder="此刻，你想让顾九思做什么？"></textarea>
+              <button class="send" title="发送">↑</button>
+            </div>
+            <div class="hint">回车发送 · Shift+回车换行 · 你的输入将作为第一人称回合记入互动</div>
+          </div>
+        </div>
+
+        <!-- 右·角色档案 -->
+        <aside class="col-side right" style="width:330px">
+          <div class="dossier">
+            <div class="head">
+              <span class="seal s56">顾</span>
+              <div class="nm">顾九思</div>
+              <div class="role">佯州纨绔 · 顾家独子</div>
+              <div class="sum">表面玩世不恭，实则重情重义。围城之困正逼他收起纨绔外壳，扛起一方生路。</div>
+            </div>
+            <div class="sec">
+              <div class="sec-t">当前状态</div>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span class="chip">驱动 · 守家 / 破局</span>
+                <span class="chip">情绪 · 凝重</span>
+              </div>
+            </div>
+            <div class="sec">
+              <div class="sec-t">记忆</div>
+              <div class="mem">三日前收到密信，信中许以满城生路，条件含糊。</div>
+              <div class="mem">与叶世安彻夜推演守城，首次认真看待时局。</div>
+            </div>
+            <div class="sec">
+              <div class="sec-t">关系</div>
+              <div class="rel"><span class="seal s22 ink">柳</span><span class="nm">柳玉茹</span><div class="meter"><i style="width:86%"></i></div><span class="val">信任·深</span></div>
+              <div class="rel"><span class="seal s22">叶</span><span class="nm">叶世安</span><div class="meter"><i style="width:64%"></i></div><span class="val">相知·渐深</span></div>
+              <div class="rel"><span class="seal s22 ink">洛</span><span class="nm">洛子商</span><div class="meter"><i style="width:18%"></i></div><span class="val">敌意·公开</span></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- 底部动作条 -->
+      <div class="cc-actionbar">
+        <span class="note">本互动共 4 个回合 · 可整段转写为章节草稿</span>
+        <div class="spacer"></div>
+        <button class="btn ghost sm">保存互动</button>
+        <button class="btn primary sm">转写为章节草稿 → 写作台</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  function switchView(name) {
+    document.getElementById('view-worldline').classList.toggle('show', name === 'worldline');
+    document.getElementById('view-character').classList.toggle('show', name === 'character');
+    document.getElementById('tabWorldline').classList.toggle('on', name === 'worldline');
+    document.getElementById('tabCharacter').classList.toggle('on', name === 'character');
+    document.getElementById('navWorldline').classList.toggle('on', name === 'worldline');
+    document.getElementById('navCharacter').classList.toggle('on', name === 'character');
+  }
+
+  // composer 输入自动增高（演示）
+  document.querySelectorAll('.composer .input').forEach(function (el) {
+    el.addEventListener('input', function () {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 132) + 'px';
+    });
+  });
+
+  // 模式 chip 单选（演示）
+  document.querySelectorAll('.composer .chips').forEach(function (group) {
+    group.addEventListener('click', function (e) {
+      var btn = e.target.closest('.mode-chip');
+      if (!btn) return;
+      group.querySelectorAll('.mode-chip').forEach(function (c) { c.classList.remove('on'); });
+      btn.classList.add('on');
+    });
+  });
+</script>
+</body>
+</html>

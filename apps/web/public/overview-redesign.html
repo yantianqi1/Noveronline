@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>墨鱼小说 · 项目工作台 — 总览</title>
+<style>
+/* ============================================================
+   墨鱼小说 · 总览 (Overview workbench)
+   A working instrument, not a landing page. Dense, quiet, honest.
+   Paper & vermilion. The data leads; decoration stays out of the way.
+   ============================================================ */
+
+:root{
+  --ink:        #1a1714;
+  --ink-soft:   #4c433a;
+  --paper:      #f4eee0;
+  --paper-deep: #ece3cf;
+  --panel:      #fbf7ec;
+  --panel-2:    #f2ebda;
+  --line:       rgba(74,58,38,.20);
+  --line-soft:  rgba(74,58,38,.11);
+  --accent:     #8f1f18;
+  --accent-hot: #a0261d;
+  --accent-deep:#6d140f;
+  --accent-wash:rgba(143,31,24,.06);
+  --gold:       #a5713a;
+  --muted:      #6b5e4e;
+  --ok:         #4c6b46;
+  --shadow:     0 1px 0 rgba(255,255,255,.5) inset, 0 14px 34px -26px rgba(24,21,18,.3);
+
+  --serif: "Songti SC","Noto Serif SC","Source Serif 4",Georgia,serif;
+  --sans:  "PingFang SC","IBM Plex Sans","Noto Sans SC",system-ui,sans-serif;
+  --brush: "Ma Shan Zheng","Songti SC","Noto Serif SC",serif;
+  --mono:  "SF Mono","IBM Plex Mono",ui-monospace,monospace;
+}
+
+*{ box-sizing:border-box; margin:0; padding:0; }
+html{ -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+body{
+  font-family:var(--sans); color:var(--ink);
+  background:linear-gradient(180deg,#f6f0e3 0%,var(--paper) 40%,#efe7d3 100%);
+  min-height:100vh;
+}
+::selection{ background:var(--accent); color:#fff; }
+a{ color:inherit; text-decoration:none; }
+button{ font-family:inherit; cursor:pointer; }
+
+.app{ display:grid; grid-template-columns:224px 1fr; min-height:100vh; }
+
+/* ---------------- Sidebar ---------------- */
+.side{
+  border-right:1px solid var(--line-soft); padding:22px 18px;
+  display:flex; flex-direction:column; gap:5px;
+  background:linear-gradient(180deg, rgba(251,247,236,.55), rgba(243,236,219,.3));
+}
+.brand{ display:flex; align-items:center; gap:10px; padding:0 4px 20px; }
+.brand .seal{
+  width:30px; height:30px; border-radius:6px; flex:none;
+  background:var(--accent); color:#f6ead2; display:grid; place-items:center;
+  font-family:var(--brush); font-size:17px;
+}
+.brand .name{ font-family:var(--brush); font-size:19px; }
+.brand .sub{ display:block; font-family:var(--sans); font-size:10px; color:var(--muted); letter-spacing:.12em; margin-top:1px; }
+
+.nav-label{ font-size:10px; letter-spacing:.2em; color:var(--muted); padding:12px 10px 6px; }
+.nav a{
+  display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px;
+  font-size:13px; color:var(--ink-soft); transition:background .15s ease,color .15s ease;
+}
+.nav a svg{ width:15px; height:15px; stroke:currentColor; opacity:.75; flex:none; }
+.nav a:hover{ background:rgba(74,58,38,.06); color:var(--ink); }
+.nav a.on{ background:var(--accent-wash); color:var(--accent-deep); box-shadow:inset 2px 0 0 var(--accent); font-weight:600; }
+.nav a.on svg{ opacity:1; }
+.side .foot{ margin-top:auto; padding:12px 4px 0; border-top:1px solid var(--line-soft); font-size:11px; color:var(--muted); line-height:1.55; }
+.side .foot b{ color:var(--ink-soft); font-weight:600; }
+
+/* ---------------- Main ---------------- */
+.main{ padding:0 clamp(24px,3.5vw,44px) 64px; max-width:1140px; width:100%; margin:0 auto; }
+
+/* Workbench header — compact, one line, honest counts */
+.head{
+  display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+  padding:16px 2px 14px; border-bottom:1px solid var(--line-soft);
+}
+.head .who{ display:flex; align-items:center; gap:11px; min-width:0; }
+.head .tag{
+  flex:none; font-size:10.5px; font-weight:600; letter-spacing:.2em;
+  color:var(--accent-deep); background:var(--accent-wash);
+  border:1px solid rgba(143,31,24,.28); padding:4px 9px; border-radius:6px;
+}
+.head h1{ font-family:var(--serif); font-size:17px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
+.head .sep{ width:1px; height:15px; background:var(--line); flex:none; }
+.head .hint{
+  min-width:0; flex:1; font-size:12.5px; color:var(--muted);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.head .hint b{ color:var(--ink-soft); font-weight:600; }
+.statusdot{ display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:600; color:var(--accent-deep); flex:none; }
+.statusdot .d{ width:7px; height:7px; border-radius:50%; background:var(--accent); animation:pulse 1.6s ease-in-out infinite; }
+@keyframes pulse{ 0%,100%{ box-shadow:0 0 0 0 rgba(143,31,24,.4);} 55%{ box-shadow:0 0 0 5px rgba(143,31,24,0);} }
+
+/* readiness strip */
+.strip{
+  display:flex; flex-wrap:wrap; align-items:stretch; gap:px;
+  margin-top:11px; border:1px solid var(--line); border-radius:11px; overflow:hidden;
+  background:var(--panel); box-shadow:var(--shadow);
+}
+.strip .cell{
+  flex:1 1 0; min-width:96px; padding:11px 14px 10px;
+  border-right:1px solid var(--line-soft); display:flex; align-items:baseline; gap:8px;
+}
+.strip .cell:last-child{ border-right:0; }
+.strip .num{ font-family:var(--serif); font-size:20px; font-weight:600; line-height:1; font-variant-numeric:tabular-nums; }
+.strip .num.accent{ color:var(--accent-deep); }
+.strip .num.zero{ color:rgba(74,58,38,.35); }
+.strip .lab{ font-size:10.5px; letter-spacing:.1em; color:var(--muted); }
+.strip .cell.lead{ background:var(--accent-wash); }
+
+/* ---------------- Sections — tight working rhythm ---------------- */
+.section{ margin-top:16px; }
+.sec-head{ display:flex; align-items:baseline; gap:11px; margin-bottom:9px; }
+.sec-head h2{ font-family:var(--serif); font-size:15px; font-weight:600; }
+.sec-head .rule{ flex:1; height:1px; background:var(--line-soft); }
+.sec-head .hint{ font-size:11.5px; color:var(--muted); }
+
+/* readiness (left, wider) + source (right, narrower); matched heights */
+.grid{ display:grid; grid-template-columns:1.18fr .82fr; gap:14px; align-items:stretch; }
+.grid .panel{ display:flex; flex-direction:column; }
+.grid .panel .p-body{ flex:1; display:flex; flex-direction:column; }
+.panel{
+  border:1px solid var(--line); border-radius:13px; background:var(--panel);
+  box-shadow:var(--shadow); overflow:hidden;
+}
+.panel .p-head{
+  padding:13px 17px 11px; border-bottom:1px solid var(--line-soft);
+  display:flex; align-items:baseline; gap:9px;
+}
+.panel .p-head h3{ font-family:var(--serif); font-size:13.5px; font-weight:600; }
+.panel .p-head .desc{ font-size:11.5px; color:var(--muted); }
+.panel .p-head .tag{ margin-left:auto; font-size:10.5px; color:var(--muted); letter-spacing:.08em; }
+.panel .p-body{ padding:16px 17px; }
+
+/* drop zone — quiet, compact */
+.drop{
+  border:1.5px dashed rgba(74,58,38,.32); border-radius:10px;
+  background:rgba(243,236,219,.3); padding:12px 14px;
+  display:flex; align-items:center; gap:12px;
+  transition:border-color .16s ease, background .16s ease;
+}
+.drop:hover{ border-color:var(--accent); background:var(--accent-wash); }
+.drop .ic{
+  width:32px; height:32px; border-radius:8px; flex:none; display:grid; place-items:center;
+  color:var(--accent-deep); background:var(--accent-wash); border:1px solid rgba(143,31,24,.2);
+}
+.drop .t1{ font-size:12.5px; font-weight:600; }
+.drop .t1 u{ text-decoration:none; color:var(--accent-deep); border-bottom:1px solid rgba(143,31,24,.4); }
+.drop .t2{ font-size:10.5px; color:var(--muted); margin-top:2px; letter-spacing:.04em; }
+
+.file{
+  margin-top:auto; display:flex; align-items:center; gap:12px;
+  border:1px solid var(--line); border-radius:10px; padding:11px 14px;
+  background:linear-gradient(180deg,#fffdf8,#faf5ea);
+}
+.file + .file{ margin-top:10px; }
+.file .fic{
+  width:34px; height:34px; border-radius:8px; flex:none; display:grid; place-items:center;
+  background:var(--accent-wash); color:var(--accent-deep);
+  font-family:var(--serif); font-size:12px; border:1px solid rgba(143,31,24,.18);
+}
+.file .meta{ min-width:0; flex:1; }
+.file .nm{ font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.file .dt{ font-size:11px; color:var(--muted); margin-top:2px; font-variant-numeric:tabular-nums; }
+
+.btn{
+  border:1px solid var(--accent-deep); color:#f7ecd9;
+  background:var(--accent); font-size:12.5px; font-weight:600;
+  padding:8px 15px; border-radius:9px;
+  transition:background .15s ease, transform .15s ease;
+  display:inline-flex; align-items:center; gap:7px;
+}
+.btn:hover{ background:var(--accent-hot); }
+.btn:active{ transform:translateY(1px); }
+.btn.ghost{ background:transparent; color:var(--ink-soft); border:1px solid var(--line); font-weight:500; }
+.btn.ghost:hover{ border-color:var(--accent); color:var(--accent-deep); background:var(--accent-wash); }
+.btn .spin{ width:11px; height:11px; border-radius:50%; border:2px solid rgba(247,236,210,.35); border-top-color:#f7ecd9; animation:rot .7s linear infinite; }
+@keyframes rot{ to{ transform:rotate(360deg);} }
+
+/* readiness ledger — each row owns a horizontal tile drawer */
+.ledger{ display:flex; flex-direction:column; flex:1; }
+.ledger .row{
+  display:flex; align-items:center; gap:14px;
+  padding:10px 0 10px 17px; border-bottom:1px solid var(--line-soft);
+}
+.ledger .row:last-child{ border-bottom:0; }
+.ledger .glyph{
+  width:28px; height:28px; border-radius:7px; flex:none; display:grid; place-items:center;
+  font-family:var(--serif); font-size:12px; background:var(--panel-2);
+  border:1px solid var(--line-soft); color:var(--ink-soft);
+}
+.ledger .rowhead{ flex:none; width:74px; }
+.ledger .nm{ font-size:12.5px; font-weight:600; }
+.ledger .dt{ font-size:10.5px; color:var(--muted); margin-top:1px; }
+.ledger .ct{
+  flex:none; width:30px; text-align:right; font-family:var(--serif);
+  font-size:15px; font-weight:600; font-variant-numeric:tabular-nums; transition:color .3s ease;
+}
+.ledger .ct.zero{ color:rgba(74,58,38,.28); }
+
+/* the drawer: horizontally scrollable strip of tiles, edge-faded */
+.drawer{
+  position:relative; flex:1; min-width:0; overflow:hidden;
+  mask-image:linear-gradient(90deg, #000 88%, transparent 100%);
+  -webkit-mask-image:linear-gradient(90deg, #000 88%, transparent 100%);
+}
+.drawer .track{
+  display:flex; gap:8px; overflow-x:auto; overflow-y:hidden;
+  padding:6px 26px 8px 2px; scroll-behavior:smooth;
+  scrollbar-width:thin; scrollbar-color:rgba(74,58,38,.3) transparent;
+}
+.drawer .track::-webkit-scrollbar{ height:5px; }
+.drawer .track::-webkit-scrollbar-thumb{ background:rgba(74,58,38,.22); border-radius:99px; }
+.drawer .hint{
+  position:absolute; right:2px; top:50%; transform:translateY(-50%);
+  font-size:9.5px; color:var(--muted); letter-spacing:.1em; pointer-events:none;
+  writing-mode:vertical-rl; opacity:.7;
+}
+.drawer .placeholder{
+  flex:none; align-self:center; font-size:11px; color:var(--muted);
+  padding:6px 4px; white-space:nowrap;
+}
+
+/* mahjong tile (compact drawer size) */
+.tile{
+  --rx:0px; --ry:0px; --rr:0deg;
+  position:relative; width:46px; height:56px; border-radius:8px; flex:none;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  background:linear-gradient(165deg,#fffdf7,#f2ebd8);
+  border:1px solid rgba(74,58,38,.28);
+  box-shadow:0 2px 0 rgba(74,58,38,.16), 0 7px 14px -10px rgba(24,21,18,.4), 0 1px 0 rgba(255,255,255,.7) inset;
+  cursor:default; user-select:none;
+  animation:slam .55s cubic-bezier(.2,1.3,.32,1) both;
+  transition:transform .16s ease, box-shadow .16s ease;
+}
+.tile:hover{ transform:translateY(-3px) rotate(-2deg); box-shadow:0 3px 0 rgba(74,58,38,.16), 0 14px 24px -12px rgba(24,21,18,.5), 0 1px 0 rgba(255,255,255,.7) inset; }
+@keyframes slam{
+  0%{ transform:translate(var(--rx),var(--ry)) rotate(var(--rr)) scale(1.7); opacity:0; }
+  55%{ transform:translate(0,0) rotate(0) scale(.93); opacity:1; }
+  76%{ transform:scale(1.05); }
+  100%{ transform:scale(1); opacity:1; }
+}
+.tile::after{
+  content:""; position:absolute; inset:-4px; border-radius:11px;
+  border:2px solid rgba(143,31,24,.5); opacity:0; pointer-events:none;
+  animation:impact .55s ease-out .16s both;
+}
+@keyframes impact{ 0%{ opacity:.8; transform:scale(.8);} 100%{ opacity:0; transform:scale(1.25);} }
+.tile .face{
+  font-family:var(--serif); font-weight:600; font-size:15px; line-height:1; color:var(--ink);
+  letter-spacing:.01em; text-align:center; padding:0 2px;
+}
+.tile .kind{ font-size:8px; letter-spacing:.12em; color:var(--muted); }
+.tile[data-kind="char"]{ border-color:rgba(143,31,24,.42); }
+.tile[data-kind="char"] .face{ color:var(--accent-deep); }
+.tile[data-kind="char"] .kind{ color:var(--accent); }
+.tile[data-kind="rel"] .face{ color:#7a5a22; }
+.tile[data-kind="rule"] .face{ color:#43586b; }
+.tile[data-kind="asset"] .face{ color:#3f5b45; }
+
+/* ---------------- Pipeline : animated W flow line ---------------- */
+.pipe{ padding:14px 18px 12px; }
+.pipe .statusline{ display:flex; align-items:center; gap:11px; flex-wrap:wrap; margin-bottom:6px; }
+.stamp-status{
+  font-size:10.5px; font-weight:700; letter-spacing:.08em; padding:4px 10px;
+  border-radius:6px; border:1.5px solid var(--accent); color:var(--accent-deep); background:var(--accent-wash);
+}
+.stamp-status.ok{ border-color:var(--ok); color:var(--ok); background:rgba(76,107,70,.08); }
+.pipe .msg{ font-size:12.5px; color:var(--ink-soft); }
+.pipe .msg code{ font-family:var(--mono); font-size:11.5px; color:var(--accent-deep); }
+.pipe .actions{ margin-left:auto; display:flex; gap:9px; }
+
+/* The W: a zigzag polyline the stages sit on; a vermilion pulse travels it. */
+.flow{ position:relative; padding:4px 2px 0; }
+.flow svg{ display:block; width:100%; height:auto; overflow:visible; }
+.flow .rail{ fill:none; stroke:rgba(74,58,38,.18); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+.flow .fill{ fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linejoin:round; stroke-linecap:round; }
+/* the moving "reading" pulse — a bright dash that travels the whole line */
+.flow .pulse{
+  fill:none; stroke:var(--accent-hot); stroke-width:3; stroke-linejoin:round; stroke-linecap:round;
+  stroke-dasharray:26 470;
+  animation:travel 3.2s linear infinite;
+  filter:drop-shadow(0 0 4px rgba(160,38,29,.6));
+  opacity:0;
+}
+.flow.running .pulse{ opacity:1; }
+@keyframes travel{ to{ stroke-dashoffset:-496; } }
+
+/* stage nodes laid over the zigzag vertices */
+.flow .nodes{ position:absolute; inset:0; }
+.fnode{ position:absolute; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; }
+.fnode .pt{
+  width:26px; height:26px; border-radius:50%; display:grid; place-items:center;
+  background:var(--panel); border:2px solid rgba(74,58,38,.3); color:transparent;
+  font-size:11px; position:relative; z-index:2; transition:all .25s ease;
+}
+.fnode.done .pt{ background:var(--accent); border-color:var(--accent); color:#f7ecd9; }
+.fnode.failed .pt{
+  background:var(--accent); border-color:var(--accent-deep); color:#f7ecd9; font-weight:700;
+  box-shadow:0 3px 10px -3px rgba(143,31,24,.65);
+}
+.fnode.active .pt{ border-color:var(--accent); color:var(--accent-deep); background:#fff; }
+.fnode.active .pt::after{
+  content:""; position:absolute; inset:-6px; border-radius:50%;
+  border:2px solid rgba(143,31,24,.45); animation:pulse 1.5s ease-in-out infinite;
+}
+/* labels alternate above/below following the zigzag */
+.fnode .lbl{ position:absolute; left:50%; transform:translateX(-50%); text-align:center; white-space:nowrap; width:90px; }
+.fnode.up .lbl{ bottom:calc(100% + 8px); }
+.fnode.down .lbl{ top:calc(100% + 8px); }
+.fnode .nm{ font-size:11.5px; font-weight:600; color:var(--ink-soft); }
+.fnode.done .nm,.fnode.active .nm{ color:var(--ink); }
+.fnode.failed .nm{ color:var(--accent-deep); }
+.fnode .st{ font-size:10px; color:var(--muted); margin-top:2px; letter-spacing:.03em; }
+.fnode.failed .st{ color:var(--accent-deep); font-weight:600; }
+.fnode.active .st{ color:var(--accent-deep); font-weight:600; }
+
+.pipe .footline{ margin-top:12px; padding-top:10px; border-top:1px dashed var(--line-soft); display:flex; align-items:center; gap:9px; font-size:11px; color:var(--muted); }
+.pipe .footline .step{ margin-left:auto; font-variant-numeric:tabular-nums; }
+
+/* recent feed */
+.feed{ display:flex; flex-direction:column; }
+.feed .item{ display:flex; align-items:center; gap:12px; padding:11px 17px; border-bottom:1px solid var(--line-soft); }
+.feed .item:last-child{ border-bottom:0; }
+.feed .badge{ width:26px; height:26px; border-radius:50%; flex:none; display:grid; place-items:center; font-size:12px; }
+.feed .badge.run{ background:rgba(165,113,58,.14); color:var(--gold); border:1px solid rgba(165,113,58,.3); }
+.feed .badge.err{ background:var(--accent-wash); color:var(--accent-deep); border:1px solid rgba(143,31,24,.25); }
+.feed .badge.ok{ background:rgba(76,107,70,.1); color:var(--ok); border:1px solid rgba(76,107,70,.3); }
+.feed .tt{ font-size:12.5px; font-weight:600; white-space:nowrap; }
+.feed .ds{ font-size:11px; color:var(--muted); font-family:var(--mono); letter-spacing:-.01em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.feed .txt{ min-width:0; flex:1; display:flex; flex-direction:column; gap:2px; }
+.feed .when{ font-size:10.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+
+.foot{ margin-top:28px; text-align:center; font-size:11px; color:var(--muted); letter-spacing:.05em; }
+
+/* ---------------- Log modal : terminal-style event stream ---------------- */
+.overlay{
+  position:fixed; inset:0; z-index:60; display:grid; place-items:center;
+  background:rgba(26,23,20,.42); backdrop-filter:blur(3px);
+  opacity:0; pointer-events:none; transition:opacity .18s ease;
+  padding:24px;
+}
+.overlay.open{ opacity:1; pointer-events:auto; }
+.logmodal{
+  width:min(760px,100%); max-height:78vh; display:flex; flex-direction:column;
+  background:#16130f; border:1px solid rgba(0,0,0,.5); border-radius:13px;
+  box-shadow:0 30px 80px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(247,236,210,.06) inset;
+  overflow:hidden; transform:translateY(10px) scale(.985); transition:transform .2s cubic-bezier(.22,1,.36,1);
+}
+.overlay.open .logmodal{ transform:translateY(0) scale(1); }
+.logmodal .lhead{
+  display:flex; align-items:center; gap:11px; padding:12px 16px;
+  border-bottom:1px solid rgba(247,236,210,.09); flex:none;
+  background:linear-gradient(180deg, rgba(247,236,210,.04), transparent);
+}
+.logmodal .dots{ display:flex; gap:6px; }
+.logmodal .dots i{ width:10px; height:10px; border-radius:50%; background:rgba(247,236,210,.16); }
+.logmodal .dots i.r{ background:#b0563f; } .logmodal .dots i.y{ background:#b08a3e; } .logmodal .dots i.g{ background:#5d7a4e; }
+.logmodal .ltitle{ font-family:var(--mono); font-size:12px; color:rgba(247,236,210,.72); letter-spacing:.02em; }
+.logmodal .ltitle b{ color:#f1e6cf; font-weight:600; }
+.logmodal .lclose{
+  margin-left:auto; width:28px; height:28px; border-radius:7px; border:1px solid rgba(247,236,210,.14);
+  background:transparent; color:rgba(247,236,210,.6); font-size:15px; line-height:1;
+  display:grid; place-items:center; transition:all .15s ease;
+}
+.logmodal .lclose:hover{ background:rgba(176,86,63,.2); color:#f1e6cf; border-color:rgba(176,86,63,.4); }
+.logmodal .lbody{
+  overflow:auto; padding:14px 16px 16px; font-family:var(--mono); font-size:12px; line-height:1.75;
+  color:#cdbf9f;
+}
+.logmodal .lbody::-webkit-scrollbar{ width:9px; }
+.logmodal .lbody::-webkit-scrollbar-thumb{ background:rgba(247,236,210,.14); border-radius:9px; }
+.lline{ display:flex; gap:12px; white-space:pre-wrap; word-break:break-word; padding:1px 0; }
+.lline .ts{ color:rgba(205,191,159,.42); flex:none; font-variant-numeric:tabular-nums; }
+.lline .lv{ flex:none; width:52px; font-weight:700; letter-spacing:.04em; }
+.lline .lv.info{ color:#7ba0d6; } .lline .lv.ok{ color:#7fae6e; } .lline .lv.warn{ color:#d0a24a; } .lline .lv.err{ color:#d96a52; }
+.lline .tx{ flex:1; color:#d9cdaf; }
+.lline.errl .tx{ color:#e8a591; }
+.lline .stage{ color:#b5a377; }
+.lcursor{ display:inline-block; width:8px; height:15px; background:#cdbf9f; vertical-align:-2px; animation:blink 1s steps(1) infinite; margin-left:2px; }
+@keyframes blink{ 50%{ opacity:0; } }
+.logmodal .lfoot{
+  flex:none; padding:9px 16px; border-top:1px solid rgba(247,236,210,.09);
+  font-family:var(--mono); font-size:10.5px; color:rgba(247,236,210,.4);
+  display:flex; justify-content:space-between; letter-spacing:.04em;
+}
+
+@media (max-width: 1024px){
+  .app{ grid-template-columns:1fr; }
+  .side{ display:none; }
+  .grid{ grid-template-columns:1fr; }
+  .flow .lbl{ width:64px; font-size:10px; }
+  .fnode .nm{ font-size:10.5px; }
+  .strip .cell{ min-width:33%; border-bottom:1px solid var(--line-soft); }
+}
+@media (prefers-reduced-motion: reduce){ *{ animation:none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="side">
+    <div class="brand">
+      <div class="seal">墨</div>
+      <div>
+        <div class="name">墨鱼小说</div>
+        <span class="sub">书架 · 项目工作台</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <div class="nav-label">工作台</div>
+      <a href="#" class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>总览</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5 10.5 16M16 7.5 13.5 16M8.5 6h7"/></svg>故事图谱</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2Zm0 0a2 2 0 0 0 2 2h13"/></svg>资产库</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 3v18M5 8c2-2 5-2 7 0s5 2 7 0M5 16c2-2 5-2 7 0s5 2 7 0"/></svg>世界线</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.5a3.5 3.5 0 0 1 0 7M21 20c0-2.6-1.7-4.8-4-5.7"/></svg>角色控制</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>写作台</a>
+      <div class="nav-label">项目</div>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>设置</a>
+    </nav>
+    <div class="foot"><b>《青山·测试》</b><br/>正在导入与解析<br/>上一次分析未走完</div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+
+    <!-- Workbench header -->
+    <header class="head">
+      <div class="who">
+        <span class="tag">总 览</span>
+        <h1>导入与分析</h1>
+        <span class="sep"></span>
+        <p class="hint">上次分析没有走完。看看失败原因，修好后重试——已读出的部分不会丢。</p>
+      </div>
+      <span class="statusdot"><span class="d"></span>Seed 分析进行中</span>
+    </header>
+
+    <!-- Readiness strip -->
+    <div class="strip">
+      <div class="cell lead"><span class="num accent">1</span><span class="lab">原文</span></div>
+      <div class="cell"><span class="num zero">0</span><span class="lab">实体</span></div>
+      <div class="cell"><span class="num zero">0</span><span class="lab">关系</span></div>
+      <div class="cell"><span class="num zero">0</span><span class="lab">世界规则</span></div>
+      <div class="cell"><span class="num zero">0</span><span class="lab">图谱节点</span></div>
+      <div class="cell"><span class="num zero">0</span><span class="lab">图谱边</span></div>
+    </div>
+
+    <!-- ============ Source + readiness ============ -->
+    <section class="section">
+      <div class="sec-head">
+        <h2>原文与就绪度</h2>
+        <span class="rule"></span>
+        <span class="hint">素材齐备后逐项填满</span>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <div class="p-head">
+            <h3>就绪度</h3>
+            <span class="desc">顺序精读产出 · 经分析逐个入库</span>
+            <span class="tag">本次运行</span>
+          </div>
+          <div class="ledger">
+            <div class="row" data-row="char">
+              <div class="glyph">人</div>
+              <div class="rowhead"><div class="nm">人物</div><div class="dt">可推演的角色</div></div>
+              <div class="ct zero" id="ct-char">0</div>
+              <div class="drawer">
+                <div class="track" id="track-char"><span class="placeholder">等待入库……</span></div>
+                <span class="hint">滑动</span>
+              </div>
+            </div>
+            <div class="row" data-row="rel">
+              <div class="glyph">关</div>
+              <div class="rowhead"><div class="nm">关系</div><div class="dt">人物间的牵连</div></div>
+              <div class="ct zero" id="ct-rel">0</div>
+              <div class="drawer">
+                <div class="track" id="track-rel"><span class="placeholder">等待入库……</span></div>
+                <span class="hint">滑动</span>
+              </div>
+            </div>
+            <div class="row" data-row="rule">
+              <div class="glyph">规</div>
+              <div class="rowhead"><div class="nm">世界规则</div><div class="dt">设定与约束</div></div>
+              <div class="ct zero" id="ct-rule">0</div>
+              <div class="drawer">
+                <div class="track" id="track-rule"><span class="placeholder">等待入库……</span></div>
+                <span class="hint">滑动</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="p-head">
+            <h3>原文</h3>
+            <span class="desc">上传原文开始一次新分析</span>
+            <span class="tag">TXT / MD / PDF</span>
+          </div>
+          <div class="p-body">
+            <div class="drop">
+              <div class="ic">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m0 0 4 4m-4-4L8 8"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              </div>
+              <div>
+                <div class="t1">拖拽原文到这里，或<u>点击选择文件</u></div>
+                <div class="t2">支持 TXT · MD · PDF</div>
+              </div>
+            </div>
+            <div class="file">
+              <div class="fic">文</div>
+              <div class="meta">
+                <div class="nm">青山-测试.txt</div>
+                <div class="dt">1.5 MB · 已就绪 · 约 72 万字</div>
+              </div>
+              <button class="btn"><span class="spin"></span>分析中</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Pipeline ============ -->
+    <section class="section">
+      <div class="sec-head">
+        <h2>分析进度</h2>
+        <span class="rule"></span>
+        <span class="hint">由 Seed 流水线驱动</span>
+      </div>
+
+      <div class="panel pipe">
+        <div class="statusline">
+          <span class="stamp-status">写入受阻</span>
+          <span class="msg"><code>runtime facts write failed</code> —— 顺序精读已走完，写入事实没有落库。</span>
+          <div class="actions">
+            <button class="btn ghost" id="openLog">查看日志</button>
+            <button class="btn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+              重试这一步
+            </button>
+          </div>
+        </div>
+
+        <!-- Animated W flow: stages ride a zigzag; a vermilion pulse travels it while running -->
+        <div class="flow running" id="flow">
+          <svg viewBox="0 0 600 120" preserveAspectRatio="none" aria-hidden="true">
+            <!-- zigzag baseline: peaks at stages 1,3,5 / valleys at 2,4,6 -->
+            <path class="rail"  d="M 50 34 L 150 86 L 250 34 L 350 86 L 450 34 L 550 86" />
+            <path class="fill"  d="M 50 34 L 150 86 L 250 34 L 350 86" />
+            <path class="pulse" d="M 50 34 L 150 86 L 250 34 L 350 86 L 450 34 L 550 86" />
+          </svg>
+          <div class="nodes">
+            <div class="fnode done up"   style="left:8.33%; top:28%"><div class="pt">✓</div><div class="lbl"><div class="nm">解析原文</div><div class="st">完成</div></div></div>
+            <div class="fnode done down" style="left:25%;   top:72%"><div class="pt">✓</div><div class="lbl"><div class="nm">切分段落</div><div class="st">完成</div></div></div>
+            <div class="fnode done up"   style="left:41.66%;top:28%"><div class="pt">✓</div><div class="lbl"><div class="nm">顺序精读</div><div class="st">72 / 72 段</div></div></div>
+            <div class="fnode failed down" style="left:58.33%; top:72%"><div class="pt">✕</div><div class="lbl"><div class="nm">写入事实</div><div class="st">失败 · 可重试</div></div></div>
+            <div class="fnode active up" style="left:75%;   top:28%"><div class="pt"></div><div class="lbl"><div class="nm">全局聚合</div><div class="st">待运行</div></div></div>
+            <div class="fnode down"      style="left:91.66%;top:72%"><div class="pt"></div><div class="lbl"><div class="nm">实体归并</div><div class="st">待运行</div></div></div>
+          </div>
+        </div>
+
+        <div class="footline">
+          <span>已读出的 72 段不会重读；修复写入后从断点继续。</span>
+          <span class="step">阶段 4 / 11</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Recent ============ -->
+    <section class="section">
+      <div class="sec-head">
+        <h2>最近分析</h2>
+        <span class="rule"></span>
+        <span class="hint">保留最近五次运行</span>
+      </div>
+
+      <div class="panel feed">
+        <div class="item">
+          <div class="badge run">●</div>
+          <div class="txt">
+            <div class="tt">进行中</div>
+            <div class="ds">seed pipeline running · 顺序精读 72/72</div>
+          </div>
+          <span class="when">1 小时前</span>
+        </div>
+        <div class="item">
+          <div class="badge err">✕</div>
+          <div class="txt">
+            <div class="tt">失败</div>
+            <div class="ds">sequential reading output schema validation failed</div>
+          </div>
+          <span class="when">7 小时前</span>
+        </div>
+        <div class="item">
+          <div class="badge ok">✓</div>
+          <div class="txt">
+            <div class="tt">完成</div>
+            <div class="ds">seed run completed · 实体 214 · 关系 396 · 规则 41</div>
+          </div>
+          <span class="when">昨天</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="foot">墨鱼小说 · 项目工作台</div>
+
+  </main>
+</div>
+
+<!-- ============ Log modal ============ -->
+<div class="overlay" id="logOverlay" role="dialog" aria-modal="true" aria-labelledby="logTitle">
+  <div class="logmodal">
+    <div class="lhead">
+      <span class="dots"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+      <span class="ltitle" id="logTitle">seed · run <b>4f2a…c91</b> · event stream</span>
+      <button class="lclose" id="closeLog" aria-label="关闭">×</button>
+    </div>
+    <div class="lbody" id="logBody">
+      <div class="lline"><span class="ts">14:02:11</span><span class="lv info">INFO</span><span class="tx">seed.run started · project=qingshan-test · run_id=4f2a…c91</span></div>
+      <div class="lline"><span class="ts">14:02:11</span><span class="lv info">INFO</span><span class="tx"><span class="stage">[parse_source]</span> loading 青山-测试.txt · 1.5 MB · 723,401 chars</span></div>
+      <div class="lline"><span class="ts">14:02:13</span><span class="lv ok">OK</span><span class="tx"><span class="stage">[parse_source]</span> completed · encoding=utf-8 · 1 source file</span></div>
+      <div class="lline"><span class="ts">14:02:13</span><span class="lv info">INFO</span><span class="tx"><span class="stage">[segment]</span> splitting into reading segments</span></div>
+      <div class="lline"><span class="ts">14:02:15</span><span class="lv ok">OK</span><span class="tx"><span class="stage">[segment]</span> completed · 72 segments · avg 10.0k chars</span></div>
+      <div class="lline"><span class="ts">14:02:15</span><span class="lv info">INFO</span><span class="tx"><span class="stage">[sequential_reading]</span> reading segment 1/72 …</span></div>
+      <div class="lline"><span class="ts">14:03:02</span><span class="lv info">INFO</span><span class="tx"><span class="stage">[sequential_reading]</span> reading segment 36/72 …</span></div>
+      <div class="lline"><span class="ts">14:03:48</span><span class="lv ok">OK</span><span class="tx"><span class="stage">[sequential_reading]</span> completed · 72/72 segments · notes=72</span></div>
+      <div class="lline"><span class="ts">14:03:49</span><span class="lv info">INFO</span><span class="tx"><span class="stage">[write_facts]</span> persisting runtime facts → graph_* tables</span></div>
+      <div class="lline errl"><span class="ts">14:03:51</span><span class="lv err">ERROR</span><span class="tx"><span class="stage">[write_facts]</span> runtime facts write failed · relation "graph_facts" · deadlock detected (tx 88114)</span></div>
+      <div class="lline errl"><span class="ts">14:03:51</span><span class="lv err">ERROR</span><span class="tx">seed.run failed at stage write_facts · will resume from checkpoint on retry</span></div>
+      <div class="lline"><span class="ts">14:03:51</span><span class="lv warn">HINT</span><span class="tx">已读出的 72 段不会重读；重试从 write_facts 断点继续 <span class="lcursor"></span></span></div>
+    </div>
+    <div class="lfoot">
+      <span>12 events · 2 errors</span>
+      <span>esc / 点击空白处关闭</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  const overlay = document.getElementById('logOverlay');
+  const openBtn = document.getElementById('openLog');
+  const closeBtn = document.getElementById('closeLog');
+  const body = document.getElementById('logBody');
+
+  function openLog(){
+    overlay.classList.add('open');
+    body.scrollTop = body.scrollHeight; // jump to the live tail
+    closeBtn.focus();
+  }
+  function closeLog(){ overlay.classList.remove('open'); openBtn.focus(); }
+
+  openBtn.addEventListener('click', openLog);
+  closeBtn.addEventListener('click', closeLog);
+  // click outside the dialog closes
+  overlay.addEventListener('click', (e)=>{ if(e.target === overlay) closeLog(); });
+  // esc closes
+  document.addEventListener('keydown', (e)=>{ if(e.key === 'Escape' && overlay.classList.contains('open')) closeLog(); });
+
+  /* ============================================================
+     Readiness drawers — streaming demo.
+     Each category (char / rel / rule) owns a horizontal drawer of
+     mahjong tiles. As the analysis lands a new ready asset, a tile
+     slams into that category's drawer, the row count ticks up, and
+     the drawer auto-scrolls to follow the newest tile. In production
+     this is driven by polling a "recent ready assets" feed (name +
+     type) alongside the readiness snapshot; here we simulate it.
+     ============================================================ */
+  (function readinessDrawers(){
+    const TRACKS = {
+      char: document.getElementById('track-char'),
+      rel:  document.getElementById('track-rel'),
+      rule: document.getElementById('track-rule'),
+    };
+    if(!TRACKS.char) return;
+
+    // Realistic first-pass assets from a reading of 《青山》 (name + kind).
+    const STREAM = [
+      {name:'沈墨', kind:'char'},
+      {name:'船娘', kind:'char'},
+      {name:'剑非凶器', kind:'rule'},
+      {name:'师父', kind:'char'},
+      {name:'沈墨·师父', kind:'rel'},
+      {name:'顾红衣', kind:'char'},
+      {name:'北境烽火', kind:'rule'},
+      {name:'沈墨·顾红衣', kind:'rel'},
+      {name:'老僧', kind:'char'},
+      {name:'乱世武林', kind:'rule'},
+      {name:'沈墨·船娘', kind:'rel'},
+      {name:'白衣客', kind:'char'},
+      {name:'庙算', kind:'rule'},
+      {name:'顾红衣·老僧', kind:'rel'},
+    ];
+    const counts = {char:0, rel:0, rule:0};
+
+    function face(name){
+      const clean = name.replace(/[·\s].*$/, '');
+      return clean.slice(0, 2);
+    }
+    function spawn(item){
+      const track = TRACKS[item.kind];
+      if(!track) return;
+      // clear the placeholder on first tile
+      const ph = track.querySelector('.placeholder');
+      if(ph) ph.remove();
+
+      const el = document.createElement('div');
+      el.className = 'tile';
+      el.dataset.kind = item.kind;
+      el.title = item.name;
+      // slam from a random side / corner
+      const side = Math.floor(Math.random()*4);
+      const dist = 120 + Math.random()*110;
+      const rx = side===0 ? -dist : side===1 ? dist : (Math.random()-.5)*70;
+      const ry = side===2 ? -dist : side===3 ? dist : (Math.random()-.5)*70;
+      const rr = (Math.random()-.5)*40;
+      el.style.setProperty('--rx', rx.toFixed(0)+'px');
+      el.style.setProperty('--ry', ry.toFixed(0)+'px');
+      el.style.setProperty('--rr', rr.toFixed(0)+'deg');
+      el.innerHTML = '<div class="face">'+face(item.name)+'</div>';
+      track.appendChild(el);
+
+      // tick this row's count
+      counts[item.kind]++;
+      const ct = document.getElementById('ct-'+item.kind);
+      if(ct){ ct.textContent = counts[item.kind]; ct.classList.remove('zero'); }
+
+      // auto-scroll the drawer to follow the newest tile
+      track.scrollTo({ left: track.scrollWidth, behavior: 'smooth' });
+    }
+
+    let i = 0;
+    function tick(){
+      if(i >= STREAM.length) return;
+      spawn(STREAM[i++]);
+      setTimeout(tick, 480 + Math.random()*820); // irregular, like live agent output
+    }
+    setTimeout(tick, 900);
+  })();
+</script>
+</body>
+</html>
