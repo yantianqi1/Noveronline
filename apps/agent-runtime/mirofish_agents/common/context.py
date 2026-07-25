@@ -33,8 +33,11 @@ class AgentContext(BaseModel):
         if value is None:
             return None
         value = value.strip()
+        # A blank optional id over the wire means "absent"; coerce to None so a
+        # missing actor/session does not take down the whole activity via a
+        # ValidationError instead of a clean failed-result.
         if not value:
-            raise ValueError("runtime context id cannot be blank")
+            return None
         return value
 
     def has_permission(self, scope: str, action: str) -> bool:

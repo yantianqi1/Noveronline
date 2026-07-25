@@ -22,6 +22,22 @@ def test_agent_context_rejects_blank_required_ids() -> None:
         )
 
 
+def test_agent_context_coerces_blank_optional_ids_to_none() -> None:
+    context = AgentContext(
+        tenant_id="tenant-1",
+        project_id=" ",
+        run_id="run-1",
+        workflow_type="hello_agent",
+        actor_user_id="",
+        module_key="   ",
+        trace_id="trace-1",
+    )
+
+    assert context.project_id is None
+    assert context.actor_user_id is None
+    assert context.module_key is None
+
+
 def test_agent_context_preserves_runtime_scope_and_permissions() -> None:
     context = AgentContext(
         tenant_id="tenant-1",
