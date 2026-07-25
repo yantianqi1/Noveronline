@@ -875,31 +875,48 @@ def test_estimate_tokens_counts_cjk_heavier_than_latin() -> None:
 
 def test_segment_batches_default_token_budget_packs_chapters_together() -> None:
     # 4 small chapters (~1200 chars each ≈ 1800 tokens) all fit under the 60k
-    # default token budget and share chapters, so they must batch into ONE call,
-    # but a new chapter never splits mid-chapter.
+    # default token budget, so they pack into ONE batch (no wasteful one-chapter-
+    # per-batch splitting), while never splitting a chapter mid-way.
     store = InMemoryObjectStore({f"segments/{i:04d}.txt": ("正文" * 600).encode("utf-8") for i in range(4)})
     segments = [
         {"segment_id": f"segment-{i}", "segment_order": i, "object_key": f"segments/{i:04d}.txt", "chapter_guess": f"第{i}章"}
         for i in range(4)
     ]
     batches = _segment_batches(segments, segment_text_store=store, settings={})
-    # Default budget 60k tokens >> these; but chapter boundaries force one batch
-    # per chapter (whole-chapter reads), so 4 chapters -> 4 batches, never split.
-    assert len(batches) == 4
-    assert all(len(batch) == 1 for batch in batches)
+    # All four tiny chapters fit comfortably in the 60k budget -> a single batch.
+    assert len(batches) == 1
+    assert [s["segment_id"] for s in batches[0]] == [f"segment-{i}" for i in range(4)]
 
 
-def test_segment_batches_respects_configured_token_budget() -> None:
-    # A tight token budget forces packing: each ~1800-token chapter, budget 4000
-    # -> two chapters per batch until the budget would overflow.
+def test_segment_batches_splits_only_when_chapter_would_overflow() -> None:
+    # Chapters pack greedily until one would overflow the token budget; only then
+    # does a batch break (at a chapter boundary, never mid-chapter).
     store = InMemoryObjectStore({f"segments/{i:04d}.txt": ("正文" * 600).encode("utf-8") for i in range(4)})
     segments = [
-        {"segment_id": f"segment-{i}", "segment_order": i, "object_key": f"segments/{i:04d}.txt"}
-        for i in range(4)  # no chapter_guess -> chapter rule inert, token budget governs
+        {"segment_id": f"segment-{i}", "segment_order": i, "object_key": f"segments/{i:04d}.txt", "chapter_guess": f"第{i}章"}
+        for i in range(4)
     ]
+    # Each chapter is 1801 tokens (600 wide chars * 1.5 + 1 margin). Budget 4000:
+    # two chapters = 3602 fit; adding a third (5403) overflows, so batch breaks.
     batches = _segment_batches(segments, segment_text_store=store, settings={"batch_max_tokens": 4000})
-    # 4 chapters * ~1800 tokens, budget 4000 -> 2 per batch -> 2 batches.
-    assert [len(batch) for batch in batches] == [2, 2]
+    assert [len(batch) for batch in batches] == [2, 1, 1]
+    # Chapter boundaries preserved: no chapter straddles two batches.
+    assert [s["chapter_guess"] for s in batches[0]] == ["第0章", "第1章"]
+    assert [s["chapter_guess"] for s in batches[1]] == ["第2章"]
+    assert [s["chapter_guess"] for s in batches[2]] == ["第3章"]
+
+
+def test_segment_batches_long_chapter_falls_back_to_segment_packing() -> None:
+    # One huge chapter (multiple segments) that exceeds the budget must not be
+    # force-kept whole — its segments pack individually under the limits.
+    store = InMemoryObjectStore({f"segments/{i:04d}.txt": ("正文" * 2000).encode("utf-8") for i in range(3)})
+    segments = [
+        {"segment_id": f"segment-{i}", "segment_order": i, "object_key": f"segments/{i:04d}.txt", "chapter_guess": "长章"}
+        for i in range(3)
+    ]
+    # Each segment ~6001 tokens; budget 7000 fits one, not two -> 3 batches.
+    batches = _segment_batches(segments, segment_text_store=store, settings={"batch_max_tokens": 7000})
+    assert [len(batch) for batch in batches] == [1, 1, 1]
 
 
 def test_chat_request_body_defaults_max_tokens_for_large_batches() -> None:

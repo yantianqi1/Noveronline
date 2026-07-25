@@ -711,6 +711,19 @@ def _segment_batches(
     legacy_max_chars = settings.get("batch_max_chars")
     max_chars = legacy_max_chars if isinstance(legacy_max_chars, int) and not isinstance(legacy_max_chars, bool) and legacy_max_chars > 0 else None
 
+    # Measure every segment once (tokens for budget, chars for the legacy cap).
+    measured: list[tuple[dict[str, Any], int, int, str | None]] = []
+    for segment in segments:
+        object_key = _required_text(segment.get("object_key"), "object_key")
+        try:
+            text = segment_text_store.read_bytes(object_key).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LLMFacilityError("TEXT_SEGMENT_DECODE_FAILED", "segment text was not valid UTF-8") from exc
+        except Exception as exc:
+            raise LLMFacilityError("TEXT_SEGMENT_READ_FAILED", "segment text read failed") from exc
+        chapter = segment.get("chapter_guess") if isinstance(segment.get("chapter_guess"), str) else None
+        measured.append((segment, _estimate_tokens(text), len(text), chapter))
+
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_tokens = 0
@@ -726,43 +739,66 @@ def _segment_batches(
         current_chars = 0
         current_chapter = None
 
-    for segment in segments:
-        # Estimate text size without mutating the public segment dict.
-        object_key = _required_text(segment.get("object_key"), "object_key")
-        try:
-            text = segment_text_store.read_bytes(object_key).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise LLMFacilityError("TEXT_SEGMENT_DECODE_FAILED", "segment text was not valid UTF-8") from exc
-        except Exception as exc:
-            raise LLMFacilityError("TEXT_SEGMENT_READ_FAILED", "segment text read failed") from exc
-        text_tokens = _estimate_tokens(text)
-        text_chars = len(text)
-        chapter = segment.get("chapter_guess") if isinstance(segment.get("chapter_guess"), str) else None
+    def add(segment: dict[str, Any], tokens: int, chars: int, chapter: str | None) -> None:
+        nonlocal current_tokens, current_chars, current_chapter
+        current.append(segment)
+        current_tokens += tokens
+        current_chars += chars
+        current_chapter = chapter if chapter is not None else current_chapter
 
-        # A single segment larger than the whole budget must go in its own batch.
-        if not current:
-            current.append(segment)
-            current_tokens = text_tokens
-            current_chars = text_chars
-            current_chapter = chapter
-            if text_tokens >= max_tokens:
-                flush()
+    def fits(tokens: int, chars: int, count: int = 1) -> bool:
+        # Whether adding `count` segments of `tokens`/`chars` to the CURRENT batch
+        # keeps it within all limits (per-batch segment count, tokens, chars). An
+        # empty batch only "fits" a group if that group alone is within the budget,
+        # so an oversized chapter is never silently kept whole.
+        if len(current) + count > max_segments:
+            return False
+        if current_tokens + tokens > max_tokens:
+            return False
+        if max_chars is not None and current_chars + chars > max_chars:
+            return False
+        return True
+
+    # Group consecutive segments into chapters (None chapter_guess attaches to the
+    # previous chapter / forms its own group), then greedily pack WHOLE chapters
+    # into each batch up to the token budget. A chapter is never split across two
+    # LLM calls — but short chapters pack many-per-batch instead of one-per-batch.
+    groups: list[tuple[str | None, list[tuple[dict[str, Any], int, int]]]] = []
+    for segment, tokens, chars, chapter in measured:
+        if groups and (chapter is None or chapter == groups[-1][0]):
+            groups[-1][1].append((segment, tokens, chars))
+        else:
+            groups.append((chapter, [(segment, tokens, chars)]))
+
+    for chapter, group_segs in groups:
+        group_tokens = sum(tokens for _, tokens, _ in group_segs)
+        group_chars = sum(chars for _, _, chars in group_segs)
+
+        if fits(group_tokens, group_chars, len(group_segs)):
+            # Whole chapter fits in the current batch — keep it together.
+            for segment, tokens, chars in group_segs:
+                add(segment, tokens, chars, chapter)
             continue
 
-        over_count = len(current) >= max_segments
-        over_tokens = current_tokens + text_tokens > max_tokens
-        over_chars = max_chars is not None and current_chars + text_chars > max_chars
-        # Keep whole chapters together: a new chapter always starts a new batch
-        # once the current one holds anything, so one chapter is never split
-        # across two LLM calls (better whole-chapter comprehension).
-        new_chapter = chapter is not None and current_chapter is not None and chapter != current_chapter
-        if over_count or over_tokens or over_chars or new_chapter:
+        # Whole chapter does not fit here. Start a fresh batch for it — but only
+        # if it actually fits an empty batch under ALL limits (count included).
+        flush()
+        if len(group_segs) <= max_segments and group_tokens <= max_tokens and (max_chars is None or group_chars <= max_chars):
+            # The chapter fits in an empty batch on its own.
+            for segment, tokens, chars in group_segs:
+                add(segment, tokens, chars, chapter)
             flush()
+            continue
 
-        current.append(segment)
-        current_tokens += text_tokens
-        current_chars += text_chars
-        current_chapter = chapter if chapter is not None else current_chapter
+        # A single chapter exceeds the whole budget: fall back to packing its
+        # segments individually (never splitting a segment mid-way), honouring
+        # the same per-batch count/token/char limits as the chapter path.
+        for segment, tokens, chars in group_segs:
+            if current and not fits(tokens, chars):
+                flush()
+            add(segment, tokens, chars, chapter)
+            if len(current) >= max_segments or current_tokens >= max_tokens or (max_chars is not None and current_chars >= max_chars):
+                flush()
 
     flush()
     return batches
