@@ -1170,6 +1170,20 @@ def test_seed_agent_profile_live_postgres_provider_chain_persists_snapshot_and_p
     assert snapshot["profiles_jsonb"]["profiles"] == [{"name": "林舟", "voice": "quiet resolve"}]
     assert persisted["workflow_events"] == [
         {
+            "event_type": "seed.agent_profiles.progress",
+            "payload_jsonb": {
+                "stage": "agent_profiles",
+                "phase": "batch_completed",
+                "message": "正在生成角色档案 1/1 · 林舟",
+                "activity": "agent_profile_activity",
+                "module_key": "character_agent_profile",
+                "batch_index": 1,
+                "entity_name": "林舟",
+                "total_entities": 1,
+                "completed_entities": 1,
+            },
+        },
+        {
             "event_type": "seed.stage.completed",
             "payload_jsonb": {
                 "stage": "agent_profiles",
@@ -1182,7 +1196,7 @@ def test_seed_agent_profile_live_postgres_provider_chain_persists_snapshot_and_p
                 "relationship_view_count": 1,
                 "model_id": "model-seed-profile-live",
             },
-        }
+        },
     ]
     encoded = json.dumps({"result": result, "persisted": persisted}, ensure_ascii=False, default=str)
     for forbidden in (
@@ -1383,7 +1397,11 @@ def test_seed_entity_resolution_live_postgres_provider_upserts_snapshot_and_publ
                     "run_id": RUN_ID,
                     "workflow_type": "seed_pipeline",
                     "actor_user_id": USER_ID,
-                    "trace_id": "trace-live-seed-entity-resolution-repeat",
+                    # A retry of the same logical call reuses the same trace_id so
+                    # the quota gate replays the cached provider response instead
+                    # of issuing a second LLM request (true Temporal-retry /
+                    # operator re-run semantics).
+                    "trace_id": "trace-live-seed-entity-resolution",
                     "permissions": {"seed_pipeline": ["run"]},
                 }
             }
@@ -1408,7 +1426,9 @@ def test_seed_entity_resolution_live_postgres_provider_upserts_snapshot_and_publ
     }
     assert repeat_result["status"] == "completed"
     assert repeat_result["resolution_snapshot_id"] == result["resolution_snapshot_id"]
-    assert len(provider.requests) == 2
+    # The retry reuses the same trace_id, so the quota gate replays the cached
+    # provider response: exactly one real LLM request is issued across both calls.
+    assert len(provider.requests) == 1
     for recorded_request in provider.requests:
         assert _header(recorded_request["headers"], "Authorization") == "Bearer sk-live-seed-entity-resolution"
         assert _header(recorded_request["headers"], "X-MiroFish-Tenant-Id") == TENANT_ID
@@ -1431,7 +1451,8 @@ def test_seed_entity_resolution_live_postgres_provider_upserts_snapshot_and_publ
         assert forbidden not in provider_body
 
     persisted = _read_seed_entity_resolution_live_rows(admin_url)
-    assert persisted["workflow_runs"] == [{"status": "running", "progress": 70}]
+    # Stage completion advances run progress to the entity_resolution anchor (80).
+    assert persisted["workflow_runs"] == [{"status": "running", "progress": 80}]
     assert persisted["seed_entity_resolution_snapshots"] == [
         {
             "module_key": "entity_resolution",
@@ -2857,11 +2878,11 @@ def _prepare_live_seed_semantic_database(admin_url: str, provider_base_url: str)
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
                    VALUES
-                     (%s, %s, 'model-seed-sequential-live', 'live-provider', true, false),
-                     (%s, %s, 'model-seed-global-aggregation-live', 'live-provider', true, false)""",
+                     (%s, %s, 'model-seed-sequential-live', 'live-provider', 8192, true, false),
+                     (%s, %s, 'model-seed-global-aggregation-live', 'live-provider', 8192, true, false)""",
                 (TENANT_ID, CHANNEL_ID, TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
@@ -2890,13 +2911,13 @@ def _prepare_live_seed_full_semantic_database(admin_url: str, provider_base_url:
         with connection.cursor() as cursor:
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
                    VALUES
-                     (%s, %s, 'model-seed-ontology-live', 'live-provider', true, false),
-                     (%s, %s, 'model-seed-entity-resolution-live', 'live-provider', true, false),
-                     (%s, %s, 'model-seed-profile-live', 'live-provider', true, false),
-                     (%s, %s, 'model-seed-archive-live', 'live-provider', true, false)""",
+                     (%s, %s, 'model-seed-ontology-live', 'live-provider', 8192, true, false),
+                     (%s, %s, 'model-seed-entity-resolution-live', 'live-provider', 8192, true, false),
+                     (%s, %s, 'model-seed-profile-live', 'live-provider', 8192, true, false),
+                     (%s, %s, 'model-seed-archive-live', 'live-provider', 8192, true, false)""",
                 (
                     TENANT_ID,
                     CHANNEL_ID,
@@ -3019,9 +3040,9 @@ def _prepare_live_agent_profile_database(admin_url: str, provider_base_url: str)
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
-                   VALUES (%s, %s, 'model-seed-profile-live', 'live-provider', true, false)""",
+                   VALUES (%s, %s, 'model-seed-profile-live', 'live-provider', 8192, true, false)""",
                 (TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
@@ -3068,6 +3089,13 @@ def _prepare_live_ontology_database(admin_url: str, provider_base_url: str) -> N
                            '{"temperature":0,"max_tokens":256,"max_concurrency":1}'::jsonb, %s)""",
                 (TENANT_ID, PROJECT_ID, CHANNEL_ID, USER_ID),
             )
+            # This fixture owns the quota policy rows it asserts against; clear the
+            # foundation's baseline tenant policy first so the scoped inserts below
+            # don't collide with it on idx_llm_quota_policies_scope.
+            cursor.execute(
+                "DELETE FROM llm_quota_policies WHERE tenant_id = %s",
+                (TENANT_ID,),
+            )
             cursor.executemany(
                 """INSERT INTO llm_quota_policies (
                      tenant_id, scope_type, project_id, module_key, token_limit,
@@ -3101,9 +3129,9 @@ def _prepare_live_entity_resolution_database(admin_url: str, provider_base_url: 
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
-                   VALUES (%s, %s, 'model-seed-entity-resolution-live', 'live-provider', true, false)""",
+                   VALUES (%s, %s, 'model-seed-entity-resolution-live', 'live-provider', 8192, true, false)""",
                 (TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
@@ -3175,9 +3203,9 @@ def _prepare_live_sequential_reading_database(
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
-                   VALUES (%s, %s, 'model-seed-sequential-live', 'live-provider', true, false)""",
+                   VALUES (%s, %s, 'model-seed-sequential-live', 'live-provider', 8192, true, false)""",
                 (TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
@@ -3317,9 +3345,9 @@ def _prepare_live_global_aggregation_database(admin_url: str, provider_base_url:
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
-                   VALUES (%s, %s, 'model-seed-global-aggregation-live', 'live-provider', true, false)""",
+                   VALUES (%s, %s, 'model-seed-global-aggregation-live', 'live-provider', 8192, true, false)""",
                 (TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
@@ -3354,9 +3382,9 @@ def _prepare_live_archive_candidate_database(admin_url: str, provider_base_url: 
             )
             cursor.execute(
                 """INSERT INTO llm_models (
-                     tenant_id, channel_id, model_id, owned_by, supports_json, supports_tools
+                     tenant_id, channel_id, model_id, owned_by, context_window, supports_json, supports_tools
                    )
-                   VALUES (%s, %s, 'model-seed-archive-live', 'live-provider', true, false)""",
+                   VALUES (%s, %s, 'model-seed-archive-live', 'live-provider', 8192, true, false)""",
                 (TENANT_ID, CHANNEL_ID),
             )
             cursor.execute(
@@ -3567,6 +3595,26 @@ def _prepare_live_database_foundation(admin_url: str) -> None:
                 """INSERT INTO project_members (tenant_id, project_id, user_id, role)
                    VALUES (%s, %s, %s, 'project_owner')""",
                 (TENANT_ID, PROJECT_ID, USER_ID),
+            )
+            # Batched enrichment routes through the quota gate, which requires an
+            # enabled tenant-scope policy. Migration 0017 backfills policies only
+            # for tenants that exist when it runs; this fixture recreates its
+            # tenant afterwards, so seed a baseline policy here (mirrors 0017).
+            # Some fixtures insert their own richer tenant policy afterwards, so
+            # only backfill when none exists (matches the partial-unique scope
+            # index idx_llm_quota_policies_scope).
+            cursor.execute(
+                """INSERT INTO llm_quota_policies (
+                     tenant_id, scope_type, project_id, module_key,
+                     token_limit, concurrency_limit, period_seconds, enabled, updated_by
+                   )
+                   SELECT %s, 'tenant', NULL, NULL, 5000000, 8, 2592000, TRUE, NULL
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM llm_quota_policies
+                     WHERE tenant_id = %s AND scope_type = 'tenant'
+                       AND project_id IS NULL AND module_key IS NULL
+                   )""",
+                (TENANT_ID, TENANT_ID),
             )
 
 
