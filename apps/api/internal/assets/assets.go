@@ -10,9 +10,33 @@ import (
 	"strings"
 )
 
+const (
+	// defaultAssetListPageSize is the asset list page size when the caller does
+	// not request one (and the reader has no configured override).
+	defaultAssetListPageSize = 100
+	// maximumAssetListPageSize caps a single page to bound the payload_jsonb
+	// row scan; callers page forward via offset/next_offset instead of asking
+	// for unbounded pages.
+	maximumAssetListPageSize = 500
+)
+
 type ListAssetsInput struct {
 	TenantID  string
 	ProjectID string
+	Offset    int
+	Limit     int
+}
+
+// AssetPage is one offset/limit page of the asset list. HasMore/NextOffset let
+// callers walk forward until the full set is assembled; ReturnedCount is the
+// number of items actually on this page (<= AppliedLimit).
+type AssetPage struct {
+	Items         []Record
+	Offset        int
+	AppliedLimit  int
+	ReturnedCount int
+	HasMore       bool
+	NextOffset    int
 }
 
 type GetAssetInput struct {
@@ -260,7 +284,7 @@ type Facets struct {
 }
 
 type Reader interface {
-	ListAssets(context.Context, ListAssetsInput) ([]Record, error)
+	ListAssets(context.Context, ListAssetsInput) (AssetPage, error)
 	GetAsset(context.Context, GetAssetInput) (Record, error)
 	ListFacets(context.Context, ListFacetsInput) (Facets, error)
 	SearchAssets(context.Context, SearchAssetsInput) ([]SearchRecord, error)
@@ -314,8 +338,8 @@ func NewDisabledReader() DisabledReader {
 	return DisabledReader{}
 }
 
-func (DisabledReader) ListAssets(context.Context, ListAssetsInput) ([]Record, error) {
-	return nil, &AppError{Code: "ASSET_BACKEND_UNCONFIGURED", Message: "asset backend is not configured"}
+func (DisabledReader) ListAssets(context.Context, ListAssetsInput) (AssetPage, error) {
+	return AssetPage{}, &AppError{Code: "ASSET_BACKEND_UNCONFIGURED", Message: "asset backend is not configured"}
 }
 
 func (DisabledReader) GetAsset(context.Context, GetAssetInput) (Record, error) {
@@ -559,9 +583,33 @@ type SQLArchiveMemoryReviewStore struct {
 func NewSQLReader(config SQLReaderConfig) *SQLReader {
 	limit := config.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = defaultAssetListPageSize
 	}
 	return &SQLReader{queryer: config.Queryer, limit: limit}
+}
+
+// normalizeAssetListLimit resolves the page size for a list request: an
+// explicit positive input wins, otherwise the reader's configured default; the
+// result is capped to bound the heavy payload_jsonb row scan per request.
+func normalizeAssetListLimit(input int, configuredDefault int) int {
+	limit := input
+	if limit <= 0 {
+		limit = configuredDefault
+	}
+	if limit <= 0 {
+		limit = defaultAssetListPageSize
+	}
+	if limit > maximumAssetListPageSize {
+		limit = maximumAssetListPageSize
+	}
+	return limit
+}
+
+func normalizeAssetListOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
 }
 
 func NewSQLAdoptionStore(config SQLAdoptionStoreConfig) *SQLAdoptionStore {
@@ -595,13 +643,17 @@ func queryWithTenantContext(ctx context.Context, queryer SQLQueryer, tenantID st
 	return queryer.QueryContext(ctx, query, args...)
 }
 
-func (r *SQLReader) ListAssets(ctx context.Context, input ListAssetsInput) ([]Record, error) {
+func (r *SQLReader) ListAssets(ctx context.Context, input ListAssetsInput) (AssetPage, error) {
 	if err := validateProjectInput(input.TenantID, input.ProjectID); err != nil {
-		return nil, err
+		return AssetPage{}, err
 	}
 	if r.queryer == nil {
-		return nil, &AppError{Code: "ASSET_BACKEND_UNCONFIGURED", Message: "asset backend is not configured"}
+		return AssetPage{}, &AppError{Code: "ASSET_BACKEND_UNCONFIGURED", Message: "asset backend is not configured"}
 	}
+	limit := normalizeAssetListLimit(input.Limit, r.limit)
+	offset := normalizeAssetListOffset(input.Offset)
+	// Fetch one extra row past the page to detect has_more without a COUNT query
+	// (same idiom as the story graph reader). The extra row is trimmed below.
 	query := `SELECT
   asset_id::text,
   project_id::text,
@@ -623,10 +675,10 @@ FROM assets
 WHERE tenant_id::text = $1
   AND project_id::text = $2
 ORDER BY pinned DESC, updated_at DESC, asset_id::text ASC
-LIMIT $3`
-	rows, err := queryWithTenantContext(ctx, r.queryer, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), r.limit)
+LIMIT $3 OFFSET $4`
+	rows, err := queryWithTenantContext(ctx, r.queryer, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), limit+1, offset)
 	if err != nil {
-		return nil, &AppError{Code: "ASSET_QUERY_FAILED", Message: err.Error()}
+		return AssetPage{}, &AppError{Code: "ASSET_QUERY_FAILED", Message: err.Error()}
 	}
 	defer rows.Close()
 
@@ -634,14 +686,28 @@ LIMIT $3`
 	for rows.Next() {
 		record, err := scanAssetRecord(rows)
 		if err != nil {
-			return nil, &AppError{Code: "ASSET_QUERY_FAILED", Message: err.Error()}
+			return AssetPage{}, &AppError{Code: "ASSET_QUERY_FAILED", Message: err.Error()}
 		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "ASSET_QUERY_FAILED", Message: err.Error()}
+		return AssetPage{}, &AppError{Code: "ASSET_QUERY_FAILED", Message: err.Error()}
 	}
-	return records, nil
+	hasMore := len(records) > limit
+	if hasMore {
+		records = records[:limit]
+	}
+	page := AssetPage{
+		Items:         records,
+		Offset:        offset,
+		AppliedLimit:  limit,
+		ReturnedCount: len(records),
+		HasMore:       hasMore,
+	}
+	if hasMore {
+		page.NextOffset = offset + len(records)
+	}
+	return page, nil
 }
 
 func (r *SQLReader) GetAsset(ctx context.Context, input GetAssetInput) (Record, error) {

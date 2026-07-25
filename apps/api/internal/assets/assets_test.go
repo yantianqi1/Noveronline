@@ -34,7 +34,7 @@ func TestSQLReaderListsSanitizedProjectAssets(t *testing.T) {
 	}
 	reader := NewSQLReader(SQLReaderConfig{Queryer: queryer, Limit: 25})
 
-	items, err := reader.ListAssets(context.Background(), ListAssetsInput{
+	page, err := reader.ListAssets(context.Background(), ListAssetsInput{
 		TenantID:  "tenant-123",
 		ProjectID: "project-123",
 	})
@@ -42,6 +42,7 @@ func TestSQLReaderListsSanitizedProjectAssets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list assets: %v", err)
 	}
+	items := page.Items
 	if len(items) != 1 {
 		t.Fatalf("expected one asset, got %#v", items)
 	}
@@ -61,8 +62,71 @@ func TestSQLReaderListsSanitizedProjectAssets(t *testing.T) {
 			t.Fatalf("assets query selected forbidden field %q: %s", field, queryer.query)
 		}
 	}
-	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "project-123", 25}) {
+	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "project-123", 26, 0}) {
 		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+}
+
+func TestSQLReaderListAssetsPaginatesWithLimitOffsetAndHasMore(t *testing.T) {
+	newAssetRow := func(id string) []any {
+		return []any{
+			id,
+			"project-123",
+			"project",
+			"character",
+			"entity",
+			"seed",
+			"标题-" + id,
+			"摘要",
+			"seed_pipeline",
+			"entity-" + id,
+			true,
+			false,
+			`["标签"]`,
+			`{"entity_id":"` + id + `"}`,
+			"2026-07-04T00:00:00Z",
+			"2026-07-04T00:00:00Z",
+		}
+	}
+	// Return limit+1 rows for a Limit of 2 so the reader detects has_more.
+	queryer := &recordingSQLQueryer{
+		rows: &fakeSQLRows{
+			values: [][]any{
+				newAssetRow("asset-1"),
+				newAssetRow("asset-2"),
+				newAssetRow("asset-3"),
+			},
+		},
+	}
+	reader := NewSQLReader(SQLReaderConfig{Queryer: queryer})
+
+	page, err := reader.ListAssets(context.Background(), ListAssetsInput{
+		TenantID:  "tenant-123",
+		ProjectID: "project-123",
+		Offset:    4,
+		Limit:     2,
+	})
+
+	if err != nil {
+		t.Fatalf("list assets page: %v", err)
+	}
+	if !page.HasMore {
+		t.Fatalf("expected has_more when limit+1 rows returned: %#v", page)
+	}
+	if page.ReturnedCount != 2 || len(page.Items) != 2 {
+		t.Fatalf("expected trimmed page of 2 items, got returned=%d items=%#v", page.ReturnedCount, page.Items)
+	}
+	if page.NextOffset != 6 {
+		t.Fatalf("expected next_offset 6, got %d", page.NextOffset)
+	}
+	if page.Offset != 4 || page.AppliedLimit != 2 {
+		t.Fatalf("unexpected page offset/limit: %#v", page)
+	}
+	if !strings.Contains(queryer.query, "LIMIT $3 OFFSET $4") {
+		t.Fatalf("expected paginated list query, got %s", queryer.query)
+	}
+	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "project-123", 3, 4}) {
+		t.Fatalf("unexpected pagination args: %#v", queryer.args)
 	}
 }
 
@@ -310,7 +374,7 @@ func TestSQLReaderUsesTenantContextQueryerForAssetReadSide(t *testing.T) {
 				_, err := reader.ListAssets(context.Background(), ListAssetsInput{TenantID: "tenant-123", ProjectID: "project-123"})
 				return err
 			},
-			args: []any{"tenant-123", "project-123", 100},
+			args: []any{"tenant-123", "project-123", 101, 0},
 		},
 		{
 			name: "get",

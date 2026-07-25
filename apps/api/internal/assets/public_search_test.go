@@ -17,8 +17,8 @@ type recordingAssetReader struct {
 	items       []SearchRecord
 }
 
-func (r *recordingAssetReader) ListAssets(context.Context, ListAssetsInput) ([]Record, error) {
-	return nil, nil
+func (r *recordingAssetReader) ListAssets(context.Context, ListAssetsInput) (AssetPage, error) {
+	return AssetPage{}, nil
 }
 
 func (r *recordingAssetReader) GetAsset(context.Context, GetAssetInput) (Record, error) {

@@ -74,7 +74,18 @@ export type SearchRecord = {
   updated_at: string;
 };
 
-export type ListResponse<T> = { items: T[] };
+// The list endpoint paginates (offset/limit). Items is always present; the
+// pagination fields are optional so other ListResponse consumers in this client
+// that don't walk pages are unaffected. Walk pages via next_offset until
+// has_more is false to assemble the full set.
+export type ListResponse<T> = {
+  items: T[];
+  offset?: number;
+  applied_limit?: number;
+  returned_count?: number;
+  has_more?: boolean;
+  next_offset?: number;
+};
 
 // ── Catalog: detail / versions / collections (internal/assetcatalog) ───────
 

@@ -1240,6 +1240,7 @@ type recordingSourceFileStore struct {
 	validateInput sourcefiles.ValidateInput
 	ownerInput    sourcefiles.GetUploadOwnerInput
 	objectInput   sourcefiles.GetUploadObjectInput
+	deleteInput   sourcefiles.DeleteInput
 	created       sourcefiles.Record
 	completed     sourcefiles.Record
 	owner         sourcefiles.UploadOwner
@@ -1338,6 +1339,11 @@ func (s *recordingSourceFileStore) ValidateSourceFile(ctx context.Context, input
 	}, nil
 }
 
+func (s *recordingSourceFileStore) DeleteSourceFile(ctx context.Context, input sourcefiles.DeleteInput) error {
+	s.deleteInput = input
+	return s.err
+}
+
 type recordingAssetReader struct {
 	listInput     assets.ListAssetsInput
 	getInput      assets.GetAssetInput
@@ -1394,12 +1400,12 @@ type recordingAssetBulkActionStore struct {
 	called bool
 }
 
-func (r *recordingAssetReader) ListAssets(ctx context.Context, input assets.ListAssetsInput) ([]assets.Record, error) {
+func (r *recordingAssetReader) ListAssets(ctx context.Context, input assets.ListAssetsInput) (assets.AssetPage, error) {
 	r.listInput = input
 	if r.err != nil {
-		return nil, r.err
+		return assets.AssetPage{}, r.err
 	}
-	return r.assets, nil
+	return assets.AssetPage{Items: r.assets, ReturnedCount: len(r.assets), HasMore: false}, nil
 }
 
 func (r *recordingAssetReader) GetAsset(ctx context.Context, input assets.GetAssetInput) (assets.Record, error) {
@@ -7511,6 +7517,75 @@ func TestListAssetsUsesTenantProjectScopeAndSanitizedRows(t *testing.T) {
 			t.Fatalf("asset list leaked forbidden field %q: %s", forbidden, body)
 		}
 	}
+}
+
+func TestListAssetsPaginationEnvelopeAndValidation(t *testing.T) {
+	t.Run("returns pagination envelope", func(t *testing.T) {
+		reader := &recordingAssetReader{
+			assets: []assets.Record{
+				{AssetID: "asset-1", ProjectID: "project-123", Title: "主角"},
+				{AssetID: "asset-2", ProjectID: "project-123", Title: "配角"},
+			},
+		}
+		server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
+		request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/assets?limit=2&offset=0", nil)
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+		}
+		if reader.listInput.Limit != 2 || reader.listInput.Offset != 0 {
+			t.Fatalf("reader lost pagination scope: %#v", reader.listInput)
+		}
+		var body assetListResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode asset list response: %v", err)
+		}
+		if body.ReturnedCount != 2 || len(body.Items) != 2 {
+			t.Fatalf("unexpected returned count/items: %#v", body)
+		}
+		if body.Offset != 0 {
+			t.Fatalf("unexpected offset: %#v", body)
+		}
+		if body.HasMore {
+			t.Fatalf("expected has_more=false from single-page mock: %#v", body)
+		}
+	})
+
+	t.Run("rejects invalid pagination params", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			query string
+		}{
+			{name: "negative offset", query: "?offset=-1"},
+			{name: "non-integer limit", query: "?limit=abc"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				reader := &recordingAssetReader{}
+				server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}, AssetReader: reader}))
+				request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/assets"+tt.query, nil)
+				request.Header.Set("X-Tenant-Id", "tenant-123")
+				response := httptest.NewRecorder()
+
+				server.ServeHTTP(response, request)
+
+				if response.Code != http.StatusBadRequest {
+					t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, response.Code, response.Body.String())
+				}
+				var body errorEnvelope
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if body.Error.Code != "VALIDATION_FAILED" {
+					t.Fatalf("unexpected error body: %#v", body)
+				}
+			})
+		}
+	})
 }
 
 func TestListWorldlineSavedPathsUsesTenantProjectScopeAndSanitizedRows(t *testing.T) {

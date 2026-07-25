@@ -75,9 +75,9 @@ func NewPublicSearchReader(config PublicSearchReaderConfig) *PublicSearchReader 
 	}
 }
 
-func (r *PublicSearchReader) ListAssets(ctx context.Context, input ListAssetsInput) ([]Record, error) {
+func (r *PublicSearchReader) ListAssets(ctx context.Context, input ListAssetsInput) (AssetPage, error) {
 	if r.base == nil {
-		return nil, searchBackendUnconfigured()
+		return AssetPage{}, searchBackendUnconfigured()
 	}
 	return r.base.ListAssets(ctx, input)
 }

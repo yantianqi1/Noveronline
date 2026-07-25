@@ -31,6 +31,11 @@ test("asset library workbench is routed and wired to real backend routes", async
   // Optimistic-lock + idempotency discipline for catalog mutations.
   assert.match(client, /expected_version/);
   assert.match(client, /X-Request-Id/);
+  // The list endpoint paginates; fetchAssets walks offset pages until done.
+  assert.match(client, /ASSET_PAGE_SIZE/);
+  assert.match(client, /offset=\$\{offset\}/);
+  assert.match(client, /has_more/);
+  assert.match(client, /next_offset/);
 });
 
 test("asset library BFF proxy allowlists only the real asset routes", async () => {

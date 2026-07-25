@@ -86,9 +86,36 @@ async function sendJson<T>(
 
 // ── Browse: list + facets + search capabilities ────────────────────────────
 
+// The list endpoint paginates at 100/page. The library and overview both need
+// the COMPLETE set (client-side filtering/facets and the new-asset diff), so we
+// walk offset pages until has_more is false and assemble the full array here —
+// the same accumulate-until-done idiom as the writer run event walk.
+const ASSET_PAGE_SIZE = 100;
+
 export async function fetchAssets(projectId: string, tenantId: string): Promise<AssetRecord[]> {
-  const data = await getJson<ListResponse<AssetRecord>>(`/api/projects/${projectId}/assets`, tenantId);
-  return data.items ?? [];
+  const all: AssetRecord[] = [];
+  // Dedupe by asset_id: the list orders by pinned/updated_at, which can shift
+  // while we page if an asset is updated mid-walk, so an overlapping row may
+  // reappear on a later offset. Seen rows are dropped rather than duplicated;
+  // the next reload re-walks from offset 0 and self-heals any skip.
+  const seen = new Set<string>();
+  let offset = 0;
+  for (;;) {
+    const data = await getJson<ListResponse<AssetRecord>>(
+      `/api/projects/${projectId}/assets?limit=${ASSET_PAGE_SIZE}&offset=${offset}`,
+      tenantId,
+    );
+    const page = data.items ?? [];
+    for (const asset of page) {
+      if (!seen.has(asset.asset_id)) {
+        seen.add(asset.asset_id);
+        all.push(asset);
+      }
+    }
+    if (!data.has_more || page.length === 0) break; // short/last page ends the walk
+    offset = data.next_offset ?? offset + page.length;
+  }
+  return all;
 }
 
 export function fetchAssetFacets(projectId: string, tenantId: string): Promise<Facets> {

@@ -594,6 +594,18 @@ type listResponse[T any] struct {
 	Items []T `json:"items"`
 }
 
+// assetListResponse is the paginated asset-list envelope. Items stays first and
+// required so existing consumers that read `data.items` keep working unchanged;
+// the offset/has_more/next_offset fields let a caller walk the full set.
+type assetListResponse struct {
+	Items         []assets.Record `json:"items"`
+	Offset        int             `json:"offset"`
+	AppliedLimit  int             `json:"applied_limit"`
+	ReturnedCount int             `json:"returned_count"`
+	HasMore       bool            `json:"has_more"`
+	NextOffset    int             `json:"next_offset,omitempty"`
+}
+
 type traceExportRequest struct {
 	IncludeFull bool `json:"include_full"`
 }
@@ -1588,6 +1600,7 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "project overview", method: http.MethodGet, match: matchProjectSuffixPath("overview")},
 	{name: "project readiness", method: http.MethodGet, match: matchProjectSuffixPath("readiness")},
 	{name: "source file list", method: http.MethodGet, match: matchProjectSuffixPath("source-files")},
+	{name: "source file delete", method: http.MethodDelete, match: isProjectSourceFileDeletePath},
 	{name: "asset list", method: http.MethodGet, match: matchProjectSuffixPath("assets")},
 	{name: "asset facets", method: http.MethodGet, match: matchProjectSuffixPath("assets/facets")},
 	{name: "worldline saved paths list", method: http.MethodGet, match: matchProjectSuffixPath("worldline/saved-paths")},
@@ -1651,6 +1664,31 @@ func matchProjectSuffixPath(suffix string) func(string) bool {
 	return func(path string) bool {
 		return hasProjectSuffixPathShape(path, suffix)
 	}
+}
+
+// projectSourceFilePathParts extracts (projectID, uploadID) from
+// /v1/projects/{projectId}/source-files/{uploadId}. Both must be single path
+// segments, which also keeps the plain collection route (…/source-files) and
+// any deeper path from matching.
+func projectSourceFilePathParts(path string) (string, string) {
+	remainder := strings.TrimPrefix(path, "/v1/projects/")
+	projectID, suffix, ok := strings.Cut(remainder, "/")
+	if !ok {
+		return "", ""
+	}
+	segment, uploadID, ok := strings.Cut(suffix, "/")
+	if !ok || segment != "source-files" {
+		return "", ""
+	}
+	if !isSinglePathSegment(projectID) || !isSinglePathSegment(uploadID) {
+		return "", ""
+	}
+	return strings.TrimSpace(projectID), strings.TrimSpace(uploadID)
+}
+
+func isProjectSourceFileDeletePath(path string) bool {
+	projectID, uploadID := projectSourceFilePathParts(path)
+	return projectID != "" && uploadID != ""
 }
 
 func matchStoryGraphPath(kind string) func(string) bool {
@@ -2287,6 +2325,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleCompleteUpload(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/source-files"):
 		s.handleListSourceFiles(response, request)
+	case request.Method == http.MethodDelete && isProjectSourceFileDeletePath(request.URL.Path):
+		s.handleDeleteSourceFile(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/assets/facets"):
 		s.handleListAssetFacets(response, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/assets"):
@@ -4377,6 +4417,36 @@ func (s *Server) handleListSourceFiles(response http.ResponseWriter, request *ht
 	writeJSON(response, http.StatusOK, listResponse[sourcefiles.Record]{Items: items})
 }
 
+func (s *Server) handleDeleteSourceFile(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID, uploadID := projectSourceFilePathParts(request.URL.Path)
+	if projectID == "" || uploadID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project source file route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
+	if !sourcefiles.IsConfigured(s.sourceFileStore) {
+		writeSourceFileError(response, request, sourcefiles.NewAppError("SOURCE_FILE_BACKEND_UNCONFIGURED", "source file backend is not configured"))
+		return
+	}
+	err := s.sourceFileStore.DeleteSourceFile(request.Context(), sourcefiles.DeleteInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		UploadID:  uploadID,
+	})
+	if err != nil {
+		writeSourceFileError(response, request, err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListAssets(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -4391,16 +4461,38 @@ func (s *Server) handleListAssets(response http.ResponseWriter, request *http.Re
 	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
-	items, err := s.assetReader.ListAssets(request.Context(), assets.ListAssetsInput{
+	limit := 0
+	if rawLimit := strings.TrimSpace(request.URL.Query().Get("limit")); rawLimit != "" {
+		parsedLimit, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "assets limit must be an integer", nil)
+			return
+		}
+		limit = parsedLimit
+	}
+	offset, ok := queryOffset(response, request, "assets offset must be a non-negative integer")
+	if !ok {
+		return
+	}
+	page, err := s.assetReader.ListAssets(request.Context(), assets.ListAssetsInput{
 		TenantID:  tenantID,
 		ProjectID: projectID,
+		Limit:     limit,
+		Offset:    offset,
 	})
 	if err != nil {
 		code := assets.ErrorCode(err)
 		writeError(response, request, statusForAppCode(code), code, assetOwnerPreflightPublicErrorMessage(code), nil)
 		return
 	}
-	writeJSON(response, http.StatusOK, listResponse[assets.Record]{Items: items})
+	writeJSON(response, http.StatusOK, assetListResponse{
+		Items:         page.Items,
+		Offset:        page.Offset,
+		AppliedLimit:  page.AppliedLimit,
+		ReturnedCount: page.ReturnedCount,
+		HasMore:       page.HasMore,
+		NextOffset:    page.NextOffset,
+	})
 }
 
 func (s *Server) handleListAssetFacets(response http.ResponseWriter, request *http.Request) {
