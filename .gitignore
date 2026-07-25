@@ -10,6 +10,8 @@ Thumbs.db
 # Local agent/tool settings
 .claude/settings.local.json
 .claude/*.local.json
+.claude/launch.json
+**/.claude/launch.json
 .codex/
 
 # Python
@@ -51,6 +53,7 @@ backend/logs/
 
 # Active Next.js frontend build
 apps/web/.next-dev/
+apps/web/next-env.d.ts
 
 # Local Playwright browser install links
 .playwright-browsers/
