@@ -8,6 +8,12 @@
  *  - Seed event:  apps/api/internal/workflows/workflow_events.go (WorkflowEvent)
  */
 
+export type SegmentCoverage = {
+  total_segment_count: number;
+  succeeded_segment_count: number;
+  failed_segment_ids: string[];
+};
+
 export type ProjectOverview = {
   project_id: string;
   status: string;
@@ -22,6 +28,9 @@ export type ProjectOverview = {
   ready_entity_count: number;
   ready_relationship_count: number;
   ready_world_rule_count: number;
+  total_segment_count: number;
+  succeeded_segment_count: number;
+  failed_segment_ids: string[];
   asset_count: number;
   graph_node_count: number;
   graph_edge_count: number;
@@ -44,6 +53,7 @@ export type ReadinessSnapshot = {
   ready_entity_count: number;
   ready_relationship_count: number;
   ready_world_rule_count: number;
+  coverage?: SegmentCoverage;
   created_at: string;
   updated_at: string;
 };

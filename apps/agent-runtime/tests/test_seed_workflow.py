@@ -2670,6 +2670,7 @@ def test_postgres_seed_asset_indexer_projects_canon_into_assets_and_search() -> 
             {"relationship_asset_count": 1},
             {"world_rule_asset_count": 3},
             {"plot_thread_asset_count": 1},
+            {"asset_link_count": 2},
             {"search_document_count": 7},
         ]
     )
@@ -2681,11 +2682,12 @@ def test_postgres_seed_asset_indexer_projects_canon_into_assets_and_search() -> 
         "status": "completed",
         "asset_index_batch_id": "seed-assets:run-1",
         "indexed_asset_count": 7,
+        "asset_link_count": 2,
         "search_document_count": 7,
         "embedding_count": 0,
     }
     queries = [query for query, _params in connection.cursor_instance.executed]
-    assert len(queries) == 6
+    assert len(queries) == 7
     assert connection.cursor_instance.executed[0] == (
         "SELECT app_set_tenant_context(%s::uuid, %s::uuid, false)",
         ("tenant-1", "user-1"),
@@ -2709,8 +2711,11 @@ def test_postgres_seed_asset_indexer_projects_canon_into_assets_and_search() -> 
         assert "enabled = CASE" in asset_query
         assert "WHEN assets.lifecycle = 'seed' AND assets.pinned = false THEN true" in asset_query
         assert "ELSE assets.enabled" in asset_query
-    assert "INSERT INTO global_search_index" in queries[5]
-    assert "AND enabled = true" in queries[5]
+    assert "INSERT INTO asset_links" in queries[5]
+    assert "FROM relationships" in queries[5]
+    assert "payload_jsonb->>'entity_id'" in queries[5]
+    assert "INSERT INTO global_search_index" in queries[6]
+    assert "AND enabled = true" in queries[6]
     assert all(params == ("tenant-1", "project-1", "run-1") for _query, params in connection.cursor_instance.executed[1:])
     assert "evidence_text" not in str(result)
     assert "body" not in result
@@ -2725,6 +2730,7 @@ def test_postgres_seed_asset_indexer_rolls_back_on_database_failure() -> None:
             {"relationship_asset_count": 1},
             {"world_rule_asset_count": 3},
             {"plot_thread_asset_count": 1},
+            {"asset_link_count": 2},
             {"search_document_count": 7},
         ],
         fail_on_execute=2,
@@ -2744,6 +2750,7 @@ def test_postgres_seed_asset_indexer_rolls_back_on_database_failure() -> None:
             {"relationship_asset_count": 1},
             {"world_rule_asset_count": 3},
             {"plot_thread_asset_count": 1},
+            {"asset_link_count": 2},
             {"search_document_count": 7},
         ],
         fail_on_commit=True,
@@ -2767,6 +2774,9 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
                 "ready_entity_count": 3,
                 "ready_relationship_count": 2,
                 "ready_world_rule_count": 1,
+                "total_segment_count": 12,
+                "succeeded_segment_count": 11,
+                "failed_segment_ids": ["seg-9"],
             }
         ]
     )
@@ -2781,6 +2791,9 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
         "ready_entity_count": 3,
         "ready_relationship_count": 2,
         "ready_world_rule_count": 1,
+        "total_segment_count": 12,
+        "succeeded_segment_count": 11,
+        "failed_segment_ids": ["seg-9"],
     }
     queries = [query for query, _params in connection.cursor_instance.executed]
     assert connection.cursor_instance.executed[0] == (
@@ -2806,6 +2819,8 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
         "tenant-1", "project-1", "run-1", "run-1",
         "tenant-1", "project-1", "run-1",
         "tenant-1", "project-1", "run-1",
+        "run-1", "tenant-1", "project-1", "run-1",
+        "tenant-1", "project-1", "run-1",
     )
     assert "readiness_report" not in joined_params
     assert "private readiness body" not in joined_params
@@ -2822,6 +2837,9 @@ def test_postgres_project_readiness_updater_accepts_psycopg_tuple_returning_rows
                 3,
                 2,
                 1,
+                12,
+                11,
+                ["seg-9"],
             )
         ]
     )
@@ -2836,6 +2854,9 @@ def test_postgres_project_readiness_updater_accepts_psycopg_tuple_returning_rows
         "ready_entity_count": 3,
         "ready_relationship_count": 2,
         "ready_world_rule_count": 1,
+        "total_segment_count": 12,
+        "succeeded_segment_count": 11,
+        "failed_segment_ids": ["seg-9"],
     }
     assert connection.committed is True
     assert connection.closed is True

@@ -45,6 +45,7 @@ export function OverviewHeader({
       {/* readiness strip */}
       <dl className="flex shrink-0 flex-wrap items-stretch gap-px overflow-hidden rounded-[10px] border border-line bg-line-soft shadow-[0_1px_2px_rgba(23,26,27,0.05)]">
         <Stat label="原文" value={count(overview?.source_file_count)} />
+        <CoverageStat overview={overview} readiness={readiness} />
         <Stat label="实体" value={count(readiness?.ready_entity_count ?? overview?.ready_entity_count)} accent />
         <Stat label="关系" value={count(readiness?.ready_relationship_count ?? overview?.ready_relationship_count)} accent />
         <Stat label="世界规则" value={count(readiness?.ready_world_rule_count ?? overview?.ready_world_rule_count)} accent />
@@ -66,6 +67,43 @@ function Stat({ label, value, accent }: { label: string; value: string; accent?:
         {value}
       </dd>
       <dt className="text-[10px] tracking-[0.08em] text-muted">{label}</dt>
+    </div>
+  );
+}
+
+/**
+ * Whole-book reading coverage: "已拆解 X/Y". Reads from the readiness
+ * snapshot's coverage block when present, else the overview row. Renders "—"
+ * until a snapshot has produced segment counts, and turns red when some
+ * chapters were skipped (succeeded < total) so a partial read can't pass as
+ * complete.
+ */
+function CoverageStat({
+  overview,
+  readiness,
+}: {
+  overview: ProjectOverview | null;
+  readiness: ReadinessSnapshot | null;
+}) {
+  const total = readiness?.coverage?.total_segment_count ?? overview?.total_segment_count;
+  const succeeded =
+    readiness?.coverage?.succeeded_segment_count ?? overview?.succeeded_segment_count;
+  if (total === undefined || total === null || total === 0) {
+    return <Stat label="已拆解" value="—" />;
+  }
+  const done = succeeded ?? 0;
+  const incomplete = done < total;
+  return (
+    <div className="flex min-w-[70px] flex-col items-center gap-0.5 bg-panel px-3 py-1.5">
+      <dd
+        title={incomplete ? `有 ${total - done} 章未拆解成功` : undefined}
+        className={`font-serif text-[16px] font-semibold leading-none ${
+          incomplete ? "text-accent" : "text-ink"
+        }`}
+      >
+        {done}/{total}
+      </dd>
+      <dt className="text-[10px] tracking-[0.08em] text-muted">已拆解</dt>
     </div>
   );
 }

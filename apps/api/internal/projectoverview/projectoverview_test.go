@@ -25,6 +25,9 @@ func TestSQLReaderGetsProjectOverviewWithTenantContextAndPublicColumns(t *testin
 				5,
 				4,
 				3,
+				12,
+				11,
+				`["seg-9"]`,
 				11,
 				9,
 				8,
@@ -74,6 +77,12 @@ func TestSQLReaderGetsProjectOverviewWithTenantContextAndPublicColumns(t *testin
 	}
 	if overview.ReadyAssetCount != 7 || overview.ReadyEntityCount != 5 || overview.ReadyRelationshipCount != 4 || overview.ReadyWorldRuleCount != 3 {
 		t.Fatalf("unexpected readiness counts: %#v", overview)
+	}
+	if overview.TotalSegmentCount != 12 || overview.SucceededSegmentCount != 11 {
+		t.Fatalf("unexpected segment coverage counts: %#v", overview)
+	}
+	if len(overview.FailedSegmentIDs) != 1 || overview.FailedSegmentIDs[0] != "seg-9" {
+		t.Fatalf("unexpected failed segment ids: %#v", overview)
 	}
 	if overview.AssetCount != 11 || overview.GraphNodeCount != 9 || overview.GraphEdgeCount != 8 {
 		t.Fatalf("unexpected asset/graph health counts: %#v", overview)

@@ -3302,6 +3302,7 @@ class PostgresSeedAssetIndexer:
                 relationship_asset_count = self._upsert_relationship_assets(cursor, context)
                 world_rule_asset_count = self._upsert_world_rule_assets(cursor, context)
                 plot_thread_asset_count = self._upsert_plot_thread_assets(cursor, context)
+                asset_link_count = self._upsert_asset_links(cursor, context)
                 search_document_count = self._upsert_search_documents(cursor, context)
             connection.commit()
             return {
@@ -3313,6 +3314,7 @@ class PostgresSeedAssetIndexer:
                     + world_rule_asset_count
                     + plot_thread_asset_count
                 ),
+                "asset_link_count": asset_link_count,
                 "search_document_count": search_document_count,
                 "embedding_count": 0,
             }
@@ -3491,6 +3493,108 @@ class PostgresSeedAssetIndexer:
         )
         return _row_int(cursor.fetchone(), "relationship_asset_count")
 
+    def _upsert_asset_links(self, cursor: Any, context: AgentContext) -> int:
+        """Project seed `relationships` into asset-to-asset links.
+
+        Each relationship connects two entity assets (located via
+        assets.payload_jsonb->>'entity_id' written by _upsert_entity_assets) and
+        the relationship asset itself (located via source_ref = relationship_id).
+        Both link directions materialize as rows so 1-hop expansion from either
+        endpoint finds them. Runs after the entity/relationship upserts in the
+        same transaction so the referenced assets already exist.
+        """
+        cursor.execute(
+            """WITH rels AS (
+                 SELECT relationship_id, tenant_id, project_id,
+                        source_entity_name, target_entity_name, relationship_type,
+                        COALESCE(
+                          NULLIF(btrim(summary), ''),
+                          NULLIF(btrim(metadata_jsonb->>'description'), ''),
+                          source_entity_name || ' 与 ' || target_entity_name || '：' || relationship_type
+                        ) AS link_summary
+                   FROM relationships
+                  WHERE tenant_id = %s
+                    AND project_id = %s
+                    AND source_run_id::text = %s
+               ),
+               resolved AS (
+                 SELECT
+                   rels.tenant_id,
+                   rels.project_id,
+                   rels.relationship_id,
+                   rels.relationship_type,
+                   rels.link_summary,
+                   src_asset.asset_id AS source_asset_id,
+                   tgt_asset.asset_id AS target_asset_id,
+                   rel_asset.asset_id AS relationship_asset_id
+                   FROM rels
+                   JOIN entities src_entity
+                     ON src_entity.tenant_id = rels.tenant_id
+                    AND src_entity.project_id = rels.project_id
+                    AND src_entity.canonical_name = rels.source_entity_name
+                   JOIN assets src_asset
+                     ON src_asset.tenant_id = rels.tenant_id
+                    AND src_asset.project_id = rels.project_id
+                    AND src_asset.source_kind = 'seed_pipeline'
+                    AND src_asset.payload_jsonb->>'entity_id' = src_entity.entity_id::text
+                   JOIN entities tgt_entity
+                     ON tgt_entity.tenant_id = rels.tenant_id
+                    AND tgt_entity.project_id = rels.project_id
+                    AND tgt_entity.canonical_name = rels.target_entity_name
+                   JOIN assets tgt_asset
+                     ON tgt_asset.tenant_id = rels.tenant_id
+                    AND tgt_asset.project_id = rels.project_id
+                    AND tgt_asset.source_kind = 'seed_pipeline'
+                    AND tgt_asset.payload_jsonb->>'entity_id' = tgt_entity.entity_id::text
+                   LEFT JOIN assets rel_asset
+                     ON rel_asset.tenant_id = rels.tenant_id
+                    AND rel_asset.project_id = rels.project_id
+                    AND rel_asset.source_kind = 'seed_pipeline'
+                    AND rel_asset.source_ref = rels.relationship_id::text
+                    AND rel_asset.asset_type = 'relationship'
+               ),
+               links AS (
+                 -- endpoint A → endpoint B
+                 SELECT tenant_id, project_id, source_asset_id AS asset_a_id,
+                        target_asset_id AS asset_b_id, relationship_type AS relation_type,
+                        'a_to_b' AS direction, relationship_id, link_summary
+                   FROM resolved
+                 UNION ALL
+                 -- endpoint A → relationship asset
+                 SELECT tenant_id, project_id, source_asset_id, relationship_asset_id,
+                        relationship_type, 'a_to_b', relationship_id, link_summary
+                   FROM resolved
+                  WHERE relationship_asset_id IS NOT NULL
+                 UNION ALL
+                 -- endpoint B → relationship asset
+                 SELECT tenant_id, project_id, target_asset_id, relationship_asset_id,
+                        relationship_type, 'b_to_a', relationship_id, link_summary
+                   FROM resolved
+                  WHERE relationship_asset_id IS NOT NULL
+               ),
+               upserted AS (
+                 INSERT INTO asset_links (
+                   tenant_id, project_id, asset_a_id, asset_b_id,
+                   relation_type, direction, source_kind, source_ref, summary
+                 )
+                 SELECT tenant_id, project_id, asset_a_id, asset_b_id,
+                        relation_type, direction, 'seed_pipeline', relationship_id::text, link_summary
+                   FROM links
+                  WHERE asset_a_id <> asset_b_id
+                 ON CONFLICT (tenant_id, project_id, asset_a_id, asset_b_id, relation_type)
+                 DO UPDATE SET
+                   direction = EXCLUDED.direction,
+                   summary = EXCLUDED.summary,
+                   source_kind = EXCLUDED.source_kind,
+                   source_ref = EXCLUDED.source_ref,
+                   updated_at = now()
+                 RETURNING asset_link_id
+               )
+               SELECT count(*)::int AS asset_link_count FROM upserted""",
+            (context.tenant_id, context.project_id, context.run_id),
+        )
+        return _row_int(cursor.fetchone(), "asset_link_count")
+
     def _upsert_world_rule_assets(self, cursor: Any, context: AgentContext) -> int:
         cursor.execute(
             """WITH upserted AS (
@@ -3653,7 +3757,7 @@ class PostgresSeedAssetIndexer:
                    asset_id::text,
                    asset_type,
                    title,
-                   COALESCE(summary, content_text, title),
+                   btrim(COALESCE(summary, '') || E'\n' || COALESCE(content_text, '')),
                    tags_jsonb,
                    jsonb_build_object(
                      'asset_id', asset_id::text,
@@ -3746,7 +3850,40 @@ class PostgresProjectReadinessUpdater:
                              WHERE tenant_id = %s
                                AND project_id = %s
                                AND run_id::text = %s
-                           ) AS ready_world_rule_count
+                           ) AS ready_world_rule_count,
+                           (
+                             SELECT count(*)::int
+                             FROM text_segments
+                             WHERE tenant_id = %s
+                               AND project_id = %s
+                               AND run_id::text = %s
+                           ) AS total_segment_count,
+                           (
+                             SELECT count(DISTINCT reading_note.segment_id)::int
+                             FROM reading_segment_notes AS reading_note
+                             JOIN text_segments AS segment
+                               ON segment.tenant_id = reading_note.tenant_id
+                              AND segment.segment_id = reading_note.segment_id
+                             WHERE reading_note.tenant_id = %s
+                               AND reading_note.project_id = %s
+                               AND reading_note.run_id::text = %s
+                           ) AS succeeded_segment_count
+                       ),
+                       coverage AS (
+                         SELECT
+                           COALESCE(
+                             jsonb_agg(segment.segment_id::text ORDER BY segment.segment_order)
+                               FILTER (WHERE reading_note.segment_id IS NULL),
+                             '[]'::jsonb
+                           ) AS failed_segment_ids
+                         FROM text_segments AS segment
+                         LEFT JOIN reading_segment_notes AS reading_note
+                           ON reading_note.tenant_id = segment.tenant_id
+                          AND reading_note.segment_id = segment.segment_id
+                          AND reading_note.run_id::text = %s
+                         WHERE segment.tenant_id = %s
+                           AND segment.project_id = %s
+                           AND segment.run_id::text = %s
                        )
                        INSERT INTO project_readiness_snapshots (
                          tenant_id, project_id, run_id,
@@ -3758,8 +3895,12 @@ class PostgresProjectReadinessUpdater:
                          %s, %s, %s,
                          ready_asset_count, ready_entity_count,
                          ready_relationship_count, ready_world_rule_count,
-                         '{}'::jsonb
-                       FROM readiness_counts
+                         jsonb_build_object(
+                           'total_segment_count', readiness_counts.total_segment_count,
+                           'succeeded_segment_count', readiness_counts.succeeded_segment_count,
+                           'failed_segment_ids', coverage.failed_segment_ids
+                         )
+                       FROM readiness_counts, coverage
                        ON CONFLICT (tenant_id, project_id, run_id)
                        DO UPDATE SET
                          ready_asset_count = EXCLUDED.ready_asset_count,
@@ -3773,7 +3914,10 @@ class PostgresProjectReadinessUpdater:
                          ready_asset_count,
                          ready_entity_count,
                          ready_relationship_count,
-                         ready_world_rule_count""",
+                         ready_world_rule_count,
+                         total_segment_count,
+                         succeeded_segment_count,
+                         failed_segment_ids""",
                     (
                         context.tenant_id,
                         context.project_id,
@@ -3781,6 +3925,13 @@ class PostgresProjectReadinessUpdater:
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
+                        context.run_id,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        context.run_id,
+                        context.tenant_id,
+                        context.project_id,
                         context.run_id,
                         context.tenant_id,
                         context.project_id,
@@ -3803,6 +3954,9 @@ class PostgresProjectReadinessUpdater:
                 "ready_entity_count": _row_int_at(row, "ready_entity_count", 2),
                 "ready_relationship_count": _row_int_at(row, "ready_relationship_count", 3),
                 "ready_world_rule_count": _row_int_at(row, "ready_world_rule_count", 4),
+                "total_segment_count": _row_int_at(row, "total_segment_count", 5),
+                "succeeded_segment_count": _row_int_at(row, "succeeded_segment_count", 6),
+                "failed_segment_ids": _row_string_list_at(row, "failed_segment_ids", 7),
             }
         except LLMFacilityError:
             _rollback_postgres_connection(connection)
@@ -7567,6 +7721,16 @@ def _sequential_schema_failed_result(
     workflow_event_writer: WorkflowEventWriter | None,
     workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
+    # The public message is deliberately generic; the internal `message` carries
+    # the actual ValueError (e.g. "payload_jsonb must be an object"). Record it
+    # so a failed run is diagnosable from the event stream instead of a dead end.
+    _record_failed_sequential_reading_event(
+        context=context,
+        segment_count=segment_count,
+        error_code="SCHEMA_VALIDATION_DETAIL",
+        error_message=message,
+        workflow_event_writer=workflow_event_writer,
+    )
     return _sequential_reading_failed_result(
         base=base,
         context=context,
@@ -11381,6 +11545,27 @@ def _row_int_at(row: Any, key: str, index: int) -> int:
         raise ValueError(f"{key} was not returned")
     value = row.get(key) if isinstance(row, dict) else row[index]
     return _non_negative_int(value, key)
+
+
+def _row_string_list_at(row: Any, key: str, index: int) -> list[str]:
+    """Read a jsonb array column that psycopg may hand back as a native list or
+    as a serialized JSON string, normalizing both to a list of strings."""
+    if row is None:
+        raise ValueError(f"{key} was not returned")
+    value = row.get(key) if isinstance(row, dict) else row[index]
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "null":
+            return []
+        try:
+            value = json.loads(text)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value]
 
 
 def _optional_result_text(result: dict[str, Any], key: str) -> str | None:

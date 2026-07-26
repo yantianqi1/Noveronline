@@ -5,7 +5,7 @@ import { Check, RefreshCw, ScrollText, X } from "lucide-react";
 import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import type { SeedRun, WorkflowEvent } from "@/lib/api/overview-types";
+import type { ReadinessSnapshot, SeedRun, WorkflowEvent } from "@/lib/api/overview-types";
 import { runStatusLabel, type EnrichmentProgress, type SeedProgress } from "@/lib/api/seed";
 
 import { SeedLogModal } from "./seed-log-modal";
@@ -26,6 +26,7 @@ export function SeedProgressPanel({
   progress,
   run,
   events,
+  readiness,
   busy,
   onCancel,
   onRetry,
@@ -34,6 +35,7 @@ export function SeedProgressPanel({
   progress: SeedProgress;
   run: SeedRun | null;
   events: WorkflowEvent[];
+  readiness: ReadinessSnapshot | null;
   busy: boolean;
   onCancel: (runId: string) => void;
   onRetry: (runId: string) => void;
@@ -137,6 +139,11 @@ export function SeedProgressPanel({
       <EnrichmentBlock running={running} progress={progress.agentProfiles} />
       <EnrichmentBlock running={running} progress={progress.archiveCandidates} />
 
+      {/* whole-book coverage: surface skipped chapters instead of letting a
+          partial read pass as complete. Shown once the run is no longer live
+          and the snapshot has produced segment counts. */}
+      {!running && <CoverageBlock readiness={readiness} run={run} onRetry={onRetry} busy={busy} canAct={canAct} />}
+
       {run && (
         <div className="border-t border-line-soft px-7 py-3">
           <p className="text-[11px] tracking-wide text-muted/60">{runStatusLabel(run)} · 分析由 Seed 流水线驱动</p>
@@ -228,6 +235,86 @@ function EnrichmentBlock({
       )}
     </AnimatePresence>
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Whole-book coverage                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Coverage reconciliation strip: how many chapters were read out of the whole
+ * book, and which segment ids were skipped. Rendered only once the run is no
+ * longer live and the readiness snapshot has produced segment counts. A full
+ * read shows a quiet confirmation; a partial read lists the missed segment ids
+ * in red and offers a retry (re-running the seed re-reads missing chapters).
+ */
+function CoverageBlock({
+  readiness,
+  run,
+  onRetry,
+  busy,
+  canAct,
+}: {
+  readiness: ReadinessSnapshot | null;
+  run: SeedRun | null;
+  onRetry: (runId: string) => void;
+  busy: boolean;
+  canAct: boolean;
+}) {
+  const coverage = readiness?.coverage;
+  if (!coverage || coverage.total_segment_count <= 0) return null;
+
+  const total = coverage.total_segment_count;
+  const succeeded = coverage.succeeded_segment_count;
+  const failedIds = coverage.failed_segment_ids ?? [];
+  const complete = succeeded >= total && failedIds.length === 0;
+
+  return (
+    <div className="border-t border-line-soft px-7 py-4">
+      {complete ? (
+        <p className="text-[12.5px] text-muted">
+          全书 <span className="font-medium text-ink">{total}</span> 章已全部拆解完成。
+        </p>
+      ) : (
+        <div className="rounded-[10px] border border-accent/30 bg-accent-wash/40 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-[12.5px] text-ink">
+              已拆解 <span className="font-semibold text-accent">{succeeded}/{total}</span> 章，
+              <span className="text-accent"> {failedIds.length > 0 ? `${failedIds.length} 章` : `部分章节`}</span>
+              没有读成功，这些章的内容不会进资产库。
+            </p>
+            {run && canAct && (
+              <Button variant="outline" size="sm" onClick={() => onRetry(run.run_id)} loading={busy}>
+                <RefreshCw className="size-3.5" aria-hidden />
+                重新分析补齐
+              </Button>
+            )}
+          </div>
+          {failedIds.length > 0 && (
+            <div className="mt-2.5 flex flex-wrap gap-1.5">
+              {failedIds.slice(0, 24).map((id) => (
+                <span
+                  key={id}
+                  className="rounded-[5px] border border-accent/30 bg-panel px-1.5 py-0.5 font-mono text-[10.5px] text-accent"
+                >
+                  {shortSegmentId(id)}
+                </span>
+              ))}
+              {failedIds.length > 24 && (
+                <span className="px-1 py-0.5 text-[10.5px] text-muted">+{failedIds.length - 24} 章</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Segment ids are long; show a readable tail so chapters stay distinguishable. */
+function shortSegmentId(id: string): string {
+  if (id.length <= 12) return id;
+  return `…${id.slice(-8)}`;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -364,6 +364,7 @@ export function OverviewWorkspace({ projectId }: { projectId: string }) {
             progress={progress}
             run={activeRun}
             events={events}
+            readiness={readiness}
             busy={Boolean(activeRun && busyRunId === activeRun.run_id)}
             onCancel={handleCancel}
             onRetry={handleRetry}

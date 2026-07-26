@@ -19,6 +19,7 @@ func TestSQLReaderGetsLatestSnapshotWithTenantContextAndPublicColumns(t *testing
 				5,
 				4,
 				3,
+				`{"total_segment_count":12,"succeeded_segment_count":11,"failed_segment_ids":["seg-9"]}`,
 				"2026-07-07T01:00:00Z",
 				"2026-07-07T01:05:00Z",
 			}},
@@ -39,6 +40,12 @@ func TestSQLReaderGetsLatestSnapshotWithTenantContextAndPublicColumns(t *testing
 	}
 	if snapshot.ReadyAssetCount != 7 || snapshot.ReadyEntityCount != 5 || snapshot.ReadyRelationshipCount != 4 || snapshot.ReadyWorldRuleCount != 3 {
 		t.Fatalf("unexpected readiness counts: %#v", snapshot)
+	}
+	if snapshot.Coverage == nil || snapshot.Coverage.TotalSegmentCount != 12 || snapshot.Coverage.SucceededSegmentCount != 11 {
+		t.Fatalf("unexpected segment coverage: %#v", snapshot)
+	}
+	if len(snapshot.Coverage.FailedSegmentIDs) != 1 || snapshot.Coverage.FailedSegmentIDs[0] != "seg-9" {
+		t.Fatalf("unexpected failed segment ids: %#v", snapshot.Coverage)
 	}
 	if queryer.tenantID != "tenant-123" {
 		t.Fatalf("reader did not set tenant context: %q", queryer.tenantID)

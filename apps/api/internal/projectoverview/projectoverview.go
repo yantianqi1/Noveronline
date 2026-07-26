@@ -3,6 +3,7 @@ package projectoverview
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 )
@@ -26,6 +27,9 @@ type Overview struct {
 	ReadyEntityCount              int    `json:"ready_entity_count"`
 	ReadyRelationshipCount        int    `json:"ready_relationship_count"`
 	ReadyWorldRuleCount           int    `json:"ready_world_rule_count"`
+	TotalSegmentCount             int    `json:"total_segment_count"`
+	SucceededSegmentCount         int    `json:"succeeded_segment_count"`
+	FailedSegmentIDs              []string `json:"failed_segment_ids"`
 	AssetCount                    int    `json:"asset_count"`
 	GraphNodeCount                int    `json:"graph_node_count"`
 	GraphEdgeCount                int    `json:"graph_edge_count"`
@@ -201,6 +205,9 @@ latest_readiness AS (
     ready_entity_count,
     ready_relationship_count,
     ready_world_rule_count,
+    COALESCE((metadata_jsonb->>'total_segment_count')::int, 0) AS total_segment_count,
+    COALESCE((metadata_jsonb->>'succeeded_segment_count')::int, 0) AS succeeded_segment_count,
+    COALESCE(metadata_jsonb->'failed_segment_ids', '[]'::jsonb)::text AS failed_segment_ids,
     updated_at::text AS readiness_updated_at
   FROM project_readiness_snapshots
   WHERE tenant_id::text = $1
@@ -412,6 +419,9 @@ SELECT
   COALESCE(latest_readiness.ready_entity_count, 0)::int AS ready_entity_count,
   COALESCE(latest_readiness.ready_relationship_count, 0)::int AS ready_relationship_count,
   COALESCE(latest_readiness.ready_world_rule_count, 0)::int AS ready_world_rule_count,
+  COALESCE(latest_readiness.total_segment_count, 0)::int AS total_segment_count,
+  COALESCE(latest_readiness.succeeded_segment_count, 0)::int AS succeeded_segment_count,
+  COALESCE(latest_readiness.failed_segment_ids, '[]') AS failed_segment_ids,
   COALESCE(asset_counts.asset_count, 0)::int AS asset_count,
   COALESCE(latest_graph.graph_node_count, 0)::int AS graph_node_count,
   COALESCE(latest_graph.graph_edge_count, 0)::int AS graph_edge_count,
@@ -501,6 +511,7 @@ func scanOverview(rows SQLRows) (Overview, error) {
 		return Overview{}, &AppError{Code: "NOT_FOUND", Message: "project overview not found"}
 	}
 	var overview Overview
+	var failedSegmentIDsRaw string
 	if err := rows.Scan(
 		&overview.ProjectID,
 		&overview.Status,
@@ -515,6 +526,9 @@ func scanOverview(rows SQLRows) (Overview, error) {
 		&overview.ReadyEntityCount,
 		&overview.ReadyRelationshipCount,
 		&overview.ReadyWorldRuleCount,
+		&overview.TotalSegmentCount,
+		&overview.SucceededSegmentCount,
+		&failedSegmentIDsRaw,
 		&overview.AssetCount,
 		&overview.GraphNodeCount,
 		&overview.GraphEdgeCount,
@@ -543,7 +557,20 @@ func scanOverview(rows SQLRows) (Overview, error) {
 	if err := rows.Err(); err != nil {
 		return Overview{}, queryFailed()
 	}
+	overview.FailedSegmentIDs = parseFailedSegmentIDs(failedSegmentIDsRaw)
 	return overview, nil
+}
+
+func parseFailedSegmentIDs(raw string) []string {
+	ids := []string{}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "null" {
+		return ids
+	}
+	if err := json.Unmarshal([]byte(trimmed), &ids); err != nil {
+		return []string{}
+	}
+	return ids
 }
 
 func queryFailed() *AppError {
