@@ -218,6 +218,7 @@ const TOOL_LABELS: Record<string, string> = {
   query_world_rules: "查阅世界规则",
   query_character_profile: "查阅角色档案",
   query_graph_neighbors: "查阅故事图谱",
+  query_asset_relationships: "带出关联资产",
   query_worldline_paths: "查阅世界线走向",
   query_manuscript_context: "查阅现有手稿",
 };

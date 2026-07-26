@@ -327,6 +327,24 @@ migration_marker_present() {
 	          AND table_name = 'entities'
 	          AND column_name = 'description'
 	      )" ;;
+	    0027_*) marker="
+	      to_regclass('public.asset_links') IS NOT NULL
+	      AND EXISTS (
+	        SELECT 1 FROM pg_class
+	        WHERE relname = 'asset_links' AND relrowsecurity AND relforcerowsecurity
+	      )
+	      AND EXISTS (
+	        SELECT 1 FROM pg_policies
+	        WHERE schemaname = 'public'
+	          AND tablename = 'asset_links'
+	          AND policyname = 'tenant_isolation_asset_links'
+	      )
+	      AND has_table_privilege('mirofish_app', 'asset_links', 'SELECT,INSERT,UPDATE')
+	      AND NOT EXISTS (
+	        SELECT 1 FROM information_schema.role_table_grants
+	        WHERE grantee = 'PUBLIC' AND table_schema = 'public'
+	          AND table_name = 'asset_links'
+	      )" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]

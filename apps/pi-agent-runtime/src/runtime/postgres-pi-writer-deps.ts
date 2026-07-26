@@ -485,6 +485,51 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
       const nodes = arrayValue(row.nodes);
       return { node: nodes[0] ?? null, nodes, neighbors: arrayValue(row.neighbors) };
     }
+    case "query_asset_relationships": {
+      // 召回一个、带出一串: 1-hop expansion over asset_links. Only enabled
+      // seed/canon/material assets are visible — the writer lifecycle gate
+      // (candidates/drafts never enter the writing context).
+      const assetId = typeof request.tool_args?.asset_id === "string" ? request.tool_args.asset_id.trim() : "";
+      if (!assetId) {
+        throw new Error("VALIDATION_FAILED: query_asset_relationships requires a non-empty asset_id");
+      }
+      const relationTypes = Array.isArray(request.tool_args?.relation_types)
+        ? request.tool_args.relation_types.filter((v): v is string => typeof v === "string" && v.trim() !== "")
+        : [];
+      const rawTopK = typeof request.tool_args?.top_k === "number" ? Math.floor(request.tool_args.top_k) : 10;
+      const topK = Math.min(25, Math.max(1, rawTopK));
+      const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
+        `SELECT
+           related.asset_id::text,
+           related.asset_type,
+           related.category,
+           related.lifecycle,
+           related.title,
+           related.summary,
+           link.relation_type,
+           CASE
+             WHEN link.asset_a_id = $3::uuid AND link.direction = 'a_to_b' THEN 'outgoing'
+             WHEN link.asset_b_id = $3::uuid AND link.direction = 'a_to_b' THEN 'incoming'
+             WHEN link.asset_a_id = $3::uuid AND link.direction = 'b_to_a' THEN 'incoming'
+             WHEN link.asset_b_id = $3::uuid AND link.direction = 'b_to_a' THEN 'outgoing'
+             ELSE 'undirected'
+           END AS direction
+         FROM asset_links link
+         JOIN assets related
+           ON related.tenant_id = link.tenant_id
+          AND related.project_id = link.project_id
+          AND related.asset_id = CASE WHEN link.asset_a_id = $3::uuid THEN link.asset_b_id ELSE link.asset_a_id END
+          AND related.enabled = TRUE
+          AND related.lifecycle IN ('seed', 'canon', 'material')
+         WHERE link.tenant_id = $1
+           AND link.project_id = $2
+           AND (link.asset_a_id = $3::uuid OR link.asset_b_id = $3::uuid)
+           AND (cardinality($4::text[]) = 0 OR link.relation_type = ANY($4::text[]))
+         ORDER BY related.pinned DESC, related.updated_at DESC
+         LIMIT $5`,
+        [request.tenant_id, request.project_id, assetId, relationTypes, topK]);
+      return { asset_id: assetId, relationships: result.rows };
+    }
     case "query_worldline_paths": {
       const pathIds = Array.isArray(request.worldline_path_ids) ? request.worldline_path_ids.filter(Boolean) : [];
       if (pathIds.length === 0) {
@@ -687,7 +732,8 @@ function parseSearchAssetsArgs(raw: Record<string, unknown> | undefined): Search
     query,
     mode,
     top_k: topK,
-    ...(assetTypes && assetTypes.length > 0 ? { asset_types: assetTypes } : {})
+    ...(assetTypes && assetTypes.length > 0 ? { asset_types: assetTypes } : {}),
+    ...(args.expand_relations === true ? { expand_relations: true } : {})
   };
 }
 
@@ -1190,7 +1236,8 @@ async function executeSearchAssets(
              ts_rank_cd(search_doc.search_vector, websearch_to_tsquery('simple'::regconfig, input.query_text)),
              CASE
                WHEN search_doc.title ILIKE input.keyword_pattern
-                 OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern THEN 0.5
+                 OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
+                 OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern THEN 0.5
                ELSE 0.0
              END
            )::float8 AS keyword_score,
@@ -1224,6 +1271,7 @@ async function executeSearchAssets(
                  search_doc.search_vector @@ websearch_to_tsquery('simple'::regconfig, input.query_text)
                  OR search_doc.title ILIKE input.keyword_pattern
                  OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
+                 OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern
                )
              )
              OR (
@@ -1313,6 +1361,20 @@ async function executeSearchAssets(
     };
   });
 
+  // 召回一个、带出一串: optionally attach each recalled asset's 1-hop relations.
+  let relatedByAsset: Map<string, Record<string, unknown>[]> | undefined;
+  if (args.expand_relations === true && assets.length > 0) {
+    relatedByAsset = await loadRelatedAssets(db, request, assets.map((a) => String(a.asset_id)));
+  }
+  if (relatedByAsset) {
+    for (const asset of assets) {
+      const related = relatedByAsset.get(String(asset.asset_id));
+      if (related && related.length > 0) {
+        (asset as Record<string, unknown>).related = related;
+      }
+    }
+  }
+
   return {
     query: args.query,
     mode_used: resolution.mode,
@@ -1328,6 +1390,57 @@ async function executeSearchAssets(
       channel: "search_assets"
     }))
   };
+}
+
+/**
+ * Batch-load 1-hop related assets for a set of recalled asset ids, grouped by
+ * the originating asset. Same lifecycle gate as query_asset_relationships.
+ */
+async function loadRelatedAssets(
+  db: QueryExecutor,
+  request: ExecuteWriterToolRequest,
+  assetIds: string[]
+): Promise<Map<string, Record<string, unknown>[]>> {
+  const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
+    `SELECT
+       CASE WHEN link.asset_a_id = related.asset_id THEN link.asset_b_id ELSE link.asset_a_id END::text AS origin_asset_id,
+       related.asset_id::text,
+       related.asset_type,
+       related.lifecycle,
+       related.title,
+       related.summary,
+       link.relation_type,
+       CASE
+         WHEN link.asset_a_id = related.asset_id AND link.direction = 'a_to_b' THEN 'incoming'
+         WHEN link.asset_b_id = related.asset_id AND link.direction = 'a_to_b' THEN 'outgoing'
+         WHEN link.asset_a_id = related.asset_id AND link.direction = 'b_to_a' THEN 'outgoing'
+         WHEN link.asset_b_id = related.asset_id AND link.direction = 'b_to_a' THEN 'incoming'
+         ELSE 'undirected'
+       END AS direction
+     FROM asset_links link
+     JOIN assets related
+       ON related.tenant_id = link.tenant_id
+      AND related.project_id = link.project_id
+      AND (link.asset_a_id = related.asset_id OR link.asset_b_id = related.asset_id)
+      AND related.enabled = TRUE
+      AND related.lifecycle IN ('seed', 'canon', 'material')
+     WHERE link.tenant_id = $1
+       AND link.project_id = $2
+       AND (link.asset_a_id = ANY($3::uuid[]) OR link.asset_b_id = ANY($3::uuid[]))
+     ORDER BY related.pinned DESC, related.updated_at DESC`,
+    [request.tenant_id, request.project_id, assetIds]);
+  const map = new Map<string, Record<string, unknown>[]>();
+  for (const row of result.rows) {
+    const origin = typeof row.origin_asset_id === "string" ? row.origin_asset_id : "";
+    if (!origin || origin === row.asset_id) continue;
+    const { origin_asset_id: _drop, ...related } = row;
+    const list = map.get(origin) ?? [];
+    if (list.length < 12) {
+      list.push(related);
+      map.set(origin, list);
+    }
+  }
+  return map;
 }
 
 function safeParseJsonArray(value: unknown): unknown[] {

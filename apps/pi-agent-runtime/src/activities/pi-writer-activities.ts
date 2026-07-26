@@ -81,6 +81,7 @@ export type WriterToolName =
   | "query_world_rules"
   | "query_character_profile"
   | "query_graph_neighbors"
+  | "query_asset_relationships"
   | "query_worldline_paths"
   | "query_manuscript_context"
   | "save_draft_revision";
@@ -92,6 +93,8 @@ export interface SearchAssetsArgs {
   asset_types?: string[];
   top_k?: number;
   mode?: SearchAssetsMode;
+  /** When true, each recalled asset also carries its 1-hop related assets (召回一个、带出一串). */
+  expand_relations?: boolean;
 }
 
 export interface SearchManuscriptArgs {

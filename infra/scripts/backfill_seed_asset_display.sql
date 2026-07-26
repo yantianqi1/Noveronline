@@ -96,7 +96,7 @@ WHERE a.source_kind = 'seed_pipeline'
 UPDATE global_search_index g
 SET
   title = a.title,
-  body = COALESCE(a.summary, a.content_text, a.title),
+  body = btrim(COALESCE(a.summary, '') || E'\n' || COALESCE(a.content_text, '')),
   updated_at = now()
 FROM assets a
 WHERE g.source = 'asset'

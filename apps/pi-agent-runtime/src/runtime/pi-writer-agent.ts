@@ -48,6 +48,15 @@ const searchManuscriptArguments = ObjectSchema(
   { additionalProperties: false }
 );
 
+const queryAssetRelationshipsArguments = ObjectSchema(
+  {
+    asset_id: { type: "string", description: "The recalled asset whose related assets you want to bring out (1-hop expansion)." },
+    relation_types: { type: "array", items: { type: "string" }, description: "Optional relation_type filter such as 师徒, 持有, 宗门." },
+    top_k: { type: "number", description: "How many related assets to return (default 10, max 25)." }
+  },
+  { additionalProperties: false, required: ["asset_id"] }
+);
+
 const fuseRecallArguments = ObjectSchema(
   {
     channels: {
@@ -388,12 +397,13 @@ function parseConsistencyViolations(
   );
 }
 
-function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments | typeof fuseRecallArguments> {
+function writerTool(name: WriterToolName, request: OrchestrateWritingBriefRequest): AgentTool<typeof noArguments | typeof searchAssetsArguments | typeof searchManuscriptArguments | typeof fuseRecallArguments | typeof queryAssetRelationshipsArguments> {
   const parameters =
     name === "search_assets" ? searchAssetsArguments
       : name === "search_manuscript" ? searchManuscriptArguments
         : name === "fuse_recall" ? fuseRecallArguments
-          : noArguments;
+          : name === "query_asset_relationships" ? queryAssetRelationshipsArguments
+            : noArguments;
   return {
     name,
     label: name,
@@ -607,6 +617,7 @@ function toolDescription(name: WriterToolName): string {
     query_world_rules: "Read extracted project world rules as private writing context.",
     query_character_profile: "Read project character identities, aliases, and current state as private writing context.",
     query_graph_neighbors: "Read explicitly selected story graph nodes and their direct relationships.",
+    query_asset_relationships: "Bring out one recalled asset's 1-hop related assets (召回一个、带出一串) — its weapon, sect, allies, the relationship records themselves. Pass the recalled asset_id; returns related assets with relation_type and direction. Use after search_assets lands a character/setting whose connections matter for the passage.",
     query_worldline_paths: "Read explicitly selected saved worldline paths as non-canon references.",
     query_manuscript_context: "Read recently adopted manuscript blocks for continuation context.",
     save_draft_revision: "Reserved runtime persistence tool. The orchestrator must not call it."

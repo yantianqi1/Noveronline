@@ -291,10 +291,21 @@ func TestSQLReaderSearchesSanitizedAssetIndex(t *testing.T) {
 	if !strings.Contains(queryer.query, "asset_versions") || !strings.Contains(queryer.query, "asset_collections") || !strings.Contains(queryer.query, "asset_collection_items") {
 		t.Fatalf("expected version/collection metadata joins, got %s", queryer.query)
 	}
-	for _, forbidden := range []string{"content_text", "body_text", "encrypted_api_key", "api_key", "credential_ref", "object_key", "draft_text", "manuscript_text"} {
+	// The query must never SELECT raw manuscript/prose into results, but it MAY
+	// match against asset.content_text as a keyword fallback (same trust level as
+	// search_doc.body, which was always allowed for matching). We therefore forbid
+	// content_text only as a RETURNED column, not as a match predicate.
+	for _, forbidden := range []string{"body_text", "encrypted_api_key", "api_key", "credential_ref", "object_key", "draft_text", "manuscript_text"} {
 		if strings.Contains(strings.ToLower(queryer.query), forbidden) {
 			t.Fatalf("asset search query selected forbidden field %q: %s", forbidden, queryer.query)
 		}
+	}
+	// content_text may appear only as `COALESCE(asset.content_text, '') ILIKE ...`
+	// (a match predicate); it must not be selected into the result payload.
+	lowerQuery := strings.ToLower(queryer.query)
+	stripped := strings.ReplaceAll(lowerQuery, "coalesce(asset.content_text, '') ilike", "")
+	if strings.Contains(stripped, "content_text") {
+		t.Fatalf("asset search query used content_text outside the keyword-match predicate: %s", queryer.query)
 	}
 	if !reflect.DeepEqual(queryer.args, []any{
 		"tenant-123", "project-123", "灵气", "%灵气%", "keyword", nil, "",

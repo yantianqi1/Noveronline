@@ -886,7 +886,8 @@ candidate_scores AS (
       ts_rank_cd(search_doc.search_vector, websearch_to_tsquery('simple'::regconfig, input.query_text)),
       CASE
         WHEN search_doc.title ILIKE input.keyword_pattern
-          OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern THEN 0.5
+          OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
+          OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern THEN 0.5
         ELSE 0.0
       END
     )::float8 AS keyword_score,
@@ -923,6 +924,7 @@ candidate_scores AS (
           search_doc.search_vector @@ websearch_to_tsquery('simple'::regconfig, input.query_text)
           OR search_doc.title ILIKE input.keyword_pattern
           OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
+          OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern
         )
       )
       OR (

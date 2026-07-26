@@ -71,6 +71,7 @@ export function runtimeContextFromInput(input: WriterRunInput): RuntimeContext {
         "query_world_rules",
         "query_character_profile",
         "query_graph_neighbors",
+        "query_asset_relationships",
         "query_worldline_paths",
         "query_manuscript_context",
         "save_draft_revision"
