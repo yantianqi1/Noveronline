@@ -34,7 +34,9 @@ WHERE tenant_id=$1::uuid AND project_id=$2::uuid`, scope.TenantID, scope.Project
 			&out.ProjectID, &out.TriggerMode, &typesCSV, &updated)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return Settings{ProjectID: scope.ProjectID, TriggerMode: "manual", EnabledAssetTypes: []string{}}, nil
+		// Projects without a settings row default to after_adoption, matching the
+		// project creation paths (registration, projectadmin).
+		return Settings{ProjectID: scope.ProjectID, TriggerMode: "after_adoption", EnabledAssetTypes: []string{}}, nil
 	}
 	if err != nil {
 		return Settings{}, storeFailed(err)
@@ -67,7 +69,7 @@ func (s *SQLStore) PatchSettings(ctx context.Context, scope Scope, patch Setting
 	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO project_asset_distillation_settings(
   tenant_id, project_id, trigger_mode, enabled_asset_types, created_by, updated_by
-) VALUES ($1::uuid,$2::uuid,COALESCE(NULLIF($3,''),'manual'),COALESCE($4::text[],'{}'::text[]),NULLIF($5,'')::uuid,NULLIF($5,'')::uuid)
+) VALUES ($1::uuid,$2::uuid,COALESCE(NULLIF($3,''),'after_adoption'),COALESCE($4::text[],'{}'::text[]),NULLIF($5,'')::uuid,NULLIF($5,'')::uuid)
 ON CONFLICT (tenant_id, project_id) DO UPDATE SET
   trigger_mode = CASE WHEN NULLIF($3,'') IS NULL THEN project_asset_distillation_settings.trigger_mode ELSE EXCLUDED.trigger_mode END,
   enabled_asset_types = CASE WHEN $6 THEN EXCLUDED.enabled_asset_types ELSE project_asset_distillation_settings.enabled_asset_types END,
@@ -192,7 +194,9 @@ FROM project_asset_distillation_settings
 WHERE tenant_id=$1::uuid AND project_id=$2::uuid`, scope.TenantID, scope.ProjectID).Scan(
 		&out.ProjectID, &out.TriggerMode, &typesCSV, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Settings{ProjectID: scope.ProjectID, TriggerMode: "manual", EnabledAssetTypes: []string{}}, nil
+		// Projects without a settings row default to after_adoption, matching the
+		// project creation paths (registration, projectadmin).
+		return Settings{ProjectID: scope.ProjectID, TriggerMode: "after_adoption", EnabledAssetTypes: []string{}}, nil
 	}
 	if err != nil {
 		return Settings{}, err
