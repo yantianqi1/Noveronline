@@ -105,6 +105,8 @@ test("current Go, Pi, and Web consumers cannot drift silently", () => {
     "requested_by",
     "request_id",
     "mode",
+    "chapter_id",
+    "scene_id",
     "instruction",
     "options",
     "workflow_type"
@@ -139,18 +141,13 @@ test("current Go, Pi, and Web consumers cannot drift silently", () => {
     [...WRITER_RUNTIME_EVENT_TYPES]
   );
 
-  const webAPI = parseTypeScript("apps/web/lib/api.ts");
-  assert.deepEqual(typeAliasPropertyNames(webAPI, "WriterRunEvent"), sorted([
+  const webAPI = parseTypeScript("apps/web/lib/api/writer-types.ts");
+  assert.deepEqual(typeAliasPropertyNames(webAPI, "WriterEvent"), sorted([
     "event_id",
-    "run_id",
-    "project_id",
     "sequence",
     "event_type",
     "payload",
     "created_at"
-  ]));
-  assert.deepEqual(returnObjectPropertyNames(webAPI, "decodeWriterRunEvent"), sorted([
-    "event_id", "run_id", "project_id", "sequence", "event_type", "payload", "created_at"
   ]));
 });
 
