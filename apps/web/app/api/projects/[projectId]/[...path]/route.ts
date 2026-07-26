@@ -61,6 +61,8 @@ const PROJECT_PATHS: Record<Method, RegExp[]> = {
     /^worldline\/saved-paths$/,
     // Character console: list interactions
     /^character-interactions$/,
+    // Asset distillation: pending proposal review reads
+    /^asset-proposals$/,
   ],
   POST: [
     /^seed-runs$/,
@@ -172,6 +174,15 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
     toGo: (rest, query) => {
       const m = rest.match(/^worldline-events\/([^/]+)(\/adoptions)?$/)!;
       return `/v1/worldline-events/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
+    },
+  },
+  // Asset distillation proposals mount at the TOP level keyed by candidate id.
+  // /api/projects/{id}/asset-proposals/{candidateId}[/decisions] → /v1/asset-proposals/{candidateId}[/decisions]
+  {
+    prefix: /^asset-proposals\/([^/]+)(\/decisions)?$/,
+    toGo: (rest, query) => {
+      const m = rest.match(/^asset-proposals\/([^/]+)(\/decisions)?$/)!;
+      return `/v1/asset-proposals/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
     },
   },
   // /api/projects/{id}/worldline-goal-starts/{runId} → /v1/worldline-goal-starts/{runId}

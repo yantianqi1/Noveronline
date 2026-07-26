@@ -34,6 +34,7 @@ import { WriterEmpty } from "./writer-empty";
 import { ManuscriptPaper } from "./manuscript-paper";
 import { WriterRail, type ConversationTurn } from "./writer-rail";
 import { WriterComposer } from "./writer-composer";
+import { ProposalRail } from "./proposal-rail";
 
 type LoadState =
   | { status: "loading" }
@@ -87,6 +88,9 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
   // run_ids whose newest run is still streaming — only one at a time, tracked
   // so the composer disables while the agent is working.
   const [activeRunIds, setActiveRunIds] = useState<ReadonlySet<string>>(new Set());
+  // Bumped after each draft adoption so the proposal rail re-fetches — the
+  // adoption enqueues a distillation that lands new candidates a few seconds later.
+  const [proposalRefreshKey, setProposalRefreshKey] = useState(0);
   const messageSeqRef = useRef(0);
 
   const saveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -354,6 +358,10 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
     try {
       await adoptDraft(selection.project_id, selection.tenant_id, csrfToken, draftId, activeChapterId ?? undefined);
       setAdoptedRunIds((prev) => new Set(prev).add(runId));
+      // Distillation runs async (outbox → ~5s dispatch → extraction), so refresh
+      // the proposal rail now and once more shortly after to catch new candidates.
+      setProposalRefreshKey((k) => k + 1);
+      setTimeout(() => setProposalRefreshKey((k) => k + 1), 12_000);
       // The adopted prose is now a trailing manuscript block — reload the
       // chapter's segments so it appears on the canvas as the newest page.
       await loadStructure(selection);
@@ -421,22 +429,34 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
       ) : (
         /* Task state: conversation rail (entry) + manuscript canvas (protagonist) */
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Conversation rail — the single entry to the agent */}
+          {/* Conversation rail — the single entry to the agent, with the
+              proposal review dock underneath: adopted drafts distill into
+              candidate assets that wait here for the author's decision. */}
           <aside className="flex h-full w-[360px] shrink-0 flex-col overflow-hidden border-r border-line bg-paper/40">
-            <WriterRail
-              turns={turns}
-              selection={selection}
-              csrfToken={csrfToken}
-              adoptedRunIds={adoptedRunIds}
-              adoptingDraftId={adoptingDraftId}
-              onAdopt={handleAdopt}
-              onCancelRun={handleCancelRun}
-              onRunSettled={handleRunSettled}
-            />
-            <WriterComposer
-              onSend={handleSend}
-              disabled={!csrfToken || anyLive}
-            />
+            <div className="flex min-h-0 flex-1 flex-col">
+              <WriterRail
+                turns={turns}
+                selection={selection}
+                csrfToken={csrfToken}
+                adoptedRunIds={adoptedRunIds}
+                adoptingDraftId={adoptingDraftId}
+                onAdopt={handleAdopt}
+                onCancelRun={handleCancelRun}
+                onRunSettled={handleRunSettled}
+              />
+              <WriterComposer
+                onSend={handleSend}
+                disabled={!csrfToken || anyLive}
+              />
+            </div>
+            <div className="flex max-h-[42%] min-h-[120px] shrink-0 flex-col">
+              <ProposalRail
+                projectId={projectId}
+                tenantId={selection?.tenant_id ?? ""}
+                csrfToken={csrfToken}
+                refreshKey={proposalRefreshKey}
+              />
+            </div>
           </aside>
 
           {/* Manuscript canvas — the dominant artifact */}
