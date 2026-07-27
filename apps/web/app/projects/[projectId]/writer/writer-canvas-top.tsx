@@ -50,7 +50,7 @@ export function WriterCanvasTop({
       <span aria-hidden className="h-4 w-px bg-line" />
 
       {/* Word count */}
-      <span className="text-[12.5px] tabular-nums text-muted">
+      <span className="text-caption tabular-nums text-muted">
         {wordCount > 0 ? `${wordCount} 字` : "尚未落笔"}
       </span>
 
@@ -60,7 +60,7 @@ export function WriterCanvasTop({
           type="button"
           onClick={onNewChapter}
           disabled={busy}
-          className="flex items-center gap-1.5 rounded-[9px] border border-line bg-panel px-3 py-1.5 text-[12.5px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-panel border border-line bg-panel px-3 py-1.5 text-caption font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
         >
           <FilePlus2 className="size-3.5" aria-hidden />
           新章节
@@ -109,15 +109,15 @@ function ChapterSwitcher({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-[9px] px-2 py-1.5 text-left transition-colors hover:bg-panel"
+        className="flex items-center gap-1.5 rounded-panel px-2 py-1.5 text-left transition-colors hover:bg-panel"
       >
-        <span className="max-w-[140px] truncate font-serif text-[15px] font-semibold text-ink">
+        <span className="max-w-[140px] truncate font-serif text-md font-semibold text-ink">
           {bookTitle}
         </span>
-        <span aria-hidden className="text-muted/60">
+        <span aria-hidden className="text-muted-soft">
           ›
         </span>
-        <span className="max-w-[180px] truncate text-[13.5px] text-ink">
+        <span className="max-w-[180px] truncate text-sm text-ink">
           {activeChapter ? activeChapter.title : "选择章节"}
         </span>
         <ChevronDown
@@ -130,7 +130,7 @@ function ChapterSwitcher({
         <div
           role="listbox"
           aria-label="章节列表"
-          className="absolute left-0 top-full z-20 mt-1.5 w-[280px] overflow-hidden rounded-card border border-line bg-panel shadow-lift"
+          className="absolute left-0 top-full z-20 mt-1.5 w-[280px] overflow-hidden rounded-modal border border-line bg-panel shadow-lift"
         >
           <div className="max-h-[320px] overflow-y-auto py-1.5">
             {chapters.map((chapter) => {
@@ -145,15 +145,15 @@ function ChapterSwitcher({
                     onSelect(chapter.chapter_id);
                     setOpen(false);
                   }}
-                  className={`flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-[13.5px] transition-colors ${
-                    active ? "bg-accent-wash text-accent" : "text-ink hover:bg-paper"
+                  className={`flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm transition-colors ${
+ active ? "bg-accent-wash text-accent" : "text-ink hover:bg-paper"
                   }`}
                 >
                   <span className="w-4 shrink-0">
                     {active ? <Check className="size-3.5" aria-hidden /> : null}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{chapter.title}</span>
-                  <span className="shrink-0 text-[11px] text-muted">
+                  <span className="shrink-0 text-caption text-muted">
                     {chapterStatusLabel(chapter.status)}
                   </span>
                 </button>
@@ -170,11 +170,11 @@ function SaveIndicator({ state }: { state: SaveState }) {
   if (state.kind === "idle") return null;
 
   if (state.kind === "dirty") {
-    return <span className="text-[12.5px] text-muted">未保存的修改…</span>;
+    return <span className="text-caption text-muted">未保存的修改…</span>;
   }
   if (state.kind === "saving") {
     return (
-      <span className="flex items-center gap-1.5 text-[12.5px] text-muted">
+      <span className="flex items-center gap-1.5 text-caption text-muted">
         <Loader2 className="size-3.5 animate-spin" aria-hidden />
         正在保存
       </span>
@@ -182,7 +182,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
   }
   if (state.kind === "saved") {
     return (
-      <span className="flex items-center gap-1.5 text-[12.5px] text-[#3f7a4a]">
+      <span className="flex items-center gap-1.5 text-caption text-success">
         <Check className="size-3.5" aria-hidden />
         已保存
       </span>
@@ -190,7 +190,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
   }
   // conflict | error — honest, never a fake "saved".
   return (
-    <span className="flex max-w-[300px] items-center gap-1.5 text-[12.5px] text-accent" role="alert">
+    <span className="flex max-w-[300px] items-center gap-1.5 text-caption text-accent" role="alert">
       <CloudOff className="size-3.5 shrink-0" aria-hidden />
       <span className="truncate">{state.message}</span>
     </span>

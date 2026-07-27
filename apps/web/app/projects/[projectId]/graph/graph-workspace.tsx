@@ -429,8 +429,8 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
   if (state.status === "error") {
     return (
       <div className="flex min-h-[70vh] flex-col items-center justify-center bg-paper px-8 text-center">
-        <h2 className="font-serif text-[22px] font-semibold text-ink">图谱暂时打不开</h2>
-        <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">{state.message}</p>
+        <h2 className="font-serif text-xl font-semibold text-ink">图谱暂时打不开</h2>
+        <p className="mt-2 max-w-[380px] text-sm text-muted">{state.message}</p>
       </div>
     );
   }
@@ -450,13 +450,13 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-paper">
       {/* Header — compact栏目条 */}
       <div className="relative z-10 flex h-[52px] shrink-0 items-center gap-3 border-b border-line-soft bg-paper/80 px-5 backdrop-blur-sm">
-        <span className="flex shrink-0 items-center gap-1.5 rounded-[6px] border border-accent/30 bg-accent-wash px-2 py-1 text-[10.5px] font-medium tracking-[0.22em] text-accent">
+        <span className="flex shrink-0 items-center gap-1.5 rounded-control border border-accent/30 bg-accent-wash px-2 py-1 text-caption font-medium tracking-label text-muted">
           <Network className="size-3" aria-hidden />
-          角 色 图 谱
+          角色图谱
         </span>
-        <h1 className="shrink-0 font-serif text-[18px] font-semibold leading-none text-ink">人物关系图谱</h1>
+        <h1 className="shrink-0 font-serif text-lg font-semibold text-ink">人物关系图谱</h1>
         <span aria-hidden className="h-4 w-px shrink-0 bg-line" />
-        <p className="min-w-0 flex-1 truncate text-[12.5px] leading-none text-muted">
+        <p className="min-w-0 flex-1 truncate text-caption text-muted">
           {building
             ? "正在构建新的图谱…"
             : `${snapshot.node_count} 个存在 · ${snapshot.edge_count} 条关系 · 快照 v${snapshot.version}`}
@@ -467,7 +467,7 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
           type="button"
           onClick={() => void handleBuild()}
           disabled={building || buildPhase === "starting"}
-          className="flex shrink-0 items-center gap-1.5 rounded-[9px] border border-line bg-panel px-3 py-1.5 text-[12.5px] font-medium text-ink shadow-[0_1px_3px_rgba(23,26,27,0.05)] transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex shrink-0 items-center gap-1.5 rounded-panel border border-line bg-panel px-3 py-1.5 text-caption font-medium text-ink shadow-hairline transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
         >
           {building || buildPhase === "starting" ? (
             <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -479,7 +479,7 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
 
         {/* Search */}
         <div className="relative w-[280px] shrink-0">
-          <div className="flex items-center gap-2 rounded-[10px] border border-line bg-panel px-3 py-1.5 shadow-[0_1px_3px_rgba(23,26,27,0.05)] transition-colors focus-within:border-accent/50">
+          <div className="flex items-center gap-2 rounded-panel border border-line bg-panel px-3 py-1.5 shadow-hairline transition-colors focus-within:border-accent/50">
             <Search className="size-3.5 shrink-0 text-muted" aria-hidden />
             <input
               value={query}
@@ -489,7 +489,7 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
               }}
               onFocus={() => setSearchActive(true)}
               placeholder="搜索角色、组织、地点…"
-              className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-muted/60"
+              className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-muted-soft"
             />
             {query ? (
               <button
@@ -510,7 +510,7 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className="absolute inset-x-0 top-full z-20 mt-2 overflow-hidden rounded-[12px] border border-line bg-panel shadow-panel"
+                className="absolute inset-x-0 top-full z-20 mt-2 overflow-hidden rounded-modal border border-line bg-panel shadow-panel"
               >
                   {searchMatches.length > 0 ? (
                     searchMatches.map((node) => {
@@ -524,16 +524,16 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
                             className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-accent-wash"
                           >
                             <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: visual.color }} />
-                            <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                            <span className="min-w-0 flex-1 truncate text-sm text-ink">
                               {concept ? concept.displayTitle : node.title}
                             </span>
-                            <span className="shrink-0 text-[11px] text-muted">{visual.label}</span>
+                            <span className="shrink-0 text-caption text-muted">{visual.label}</span>
                           </button>
                         </li>
                       );
                     })
                   ) : (
-                    <li className="px-3.5 py-3 text-[12.5px] text-muted">没有匹配「{query}」的星点。</li>
+                    <li className="px-3.5 py-3 text-caption text-muted">没有匹配「{query}」的星点。</li>
                   )}
               </motion.ul>
             )}
@@ -558,15 +558,15 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
         <div className="relative min-w-0 flex-1">
           {visibleNodes.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-              <p className="font-serif text-[18px] text-ink">这片星野暂时没有星星</p>
-              <p className="mt-1.5 max-w-[320px] text-[13px] text-muted">
+              <p className="font-serif text-lg text-ink">这片星野暂时没有星星</p>
+              <p className="mt-1.5 max-w-[320px] text-sm text-muted">
                 {hidden.size > 0 ? "所有图层都被藏起来了，点「全部显示」再把它们点亮。" : "图谱已就绪，但这个视口里还没有节点。"}
               </p>
               {hidden.size > 0 ? (
                 <button
                   type="button"
                   onClick={handleShowAll}
-                  className="mt-5 rounded-[10px] border border-line bg-panel px-4 py-2 text-[13px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+                  className="mt-5 rounded-panel border border-line bg-panel px-4 py-2 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
                 >
                   全部显示
                 </button>
@@ -592,7 +592,7 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               onClick={handleReset}
-              className="absolute bottom-5 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-line bg-panel/90 px-4 py-2 text-[12.5px] font-medium text-ink shadow-panel backdrop-blur-sm transition-colors hover:border-accent/50 hover:text-accent"
+              className="absolute bottom-5 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-line bg-panel/90 px-4 py-2 text-caption font-medium text-ink shadow-panel backdrop-blur-sm transition-colors hover:border-accent/50 hover:text-accent"
             >
               <Maximize2 className="size-3.5" aria-hidden />
               回到全景
@@ -600,7 +600,7 @@ export function GraphWorkspace({ projectId }: { projectId: string }) {
           ) : null}
 
           {/* Hint */}
-          <div className="pointer-events-none absolute bottom-5 right-5 z-10 text-[11px] tracking-wide text-muted/60">
+          <div className="pointer-events-none absolute bottom-5 right-5 z-10 text-caption tracking-wide text-muted-soft">
             拖拽平移 · 滚轮缩放 · 点击星点查看档案
           </div>
         </div>
@@ -631,14 +631,14 @@ function GraphLoading() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-paper">
       <div className="border-b border-line-soft px-8 pb-4 pt-6">
-        <div className="h-3 w-20 animate-pulse rounded bg-paper-deep" />
-        <div className="mt-3 h-7 w-52 animate-pulse rounded bg-paper-deep" />
-        <div className="mt-2 h-4 w-64 animate-pulse rounded bg-paper-deep" />
+        <div className="h-3 w-20 animate-pulse rounded-control bg-paper-deep" />
+        <div className="mt-3 h-7 w-52 animate-pulse rounded-control bg-paper-deep" />
+        <div className="mt-2 h-4 w-64 animate-pulse rounded-control bg-paper-deep" />
       </div>
       <div className="flex flex-1 items-center justify-center">
         <div className="flex flex-col items-center gap-4 text-muted">
           <Loader2 className="size-7 animate-spin text-gold" aria-hidden />
-          <p className="text-[13px]">正在点亮星图…</p>
+          <p className="text-sm">正在点亮星图…</p>
         </div>
       </div>
     </div>
@@ -657,11 +657,11 @@ function GraphEmpty({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-paper">
       <div className="border-b border-line-soft px-8 pb-4 pt-6">
-        <p className="mb-1 flex items-center gap-2 text-[11px] font-medium tracking-[0.28em] text-accent">
+        <p className="mb-1 flex items-center gap-2 text-caption font-medium tracking-label text-muted">
           <Network className="size-3.5" aria-hidden />
-          角 色 图 谱
+          角色图谱
         </p>
-        <h1 className="font-serif text-[26px] font-semibold leading-tight text-ink">人物关系图谱</h1>
+        <h1 className="font-serif text-display font-semibold leading-tight text-ink">人物关系图谱</h1>
       </div>
       <div className="flex flex-1 items-center justify-center px-8 py-16">
         <div className="flex max-w-md flex-col items-center text-center">
@@ -669,7 +669,7 @@ function GraphEmpty({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="grid size-16 place-items-center rounded-[16px] bg-accent-wash text-accent"
+            className="grid size-16 place-items-center rounded-modal bg-accent-wash text-accent"
           >
             <Network className="size-7" aria-hidden />
           </motion.span>
@@ -677,7 +677,7 @@ function GraphEmpty({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.08, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="mt-6 font-serif text-[22px] font-semibold text-ink"
+            className="mt-6 font-serif text-xl font-semibold text-ink"
           >
             {building ? "正在把角色连成一片星图" : "这个故事的图谱还没亮起"}
           </motion.h2>
@@ -685,7 +685,7 @@ function GraphEmpty({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.16, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="mt-2 text-[13.5px] leading-relaxed text-muted"
+            className="mt-2 text-sm leading-relaxed text-muted"
           >
             {building
               ? "图谱构建需要一点时间。角色与他们的羁绊连好之后，会自动亮在这里。"
@@ -701,12 +701,12 @@ function GraphEmpty({
               type="button"
               onClick={onBuild}
               disabled={building}
-              className="flex items-center gap-2 rounded-[10px] bg-accent px-5 py-2.5 text-[13.5px] font-medium text-white shadow-[0_6px_16px_rgba(23,26,27,0.12)] transition-all hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
+              className="flex items-center gap-2 rounded-panel bg-accent px-5 py-2.5 text-sm font-medium text-panel shadow-lift transition-all hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {building ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Network className="size-4" aria-hidden />}
               {building ? "构建中…" : "构建故事图谱"}
             </button>
-            {error ? <p className="text-[12.5px] text-[#b4542a]">{error}</p> : null}
+            {error ? <p className="text-caption text-warning">{error}</p> : null}
           </motion.div>
         </div>
       </div>
@@ -717,14 +717,14 @@ function GraphEmpty({
 function NoSelection({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex min-h-[70vh] flex-col items-center justify-center bg-paper px-8 text-center">
-      <h2 className="font-serif text-[22px] font-semibold text-ink">请先回到书架进入项目</h2>
-      <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">
+      <h2 className="font-serif text-xl font-semibold text-ink">请先回到书架进入项目</h2>
+      <p className="mt-2 max-w-[380px] text-sm text-muted">
         图谱需要知道你正在看哪部作品的世界。回到书架，挑一部作品再进来。
       </p>
       <button
         type="button"
         onClick={onBack}
-        className="mt-6 rounded-[10px] border border-line bg-panel px-5 py-2.5 text-[13.5px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+        className="mt-6 rounded-panel border border-line bg-panel px-5 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
       >
         返回书架
       </button>

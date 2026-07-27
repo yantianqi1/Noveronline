@@ -854,7 +854,7 @@ func (r *SQLReader) SearchAssets(ctx context.Context, input SearchAssetsInput) (
     $1::text AS tenant_id,
     $2::text AS project_id,
     $3::text AS query_text,
-    $4::text AS keyword_pattern,
+    $4::text[] AS keyword_patterns,
     $5::text AS search_mode,
     CASE WHEN $5::text = 'keyword' THEN NULL::vector ELSE $6::vector END AS query_embedding,
     $7::text AS embedding_model,
@@ -885,14 +885,18 @@ candidate_scores AS (
     GREATEST(
       ts_rank_cd(search_doc.search_vector, websearch_to_tsquery('simple'::regconfig, input.query_text)),
       CASE
-        WHEN search_doc.title ILIKE input.keyword_pattern
-          OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
-          OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern THEN 0.5
-        ELSE 0.0
+        WHEN cardinality(input.keyword_patterns) = 0 THEN 0.0
+        ELSE 0.5 * (
+          SELECT COUNT(*)::float8
+            FROM unnest(input.keyword_patterns) AS term(pattern)
+           WHERE search_doc.title ILIKE term.pattern
+              OR COALESCE(search_doc.body, '') ILIKE term.pattern
+              OR COALESCE(asset.content_text, '') ILIKE term.pattern
+        ) / cardinality(input.keyword_patterns)
       END
     )::float8 AS keyword_score,
     CASE
-      WHEN input.search_mode = 'keyword' THEN 0.0
+      WHEN input.search_mode = 'keyword' OR embedding.embedding_id IS NULL THEN 0.0
       ELSE GREATEST(0.0, LEAST(1.0, 1.0 - (embedding.embedding <=> input.query_embedding)))
     END::float8 AS vector_score
   FROM global_search_index search_doc
@@ -919,12 +923,16 @@ candidate_scores AS (
     AND (input.pinned IS NULL OR asset.pinned = input.pinned)
     AND (
       (
-        input.search_mode = 'keyword'
+        input.search_mode IN ('keyword', 'hybrid')
         AND (
           search_doc.search_vector @@ websearch_to_tsquery('simple'::regconfig, input.query_text)
-          OR search_doc.title ILIKE input.keyword_pattern
-          OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
-          OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern
+          OR EXISTS (
+            SELECT 1
+              FROM unnest(input.keyword_patterns) AS term(pattern)
+             WHERE search_doc.title ILIKE term.pattern
+                OR COALESCE(search_doc.body, '') ILIKE term.pattern
+                OR COALESCE(asset.content_text, '') ILIKE term.pattern
+          )
         )
       )
       OR (
@@ -1032,7 +1040,7 @@ LIMIT $14`
 		strings.TrimSpace(input.TenantID),
 		strings.TrimSpace(input.ProjectID),
 		query,
-		"%"+query+"%",
+		searchLikePatterns(TokenizeSearchQuery(query)),
 		mode,
 		embeddingLiteral,
 		embeddingModel,

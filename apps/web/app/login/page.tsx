@@ -62,44 +62,44 @@ export default function LoginPage() {
         <div className="relative w-full max-w-[400px] animate-fade-up">
           {/* compact brand for small screens (cover hidden) */}
           <div className="mb-8 flex items-center gap-3 lg:hidden">
-            <span className="grid size-11 place-items-center rounded-[12px] bg-accent text-white shadow-[0_8px_20px_-6px_rgba(143,33,27,0.6)]">
+            <span className="grid size-11 place-items-center rounded-modal bg-accent text-panel shadow-accent">
               <Feather className="size-5" aria-hidden />
             </span>
             <div>
-              <p className="font-brush text-[24px] leading-tight tracking-wide text-ink">
+              <p className="font-brush text-xl leading-tight tracking-wide text-ink">
                 墨鱼小说
               </p>
-              <p className="text-[12px] tracking-[0.18em] text-muted">长篇小说工作台</p>
+              <p className="text-caption tracking-label text-muted">长篇小说工作台</p>
             </div>
           </div>
 
           {/* floating paper card */}
-          <div className="rounded-card border border-line bg-panel p-7 shadow-panel sm:p-9">
+          <div className="rounded-modal border border-line bg-panel p-7 shadow-panel sm:p-9">
             <header className="mb-8">
-              <p className="mb-2 text-[12px] font-medium tracking-[0.3em] text-accent">
-                登 录
+              <p className="mb-2 text-caption font-medium tracking-label text-muted">
+                登录
               </p>
-              <h2 className="font-brush text-[34px] leading-snug text-ink">
+              <h2 className="font-brush text-display leading-snug text-ink">
                 欢迎回来
               </h2>
-              <p className="mt-2 text-[14px] leading-relaxed text-muted">
+              <p className="mt-2 text-base leading-relaxed text-muted">
                 继续你的写作与故事世界。
               </p>
             </header>
 
             <LoginForm />
 
-            <div className="mt-7 flex items-center gap-3 text-[12px] text-muted">
+            <div className="mt-7 flex items-center gap-3 text-caption text-muted">
               <span className="h-px flex-1 bg-line-soft" />
               <span>还没有账号？</span>
               <span className="h-px flex-1 bg-line-soft" />
             </div>
-            <p className="mt-3 text-center text-[13px] text-muted">
+            <p className="mt-3 text-center text-sm text-muted">
               请联系你的工作区管理员开通，或使用邀请链接加入。
             </p>
           </div>
 
-          <footer className="mt-7 flex items-center justify-center gap-2 text-[12px] text-muted/80">
+          <footer className="mt-7 flex items-center justify-center gap-2 text-caption text-muted">
             <span>为长篇小说创作者而设的工作台</span>
           </footer>
         </div>

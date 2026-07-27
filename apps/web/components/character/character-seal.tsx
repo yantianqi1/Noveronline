@@ -14,10 +14,10 @@ type SealTone = "vermilion" | "ink" | "gold";
 type SealSize = "sm" | "md" | "lg" | "xl";
 
 const SIZE_CLASSES: Record<SealSize, string> = {
-  sm: "size-7 text-[15px] rounded-[4px]",
-  md: "size-9 text-[18px] rounded-[5px]",
-  lg: "size-12 text-[24px] rounded-[6px]",
-  xl: "size-16 text-[34px] rounded-[7px]",
+  sm: "size-7 text-md rounded-control",
+  md: "size-9 text-lg rounded-control",
+  lg: "size-12 text-xl rounded-control",
+  xl: "size-16 text-display rounded-control",
 };
 
 const TONE_CLASSES: Record<SealTone, string> = {
@@ -55,7 +55,7 @@ export function CharacterSeal({
       aria-label={title ?? name}
       title={title ?? name}
       className={cn(
-        "grid shrink-0 select-none place-items-center font-brush leading-none",
+        "grid shrink-0 select-none place-items-center font-brush",
         SIZE_CLASSES[size],
         TONE_CLASSES[tone],
         className,

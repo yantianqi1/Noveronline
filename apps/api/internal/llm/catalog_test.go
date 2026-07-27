@@ -516,6 +516,18 @@ func TestCredentialDecryptorRequiresConfiguredKeyAndDecryptsStoredEnvelope(t *te
 	}
 }
 
+func TestHealthCapabilityDiscoveryDoesNotOverwriteOperatorFlags(t *testing.T) {
+	queryer := &recordingSQLQueryer{rows: &fakeSQLRows{}}
+	store := NewSQLChannelStore(SQLChannelStoreConfig{Queryer: queryer})
+
+	if err := store.UpgradeModelCapabilities(context.Background(), "tenant-1", "channel-1", "model-1", true, true); err != nil {
+		t.Fatalf("capability discovery: %v", err)
+	}
+	if queryer.query != "" {
+		t.Fatalf("health discovery mutated operator-managed capability flags: %s", queryer.query)
+	}
+}
+
 func TestDisabledCatalogReaderFailsExplicitly(t *testing.T) {
 	reader := NewDisabledCatalogReader()
 

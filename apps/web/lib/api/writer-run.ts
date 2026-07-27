@@ -29,6 +29,15 @@ export type RunCitation = {
   title: string;
   lifecycle: string;
   channel: string;
+  /** Relevance score when the recall channel reports one. */
+  score?: number;
+};
+
+/** The retrieval planner's outcome — did the run plan its recall up front? */
+export type RetrievalPlanSummary = {
+  status: "completed" | "degraded" | "skipped";
+  intent?: string;
+  queryCount?: number;
 };
 
 /** A canon contradiction the consistency checker found in the draft. */
@@ -50,6 +59,10 @@ export type WriterRunState = {
   citations: RunCitation[];
   /** True when semantic recall degraded to keyword-only (embeddings unavailable). */
   citationsDegraded: boolean;
+  /** The retrieval planner's outcome for this run, when one ran. */
+  retrievalPlan: RetrievalPlanSummary | null;
+  /** Recall items dropped by the token-budget packer (0 = nothing trimmed). */
+  contextTrimmedItems: number;
   /** Post-generation consistency violations (canon contradictions), if any. */
   consistencyViolations: ConsistencyViolation[];
   /** Concatenated candidate prose from writer.token events. */
@@ -75,6 +88,8 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
   const citations: RunCitation[] = [];
   const seenCitationIds = new Set<string>();
   let citationsDegraded = false;
+  let retrievalPlan: RetrievalPlanSummary | null = null;
+  let contextTrimmedItems = 0;
   const consistencyViolations: ConsistencyViolation[] = [];
 
   // Process in stream order.
@@ -96,17 +111,20 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
         if (!TERMINAL.has(phase)) phase = "orchestrating";
         break;
       }
-      case "writer.tool.completed":
-      case "writer.tool.failed": {
+      case "writer.tool.completed": {
         const callId = toolCallId(payload, 0);
         const index = stepIndexByCallId.get(callId);
+        // The backend never emits a separate failed event: a failed tool call
+        // arrives as writer.tool.completed with is_error/status "failed".
+        const failed = payload.is_error === true || payload.status === "failed";
         if (index !== undefined) {
           steps[index] = {
             ...steps[index],
-            status: type === "writer.tool.failed" ? "error" : "completed",
+            status: failed ? "error" : "completed",
           };
         }
-        if (type === "writer.tool.completed" && payload.tool_name === "search_assets") {
+        if (failed) break;
+        if (payload.tool_name === "search_assets") {
           const result = (payload.result ?? {}) as Record<string, unknown>;
           if (result.degraded === true) citationsDegraded = true;
           for (const item of Array.isArray(result.items) ? result.items : []) {
@@ -119,13 +137,33 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
               title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
               lifecycle: typeof c.lifecycle === "string" ? c.lifecycle : "",
               channel: typeof c.channel === "string" ? c.channel : "search_assets",
+              ...(typeof c.score === "number" ? { score: c.score } : {}),
+            });
+          }
+        }
+        // Prior-prose recall (foreshadowing callbacks) is grounding evidence
+        // too — surface each recalled block as a 前文 citation.
+        if (payload.tool_name === "search_manuscript") {
+          const result = (payload.result ?? {}) as Record<string, unknown>;
+          for (const item of Array.isArray(result.items) ? result.items : []) {
+            const c = item as Record<string, unknown>;
+            const blockId = typeof c.block_id === "string" ? c.block_id : "";
+            if (!blockId || seenCitationIds.has(blockId)) continue;
+            seenCitationIds.add(blockId);
+            const order = typeof c.block_order === "number" ? c.block_order : null;
+            citations.push({
+              assetId: blockId,
+              title: order !== null ? `前文呼应 · 第 ${order + 1} 段` : "前文呼应",
+              lifecycle: "前文",
+              channel: "search_manuscript",
+              ...(typeof c.score === "number" ? { score: c.score } : {}),
             });
           }
         }
         // Constant-injection (always_on) canon rides the fused recall. Collect it
         // as a citation so the rail can mark it as 常驻 (always present), distinct
         // from relevance-recalled assets.
-        if (type === "writer.tool.completed" && payload.tool_name === "fuse_recall") {
+        if (payload.tool_name === "fuse_recall") {
           const result = (payload.result ?? {}) as Record<string, unknown>;
           for (const item of Array.isArray(result.items) ? result.items : []) {
             const c = item as Record<string, unknown>;
@@ -141,12 +179,71 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
             });
           }
         }
+        // Related assets brought out by 1-hop expansion (召回一个、带出一串) are
+        // recalled canon too — surface them alongside the search citations.
+        if (payload.tool_name === "query_asset_relationships") {
+          const result = (payload.result ?? {}) as Record<string, unknown>;
+          for (const item of Array.isArray(result.items) ? result.items : []) {
+            const c = item as Record<string, unknown>;
+            const assetId = typeof c.asset_id === "string" ? c.asset_id : "";
+            if (!assetId || seenCitationIds.has(assetId)) continue;
+            seenCitationIds.add(assetId);
+            citations.push({
+              assetId,
+              title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
+              lifecycle: typeof c.lifecycle === "string" ? c.lifecycle : "",
+              channel: "关联带出",
+            });
+          }
+        }
+        break;
+      }
+      // Constant canon injected by the runtime before the tool loop — always
+      // visible, even when the agent never calls fuse_recall.
+      case "writer.always_on.injected": {
+        for (const item of Array.isArray(payload.items) ? payload.items : []) {
+          const c = item as Record<string, unknown>;
+          const assetId = typeof c.asset_id === "string" ? c.asset_id : "";
+          if (!assetId || seenCitationIds.has(assetId)) continue;
+          seenCitationIds.add(assetId);
+          citations.push({
+            assetId,
+            title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
+            lifecycle: "常驻",
+            channel: "always_on",
+          });
+        }
         break;
       }
       case "writer.token":
         candidateText += typeof payload.token === "string" ? payload.token : "";
         if (!TERMINAL.has(phase)) phase = "composing";
         break;
+      // Retrieval-plan events used to fall into the default branch, so the
+      // author could never tell whether the run grounded itself deliberately.
+      case "writer.retrieval_plan.completed": {
+        const queries = Array.isArray(payload.queries) ? payload.queries : [];
+        retrievalPlan = {
+          status: "completed",
+          ...(typeof payload.intent === "string" && payload.intent.trim() ? { intent: payload.intent } : {}),
+          queryCount: queries.length,
+        };
+        break;
+      }
+      case "writer.retrieval_plan.degraded":
+        retrievalPlan = { status: "degraded" };
+        break;
+      case "writer.retrieval_plan.skipped":
+        retrievalPlan = { status: "skipped" };
+        break;
+      // Budget-packer trims — recall that was gathered but didn't fit the
+      // context window. Distinguishes "nothing relevant existed" from
+      // "relevant canon was dropped for budget" for the author.
+      case "writer.context_budget.trimmed": {
+        const dropped = typeof payload.dropped_items === "number" ? payload.dropped_items : 0;
+        if (dropped > contextTrimmedItems) contextTrimmedItems = dropped;
+        break;
+      }
       case "writer.draft.saved":
         if (typeof payload.draft_id === "string") draftId = payload.draft_id;
         break;
@@ -188,6 +285,8 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
     steps,
     citations,
     citationsDegraded,
+    retrievalPlan,
+    contextTrimmedItems,
     consistencyViolations,
     candidateText,
     draftId,

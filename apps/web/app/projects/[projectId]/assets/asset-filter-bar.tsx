@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import type { Collection, Facets, SearchCapabilities } from "@/lib/api/asset-types";
 import { Input } from "@/components/ui/input";
 
-import { DUR, EASE } from "./asset-motion";
+import { DUR, EASE } from "@/lib/motion";
 import { lifecycleChip, presentSource, presentType } from "./asset-present";
 
 export type AssetFilterState = {
@@ -89,7 +89,7 @@ export function AssetFilterBar({
                 : "搜索角色、设定、伏笔…"
             }
             aria-label="搜索资产"
-            className="h-10 pl-9 text-[13.5px]"
+            className="h-10 pl-9 text-sm"
           />
         </label>
 
@@ -139,7 +139,7 @@ export function AssetFilterBar({
         {facetsUnavailable ? (
           <span
             role="status"
-            className="inline-flex h-10 items-center rounded-[10px] border border-gold/50 bg-gold/10 px-3 text-[12px] text-[#8a6a33]"
+            className="inline-flex h-10 items-center rounded-panel border border-gold/50 bg-gold/10 px-3 text-caption text-candidate"
           >
             分类加载失败，请刷新重试
           </span>
@@ -171,7 +171,7 @@ export function AssetFilterBar({
               key={chip.key}
               type="button"
               onClick={() => set({ [chip.key]: null } as Partial<AssetFilterState>)}
-              className="group flex h-7 items-center gap-1.5 rounded-full border border-accent/40 bg-accent-wash pl-3 pr-2 text-[12px] font-medium text-accent-strong transition-colors hover:border-accent/60"
+              className="group flex h-7 items-center gap-1.5 rounded-full border border-accent/50 bg-accent-wash pl-3 pr-2 text-caption font-medium text-accent-strong transition-colors hover:border-accent/50"
               aria-label={`移除筛选：${chip.label}`}
             >
               <span className="truncate">{chip.label}</span>
@@ -181,7 +181,7 @@ export function AssetFilterBar({
           <button
             type="button"
             onClick={() => onChange(EMPTY_FILTERS)}
-            className="h-7 rounded-full px-2 text-[12px] text-muted transition-colors hover:text-ink"
+            className="h-7 rounded-full px-2 text-caption text-muted transition-colors hover:text-ink"
           >
             清空
           </button>
@@ -238,10 +238,10 @@ function FacetPicker({
         aria-expanded={open}
         aria-label={ariaLabel}
         className={cn(
-          "flex h-10 max-w-[190px] items-center gap-2 rounded-[10px] border bg-panel px-3 text-[13px] shadow-sm transition-colors",
+          "flex h-10 max-w-[190px] items-center gap-2 rounded-panel border bg-panel px-3 text-sm shadow-hairline transition-colors",
           selected
-            ? "border-accent/40 text-accent-strong"
-            : "border-line text-ink hover:border-accent/40",
+            ? "border-accent/50 text-accent-strong"
+            : "border-line text-ink hover:border-accent/50",
         )}
       >
         <span className="truncate">{selected ? selected.label : placeholder}</span>
@@ -259,7 +259,7 @@ function FacetPicker({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: DUR.fast, ease: EASE }}
-            className="absolute left-0 top-[calc(100%+8px)] z-40 max-h-64 w-[220px] origin-top-left overflow-y-auto rounded-card border border-line bg-panel p-1.5 shadow-panel"
+            className="absolute left-0 top-[calc(100%+8px)] z-40 max-h-64 w-[220px] origin-top-left overflow-y-auto rounded-modal border border-line bg-panel p-1.5 shadow-panel"
           >
             <PickerOption
               label={placeholder}
@@ -306,14 +306,14 @@ function PickerOption({
       aria-checked={checked}
       onClick={onSelect}
       className={cn(
-        "flex w-full items-center gap-2 rounded-[9px] px-3 py-2 text-left text-[13px] transition-colors",
+        "flex w-full items-center gap-2 rounded-panel px-3 py-2 text-left text-sm transition-colors",
         checked ? "bg-accent-wash text-accent-strong" : "text-ink-soft hover:bg-paper-deep hover:text-ink",
       )}
     >
       <Check className={cn("size-[15px] shrink-0", checked ? "text-accent" : "text-transparent")} aria-hidden />
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {typeof count === "number" ? (
-        <span className="shrink-0 text-[11.5px] tabular-nums text-muted">{count}</span>
+        <span className="shrink-0 text-caption tabular-nums text-muted">{count}</span>
       ) : null}
     </button>
   );
@@ -334,10 +334,10 @@ function StatusChip({
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "h-8 rounded-full border px-3.5 text-[12.5px] font-medium transition-colors duration-200",
+        "h-8 rounded-full border px-3.5 text-caption font-medium transition-colors duration-200",
         active
           ? "border-accent/50 bg-accent-wash text-accent-strong"
-          : "border-line bg-panel text-muted hover:border-accent/35 hover:text-ink",
+          : "border-line bg-panel text-muted hover:border-accent/30 hover:text-ink",
       )}
     >
       {label}

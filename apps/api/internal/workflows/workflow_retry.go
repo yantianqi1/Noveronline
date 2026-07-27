@@ -527,7 +527,11 @@ func (r *TemporalWorkflowRetrier) RetryWorkflowRun(ctx context.Context, input Re
 		"source_file_id", strings.TrimSpace(target.SourceFileID),
 		"retry_from_stage", retryFromStage(target),
 	}
-	temporalWorkflowID := "seed_run_" + runID + "_retry"
+	retryAttemptID, err := newRunID()
+	if err != nil {
+		return WorkflowRunRetry{}, workflowRetryFailed()
+	}
+	temporalWorkflowID := "seed_run_" + runID + "_retry_" + retryAttemptID
 	if err := r.store.AdmitWorkflowRetry(ctx, WorkflowRetryAdmissionInput{
 		TenantID:           tenantID,
 		ProjectID:          strings.TrimSpace(target.ProjectID),
@@ -544,6 +548,8 @@ func (r *TemporalWorkflowRetrier) RetryWorkflowRun(ctx context.Context, input Re
 		return WorkflowRunRetry{}, err
 	}
 	payload := seedRetryTemporalPayload(tenantID, target, actorUserID, requestID, traceID)
+	payload["retry_attempt_id"] = retryAttemptID
+	payload["context"].(map[string]any)["retry_attempt_id"] = retryAttemptID
 	if _, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                       temporalWorkflowID,
 		TaskQueue:                r.taskQueue,
@@ -720,7 +726,7 @@ func (s *SQLWorkflowRetryStore) AdmitWorkflowRetry(ctx context.Context, input Wo
 	}
 	query := `WITH source_update AS (
   UPDATE source_files
-  SET parse_status = CASE WHEN $9 = 'sequential_reading' THEN parse_status ELSE 'parsing' END,
+  SET parse_status = CASE WHEN $9 IN ('sequential_reading', 'finalize') THEN parse_status ELSE 'parsing' END,
       updated_at = now()
   WHERE tenant_id = $1::uuid
     AND project_id = $2::uuid
@@ -743,7 +749,11 @@ workflow_update AS (
   UPDATE workflow_runs
   SET
     status = 'queued',
-    progress = CASE WHEN $9 = 'sequential_reading' THEN 24 ELSE 0 END,
+    progress = CASE
+      WHEN $9 = 'finalize' THEN 96
+      WHEN $9 = 'sequential_reading' THEN 24
+      ELSE 0
+    END,
     message = 'retry requested',
     error_code = NULL,
     error_message = NULL,
@@ -957,11 +967,16 @@ func seedRetryTemporalPayload(tenantID string, target WorkflowRetryTarget, actor
 			})
 		}
 		payload["segments"] = segments
+	} else if retryFromStage(target) == "finalize" {
+		payload["retry_from_stage"] = "finalize"
 	}
 	return payload
 }
 
 func retryFromStage(target WorkflowRetryTarget) string {
+	if strings.TrimSpace(target.FailedStage) == "finalize" {
+		return "finalize"
+	}
 	if strings.TrimSpace(target.FailedStage) == "sequential_reading" && len(target.Segments) > 0 {
 		return "sequential_reading"
 	}

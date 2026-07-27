@@ -345,6 +345,27 @@ migration_marker_present() {
 	        WHERE grantee = 'PUBLIC' AND table_schema = 'public'
 	          AND table_name = 'asset_links'
 	      )" ;;
+	    0028_*) marker="
+	      to_regclass('public.idx_worldline_variables_session_locked') IS NOT NULL" ;;
+	    0029_*) marker="
+	      EXISTS (
+	        SELECT 1 FROM pg_trigger
+	        WHERE tgname = 'trg_assets_search_index_sync' AND NOT tgisinternal
+	      )
+	      AND EXISTS (
+	        SELECT 1 FROM pg_trigger
+	        WHERE tgname = 'trg_assets_search_index_cleanup' AND NOT tgisinternal
+	      )" ;;
+	    0030_*) marker="
+	      has_table_privilege('mirofish_app', 'public.writer_thread_messages', 'UPDATE')
+	      AND NOT has_table_privilege('mirofish_app', 'public.writer_thread_messages', 'DELETE')" ;;
+	    0031_*) marker="
+	      to_regclass('public.idx_manuscript_asset_distillation_fingerprint_replay') IS NOT NULL
+	      AND NOT EXISTS (
+	        SELECT 1 FROM pg_constraint
+	        WHERE conname = 'manuscript_asset_distillation_tenant_id_project_id_input_fi_key'
+	          AND conrelid = 'public.manuscript_asset_distillation_requests'::regclass
+	      )" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]

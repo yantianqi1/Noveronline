@@ -42,9 +42,9 @@ export function ModuleBindingRow({
   return (
     <div
       className={cn(
-        "group flex items-center justify-between gap-4 rounded-[10px] border px-4 py-3 transition-colors",
+        "group flex items-center justify-between gap-4 rounded-panel border px-4 py-3 transition-colors",
         saveState === "error"
-          ? "border-accent/60 bg-accent-wash/40"
+          ? "border-accent/50 bg-accent-wash/40"
           : bound
             ? "border-line-soft bg-panel hover:border-line"
             : "border-dashed border-line bg-paper/50",
@@ -53,25 +53,25 @@ export function ModuleBindingRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <StatusDot bound={bound} overridden={overridden} />
-          <span className="text-[13.5px] font-medium text-ink" title={module.description}>
+          <span className="text-sm font-medium text-ink" title={module.description}>
             {module.label}
           </span>
           {overridden && (
-            <span className="shrink-0 rounded-full bg-accent-wash px-1.5 py-px text-[10.5px] font-medium text-accent-strong">
+            <span className="shrink-0 rounded-full bg-accent-wash px-1.5 py-px text-caption font-medium text-accent-strong">
               自定义
             </span>
           )}
         </div>
-        <p className="mt-1 truncate pl-[15px] text-[12px] text-muted">
+        <p className="mt-1 truncate pl-[15px] text-caption text-muted">
           {saveState === "error" ? (
             <span className="text-accent">保存失败，请重试</span>
           ) : bound ? (
             <>
               <span className="text-ink-soft">{state.binding.model_id}</span>
-              <span className="text-muted/70"> · {state.binding.channel_name}</span>
+              <span className="text-muted-soft"> · {state.binding.channel_name}</span>
             </>
           ) : (
-            <span className="text-muted/80">未绑定 — 选一个模型即可启用</span>
+            <span className="text-muted">未绑定 — 选一个模型即可启用</span>
           )}
         </p>
       </div>
@@ -84,7 +84,7 @@ export function ModuleBindingRow({
             onClick={() => onReset(module.module_key)}
             disabled={busy || disabled}
             title="清除自定义，恢复默认"
-            className="grid size-7 place-items-center rounded-[7px] text-muted/70 opacity-0 transition-all hover:bg-accent-wash hover:text-accent focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+            className="grid size-7 place-items-center rounded-control text-muted-soft opacity-0 transition-all hover:bg-accent-wash hover:text-accent focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40"
           >
             <RotateCcw className="size-3.5" aria-hidden />
           </button>

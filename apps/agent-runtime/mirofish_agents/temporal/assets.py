@@ -475,6 +475,7 @@ class PostgresAssetCandidateWriter:
         normalized_source_kind = _required_text(self._source_kind, "source_kind")
         connection = self._connect()
         try:
+            set_postgres_tenant_context(connection, context=context)
             with connection.cursor() as cursor:
                 for index, candidate in enumerate(normalized_candidates):
                     asset_type = _required_text(candidate.get("asset_type"), "asset_type")
@@ -560,6 +561,7 @@ class PostgresStyleSourceMaterialLoader:
         normalized_asset_id = _required_text(source_asset_id, "source_asset_id")
         connection = self._connect()
         try:
+            set_postgres_tenant_context(connection, context=context)
             with connection.cursor() as cursor:
                 cursor.execute(
                     """SELECT content_text

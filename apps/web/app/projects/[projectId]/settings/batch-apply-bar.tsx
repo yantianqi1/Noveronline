@@ -35,14 +35,14 @@ export function BatchApplyBar({
 }) {
   const ready = Boolean(choice.channelId && choice.modelId);
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-card border border-line bg-gradient-to-br from-panel to-paper-deep/40 px-5 py-4 shadow-[0_1px_2px_rgba(23,26,27,0.05)]">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-modal border border-line bg-gradient-to-br from-panel to-paper-deep/40 px-5 py-4 shadow-hairline">
       <div className="flex items-center gap-2.5">
-        <span className="grid size-9 place-items-center rounded-[9px] bg-accent-wash text-accent">
+        <span className="grid size-9 place-items-center rounded-panel bg-accent-wash text-accent">
           <Wand2 className="size-4.5" aria-hidden />
         </span>
         <div>
-          <p className="text-[13.5px] font-semibold text-ink">一键套用全部功能</p>
-          <p className="text-[12px] text-muted">
+          <p className="text-sm font-semibold text-ink">一键套用全部功能</p>
+          <p className="text-caption text-muted">
             已绑定 <span className="font-medium text-ink">{boundCount}</span>/{totalCount} 个功能
           </p>
         </div>
@@ -82,7 +82,7 @@ export function BatchProgress({ done, total }: { done: number; total: number }) 
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="flex items-center gap-1.5 text-[12px] text-muted">
+      <span className="flex items-center gap-1.5 text-caption text-muted">
         <Loader2 className="size-3 animate-spin" aria-hidden />
         {done}/{total}
       </span>

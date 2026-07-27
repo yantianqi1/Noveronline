@@ -7,6 +7,7 @@ import type {
   ManuscriptBlock,
   ManuscriptBlockMeta,
   MessageListResponse,
+  WriterDraft,
   WriterEvent,
   WriterMessage,
   WriterRun,
@@ -313,6 +314,23 @@ export async function fetchRunEvents(
 }
 
 // ── W2: candidate adoption ───────────────────────────────────────────────
+
+/**
+ * Read a saved candidate draft. With `includeContent` the body text comes
+ * along (same block-read permission as manuscript bodies) so a settled rail
+ * turn can keep showing the exact prose it drafted. The draft's `status`
+ * flips to "adopted" the moment the author adopts it — live turns use this
+ * to settle without waiting for their own adopt click to round-trip.
+ */
+export function fetchWriterDraft(
+  projectId: string,
+  tenantId: string,
+  draftId: string,
+  includeContent?: boolean,
+): Promise<WriterDraft> {
+  const query = includeContent ? "?include=content" : "";
+  return getJson<WriterDraft>(`/api/projects/${projectId}/drafts/${draftId}${query}`, tenantId);
+}
 
 /**
  * Adopt a candidate draft into the manuscript. Always sends `block_order: 0`

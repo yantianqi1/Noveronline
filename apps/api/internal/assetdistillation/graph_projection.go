@@ -376,8 +376,9 @@ RETURNING rule_evidence_id::text`,
 // does not produce seed segments, so we upsert a bridge segment under the distillation run.
 func ensureDistillationBridgeSegment(ctx context.Context, tx *sql.Tx, tenantID, projectID string, src graphProjectionSource) (string, error) {
 	excerpt := src.Evidence
-	if len(excerpt) > 240 {
-		excerpt = excerpt[:240]
+	excerptRunes := []rune(excerpt)
+	if len(excerptRunes) > 240 {
+		excerpt = string(excerptRunes[:240])
 	}
 	if excerpt == "" {
 		excerpt = src.Summary

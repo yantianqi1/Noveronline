@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "test": "node --test tests/*.test.mjs",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "build": "next build"
   },
@@ -31,6 +32,8 @@
     "@types/node": "^24.10.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "typescript": "^5.9.3"
+    "eslint": "^10.8.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0"
   }
 }

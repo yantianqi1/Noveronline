@@ -55,49 +55,49 @@ export function WorldlineRunControls({
       {injectOpen && hasSession ? (
         <div className="flex items-end gap-2 border-b border-line-soft px-6 py-3">
           <label className="flex-1">
-            <span className="mb-1 block text-[11px] text-muted">变量名</span>
+            <span className="mb-1 block text-caption text-muted">变量名</span>
             <input
               value={varName}
               onChange={(e) => setVarName(e.target.value)}
               placeholder="例如：顾临渊的记忆恢复"
-              className="w-full rounded-[8px] border border-line bg-paper px-3 py-2 text-[13px] text-ink outline-none focus:border-accent/50"
+              className="w-full rounded-panel border border-line bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-accent/50"
             />
           </label>
           <label className="flex-[1.4]">
-            <span className="mb-1 block text-[11px] text-muted">影响描述</span>
+            <span className="mb-1 block text-caption text-muted">影响描述</span>
             <input
               value={varDesc}
               onChange={(e) => setVarDesc(e.target.value)}
               placeholder="它会怎样改变走向…"
-              className="w-full rounded-[8px] border border-line bg-paper px-3 py-2 text-[13px] text-ink outline-none focus:border-accent/50"
+              className="w-full rounded-panel border border-line bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-accent/50"
             />
           </label>
           <button
             type="button"
             onClick={submitVariable}
             disabled={!varName.trim()}
-            className="rounded-[8px] border border-accent/40 bg-accent-wash px-4 py-2 text-[12.5px] font-medium text-accent transition-colors hover:bg-accent/15 disabled:opacity-50"
+            className="shrink-0 whitespace-nowrap rounded-control border border-line bg-panel px-4 py-2 text-caption font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
           >
             注入
           </button>
           <button
             type="button"
             onClick={() => setInjectOpen(false)}
-            className="rounded-[8px] px-3 py-2 text-[12.5px] text-muted transition-colors hover:text-ink"
+            className="rounded-panel px-3 py-2 text-caption text-muted transition-colors hover:text-ink"
           >
             收起
           </button>
         </div>
       ) : null}
 
-      <div className="flex items-center gap-3 px-6 py-3.5">
+      <div className="flex flex-wrap items-center gap-3 px-6 py-3.5">
         {/* primary action */}
         <button
           type="button"
           onClick={onPrimary}
           disabled={busy}
           className={cn(
-            "rounded-[10px] bg-accent px-5 py-2.5 text-[13.5px] font-medium text-panel shadow-sm transition-colors hover:bg-accent-strong disabled:opacity-60",
+            "shrink-0 whitespace-nowrap rounded-control bg-accent px-5 py-2.5 text-sm font-medium text-panel shadow-accent transition-colors hover:bg-accent-strong disabled:opacity-60",
             evolving && "animate-pulse",
           )}
         >
@@ -110,7 +110,7 @@ export function WorldlineRunControls({
               type="button"
               onClick={() => setInjectOpen((open) => !open)}
               disabled={busy}
-              className="rounded-[10px] border border-line bg-panel px-4 py-2.5 text-[13px] font-medium text-ink transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+              className="shrink-0 whitespace-nowrap rounded-control border border-line bg-panel px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
             >
               注入变量
             </button>
@@ -119,7 +119,7 @@ export function WorldlineRunControls({
             <div
               role="tablist"
               aria-label="推演模式"
-              className="ml-auto flex items-center rounded-[10px] border border-line bg-paper p-0.5"
+              className="ml-auto flex shrink-0 items-center rounded-control border border-line bg-paper p-0.5"
             >
               {MODES.map((m) => (
                 <button
@@ -129,8 +129,8 @@ export function WorldlineRunControls({
                   aria-selected={mode === m.value}
                   onClick={() => onModeChange(m.value)}
                   className={cn(
-                    "rounded-[8px] px-3.5 py-1.5 text-[12.5px] font-medium transition-colors",
-                    mode === m.value ? "bg-panel text-accent shadow-sm" : "text-muted hover:text-ink",
+                    "shrink-0 whitespace-nowrap rounded-control px-3.5 py-1.5 text-caption font-medium transition-colors",
+                    mode === m.value ? "bg-panel text-accent shadow-hairline" : "text-muted hover:text-ink",
                   )}
                 >
                   {m.label}
@@ -139,7 +139,7 @@ export function WorldlineRunControls({
             </div>
           </>
         ) : (
-          <p className="ml-auto text-[12.5px] text-muted">整备会自动选好演员，也可以稍后再调。</p>
+          <p className="ml-auto text-caption text-muted">选角导演会自动选好演员，也可以稍后再调。</p>
         )}
       </div>
     </div>

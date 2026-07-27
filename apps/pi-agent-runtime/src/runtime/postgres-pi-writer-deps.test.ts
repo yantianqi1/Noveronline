@@ -209,7 +209,7 @@ describe("createPostgresPiWriterDeps", () => {
     expect(db.queries).toHaveLength(4);
     for (const query of db.queries) {
       expect(query.context).toEqual({ tenant_id: "ten_1", project_id: "proj_1" });
-      expect(query.values).toEqual(["ten_1", "proj_1"]);
+      expect(query.values.slice(0, 2)).toEqual(["ten_1", "proj_1"]);
       expect(query.text).toMatch(/WHERE .*tenant_id = \$1.*project_id = \$2/s);
       expect(query.text).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\b/);
     }
@@ -217,10 +217,16 @@ describe("createPostgresPiWriterDeps", () => {
     expect(db.queries[0]?.text).toContain("confidence::double precision AS confidence");
     expect(db.queries[1]?.text).toContain("FROM assets");
     expect(db.queries[1]?.text).toContain("world_rule");
+    // Asset-sourced rules/profiles are spoiler-gated; no chapter target => NULL
+    // (only always-visible assets pass).
+    expect(db.queries[1]?.text).toContain("reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $3");
+    expect(db.queries[1]?.values[2]).toBeNull();
     expect(db.queries[2]?.text).toContain("FROM entities");
     expect(db.queries[2]?.text).toContain("entity_aliases");
     expect(db.queries[3]?.text).toContain("FROM assets");
     expect(db.queries[3]?.text).toContain("character");
+    expect(db.queries[3]?.text).toContain("reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $3");
+    expect(db.queries[3]?.values[2]).toBeNull();
   });
 
   it("requires explicit worldline path selection and scopes manuscript context to active chapter blocks", async () => {
@@ -1126,6 +1132,34 @@ describe("createPostgresPiWriterDeps", () => {
     expect(search.values[4]).toBeNull();                // embedding literal
     expect(search.values[7]).toEqual(["seed", "canon", "material"]); // lifecycle gate
     expect(search.values[8]).toBe(10);                  // default top_k
+    expect(search.values[10]).toEqual(["%magic%", "%cost%"]); // tokenized terms, not whole-query ILIKE
+  });
+
+  it("search_assets tokenizes CJK queries so multi-word queries still hit", async () => {
+    const db = new RecordingDb();
+    db.enqueue([]); // keyword search -> rows irrelevant here
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    await deps.executeWriterTool!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      tool_name: "search_assets",
+      tool_args: { query: "许七安的师门 打更人", mode: "keyword" }
+    });
+
+    const search = db.queries[0]!;
+    // "的" splits the unsegmented run; each term matches independently.
+    expect(search.values[10]).toEqual(["%许七安%", "%师门%", "%打更人%"]);
+    expect(search.text).toContain("unnest(input.keyword_patterns)");
+    expect(search.text).not.toContain("('%' || $3::text || '%')");
   });
 
   it("search_assets explicitly degrades to keyword when the embedding module is unbound", async () => {
@@ -1331,13 +1365,14 @@ describe("createPostgresPiWriterDeps", () => {
     expect(String(blocks[0]?.snippet)).toContain("雨夜潜入医院");
     const citations = result.citations as Array<Record<string, unknown>>;
     expect(citations[0]).toMatchObject({ block_id: "block-9", channel: "search_manuscript" });
-    // Timeline gate: vector query passes cursor order and scene id.
+    // Timeline gate: strictly-prior prose only — no "other scene" escape hatch
+    // that used to readmit future blocks.
     const vectorQuery = db.queries[4]!;
     expect(vectorQuery.text).toContain("manuscript_block_embeddings");
-    expect(vectorQuery.text).toContain("block_order < $5");
+    expect(vectorQuery.text).toContain("block.block_order < $5");
+    expect(vectorQuery.text).not.toContain("IS DISTINCT FROM");
     expect(vectorQuery.values[4]).toBe(7);
-    expect(vectorQuery.values[5]).toBe("scene-1");
-    expect(vectorQuery.values[6]).toBe(3);
+    expect(vectorQuery.values[5]).toBe(3);
   });
 
   it("search_assets applies the spoiler gate with the current chapter order", async () => {
@@ -1396,6 +1431,7 @@ describe("createPostgresPiWriterDeps", () => {
 
   it("search_assets keyed channel force-injects title and alias matches", async () => {
     const db = new RecordingDb();
+    db.enqueue([]);                     // recent manuscript tail (chapter target, empty)
     db.enqueue([{ chapter_order: 5 }]); // resolveCurrentChapterOrder
     db.enqueue([ // candidate assets (title matching)
       { asset_id: "a-shifu", asset_type: "character", category: "cast", lifecycle: "canon", title: "师父", summary: "掌门", content_text: "师门掌门。", pinned: false },
@@ -1471,27 +1507,15 @@ describe("createPostgresPiWriterDeps", () => {
     expect(db.queries).toHaveLength(0);
   });
 
-  it("fuse_recall reranks the fused list via the cross-encoder and degrades on failure", async () => {
-    // Rerank path: reranker promotes a3 above the RRF order.
+  it("fuse_recall reranks the fused list via the injected executor and degrades on failure", async () => {
+    // Rerank path: the activity-injected executor promotes a3 above the RRF order.
     const db = new RecordingDb();
-    db.enqueue([{ // rerank binding
-      module_key: "writer_retrieval_rerank",
-      channel_id: "channel-rr",
-      model_id: "rerank-model",
-      provider: "openai-compatible",
-      base_url: "https://llm.example.test/v1",
-      credential_ref: "channel-rr",
-      supports_tools: false,
-      supports_json: true,
-      settings_jsonb: {}
-    }]);
-    db.enqueue([{ encrypted_api_key: "cipher" }]); // rerank credential
     const deps = createPostgresPiWriterDeps({
       db,
       decryptCredential: async () => "sk-live",
-      composeDraft: async () => ({ content: "draft" }),
-      rerankRecall: async (req) => ({ ranked_ids: ["a3", "a1", "a2"] })
+      composeDraft: async () => ({ content: "draft" })
     });
+    const rerankCalls: Array<{ query: string; ids: string[] }> = [];
     const result = await deps.executeWriterTool!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
       selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
@@ -1503,23 +1527,22 @@ describe("createPostgresPiWriterDeps", () => {
           { channel: "keyed", items: [{ asset_id: "a1", title: "师门戒律", content_preview: "戒律" }] },
           { channel: "hybrid", items: [{ asset_id: "a2", title: "师父", content_preview: "师父" }, { asset_id: "a3", title: "旧事件", content_preview: "复命旧事" }] }
         ]
+      },
+      rerank_executor: async (query, candidates) => {
+        rerankCalls.push({ query, ids: candidates.map((c) => c.id) });
+        return ["a3", "a1", "a2"];
       }
     });
     const fused = result.fused as Array<Record<string, unknown>>;
     expect(result.reranked).toBe(true);
     expect(fused.map((f) => f.id)).toEqual(["a3", "a1", "a2"]);
+    expect(rerankCalls).toEqual([{ query: "师门复命", ids: ["a1", "a2", "a3"] }]);
+    // The rerank hop is the activity's job (quota + provider_call_id); the deps
+    // layer itself never touches the DB for it.
+    expect(db.queries).toHaveLength(0);
 
-    // Degraded path: reranker throws -> falls back to RRF order, flagged.
-    const failDb = new RecordingDb();
-    failDb.enqueue([{ module_key: "writer_retrieval_rerank", channel_id: "c", model_id: "m", provider: "openai-compatible", base_url: "https://x/v1", credential_ref: "c", supports_tools: false, supports_json: true, settings_jsonb: {} }]);
-    failDb.enqueue([{ encrypted_api_key: "cipher" }]);
-    const failDeps = createPostgresPiWriterDeps({
-      db: failDb,
-      decryptCredential: async () => "sk-live",
-      composeDraft: async () => ({ content: "draft" }),
-      rerankRecall: async () => { throw new Error("reranker unavailable"); }
-    });
-    const degraded = await failDeps.executeWriterTool!({
+    // Degraded path: executor throws -> falls back to RRF order, flagged.
+    const degraded = await deps.executeWriterTool!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
       selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
       tool_name: "fuse_recall",
@@ -1529,12 +1552,26 @@ describe("createPostgresPiWriterDeps", () => {
           { channel: "keyed", items: [{ asset_id: "b1", title: "甲" }] },
           { channel: "hybrid", items: [{ asset_id: "b1", title: "甲" }, { asset_id: "b2", title: "乙" }] }
         ]
-      }
+      },
+      rerank_executor: async () => { throw new Error("reranker unavailable"); }
     });
     expect(degraded.reranked).toBe(false);
     expect(degraded.rerank_degraded).toMatch(/reranker unavailable/);
     // RRF order preserved: b1 (both channels) first.
     expect((degraded.fused as Array<Record<string, unknown>>)[0]?.id).toBe("b1");
+
+    // Rerank requested but no executor wired -> explicit, visible degradation.
+    const unwired = await deps.executeWriterTool!({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      tool_name: "fuse_recall",
+      tool_args: {
+        rerank: true, query: "x",
+        channels: [{ channel: "hybrid", items: [{ asset_id: "c1", title: "丙" }] }]
+      }
+    });
+    expect(unwired.reranked).toBe(false);
+    expect(unwired.rerank_degraded).toMatch(/not wired/);
   });
 
   it("loadAlwaysOnAssets returns only always_on canon inside the safety gates", async () => {

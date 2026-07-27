@@ -218,11 +218,6 @@ LIMIT 1`
 	}
 	resolution.CredentialRef = resolution.ChannelID
 	resolution.Settings = decodeSettingsJSON(settingsJSON)
-	// Catalog rows often keep supports_json=false after model sync. OR in
-	// documented chat-model defaults so Seed/Writer do not hard-fail before call.
-	caps := inferModelCapabilities(resolution.ModelID)
-	resolution.SupportsJSON = resolution.SupportsJSON || caps.SupportsJSON
-	resolution.SupportsTools = resolution.SupportsTools || caps.SupportsTools
 	return resolution, nil
 }
 
@@ -302,6 +297,7 @@ FROM (
   JOIN llm_channels c
     ON c.channel_id = b.channel_id
    AND (c.tenant_id = b.tenant_id OR c.tenant_id IS NULL)
+   AND c.enabled = TRUE
   JOIN llm_models m
     ON m.channel_id = b.channel_id
    AND m.model_id = b.model_id

@@ -16,6 +16,7 @@ class AgentContext(BaseModel):
     workflow_type: str
     actor_user_id: str | None = None
     module_key: str | None = None
+    retry_attempt_id: str | None = None
     trace_id: str
     permissions: dict[str, Any] = Field(default_factory=dict)
 
@@ -27,7 +28,7 @@ class AgentContext(BaseModel):
             raise ValueError("required runtime context id cannot be blank")
         return value
 
-    @field_validator("project_id", "actor_user_id", "module_key")
+    @field_validator("project_id", "actor_user_id", "module_key", "retry_attempt_id")
     @classmethod
     def _optional_id_must_not_be_blank(cls, value: str | None) -> str | None:
         if value is None:

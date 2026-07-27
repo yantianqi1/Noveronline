@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import LLMFacilityError
@@ -23,6 +24,12 @@ from mirofish_agents.temporal.worldline import (
 WORLDLINE_AUTO_EVOLUTION_MODULE_KEY = WORLDLINE_STEP_MODULE_KEY
 WORLDLINE_AUTO_EVOLUTION_WORLD_SCOPE = "current_world"
 WORLDLINE_AUTO_EVOLUTION_MODE = "auto_evolution"
+WORLDLINE_AUTO_EVOLUTION_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 SAFE_AUTO_EVOLUTION_ERRORS = {
     "CURRENT_WORLD_REQUIRED": "worldline auto-evolution requires current_world scope",
     "FORBIDDEN": "worldline_director run permission is required",
@@ -179,17 +186,10 @@ def worldline_auto_evolution_step_activity(
                 **public_step,
             },
         )
-    except Exception:
-        return _failed_result(
-            context=context,
-            session_id=session_id,
-            source_step_index=source_step_index,
-            max_steps=max_steps,
-            code="WORKFLOW_EVENT_WRITE_FAILED",
-            message="worldline auto-evolution workflow event write failed",
-            workflow_event_writer=writers[0],
-            workflow_status_writer=writers[1],
-        )
+    except Exception as exc:
+        raise RuntimeError("WORKFLOW_EVENT_WRITE_FAILED: worldline auto-evolution workflow event write failed") from exc
+    if not event_persisted:
+        raise RuntimeError("WORKFLOW_EVENT_WRITE_FAILED: worldline auto-evolution workflow event write failed")
     return {
         **_base_payload(context),
         "status": "completed",
@@ -265,24 +265,16 @@ def worldline_auto_evolution_finalize_activity(
                 **public_result,
             },
         )
-    except Exception:
-        return _finalization_failure(
-            context=context,
-            public_result=public_result,
-            code="WORKFLOW_EVENT_WRITE_FAILED",
-            message="worldline auto-evolution workflow event write failed",
-            stage_event_persisted=False,
-        )
+    except Exception as exc:
+        raise RuntimeError("WORKFLOW_EVENT_WRITE_FAILED: worldline auto-evolution workflow event write failed") from exc
+    if not event_persisted:
+        raise RuntimeError("WORKFLOW_EVENT_WRITE_FAILED: worldline auto-evolution workflow event write failed")
     try:
         status_persisted = _mark_completed(writers[1], context=context, result=public_result)
-    except Exception:
-        return _finalization_failure(
-            context=context,
-            public_result=public_result,
-            code="WORKFLOW_STATUS_WRITE_FAILED",
-            message="worldline auto-evolution workflow status write failed",
-            stage_event_persisted=event_persisted,
-        )
+    except Exception as exc:
+        raise RuntimeError("WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution workflow status write failed") from exc
+    if not status_persisted:
+        raise RuntimeError("WORKFLOW_STATUS_WRITE_FAILED: worldline auto-evolution workflow status write failed")
     return {
         **_base_payload(context),
         "status": "completed",
@@ -305,6 +297,7 @@ class WorldlineAutoEvolutionWorkflow:
                 invalid_payload,
                 start_to_close_timeout=timedelta(minutes=20),
                 schedule_to_close_timeout=timedelta(hours=2),
+                retry_policy=WORLDLINE_AUTO_EVOLUTION_RETRY_POLICY,
             )
         step_results: list[dict[str, Any]] = []
         for source_step_index in range(1, max_steps + 1):
@@ -313,6 +306,7 @@ class WorldlineAutoEvolutionWorkflow:
                 {**payload, "source_step_index": source_step_index},
                 start_to_close_timeout=timedelta(minutes=20),
                 schedule_to_close_timeout=timedelta(hours=2),
+                retry_policy=WORLDLINE_AUTO_EVOLUTION_RETRY_POLICY,
             )
             if result.get("status") != "completed":
                 return result
@@ -322,6 +316,7 @@ class WorldlineAutoEvolutionWorkflow:
             {**payload, "step_results": step_results},
             start_to_close_timeout=timedelta(minutes=2),
             schedule_to_close_timeout=timedelta(minutes=10),
+            retry_policy=WORLDLINE_AUTO_EVOLUTION_RETRY_POLICY,
         )
 
 

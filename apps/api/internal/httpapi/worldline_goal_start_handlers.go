@@ -135,6 +135,8 @@ func worldlineGoalStartPublicErrorMessage(code string) string {
 		return "worldline goal-start resource was not found"
 	case "IDEMPOTENCY_CONFLICT":
 		return "request_id was already used for a different worldline goal-start"
+	case "WORLDLINE_GOAL_START_ACTIVE":
+		return "this project already has an active worldline"
 	case "WORLDLINE_GOAL_START_BACKEND_UNCONFIGURED", "WORKFLOW_BACKEND_UNCONFIGURED":
 		return "worldline goal-start backend is not configured"
 	case "WORKFLOW_ADMISSION_FAILED":

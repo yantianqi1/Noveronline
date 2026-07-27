@@ -134,7 +134,7 @@ func TestSQLReaderHybridSearchUsesVectorRankingAndReturnsStableMetadata(t *testi
 		"tenant-123",
 		"project-123",
 		"师门规则",
-		"%师门规则%",
+		[]string{"%师门规则%"},
 		"hybrid",
 		"[1,0.25,-0.5]",
 		"embedding-model-1",

@@ -11,6 +11,7 @@ import {
   type WorldlineGoalStartInput
 } from "../contracts/worldline-cast-run.js";
 import { validateWorldlineGoalStartPayload } from "../contracts/worldline-cast-worker-spec.js";
+import { ApplicationFailure } from "@temporalio/activity";
 import type { WorldlineCastStageRequest, WorldlineCastStageResult } from "../runtime/pi-worldline-cast-agent.js";
 
 export interface PiWorldlineCastUsage {
@@ -123,6 +124,7 @@ export interface PiWorldlineCastDeps {
     project_id: string;
     prepare_id: string;
     timeout_ms?: number;
+    abort_signal?: AbortSignal;
   }): Promise<{ status: "completed" | "failed"; error_message?: string }>;
   startSession?(request: {
     tenant_id: string;
@@ -160,7 +162,12 @@ export interface PiWorldlineCastDeps {
 
 export function createPiWorldlineGoalStartActivity(deps: PiWorldlineCastDeps = {}) {
   return async function runPiWorldlineGoalStartActivity(payload: unknown): Promise<PiWorldlineGoalStartActivityResult> {
-    const input = validateWorldlineGoalStartPayload(payload);
+    let input: ReturnType<typeof validateWorldlineGoalStartPayload>;
+    try {
+      input = validateWorldlineGoalStartPayload(payload);
+    } catch (error) {
+      throw ApplicationFailure.nonRetryable("Pi worldline cast workflow payload is invalid", "VALIDATION_FAILED", error instanceof Error ? error.message : "invalid payload");
+    }
     const record = async (
       event_type: string,
       eventPayload: Record<string, unknown>,
@@ -249,7 +256,8 @@ export function createPiWorldlineGoalStartActivity(deps: PiWorldlineCastDeps = {
         tenant_id: input.tenant_id,
         project_id: input.project_id,
         prepare_id: preparation.prepare_id,
-        timeout_ms: 30 * 60 * 1000
+        timeout_ms: 30 * 60 * 1000,
+        abort_signal: deps.cancellationSignal?.()
       });
       if (prepareResult.status !== "completed") {
         throw Object.assign(new Error(prepareResult.error_message || "worldline preparation failed"), {

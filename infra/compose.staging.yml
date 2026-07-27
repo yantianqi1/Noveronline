@@ -59,10 +59,41 @@ services:
       MIROFISH_TRUSTED_CLIENT_IP_HEADER: ${MIROFISH_TRUSTED_CLIENT_IP_HEADER:?MIROFISH_TRUSTED_CLIENT_IP_HEADER is required}
     ports:
       - "127.0.0.1:${WEB_PORT:?WEB_PORT is required}:3000"
+  agent-runtime:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  agent-runtime-seed:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  agent-runtime-asset:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  agent-runtime-graph:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  agent-runtime-worldline:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  agent-runtime-character:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  agent-runtime-reviewer:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
   agent-runtime-writer-planning:
     environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       LLM_CREDENTIAL_ENCRYPTION_KEY: ${LLM_CREDENTIAL_ENCRYPTION_KEY:?LLM_CREDENTIAL_ENCRYPTION_KEY is required}
+  pi-agent-runtime:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  pi-agent-runtime-analysis:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+  pi-agent-runtime-worldline-cast:
+    environment:
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
   legacy-import-worker:
     build:
       context: ../apps/agent-runtime

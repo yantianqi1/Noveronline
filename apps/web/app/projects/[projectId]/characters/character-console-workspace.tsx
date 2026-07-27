@@ -307,8 +307,8 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
   if (state.status === "error") {
     return (
       <div className="flex min-h-[70vh] flex-col items-center justify-center px-8 text-center">
-        <h2 className="font-serif text-[22px] font-semibold text-ink">角色控制暂时打不开</h2>
-        <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">{state.message}</p>
+        <h2 className="font-serif text-xl font-semibold text-ink">角色控制暂时打不开</h2>
+        <p className="mt-2 max-w-[380px] text-sm text-muted">{state.message}</p>
       </div>
     );
   }
@@ -323,23 +323,23 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
         {/* 栏目眉 — compact栏目条 */}
         <WorkbenchMasthead
-          eyebrow="角 色 控 制"
+          eyebrow="角色控制"
           title="互动舞台"
           tagline="以第一人称进入角色，在当前世界节点互动写作。互动只产候选，采纳后才沉淀。"
           aside={
             inStage && activeAgent ? (
-              <span className="font-serif text-[13px] text-ink-soft">我，{activeAgent.name}</span>
+              <span className="font-serif text-sm text-ink-soft">我，{activeAgent.name}</span>
             ) : undefined
           }
         />
 
         {actionError ? (
-          <div className="shrink-0 border-b border-line bg-accent-wash px-6 py-2.5 text-[13px] text-accent">
+          <div className="shrink-0 border-b border-line bg-accent-wash px-6 py-2.5 text-sm text-accent">
             {actionError}
           </div>
         ) : null}
         {notice ? (
-          <div className="shrink-0 border-b border-line-soft bg-panel px-6 py-2.5 text-[13px] text-ink-soft">
+          <div className="shrink-0 border-b border-line-soft bg-panel px-6 py-2.5 text-sm text-ink-soft">
             {notice}
           </div>
         ) : null}
@@ -369,7 +369,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
               {/* center: scene stream + composer (hidden in 回放) */}
               <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
                 {isReplay ? (
-                  <div className="shrink-0 border-b border-line-soft bg-paper/60 px-6 py-2 text-center text-[12px] tracking-wide text-muted">
+                  <div className="shrink-0 border-b border-line-soft bg-paper/60 px-6 py-2 text-center text-caption tracking-wide text-muted">
                     回放 · 这段互动已{active.status === "saved" ? "保存" : "归档"}，只能阅读
                   </div>
                 ) : null}
@@ -389,7 +389,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
               </div>
 
               {/* right: dossier */}
-              <aside className="hidden h-full w-[360px] shrink-0 overflow-hidden border-l border-line bg-panel lg:block">
+              <aside className="hidden h-full w-rail-inspector shrink-0 overflow-hidden border-l border-line bg-panel wide:block">
                 <CharacterDossierPanel
                   name={activeAgent?.name ?? "角色"}
                   profile={{ role: activeAgent?.role, status: active.status === "active" ? "进行中" : active.status }}
@@ -402,12 +402,12 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
             <div className="flex shrink-0 items-center gap-3 border-t border-line bg-panel px-6 py-3">
               {isReplay ? (
                 <>
-                  <span className="text-[12.5px] text-muted">想接着写？恢复这段互动就能继续。</span>
+                  <span className="text-caption text-muted">想接着写？恢复这段互动就能继续。</span>
                   <button
                     type="button"
                     onClick={handleResume}
                     disabled={busy}
-                    className="rounded-[10px] border border-line bg-panel px-4 py-2 text-[13px] font-medium text-ink transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+                    className="rounded-panel border border-line bg-panel px-4 py-2 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
                   >
                     继续互动
                   </button>
@@ -417,7 +417,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
                   type="button"
                   onClick={handleSave}
                   disabled={busy}
-                  className="rounded-[10px] border border-line bg-panel px-4 py-2 text-[13px] font-medium text-ink transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+                  className="rounded-panel border border-line bg-panel px-4 py-2 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
                 >
                   保存互动
                 </button>
@@ -426,7 +426,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
                 type="button"
                 onClick={handleConvertToDraft}
                 disabled={busy || turns.length === 0}
-                className="ml-auto rounded-[10px] bg-accent px-5 py-2 text-[13px] font-medium text-panel shadow-sm transition-colors hover:bg-accent-strong disabled:opacity-50"
+                className="ml-auto rounded-panel bg-accent px-5 py-2 text-sm font-medium text-panel shadow-hairline transition-colors hover:bg-accent-strong disabled:opacity-50"
               >
                 转写为章节草稿 → 写作台
               </button>
@@ -441,14 +441,14 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
 function NoSelection({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex min-h-[70vh] flex-col items-center justify-center px-8 text-center">
-      <h2 className="font-serif text-[22px] font-semibold text-ink">请先回到书架进入项目</h2>
-      <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">
+      <h2 className="font-serif text-xl font-semibold text-ink">请先回到书架进入项目</h2>
+      <p className="mt-2 max-w-[380px] text-sm text-muted">
         角色控制需要知道你正在写哪部作品。回到书架，挑一部作品再进来。
       </p>
       <button
         type="button"
         onClick={onBack}
-        className="mt-6 rounded-[10px] border border-line bg-panel px-5 py-2.5 text-[13.5px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+        className="mt-6 rounded-panel border border-line bg-panel px-5 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
       >
         返回书架
       </button>
@@ -460,15 +460,15 @@ function ConsoleSkeleton() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="border-b border-line-soft px-8 pb-5 pt-7">
-        <div className="h-3 w-20 animate-pulse rounded bg-line-soft" />
-        <div className="mt-3 h-7 w-40 animate-pulse rounded bg-line-soft" />
-        <div className="mt-2 h-4 w-80 animate-pulse rounded bg-line-soft" />
+        <div className="h-3 w-20 animate-pulse rounded-control bg-line-soft" />
+        <div className="mt-3 h-7 w-40 animate-pulse rounded-control bg-line-soft" />
+        <div className="mt-2 h-4 w-80 animate-pulse rounded-control bg-line-soft" />
       </div>
       <div className="flex flex-1 items-center justify-center">
         <div className="w-full max-w-[680px] space-y-4 px-8">
-          <div className="h-4 w-1/3 animate-pulse rounded bg-line-soft" />
-          <div className="h-16 w-full animate-pulse rounded bg-line-soft" />
-          <div className="h-16 w-full animate-pulse rounded bg-line-soft" />
+          <div className="h-4 w-1/3 animate-pulse rounded-control bg-line-soft" />
+          <div className="h-16 w-full animate-pulse rounded-control bg-line-soft" />
+          <div className="h-16 w-full animate-pulse rounded-control bg-line-soft" />
         </div>
       </div>
     </div>

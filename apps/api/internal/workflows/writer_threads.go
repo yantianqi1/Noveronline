@@ -200,12 +200,20 @@ func (s *SQLWriterThreadStore) ListMessages(ctx context.Context, input ListWrite
 	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, $2::uuid, false)", input.TenantID, input.ProjectID); err != nil {
 		return nil, &AppError{Code: "WRITER_THREAD_QUERY_FAILED", Message: "failed to set tenant context for writer messages"}
 	}
+	// Most-recent window, returned in chronological order. The old
+	// `ORDER BY sequence ASC LIMIT 500` kept the OLDEST 500 rows, so a
+	// long-form thread past ~250 rounds silently froze at its beginning —
+	// the author's newest turns never loaded.
 	rows, err := tx.QueryContext(ctx, `
 SELECT message_id::text, thread_id::text, role, body, COALESCE(run_id::text, ''), sequence, created_at::text, metadata_jsonb::text
-FROM writer_thread_messages
-WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND thread_id = $3::uuid
-ORDER BY sequence ASC
-LIMIT 500`, input.TenantID, input.ProjectID, input.ThreadID)
+FROM (
+  SELECT message_id, thread_id, role, body, run_id, sequence, created_at, metadata_jsonb
+  FROM writer_thread_messages
+  WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND thread_id = $3::uuid
+  ORDER BY sequence DESC
+  LIMIT 500
+) recent
+ORDER BY sequence ASC`, input.TenantID, input.ProjectID, input.ThreadID)
 	if err != nil {
 		return nil, &AppError{Code: "WRITER_THREAD_QUERY_FAILED", Message: "failed to list writer messages"}
 	}
@@ -256,6 +264,12 @@ func (s *SQLWriterThreadStore) AppendMessage(ctx context.Context, input AppendWr
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, "SELECT app_set_tenant_context($1::uuid, $2::uuid, false)", input.TenantID, input.ProjectID); err != nil {
 		return WriterThreadMessage{}, &AppError{Code: "WRITER_THREAD_MUTATION_FAILED", Message: "failed to set tenant context for writer messages"}
+	}
+	if _, err := tx.ExecContext(ctx, `
+SELECT 1 FROM writer_threads
+WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND thread_id = $3::uuid
+FOR UPDATE`, input.TenantID, input.ProjectID, input.ThreadID); err != nil {
+		return WriterThreadMessage{}, &AppError{Code: "WRITER_THREAD_MUTATION_FAILED", Message: "failed to lock writer thread"}
 	}
 	var nextSequence int64
 	if err := tx.QueryRowContext(ctx, `

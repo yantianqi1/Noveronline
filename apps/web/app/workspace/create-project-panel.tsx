@@ -81,13 +81,13 @@ export function CreateProjectPanel({ tenants, open, onClose, onCreated }: Create
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -6 }}
           transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-          className="mb-9 rounded-card border border-line bg-panel p-5 shadow-[0_1px_2px_rgba(23,26,27,0.05)]"
+          className="mb-9 rounded-modal border border-line bg-panel p-5 shadow-hairline"
           aria-labelledby={titleId}
         >
           <div className="mb-4 flex items-start justify-between gap-3">
             <div>
-              <p className="text-[12px] font-medium tracking-[0.22em] text-accent">新 作 品</p>
-              <h2 id={titleId} className="mt-1 font-serif text-[20px] font-semibold text-ink">
+              <p className="text-caption font-medium tracking-label text-muted">新作品</p>
+              <h2 id={titleId} className="mt-1 font-serif text-xl font-semibold text-ink">
                 创建一部小说
               </h2>
             </div>
@@ -95,7 +95,7 @@ export function CreateProjectPanel({ tenants, open, onClose, onCreated }: Create
               type="button"
               onClick={onClose}
               disabled={submitting}
-              className="grid size-8 place-items-center rounded-[8px] text-muted transition-colors hover:bg-paper-deep hover:text-ink"
+              className="grid size-8 place-items-center rounded-panel text-muted transition-colors hover:bg-paper-deep hover:text-ink"
               aria-label="关闭"
             >
               <X className="size-4" aria-hidden />
@@ -125,7 +125,7 @@ export function CreateProjectPanel({ tenants, open, onClose, onCreated }: Create
                   value={selectedTenantId}
                   onChange={(event) => setSelectedTenantId(event.target.value)}
                   disabled={submitting}
-                  className="flex h-11 w-full rounded-[10px] border border-line bg-panel px-3.5 text-[15px] text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/25 disabled:opacity-55"
+                  className="flex h-11 w-full rounded-panel border border-line bg-panel px-3.5 text-md text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/25 disabled:opacity-55"
                 >
                   {tenants.map((tenant) => (
                     <option key={tenant.tenant_id} value={tenant.tenant_id}>
@@ -137,7 +137,7 @@ export function CreateProjectPanel({ tenants, open, onClose, onCreated }: Create
             ) : null}
 
             {error ? (
-              <p className="text-[13px] text-accent-strong" role="alert">
+              <p className="text-sm text-accent-strong" role="alert">
                 {error}
               </p>
             ) : null}

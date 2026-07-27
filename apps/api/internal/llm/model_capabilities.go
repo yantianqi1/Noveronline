@@ -37,13 +37,13 @@ func InferModelCapabilities(modelID string) InferredModelCapabilities {
 	return InferredModelCapabilities{SupportsJSON: true, SupportsTools: true}
 }
 
-// EffectiveModelCapabilities ORs catalog column defaults with inference so a
-// FALSE column default never reports "unsupported" for real chat models.
-func EffectiveModelCapabilities(modelID string, storedJSON, storedTools bool) InferredModelCapabilities {
-	caps := InferModelCapabilities(modelID)
+// EffectiveModelCapabilities preserves explicit catalog values. Model-name
+// inference is discovery metadata only and must not override an operator's
+// explicit false setting.
+func EffectiveModelCapabilities(_ string, storedJSON, storedTools bool) InferredModelCapabilities {
 	return InferredModelCapabilities{
-		SupportsJSON:  storedJSON || caps.SupportsJSON,
-		SupportsTools: storedTools || caps.SupportsTools,
+		SupportsJSON:  storedJSON,
+		SupportsTools: storedTools,
 	}
 }
 

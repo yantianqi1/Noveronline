@@ -1,5 +1,6 @@
 import type {
   WorldlineEvent,
+  WorldlineGoalStart,
   WorldlinePreparation,
   WorldlinePreparedAgent,
   WorldlineSavedPath,
@@ -132,6 +133,52 @@ export function startWorldlineSession(
   );
 }
 
+// ── Goal-start (Pi 整备编排) ─────────────────────────────────────────────────
+//
+// The goal-start is the real 整备入口: it admits a worldline_goal_start run,
+// the Pi cast planner decomposes the goal against the asset library, commits a
+// cast, prepares each agent, and only then creates the worldline session. Poll
+// fetchWorldlineGoalStart until status is ready (session_id attached) or failed.
+
+/** Kick off the goal-driven 整备 orchestration (Pi cast planner). */
+export function startWorldlineGoalStart(
+  projectId: string,
+  tenantId: string,
+  csrfToken: string,
+  input: { goal: string; anchor_path_id?: string; options?: Record<string, unknown> },
+): Promise<WorldlineGoalStart> {
+  return sendJson<WorldlineGoalStart>(
+    "POST",
+    `/api/projects/${projectId}/worldline-goal-starts`,
+    tenantId,
+    csrfToken,
+    input,
+  );
+}
+
+/** Read one goal-start run by its run_id (poll until ready / failed). */
+export function fetchWorldlineGoalStart(
+  projectId: string,
+  tenantId: string,
+  runId: string,
+): Promise<WorldlineGoalStart> {
+  return getJson<WorldlineGoalStart>(
+    `/api/projects/${projectId}/worldline-goal-starts/${encodeURIComponent(runId)}`,
+    tenantId,
+  );
+}
+
+export async function fetchWorldlineGoalStarts(
+  projectId: string,
+  tenantId: string,
+): Promise<WorldlineGoalStart[]> {
+  const data = await getJson<{ items?: WorldlineGoalStart[] } | WorldlineGoalStart[]>(
+    `/api/projects/${projectId}/worldline-goal-starts`,
+    tenantId,
+  );
+  return Array.isArray(data) ? data : data.items ?? [];
+}
+
 // ── Timeline + events ──────────────────────────────────────────────────────
 
 export async function fetchWorldlineTimeline(
@@ -230,6 +277,18 @@ export function updateWorldlineEvent(
 
 // ── Variables ──────────────────────────────────────────────────────────────
 
+export async function fetchWorldlineVariables(
+  projectId: string,
+  tenantId: string,
+  sessionId: string,
+): Promise<WorldlineVariable[]> {
+  const data = await getJson<{ items?: WorldlineVariable[] } | WorldlineVariable[]>(
+    `/api/projects/${projectId}/worldline-sessions/${encodeURIComponent(sessionId)}/variables`,
+    tenantId,
+  );
+  return unwrapItems(data);
+}
+
 export function injectWorldlineVariable(
   projectId: string,
   tenantId: string,
@@ -243,6 +302,25 @@ export function injectWorldlineVariable(
     tenantId,
     csrfToken,
     input,
+  );
+}
+
+/** Persist a variable's lock. Locked variables are hard constraints the
+ * director must honor on the next step; unlocked ones sit out of the prompt. */
+export function setWorldlineVariableLocked(
+  projectId: string,
+  tenantId: string,
+  csrfToken: string,
+  sessionId: string,
+  variableId: string,
+  locked: boolean,
+): Promise<WorldlineVariable> {
+  return sendJson<WorldlineVariable>(
+    "PATCH",
+    `/api/projects/${projectId}/worldline-sessions/${encodeURIComponent(sessionId)}/variables/${encodeURIComponent(variableId)}`,
+    tenantId,
+    csrfToken,
+    { locked },
   );
 }
 

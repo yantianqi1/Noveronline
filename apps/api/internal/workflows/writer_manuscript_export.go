@@ -181,6 +181,7 @@ func manuscriptArtifactContentQuery() string {
 FROM manuscript_blocks
 WHERE tenant_id::text = $1
   AND project_id::text = $2
+  AND status = 'active'
 ORDER BY block_order ASC, created_at ASC`
 }
 

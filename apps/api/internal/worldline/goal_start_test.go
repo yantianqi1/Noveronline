@@ -179,6 +179,16 @@ func TestValidateGoalStartInputRequiresGoal(t *testing.T) {
 	}
 }
 
+func TestSanitizeGoalStartAdmissionErrorPreservesActiveGuard(t *testing.T) {
+	err := sanitizeGoalStartAdmissionError(&AppError{
+		Code:    "WORLDLINE_GOAL_START_ACTIVE",
+		Message: "project already has an active worldline goal-start or current world",
+	})
+	if ErrorCode(err) != "WORLDLINE_GOAL_START_ACTIVE" {
+		t.Fatalf("expected active guard error, got %s (%v)", ErrorCode(err), err)
+	}
+}
+
 func TestGoalStartTemporalPayloadShape(t *testing.T) {
 	payload := goalStartTemporalPayload(StartGoalStartInput{
 		TenantID:    "t1",

@@ -35,13 +35,9 @@ func TestInferModelCapabilities(t *testing.T) {
 		if got.SupportsJSON != tc.wantJSON || got.SupportsTools != tc.wantTools {
 			t.Fatalf("InferModelCapabilities(%q) = %+v, want json=%v tools=%v", tc.modelID, got, tc.wantJSON, tc.wantTools)
 		}
-		effective := EffectiveModelCapabilities(tc.modelID, false, false)
-		if effective.SupportsJSON != tc.wantJSON || effective.SupportsTools != tc.wantTools {
-			t.Fatalf("EffectiveModelCapabilities(%q,false,false) = %+v, want json=%v tools=%v", tc.modelID, effective, tc.wantJSON, tc.wantTools)
-		}
 	}
-	if caps := EffectiveModelCapabilities("deepseek-v4-flash", true, false); !caps.SupportsJSON || !caps.SupportsTools {
-		t.Fatalf("stored JSON should OR with inferred tools for deepseek-v4-flash, got %+v", caps)
+	if caps := EffectiveModelCapabilities("deepseek-v4-flash", true, false); !caps.SupportsJSON || caps.SupportsTools {
+		t.Fatalf("explicit stored capability flags must be preserved, got %+v", caps)
 	}
 }
 

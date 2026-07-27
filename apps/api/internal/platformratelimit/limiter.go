@@ -28,6 +28,7 @@ const (
 	ClassCollaborationInviteAccept Class = "collaboration_invite_accept"
 	ClassLLMAdminMutation          Class = "llm_admin_mutation"
 	ClassLLMProviderHealth         Class = "llm_provider_health"
+	ClassWriterRunStart            Class = "writer_run_start"
 )
 
 var productionClasses = []Class{
@@ -38,6 +39,7 @@ var productionClasses = []Class{
 	ClassCollaborationInviteAccept,
 	ClassLLMAdminMutation,
 	ClassLLMProviderHealth,
+	ClassWriterRunStart,
 }
 
 type Policy struct {

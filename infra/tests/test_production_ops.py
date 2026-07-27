@@ -79,8 +79,9 @@ def test_writer_planning_worker_has_staging_and_production_runtime_contracts() -
             assert "security_opt: *service-security" in section
 
 
-def test_production_workers_share_the_configured_temporal_namespace() -> None:
-    encoded = (INFRA / "compose.production.yml").read_text(encoding="utf-8")
+@pytest.mark.parametrize("compose_name", ["compose.staging.yml", "compose.production.yml"])
+def test_deployment_workers_share_the_configured_temporal_namespace(compose_name: str) -> None:
+    encoded = (INFRA / compose_name).read_text(encoding="utf-8")
     worker_services = (
         "agent-runtime",
         "agent-runtime-seed",
@@ -92,6 +93,7 @@ def test_production_workers_share_the_configured_temporal_namespace() -> None:
         "agent-runtime-writer-planning",
         "pi-agent-runtime",
         "pi-agent-runtime-analysis",
+        "pi-agent-runtime-worldline-cast",
         "legacy-import-worker",
     )
     for index, service in enumerate(worker_services):
@@ -103,6 +105,32 @@ def test_production_workers_share_the_configured_temporal_namespace() -> None:
         end = min((position for position in later_starts if position != -1), default=len(encoded))
         section = encoded[start:end]
         assert "TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}" in section
+
+
+def test_temporal_uses_configured_database_names_and_readiness_checks_all_queues() -> None:
+    compose = (INFRA / "docker-compose.yml").read_text(encoding="utf-8")
+    temporal = compose.split("  temporal:", 1)[1].split("\n  temporal-db-init:", 1)[0]
+    assert "DBNAME: ${TEMPORAL_DB:-temporal}" in temporal
+    assert "VISIBILITY_DBNAME: ${TEMPORAL_VISIBILITY_DB:-temporal_visibility}" in temporal
+
+    readiness = (INFRA / "scripts" / "check-temporal-workers.sh").read_text(encoding="utf-8")
+    assert "analysis-streaming" in readiness
+    assert "worldline-cast-streaming" in readiness
+
+
+def test_worldline_0028_rollback_removes_migration_ledger_entry() -> None:
+    rollback = (INFRA / "postgres" / "rollbacks" / "0028_worldline_variable_lock_and_canon.sql").read_text(encoding="utf-8")
+    assert "DELETE FROM mirofish_schema_migrations" in rollback
+    assert "0028_worldline_variable_lock_and_canon" in rollback
+
+
+def test_asset_distillation_0031_allows_failed_fingerprint_retry_and_rolls_back_ledger() -> None:
+    migration = (INFRA / "postgres" / "migrations" / "0031_asset_distillation_retryable_fingerprint.sql").read_text(encoding="utf-8")
+    rollback = (INFRA / "postgres" / "rollbacks" / "0031_asset_distillation_retryable_fingerprint.sql").read_text(encoding="utf-8")
+    assert "DROP CONSTRAINT IF EXISTS manuscript_asset_distillation_tenant_id_project_id_input_fi_key" in migration
+    assert "idx_manuscript_asset_distillation_fingerprint_replay" in migration
+    assert "DELETE FROM mirofish_schema_migrations" in rollback
+    assert "0031_asset_distillation_retryable_fingerprint" in rollback
 
 
 def test_base_compose_legacy_worker_uses_fixed_read_only_local_source_root() -> None:

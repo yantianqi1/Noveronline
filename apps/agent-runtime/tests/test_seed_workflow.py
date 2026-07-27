@@ -77,6 +77,7 @@ def test_seed_retry_checkpoint_accepts_persisted_sequential_segments() -> None:
 
     assert seed_module._seed_retry_from_stage(payload) == "sequential_reading"
     assert seed_module._seed_retry_from_stage({**payload, "segments": []}) is None
+    assert seed_module._seed_retry_from_stage({"retry_from_stage": "finalize"}) == "finalize"
 
 
 def _minimal_text_pdf(text: str) -> bytes:
@@ -2809,6 +2810,9 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
     assert "FROM world_rule_evidence" in queries[1]
     assert "RETURNING" in queries[1]
     assert "project_readiness_snapshot_id::text AS project_readiness_snapshot_id" in queries[1]
+    assert "(metadata_jsonb->>'total_segment_count')::int AS total_segment_count" in queries[1]
+    assert "(metadata_jsonb->>'succeeded_segment_count')::int AS succeeded_segment_count" in queries[1]
+    assert "metadata_jsonb->'failed_segment_ids' AS failed_segment_ids" in queries[1]
     joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
     assert "tenant-1" in joined_params
     assert "project-1" in joined_params
@@ -2817,6 +2821,7 @@ def test_postgres_project_readiness_updater_records_snapshot_counts_without_repo
         "tenant-1", "project-1", "run-1",
         "tenant-1", "project-1", "run-1", "run-1",
         "tenant-1", "project-1", "run-1", "run-1",
+        "tenant-1", "project-1", "run-1",
         "tenant-1", "project-1", "run-1",
         "tenant-1", "project-1", "run-1",
         "run-1", "tenant-1", "project-1", "run-1",
@@ -7349,6 +7354,8 @@ def test_postgres_seed_workflow_status_writer_marks_failed_with_tenant_context_a
         "tenant-1",
         "project-1",
         "run-1",
+        None,
+        None,
     )
     encoded = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
     for forbidden in ("prompt", "api_key", "credential_ref", "object_key", "raw_text", "draft", "manuscript"):
@@ -7383,6 +7390,8 @@ def test_postgres_seed_workflow_status_writer_marks_running_with_tenant_context(
         "tenant-1",
         "project-1",
         "run-1",
+        None,
+        None,
     )
     assert connection.committed is True
     assert connection.closed is True

@@ -157,9 +157,10 @@ WHERE tenant_id=$1 AND project_id=$2 AND status='active'`, emptyProjectLiveTenan
 
 	// Idempotent replay must not create a second block or Seed artifacts.
 	replay, err := adoption.AdoptDraft(ctx, DraftAdoptionInput{
-		TenantID:  emptyProjectLiveTenant,
-		DraftID:   emptyProjectLiveDraft,
-		RequestID: "empty-project-live-adopt-replay",
+		TenantID:    emptyProjectLiveTenant,
+		DraftID:     emptyProjectLiveDraft,
+		ActorUserID: emptyProjectLiveUser,
+		RequestID:   "empty-project-live-adopt-replay",
 	})
 	if err != nil {
 		t.Fatalf("adoption replay: %s %v", ErrorCode(err), err)

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   PiWorldlineCastDeps,
@@ -174,7 +174,7 @@ async function executeCastTool(
   switch (request.tool_name) {
     case "query_project_context": {
       const result = await queryWithTenant(db, request, `
-SELECT project_id::text, name, summary, status
+SELECT project_id::text, title AS name, description AS summary, status
   FROM projects
  WHERE tenant_id = $1 AND project_id = $2
  LIMIT 1`, [request.tenant_id, request.project_id]);
@@ -401,9 +401,27 @@ async function admitPreparation(
     source_refs: WorldlineCastCommit["source_refs"];
   }
 ): Promise<{ prepare_id: string; run_id: string; temporal_workflow_id: string }> {
-  const runId = randomUUID();
-  const prepareId = randomUUID();
-  const eventId = randomUUID();
+	const existing = await queryWithTenant(db, request, `
+SELECT preparation.prepare_id::text, preparation.run_id::text, workflow.temporal_workflow_id
+  FROM worldline_preparations preparation
+  JOIN workflow_runs workflow
+    ON workflow.tenant_id = preparation.tenant_id AND workflow.run_id = preparation.run_id
+  JOIN workflow_events event
+    ON event.tenant_id = workflow.tenant_id AND event.run_id = workflow.run_id
+   AND event.event_type = 'workflow.queued'
+ WHERE preparation.tenant_id = $1::uuid AND preparation.project_id = $2::uuid
+   AND event.payload_jsonb->>'request_id' = $3
+ LIMIT 1`, [request.tenant_id, request.project_id, request.request_id]);
+	if (existing.rows[0]) {
+		return {
+			prepare_id: String(existing.rows[0].prepare_id),
+			run_id: String(existing.rows[0].run_id),
+			temporal_workflow_id: String(existing.rows[0].temporal_workflow_id)
+		};
+	}
+	const runId = stableUUID(`${request.tenant_id}:${request.project_id}:${request.request_id}:preparation-run`);
+	const prepareId = stableUUID(`${request.tenant_id}:${request.project_id}:${request.request_id}:preparation`);
+	const eventId = stableUUID(`${request.tenant_id}:${request.project_id}:${request.request_id}:preparation-event`);
   const temporalWorkflowId = `worldline_preparation_${runId}`;
   const options = {
     agent_refs: request.agent_refs,
@@ -431,6 +449,7 @@ WITH workflow_insert AS (
     $1::uuid, $3::uuid, 'worldline_preparation', $2::uuid, 'queued', 0,
     'queued', NULLIF($7, '')::uuid, $8
   )
+  ON CONFLICT (run_id) DO NOTHING
   RETURNING tenant_id, run_id, project_id
 ), preparation_insert AS (
   INSERT INTO worldline_preparations (
@@ -474,11 +493,15 @@ async function waitPreparationReady(
     project_id: string;
     prepare_id: string;
     timeout_ms?: number;
+    abort_signal?: AbortSignal;
   }
 ): Promise<{ status: "completed" | "failed"; error_message?: string }> {
   const timeoutMs = request.timeout_ms ?? 30 * 60 * 1000;
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+	if (request.abort_signal?.aborted) {
+		throw new Error("WORKFLOW_CANCELLED: worldline preparation wait was cancelled");
+	}
     const result = await queryWithTenant(db, request, `
 SELECT status, lifecycle
   FROM worldline_preparations
@@ -494,7 +517,7 @@ SELECT status, lifecycle
     if (row.status === "failed" || row.status === "cancelled") {
       return { status: "failed", error_message: `worldline preparation ${String(row.status)}` };
     }
-    await sleep(2000);
+	await sleep(2000, request.abort_signal);
   }
   return { status: "failed", error_message: "worldline preparation timed out" };
 }
@@ -511,9 +534,21 @@ async function startSession(
     prepare_id: string;
   }
 ): Promise<{ session_id: string; run_id: string }> {
-  const runId = randomUUID();
-  const sessionId = randomUUID();
-  const eventId = randomUUID();
+	const existing = await queryWithTenant(db, request, `
+SELECT session.session_id::text, session.run_id::text
+  FROM worldline_sessions session
+  JOIN workflow_events event
+    ON event.tenant_id = session.tenant_id AND event.run_id = session.run_id
+   AND event.event_type = 'workflow.queued'
+ WHERE session.tenant_id = $1::uuid AND session.project_id = $2::uuid
+   AND event.payload_jsonb->>'request_id' = $3
+ LIMIT 1`, [request.tenant_id, request.project_id, request.request_id]);
+	if (existing.rows[0]) {
+		return { session_id: String(existing.rows[0].session_id), run_id: String(existing.rows[0].run_id) };
+	}
+	const runId = stableUUID(`${request.tenant_id}:${request.project_id}:${request.request_id}:session-run`);
+	const sessionId = stableUUID(`${request.tenant_id}:${request.project_id}:${request.request_id}:session`);
+	const eventId = stableUUID(`${request.tenant_id}:${request.project_id}:${request.request_id}:session-event`);
   const eventPayload = {
     status: "queued",
     workflow_type: "worldline_session",
@@ -533,6 +568,7 @@ WITH workflow_insert AS (
     $1::uuid, $3::uuid, 'worldline_session', $2::uuid, 'queued', 0,
     'queued', NULLIF($6, '')::uuid, ''
   )
+  ON CONFLICT (run_id) DO NOTHING
   RETURNING run_id
 ),
 session_insert AS (
@@ -679,6 +715,23 @@ function sanitizePublicPayload(payload: Record<string, unknown>): Record<string,
   return out;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function stableUUID(value: string): string {
+  const hex = createHash("sha256").update(value).digest("hex").slice(0, 32).split("");
+  hex[12] = "5";
+  hex[16] = ((Number.parseInt(hex[16] ?? "0", 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8).join("")}-${hex.slice(8, 12).join("")}-${hex.slice(12, 16).join("")}-${hex.slice(16, 20).join("")}-${hex.slice(20).join("")}`;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("WORKFLOW_CANCELLED: worldline preparation wait was cancelled"));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new Error("WORKFLOW_CANCELLED: worldline preparation wait was cancelled"));
+    }, { once: true });
+  });
 }

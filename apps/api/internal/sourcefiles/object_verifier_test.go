@@ -194,6 +194,40 @@ func TestMinIOObjectWriterRejectsPayloadMismatchBeforePut(t *testing.T) {
 	}
 }
 
+func TestMinIOObjectWriterRejectsDeclaredOversizeBeforeReadingOrPut(t *testing.T) {
+	client := &recordingMinIOPutClient{}
+	reader := &recordingReader{content: "must-not-be-read"}
+	writer := minioObjectWriter{client: client, bucket: "mirofish-uploads", maxSizeBytes: 4}
+
+	err := writer.WriteObject(context.Background(), ObjectWriteInput{
+		ObjectKey: "projects/project-1/source-files/upload-1/book.txt",
+		SizeBytes: 5,
+		SHA256:    strings.Repeat("a", 64),
+	}, reader)
+
+	if code := ErrorCode(err); code != "SOURCE_FILE_OBJECT_TOO_LARGE" {
+		t.Fatalf("expected SOURCE_FILE_OBJECT_TOO_LARGE, got %s (%v)", code, err)
+	}
+	if reader.reads != 0 || client.objectKey != "" {
+		t.Fatalf("oversize payload was read or uploaded: reads=%d object=%q", reader.reads, client.objectKey)
+	}
+}
+
+type recordingReader struct {
+	content string
+	reads   int
+}
+
+func (r *recordingReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.content == "" {
+		return 0, io.EOF
+	}
+	n := copy(p, r.content)
+	r.content = r.content[n:]
+	return n, nil
+}
+
 type recordingMinIOStatClient struct {
 	info      minio.ObjectInfo
 	err       error

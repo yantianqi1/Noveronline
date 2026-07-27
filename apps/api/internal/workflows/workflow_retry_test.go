@@ -282,12 +282,12 @@ func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *test
 		store.admitInput.ProjectID != "22222222-2222-4222-8222-222222222222" ||
 		store.admitInput.RunID != "33333333-3333-4333-8333-333333333333" ||
 		store.admitInput.WorkflowType != SeedWorkflowType ||
-		store.admitInput.TemporalWorkflowID != "seed_run_33333333-3333-4333-8333-333333333333_retry" ||
+		!strings.HasPrefix(store.admitInput.TemporalWorkflowID, "seed_run_33333333-3333-4333-8333-333333333333_retry_") ||
 		store.admitInput.ActorUserID != "44444444-4444-4444-8444-444444444444" ||
 		store.admitInput.RequestID != "req-retry" {
 		t.Fatalf("store lost retry admission metadata: %#v", store.admitInput)
 	}
-	if temporalClient.workflowID != "seed_run_33333333-3333-4333-8333-333333333333_retry" ||
+	if temporalClient.workflowID != store.admitInput.TemporalWorkflowID ||
 		temporalClient.workflowName != SeedWorkflowName ||
 		temporalClient.options.TaskQueue != "seed-heavy-test" {
 		t.Fatalf("unexpected temporal start: workflowID=%q name=%v options=%#v", temporalClient.workflowID, temporalClient.workflowName, temporalClient.options)
@@ -303,6 +303,13 @@ func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *test
 		payload["retry_from_stage"] != "sequential_reading" {
 		t.Fatalf("payload lost required seed retry metadata: %#v", payload)
 	}
+	if attempt, ok := payload["retry_attempt_id"].(string); !ok || attempt == "" || !strings.HasSuffix(temporalClient.workflowID, "_"+attempt) {
+		t.Fatalf("retry attempt is not shared by the workflow id and payload: %#v", payload)
+	}
+	contextPayload, ok := payload["context"].(map[string]any)
+	if !ok || contextPayload["retry_attempt_id"] != payload["retry_attempt_id"] {
+		t.Fatalf("retry attempt is not fenced in the runtime context: %#v", payload)
+	}
 	if segments, ok := payload["segments"].([]map[string]any); !ok || len(segments) != 1 || segments[0]["segment_id"] != "77777777-7777-4777-8777-777777777777" {
 		t.Fatalf("payload lost sequential-reading checkpoint segments: %#v", payload["segments"])
 	}
@@ -313,6 +320,28 @@ func TestTemporalWorkflowRetrierRetriesStoredSeedRunWithSanitizedPayload(t *test
 		strings.Contains(publicPayload, "api_key") ||
 		strings.Contains(publicPayload, "credential_ref") {
 		t.Fatalf("public retry payload leaked private metadata: %s", publicPayload)
+	}
+}
+
+func TestSeedRetryPayloadResumesFinalizeWithoutSegmentCheckpoint(t *testing.T) {
+	target := WorkflowRetryTarget{
+		RunID: "33333333-3333-4333-8333-333333333333", ProjectID: "22222222-2222-4222-8222-222222222222",
+		FailedStage: "finalize",
+	}
+
+	payload := seedRetryTemporalPayload(
+		"11111111-1111-4111-8111-111111111111",
+		target,
+		"44444444-4444-4444-8444-444444444444",
+		"req-finalize-retry",
+		"trace-finalize-retry",
+	)
+
+	if payload["retry_from_stage"] != "finalize" {
+		t.Fatalf("finalize retry lost checkpoint: %#v", payload)
+	}
+	if _, exists := payload["segments"]; exists {
+		t.Fatalf("finalize retry must not require private segment refs: %#v", payload)
 	}
 }
 
@@ -340,14 +369,14 @@ func TestSeedRetryReplacesLegacyRerunWithoutCreatingOrAdoptingAnotherRun(t *test
 	if result != (WorkflowRunRetry{RunID: originalRunID, Status: "retry_requested"}) {
 		t.Fatalf("retry fabricated or adopted a different run: %#v", result)
 	}
-	if store.admitInput.RunID != originalRunID || store.admitInput.TemporalWorkflowID != "seed_run_"+originalRunID+"_retry" {
+	if store.admitInput.RunID != originalRunID || !strings.HasPrefix(store.admitInput.TemporalWorkflowID, "seed_run_"+originalRunID+"_retry_") {
 		t.Fatalf("retry admission did not preserve the original run identity: %#v", store.admitInput)
 	}
 	payload, ok := temporalClient.args[0].(map[string]any)
 	if !ok || payload["run_id"] != originalRunID {
 		t.Fatalf("Temporal retry payload fabricated another run: %#v", temporalClient.args)
 	}
-	if store.targetInput.RunID != originalRunID || temporalClient.workflowID != "seed_run_"+originalRunID+"_retry" {
+	if store.targetInput.RunID != originalRunID || temporalClient.workflowID != store.admitInput.TemporalWorkflowID {
 		t.Fatalf("retry crossed run identity: target=%#v temporal=%q", store.targetInput, temporalClient.workflowID)
 	}
 }
@@ -541,7 +570,7 @@ func TestSQLWorkflowRetryStoreAdmitsOnlyTerminalSeedRunAndSanitizesEvent(t *test
 		!strings.Contains(execer.query, "status IN ('failed', 'cancelled')") ||
 		!strings.Contains(execer.query, "workflow.retry_requested") ||
 		!strings.Contains(execer.query, "UPDATE source_files") ||
-		!strings.Contains(execer.query, "CASE WHEN $9 = 'sequential_reading'") {
+		!strings.Contains(execer.query, "CASE WHEN $9 IN ('sequential_reading', 'finalize')") {
 		t.Fatalf("retry admission query lost state-machine guards: %s", execer.query)
 	}
 	joinedArgs := strings.Join(argsAsStrings(execer.args), "\n")

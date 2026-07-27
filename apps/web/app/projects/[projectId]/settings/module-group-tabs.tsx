@@ -26,7 +26,7 @@ export function ModuleGroupTabs({
       <div
         role="tablist"
         aria-label="功能分组"
-        className="flex flex-wrap items-center gap-1 rounded-[12px] border border-line bg-paper/60 p-1"
+        className="flex flex-wrap items-center gap-1 rounded-modal border border-line bg-paper/60 p-1"
       >
         {groups.map((group) => {
           const bound = group.modules.filter(
@@ -42,7 +42,7 @@ export function ModuleGroupTabs({
               aria-selected={selected}
               onClick={() => onChange(group.key)}
               className={cn(
-                "relative flex items-center gap-2 rounded-[9px] px-3.5 py-2 text-[13px] font-medium transition-colors",
+                "relative flex items-center gap-2 rounded-panel px-3.5 py-2 text-sm font-medium transition-colors",
                 selected ? "text-accent-strong" : "text-muted hover:text-ink",
               )}
             >
@@ -50,18 +50,18 @@ export function ModuleGroupTabs({
                 <motion.span
                   layoutId="tab-active-pill"
                   transition={{ type: "spring", stiffness: 420, damping: 34 }}
-                  className="absolute inset-0 rounded-[9px] border border-accent/25 bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.06)]"
+                  className="absolute inset-0 rounded-panel border border-accent/30 bg-panel shadow-hairline"
                 />
               )}
               <span className="relative z-10">{group.label}</span>
               <span
                 className={cn(
-                  "relative z-10 rounded-full px-1.5 py-px text-[10.5px] tabular-nums",
+                  "relative z-10 rounded-full px-1.5 py-px text-caption tabular-nums",
                   complete
                     ? "bg-accent-wash text-accent-strong"
                     : selected
                       ? "bg-paper-deep text-ink-soft"
-                      : "bg-paper-deep/70 text-muted/80",
+                      : "bg-paper-deep/70 text-muted",
                 )}
               >
                 {bound}/{total}

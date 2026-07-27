@@ -82,10 +82,10 @@ export function ProposalRail({
   return (
     <section className="flex min-h-0 flex-col border-t border-line">
       <header className="flex shrink-0 items-center justify-between px-4 py-2.5">
-        <h3 className="flex items-center gap-2 text-[12.5px] font-semibold text-ink">
+        <h3 className="flex items-center gap-2 text-caption font-semibold text-ink">
           待审资产
           {count > 0 && (
-            <span className="rounded-full bg-accent px-1.5 py-px text-[10.5px] font-medium text-white">
+            <span className="rounded-full bg-accent px-1.5 py-px text-caption font-medium text-panel">
               {count}
             </span>
           )}
@@ -96,12 +96,12 @@ export function ProposalRail({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        {error && <p className="mb-2 rounded-[8px] bg-accent-wash px-3 py-2 text-[12px] text-accent">{error}</p>}
+        {error && <p className="mb-2 rounded-panel bg-accent-wash px-3 py-2 text-caption text-accent">{error}</p>}
 
         {proposals === null ? (
-          <p className="px-1 py-3 text-[12px] text-muted">加载中…</p>
+          <p className="px-1 py-3 text-caption text-muted">加载中…</p>
         ) : proposals.length === 0 ? (
-          <p className="px-1 py-3 text-[12px] leading-relaxed text-muted">
+          <p className="px-1 py-3 text-caption leading-relaxed text-muted">
             暂时没有待审资产。采纳 AI 草稿后，新出现的人物、设定会自动抽出来放在这里等你过目——你点头之前，它们不会进资产库。
           </p>
         ) : (
@@ -181,7 +181,7 @@ function ProposalCard({
   const isUpdate = proposal.operation === "update" && proposal.target_asset_id;
 
   return (
-    <li className="rounded-[10px] border border-line bg-panel">
+    <li className="rounded-panel border border-line bg-panel">
       <button
         type="button"
         onClick={onToggle}
@@ -194,18 +194,18 @@ function ProposalCard({
         )}
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
-            <span className="truncate text-[13px] font-medium text-ink">{proposal.title}</span>
-            <span className="shrink-0 rounded-[5px] border border-line bg-paper px-1.5 py-px text-[10px] text-muted">
+            <span className="truncate text-sm font-medium text-ink">{proposal.title}</span>
+            <span className="shrink-0 rounded-control border border-line bg-paper px-1.5 py-px text-caption text-muted">
               {assetTypeLabel(proposal.asset_type)}
             </span>
             {isUpdate && (
-              <span className="shrink-0 rounded-[5px] border border-accent/30 bg-accent-wash px-1.5 py-px text-[10px] text-accent">
+              <span className="shrink-0 rounded-control border border-accent/30 bg-accent-wash px-1.5 py-px text-caption text-accent">
                 合并建议
               </span>
             )}
           </span>
           {proposal.summary && (
-            <span className="mt-1 line-clamp-2 block text-[11.5px] leading-relaxed text-muted">
+            <span className="mt-1 line-clamp-2 block text-caption leading-relaxed text-muted">
               {proposal.summary}
             </span>
           )}
@@ -215,11 +215,11 @@ function ProposalCard({
       {open && (
         <div className="border-t border-line-soft px-3 py-2.5">
           {/* Evidence: where in the manuscript this candidate came from. */}
-          <p className="text-[10.5px] font-medium tracking-wide text-muted">
+          <p className="text-caption font-medium tracking-wide text-muted">
             出处（{proposal.evidence_count} 处）
           </p>
-          {detailError && <p className="mt-1 text-[11.5px] text-accent">{detailError}</p>}
-          {!detail && !detailError && <p className="mt-1 text-[11.5px] text-muted">加载出处…</p>}
+          {detailError && <p className="mt-1 text-caption text-accent">{detailError}</p>}
+          {!detail && !detailError && <p className="mt-1 text-caption text-muted">加载出处…</p>}
           {detail && (
             <ul className="mt-1.5 flex flex-col gap-1.5">
               {detail.evidence.map((ev) => {
@@ -227,7 +227,7 @@ function ProposalCard({
                 return (
                   <li
                     key={ev.evidence_id}
-                    className="rounded-[7px] border border-line-soft bg-paper/70 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-ink-soft"
+                    className="rounded-control border border-line-soft bg-paper/70 px-2.5 py-1.5 text-caption leading-relaxed text-ink-soft"
                   >
                     {text ? (
                       <span className="line-clamp-3">「{text}」</span>
@@ -235,13 +235,13 @@ function ProposalCard({
                       <span className="text-muted">手稿片段 {ev.block_id.slice(0, 8)}…（无查看原文权限）</span>
                     )}
                     {!ev.current && (
-                      <span className="ml-1 text-[10px] text-accent">（手稿已改动，采纳前请再核对）</span>
+                      <span className="ml-1 text-caption text-accent">（手稿已改动，采纳前请再核对）</span>
                     )}
                   </li>
                 );
               })}
               {detail.evidence.length === 0 && (
-                <li className="text-[11.5px] text-muted">没有记录出处。</li>
+                <li className="text-caption text-muted">没有记录出处。</li>
               )}
             </ul>
           )}

@@ -145,15 +145,15 @@ export function ReadinessRail({
   const total = tiles.length;
 
   return (
-    <section className="flex h-full flex-col overflow-hidden rounded-card border border-line bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.05)]">
+    <section className="flex h-full flex-col overflow-hidden rounded-modal border border-line bg-panel shadow-hairline">
       <div className="border-b border-line-soft px-5 py-4">
         <div className="flex items-baseline justify-between gap-3">
-          <h2 className="font-serif text-[16px] font-semibold text-ink">就绪度</h2>
-          <span className="text-[11px] tracking-wide text-muted">
+          <h2 className="font-serif text-md font-semibold text-ink">就绪度</h2>
+          <span className="text-caption tracking-wide text-muted">
             {total > 0 ? `${total} 件资产已入库` : "顺序精读产出 · 经分析逐个入库"}
           </span>
         </div>
-        <p className="mt-0.5 text-[12px] text-muted">分析已经读出的故事素材。</p>
+        <p className="mt-0.5 text-caption text-muted">分析已经读出的故事素材。</p>
       </div>
 
       {total === 0 ? (
@@ -196,16 +196,16 @@ function DrawerRow({
 
   return (
     <li className="flex flex-1 items-center gap-3.5 py-2.5 pl-5">
-      <span className="grid size-7 shrink-0 place-items-center rounded-[7px] border border-line-soft bg-panel-2 font-serif text-[12px] text-ink-soft">
+      <span className="grid size-7 shrink-0 place-items-center rounded-control border border-line-soft bg-panel-2 font-serif text-caption text-ink-soft">
         {drawer.glyph}
       </span>
       <div className="w-[74px] shrink-0">
-        <div className="text-[12.5px] font-semibold text-ink">{drawer.name}</div>
-        <div className="mt-px text-[10.5px] text-muted">{drawer.desc}</div>
+        <div className="text-caption font-semibold text-ink">{drawer.name}</div>
+        <div className="mt-px text-caption text-muted">{drawer.desc}</div>
       </div>
       <span
-        className={`w-7 shrink-0 text-right font-serif text-[15px] font-semibold tabular-nums ${
-          tiles.length === 0 ? "text-line" : "text-ink"
+        className={`w-7 shrink-0 text-right font-serif text-md font-semibold tabular-nums ${
+ tiles.length === 0 ? "text-line" : "text-ink"
         }`}
       >
         {tiles.length}
@@ -217,7 +217,7 @@ function DrawerRow({
           className="asset-drawer-track flex gap-2 overflow-x-auto overflow-y-hidden py-1.5 pl-0.5 pr-7"
         >
           {tiles.length === 0 ? (
-            <span className="self-center whitespace-nowrap px-1 py-1.5 text-[11px] text-muted">
+            <span className="self-center whitespace-nowrap px-1 py-1.5 text-caption text-muted">
               等待入库……
             </span>
           ) : (
@@ -229,7 +229,7 @@ function DrawerRow({
         {tiles.length > 0 && (
           <span
             aria-hidden
-            className="pointer-events-none absolute right-0.5 top-1/2 -translate-y-1/2 text-[9.5px] tracking-[0.14em] text-muted/70 [writing-mode:vertical-rl]"
+            className="pointer-events-none absolute right-0.5 top-1/2 -translate-y-1/2 text-micro tracking-label text-muted-soft [writing-mode:vertical-rl]"
           >
             滑动
           </span>
@@ -243,15 +243,15 @@ function TileChip({ tile, isNew, index }: { tile: Tile; isNew: boolean; index: n
   const vec = slamVectors(tile.id);
   const kindClass =
     tile.kind === "char"
-      ? "border-accent/40 text-accent-strong"
+      ? "border-accent/50 text-accent-strong"
       : tile.kind === "rel"
-        ? "border-line text-[#7a5a22]"
-        : "border-line text-[#43586b]";
+        ? "border-line text-candidate"
+        : "border-line text-muted";
   return (
     <div
       title={tile.title}
-      className={`asset-tile relative flex h-[54px] w-[44px] shrink-0 select-none flex-col items-center justify-center rounded-[8px] border ${kindClass} ${
-        isNew ? "" : "[animation:none]"
+      className={`asset-tile relative flex h-[54px] w-[44px] shrink-0 select-none flex-col items-center justify-center rounded-panel border ${kindClass} ${
+ isNew ? "" : "[animation:none]"
       }`}
       style={
         isNew
@@ -264,7 +264,7 @@ function TileChip({ tile, isNew, index }: { tile: Tile; isNew: boolean; index: n
           : undefined
       }
     >
-      <span className="px-0.5 text-center font-serif text-[15px] font-semibold leading-none">
+      <span className="px-0.5 text-center font-serif text-md font-semibold">
         {tile.face}
       </span>
     </div>
@@ -289,17 +289,17 @@ function EmptyLedger({
       <ul className="divide-y divide-line-soft">
         {rows.map((row) => (
           <li key={row.name} className="flex items-center gap-3.5 px-5 py-3">
-            <span className="grid size-7 shrink-0 place-items-center rounded-[7px] border border-line-soft bg-panel-2 font-serif text-[12px] text-ink-soft">
+            <span className="grid size-7 shrink-0 place-items-center rounded-control border border-line-soft bg-panel-2 font-serif text-caption text-ink-soft">
               {row.glyph}
             </span>
-            <span className="flex-1 text-[12.5px] font-semibold text-ink">{row.name}</span>
-            <span className={`font-serif text-[15px] font-semibold tabular-nums ${row.value === 0 ? "text-line" : "text-ink"}`}>
+            <span className="flex-1 text-caption font-semibold text-ink">{row.name}</span>
+            <span className={`font-serif text-md font-semibold tabular-nums ${row.value === 0 ? "text-line" : "text-ink"}`}>
               {row.value}
             </span>
           </li>
         ))}
       </ul>
-      <p className="mt-auto border-t border-dashed border-line-soft bg-paper/40 px-5 py-3.5 text-[11.5px] leading-relaxed text-muted">
+      <p className="mt-auto border-t border-dashed border-line-soft bg-paper/40 px-5 py-3.5 text-caption leading-relaxed text-muted">
         还没有就绪的素材。完成一次分析后，人物、关系与世界规则会在这里逐块入库。
       </p>
     </div>

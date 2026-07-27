@@ -1,6 +1,56 @@
 # 04. Design System and UI
 
-更新时间：`2026-07-12`
+更新时间：`2026-07-26`
+
+## 实现口径（apps/web）
+
+本节是代码里 `apps/web/app/globals.css` `@theme` 的对应文档。此前本文只描述方向，实现层各写各的，累积出 24 种字号、15 种圆角、18 种手写阴影和约 98 处硬编码颜色。现在 token 是唯一词表：Tailwind 自带的 `--text-*` / `--radius-*` / `--shadow-*` 三个 scale 已被 `initial` 清空，off-scale 值在编译期不存在。
+
+`apps/web/tests/design-tokens.test.mjs` 是 CI 阻断项，`apps/web/eslint.config.mjs` 提供编辑器内联提示。新增 token 时两处都要同步。
+
+### 字阶（8 档 + 阅读态）
+
+汉字在 11px 以下笔画发糊，因此正文字号地板为 12px；`micro` 仅供图形内标签（图谱节点）使用，不得用于阅读文本。行高与字号成对定义，不再单独写 `leading-*`。
+
+| token | px | line-height | 用途 |
+|---|---|---|---|
+| `text-micro` | 11 | 1.4 | 仅图形内标签 |
+| `text-caption` | 12 | 1.5 | 元信息、徽章、面包屑 |
+| `text-sm` | 13 | 1.55 | 密集 UI：rail 项、列表次要行 |
+| `text-base` | 14 | 1.6 | 默认 UI 文本、按钮 |
+| `text-md` | 16 | 1.6 | 输入框、主要列表项 |
+| `text-lg` | 18 | 1.45 | 面板 / 工作台标题 |
+| `text-xl` | 22 | 1.35 | 页面标题 |
+| `text-display` | 30 | 1.25 | 登录 / 空态大标题 |
+| `text-reading` | 17 | 1.85 | 稿件正文 |
+
+### 圆角（3 档）
+
+`rounded-control` 6px（按钮、输入框、chip、tab）、`rounded-panel` 10px（卡片、面板、popover）、`rounded-modal` 14px（模态、大表面）。`rounded-full` 保留。
+
+### 阴影（5 档，统一暖墨光源）
+
+`shadow-hairline`、`shadow-lift`、`shadow-panel`、`shadow-accent`（唯一朱砂投影，alpha 0.45）、`shadow-ink`（深色面）。
+
+### 语义色
+
+`--color-success` `#3f7a4a`、`--color-warning` `#95651f`、`--color-danger` `#b8402f`、`--color-candidate` `#856530`，各配 `-wash` 底色，全部在纸底上验算 ≥4.5:1。danger 比品牌朱砂 `#8f211b` 更亮更冷，确保报错不会被误读为主操作。`--color-muted-soft` 取代此前的 `text-muted/50`–`/70` 兑水灰（实测仅约 2.7:1）。
+
+**朱砂 `accent` 只用于**：唯一主 CTA、选中态、focus ring、品牌标识。栏目眉、分节标题、状态徽章一律不得使用。`border-accent` 透明度只有三档：`/30` 静置、`/50` hover、原色选中。
+
+### 字体
+
+`app/layout.tsx` 通过 `next/font/google` 自托管 Noto Sans SC（400/500/700）与 Noto Serif SC（400/600），CJK 必须 `preload: false`（Google 按 unicode-range 分片，浏览器只取用到的字块）。两者拉丁部分分别源自 Source Sans / Source Serif，中西文同源。`font-brush`（Ma Shan Zheng 子集）仅限品牌位。
+
+### 动效
+
+`@theme` 覆盖 `--default-transition-duration: 220ms` 与 `--default-transition-timing-function`，未显式指定时长的 `transition-*` 自动对齐规范。显式档位 `duration-160 / 220 / 280`。`lib/motion.ts` 是 `motion/react` 侧的唯一来源（此前三个工作台各存一份逐字重复的副本）。
+
+### 布局带与栏宽
+
+断点 `stack` 861px、`wide` 1200px，对应下文 §Web 适配边界。栏宽三档：`w-rail-nav` 224px、`w-rail-filter` 240px、`w-rail-inspector` 360px（此前有 8 种手挑宽度）。
+
+三栏工作台必须让侧栏随带折叠，而不是给中间栏加最小宽度——中间栏需要 `min-w-0` 才能截断文本，因此固定宽侧栏 + `shrink-0` 会把它压向 0（实测世界线在 883px 视口下中间栏只剩 65px）。Inspector 轨在 `wide` 以下折叠为覆盖式抽屉，并必须提供唤起入口。
 
 ## UI 目标
 

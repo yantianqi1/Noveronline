@@ -47,6 +47,8 @@ services:
       POSTGRES_SEEDS: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mirofish}
       POSTGRES_PWD: ${POSTGRES_PASSWORD:-mirofish_dev_password}
+      DBNAME: ${TEMPORAL_DB:-temporal}
+      VISIBILITY_DBNAME: ${TEMPORAL_VISIBILITY_DB:-temporal_visibility}
       SKIP_DB_CREATE: "true"
     ports:
       - "${TEMPORAL_PORT:-7233}:7233"
@@ -186,7 +188,7 @@ services:
       MIROFISH_AUTH_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       MIROFISH_RATE_LIMIT_KEY_SECRET: ${MIROFISH_RATE_LIMIT_KEY_SECRET:-fedcba9876543210fedcba9876543210}
       MIROFISH_RATE_LIMIT_POLICIES_JSON: >-
-        {"auth_login":{"limit":20,"window_seconds":60},"auth_signup":{"limit":8,"window_seconds":300},"auth_session_mutation":{"limit":60,"window_seconds":60},"collaboration_invite_create":{"limit":20,"window_seconds":60},"collaboration_invite_accept":{"limit":30,"window_seconds":60},"llm_admin_mutation":{"limit":60,"window_seconds":60},"llm_provider_health":{"limit":10,"window_seconds":60}}
+        {"auth_login":{"limit":20,"window_seconds":60},"auth_signup":{"limit":8,"window_seconds":300},"auth_session_mutation":{"limit":60,"window_seconds":60},"collaboration_invite_create":{"limit":20,"window_seconds":60},"collaboration_invite_accept":{"limit":30,"window_seconds":60},"llm_admin_mutation":{"limit":60,"window_seconds":60},"llm_provider_health":{"limit":10,"window_seconds":60},"writer_run_start":{"limit":12,"window_seconds":300}}
       TEMPORAL_ADDRESS: temporal:7233
       WRITER_TASK_QUEUE: writer-streaming
       ANALYSIS_TASK_QUEUE: analysis-streaming

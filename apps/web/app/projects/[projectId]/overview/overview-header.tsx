@@ -2,6 +2,7 @@
 
 import { motion } from "motion/react";
 
+import { Eyebrow } from "@/components/ui/badge";
 import type { ProjectOverview, ReadinessSnapshot } from "@/lib/api/overview-types";
 import type { SeedProgress } from "@/lib/api/seed";
 
@@ -32,18 +33,16 @@ export function OverviewHeader({
       className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-line-soft px-6 py-3"
     >
       <div className="flex min-w-0 items-center gap-3">
-        <span className="shrink-0 rounded-[6px] border border-accent/30 bg-accent-wash px-2 py-1 text-[10.5px] font-medium tracking-[0.22em] text-accent">
-          总 览
-        </span>
-        <h1 className="shrink-0 font-serif text-[18px] font-semibold leading-none text-ink">导入与分析</h1>
+        <Eyebrow>总览</Eyebrow>
+        <h1 className="shrink-0 font-serif text-lg font-semibold text-ink">导入与分析</h1>
         <span aria-hidden className="h-4 w-px shrink-0 bg-line" />
-        <p title={stageHint} className="min-w-0 truncate text-[12.5px] leading-none text-muted">
+        <p title={stageHint} className="min-w-0 truncate text-caption text-muted">
           {stageHint}
         </p>
       </div>
 
       {/* readiness strip */}
-      <dl className="flex shrink-0 flex-wrap items-stretch gap-px overflow-hidden rounded-[10px] border border-line bg-line-soft shadow-[0_1px_2px_rgba(23,26,27,0.05)]">
+      <dl className="flex shrink-0 flex-wrap items-stretch gap-px overflow-hidden rounded-panel border border-line bg-line-soft shadow-hairline">
         <Stat label="原文" value={count(overview?.source_file_count)} />
         <CoverageStat overview={overview} readiness={readiness} />
         <Stat label="实体" value={count(readiness?.ready_entity_count ?? overview?.ready_entity_count)} accent />
@@ -60,13 +59,13 @@ function Stat({ label, value, accent }: { label: string; value: string; accent?:
   return (
     <div className="flex min-w-[70px] flex-col items-center gap-0.5 bg-panel px-3 py-1.5">
       <dd
-        className={`font-serif text-[16px] font-semibold leading-none ${
-          accent ? "text-accent-strong" : "text-ink"
+        className={`font-serif text-md font-semibold ${
+ accent ? "text-accent-strong" : "text-ink"
         }`}
       >
         {value}
       </dd>
-      <dt className="text-[10px] tracking-[0.08em] text-muted">{label}</dt>
+      <dt className="text-caption tracking-wide text-muted">{label}</dt>
     </div>
   );
 }
@@ -97,13 +96,13 @@ function CoverageStat({
     <div className="flex min-w-[70px] flex-col items-center gap-0.5 bg-panel px-3 py-1.5">
       <dd
         title={incomplete ? `有 ${total - done} 章未拆解成功` : undefined}
-        className={`font-serif text-[16px] font-semibold leading-none ${
-          incomplete ? "text-accent" : "text-ink"
+        className={`font-serif text-md font-semibold ${
+ incomplete ? "text-accent" : "text-ink"
         }`}
       >
         {done}/{total}
       </dd>
-      <dt className="text-[10px] tracking-[0.08em] text-muted">已拆解</dt>
+      <dt className="text-caption tracking-wide text-muted">已拆解</dt>
     </div>
   );
 }

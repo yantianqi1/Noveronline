@@ -217,6 +217,7 @@ func (s *SQLWorkflowCancellationStore) CancelWorkflowRun(ctx context.Context, in
   WHERE tenant_id = $1::uuid
     AND run_id = $3::uuid
     AND project_id = $2::uuid
+    AND status IN ('queued', 'running')
   RETURNING run_id, project_id, workflow_type
 ),
 next_sequence AS (

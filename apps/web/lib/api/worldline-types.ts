@@ -19,6 +19,13 @@ export type WorldlineSession = {
   lifecycle: string;
   goal_summary: string;
   anchor_path_id: string;
+  /**
+   * The domain step anchor (MAX(worldline_events.step) for this session) — the
+   * single public "第 X 步". The orchestration timeline `sequence` counts
+   * bookkeeping rows too (adoptions bump it without stepping the world), so the
+   * banner/cards must never read step from it.
+   */
+  current_step: number;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -29,6 +36,37 @@ export type WorldlineSessionRun = {
   project_id: string;
   workflow_type: string;
   status: string;
+};
+
+export type WorldlinePreparationRef = {
+  source_kind: string;
+  source_id: string;
+};
+
+/**
+ * A goal-driven 整备 run (worldline_goal_start). The Pi cast planner decomposes
+ * the author's goal against the asset library, commits a cast, prepares each
+ * agent, and only then admits the worldline session — the status ladder is
+ * queued → casting → preparing → starting → ready, or failed at any point.
+ */
+export type WorldlineGoalStart = {
+  run_id: string;
+  trace_id?: string;
+  project_id: string;
+  workflow_type: string;
+  status: string;
+  goal?: string;
+  anchor_path_id?: string;
+  agent_refs?: WorldlinePreparationRef[];
+  source_refs?: WorldlinePreparationRef[];
+  rationale?: string;
+  prepare_id?: string;
+  session_id?: string;
+  error_code?: string;
+  error_message?: string;
+  created_at?: string;
+  updated_at?: string;
+  result?: Record<string, unknown>;
 };
 
 export type WorldlineStepRun = {
@@ -52,6 +90,10 @@ export type WorldlineTimelineEvent = {
   title: string;
   summary: string;
   kind: string;
+  /** For adoption records: the canon domain event this orchestration step adopted. */
+  event_ref_id?: string;
+  adopted_title?: string;
+  adopted_summary?: string;
   created_at: string;
 };
 
@@ -66,6 +108,8 @@ export type WorldlineEvent = {
   kind: string;
   status: string;
   lifecycle: string;
+  /** Orchestration event_type for timeline rows (workflow.* markers vs worldline.* records). */
+  event_type?: string;
   confidence: string;
   involved_agent_ids: string[];
   state_changes: Record<string, unknown>;

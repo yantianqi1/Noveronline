@@ -8,6 +8,7 @@ import {
   type AnalysisToolName
 } from "../contracts/analysis-run.js";
 import { validateAnalysisWorkflowPayload } from "../contracts/analysis-worker-spec.js";
+import { ApplicationFailure } from "@temporalio/activity";
 import { extractAnalysisCandidatesFromWorkspaceFiles } from "../runtime/analysis-candidate-extract.js";
 
 export interface PiAnalysisActivityResult {
@@ -217,7 +218,12 @@ const WORKER_TOOLS: AnalysisToolName[] = [
 
 export function createPiAnalysisRunActivity(deps: PiAnalysisDeps = {}) {
   return async function runPiAnalysisRunActivity(payload: unknown): Promise<PiAnalysisActivityResult> {
-    const input = validateAnalysisWorkflowPayload(payload);
+    let input: ReturnType<typeof validateAnalysisWorkflowPayload>;
+    try {
+      input = validateAnalysisWorkflowPayload(payload);
+    } catch (error) {
+      throw ApplicationFailure.nonRetryable("Pi analysis workflow payload is invalid", "VALIDATION_FAILED", error instanceof Error ? error.message : "invalid payload");
+    }
     const record = async (
       event_type: string,
       eventPayload: Record<string, unknown>,

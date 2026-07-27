@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any, Callable, Protocol
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -33,6 +34,12 @@ from mirofish_agents.temporal.worldline_prepare import (
 
 
 WORLDLINE_TASK_QUEUE = "worldline-interactive"
+WORLDLINE_ACTIVITY_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 WORLDLINE_STEP_WORKFLOW_TYPE = "worldline_step"
 WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE = "worldline_auto_evolution"
 WORLDLINE_STEP_MODULE_KEY = "worldline_director"
@@ -800,7 +807,7 @@ class PostgresWorldlineSourceLoader:
         connection = self._connect()
         try:
             set_postgres_tenant_context(connection, context=context)
-            with connection.cursor() as cursor:
+            with connection.cursor() as cursor, connection.cursor() as recent_cursor, connection.cursor() as variable_cursor:
                 cursor.execute(
                     """SELECT session_id::text, status, lifecycle, goal_summary,
                               COALESCE(anchor_path_id::text, '') AS anchor_path_id
@@ -812,16 +819,45 @@ class PostgresWorldlineSourceLoader:
                 session_row = cursor.fetchone()
                 if session_row is None:
                     raise LLMFacilityError("NOT_FOUND", "worldline session was not found")
-                cursor.execute(
-                    """SELECT event_id::text, title, summary, kind, status, step
+                recent_cursor.execute(
+                    """SELECT event_id::text, title, summary, kind, status, step, created_at
                          FROM worldline_events
                         WHERE tenant_id = %s AND project_id = %s AND session_id = %s
-                          AND status IN ('candidate', 'canon')
+                          AND status = 'canon'
                         ORDER BY step DESC NULLS LAST, created_at DESC
-                        LIMIT 12""",
+                        LIMIT 8""",
                     (context.tenant_id, context.project_id, normalized_session_id),
                 )
-                recent_events = _public_source_summaries(cursor.fetchall())
+                confirmed_canon = _public_source_summaries(recent_cursor.fetchall())
+                recent_cursor.execute(
+                    """SELECT event_id::text, title, summary, kind, status, step, created_at
+                         FROM worldline_events
+                        WHERE tenant_id = %s AND project_id = %s AND session_id = %s
+                          AND status = 'candidate'
+                        ORDER BY step DESC NULLS LAST, created_at DESC
+                        LIMIT 4""",
+                    (context.tenant_id, context.project_id, normalized_session_id),
+                )
+                pending_candidates = _public_source_summaries(recent_cursor.fetchall())
+                variable_cursor.execute(
+                    """SELECT name, description, impact_axis
+                         FROM worldline_variables
+                        WHERE tenant_id = %s AND project_id = %s AND session_id = %s
+                          AND locked = true
+                        ORDER BY updated_at DESC
+                        LIMIT 24""",
+                    (context.tenant_id, context.project_id, normalized_session_id),
+                )
+                locked_variables = [
+                    _sanitize_worldline_value(
+                        {
+                            "name": _optional_text(_row_value(row, "name", 0)),
+                            "description": _optional_text(_row_value(row, "description", 1)),
+                            "impact_axis": _optional_text(_row_value(row, "impact_axis", 2)),
+                        }
+                    )
+                    for row in variable_cursor.fetchall()
+                ]
                 prepared_agents: list[dict[str, Any]] = []
                 goal_from_prepare = ""
                 resolved_prepare_id = _optional_text(prepare_id)
@@ -867,7 +903,9 @@ class PostgresWorldlineSourceLoader:
             "prepare_id": resolved_prepare_id or "",
             "preparation_goal_summary": goal_from_prepare,
             "prepared_agents": prepared_agents,
-            "recent_events": recent_events,
+            "locked_variables": locked_variables,
+            "confirmed_canon": confirmed_canon,
+            "pending_candidates": pending_candidates,
         }
 
 
@@ -1350,7 +1388,8 @@ class PostgresWorkflowRunStatusWriter:
                        ),
                        session_update AS (
                          UPDATE worldline_sessions
-                            SET status = 'paused', updated_at = now()
+                            SET status = CASE WHEN %s = 'failed' THEN 'failed' ELSE 'paused' END,
+                                updated_at = now()
                           WHERE tenant_id = %s
                             AND project_id = %s
                             AND session_id = %s
@@ -1391,6 +1430,7 @@ class PostgresWorkflowRunStatusWriter:
                         context.tenant_id,
                         context.project_id,
                         normalized_session_id,
+                        status,
                         status,
                         context.tenant_id,
                         context.project_id,
@@ -1519,14 +1559,15 @@ class PostgresWorkflowRunStatusWriter:
                     )
                 cursor.execute(
                     """UPDATE worldline_sessions
-                          SET status = 'paused', updated_at = now()
+                          SET status = CASE WHEN %s = 'failed' THEN 'failed' ELSE 'paused' END,
+                              updated_at = now()
                         WHERE tenant_id = %s
                           AND project_id = %s
                           AND session_id = %s
                           AND lifecycle = 'active'
                           AND status IN ('queued', 'running', 'paused')
                         RETURNING session_id""",
-                    (context.tenant_id, context.project_id, session_id),
+                    (status, context.tenant_id, context.project_id, session_id),
                 )
                 if cursor.fetchone() is None:
                     raise RuntimeError(
@@ -2125,6 +2166,11 @@ def _worldline_step_messages(
                 "You are the MiroFish worldline director. Return one JSON object with candidate_events. "
                 "Each candidate event must include title, summary, kind, optional confidence, "
                 "optional involved_agent_ids, and optional state_change_summary. "
+                "session_context.locked_variables are hard constraints the author injected into the world; "
+                "every candidate event this round must stay consistent with all of them. "
+                "session_context.confirmed_canon is confirmed history; continue in a way that stays "
+                "consistent with it. session_context.pending_candidates are unadopted drafts for "
+                "reference only — never treat them as events that already happened. "
                 "Do not include event bodies, manuscript text, prompt bodies, API keys, credentials, or provider metadata."
             ),
         },
@@ -2479,16 +2525,9 @@ def worldline_step_activity(
             default_code="WORKFLOW_EVENT_WRITE_FAILED",
             default_message="worldline workflow event write failed",
         )
-        return _persistence_failure_result(
-            base=base,
-            context=context,
-            session_id=session_id,
-            mode=mode,
-            code=code,
-            message=message,
-            stage_event_persisted=False,
-            workflow_status_writer=workflow_status_writer,
-        )
+        raise RuntimeError(f"{code}: {message}") from exc
+    if not stage_event_persisted:
+        raise RuntimeError("WORKFLOW_EVENT_WRITE_FAILED: worldline workflow event write failed")
     try:
         workflow_status_persisted = _mark_workflow_completed(
             workflow_status_writer,
@@ -2501,17 +2540,9 @@ def worldline_step_activity(
             default_code="WORKFLOW_STATUS_WRITE_FAILED",
             default_message="worldline workflow status write failed",
         )
-        return _persistence_failure_result(
-            base=base,
-            context=context,
-            session_id=session_id,
-            mode=mode,
-            code=code,
-            message=message,
-            stage_event_persisted=stage_event_persisted,
-            workflow_status_writer=workflow_status_writer,
-            mark_failed_status=False,
-        )
+        raise RuntimeError(f"{code}: {message}") from exc
+    if not workflow_status_persisted:
+        raise RuntimeError("WORKFLOW_STATUS_WRITE_FAILED: worldline workflow status write failed")
     return {
         **base,
         "status": "completed",
@@ -2532,6 +2563,7 @@ class WorldlineStepWorkflow:
             payload,
             start_to_close_timeout=timedelta(minutes=20),
             schedule_to_close_timeout=timedelta(hours=2),
+            retry_policy=WORLDLINE_ACTIVITY_RETRY_POLICY,
         )
 
 

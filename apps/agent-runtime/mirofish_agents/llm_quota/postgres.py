@@ -166,6 +166,11 @@ class PostgresQuotaStore:
         if actual_cost is not None and actual_cost > admission.reserved_cost_micros:
             raise LLMFacilityError("LLM_USAGE_EXCEEDS_RESERVATION", "LLM provider cost exceeded its reservation")
         private_payload = _json_payload(response_payload)
+        # Return the same sanitized shape that a Temporal replay will load.
+        # Mutating the caller-owned response keeps first execution and replay
+        # deterministic without persisting credential-like fields.
+        response_payload.clear()
+        response_payload.update(private_payload)
         connection = self._connect()
         try:
             with connection.cursor() as cursor:

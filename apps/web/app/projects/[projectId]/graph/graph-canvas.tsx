@@ -197,8 +197,8 @@ function GraphCanvasInner({
         zoomable
         className="constellation-minimap"
         nodeColor={(n) => layerVisual((n.data as { layerKey?: string }).layerKey ?? "concept").color}
-        maskColor="rgba(9,11,17,0.72)"
-        bgColor="rgba(13,16,23,0.85)"
+        maskColor="rgba(247,242,233,0.78)"
+        bgColor="rgba(239,231,216,0.9)"
       />
     </ReactFlow>
   );

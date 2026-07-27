@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"mirofish-novel/apps/api/internal/assetcatalog"
@@ -43,7 +46,7 @@ import (
 )
 
 const (
-	appDatabaseMaxOpenConnections  = 4
+	appDatabaseMaxOpenConnections  = 1
 	authDatabaseMaxOpenConnections = 8
 	authDatabaseMaxIdleConnections = 4
 )
@@ -1123,6 +1126,7 @@ func main() {
 		WriterCanceller:                  writerCanceller,
 		WriterThreadStore:                writerThreadStore,
 		DraftAdoptionStore:               draftAdoptionStore,
+		WriterDraftReader:                draftReviewRuntimeStore,
 		DraftReviewStore:                 draftReviewStore,
 		DraftReviewOwnerLookup:           draftReviewRuntimeStore,
 		DraftReviewIssueStore:            draftReviewIssueStore,
@@ -1210,8 +1214,26 @@ func main() {
 	rootHandler := http.NewServeMux()
 	rootHandler.Handle("/metrics", metricsRegistry.Handler())
 	rootHandler.Handle("/", metricsRegistry.Middleware(server))
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           rootHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-shutdownContext.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			log.Printf("graceful API shutdown: %v", err)
+		}
+	}()
 	log.Printf("mirofish api listening on %s", addr)
-	if err := http.ListenAndServe(addr, rootHandler); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
@@ -2791,13 +2813,30 @@ func newObjectWriterFromEnv() (sourcefiles.ObjectWriter, error) {
 	if endpoint == "" && bucket == "" && accessKey == "" && secretKey == "" {
 		return nil, nil
 	}
+	maxSizeBytes, err := sourceUploadMaxBytes()
+	if err != nil {
+		return nil, err
+	}
 	return sourcefiles.NewMinIOObjectWriter(sourcefiles.MinIOObjectWriterConfig{
-		Endpoint:  endpoint,
-		Bucket:    bucket,
-		AccessKey: accessKey,
-		SecretKey: secretKey,
-		UseSSL:    parseBoolEnv(os.Getenv("MIROFISH_OBJECT_STORAGE_USE_SSL")),
+		Endpoint:     endpoint,
+		Bucket:       bucket,
+		AccessKey:    accessKey,
+		SecretKey:    secretKey,
+		UseSSL:       parseBoolEnv(os.Getenv("MIROFISH_OBJECT_STORAGE_USE_SSL")),
+		MaxSizeBytes: maxSizeBytes,
 	})
+}
+
+func sourceUploadMaxBytes() (int64, error) {
+	raw := strings.TrimSpace(os.Getenv("MIROFISH_SOURCE_UPLOAD_MAX_BYTES"))
+	if raw == "" {
+		return sourcefiles.DefaultMaxSourceUploadBytes, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("MIROFISH_SOURCE_UPLOAD_MAX_BYTES must be a positive integer")
+	}
+	return value, nil
 }
 
 func parseBoolEnv(value string) bool {

@@ -68,7 +68,7 @@ func TestStartAnalysisRunFailsClosedWhenAnalysisModulesUnbound(t *testing.T) {
 	}
 }
 
-func TestStartAnalysisRunAutoEnsuresBindingsFromWriterDonor(t *testing.T) {
+func TestStartAnalysisRunDoesNotBorrowWriterBinding(t *testing.T) {
 	starter := &recordingAnalysisStarter{}
 	bindingStore := &appendingLLMBindingStore{
 		bindings: []llm.ModuleBindingRecord{{
@@ -101,21 +101,14 @@ func TestStartAnalysisRunAutoEnsuresBindingsFromWriterDonor(t *testing.T) {
 
 	server.ServeHTTP(response, request)
 
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("expected analysis admit after donor ensure, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "LLM_MODULE_UNBOUND") {
+		t.Fatalf("expected explicit analysis binding failure, got %d: %s", response.Code, response.Body.String())
 	}
-	if starter.calls != 1 {
-		t.Fatalf("expected one analysis admit, got %d", starter.calls)
+	if starter.calls != 0 {
+		t.Fatalf("analysis must not start by borrowing writer binding, got %d calls", starter.calls)
 	}
-	if starter.input.Options["module_key"] != "analysis_planner" {
-		t.Fatalf("unexpected module_key: %#v", starter.input.Options)
-	}
-	keys, _ := starter.input.Options["required_module_keys"].([]string)
-	if len(keys) != 2 {
-		t.Fatalf("expected required analysis modules on options, got %#v", starter.input.Options["required_module_keys"])
-	}
-	if bindingStore.upsertCount < 2 {
-		t.Fatalf("expected planner+worker upserts, got %d bindings=%#v", bindingStore.upsertCount, bindingStore.bindings)
+	if bindingStore.upsertCount != 0 {
+		t.Fatalf("unbound analysis path mutated bindings: %d", bindingStore.upsertCount)
 	}
 }
 

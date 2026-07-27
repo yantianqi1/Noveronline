@@ -9,7 +9,7 @@ export const Label = forwardRef<
 >(({ className, ...props }, ref) => (
   <LabelPrimitive.Root
     ref={ref}
-    className={cn("text-[13px] font-medium leading-none text-ink-soft", className)}
+    className={cn("text-sm font-medium text-ink-soft", className)}
     {...props}
   />
 ));

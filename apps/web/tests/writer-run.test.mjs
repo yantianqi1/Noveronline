@@ -94,11 +94,28 @@ test("a tool step with no name falls back to a calm retrieval label", () => {
   const state = reduceWriterRun([
     ev("writer.run.started"),
     ev("writer.tool.started", { tool_call_id: "a" }),
-    ev("writer.tool.failed", { tool_call_id: "a" }),
+    ev("writer.tool.completed", { tool_call_id: "a", is_error: true, status: "failed" }),
   ]);
   assert.equal(state.steps.length, 1);
   assert.match(state.steps[0].label, /查阅故事资料/);
   assert.equal(state.steps[0].status, "error");
+});
+
+test("a failed tool completion (is_error) marks the step as error, not completed", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.tool.started", { tool_call_id: "s1", tool_name: "search_assets" }),
+    ev("writer.tool.completed", {
+      tool_call_id: "s1",
+      tool_name: "search_assets",
+      status: "failed",
+      is_error: true,
+      result: { items: [{ asset_id: "bad", title: "不应收录" }] },
+    }),
+  ]);
+  assert.equal(state.steps[0].status, "error");
+  // A failed retrieval never contributes citations.
+  assert.equal(state.citations.length, 0);
 });
 
 test("search_assets completions collect deduped citations and the degraded flag", () => {
@@ -166,6 +183,50 @@ test("fuse_recall always_on items surface as 常驻 citations, deduped against r
   assert.equal(alwaysOn.lifecycle, "常驻");
 });
 
+test("writer.always_on.injected surfaces 常驻 citations without any fuse_recall call", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.always_on.injected", {
+      count: 2,
+      items: [
+        { asset_id: "law-1", title: "世界铁律", asset_type: "world_rule" },
+        { asset_id: "ban-1", title: "禁词表", asset_type: "style" },
+      ],
+    }),
+    ev("writer.tool.completed", {
+      tool_call_id: "f1",
+      tool_name: "fuse_recall",
+      result: { items: [{ asset_id: "law-1", title: "世界铁律", channel: "always_on" }] },
+    }),
+  ]);
+  // Both constant assets cited once each; the later fuse_recall echo dedupes.
+  assert.equal(state.citations.length, 2);
+  assert.deepEqual(state.citations.map((c) => c.assetId), ["law-1", "ban-1"]);
+  assert.ok(state.citations.every((c) => c.channel === "always_on" && c.lifecycle === "常驻"));
+});
+
+test("query_asset_relationships completions surface related assets as citations", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.tool.started", { tool_call_id: "r1", tool_name: "query_asset_relationships" }),
+    ev("writer.tool.completed", {
+      tool_call_id: "r1",
+      tool_name: "query_asset_relationships",
+      result: {
+        asset_id: "a1",
+        items: [
+          { asset_id: "w1", title: "青冥剑", lifecycle: "canon", relation_type: "持有", direction: "outgoing" },
+          { asset_id: "s1", title: "玄天宗", lifecycle: "canon", relation_type: "宗门", direction: "outgoing" },
+        ],
+      },
+    }),
+  ]);
+  assert.equal(state.steps[0].label, "带出关联资产");
+  assert.equal(state.citations.length, 2);
+  assert.deepEqual(state.citations.map((c) => c.assetId), ["w1", "s1"]);
+  assert.ok(state.citations.every((c) => c.channel === "关联带出"));
+});
+
 test("consistency violation events are collected for the author notice", () => {
   const state = reduceWriterRun([
     ev("writer.run.started"),
@@ -195,4 +256,58 @@ test("a clean run has no consistency violations", () => {
     ev("writer.run.completed"),
   ]);
   assert.equal(state.consistencyViolations.length, 0);
+});
+
+test("search_manuscript results become 前文 citations with scores kept", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.tool.started", { tool_call_id: "m", tool_name: "search_manuscript" }),
+    ev("writer.tool.completed", {
+      tool_call_id: "m",
+      tool_name: "search_manuscript",
+      result: {
+        mode_used: "vector",
+        degraded: false,
+        items: [{ block_id: "block-9", chapter_id: "c1", block_order: 3, score: 0.88, channel: "search_manuscript" }],
+      },
+    }),
+  ]);
+  assert.equal(state.citations.length, 1);
+  assert.equal(state.citations[0].channel, "search_manuscript");
+  assert.equal(state.citations[0].score, 0.88);
+  assert.match(state.citations[0].title, /前文呼应/);
+});
+
+test("search_assets citations keep their relevance score", () => {
+  const state = reduceWriterRun([
+    ev("writer.tool.completed", {
+      tool_call_id: "s",
+      tool_name: "search_assets",
+      result: {
+        degraded: false,
+        items: [{ asset_id: "a1", title: "世界规则", lifecycle: "canon", score: 0.76, channel: "search_assets" }],
+      },
+    }),
+  ]);
+  assert.equal(state.citations[0].score, 0.76);
+});
+
+test("retrieval plan and budget-trim events no longer fall through", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.retrieval_plan.completed", {
+      intent: "payoff_foreshadow",
+      queries: [{ channel: "keyed", text: "许七安" }, { channel: "hybrid", text: "税银案" }],
+    }),
+    ev("writer.context_budget.trimmed", { dropped_items: 3, budget_tokens: 24000 }),
+  ]);
+  assert.deepEqual(state.retrievalPlan, { status: "completed", intent: "payoff_foreshadow", queryCount: 2 });
+  assert.equal(state.contextTrimmedItems, 3);
+});
+
+test("degraded and skipped retrieval plans surface distinctly", () => {
+  const degraded = reduceWriterRun([ev("writer.retrieval_plan.degraded", { reason: "planner_call_failed" })]);
+  assert.deepEqual(degraded.retrievalPlan, { status: "degraded" });
+  const skipped = reduceWriterRun([ev("writer.retrieval_plan.skipped", { reason: "no_planner_binding" })]);
+  assert.deepEqual(skipped.retrievalPlan, { status: "skipped" });
 });

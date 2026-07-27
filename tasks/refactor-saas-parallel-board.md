@@ -1,6 +1,6 @@
 # Refactor SaaS Active Goal Board
 
-更新时间：`2026-07-13`
+更新时间：`2026-07-27`
 
 ## 规则
 
@@ -30,17 +30,20 @@
 | P6-003-A | `verified_current` | `019f4cad-4146-7a50-b20c-252b5f26d7b8` | dedup/book planning producer、Facility、candidate/draft 边界、中央挂载与 browser 认证通过；shared writer contract 与 world-rule/character-profile tools 已补证 |
 | P5-005-B | `verified_current` | `019f4cad-15a2-76e1-a6c1-7e49b2f3511c` | Seed trace/retry 与 Knowledge/Simulation full/live/browser 通过；2026-07-25 分批富化（doc 42：agent_profiles/archive_candidates 分批 + 逐批落库 + 进度事件 + Web 子进度）落地后重开验证通过——Go/Python/Pi/Web full regression 绿 + seed live e2e 8 passed（quota-gated 分批、idempotent） |
 | P8-002-C | `verified_current` | `019f4cac-fde5-71d1-b71f-090a037551af` | model-sync/retirement/Legacy/Ops/Security/matrix reviewer 通过 |
-| Z-028 | `in_progress` | current | Z0–Z6 `connected` + 2026-07-13 disposable app-role live 绿（distillation/manuscript/empty-writer/worldline/character）与 Pi local-provider live 2/2；Z7 仍缺：Docker socket 权限下的 `--app` 全栈重建、Playwright 浏览器安装、authenticated zero-start desktop/mobile journey |
+| Z-028 | `in_progress` | current | Z0–Z6 `connected` + disposable app-role live 与 Pi local-provider live 2/2；2026-07-27 隔离真实 Go API + Next Web/BFF 启动通过；Z7 仍缺 authenticated zero-start desktop/mobile browser journey |
+| AUDIT-044 | `verified_current` | current | 四个梯队确认缺陷全部修复；误报保持否决；ledger/readiness 至 31；六包隔离 app-role live 与四 runtime full regression 通过 |
 
 ## 当前证据
 
-1. Central handlers/workers/security shell、readiness migration 14、fixed read-only Legacy source root 已挂载；platform channel/default 的 FORCE RLS 与 project > tenant > platform resolver contract 已闭合。
+1. Central handlers/workers/security shell、readiness migration 31、fixed read-only Legacy source root 已挂载；platform channel/default 的 FORCE RLS 与 project > tenant > platform resolver contract 已闭合。
 2. Go/Python/Pi/Web/schema/infra full regression 当前通过；live DB fixtures 已禁止在 upgraded ledger DB 重放 raw migrations。
 3. Writer、Worldline/Character、Platform 三条 production-style browser 旅程通过，零 privacy/pageerror finding；Platform browser 后 recovery direct grants 为 0。
 4. Compose persistent recovery、backup/restore、rate limit、observability/alerts 当前通过；restart invariant 强制 recovery direct grants 为 0；Temporal readiness 已通过 20/20 串行、50/50 五并发和 bounded strict poller 5/5。
 5. Coverage Matrix 当前为 `90 verified / 25 verified replacement / 5 explicit non-restored / 1 blocked`，无裸未决表格状态；唯一 blocked row 为 real Legacy source。
 6. Phase 3 `packages/shared-contracts` 已由 JSON Schema + Go/Pi/Web AST drift tests 约束；Pi world-rule/character-profile app-role live 证明同租户跨项目与跨租户隔离、公开薄投影及零 canon/adoption/manuscript 写入。
 7. Legacy relationship-owned evidence 兼容映射已修复；三个候选项目 plan 均 `complete` / zero blockers，deterministic replay 与公开报告 privacy scan 通过。
+8. 2026-07-26 写作台 rail 历史重建（P6-003-A）：task 回合按 `run_id` 从持久 thread + durable 事件流重建，采用后 SettledCard 保留步骤/召回/散文/「查看正文」（跨章闪烁定位）；采用落库与编辑器手工改稿分别在同事务写/清 `writer_thread_messages.metadata_jsonb.adopted`；`useWriterRun` 跟踪草稿权威 status；`writer-turns` 纯函数 8 项 node:test 通过。
+9. 2026-07-27 全模块审计：四个梯队确认缺陷全部 `fixed_verified` / `verified_by_design`；迁移/readiness 已至 `31:0031`。六包隔离 app-role live、Go/Python/Pi/Web full 与 infra `72 passed` 通过；不替代 Legacy 授权 gate。
 
 ## Next Gate
 

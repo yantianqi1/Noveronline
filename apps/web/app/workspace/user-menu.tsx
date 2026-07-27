@@ -61,12 +61,12 @@ export function UserMenu({ currentUser }: { currentUser: CurrentUser }) {
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-2.5 rounded-full border border-line bg-panel py-1.5 pl-1.5 pr-3 shadow-[0_1px_2px_rgba(23,26,27,0.05)] transition-colors hover:border-accent/40 hover:bg-accent-wash"
+        className="flex items-center gap-2.5 rounded-full border border-line bg-panel py-1.5 pl-1.5 pr-3 shadow-hairline transition-colors hover:border-accent/50 hover:bg-accent-wash"
       >
-        <span className="grid size-8 place-items-center rounded-full bg-accent font-serif text-[15px] font-semibold text-white">
+        <span className="grid size-8 place-items-center rounded-full bg-accent font-serif text-md font-semibold text-panel">
           {avatarInitial(currentUser)}
         </span>
-        <span className="max-w-[140px] truncate text-[13.5px] font-medium text-ink">
+        <span className="max-w-[140px] truncate text-sm font-medium text-ink">
           {currentUser.user.display_name || currentUser.user.email}
         </span>
         <ChevronDown
@@ -83,14 +83,14 @@ export function UserMenu({ currentUser }: { currentUser: CurrentUser }) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-            className="absolute right-0 top-[calc(100%+8px)] z-40 w-[240px] origin-top-right overflow-hidden rounded-card border border-line bg-panel shadow-panel"
+            className="absolute right-0 top-[calc(100%+8px)] z-40 w-[240px] origin-top-right overflow-hidden rounded-modal border border-line bg-panel shadow-panel"
           >
             <div className="border-b border-line-soft px-4 py-3.5">
-              <p className="truncate text-[13.5px] font-medium text-ink">
+              <p className="truncate text-sm font-medium text-ink">
                 {currentUser.user.display_name || "未命名用户"}
               </p>
-              <p className="mt-0.5 truncate text-[12px] text-muted">{currentUser.user.email}</p>
-              <span className="mt-2 inline-flex items-center rounded-full bg-accent-wash px-2 py-0.5 text-[11px] font-medium text-accent-strong">
+              <p className="mt-0.5 truncate text-caption text-muted">{currentUser.user.email}</p>
+              <span className="mt-2 inline-flex items-center rounded-full bg-accent-wash px-2 py-0.5 text-caption font-medium text-accent-strong">
                 {roleLabel(primaryRole)}
               </span>
             </div>
@@ -100,7 +100,7 @@ export function UserMenu({ currentUser }: { currentUser: CurrentUser }) {
                 role="menuitem"
                 onClick={handleSignOut}
                 disabled={signingOut}
-                className="flex w-full items-center gap-2.5 rounded-[9px] px-3 py-2 text-left text-[13px] text-ink transition-colors hover:bg-accent-wash hover:text-accent-strong disabled:opacity-60"
+                className="flex w-full items-center gap-2.5 rounded-panel px-3 py-2 text-left text-sm text-ink transition-colors hover:bg-accent-wash hover:text-accent-strong disabled:opacity-60"
               >
                 <LogOut className="size-4" aria-hidden />
                 {signingOut ? "正在退出…" : "退出登录"}

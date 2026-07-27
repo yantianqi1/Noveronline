@@ -133,6 +133,14 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
       return `/v1/drafts/${encodeURIComponent(m[1])}/adoptions${query}`;
     },
   },
+  // /api/projects/{id}/drafts/{draftId} → /v1/drafts/{draftId} (rail draft polling)
+  {
+    prefix: /^drafts\/([^/]+)$/,
+    toGo: (rest, query) => {
+      const m = rest.match(/^drafts\/([^/]+)$/)!;
+      return `/v1/drafts/${encodeURIComponent(m[1])}${query}`;
+    },
+  },
   // /api/projects/{id}/assets/search → /v1/assets/search (POST body carries project_id)
   {
     prefix: /^assets\/search$/,
@@ -152,12 +160,15 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
   },
   // Worldline run-scoped routes mount at the TOP level (not under /projects).
   // /api/projects/{id}/worldline-sessions/{sessionId}[/timeline|/events|/steps|/auto-evolutions|/variables|/saved-paths]
+  // /api/projects/{id}/worldline-sessions/{sessionId}/variables/{variableId}
   //   → /v1/worldline-sessions/{sessionId}[...]
   {
-    prefix: /^worldline-sessions\/([^/]+)(\/timeline|\/events|\/steps|\/auto-evolutions|\/variables|\/saved-paths)?$/,
+    prefix: /^worldline-sessions\/([^/]+)(\/timeline|\/events|\/steps|\/auto-evolutions|\/saved-paths|\/variables(\/[^/]+)?)?$/,
     toGo: (rest, query) => {
-      const m = rest.match(/^worldline-sessions\/([^/]+)(\/timeline|\/events|\/steps|\/auto-evolutions|\/variables|\/saved-paths)?$/)!;
-      return `/v1/worldline-sessions/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
+      const m = rest.match(/^worldline-sessions\/([^/]+)(\/timeline|\/events|\/steps|\/auto-evolutions|\/saved-paths|\/variables(\/[^/]+)?)?$/)!;
+      const variableId = m[3]?.slice(1);
+      const suffix = variableId ? `/variables/${encodeURIComponent(variableId)}` : (m[2] ?? "");
+      return `/v1/worldline-sessions/${encodeURIComponent(m[1])}${suffix}${query}`;
     },
   },
   // /api/projects/{id}/worldline-preparations/{prepareId}[/agents] → /v1/worldline-preparations/{prepareId}[/agents]

@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { isIP } from "node:net";
 
 import { apiBaseUrl } from "@/lib/config";
 import { signTrustedClientProof } from "@/lib/server/client-proof";
@@ -53,11 +54,12 @@ export type ProxyResult = {
 };
 
 function resolveClientIp(request: Request): string {
-  return (
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    request.headers.get("x-real-ip")?.trim() ||
-    "127.0.0.1"
-  );
+  const trustedHeader = process.env.MIROFISH_TRUSTED_CLIENT_IP_HEADER?.trim();
+  if (!trustedHeader) return "127.0.0.1";
+  const chain = request.headers.get(trustedHeader);
+  if (!chain) return "127.0.0.1";
+  const candidate = chain.split(",").at(-1)?.trim() ?? "";
+  return isIP(candidate) ? candidate : "127.0.0.1";
 }
 
 /** Server-side idempotency key when the caller didn't supply one. */

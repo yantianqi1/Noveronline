@@ -13,10 +13,12 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         ref={ref}
         aria-invalid={invalid || undefined}
         className={cn(
-          "flex h-11 w-full rounded-[10px] border bg-panel px-3.5 text-[15px] text-ink shadow-[0_1px_2px_rgba(23,26,27,0.04)] transition-colors duration-200 placeholder:text-muted/60",
+          "flex h-11 w-full rounded-control border bg-panel px-3.5 text-md text-ink shadow-hairline transition-colors placeholder:text-muted-soft",
           "outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/25",
           "disabled:cursor-not-allowed disabled:opacity-55",
-          invalid ? "border-accent/70 ring-1 ring-accent/20" : "border-line",
+          // Error state reads as danger, not brand. Both used to be vermilion
+          // rings, so "I'm editing this" and "this is wrong" looked identical.
+          invalid ? "border-danger ring-1 ring-danger/25" : "border-line",
           className,
         )}
         {...props}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,11 +218,18 @@ func admitRequestOn(ctx context.Context, q sqlQuerier, scope Scope, triggerKind 
 		TriggerKind:  triggerKind,
 	}
 	temporalID := WorkflowType + "_" + proposed.RunID
+	if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		scope.TenantID+":"+scope.ProjectID+":"+fingerprint+":"+strconv.Itoa(ExtractorContractV1)); err != nil {
+		return Admission{}, false, err
+	}
 	var existingRun, existingReq, status string
-	err := q.QueryRowContext(ctx, `SELECT run_id::text, request_id::text, 'queued'
-FROM manuscript_asset_distillation_requests
-WHERE tenant_id=$1::uuid AND project_id=$2::uuid
-  AND input_fingerprint=$3 AND extractor_contract_version=$4
+	err := q.QueryRowContext(ctx, `SELECT req.run_id::text, req.request_id::text, workflow.status
+FROM manuscript_asset_distillation_requests req
+JOIN workflow_runs workflow ON workflow.tenant_id=req.tenant_id AND workflow.run_id=req.run_id
+WHERE req.tenant_id=$1::uuid AND req.project_id=$2::uuid
+  AND req.input_fingerprint=$3 AND req.extractor_contract_version=$4
+  AND workflow.status IN ('queued','running','completed')
+ORDER BY req.created_at DESC
 LIMIT 1`, scope.TenantID, scope.ProjectID, fingerprint, ExtractorContractV1).Scan(&existingRun, &existingReq, &status)
 	if err == nil {
 		proposed.RunID = existingRun
@@ -498,6 +506,7 @@ func (s *SQLStore) Decide(ctx context.Context, input DecisionInput) (DecisionRes
 		return DecisionResult{}, appError(CodeValidationFailed, "target_lifecycle must be canon or material")
 	}
 	var result DecisionResult
+	staleSources := false
 	err := s.withTenant(ctx, scope, func(tx *sql.Tx) error {
 		var reviewStatus, operation, projectID string
 		var targetID sql.NullString
@@ -532,8 +541,13 @@ FOR UPDATE`, scope.TenantID, candidateID).Scan(&projectID, &reviewStatus, &opera
 		if reviewStatus != "pending" && reviewStatus != "conflict" {
 			return appError(CodeConflict, "proposal is not actionable")
 		}
-		if err := assertSourcesCurrent(ctx, tx, scope.TenantID, candidateID); err != nil {
+		stale, err := markStaleIfSourcesChanged(ctx, tx, scope.TenantID, candidateID)
+		if err != nil {
 			return err
+		}
+		if stale {
+			staleSources = true
+			return nil
 		}
 		switch decision {
 		case "accept_create":
@@ -662,6 +676,9 @@ WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, scope.TenantID, candi
 		}
 		return DecisionResult{}, storeFailed(err)
 	}
+	if staleSources {
+		return DecisionResult{CandidateAssetID: candidateID, ReviewStatus: "stale"}, appError(CodeProposalStale, "proposal source manuscript is no longer current")
+	}
 	if result.ReviewStatus == "conflict" {
 		return result, appError(CodeTargetConflict, "target asset version changed")
 	}
@@ -694,8 +711,6 @@ WHERE p.tenant_id=$1::uuid AND p.project_id=$2::uuid AND p.review_status IN ('pe
   )`, scope.TenantID, scope.ProjectID, blockID)
 	return err
 }
-
-
 
 func (s *SQLStore) LookupProposalProject(ctx context.Context, tenantID, candidateAssetID string) (string, error) {
 	if s == nil || s.db == nil {
@@ -861,21 +876,23 @@ func splitCSV(raw string) []string {
 	return out
 }
 
-func assertSourcesCurrent(ctx context.Context, tx *sql.Tx, tenantID, candidateAssetID string) error {
+func markStaleIfSourcesChanged(ctx context.Context, tx *sql.Tx, tenantID, candidateAssetID string) (bool, error) {
 	var stale int
 	err := tx.QueryRowContext(ctx, `SELECT count(*) FROM asset_candidate_evidence e
 LEFT JOIN manuscript_blocks b ON b.tenant_id=e.tenant_id AND b.project_id=e.project_id AND b.block_id=e.block_id
 WHERE e.tenant_id=$1::uuid AND e.candidate_asset_id=$2::uuid
   AND (b.block_id IS NULL OR b.status<>'active' OR b.version<>e.block_version)`, tenantID, candidateAssetID).Scan(&stale)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if stale > 0 {
-		_, _ = tx.ExecContext(ctx, `UPDATE asset_candidate_proposals SET review_status='stale', updated_at=now()
-WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, tenantID, candidateAssetID)
-		return appError(CodeProposalStale, "proposal source manuscript is no longer current")
+		if _, err := tx.ExecContext(ctx, `UPDATE asset_candidate_proposals SET review_status='stale', updated_at=now()
+WHERE tenant_id=$1::uuid AND candidate_asset_id=$2::uuid`, tenantID, candidateAssetID); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func writeAudit(ctx context.Context, tx *sql.Tx, scope Scope, action, resourceID string, meta map[string]any) error {

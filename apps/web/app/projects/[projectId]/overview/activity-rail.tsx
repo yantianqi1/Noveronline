@@ -25,13 +25,13 @@ export function ActivityRail({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
-      className="overflow-hidden rounded-card border border-line bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.05)]"
+      className="overflow-hidden rounded-modal border border-line bg-panel shadow-hairline"
     >
       <div className="border-b border-line-soft px-5 py-4">
-        <h2 className="font-serif text-[16px] font-semibold text-ink">最近分析</h2>
+        <h2 className="font-serif text-md font-semibold text-ink">最近分析</h2>
       </div>
       {runs.length === 0 ? (
-        <p className="px-5 py-6 text-[12.5px] text-muted">还没有分析记录。</p>
+        <p className="px-5 py-6 text-caption text-muted">还没有分析记录。</p>
       ) : (
         <ul className="divide-y divide-line-soft">
           {runs.slice(0, 6).map((run) => {
@@ -43,12 +43,12 @@ export function ActivityRail({
               >
                 <StatusIcon status={run.status} />
                 <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-medium text-ink">{runStatusLabel(run)}</p>
-                  <p className="mt-0.5 truncate text-[11.5px] text-muted" title={run.message}>
+                  <p className="text-sm font-medium text-ink">{runStatusLabel(run)}</p>
+                  <p className="mt-0.5 truncate text-caption text-muted" title={run.message}>
                     {presentRunMessage(run.message) || relativeTime(run.updated_at || run.created_at)}
                   </p>
                 </div>
-                <span className="shrink-0 pt-0.5 text-[11px] text-muted/70">
+                <span className="shrink-0 pt-0.5 text-caption text-muted-soft">
                   {relativeTime(run.updated_at || run.created_at)}
                 </span>
               </li>

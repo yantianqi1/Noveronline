@@ -125,6 +125,10 @@ type SQLTenantQueryer interface {
 	QueryTenantContext(context.Context, string, string, ...any) (SQLRows, error)
 }
 
+type SQLTenantWriteQueryer interface {
+	QueryTenantWriteContext(context.Context, string, string, ...any) (SQLRows, error)
+}
+
 type SQLReaderConfig struct {
 	Queryer SQLQueryer
 	Limit   int
@@ -168,7 +172,15 @@ func (q sqlDBQueryer) QueryContext(ctx context.Context, query string, args ...an
 }
 
 func (q sqlDBQueryer) QueryTenantContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
-	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	return q.queryTenantContext(ctx, tenantID, true, query, args...)
+}
+
+func (q sqlDBQueryer) QueryTenantWriteContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	return q.queryTenantContext(ctx, tenantID, false, query, args...)
+}
+
+func (q sqlDBQueryer) queryTenantContext(ctx context.Context, tenantID string, readOnly bool, query string, args ...any) (SQLRows, error) {
+	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: readOnly})
 	if err != nil {
 		return nil, err
 	}
@@ -313,8 +325,13 @@ func (a *SQLExportAuditor) RecordExport(ctx context.Context, input ExportAuditIn
   $4,
   $5::jsonb
 ) RETURNING audit_id::text`
-	rows, err := a.queryer.QueryContext(
+	tenantQueryer, ok := a.queryer.(SQLTenantWriteQueryer)
+	if !ok {
+		return traceAuditError()
+	}
+	rows, err := tenantQueryer.QueryTenantWriteContext(
 		ctx,
+		strings.TrimSpace(input.TenantID),
 		query,
 		strings.TrimSpace(input.TenantID),
 		strings.TrimSpace(input.ActorID),
@@ -325,21 +342,28 @@ func (a *SQLExportAuditor) RecordExport(ctx context.Context, input ExportAuditIn
 	if err != nil {
 		return traceAuditError()
 	}
-	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
+			_ = rows.Close()
 			return traceAuditError()
 		}
+		_ = rows.Close()
 		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: "audit insert did not return audit_id"}
 	}
 	var auditID string
 	if err := rows.Scan(&auditID); err != nil {
+		_ = rows.Close()
 		return traceAuditError()
 	}
 	if strings.TrimSpace(auditID) == "" {
+		_ = rows.Close()
 		return &AppError{Code: "TRACE_AUDIT_FAILED", Message: "audit insert returned empty audit_id"}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return traceAuditError()
+	}
+	if err := rows.Close(); err != nil {
 		return traceAuditError()
 	}
 	return nil

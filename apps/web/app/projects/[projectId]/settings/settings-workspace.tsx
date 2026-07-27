@@ -372,8 +372,8 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
   if (state.status === "error") {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center px-8 text-center">
-        <h2 className="font-serif text-[22px] font-semibold text-ink">设置暂时打不开</h2>
-        <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">{state.message}</p>
+        <h2 className="font-serif text-xl font-semibold text-ink">设置暂时打不开</h2>
+        <p className="mt-2 max-w-[380px] text-sm text-muted">{state.message}</p>
       </div>
     );
   }
@@ -384,11 +384,11 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
     <div className="mx-auto w-full max-w-[1320px] px-8 py-8">
       {/* header */}
       <header className="mb-6">
-        <p className="mb-1 text-[11.5px] font-medium tracking-[0.28em] text-accent">设 置</p>
+        <p className="mb-1 text-caption font-medium tracking-label text-muted">设置</p>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="font-serif text-[30px] font-semibold leading-tight text-ink">模型绑定</h1>
-            <p className="mt-2 max-w-[560px] text-[13.5px] leading-relaxed text-muted">
+            <h1 className="font-serif text-display font-semibold leading-tight text-ink">模型绑定</h1>
+            <p className="mt-2 max-w-[560px] text-sm leading-relaxed text-muted">
               给每个功能指定要用的模型。先用「一键套用」把全部功能接到同一个模型，再按需要单独微调。
               绑定之后，原文分析、图谱、写作台才会真正跑起来。
             </p>
@@ -404,9 +404,9 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
-            className={`mb-5 flex items-center gap-2.5 rounded-[10px] border px-4 py-3 text-[13px] ${
-              notice.tone === "success"
-                ? "border-emerald-900/20 bg-emerald-950/5 text-emerald-950"
+            className={`mb-5 flex items-center gap-2.5 rounded-panel border px-4 py-3 text-sm ${
+ notice.tone === "success"
+                ? "border-success/30 bg-success-wash text-success"
                 : "border-accent/30 bg-accent-wash/50 text-accent-strong"
             }`}
           >
@@ -501,12 +501,12 @@ function SummaryPills({ bound, overridden, total }: { bound: number; overridden:
 function Pill({ label, value, tone }: { label: string; value: string; tone: "ok" | "warn" | "neutral" }) {
   const cls =
     tone === "ok"
-      ? "border-emerald-900/20 bg-emerald-950/5 text-emerald-950"
+      ? "border-success/30 bg-success-wash text-success"
       : tone === "warn"
-        ? "border-accent/25 bg-accent-wash/50 text-accent-strong"
+        ? "border-accent/30 bg-accent-wash/50 text-accent-strong"
         : "border-line bg-panel text-ink-soft";
   return (
-    <span className={`inline-flex items-baseline gap-1.5 rounded-full border px-3 py-1.5 text-[12px] ${cls}`}>
+    <span className={`inline-flex items-baseline gap-1.5 rounded-full border px-3 py-1.5 text-caption ${cls}`}>
       <span className="font-medium">{value}</span>
       <span className="opacity-75">{label}</span>
     </span>
@@ -516,14 +516,14 @@ function Pill({ label, value, tone }: { label: string; value: string; tone: "ok"
 function NoSelection({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center px-8 text-center">
-      <h2 className="font-serif text-[22px] font-semibold text-ink">请先回到书架进入项目</h2>
-      <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">
+      <h2 className="font-serif text-xl font-semibold text-ink">请先回到书架进入项目</h2>
+      <p className="mt-2 max-w-[380px] text-sm text-muted">
         设置需要知道你正在配置哪个项目。回到书架，挑一部作品再进来。
       </p>
       <button
         type="button"
         onClick={onBack}
-        className="mt-6 rounded-[10px] border border-line bg-panel px-5 py-2.5 text-[13.5px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+        className="mt-6 rounded-panel border border-line bg-panel px-5 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
       >
         返回书架
       </button>
@@ -535,15 +535,15 @@ function SettingsSkeleton() {
   return (
     <div className="mx-auto w-full max-w-[1320px] px-8 py-8">
       <div className="space-y-3">
-        <div className="h-3 w-16 animate-pulse rounded bg-line-soft" />
-        <div className="h-9 w-56 animate-pulse rounded bg-line-soft" />
-        <div className="h-4 w-[480px] animate-pulse rounded bg-line-soft" />
+        <div className="h-3 w-16 animate-pulse rounded-control bg-line-soft" />
+        <div className="h-9 w-56 animate-pulse rounded-control bg-line-soft" />
+        <div className="h-4 w-[480px] animate-pulse rounded-control bg-line-soft" />
       </div>
       <div className="mt-8 space-y-5">
-        <div className="h-[64px] animate-pulse rounded-card border border-line bg-panel" />
-        <div className="h-[76px] animate-pulse rounded-card border border-line bg-panel" />
-        <div className="h-[44px] animate-pulse rounded-[12px] border border-line bg-panel" />
-        <div className="h-[320px] animate-pulse rounded-card border border-line bg-panel" />
+        <div className="h-[64px] animate-pulse rounded-modal border border-line bg-panel" />
+        <div className="h-[76px] animate-pulse rounded-modal border border-line bg-panel" />
+        <div className="h-[44px] animate-pulse rounded-modal border border-line bg-panel" />
+        <div className="h-[320px] animate-pulse rounded-modal border border-line bg-panel" />
       </div>
     </div>
   );

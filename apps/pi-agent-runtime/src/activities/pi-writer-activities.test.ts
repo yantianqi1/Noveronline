@@ -386,6 +386,7 @@ describe("runPiWriterRunActivity", () => {
       "query_world_rules",
       "query_character_profile",
       "query_graph_neighbors",
+      "query_asset_relationships",
       "query_worldline_paths",
       "query_manuscript_context"
     ]);
@@ -600,6 +601,7 @@ describe("runPiWriterRunActivity", () => {
     const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
     let fusedChannels: unknown;
     let loadCalled = false;
+    let orchestratorAlwaysOn: unknown;
     const big = "很长的设定内容".repeat(60); // heavy recall that would blow a tiny budget
     const activity = createPiWriterRunActivity({
       resolveModuleBinding: async ({ module_key }) => ({
@@ -634,6 +636,8 @@ describe("runPiWriterRunActivity", () => {
         return {};
       },
       orchestrateWritingBrief: async (request) => {
+        // Constant canon reaches the orchestrator prompt directly (tool-independent).
+        orchestratorAlwaysOn = request.always_on_assets;
         // Tiny budget (10) + a heavy always_on asset: it must still reach fuse_recall
         // untrimmed, because constant canon never counts against the recall budget.
         await request.executeTool("fuse_recall", "call-fuse", { channels: [] });
@@ -657,6 +661,18 @@ describe("runPiWriterRunActivity", () => {
     expect(channels[0]?.channel).toBe("always_on");
     expect(channels[0]?.items[0]?.asset_id).toBe("law-1");
     expect(channels[0]?.items[0]?.content_preview).toBe(big);
+    // Constant canon also reaches the orchestrator request directly, so it does
+    // not depend on the agent choosing to call fuse_recall.
+    expect(orchestratorAlwaysOn).toEqual([
+      expect.objectContaining({ asset_id: "law-1", title: "世界铁律" })
+    ]);
+    // And its presence is a visible workflow event (no content, safe fields only).
+    const injected = workflows.find((w) => w.type === "writer.always_on.injected");
+    expect(injected?.payload.count).toBe(1);
+    expect(injected?.payload.items).toEqual([
+      { asset_id: "law-1", title: "世界铁律", asset_type: "world_rule" }
+    ]);
+    expect(JSON.stringify(injected)).not.toContain(big);
   });
 
   it("treats always_on load failure as a visible no-op, not a run failure", async () => {
@@ -690,6 +706,127 @@ describe("runPiWriterRunActivity", () => {
 
     expect(result).toMatchObject({ status: "completed" });
     expect(workflows.some((w) => w.type === "writer.context_budget.trimmed" && typeof w.payload.always_on_error === "string")).toBe(true);
+  });
+
+  it("runs fuse_recall rerank as a quota-gated provider stage with a stable identity", async () => {
+    const lifecycle: string[] = [];
+    let rerankRequest: Record<string, unknown> | undefined;
+    let rankedFromTool: string[] | undefined;
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+      }),
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => {
+        lifecycle.push(`reserve:${request.module_key}`);
+        return { reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" };
+      },
+      finalizeLLMQuota: async (request) => { lifecycle.push(`finalize:${request.provider_call_id}`); },
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ module_key, channel_id }) => {
+        lifecycle.push(`lease:${module_key}`);
+        return { lease_id: channel_id, channel_id, lock_mode: "slot:0" };
+      },
+      releaseLLMLease: async () => undefined,
+      rerankRecall: async (request) => {
+        rerankRequest = { ...request };
+        return { ranked_ids: ["a2", "a1"], usage: { prompt_tokens: 2, completion_tokens: 1 } };
+      },
+      executeWriterTool: async (request) => {
+        if (request.tool_name === "fuse_recall") {
+          // Simulate executeFuseRecall's rerank hop through the injected executor.
+          rankedFromTool = await request.rerank_executor?.("师门复命", [
+            { id: "a1", title: "甲", text: "……" },
+            { id: "a2", title: "乙", text: "……" }
+          ]);
+          return { fused: [], citations: [] };
+        }
+        return {};
+      },
+      orchestrateWritingBrief: async (request) => {
+        await request.executeTool("fuse_recall", "call-fuse", { rerank: true, query: "师门复命", channels: [] });
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async () => undefined,
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    expect(result).toMatchObject({ status: "completed", draft_id: "draft-1" });
+    expect(rankedFromTool).toEqual(["a2", "a1"]);
+    // The rerank ran as a proper provider stage: reserved + leased + finalized
+    // under the writer_retrieval_rerank module with a stable call identity.
+    const expectedCallId = stableProviderCallId({
+      tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
+      module_key: "writer_retrieval_rerank", stage: "rerank", call_index: 0
+    });
+    expect(rerankRequest?.provider_call_id).toBe(expectedCallId);
+    expect(rerankRequest?.apiKey).toBe("key-for-writer_retrieval_rerank");
+    expect(lifecycle).toContain("reserve:writer_retrieval_rerank");
+    expect(lifecycle).toContain("lease:writer_retrieval_rerank");
+    expect(lifecycle).toContain(`finalize:${expectedCallId}`);
+  });
+
+  it("degrades fuse_recall rerank visibly when writer_retrieval_rerank is unbound", async () => {
+    let rerankError = "";
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => {
+        if (module_key === "writer_retrieval_rerank") {
+          throw new Error("LLM_MODULE_UNBOUND: writer_retrieval_rerank module is not bound");
+        }
+        return {
+          module_key,
+          channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+          base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+          supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+        };
+      },
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      rerankRecall: async () => ({ ranked_ids: [] }),
+      executeWriterTool: async (request) => {
+        if (request.tool_name === "fuse_recall") {
+          // executeFuseRecall catches executor failures and degrades to RRF order.
+          try {
+            await request.rerank_executor?.("x", [{ id: "a1", text: "……" }]);
+          } catch (error) {
+            rerankError = error instanceof Error ? error.message : String(error);
+          }
+          return { fused: [], citations: [], reranked: false, rerank_degraded: rerankError };
+        }
+        return {};
+      },
+      orchestrateWritingBrief: async (request) => {
+        await request.executeTool("fuse_recall", "call-fuse", { rerank: true, query: "x", channels: [] });
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      composeDraft: async () => ({ content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async () => undefined,
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity(basePayload);
+
+    // The run still completes; the degradation reason names the unbound module.
+    expect(result).toMatchObject({ status: "completed", draft_id: "draft-1" });
+    expect(rerankError).toContain("writer_retrieval_rerank module is not bound");
   });
 
   it("runs the consistency check and surfaces violations without failing the run", async () => {

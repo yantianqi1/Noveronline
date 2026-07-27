@@ -119,6 +119,9 @@ func TestSQLExportAuditorRecordsTraceExportAudit(t *testing.T) {
 	if len(queryer.args) != 5 {
 		t.Fatalf("unexpected audit args: %#v", queryer.args)
 	}
+	if queryer.writeTenantID != "tenant-123" {
+		t.Fatalf("audit write lost tenant transaction context: %#v", queryer)
+	}
 	if queryer.args[0] != "tenant-123" || queryer.args[1] != "user-123" || queryer.args[2] != "project-123" || queryer.args[3] != "req-export" {
 		t.Fatalf("audit lost core context: %#v", queryer.args)
 	}
@@ -145,10 +148,11 @@ func TestDisabledExportAuditorFailsExplicitly(t *testing.T) {
 }
 
 type recordingTraceQueryer struct {
-	query string
-	args  []any
-	rows  *fakeTraceRows
-	err   error
+	query         string
+	args          []any
+	rows          *fakeTraceRows
+	err           error
+	writeTenantID string
 }
 
 func (q *recordingTraceQueryer) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
@@ -161,6 +165,11 @@ func (q *recordingTraceQueryer) QueryContext(ctx context.Context, query string, 
 		return nil, errors.New("no rows configured")
 	}
 	return q.rows, nil
+}
+
+func (q *recordingTraceQueryer) QueryTenantWriteContext(ctx context.Context, tenantID string, query string, args ...any) (SQLRows, error) {
+	q.writeTenantID = tenantID
+	return q.QueryContext(ctx, query, args...)
 }
 
 type fakeTraceRows struct {

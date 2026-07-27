@@ -104,7 +104,7 @@ export function LoginForm() {
           >
             <div
               role="alert"
-              className="flex items-start gap-2.5 rounded-[10px] border border-accent/30 bg-accent-wash px-3.5 py-3 text-[13px] leading-relaxed text-accent-strong"
+              className="flex items-start gap-2.5 rounded-panel border border-accent/30 bg-accent-wash px-3.5 py-3 text-sm leading-relaxed text-accent-strong"
             >
               <AlertCircle className="mt-px size-4 shrink-0" aria-hidden />
               <span>{formError}</span>
@@ -128,7 +128,7 @@ export function LoginForm() {
           autoFocus
         />
         {fieldErrors.email ? (
-          <p className="text-[12.5px] text-accent">{fieldErrors.email}</p>
+          <p className="text-caption text-accent">{fieldErrors.email}</p>
         ) : null}
       </div>
 
@@ -137,7 +137,7 @@ export function LoginForm() {
           <Label htmlFor="password">密码</Label>
           <a
             href="/recovery"
-            className="text-[12.5px] text-muted transition-colors hover:text-accent"
+            className="text-caption text-muted transition-colors hover:text-accent"
           >
             忘记密码？
           </a>
@@ -159,7 +159,7 @@ export function LoginForm() {
             type="button"
             onClick={() => setShowPassword((value) => !value)}
             aria-label={showPassword ? "隐藏密码" : "显示密码"}
-            className="absolute right-1.5 top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-[8px] text-muted transition-colors hover:bg-accent-wash hover:text-accent"
+            className="absolute right-1.5 top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-panel text-muted transition-colors hover:bg-accent-wash hover:text-accent"
           >
             {showPassword ? (
               <EyeOff className="size-4" aria-hidden />
@@ -169,7 +169,7 @@ export function LoginForm() {
           </button>
         </div>
         {fieldErrors.password ? (
-          <p className="text-[12.5px] text-accent">{fieldErrors.password}</p>
+          <p className="text-caption text-accent">{fieldErrors.password}</p>
         ) : null}
       </div>
 

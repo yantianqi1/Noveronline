@@ -539,14 +539,31 @@ def test_llm_facility_style_extraction_runner_fails_closed_on_invalid_schema() -
 def test_postgres_style_source_material_loader_reads_tenant_project_scoped_content_text() -> None:
     connection = FakeStyleSourceMaterialConnection([{"content_text": "私有源资产正文"}])
     loader = PostgresStyleSourceMaterialLoader(connect=lambda: connection)
+    context = _style_context().model_copy(
+        update={
+            "tenant_id": "11111111-1111-4111-8111-111111111111",
+            "project_id": "22222222-2222-4222-8222-222222222222",
+            "actor_user_id": "33333333-3333-4333-8333-333333333333",
+        }
+    )
 
-    material = loader.load_material(context=_style_context(), source_asset_id="asset-style-source-1")
+    material = loader.load_material(context=context, source_asset_id="asset-style-source-1")
 
     assert material == "私有源资产正文"
-    query, params = connection.cursor_instance.executed[0]
+    context_query, context_params = connection.cursor_instance.executed[0]
+    assert "app_set_tenant_context" in context_query
+    assert context_params == (
+        "11111111-1111-4111-8111-111111111111",
+        "33333333-3333-4333-8333-333333333333",
+    )
+    query, params = connection.cursor_instance.executed[1]
     assert "FROM assets" in query
     assert "content_text" in query
-    assert params == ("tenant-1", "project-1", "asset-style-source-1")
+    assert params == (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "asset-style-source-1",
+    )
     assert connection.closed is True
 
 
@@ -597,9 +614,16 @@ def test_llm_facility_asset_ingestion_runner_fails_closed_when_module_unbound() 
 def test_postgres_asset_candidate_writer_persists_candidate_assets_without_source_material_or_credentials() -> None:
     connection = FakeCandidateAssetConnection([{"asset_id": "asset-1"}, {"asset_id": "asset-2"}])
     writer = PostgresAssetCandidateWriter(connect=lambda: connection)
+    context = _context().model_copy(
+        update={
+            "tenant_id": "11111111-1111-4111-8111-111111111111",
+            "project_id": "22222222-2222-4222-8222-222222222222",
+            "actor_user_id": "33333333-3333-4333-8333-333333333333",
+        }
+    )
 
     result = writer.write_candidates(
-        context=_context(),
+        context=context,
         candidate_batch_id="asset-ingestion:run-1",
         model_id="model-asset",
         scope="project",
@@ -631,9 +655,15 @@ def test_postgres_asset_candidate_writer_persists_candidate_assets_without_sourc
         "candidate_count": 2,
         "asset_type_counts": {"world_rule": 1, "note": 1},
     }
-    assert len(connection.cursor_instance.executed) == 2
-    assert all("INSERT INTO assets" in query for query, _params in connection.cursor_instance.executed)
-    assert all("'candidate'" in query for query, _params in connection.cursor_instance.executed)
+    assert "app_set_tenant_context" in connection.cursor_instance.executed[0][0]
+    assert connection.cursor_instance.executed[0][1] == (
+        "11111111-1111-4111-8111-111111111111",
+        "33333333-3333-4333-8333-333333333333",
+    )
+    candidate_writes = connection.cursor_instance.executed[1:]
+    assert len(candidate_writes) == 2
+    assert all("INSERT INTO assets" in query for query, _params in candidate_writes)
+    assert all("'candidate'" in query for query, _params in candidate_writes)
     joined_params = json.dumps(connection.cursor_instance.executed, ensure_ascii=False, default=str)
     assert "用户素材正文不得持久化" not in joined_params
     assert "credential_ref" not in joined_params

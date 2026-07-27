@@ -1,6 +1,6 @@
 # SaaS Current Development Progress
 
-更新时间：`2026-07-19`
+更新时间：`2026-07-27`
 
 ## 文档职责
 
@@ -15,8 +15,14 @@
 | MAIN-100 | `awaiting_legacy_authorization`，本地、external provider 与 Legacy read-only plan coverage 已闭合；真实 cutover 未获授权前不能标记 complete |
 | 本地/production-style 产品闭环 | 自助注册与个人工作区、登录、Recovery、邀请、成员、Seed/Assets/Graph、single-current-world、Character、Writer/Reviewer、显式 adoption、manuscript/export 已有当前 live/browser 证据 |
 | 中央集成 | 产品 handlers/workers 已进入中央 auth/RBAC/CSRF/RLS/limiter/readiness 安全壳 |
-| Compose | 全服务 health、15 migrations readiness、持久化 restart/recovery、worker queues 当前通过 |
+| Compose | 全服务 health、31 migrations readiness、持久化 restart/recovery、worker queues 当前通过 |
 | 当前未完成 | 唯一 Legacy 候选尚未获授权为真实业务数据；apply/verify/rollback/final cutover 尚未执行 |
+
+## 2026-07-27 全模块缺陷审计收口
+
+`44-full-module-bug-audit.md` 四个梯队中的确认缺陷已全部闭合，误报保持否决。除第一梯队的采纳权限、写入口 RBAC、goal-start 单活跃与 Writer autosave 外，本轮完成真实库 RLS、workflow attempt fencing、Worldline 失败终态、Pi payload/cast 幂等、LLM capability fail-closed、蒸馏失败指纹重试、上传流式限额、协作 owner 不变量、Temporal/Compose 与 DB/HTTP 资源边界等修复。逐条状态与边界见审计文档 §7。
+
+readiness 真相源已更新至 `31:0031_asset_distillation_retryable_fingerprint`。隔离 `mirofish_test_*` + `mirofish.live_test=on` 栈中 migration/sentinel 与 assetdistillation/collaboration/workflows/worldline/traces/sourcefiles app-role live 全绿，退出执行 `down -v`；`infra/tests` full 为 `72 passed`。Go full、Python `504 passed, 31 skipped`、Pi `133 passed, 4 skipped` + typecheck/build、Web `92 passed, 1 skipped` + typecheck/build 均通过。真实隔离 Go API 镜像 `/healthz` 返回 ok、直连 `/v1/me` 401；当前 Next Web 连接该 API 后 `/login` 200、同源 `/api/me` 401，未使用 stub/mock。该审计收口不改变 MAIN-100 `awaiting_legacy_authorization` 状态。
 
 本地 completion audit 已闭合：Coverage Matrix 当前为 `90 verified / 25 verified replacement / 5 explicit non-restored / 1 blocked`，无裸 `planned` / `implemented` / `in_progress` / `pending` 表格状态；Production/Ops 四行已按当前 billing、object storage、recovery、audit 证据校准，并由语义防漂移测试约束。external HTTPS provider 的真实成功证书已升级为 `verified`；机械状态归一化不得改写 `seed.stage.pending` 等真实代码标识的防回归测试也已通过。唯一 blocked row 为 real Legacy source，不能用 synthetic legacy fixture 替代。
 
@@ -32,7 +38,7 @@
 | 子目标 | 当前状态 | 当前证据 |
 |---|---|---|
 | P6-003-A Writer/Reviewer/Workspace/Manuscript | `verified_current` | `writer_dedup_extractor` 与 `writer_book_planner` 已经真实 Facility/Temporal producer、中央安全挂载、app-role SQL 和 browser 认证；只产出 disabled candidate/draft；Pi 另承载候选式故事分析（`PiAnalysisRunWorkflow`）与 Worldline Cast Planner 两个独立域，不写 canon |
-| P5-005-B Knowledge/Simulation | `verified_current` | Seed unified private trace app-role live、same-run retry replacement、Seed/Assets/Graph/Worldline/Character browser 与 full regression 当前通过 |
+| P5-005-B Knowledge/Simulation | `verified_current` | Seed unified private trace app-role live、same-run retry replacement、Seed/Assets/Graph/Worldline/Character browser 与 full regression 当前通过；2026-07-26 世界线闭环（迁移 0028 + 变量 lock PATCH/GET + current_step + director prompt locked/canon 分列）重开后以 compose live + browser 证据重新闭合（doc 42 实施记录） |
 | P8-002-C Platform/Legacy/Ops | `verified_current` | model-sync app-role/live、retirement artifact、Legacy/Ops/Security、matrix closure 与 production override reviewer 当前通过 |
 
 ## 中央集成与安全
@@ -84,7 +90,7 @@
 ## Compose / Recovery 证据
 
 - `/readyz` exact GET 返回 Postgres/schema、Redis、Temporal/required pollers、object storage 四依赖 `ready`。
-- migration ledger 目标为 `19:0019_writer_threads`；readiness 常量同步要求 19。Compose bootstrap 校验至 0019（writer_threads / messages / approvals + writer_runs.mode 含 revise；0018 四表/FORCE RLS/adopt snapshot reason/evidence 无 DELETE grant sentinel 仍保留）。
+- migration ledger 目标为 `31:0031_asset_distillation_retryable_fingerprint`；readiness 常量同步要求 31。Compose bootstrap 校验至 0031，包含 0028 worldline lock/canon、0029 asset search trigger、0030 `writer_thread_messages UPDATE=true / DELETE=false` 权限，以及 0031 failed/cancelled fingerprint 可重试 sentinel；早期 migration sentinel 继续保留。
 - 本地 fixture 清理器默认 preview、仅 `--apply` 删除固定 UUID + 精确 marker 的 allowlist，拒绝非 local/远程数据库、拒绝 libpq query 路由覆盖并保护管理员个人工作区；管理员的正常多设备会话不在清理范围。当前库清理后为 `1 user / 1 workspace / 1 project / 1 session`，测试 source/workflow 为 0，正式 LLM channel/model/binding 保持 `1 / 50 / 26`。
 - 后续 live/E2E fixture 不再复用主库：`run-live-test-stack.sh` 为每次任务创建独立 Compose project、`mirofish_test_*` 数据库、live-test marker 和 volumes，退出统一 `down -v`；Go/Python/Web guard 会在写 fixture 前拒绝主 `mirofish` 库。历史清理器只保留为一次性旧污染收敛工具。
 - recovery 私表对 `mirofish_app` 的 direct grants 当前为 `0`。
@@ -99,13 +105,13 @@
 | 范围 | 当前结果 |
 |---|---:|
 | Go API full | `go test -count=1 ./...` passed |
-| Python Agent Runtime full | `443 passed, 31 skipped` |
-| Pi Runtime | `71 passed, 4 skipped`; typecheck/build passed；shared-contracts/Pi tool focused `44 passed`，app-role live `2 passed` |
-| Web | 当前串行 full 为 `241 passed, 9 skipped`；LLM Facility settings 契约与 cookie abort 时序回归均已闭合；typecheck/build passed |
+| Python Agent Runtime full | `504 passed, 31 skipped` |
+| Pi Runtime | `133 passed, 4 skipped`; typecheck/build passed |
+| Web | `92 passed, 1 skipped`；typecheck/build passed |
 | Legacy Backend full | `829 passed, 5 skipped` |
 | Matrix + retirement + production ops | `55 passed` |
 | External provider strict Facility | `2 passed`；JSON/tools probes、formal provider health、26 non-embedding bindings passed |
-| Infra/schema/release full | `67 passed` |
+| Infra/schema/release full | `72 passed` |
 | Legacy importer focused | `49 passed, 1 skipped`；relationship-owned evidence compatibility regression passed |
 | Production ops latest | `44 passed` |
 | Compose recovery | passed |
@@ -127,6 +133,10 @@
 **R4 quota 幂等键**：分批后每批唯一 call id 由 `stable_provider_call_id(context, module, stage, call_index)` 保证——`stage` 嵌入批输入 digest，批间消息不同 → digest 不同 → call id 唯一；以 `test_seed_quota_chat_client_gives_distinct_call_identity_per_enrichment_batch` 锁定。
 
 **回归证据（2026-07-25）**：Go API `go test ./...` 27 包全 ok；Python agent-runtime `484 passed, 30 skipped`（含 seed workflow 183 + ontology 11 + quota）；Pi `125 passed` + typecheck/build；Web `50 passed` + typecheck + production build。**live**：seed live e2e 对一次性 `mirofish_test_*` 库（全量 migration 链 + ledger）`8 passed`（quota-gated 分批落库、进度事件、隐私扫描、idempotent 重跑）。live fixtures 修正已提交：foundation 回填 tenant-scope quota policy（镜像 0017）、各 `llm_models` 补 `context_window`、entity_resolution 重试复用 trace_id 使命中 quota replay（单次真实 LLM 调用）、run progress 断言对齐阶段锚点 80。
+
+## 并行：世界线推演闭环补齐（doc 42，2026-07-26 落地）
+
+`docs/refactor-saas/42-worldline-loop-closure-plan.md` 三处闭环已实现并验证：locked 变量真正注入 director prompt（变量不再死数据）、采纳有权重（`confirmed_canon` 8 + `pending_candidates` 4 分列）、步号口径统一（banner/卡片/折叠条恒等于 `SessionRecord.current_step` = `MAX(worldline_events.step)`，采纳不再推高步号）。迁移 `0028` 已入 compose ledger；Go/Python/Web 回归与 live/browser 证据见该文档"实施记录"。P5-005-B 域按重开规则已重新闭合。
 
 ## 最终 DoD 审计
 
@@ -210,6 +220,14 @@ Synthetic inspect/plan/apply/verify/rollback 与 MinIO version ownership 已通�
 | 6 视觉打磨 + a11y + 验收截图 | `connected`（截图 pending Z7） | paper/selection/diff/timeline/approval CSS；fresh desktop/mobile browser 截图仍待 Z7 |
 
 **Phase 2–6 + doc 32 remediation 代码连通（2026-07-13）：** 见 `33-connectivity-remediation-plan.md`。`connected` 表示代码路径与 focused tests 已接线；`verified` 仍要求 disposable live / browser 证据。Z7 全链浏览器认证不在本轮。
+
+**写作台 rail 历史重建（2026-07-26）：** 修复「跑完一次起草后，工具链/召回/采用卡片全消失、刷新后只剩用户消息」。根因：task 回合只活在内存，历史加载只把消息映射成 user 气泡、丢弃 run_id。修复：
+
+- 历史按 `run_id` 折叠重建为 `user + task` 回合（`writer-turns.ts` 纯函数，8 项 node:test 通过），每个 task 从 durable 事件流重读步骤/召回/候选稿，刷新后完整还原。
+- 采用后卡片改为 `SettledCard`（保留 TaskCard 步骤链 + 召回 chips + 散文 + 「查看正文」），不再塌缩；「查看正文」跨章切换并闪烁定位到手稿对应 segment。
+- 采用落库同事务把 `adopted`/`adopted_block_id`/`adopted_chapter_id` 写进 `writer_thread_messages.metadata_jsonb`（幂等 CTE）；编辑器手工改稿后由 `manuscriptworkspace` store 同事务回清，rail 与画布不打架。
+- `useWriterRun` 跟踪已存草稿的权威 `status`（`fetchWriterDraft`），本页面/其他页面的采用都能即时 settle；completed 后拉全文支撑 settled 卡片正文。
+- 去掉前端双重 `appendThreadMessage`（Go 起 run 时已带 run_id 持久化）；rail 过滤放宽为 `role !== "system"`，并把 agent 状态行并入 task 卡片不再回显。
 
 ## 并行：Z-028 Zero-start Writer / Manuscript Asset Distillation
 

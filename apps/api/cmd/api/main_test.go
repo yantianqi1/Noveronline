@@ -37,7 +37,8 @@ const testPlatformRateLimitPolicies = `{
 	"collaboration_invite_create":{"limit":10,"window_seconds":60},
 	"collaboration_invite_accept":{"limit":10,"window_seconds":60},
 	"llm_admin_mutation":{"limit":30,"window_seconds":60},
-	"llm_provider_health":{"limit":5,"window_seconds":60}
+	"llm_provider_health":{"limit":5,"window_seconds":60},
+	"writer_run_start":{"limit":12,"window_seconds":300}
 }`
 
 func TestOpenAppDatabaseUsesBoundedPool(t *testing.T) {
@@ -2460,6 +2461,19 @@ func TestNewObjectWriterFromEnvCreatesMinIOWriter(t *testing.T) {
 	}
 	if writer == nil {
 		t.Fatal("expected configured object writer")
+	}
+}
+
+func TestNewObjectWriterFromEnvRejectsInvalidUploadLimit(t *testing.T) {
+	t.Setenv("MIROFISH_OBJECT_STORAGE_ENDPOINT", "127.0.0.1:9000")
+	t.Setenv("MIROFISH_OBJECT_STORAGE_BUCKET", "mirofish-uploads")
+	t.Setenv("MIROFISH_OBJECT_STORAGE_ACCESS_KEY", "mirofish")
+	t.Setenv("MIROFISH_OBJECT_STORAGE_SECRET_KEY", "secret")
+	t.Setenv("MIROFISH_SOURCE_UPLOAD_MAX_BYTES", "not-a-positive-integer")
+
+	_, err := newObjectWriterFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "MIROFISH_SOURCE_UPLOAD_MAX_BYTES") {
+		t.Fatalf("expected explicit upload limit configuration error, got %v", err)
 	}
 }
 

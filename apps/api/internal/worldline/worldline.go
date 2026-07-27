@@ -111,9 +111,13 @@ type SessionRecord struct {
 	Lifecycle    string `json:"lifecycle"`
 	GoalSummary  string `json:"goal_summary"`
 	AnchorPathID string `json:"anchor_path_id"`
-	CreatedBy    string `json:"created_by"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	// CurrentStep is the latest domain step this session produced
+	// (MAX(worldline_events.step)); the single public "第 X 步" anchor. The
+	// orchestration workflow_events.sequence stays internal.
+	CurrentStep int    `json:"current_step"`
+	CreatedBy   string `json:"created_by"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type SessionReader interface {
@@ -138,7 +142,13 @@ type TimelineEventRecord struct {
 	Title     string `json:"title"`
 	Summary   string `json:"summary"`
 	Kind      string `json:"kind"`
-	CreatedAt string `json:"created_at"`
+	// For adoption records: the canon domain event this orchestration event
+	// adopted, so the timeline can surface real history instead of the
+	// orchestration placeholder.
+	EventRefID     string `json:"event_ref_id"`
+	AdoptedTitle   string `json:"adopted_title"`
+	AdoptedSummary string `json:"adopted_summary"`
+	CreatedAt      string `json:"created_at"`
 }
 
 type TimelineReader interface {
@@ -232,8 +242,23 @@ type VariableRecord struct {
 	UpdatedAt   string `json:"updated_at"`
 }
 
+type SetVariableLockedInput struct {
+	TenantID    string
+	SessionID   string
+	VariableID  string
+	ActorUserID string
+	Locked      bool
+}
+
+type ListVariablesInput struct {
+	TenantID  string
+	SessionID string
+}
+
 type VariableStore interface {
 	InjectVariable(context.Context, InjectVariableInput) (VariableRecord, error)
+	SetVariableLocked(context.Context, SetVariableLockedInput) (VariableRecord, error)
+	ListVariables(context.Context, ListVariablesInput) ([]VariableRecord, error)
 }
 
 type CreatePreparationInput struct {
@@ -492,6 +517,20 @@ func (s *DisabledVariableStore) InjectVariable(context.Context, InjectVariableIn
 	}
 }
 
+func (s *DisabledVariableStore) SetVariableLocked(context.Context, SetVariableLockedInput) (VariableRecord, error) {
+	return VariableRecord{}, &AppError{
+		Code:    "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED",
+		Message: "worldline variable backend is not configured",
+	}
+}
+
+func (s *DisabledVariableStore) ListVariables(context.Context, ListVariablesInput) ([]VariableRecord, error) {
+	return nil, &AppError{
+		Code:    "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED",
+		Message: "worldline variable backend is not configured",
+	}
+}
+
 type SQLRows interface {
 	Next() bool
 	Scan(...any) error
@@ -553,7 +592,7 @@ func (q *SQLDBQueryer) QueryTenantContext(ctx context.Context, tenantID string, 
 		_ = tx.Rollback()
 		return nil, err
 	}
-	return &sqlTenantRows{Rows: rows, tx: tx}, nil
+	return &sqlTenantRows{Rows: rows, tx: tx, readOnly: true}, nil
 }
 
 func (q *SQLDBQueryer) QueryTenantActorContext(ctx context.Context, tenantID string, actorUserID string, query string, args ...any) (SQLRows, error) {
@@ -575,16 +614,37 @@ func (q *SQLDBQueryer) QueryTenantActorContext(ctx context.Context, tenantID str
 
 type sqlTenantRows struct {
 	*sql.Rows
-	tx *sql.Tx
+	tx          *sql.Tx
+	readOnly    bool
+	closed      bool
+	finalizeErr error
 }
 
 func (r *sqlTenantRows) Close() error {
+	if r.closed {
+		return r.finalizeErr
+	}
+	r.closed = true
 	rowsErr := r.Rows.Close()
 	if rowsErr != nil {
 		_ = r.tx.Rollback()
-		return rowsErr
+		r.finalizeErr = rowsErr
+		return r.finalizeErr
 	}
-	return r.tx.Commit()
+	if r.readOnly {
+		r.finalizeErr = r.tx.Rollback()
+	} else {
+		r.finalizeErr = r.tx.Commit()
+	}
+	return r.finalizeErr
+}
+
+func (r *sqlTenantRows) Err() error {
+	if err := r.Rows.Err(); err != nil {
+		_ = r.Close()
+		return err
+	}
+	return r.Close()
 }
 
 func (q *SQLDBQueryer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -1272,9 +1332,9 @@ func (s *SQLSessionStore) ListSessions(ctx context.Context, input ListSessionsIn
 		return nil, &AppError{Code: "WORLDLINE_SESSION_BACKEND_UNCONFIGURED", Message: "worldline session backend is not configured"}
 	}
 	query := sessionRecordSelectQuery() + `
-WHERE tenant_id::text = $1
-  AND project_id::text = $2
-ORDER BY updated_at DESC, created_at DESC
+WHERE s.tenant_id::text = $1
+  AND s.project_id::text = $2
+ORDER BY s.updated_at DESC, s.created_at DESC
 LIMIT $3`
 	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, projectID, s.limit)
 	if err != nil {
@@ -1305,8 +1365,8 @@ func (s *SQLSessionStore) GetSession(ctx context.Context, input GetSessionInput)
 		return SessionRecord{}, &AppError{Code: "WORLDLINE_SESSION_BACKEND_UNCONFIGURED", Message: "worldline session backend is not configured"}
 	}
 	query := sessionRecordSelectQuery() + `
-WHERE tenant_id::text = $1
-  AND session_id::text = $2
+WHERE s.tenant_id::text = $1
+  AND s.session_id::text = $2
 LIMIT 1`
 	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, query, tenantID, sessionID)
 	if err != nil {
@@ -1329,17 +1389,24 @@ LIMIT 1`
 func sessionRecordSelectQuery() string {
 	return `
 SELECT
-  session_id::text,
-  run_id::text,
-  project_id::text,
-  status,
-  lifecycle,
-  goal_summary,
-  COALESCE(anchor_path_id::text, ''),
-  COALESCE(created_by::text, ''),
-  created_at::text,
-  updated_at::text
-FROM worldline_sessions
+  s.session_id::text,
+  s.run_id::text,
+  s.project_id::text,
+  s.status,
+  s.lifecycle,
+  s.goal_summary,
+  COALESCE(s.anchor_path_id::text, ''),
+  COALESCE((
+    SELECT MAX(e.step)
+    FROM worldline_events e
+    WHERE e.tenant_id = s.tenant_id
+      AND e.project_id = s.project_id
+      AND e.session_id = s.session_id
+  ), 0) AS current_step,
+  COALESCE(s.created_by::text, ''),
+  s.created_at::text,
+  s.updated_at::text
+FROM worldline_sessions s
 `
 }
 
@@ -1367,6 +1434,7 @@ func scanSessionRecord(rows SQLRows) (SessionRecord, error) {
 		&record.Lifecycle,
 		&record.GoalSummary,
 		&record.AnchorPathID,
+		&record.CurrentStep,
 		&record.CreatedBy,
 		&record.CreatedAt,
 		&record.UpdatedAt,
@@ -1769,12 +1837,20 @@ SELECT
   COALESCE(e.payload_jsonb->>'title', ''),
   COALESCE(e.payload_jsonb->>'summary', ''),
   COALESCE(e.payload_jsonb->>'kind', ''),
+  COALESCE(ref.event_id::text, ''),
+  COALESCE(ref.title, ''),
+  COALESCE(ref.summary, ''),
   e.created_at::text
 FROM workflow_events e
 JOIN worldline_sessions s
   ON s.tenant_id = e.tenant_id
  AND s.project_id = e.project_id
  AND s.run_id = e.run_id
+LEFT JOIN worldline_events ref
+  ON ref.tenant_id = e.tenant_id
+ AND ref.project_id = e.project_id
+ AND ref.session_id = s.session_id
+ AND ref.event_id::text = e.payload_jsonb->>'event_ref_id'
 WHERE s.tenant_id::text = $1
   AND s.session_id::text = $2
   AND e.workflow_type = 'worldline_session'
@@ -1813,6 +1889,9 @@ func scanTimelineEventRecord(rows SQLRows) (TimelineEventRecord, error) {
 		&record.Title,
 		&record.Summary,
 		&record.Kind,
+		&record.EventRefID,
+		&record.AdoptedTitle,
+		&record.AdoptedSummary,
 		&record.CreatedAt,
 	); err != nil {
 		return TimelineEventRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
@@ -2221,15 +2300,18 @@ func (s *SQLEventAdoptionStore) AdoptEvent(ctx context.Context, input AdoptEvent
 	workflowEventID := s.newID()
 	actorUserID := strings.TrimSpace(input.ActorUserID)
 	note := strings.TrimSpace(input.Note)
+	// The timeline surfaces the adopted domain event's own title/summary (via the
+	// event_ref_id join), so this payload records the reference, not a
+	// "Worldline event adopted" placeholder. Note stays for the audit trail.
 	eventPayload, err := json.Marshal(map[string]any{
-		"status":      "canon",
-		"lifecycle":   "canon_reference",
-		"kind":        "event_adoption",
-		"title":       "Worldline event adopted",
-		"summary":     note,
-		"event_id":    eventID,
-		"adoption_id": adoptionID,
-		"request_id":  strings.TrimSpace(input.RequestID),
+		"status":       "canon",
+		"lifecycle":    "canon_reference",
+		"kind":         "event_adoption",
+		"event_ref_id": eventID,
+		"event_id":     eventID,
+		"adoption_id":  adoptionID,
+		"note":         note,
+		"request_id":   strings.TrimSpace(input.RequestID),
 	})
 	if err != nil {
 		return EventRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline event adoption payload must be JSON serializable"}
@@ -2623,6 +2705,103 @@ event_insert AS (
     ON variable_insert.session_id = session_scope.session_id
   RETURNING 1
 )`
+}
+
+func (s *SQLVariableStore) SetVariableLocked(ctx context.Context, input SetVariableLockedInput) (VariableRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	sessionID := strings.TrimSpace(input.SessionID)
+	variableID := strings.TrimSpace(input.VariableID)
+	if tenantID == "" || sessionID == "" || variableID == "" {
+		return VariableRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, session_id, and variable_id are required"}
+	}
+	if s.queryer == nil {
+		return VariableRecord{}, &AppError{Code: "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED", Message: "worldline variable backend is not configured"}
+	}
+	// Idempotent: re-PATCHing the current value is a 200 no-op; either way the
+	// latest record comes back via RETURNING.
+	rows, err := queryWorldlineTenantActorSQL(ctx, s.queryer, tenantID, strings.TrimSpace(input.ActorUserID), `
+UPDATE worldline_variables
+SET locked = $4,
+    updated_at = now()
+WHERE tenant_id = $1::uuid
+  AND session_id = $2::uuid
+  AND variable_id = $3::uuid
+RETURNING
+  variable_id::text,
+  session_id::text,
+  project_id::text,
+  name,
+  description,
+  impact_axis,
+  locked,
+  source,
+  COALESCE(created_by::text, ''),
+  created_at::text,
+  updated_at::text`,
+		tenantID, sessionID, variableID, input.Locked)
+	if err != nil {
+		return VariableRecord{}, &AppError{Code: "WORLDLINE_VARIABLE_WRITE_FAILED", Message: err.Error()}
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return VariableRecord{}, &AppError{Code: "WORLDLINE_VARIABLE_WRITE_FAILED", Message: err.Error()}
+		}
+		return VariableRecord{}, &AppError{Code: "NOT_FOUND", Message: "worldline variable not found"}
+	}
+	record, err := scanVariableRecord(rows)
+	if err != nil {
+		return VariableRecord{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return VariableRecord{}, &AppError{Code: "WORLDLINE_VARIABLE_WRITE_FAILED", Message: err.Error()}
+	}
+	return record, nil
+}
+
+func (s *SQLVariableStore) ListVariables(ctx context.Context, input ListVariablesInput) ([]VariableRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	sessionID := strings.TrimSpace(input.SessionID)
+	if tenantID == "" || sessionID == "" {
+		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and session_id are required"}
+	}
+	if s.queryer == nil {
+		return nil, &AppError{Code: "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED", Message: "worldline variable backend is not configured"}
+	}
+	rows, err := queryWorldlineTenantSQL(ctx, s.queryer, tenantID, `
+SELECT
+  variable_id::text,
+  session_id::text,
+  project_id::text,
+  name,
+  description,
+  impact_axis,
+  locked,
+  source,
+  COALESCE(created_by::text, ''),
+  created_at::text,
+  updated_at::text
+FROM worldline_variables
+WHERE tenant_id = $1::uuid
+  AND session_id = $2::uuid
+ORDER BY created_at ASC, variable_id ASC`,
+		tenantID, sessionID)
+	if err != nil {
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+	}
+	defer rows.Close()
+	records := []VariableRecord{}
+	for rows.Next() {
+		record, err := scanVariableRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+	}
+	return records, nil
 }
 
 func scanVariableRecord(rows SQLRows) (VariableRecord, error) {

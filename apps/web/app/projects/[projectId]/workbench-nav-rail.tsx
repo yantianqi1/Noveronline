@@ -30,7 +30,7 @@ export function WorkbenchNav({ projectId }: { projectId: string }) {
             href={href}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "group relative flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 text-[13.5px] transition-colors duration-200",
+              "group relative flex items-center gap-3 rounded-panel px-3.5 py-2.5 text-sm transition-colors duration-200",
               active
                 ? "bg-accent-wash font-medium text-accent-strong"
                 : "text-ink-soft hover:bg-paper-deep hover:text-ink",

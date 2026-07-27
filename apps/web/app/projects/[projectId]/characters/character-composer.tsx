@@ -67,7 +67,7 @@ export function CharacterComposer({
             onClick={() => setKind(k)}
             aria-pressed={kind === k}
             className={cn(
-              "rounded-[8px] px-3 py-1.5 text-[12px] font-medium transition-colors",
+              "rounded-panel px-3 py-1.5 text-caption font-medium transition-colors",
               kind === k
                 ? "bg-accent-wash text-accent ring-1 ring-inset ring-accent/40"
                 : "text-muted hover:bg-paper hover:text-ink",
@@ -91,13 +91,13 @@ export function CharacterComposer({
           rows={1}
           disabled={disabled}
           placeholder={KIND_HINTS[kind]}
-          className="max-h-[160px] flex-1 resize-none rounded-[12px] border border-line bg-paper px-4 py-3 font-serif text-[14.5px] leading-relaxed text-ink outline-none transition-colors focus:border-accent/50 disabled:opacity-60"
+          className="max-h-[160px] flex-1 resize-none rounded-modal border border-line bg-paper px-4 py-3 font-serif text-base leading-relaxed text-ink outline-none transition-colors focus:border-accent/50 disabled:opacity-60"
         />
         <button
           type="button"
           onClick={submit}
           disabled={disabled || busy || !text.trim()}
-          className="shrink-0 rounded-[12px] bg-accent px-5 py-3 text-[13.5px] font-medium text-panel shadow-sm transition-colors hover:bg-accent-strong disabled:opacity-50"
+          className="shrink-0 rounded-modal bg-accent px-5 py-3 text-sm font-medium text-panel shadow-hairline transition-colors hover:bg-accent-strong disabled:opacity-50"
         >
           {busy ? "送出…" : "发送"}
         </button>

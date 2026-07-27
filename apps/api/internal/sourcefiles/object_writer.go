@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -13,11 +14,12 @@ import (
 )
 
 type MinIOObjectWriterConfig struct {
-	Endpoint  string
-	AccessKey string
-	SecretKey string
-	Bucket    string
-	UseSSL    bool
+	Endpoint     string
+	AccessKey    string
+	SecretKey    string
+	Bucket       string
+	UseSSL       bool
+	MaxSizeBytes int64
 }
 
 type minioPutClient interface {
@@ -25,9 +27,12 @@ type minioPutClient interface {
 }
 
 type minioObjectWriter struct {
-	client minioPutClient
-	bucket string
+	client       minioPutClient
+	bucket       string
+	maxSizeBytes int64
 }
+
+const DefaultMaxSourceUploadBytes int64 = 100 * 1024 * 1024
 
 func NewDisabledObjectWriter() ObjectWriter {
 	return disabledObjectWriter{}
@@ -66,7 +71,11 @@ func NewMinIOObjectWriter(config MinIOObjectWriterConfig) (ObjectWriter, error) 
 	if err != nil {
 		return nil, &AppError{Code: "SOURCE_FILE_STORAGE_BACKEND_UNCONFIGURED", Message: "object storage backend could not be configured"}
 	}
-	return minioObjectWriter{client: client, bucket: bucket}, nil
+	maxSizeBytes := config.MaxSizeBytes
+	if maxSizeBytes <= 0 {
+		maxSizeBytes = DefaultMaxSourceUploadBytes
+	}
+	return minioObjectWriter{client: client, bucket: bucket, maxSizeBytes: maxSizeBytes}, nil
 }
 
 func (w minioObjectWriter) WriteObject(ctx context.Context, input ObjectWriteInput, reader io.Reader) error {
@@ -74,6 +83,13 @@ func (w minioObjectWriter) WriteObject(ctx context.Context, input ObjectWriteInp
 	expectedSHA256 := strings.TrimSpace(input.SHA256)
 	if objectKey == "" || strings.TrimSpace(w.bucket) == "" || w.client == nil || input.SizeBytes < 0 || expectedSHA256 == "" || reader == nil {
 		return sourceFileObjectWriteFailed()
+	}
+	maxSizeBytes := w.maxSizeBytes
+	if maxSizeBytes <= 0 {
+		maxSizeBytes = DefaultMaxSourceUploadBytes
+	}
+	if input.SizeBytes > maxSizeBytes {
+		return sourceFileObjectTooLarge(maxSizeBytes)
 	}
 	tempFile, err := os.CreateTemp("", "mirofish-source-upload-*")
 	if err != nil {
@@ -85,7 +101,7 @@ func (w minioObjectWriter) WriteObject(ctx context.Context, input ObjectWriteInp
 	}()
 
 	hash := sha256.New()
-	bytesWritten, err := io.Copy(io.MultiWriter(tempFile, hash), reader)
+	bytesWritten, err := io.Copy(io.MultiWriter(tempFile, hash), io.LimitReader(reader, input.SizeBytes+1))
 	if err != nil {
 		return sourceFileObjectWriteFailed()
 	}
@@ -112,6 +128,10 @@ func (w minioObjectWriter) WriteObject(ctx context.Context, input ObjectWriteInp
 
 func sourceFileObjectPayloadMismatch() error {
 	return &AppError{Code: "SOURCE_FILE_OBJECT_PAYLOAD_MISMATCH", Message: "source file upload payload does not match admitted metadata"}
+}
+
+func sourceFileObjectTooLarge(maxSizeBytes int64) error {
+	return &AppError{Code: "SOURCE_FILE_OBJECT_TOO_LARGE", Message: "source file exceeds configured upload limit of " + strconv.FormatInt(maxSizeBytes, 10) + " bytes"}
 }
 
 func sourceFileObjectWriteFailed() error {

@@ -196,56 +196,14 @@ func NewSQLChannelStore(config SQLChannelStoreConfig) *SQLChannelStore {
 	return &SQLChannelStore{queryer: config.Queryer, key: key}
 }
 
-// UpgradeModelCapabilities ORs capability flags on a tenant-owned model row.
-// Used after successful provider health checks so stale FALSE defaults do not
-// keep reporting "tools/JSON unsupported" for official chat models.
+// UpgradeModelCapabilities intentionally keeps health-check discovery separate
+// from operator-managed capability flags. A probe must never turn an explicit
+// false override back on; model sync seeds capabilities only for new rows.
 func (s *SQLChannelStore) UpgradeModelCapabilities(
-	ctx context.Context,
-	tenantID, channelID, modelID string,
-	supportsJSON, supportsTools bool,
+	context.Context,
+	string, string, string,
+	bool, bool,
 ) error {
-	if s == nil || s.queryer == nil {
-		return &AppError{Code: "LLM_MODEL_BACKEND_UNCONFIGURED", Message: "LLM model backend is not configured"}
-	}
-	if !supportsJSON && !supportsTools {
-		return nil
-	}
-	tenantWriteQueryer, ok := s.queryer.(SQLTenantWriteQueryer)
-	if !ok {
-		return &AppError{Code: "LLM_MODEL_BACKEND_UNCONFIGURED", Message: "LLM model backend does not support tenant-scoped writes"}
-	}
-	tenantID = strings.TrimSpace(tenantID)
-	channelID = strings.TrimSpace(channelID)
-	modelID = strings.TrimSpace(modelID)
-	if tenantID == "" || channelID == "" || modelID == "" {
-		return &AppError{Code: "VALIDATION_FAILED", Message: "model capability upgrade input is invalid"}
-	}
-	query := `UPDATE llm_models AS model
-SET supports_json = model.supports_json OR $4,
-    supports_tools = model.supports_tools OR $5,
-    updated_at = now()
-WHERE model.tenant_id::text = $1
-  AND model.channel_id::text = $2
-  AND model.model_id = $3
-RETURNING model.model_id`
-	rows, err := tenantWriteQueryer.QueryTenantWriteContext(
-		ctx,
-		tenantID,
-		query,
-		tenantID,
-		channelID,
-		modelID,
-		supportsJSON,
-		supportsTools,
-	)
-	if err != nil {
-		return &AppError{Code: "LLM_MODEL_UPDATE_FAILED", Message: err.Error()}
-	}
-	if rows == nil {
-		return nil
-	}
-	defer rows.Close()
-	_ = rows.Next()
 	return nil
 }
 
@@ -379,10 +337,6 @@ LIMIT $3`
 			_ = rows.Close()
 			return nil, &AppError{Code: "LLM_CATALOG_QUERY_FAILED", Message: err.Error()}
 		}
-		// Catalog FALSE defaults are not provider truth; surface effective chat capabilities.
-		caps := EffectiveModelCapabilities(record.ModelID, record.SupportsJSON, record.SupportsTools)
-		record.SupportsJSON = caps.SupportsJSON
-		record.SupportsTools = caps.SupportsTools
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {

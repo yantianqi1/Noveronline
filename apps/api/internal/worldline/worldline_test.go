@@ -448,6 +448,7 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 			"active",
 			"Explore public consequence",
 			"path-1",
+			3,
 			"user-1",
 			"2026-07-05T00:00:00Z",
 			"2026-07-05T00:01:00Z",
@@ -470,10 +471,16 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 	if session.SessionID != "session-1" || session.RunID != "run-1" || session.Status != "queued" {
 		t.Fatalf("unexpected session summary: %#v", session)
 	}
+	if session.CurrentStep != 3 {
+		t.Fatalf("expected domain current_step 3, got %#v", session)
+	}
 	if !strings.Contains(queryer.query, "FROM worldline_sessions") {
 		t.Fatalf("expected worldline_sessions query, got %s", queryer.query)
 	}
-	if !strings.Contains(queryer.query, "tenant_id::text = $1") || !strings.Contains(queryer.query, "project_id::text = $2") {
+	if !strings.Contains(queryer.query, "MAX(e.step)") || !strings.Contains(queryer.query, "FROM worldline_events e") {
+		t.Fatalf("expected domain-step subquery for current_step, got %s", queryer.query)
+	}
+	if !strings.Contains(queryer.query, "s.tenant_id::text = $1") || !strings.Contains(queryer.query, "s.project_id::text = $2") {
 		t.Fatalf("expected tenant/project scoped list query, got %s", queryer.query)
 	}
 	for _, forbidden := range []string{"body_text", "content_text", "prompt", "response", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
@@ -490,6 +497,7 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 		"active",
 		"Explore public consequence",
 		"path-1",
+		0,
 		"user-1",
 		"2026-07-05T00:00:00Z",
 		"2026-07-05T00:01:00Z",
@@ -504,7 +512,10 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 	if detail.SessionID != "session-1" || detail.ProjectID != "project-123" {
 		t.Fatalf("unexpected session detail: %#v", detail)
 	}
-	if !strings.Contains(queryer.query, "session_id::text = $2") {
+	if detail.CurrentStep != 0 {
+		t.Fatalf("expected current_step 0 before any domain event, got %#v", detail)
+	}
+	if !strings.Contains(queryer.query, "s.session_id::text = $2") {
 		t.Fatalf("expected tenant/session scoped detail query, got %s", queryer.query)
 	}
 }
@@ -523,6 +534,9 @@ func TestSQLTimelineReaderListsSessionWorkflowEventsAsPublicMetadata(t *testing.
 			"Director opened the current-world experiment",
 			"Public event summary",
 			"director",
+			"",
+			"",
+			"",
 			"2026-07-05T00:00:00Z",
 		}}},
 	}
@@ -546,6 +560,9 @@ func TestSQLTimelineReaderListsSessionWorkflowEventsAsPublicMetadata(t *testing.
 	if event.Status != "running" || event.Lifecycle != "active" || event.Kind != "director" {
 		t.Fatalf("unexpected timeline metadata: %#v", event)
 	}
+	if event.EventRefID != "" || event.AdoptedTitle != "" || event.AdoptedSummary != "" {
+		t.Fatalf("unexpected adoption reference on a plain orchestration event: %#v", event)
+	}
 	if !strings.Contains(queryer.query, "FROM workflow_events") || !strings.Contains(queryer.query, "JOIN worldline_sessions") {
 		t.Fatalf("expected workflow_events joined to worldline_sessions, got %s", queryer.query)
 	}
@@ -562,6 +579,63 @@ func TestSQLTimelineReaderListsSessionWorkflowEventsAsPublicMetadata(t *testing.
 	}
 	if queryer.tenantID != "tenant-123" || queryer.tenantCalls != 1 {
 		t.Fatalf("timeline reader skipped tenant context: %#v", queryer)
+	}
+}
+
+func TestSQLTimelineReaderResolvesAdoptionToDomainEvent(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"orch-event-9",
+			"session-1",
+			"run-1",
+			"project-123",
+			"worldline.event.adopted",
+			3,
+			"canon",
+			"canon_reference",
+			"",
+			"",
+			"event_adoption",
+			"domain-event-42",
+			"王捕头赠别",
+			"王捕头私下赠予许七安防身之物。",
+			"2026-07-05T00:02:00Z",
+		}}},
+	}
+	reader := NewSQLTimelineReader(SQLTimelineReaderConfig{Queryer: queryer, Limit: 25})
+
+	events, err := reader.ListTimeline(context.Background(), ListTimelineInput{
+		TenantID:  "tenant-123",
+		SessionID: "session-1",
+	})
+	if err != nil {
+		t.Fatalf("list timeline: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one timeline event, got %#v", events)
+	}
+	event := events[0]
+	if event.EventRefID != "domain-event-42" || event.AdoptedTitle != "王捕头赠别" || event.AdoptedSummary == "" {
+		t.Fatalf("expected adoption to resolve to the referenced domain event, got %#v", event)
+	}
+	if !strings.Contains(queryer.query, "LEFT JOIN worldline_events ref") || !strings.Contains(queryer.query, "event_ref_id") {
+		t.Fatalf("expected timeline to join the referenced domain event, got %s", queryer.query)
+	}
+}
+
+func TestAdoptEventPayloadReferencesDomainEvent(t *testing.T) {
+	// The adoption workflow_event should carry the referenced event id, not a
+	// "Worldline event adopted" placeholder title.
+	payload := map[string]any{
+		"status":       "canon",
+		"lifecycle":    "canon_reference",
+		"kind":         "event_adoption",
+		"event_ref_id": "domain-event-42",
+		"event_id":     "domain-event-42",
+		"adoption_id":  "adoption-1",
+	}
+	if payload["event_ref_id"] != payload["event_id"] {
+		t.Fatalf("adoption payload should key the referenced event under event_ref_id")
 	}
 }
 
@@ -966,6 +1040,169 @@ func TestSQLVariableStoreInjectsVariableMetadataAndQueuedEvent(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSQLVariableStoreSetVariableLockedUpdatesAndReturnsCurrentRow(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"11111111-1111-1111-1111-111111111111",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			"project-123",
+			"主角亲族提前失踪",
+			"公开变量摘要",
+			"kinship_pressure",
+			true,
+			"author",
+			"user-1",
+			"2026-07-05T00:00:00Z",
+			"2026-07-26T00:00:00Z",
+		}}},
+	}
+	store := NewSQLVariableStore(SQLVariableStoreConfig{Queryer: queryer})
+
+	variable, err := store.SetVariableLocked(context.Background(), SetVariableLockedInput{
+		TenantID:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		SessionID:   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		VariableID:  "11111111-1111-1111-1111-111111111111",
+		ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		Locked:      true,
+	})
+
+	if err != nil {
+		t.Fatalf("set variable locked: %v", err)
+	}
+	if !variable.Locked || variable.VariableID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("expected RETURNING row with locked=true, got %#v", variable)
+	}
+	if queryer.tenantID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		queryer.actorUserID != "cccccccc-cccc-cccc-cccc-cccccccccccc" {
+		t.Fatalf("lock update bypassed tenant/actor context: tenant=%q actor=%q", queryer.tenantID, queryer.actorUserID)
+	}
+	if !strings.Contains(queryer.query, "UPDATE worldline_variables") ||
+		!strings.Contains(queryer.query, "SET locked = $4") ||
+		!strings.Contains(queryer.query, "RETURNING") {
+		t.Fatalf("expected UPDATE … RETURNING lock query, got %s", queryer.query)
+	}
+	if len(queryer.args) != 4 || queryer.args[3] != true {
+		t.Fatalf("expected locked value as the fourth bind, got %#v", queryer.args)
+	}
+
+	// Idempotent: PATCHing the same value again returns the current row (200).
+	queryer.rows = &fakeWorldlineRows{values: [][]any{{
+		"11111111-1111-1111-1111-111111111111",
+		"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		"project-123",
+		"主角亲族提前失踪",
+		"公开变量摘要",
+		"kinship_pressure",
+		true,
+		"author",
+		"user-1",
+		"2026-07-05T00:00:00Z",
+		"2026-07-26T00:01:00Z",
+	}}}
+	again, err := store.SetVariableLocked(context.Background(), SetVariableLockedInput{
+		TenantID:   "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		SessionID:  "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		VariableID: "11111111-1111-1111-1111-111111111111",
+		Locked:     true,
+	})
+	if err != nil || !again.Locked {
+		t.Fatalf("expected idempotent re-lock to succeed, got %#v (%v)", again, err)
+	}
+}
+
+func TestSQLVariableStoreSetVariableLockedReturnsNotFoundForUnknownVariable(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{rows: &fakeWorldlineRows{}}
+	store := NewSQLVariableStore(SQLVariableStoreConfig{Queryer: queryer})
+
+	_, err := store.SetVariableLocked(context.Background(), SetVariableLockedInput{
+		TenantID:   "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		SessionID:  "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		VariableID: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		Locked:     true,
+	})
+
+	if code := ErrorCode(err); code != "NOT_FOUND" {
+		t.Fatalf("expected NOT_FOUND for unknown variable, got %s (%v)", code, err)
+	}
+}
+
+func TestSQLVariableStoreListsSessionVariablesInCreationOrder(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{
+			{
+				"11111111-1111-1111-1111-111111111111",
+				"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				"project-123",
+				"亲族提前失踪",
+				"公开变量摘要",
+				"kinship_pressure",
+				true,
+				"author",
+				"user-1",
+				"2026-07-05T00:00:00Z",
+				"2026-07-26T00:00:00Z",
+			},
+			{
+				"22222222-2222-2222-2222-222222222222",
+				"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				"project-123",
+				"未锁定变量",
+				"",
+				"",
+				false,
+				"author",
+				"user-1",
+				"2026-07-05T00:02:00Z",
+				"2026-07-05T00:02:00Z",
+			},
+		}},
+	}
+	store := NewSQLVariableStore(SQLVariableStoreConfig{Queryer: queryer})
+
+	variables, err := store.ListVariables(context.Background(), ListVariablesInput{
+		TenantID:  "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		SessionID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+	})
+
+	if err != nil {
+		t.Fatalf("list variables: %v", err)
+	}
+	if len(variables) != 2 || !variables[0].Locked || variables[1].Locked {
+		t.Fatalf("unexpected variables: %#v", variables)
+	}
+	if queryer.tenantCalls != 1 || queryer.tenantID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" {
+		t.Fatalf("variable list bypassed tenant context: %#v", queryer)
+	}
+	if !strings.Contains(queryer.query, "FROM worldline_variables") ||
+		!strings.Contains(queryer.query, "session_id = $2::uuid") {
+		t.Fatalf("expected session-scoped variable list query, got %s", queryer.query)
+	}
+	for _, forbidden := range []string{"body_text", "content_text", "prompt", "response", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
+		if strings.Contains(strings.ToLower(queryer.query), forbidden) {
+			t.Fatalf("variable list selected forbidden field %q: %s", forbidden, queryer.query)
+		}
+	}
+}
+
+func TestDisabledVariableStoreLockAndListFailClosed(t *testing.T) {
+	store := NewDisabledVariableStore()
+
+	if _, err := store.SetVariableLocked(context.Background(), SetVariableLockedInput{
+		TenantID:   "tenant-123",
+		SessionID:  "session-1",
+		VariableID: "variable-1",
+		Locked:     true,
+	}); ErrorCode(err) != "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected fail-closed lock error, got %v", err)
+	}
+	if _, err := store.ListVariables(context.Background(), ListVariablesInput{
+		TenantID:  "tenant-123",
+		SessionID: "session-1",
+	}); ErrorCode(err) != "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected fail-closed list error, got %v", err)
 	}
 }
 

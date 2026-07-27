@@ -118,14 +118,14 @@ function SelectShell({
   return (
     <span
       className={cn(
-        "relative inline-flex items-center rounded-[9px] border border-line bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.04)] transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20",
+        "relative inline-flex items-center rounded-panel border border-line bg-panel shadow-hairline transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/25",
         compact ? "h-8" : "h-9",
       )}
       aria-label={ariaLabel}
     >
       {children}
       <ChevronDown
-        className={cn("pointer-events-none absolute right-2 text-muted/70", compact ? "size-3" : "size-3.5")}
+        className={cn("pointer-events-none absolute right-2 text-muted-soft", compact ? "size-3" : "size-3.5")}
         aria-hidden
       />
     </span>
@@ -135,7 +135,7 @@ function SelectShell({
 function selectClass(compact: boolean, placeholder: boolean): string {
   return cn(
     "w-full appearance-none bg-transparent pl-2.5 pr-7 text-ink outline-none disabled:cursor-not-allowed disabled:opacity-50",
-    compact ? "h-8 max-w-[150px] text-[12.5px]" : "h-9 max-w-[170px] text-[13px]",
-    placeholder && "text-muted/70",
+    compact ? "h-8 max-w-[150px] text-caption" : "h-9 max-w-[170px] text-sm",
+    placeholder && "text-muted-soft",
   );
 }

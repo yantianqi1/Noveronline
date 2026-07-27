@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
 from mirofish_agents.common.context import AgentContext
-from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution
+from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution, _parse_chat_json_content
 
 from .gate import ProviderQuotaGate
 
@@ -53,10 +54,7 @@ class QuotaAwareJSONChatClient:
             content = response_json["choices"][0]["message"]["content"]
         except Exception as exc:
             raise LLMFacilityError("LLM_PROVIDER_ERROR", "chat completion provider call failed") from exc
-        try:
-            parsed = json.loads(content)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion content was not valid JSON") from exc
+        parsed = _parse_chat_json_content(content)
         if not isinstance(parsed, dict):
             raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", "chat completion JSON must be an object")
         usage = _usage(response_json.get("usage"))
@@ -168,5 +166,12 @@ def _chat_completions_url(base_url: str) -> str:
 
 
 def _urlopen_bytes(request: Request) -> bytes:
-    with urlopen(request, timeout=60) as response:
+    timeout_raw = os.getenv("MIROFISH_LLM_HTTP_TIMEOUT_SECONDS", "600").strip()
+    try:
+        timeout_seconds = float(timeout_raw)
+    except ValueError as exc:
+        raise LLMFacilityError("LLM_HTTP_TIMEOUT_INVALID", "LLM HTTP timeout configuration is invalid") from exc
+    if timeout_seconds <= 0:
+        raise LLMFacilityError("LLM_HTTP_TIMEOUT_INVALID", "LLM HTTP timeout configuration is invalid")
+    with urlopen(request, timeout=timeout_seconds) as response:
         return response.read()

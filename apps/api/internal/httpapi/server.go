@@ -51,6 +51,7 @@ type Config struct {
 	WriterCanceller                  workflows.WriterCanceller
 	WriterThreadStore                workflows.WriterThreadStore
 	DraftAdoptionStore               workflows.DraftAdoptionStore
+	WriterDraftReader                workflows.WriterDraftReader
 	DraftReviewStore                 workflows.DraftReviewStore
 	DraftReviewOwnerLookup           workflows.DraftReviewOwnerLookup
 	DraftReviewIssueStore            workflows.DraftReviewIssueStore
@@ -193,6 +194,7 @@ type Server struct {
 	writerCanceller                  workflows.WriterCanceller
 	writerThreadStore                workflows.WriterThreadStore
 	draftAdoptionStore               workflows.DraftAdoptionStore
+	writerDraftReader                workflows.WriterDraftReader
 	draftReviewStore                 workflows.DraftReviewStore
 	draftReviewOwnerLookup           workflows.DraftReviewOwnerLookup
 	draftReviewIssueStore            workflows.DraftReviewIssueStore
@@ -495,6 +497,11 @@ type injectWorldlineVariableRequest struct {
 	ImpactAxis   string `json:"impact_axis"`
 	Locked       bool   `json:"locked"`
 	Source       string `json:"source"`
+}
+
+type updateWorldlineVariableLockRequest struct {
+	BodyTenantID string `json:"tenant_id"`
+	Locked       bool   `json:"locked"`
 }
 
 type createWorldlineSavedPathRequest struct {
@@ -1135,6 +1142,7 @@ func NewServer(config Config) *Server {
 		writerCanceller:                  writerCanceller,
 		writerThreadStore:                writerThreadStore,
 		draftAdoptionStore:               draftAdoptionStore,
+		writerDraftReader:                config.WriterDraftReader,
 		draftReviewStore:                 draftReviewStore,
 		draftReviewOwnerLookup:           config.DraftReviewOwnerLookup,
 		draftReviewIssueStore:            config.DraftReviewIssueStore,
@@ -1554,6 +1562,8 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "worldline session step", method: http.MethodPost, match: isWorldlineSessionStepPath},
 	{name: "worldline session auto evolution", method: http.MethodPost, match: isWorldlineSessionAutoEvolutionPath},
 	{name: "worldline session variables", method: http.MethodPost, match: isWorldlineSessionVariablesPath},
+	{name: "worldline session variables list", method: http.MethodGet, match: isWorldlineSessionVariablesPath},
+	{name: "worldline session variable lock", method: http.MethodPatch, match: isWorldlineSessionVariableMutationPath},
 	{name: "worldline session saved paths", method: http.MethodPost, match: isWorldlineSessionSavedPathsPath},
 	{name: "worldline session detail", method: http.MethodGet, match: isWorldlineSessionDetailPath},
 	{name: "worldline session timeline", method: http.MethodGet, match: isWorldlineSessionTimelinePath},
@@ -1991,6 +2001,29 @@ func isWorldlineSessionVariablesPath(path string) bool {
 	return worldlineSessionPathPart(path, "variables") != ""
 }
 
+// isWorldlineSessionVariableMutationPath matches
+// /v1/worldline-sessions/{sessionId}/variables/{variableId} exactly (no deeper
+// suffix), so the variable-lock PATCH stays a single-variable mutation.
+func isWorldlineSessionVariableMutationPath(path string) bool {
+	return worldlineSessionVariablePathPart(path) != ""
+}
+
+func worldlineSessionVariablePathPart(path string) string {
+	const prefix = "/v1/worldline-sessions/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	remainder := strings.TrimPrefix(path, prefix)
+	sessionID, variableID, ok := strings.Cut(remainder, "/variables/")
+	sessionID = strings.TrimSpace(sessionID)
+	variableID = strings.TrimSpace(variableID)
+	if !ok || sessionID == "" || variableID == "" ||
+		strings.Contains(sessionID, "/") || strings.Contains(variableID, "/") {
+		return ""
+	}
+	return variableID
+}
+
 func isWorldlineSessionSavedPathsPath(path string) bool {
 	return worldlineSessionPathPart(path, "saved-paths") != ""
 }
@@ -2420,8 +2453,12 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleAdoptWorldlineEvent(response, request)
 	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(request.URL.Path):
 		s.handleUpdateWorldlineEvent(response, request)
+	case request.Method == http.MethodPatch && isWorldlineSessionVariableMutationPath(request.URL.Path):
+		s.handleSetWorldlineVariableLocked(response, request)
 	case request.Method == http.MethodPost && isWorldlineSessionVariablesPath(request.URL.Path):
 		s.handleInjectWorldlineVariable(response, request)
+	case request.Method == http.MethodGet && isWorldlineSessionVariablesPath(request.URL.Path):
+		s.handleListWorldlineVariables(response, request)
 	case request.Method == http.MethodPost && isWorldlineSessionSavedPathsPath(request.URL.Path):
 		s.handleCreateWorldlineSavedPath(response, request)
 	case request.Method == http.MethodGet && isWorldlineSessionDetailPath(request.URL.Path):
@@ -2470,6 +2507,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartDraftReview(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
 		s.handleListDraftReviews(response, request)
+	case request.Method == http.MethodGet && isDraftDetailPath(request.URL.Path):
+		s.handleGetWriterDraft(response, request)
 	case request.Method == http.MethodPatch && isDraftReviewIssuePath(request.URL.Path):
 		s.handleUpdateDraftReviewIssue(response, request)
 	case request.Method == http.MethodGet && isWriterRunEventsPath(request.URL.Path):
@@ -3641,6 +3680,21 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionWriterRun) {
 		return
 	}
+	// A writer run burns real LLM quota (planner + tool loop + composer), so
+	// run starts are rate-limited per project per author like every other
+	// costly mutation. The KeyParts contract rejects empty parts, so when the
+	// actor id is unavailable the window keys on the project only.
+	writerRateKey := []string{tenantID, projectID}
+	if actorID := strings.TrimSpace(s.actorUserID(request)); actorID != "" {
+		writerRateKey = append(writerRateKey, actorID)
+	}
+	if !s.allowPlatformRequest(response, request, platformratelimit.Input{
+		Class:    platformratelimit.ClassWriterRunStart,
+		KeyParts: writerRateKey,
+		Cost:     1,
+	}) {
+		return
+	}
 
 	var payload startWriterRunRequest
 	decoder := json.NewDecoder(request.Body)
@@ -3951,6 +4005,9 @@ func (s *Server) handleStartSeedRun(response http.ResponseWriter, request *http.
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "seed-runs")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project seed route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
 		return
 	}
 	var payload startSeedRunRequest
@@ -5343,6 +5400,69 @@ func (s *Server) handleInjectWorldlineVariable(response http.ResponseWriter, req
 	writeJSON(response, http.StatusAccepted, record)
 }
 
+func (s *Server) handleListWorldlineVariables(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	sessionID := worldlineSessionPathPart(request.URL.Path, "variables")
+	if sessionID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline variable route not found", nil)
+		return
+	}
+	if _, ok := s.authorizeWorldlineSessionProjectRead(response, request, tenantID, sessionID); !ok {
+		return
+	}
+	items, err := s.worldlineVariableStore.ListVariables(request.Context(), worldline.ListVariablesInput{
+		TenantID:  tenantID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, listResponse[worldline.VariableRecord]{Items: items})
+}
+
+func (s *Server) handleSetWorldlineVariableLocked(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	remainder := strings.TrimPrefix(request.URL.Path, "/v1/worldline-sessions/")
+	sessionID, variableID, ok := strings.Cut(remainder, "/variables/")
+	sessionID = strings.TrimSpace(sessionID)
+	variableID = strings.TrimSpace(variableID)
+	if !ok || sessionID == "" || variableID == "" ||
+		strings.Contains(sessionID, "/") || strings.Contains(variableID, "/") {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline variable route not found", nil)
+		return
+	}
+	if _, authorized := s.authorizeWorldlineSessionCreativeWrite(response, request, tenantID, sessionID); !authorized {
+		return
+	}
+	var payload updateWorldlineVariableLockRequest
+	decoder := json.NewDecoder(request.Body)
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid worldline variable lock payload", nil)
+		return
+	}
+	record, err := s.worldlineVariableStore.SetVariableLocked(request.Context(), worldline.SetVariableLockedInput{
+		TenantID:    tenantID,
+		SessionID:   sessionID,
+		VariableID:  variableID,
+		ActorUserID: s.actorUserID(request),
+		Locked:      payload.Locked,
+	})
+	if err != nil {
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, record)
+}
+
 func (s *Server) handleCreateWorldlineSavedPath(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -5929,6 +6049,9 @@ func (s *Server) handleStartStoryGraphBuild(response http.ResponseWriter, reques
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph build route not found", nil)
 		return
 	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
+		return
+	}
 	var payload startStoryGraphBuildRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -5966,6 +6089,9 @@ func (s *Server) handleStartStoryGraphBondGeneration(response http.ResponseWrite
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "story-graph/bond-generations")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project story graph bond generation route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
 		return
 	}
 	var payload startStoryGraphBondGenerationRequest
@@ -6997,6 +7123,8 @@ func sourceFilePublicErrorMessage(code string) string {
 		return "source file object upload failed"
 	case "SOURCE_FILE_OBJECT_PAYLOAD_MISMATCH":
 		return "source file upload payload does not match admitted metadata"
+	case "SOURCE_FILE_OBJECT_TOO_LARGE":
+		return "source file exceeds the configured upload limit"
 	case "SOURCE_FILE_STORAGE_VERIFY_FAILED":
 		return "source file storage verification failed"
 	case "SOURCE_FILE_NOT_UPLOADED":
@@ -7213,6 +7341,9 @@ func (s *Server) handleStartHelloAgent(response http.ResponseWriter, request *ht
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "agent-runtime/hello-runs")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project route not found", nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, projectID, auth.PermissionCreativeWrite) {
 		return
 	}
 	run, err := s.agentHelloStarter.StartHelloAgent(request.Context(), workflows.StartHelloAgentInput{
@@ -7433,6 +7564,23 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "draft adoption route not found", nil)
 		return
 	}
+	if s.writerDraftReader == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "DRAFT_ADOPTION_BACKEND_UNCONFIGURED", "draft adoption backend is not configured", nil)
+		return
+	}
+	draft, err := s.writerDraftReader.GetWriterDraft(request.Context(), workflows.GetWriterDraftInput{
+		TenantID:    tenantID,
+		DraftID:     draftID,
+		ActorUserID: s.actorUserID(request),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftAdoptionErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeProject(response, request, tenantID, draft.ProjectID, auth.PermissionCreativeWrite) {
+		return
+	}
 	var payload adoptDraftRequest
 	decoder := json.NewDecoder(request.Body)
 	if err := decoder.Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
@@ -7459,6 +7607,46 @@ func (s *Server) handleAdoptDraft(response http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(response, http.StatusAccepted, adoption)
+}
+
+// handleGetWriterDraft serves GET /v1/drafts/{draftID}[?include=content]. The
+// writer rail polls this to follow a saved draft's status (candidate/adopted)
+// and, with include=content, to keep showing the drafted prose after settle.
+func (s *Server) handleGetWriterDraft(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	draftID := draftDetailPathPart(request.URL.Path)
+	if draftID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "writer draft route not found", nil)
+		return
+	}
+	if s.writerDraftReader == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WRITER_BACKEND_UNCONFIGURED", "writer draft backend is not configured", nil)
+		return
+	}
+	includeContent := strings.TrimSpace(request.URL.Query().Get("include")) == "content"
+	draft, err := s.writerDraftReader.GetWriterDraft(request.Context(), workflows.GetWriterDraftInput{
+		TenantID:       tenantID,
+		DraftID:        draftID,
+		ActorUserID:    s.actorUserID(request),
+		IncludeContent: includeContent,
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		message := "writer draft read failed"
+		if code == "NOT_FOUND" {
+			message = "writer draft not found"
+		}
+		writeError(response, request, statusForWorkflowError(err), code, message, nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, draft.ProjectID) {
+		return
+	}
+	writeJSON(response, http.StatusOK, draft)
 }
 
 func (s *Server) handleStartDraftReview(response http.ResponseWriter, request *http.Request) {
@@ -8741,6 +8929,23 @@ func isDraftAdoptionPath(path string) bool {
 	return draftAdoptionPathPart(path) != ""
 }
 
+// draftDetailPathPart matches the bare /v1/drafts/{draftID} detail route (no
+// nested suffix).
+func draftDetailPathPart(path string) string {
+	remainder, prefixOK := strings.CutPrefix(path, "/v1/drafts/")
+	if !prefixOK {
+		return ""
+	}
+	if !isSinglePathSegment(remainder) {
+		return ""
+	}
+	return strings.TrimSpace(remainder)
+}
+
+func isDraftDetailPath(path string) bool {
+	return draftDetailPathPart(path) != ""
+}
+
 func isDraftReviewPath(path string) bool {
 	return draftReviewPathPart(path) != ""
 }
@@ -9175,11 +9380,15 @@ func statusForAppCode(code string) int {
 		return http.StatusConflict
 	case "SOURCE_FILE_OBJECT_PAYLOAD_MISMATCH":
 		return http.StatusConflict
+	case "SOURCE_FILE_OBJECT_TOO_LARGE":
+		return http.StatusRequestEntityTooLarge
 	case "WORKFLOW_RETRY_NOT_ALLOWED":
 		return http.StatusConflict
 	case "WORLDLINE_STEP_ACTIVE":
 		return http.StatusConflict
 	case "WORLDLINE_AUTO_EVOLUTION_ACTIVE":
+		return http.StatusConflict
+	case "WORLDLINE_GOAL_START_ACTIVE":
 		return http.StatusConflict
 	case "CURRENT_WORLD_REQUIRED":
 		return http.StatusConflict

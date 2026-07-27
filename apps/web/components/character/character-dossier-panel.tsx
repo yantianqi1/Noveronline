@@ -68,26 +68,26 @@ export function CharacterDossierPanel({
       {/* header: large seal + name + status */}
       <header className="flex flex-col items-center border-b border-line-soft px-6 pb-6 pt-8 text-center">
         <CharacterSeal name={name} size="xl" tone={candidate ? "gold" : "vermilion"} />
-        <h3 className="mt-4 font-serif text-[22px] font-semibold leading-tight text-ink">{name}</h3>
+        <h3 className="mt-4 font-serif text-xl font-semibold leading-tight text-ink">{name}</h3>
         <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
           {profile?.role ? (
-            <span className="rounded-[6px] border border-line bg-panel px-2 py-0.5 text-[11px] text-ink-soft">
+            <span className="rounded-control border border-line bg-panel px-2 py-0.5 text-caption text-ink-soft">
               {profile.role}
             </span>
           ) : null}
           {profile?.status ? (
-            <span className="rounded-[6px] border border-accent/30 bg-accent-wash px-2 py-0.5 text-[11px] text-accent">
+            <span className="rounded-control border border-accent/30 bg-accent-wash px-2 py-0.5 text-caption text-accent">
               {profile.status}
             </span>
           ) : null}
           {candidate ? (
-            <span className="rounded-[6px] border border-gold/50 bg-gold/10 px-2 py-0.5 text-[11px] text-gold">
+            <span className="rounded-control border border-gold/50 bg-gold/10 px-2 py-0.5 text-caption text-gold">
               候选
             </span>
           ) : null}
         </div>
         {profile?.summary ? (
-          <p className="mt-3 max-w-[280px] font-serif text-[13px] leading-[1.85] text-muted">
+          <p className="mt-3 max-w-[280px] font-serif text-sm text-muted">
             {profile.summary}
           </p>
         ) : null}
@@ -102,9 +102,9 @@ export function CharacterDossierPanel({
             {memories.map((memory) => (
               <li
                 key={memory.id}
-                className="rounded-[10px] border border-line-soft bg-paper px-3 py-2.5"
+                className="rounded-panel border border-line-soft bg-paper px-3 py-2.5"
               >
-                <p className="font-serif text-[12.5px] leading-[1.8] text-ink-soft">{memory.text}</p>
+                <p className="font-serif text-caption text-ink-soft">{memory.text}</p>
                 {typeof memory.weight === "number" ? (
                   <Meter value={memory.weight} className="mt-2" />
                 ) : null}
@@ -125,8 +125,8 @@ export function CharacterDossierPanel({
                 <CharacterSeal name={relation.name} size="sm" tone="ink" />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline justify-between gap-2">
-                    <span className="truncate font-serif text-[13px] font-medium text-ink">{relation.name}</span>
-                    <span className="shrink-0 text-[11px] text-muted">{relation.kind}</span>
+                    <span className="truncate font-serif text-sm font-medium text-ink">{relation.name}</span>
+                    <span className="shrink-0 text-caption text-muted">{relation.kind}</span>
                   </div>
                   {typeof relation.strength === "number" ? (
                     <Meter value={relation.strength} className="mt-1.5" />
@@ -144,10 +144,10 @@ export function CharacterDossierPanel({
           <ol className="space-y-1.5">
             {outline.map((line, index) => (
               <li key={index} className="flex gap-2.5">
-                <span className="mt-0.5 shrink-0 font-serif text-[12px] tabular-nums text-accent">
+                <span className="mt-0.5 shrink-0 font-serif text-caption tabular-nums text-accent">
                   {String(index + 1).padStart(2, "0")}
                 </span>
-                <span className="font-serif text-[12.5px] leading-[1.8] text-ink-soft">{line}</span>
+                <span className="font-serif text-caption text-ink-soft">{line}</span>
               </li>
             ))}
           </ol>
@@ -169,9 +169,9 @@ function DossierSection({
   return (
     <section className="border-b border-line-soft px-6 py-5 last:border-b-0">
       <div className="mb-3 flex items-baseline justify-between">
-        <h4 className="text-[11.5px] font-medium tracking-[0.24em] text-accent">{title}</h4>
+        <h4 className="text-caption font-medium tracking-label text-muted">{title}</h4>
         {typeof count === "number" && count > 0 ? (
-          <span className="text-[11px] tabular-nums text-muted">{count}</span>
+          <span className="text-caption tabular-nums text-muted">{count}</span>
         ) : null}
       </div>
       {children}
@@ -181,7 +181,7 @@ function DossierSection({
 
 function EmptyLine({ children }: { children: React.ReactNode }) {
   return (
-    <p className="rounded-[10px] border border-dashed border-line px-3 py-3 text-center text-[12px] text-muted">
+    <p className="rounded-panel border border-dashed border-line px-3 py-3 text-center text-caption text-muted">
       {children}
     </p>
   );

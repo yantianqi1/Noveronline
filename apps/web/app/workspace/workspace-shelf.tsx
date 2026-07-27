@@ -87,12 +87,12 @@ export function WorkspaceShelf() {
       <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur-md">
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-4 px-6">
           <div className="flex items-center gap-3">
-            <span className="grid size-9 place-items-center rounded-[10px] bg-accent text-white shadow-[0_6px_16px_-6px_rgba(143,33,27,0.6)]">
+            <span className="grid size-9 place-items-center rounded-panel bg-accent text-panel shadow-accent">
               <Feather className="size-4" aria-hidden />
             </span>
             <div className="leading-tight">
-              <p className="font-brush text-[18px] text-ink">墨鱼小说</p>
-              <p className="text-[10.5px] tracking-[0.22em] text-muted">长篇小说工作台</p>
+              <p className="font-brush text-lg text-ink">墨鱼小说</p>
+              <p className="text-caption tracking-label text-muted">长篇小说工作台</p>
             </div>
           </div>
           {state.status === "ready" ? <UserMenu currentUser={state.currentUser} /> : null}
@@ -145,11 +145,11 @@ function ShelfContent({
       {/* shelf heading */}
       <div className="mb-9 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="mb-1.5 text-[12px] font-medium tracking-[0.3em] text-accent">书 架</p>
-          <h1 className="font-serif text-[34px] font-semibold leading-tight text-ink">
+          <p className="mb-1.5 text-caption font-medium tracking-label text-muted">书架</p>
+          <h1 className="font-serif text-display font-semibold leading-tight text-ink">
             你的故事世界
           </h1>
-          <p className="mt-2 text-[14px] text-muted">
+          <p className="mt-2 text-base text-muted">
             {total > 0
               ? `共 ${total} 部作品，分布在 ${groups.length} 个工作区。挑一部，继续写下去。`
               : "这里还空着，等你的第一部作品。"}
@@ -157,11 +157,11 @@ function ShelfContent({
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {total > 0 ? (
-            <div className="hidden items-baseline gap-2 rounded-card border border-line bg-panel px-4 py-2.5 sm:flex">
-              <span className="font-serif text-[26px] font-semibold leading-none text-accent-strong">
+            <div className="hidden items-baseline gap-2 rounded-modal border border-line bg-panel px-4 py-2.5 sm:flex">
+              <span className="font-serif text-display font-semibold text-accent-strong">
                 {total}
               </span>
-              <span className="text-[12px] text-muted">部作品</span>
+              <span className="text-caption text-muted">部作品</span>
             </div>
           ) : null}
           {creatableTenants.length > 0 ? (
@@ -200,11 +200,11 @@ function ShelfContent({
             <section key={tenant.tenant_id}>
               {/* workspace divider */}
               <div className="mb-5 flex items-center gap-3">
-                <h2 className="text-[13px] font-medium tracking-[0.18em] text-muted">
+                <h2 className="text-sm font-medium tracking-label text-muted">
                   {tenant.name}
                 </h2>
                 <span className="h-px flex-1 bg-line-soft" />
-                <span className="text-[11.5px] text-muted/70">{projects.length} 部</span>
+                <span className="text-caption text-muted-soft">{projects.length} 部</span>
               </div>
               <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
                 {projects.map((project) => {
@@ -245,15 +245,15 @@ function CreateVolumeCard({ index, onClick }: { index: number; onClick: () => vo
       transition={{ duration: 0.45, delay: 0.08 + index * 0.06, ease: [0.22, 1, 0.36, 1] }}
       whileHover={{ y: -3 }}
       whileTap={{ scale: 0.985 }}
-      className="group flex h-full min-h-[180px] flex-col items-center justify-center gap-3 rounded-card border border-dashed border-line bg-panel/50 p-6 text-center transition-colors hover:border-accent/45 hover:bg-accent-wash/40"
+      className="group flex h-full min-h-[180px] flex-col items-center justify-center gap-3 rounded-modal border border-dashed border-line bg-panel/50 p-6 text-center transition-colors hover:border-accent/50 hover:bg-accent-wash/40"
     >
       <span className="grid size-10 place-items-center rounded-full border border-line bg-panel text-muted transition-colors group-hover:border-accent group-hover:text-accent">
         <Plus className="size-4" aria-hidden />
       </span>
-      <span className="font-serif text-[17px] font-semibold text-ink group-hover:text-accent-strong">
+      <span className="font-serif text-lg font-semibold text-ink group-hover:text-accent-strong">
         新建作品
       </span>
-      <span className="text-[12.5px] text-muted">在这个工作区开一部新小说</span>
+      <span className="text-caption text-muted">在这个工作区开一部新小说</span>
     </motion.button>
   );
 }
@@ -264,13 +264,13 @@ function EmptyShelf({ canCreate, onCreate }: { canCreate: boolean; onCreate: () 
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-      className="flex flex-col items-center rounded-card border border-dashed border-line bg-panel/60 px-8 py-20 text-center"
+      className="flex flex-col items-center rounded-modal border border-dashed border-line bg-panel/60 px-8 py-20 text-center"
     >
       <span className="grid size-14 place-items-center rounded-full bg-accent-wash text-accent">
         <Feather className="size-6" aria-hidden />
       </span>
-      <h3 className="mt-5 font-serif text-[22px] font-semibold text-ink">还没有作品</h3>
-      <p className="mt-2 max-w-[360px] text-[13.5px] leading-relaxed text-muted">
+      <h3 className="mt-5 font-serif text-xl font-semibold text-ink">还没有作品</h3>
+      <p className="mt-2 max-w-[360px] text-sm leading-relaxed text-muted">
         {canCreate
           ? "书架还是空的。写下第一部作品的名字，开始你的故事世界。"
           : "你加入的工作区里还没有任何小说项目。请联系工作区管理员为你创建第一部作品，或接受邀请加入已有的项目。"}
@@ -291,10 +291,10 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
-      className="flex flex-col items-center rounded-card border border-line bg-panel px-8 py-20 text-center"
+      className="flex flex-col items-center rounded-modal border border-line bg-panel px-8 py-20 text-center"
     >
-      <h3 className="font-serif text-[20px] font-semibold text-ink">书架暂时打不开</h3>
-      <p className="mt-2 max-w-[360px] text-[13.5px] leading-relaxed text-muted">{message}</p>
+      <h3 className="font-serif text-xl font-semibold text-ink">书架暂时打不开</h3>
+      <p className="mt-2 max-w-[360px] text-sm leading-relaxed text-muted">{message}</p>
       <Button onClick={onRetry} variant="outline" className="mt-6">
         <RefreshCw className="size-4" aria-hidden />
         重新加载
@@ -307,15 +307,15 @@ function ShelfSkeleton() {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       <div className="mb-9 space-y-3">
-        <div className="h-3 w-16 animate-pulse rounded bg-line-soft" />
-        <div className="h-9 w-56 animate-pulse rounded bg-line-soft" />
-        <div className="h-4 w-72 animate-pulse rounded bg-line-soft" />
+        <div className="h-3 w-16 animate-pulse rounded-control bg-line-soft" />
+        <div className="h-9 w-56 animate-pulse rounded-control bg-line-soft" />
+        <div className="h-4 w-72 animate-pulse rounded-control bg-line-soft" />
       </div>
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
         {Array.from({ length: 3 }).map((_, index) => (
           <div
             key={index}
-            className="h-[180px] animate-pulse rounded-card border border-line bg-panel"
+            className="h-[180px] animate-pulse rounded-modal border border-line bg-panel"
             style={{ animationDelay: `${index * 120}ms` }}
           />
         ))}

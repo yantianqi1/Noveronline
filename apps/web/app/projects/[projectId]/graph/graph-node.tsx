@@ -57,8 +57,8 @@ function ConstellationNodeComponent({ data, selected }: NodeProps<ConstellationN
     // ── Quiet paper slip for background notions ──
     return (
       <div
-        className={`relative flex max-w-[190px] items-center gap-1.5 rounded-[7px] border px-2.5 py-1.5 transition-all duration-300 ${
-          data.isUntitled ? "border-dashed" : ""
+        className={`relative flex max-w-[190px] items-center gap-1.5 rounded-control border px-2.5 py-1.5 transition-all duration-300 ${
+ data.isUntitled ? "border-dashed" : ""
         }`}
         style={{
           borderColor: lit ? visual.color : "rgba(86,69,45,0.18)",
@@ -70,8 +70,8 @@ function ConstellationNodeComponent({ data, selected }: NodeProps<ConstellationN
         {HANDLES}
         <Icon className="size-3 shrink-0" style={{ color: lit ? visual.color : visual.ink }} aria-hidden />
         <span
-          className="truncate text-[11px] font-medium leading-snug"
-          style={{ color: lit ? "#2a2620" : visual.ink, fontStyle: data.isUntitled ? "italic" : "normal" }}
+          className={`truncate text-caption leading-snug `}
+          style={{ color: lit ? "#2a2620" : visual.ink }}
         >
           {data.title}
         </span>
@@ -116,16 +116,16 @@ function ConstellationNodeComponent({ data, selected }: NodeProps<ConstellationN
       </span>
       {/* Name plate */}
       <span
-        className="relative mt-1.5 max-w-[150px] rounded-[6px] px-1.5 text-center leading-tight transition-all duration-300"
+        className="relative mt-1.5 max-w-[150px] rounded-control px-1.5 text-center leading-tight transition-all duration-300"
         style={{
           background: lit ? "rgba(255,253,248,0.95)" : "transparent",
           boxShadow: lit ? "0 1px 4px rgba(23,26,27,0.12)" : "none",
         }}
       >
-        <span className="block truncate text-[12.5px] font-semibold" style={{ color: lit ? "#201a14" : "#3c3a36" }}>
+        <span className="block truncate text-caption font-semibold" style={{ color: lit ? "#201a14" : "#3c3a36" }}>
           {data.title}
         </span>
-        <span className="block text-[9px] font-medium tracking-[0.16em]" style={{ color: lit ? visual.color : "#a89f88" }}>
+        <span className="block text-micro font-medium tracking-label" style={{ color: lit ? visual.color : "#a89f88" }}>
           {visual.label}
         </span>
       </span>

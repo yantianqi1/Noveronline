@@ -35,7 +35,7 @@ import { EMPTY_FILTERS, AssetFilterBar, type AssetFilterState } from "./asset-fi
 import { AssetInspector } from "./asset-inspector";
 import { AssetList } from "./asset-list";
 import { AssetCollectionsRail } from "./asset-collections-rail";
-import { DUR, EASE, useFadeUp, useSlideIn } from "./asset-motion";
+import { DUR, EASE, useFadeUp, useSlideIn } from "@/lib/motion";
 import { WorkbenchMasthead } from "@/components/workbench-masthead";
 
 type LoadState =
@@ -482,8 +482,8 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
   if (state.status === "error") {
     return (
       <div className="flex min-h-[70vh] flex-col items-center justify-center px-8 text-center">
-        <h2 className="font-serif text-[22px] font-semibold text-ink">资产库暂时打不开</h2>
-        <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">{state.message}</p>
+        <h2 className="font-serif text-xl font-semibold text-ink">资产库暂时打不开</h2>
+        <p className="mt-2 max-w-[380px] text-sm text-muted">{state.message}</p>
       </div>
     );
   }
@@ -495,11 +495,11 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* section header — compact栏目条 */}
       <WorkbenchMasthead
-        eyebrow="资 产 库"
+        eyebrow="资产库"
         title="故事资产"
         tagline="角色、设定、关系、伏笔、世界规则与档案，都在这里统一查阅与管理。"
         aside={
-          <span className="text-[12.5px] tabular-nums text-muted">
+          <span className="text-caption tabular-nums text-muted">
             {isEmptyProject ? "" : `${visibleAssets.length} / ${assets.length} 条`}
             {searching ? " · 搜索中…" : ""}
           </span>
@@ -507,7 +507,7 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
       />
 
       {actionError ? (
-        <div className="shrink-0 border-b border-line bg-accent-wash px-6 py-2.5 text-[13px] text-accent">
+        <div className="shrink-0 border-b border-line bg-accent-wash px-6 py-2.5 text-sm text-accent">
           {actionError}
         </div>
       ) : null}
@@ -553,7 +553,7 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
                 animate={slideIn.animate}
                 exit={slideIn.exit}
                 transition={{ duration: DUR.med, ease: EASE }}
-                className="flex h-full w-[380px] shrink-0 flex-col overflow-hidden border-l border-line bg-panel max-lg:fixed max-lg:inset-y-0 max-lg:right-0 max-lg:z-40 max-lg:w-full max-lg:max-w-[420px] max-lg:shadow-panel"
+                className="flex h-full w-rail-inspector shrink-0 flex-col overflow-hidden border-l border-line bg-panel max-wide:fixed max-wide:inset-y-0 max-wide:right-0 max-wide:z-40 max-wide:w-full max-wide:max-w-[420px] max-wide:shadow-panel"
               >
                 <AssetInspector
                   asset={detail}
@@ -576,12 +576,12 @@ export function AssetWorkspace({ projectId }: { projectId: string }) {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: DUR.fast, ease: EASE }}
-                className="flex h-full w-[380px] shrink-0 flex-col gap-4 border-l border-line bg-panel px-5 py-5 max-lg:fixed max-lg:inset-y-0 max-lg:right-0 max-lg:z-40 max-lg:w-full max-lg:max-w-[420px]"
+                className="flex h-full w-rail-inspector shrink-0 flex-col gap-4 border-l border-line bg-panel px-5 py-5 max-wide:fixed max-wide:inset-y-0 max-wide:right-0 max-wide:z-40 max-wide:w-full max-wide:max-w-[420px]"
               >
-                <div className="h-6 w-2/3 animate-pulse rounded bg-line-soft" />
-                <div className="h-4 w-full animate-pulse rounded bg-line-soft" />
-                <div className="h-4 w-5/6 animate-pulse rounded bg-line-soft" />
-                <div className="h-24 w-full animate-pulse rounded bg-line-soft" />
+                <div className="h-6 w-2/3 animate-pulse rounded-control bg-line-soft" />
+                <div className="h-4 w-full animate-pulse rounded-control bg-line-soft" />
+                <div className="h-4 w-5/6 animate-pulse rounded-control bg-line-soft" />
+                <div className="h-24 w-full animate-pulse rounded-control bg-line-soft" />
               </motion.aside>
             ) : null}
           </AnimatePresence>
@@ -603,7 +603,7 @@ function AssetEmpty() {
           initial={fadeUp.initial}
           animate={fadeUp.animate}
           transition={{ duration: DUR.med, ease: EASE }}
-          className="grid size-16 place-items-center rounded-card bg-accent-wash text-accent"
+          className="grid size-16 place-items-center rounded-modal bg-accent-wash text-accent"
         >
           <BoxesIcon />
         </motion.span>
@@ -611,7 +611,7 @@ function AssetEmpty() {
           initial={fadeUp.initial}
           animate={fadeUp.animate}
           transition={{ delay: 0.08, duration: DUR.med, ease: EASE }}
-          className="mt-6 font-serif text-[22px] font-semibold text-ink"
+          className="mt-6 font-serif text-xl font-semibold text-ink"
         >
           这个项目还没有故事资产
         </motion.h2>
@@ -619,7 +619,7 @@ function AssetEmpty() {
           initial={fadeUp.initial}
           animate={fadeUp.animate}
           transition={{ delay: 0.16, duration: DUR.med, ease: EASE }}
-          className="mt-2 text-[13.5px] leading-relaxed text-muted"
+          className="mt-2 text-sm leading-relaxed text-muted"
         >
           上传原文跑一次 Seed 分析，或在写作台里边写边蒸馏，角色、设定和伏笔会自动汇聚到这里。
         </motion.p>
@@ -637,12 +637,12 @@ function NoMatches({ onClear }: { onClear: () => void }) {
       transition={{ duration: DUR.med, ease: EASE }}
       className="flex h-full flex-col items-center justify-center px-8 py-16 text-center"
     >
-      <p className="font-serif text-[17px] font-medium text-ink">没有符合条件的资产</p>
-      <p className="mt-1.5 max-w-[300px] text-[13px] text-muted">换个关键词，或者清空筛选再看看。</p>
+      <p className="font-serif text-lg font-medium text-ink">没有符合条件的资产</p>
+      <p className="mt-1.5 max-w-[300px] text-sm text-muted">换个关键词，或者清空筛选再看看。</p>
       <button
         type="button"
         onClick={onClear}
-        className="mt-5 rounded-[10px] border border-line bg-panel px-4 py-2 text-[13px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+        className="mt-5 rounded-panel border border-line bg-panel px-4 py-2 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
       >
         清空筛选
       </button>
@@ -653,14 +653,14 @@ function NoMatches({ onClear }: { onClear: () => void }) {
 function NoSelection({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex min-h-[70vh] flex-col items-center justify-center px-8 text-center">
-      <h2 className="font-serif text-[22px] font-semibold text-ink">请先回到书架进入项目</h2>
-      <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">
+      <h2 className="font-serif text-xl font-semibold text-ink">请先回到书架进入项目</h2>
+      <p className="mt-2 max-w-[380px] text-sm text-muted">
         资产库需要知道你正在整理哪部作品。回到书架，挑一部作品再进来。
       </p>
       <button
         type="button"
         onClick={onBack}
-        className="mt-6 rounded-[10px] border border-line bg-panel px-5 py-2.5 text-[13.5px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+        className="mt-6 rounded-panel border border-line bg-panel px-5 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
       >
         返回书架
       </button>
@@ -677,17 +677,17 @@ function AssetSkeleton() {
       className="flex h-full min-h-0 flex-col overflow-hidden"
     >
       <div className="border-b border-line-soft px-8 pb-5 pt-7">
-        <div className="h-3 w-16 animate-pulse rounded bg-line-soft" />
-        <div className="mt-3 h-7 w-40 animate-pulse rounded bg-line-soft" />
-        <div className="mt-2 h-4 w-72 animate-pulse rounded bg-line-soft" />
+        <div className="h-3 w-16 animate-pulse rounded-control bg-line-soft" />
+        <div className="mt-3 h-7 w-40 animate-pulse rounded-control bg-line-soft" />
+        <div className="mt-2 h-4 w-72 animate-pulse rounded-control bg-line-soft" />
       </div>
       <div className="space-y-3 px-6 py-6">
         {Array.from({ length: 6 }).map((_, index) => (
           <div key={index} className="flex items-start gap-3">
-            <div className="size-9 shrink-0 animate-pulse rounded-[9px] bg-line-soft" />
+            <div className="size-9 shrink-0 animate-pulse rounded-panel bg-line-soft" />
             <div className="flex-1 space-y-2">
-              <div className="h-4 w-1/3 animate-pulse rounded bg-line-soft" />
-              <div className="h-3 w-2/3 animate-pulse rounded bg-line-soft" />
+              <div className="h-4 w-1/3 animate-pulse rounded-control bg-line-soft" />
+              <div className="h-3 w-2/3 animate-pulse rounded-control bg-line-soft" />
             </div>
           </div>
         ))}

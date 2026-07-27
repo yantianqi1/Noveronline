@@ -40,7 +40,7 @@ export function ChannelPanel({
   const totalModels = Object.values(modelCounts).reduce((a, b) => a + b, 0);
 
   return (
-    <section className="overflow-hidden rounded-card border border-line bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.05)]">
+    <section className="overflow-hidden rounded-modal border border-line bg-panel shadow-hairline">
       {/* summary row — always visible, toggles the manager */}
       <button
         type="button"
@@ -49,12 +49,12 @@ export function ChannelPanel({
         className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-paper/50"
       >
         <span className="flex min-w-0 items-center gap-2.5">
-          <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent-wash text-accent">
+          <span className="grid size-8 shrink-0 place-items-center rounded-panel bg-accent-wash text-accent">
             <Cable className="size-4" aria-hidden />
           </span>
           <span className="min-w-0">
-            <span className="block truncate text-[13.5px] font-semibold text-ink">模型渠道</span>
-            <span className="block truncate text-[12px] text-muted">
+            <span className="block truncate text-sm font-semibold text-ink">模型渠道</span>
+            <span className="block truncate text-caption text-muted">
               {channels.length === 0
                 ? "还没有渠道 — 连接一个模型服务"
                 : `${channels.length} 个渠道 · ${totalModels} 个模型`}
@@ -63,7 +63,7 @@ export function ChannelPanel({
         </span>
         <span className="flex shrink-0 items-center gap-1.5">
           {channels.length > 0 && (
-            <span className="hidden rounded-full bg-paper-deep px-2 py-0.5 text-[11px] text-muted sm:inline">
+            <span className="hidden rounded-full bg-paper-deep px-2 py-0.5 text-caption text-muted sm:inline">
               {channels.filter((c) => c.enabled).length} 启用
             </span>
           )}
@@ -85,7 +85,7 @@ export function ChannelPanel({
           >
             <div className="space-y-2.5 p-4">
               {channels.length === 0 ? (
-                <p className="rounded-[10px] border border-dashed border-line bg-paper/50 px-4 py-5 text-center text-[12.5px] leading-relaxed text-muted">
+                <p className="rounded-panel border border-dashed border-line bg-paper/50 px-4 py-5 text-center text-caption leading-relaxed text-muted">
                   还没有可用渠道。连接一个模型渠道，才能给各功能绑定模型。
                 </p>
               ) : (
@@ -108,10 +108,10 @@ export function ChannelPanel({
                 type="button"
                 onClick={() => setFormOpen((v) => !v)}
                 className={cn(
-                  "inline-flex items-center gap-1.5 rounded-[9px] border border-dashed border-line px-3.5 py-2 text-[12.5px] font-medium transition-colors",
+                  "inline-flex items-center gap-1.5 rounded-panel border border-dashed border-line px-3.5 py-2 text-caption font-medium transition-colors",
                   formOpen
-                    ? "border-accent/40 bg-accent-wash text-accent"
-                    : "text-muted hover:border-accent/40 hover:text-accent",
+                    ? "border-accent/50 bg-accent-wash text-accent"
+                    : "text-muted hover:border-accent/50 hover:text-accent",
                 )}
               >
                 <Plus className={cn("size-3.5 transition-transform", formOpen && "rotate-45")} aria-hidden />
@@ -165,24 +165,24 @@ function ChannelRow({
   const noModels = channel.enabled && modelCount !== undefined && modelCount === 0;
 
   return (
-    <div className="rounded-[10px] border border-line-soft bg-paper/40 px-3.5 py-2.5">
+    <div className="rounded-panel border border-line-soft bg-paper/40 px-3.5 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span
-              className={cn("size-[7px] shrink-0 rounded-full", channel.enabled ? "bg-emerald-700/70" : "bg-muted/50")}
+              className={cn("size-[7px] shrink-0 rounded-full", channel.enabled ? "bg-success" : "bg-muted/50")}
               aria-hidden
             />
-            <span className="truncate text-[13px] font-medium text-ink">{channel.name}</span>
-            <span className="shrink-0 rounded-full bg-paper-deep px-1.5 py-px text-[10.5px] text-muted">
+            <span className="truncate text-sm font-medium text-ink">{channel.name}</span>
+            <span className="shrink-0 rounded-full bg-paper-deep px-1.5 py-px text-caption text-muted">
               {channel.provider}
             </span>
           </div>
-          <p className="mt-0.5 truncate pl-[15px] text-[11.5px] text-muted/80" title={channel.base_url}>
+          <p className="mt-0.5 truncate pl-[15px] text-caption text-muted" title={channel.base_url}>
             {channel.base_url}
           </p>
           {modelCount !== undefined && (
-            <p className={cn("mt-0.5 pl-[15px] text-[11px]", noModels ? "text-accent" : "text-muted/70")}>
+            <p className={cn("mt-0.5 pl-[15px] text-caption", noModels ? "text-accent" : "text-muted-soft")}>
               {noModels ? "0 个模型 — 检查密钥后重试同步" : `${modelCount} 个模型`}
             </p>
           )}
@@ -193,8 +193,8 @@ function ChannelRow({
             onClick={() => setEditingKey((v) => !v)}
             title="更新 API 密钥"
             className={cn(
-              "grid size-7 place-items-center rounded-[7px] transition-colors",
-              editingKey ? "bg-accent-wash text-accent" : "text-muted/70 hover:bg-accent-wash hover:text-accent",
+              "grid size-7 place-items-center rounded-control transition-colors",
+              editingKey ? "bg-accent-wash text-accent" : "text-muted-soft hover:bg-accent-wash hover:text-accent",
             )}
           >
             <KeyRound className="size-3.5" aria-hidden />
@@ -204,7 +204,7 @@ function ChannelRow({
             onClick={onSync}
             disabled={syncing}
             title="同步该渠道的最新模型目录"
-            className="grid size-7 place-items-center rounded-[7px] text-muted/70 transition-colors hover:bg-accent-wash hover:text-accent disabled:opacity-50"
+            className="grid size-7 place-items-center rounded-control text-muted-soft transition-colors hover:bg-accent-wash hover:text-accent disabled:opacity-50"
           >
             {syncing ? (
               <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -239,7 +239,7 @@ function ChannelRow({
                 onChange={(e) => setKey(e.target.value)}
                 placeholder="新的 API Key"
                 type="password"
-                className="h-8 flex-1 text-[12.5px]"
+                className="h-8 flex-1 text-caption"
               />
               <Button type="submit" size="sm" disabled={key.trim() === "" || savingKey} loading={savingKey} className="h-8 px-3">
                 保存
@@ -273,23 +273,23 @@ function ChannelForm({
 
   return (
     <form
-      className="space-y-2.5 rounded-[10px] border border-line-soft bg-paper/40 p-4"
+      className="space-y-2.5 rounded-panel border border-line-soft bg-paper/40 p-4"
       onSubmit={(e) => {
         e.preventDefault();
         if (!valid) return;
         onSubmit({ name: name.trim(), base_url: baseUrl.trim(), api_key: apiKey.trim(), max_concurrency: 4 });
       }}
     >
-      <p className="text-[12px] leading-relaxed text-muted">
+      <p className="text-caption leading-relaxed text-muted">
         接入一个 OpenAI 兼容的模型服务。密钥只发往服务端加密保存，这里不会再显示。
       </p>
       <div className="grid gap-2.5 sm:grid-cols-2">
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="渠道名称，如 我的 GPT" className="h-9 text-[13px]" />
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="渠道名称，如 我的 GPT" className="h-9 text-sm" />
         <Input
           value={baseUrl}
           onChange={(e) => setBaseUrl(e.target.value)}
           placeholder="Base URL，如 https://api.example.com/v1"
-          className="h-9 text-[13px]"
+          className="h-9 text-sm"
         />
       </div>
       <Input
@@ -297,7 +297,7 @@ function ChannelForm({
         onChange={(e) => setApiKey(e.target.value)}
         placeholder="API Key"
         type="password"
-        className="h-9 text-[13px]"
+        className="h-9 text-sm"
       />
       <Button type="submit" size="sm" disabled={!valid || creating} loading={creating} className="w-full">
         {creating ? "连接中…" : "连接并同步模型"}

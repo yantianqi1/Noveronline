@@ -320,8 +320,8 @@ export function OverviewWorkspace({ projectId }: { projectId: string }) {
   if (state.status === "error") {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center px-8 text-center">
-        <h2 className="font-serif text-[22px] font-semibold text-ink">书案暂时打不开</h2>
-        <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">{state.message}</p>
+        <h2 className="font-serif text-xl font-semibold text-ink">书案暂时打不开</h2>
+        <p className="mt-2 max-w-[380px] text-sm text-muted">{state.message}</p>
       </div>
     );
   }
@@ -410,14 +410,14 @@ function mergeEvents(existing: WorkflowEvent[], incoming: WorkflowEvent[]): Work
 function NoSelection({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center px-8 text-center">
-      <h2 className="font-serif text-[22px] font-semibold text-ink">请先回到书架进入项目</h2>
-      <p className="mt-2 max-w-[380px] text-[13.5px] text-muted">
+      <h2 className="font-serif text-xl font-semibold text-ink">请先回到书架进入项目</h2>
+      <p className="mt-2 max-w-[380px] text-sm text-muted">
         工作台需要知道你正在处理哪个项目。回到书架，挑一部作品再进来。
       </p>
       <button
         type="button"
         onClick={onBack}
-        className="mt-6 rounded-[10px] border border-line bg-panel px-5 py-2.5 text-[13.5px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
+        className="mt-6 rounded-panel border border-line bg-panel px-5 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent"
       >
         返回书架
       </button>
@@ -429,13 +429,13 @@ function OverviewSkeleton() {
   return (
     <div className="mx-auto w-full max-w-[1200px] px-8 py-8">
       <div className="space-y-3">
-        <div className="h-3 w-20 animate-pulse rounded bg-line-soft" />
-        <div className="h-9 w-64 animate-pulse rounded bg-line-soft" />
-        <div className="h-4 w-96 animate-pulse rounded bg-line-soft" />
+        <div className="h-3 w-20 animate-pulse rounded-control bg-line-soft" />
+        <div className="h-9 w-64 animate-pulse rounded-control bg-line-soft" />
+        <div className="h-4 w-96 animate-pulse rounded-control bg-line-soft" />
       </div>
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1.55fr_1fr]">
-        <div className="h-[320px] animate-pulse rounded-card border border-line bg-panel" />
-        <div className="h-[320px] animate-pulse rounded-card border border-line bg-panel" />
+        <div className="h-[320px] animate-pulse rounded-modal border border-line bg-panel" />
+        <div className="h-[320px] animate-pulse rounded-modal border border-line bg-panel" />
       </div>
     </div>
   );

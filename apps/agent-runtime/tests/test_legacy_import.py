@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.legacy_import import parser as legacy_import_parser
+from mirofish_agents.legacy_import.cli import parser as legacy_import_parser
 
 from mirofish_agents.legacy_import.models import FAMILY_DEPENDENCIES
 from mirofish_agents.legacy_import.service import LegacyImportService, write_report

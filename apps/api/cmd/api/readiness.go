@@ -25,8 +25,8 @@ const (
 	temporalPollerWorkers   = 4
 	temporalPollerAttempts  = 2
 	temporalPollerRetryWait = 25 * time.Millisecond
-	latestRequiredMigration = "0022_worldline_goal_starts"
-	requiredMigrationCount  = 22
+	latestRequiredMigration = "0031_asset_distillation_retryable_fingerprint"
+	requiredMigrationCount  = 31
 )
 
 type productionReadinessConfig struct {

@@ -43,8 +43,8 @@ export function AssetCollectionsRail({
   }
 
   return (
-    <aside className="hidden w-[218px] shrink-0 flex-col overflow-y-auto border-r border-line-soft py-5 lg:flex">
-      <p className="px-6 pb-2 text-[11.5px] font-medium tracking-[0.22em] text-muted">
+    <aside className="hidden w-rail-nav shrink-0 flex-col overflow-y-auto border-r border-line-soft py-5 stack:flex">
+      <p className="px-6 pb-2 text-caption font-medium tracking-label text-muted">
         集合
       </p>
       <nav aria-label="资产集合" className="flex flex-col gap-0.5 px-3">
@@ -72,7 +72,7 @@ export function AssetCollectionsRail({
         <div className="mt-3 px-3">
           {creating ? (
             <form
-              className="flex flex-col gap-2 rounded-[10px] border border-line bg-panel p-2.5"
+              className="flex flex-col gap-2 rounded-panel border border-line bg-panel p-2.5"
               onSubmit={(event) => {
                 event.preventDefault();
                 void submit();
@@ -84,13 +84,13 @@ export function AssetCollectionsRail({
                 onChange={(event) => setTitle(event.target.value)}
                 placeholder="集合名称，如「主要角色」"
                 aria-label="新集合名称"
-                className="h-9 rounded-[8px] border border-line bg-panel px-2.5 text-[13px] text-ink outline-none placeholder:text-muted/60 focus:border-accent/50 focus:ring-2 focus:ring-accent/15"
+                className="h-9 rounded-panel border border-line bg-panel px-2.5 text-sm text-ink outline-none placeholder:text-muted-soft focus:border-accent/50 focus:ring-2 focus:ring-accent/15"
               />
               <div className="flex gap-1.5">
                 <button
                   type="submit"
                   disabled={!title.trim() || busy}
-                  className="h-8 flex-1 rounded-[8px] bg-accent text-[12.5px] font-medium text-white transition-colors hover:bg-accent-strong disabled:opacity-50"
+                  className="h-8 flex-1 rounded-panel bg-accent text-caption font-medium text-panel transition-colors hover:bg-accent-strong disabled:opacity-50"
                 >
                   新建
                 </button>
@@ -100,7 +100,7 @@ export function AssetCollectionsRail({
                     setCreating(false);
                     setTitle("");
                   }}
-                  className="h-8 rounded-[8px] border border-line px-3 text-[12.5px] text-muted transition-colors hover:text-ink"
+                  className="h-8 rounded-panel border border-line px-3 text-caption text-muted transition-colors hover:text-ink"
                 >
                   取消
                 </button>
@@ -110,7 +110,7 @@ export function AssetCollectionsRail({
             <button
               type="button"
               onClick={() => setCreating(true)}
-              className="flex h-9 w-full items-center gap-2 rounded-[10px] border border-dashed border-line px-3.5 text-[13px] text-muted transition-colors hover:border-accent/45 hover:text-accent"
+              className="flex h-9 w-full items-center gap-2 rounded-panel border border-dashed border-line px-3.5 text-sm text-muted transition-colors hover:border-accent/50 hover:text-accent"
             >
               <Plus className="size-[15px]" aria-hidden />
               新建集合
@@ -141,7 +141,7 @@ function RailItem({
       onClick={onClick}
       aria-current={active ? "true" : undefined}
       className={cn(
-        "group relative flex items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-left text-[13.5px] transition-colors duration-200",
+        "group relative flex items-center gap-2.5 rounded-panel px-3 py-2.5 text-left text-sm transition-colors duration-200",
         active ? "bg-accent-wash font-medium text-accent-strong" : "text-ink-soft hover:bg-paper-deep hover:text-ink",
       )}
     >
@@ -158,7 +158,7 @@ function RailItem({
       />
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {typeof count === "number" ? (
-        <span className="shrink-0 text-[11.5px] tabular-nums text-muted">{count}</span>
+        <span className="shrink-0 text-caption tabular-nums text-muted">{count}</span>
       ) : null}
     </button>
   );

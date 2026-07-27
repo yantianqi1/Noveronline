@@ -26,6 +26,7 @@ const (
 	liveInviteeID       = "27000000-0000-4000-8000-000000000012"
 	liveForeignOwnerID  = "27000000-0000-4000-8000-000000000013"
 	liveSuspendedID     = "27000000-0000-4000-8000-000000000014"
+	liveAdminID         = "27000000-0000-4000-8000-000000000015"
 )
 
 func TestLiveInvitationAcceptanceMembershipLifecycleAndRLS(t *testing.T) {
@@ -132,6 +133,39 @@ func TestLiveInvitationAcceptanceMembershipLifecycleAndRLS(t *testing.T) {
 	if _, err := service.ListMembers(context.Background(), ListInput{TenantID: liveForeignTenantID, ActorID: liveOwnerID}); ErrorCode(err) != CodeAccessDenied {
 		t.Fatalf("cross-tenant list code=%s err=%v", ErrorCode(err), err)
 	}
+	if _, err := service.CreateInvitation(context.Background(), CreateInvitationInput{TenantID: liveTenantID, Email: "owner-candidate@example.test", TenantRole: "owner", ActorID: liveAdminID}); ErrorCode(err) != CodeAccessDenied {
+		t.Fatalf("admin owner invitation code=%s err=%v", ErrorCode(err), err)
+	}
+	if _, err := service.ChangeMembership(context.Background(), MembershipChangeInput{TenantID: liveTenantID, UserID: liveAdminID, ActorID: liveAdminID, Role: "owner"}); ErrorCode(err) != CodeAccessDenied {
+		t.Fatalf("admin self-promotion code=%s err=%v", ErrorCode(err), err)
+	}
+	promoted, err := service.ChangeMembership(context.Background(), MembershipChangeInput{TenantID: liveTenantID, UserID: liveAdminID, ActorID: liveOwnerID, Role: "owner", RequestID: "live-owner-grant"})
+	if err != nil || promoted.Role != "owner" {
+		t.Fatalf("owner grant: member=%+v err=%v", promoted, err)
+	}
+	if _, err := service.ChangeMembership(context.Background(), MembershipChangeInput{TenantID: liveTenantID, UserID: liveAdminID, ActorID: liveOwnerID, Role: "admin", RequestID: "live-owner-grant-reset"}); err != nil {
+		t.Fatalf("reset granted owner: %v", err)
+	}
+	ownerAddress, ownerMessages, closeOwnerSink := startSMTPSink(t)
+	defer closeOwnerSink()
+	ownerHost, ownerPortText, _ := net.SplitHostPort(ownerAddress)
+	ownerPort, _ := strconv.Atoi(ownerPortText)
+	ownerNotifier, err := NewSMTPNotifier(SMTPNotifierConfig{Host: ownerHost, Port: ownerPort, Username: "test-user", Password: "test-pass", From: "collaboration@example.test", AcceptBaseURL: "http://localhost/invitations/accept", TLSMode: SMTPModeLoopbackPlaintext})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerService := NewService(ServiceConfig{DB: appDB, Notifier: ownerNotifier, Now: func() time.Time { return time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC) }})
+	ownerViewerInvitation, err := ownerService.CreateInvitation(context.Background(), CreateInvitationInput{TenantID: liveTenantID, Email: "owner@example.test", TenantRole: "viewer", ActorID: liveOwnerID, RequestID: "live-owner-lower-invite"})
+	if err != nil {
+		t.Fatalf("create lower-role owner invitation: %v", err)
+	}
+	ownerViewerToken := tokenFromSMTPMessage(t, <-ownerMessages)
+	if _, err := ownerService.AcceptInvitation(context.Background(), AcceptInvitationInput{Token: ownerViewerToken, ActorID: liveOwnerID, RequestID: "live-owner-lower-accept"}); err != nil {
+		t.Fatalf("accept lower-role owner invitation: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT role,status FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2`, liveTenantID, liveOwnerID).Scan(&role, &status); err != nil || role != "owner" || status != "active" {
+		t.Fatalf("lower-role invitation changed active owner: invitation=%s role=%s status=%s err=%v", ownerViewerInvitation.InvitationID, role, status, err)
+	}
 	if err := service.RemoveMembership(context.Background(), MembershipChangeInput{TenantID: liveTenantID, UserID: liveOwnerID, ActorID: liveOwnerID}); ErrorCode(err) != CodeLastOwner {
 		t.Fatalf("last owner code=%s err=%v", ErrorCode(err), err)
 	}
@@ -184,8 +218,8 @@ func prepareCollaborationFixture(t *testing.T, adminURL string) (*sql.DB, *sql.D
 		t.Fatal(err)
 	}
 	_, _ = adminDB.Exec(`DELETE FROM tenants WHERE tenant_id IN($1,$2)`, liveTenantID, liveForeignTenantID)
-	_, _ = adminDB.Exec(`DELETE FROM users WHERE user_id IN($1,$2,$3,$4)`, liveOwnerID, liveInviteeID, liveForeignOwnerID, liveSuspendedID)
-	_, err = adminDB.Exec(`INSERT INTO users(user_id,email,display_name)VALUES($1,'owner@example.test','Owner'),($2,'invitee@example.test','Invitee'),($3,'foreign@example.test','Foreign'),($4,'suspended@example.test','Suspended')`, liveOwnerID, liveInviteeID, liveForeignOwnerID, liveSuspendedID)
+	_, _ = adminDB.Exec(`DELETE FROM users WHERE user_id IN($1,$2,$3,$4,$5)`, liveOwnerID, liveInviteeID, liveForeignOwnerID, liveSuspendedID, liveAdminID)
+	_, err = adminDB.Exec(`INSERT INTO users(user_id,email,display_name)VALUES($1,'owner@example.test','Owner'),($2,'invitee@example.test','Invitee'),($3,'foreign@example.test','Foreign'),($4,'suspended@example.test','Suspended'),($5,'admin@example.test','Admin')`, liveOwnerID, liveInviteeID, liveForeignOwnerID, liveSuspendedID, liveAdminID)
 	if err == nil {
 		_, err = adminDB.Exec(`INSERT INTO tenants(tenant_id,slug,name,tenant_type)VALUES($1,'collab-live','Collab Live','organization'),($2,'collab-foreign','Collab Foreign','organization')`, liveTenantID, liveForeignTenantID)
 	}
@@ -194,6 +228,9 @@ func prepareCollaborationFixture(t *testing.T, adminURL string) (*sql.DB, *sql.D
 	}
 	if err == nil {
 		_, err = adminDB.Exec(`INSERT INTO tenant_memberships(tenant_id,user_id,role,status,access_scope)VALUES($1,$2,'admin','suspended','tenant')`, liveTenantID, liveSuspendedID)
+	}
+	if err == nil {
+		_, err = adminDB.Exec(`INSERT INTO tenant_memberships(tenant_id,user_id,role,status,access_scope)VALUES($1,$2,'admin','active','tenant')`, liveTenantID, liveAdminID)
 	}
 	if err == nil {
 		_, err = adminDB.Exec(`INSERT INTO projects(tenant_id,project_id,title,created_by)VALUES
@@ -218,7 +255,7 @@ func prepareCollaborationFixture(t *testing.T, adminURL string) (*sql.DB, *sql.D
 	t.Cleanup(func() {
 		appDB.Close()
 		_, _ = adminDB.Exec(`DELETE FROM tenants WHERE tenant_id IN($1,$2)`, liveTenantID, liveForeignTenantID)
-		_, _ = adminDB.Exec(`DELETE FROM users WHERE user_id IN($1,$2,$3,$4)`, liveOwnerID, liveInviteeID, liveForeignOwnerID, liveSuspendedID)
+		_, _ = adminDB.Exec(`DELETE FROM users WHERE user_id IN($1,$2,$3,$4,$5)`, liveOwnerID, liveInviteeID, liveForeignOwnerID, liveSuspendedID, liveAdminID)
 		adminDB.Close()
 	})
 	return adminDB, appDB

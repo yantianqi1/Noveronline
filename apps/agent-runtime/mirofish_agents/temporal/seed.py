@@ -13,6 +13,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.pdf_ocr import (
@@ -31,6 +32,12 @@ with workflow.unsafe.imports_passed_through():
 
 
 SEED_TASK_QUEUE = "seed-heavy"
+SEED_ACTIVITY_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 SENSITIVE_WORKFLOW_EVENT_KEYS = {
     "api_key",
     "artifact_object_key",
@@ -874,6 +881,10 @@ class PostgresSeedWorkflowRunStatusWriter:
                             AND project_id = %s
                             AND run_id = %s
                             AND workflow_type = 'seed_pipeline'
+                            AND (
+                              (%s::uuid IS NULL AND strpos(COALESCE(temporal_workflow_id, ''), '_retry_') = 0)
+                              OR temporal_workflow_id = 'seed_run_' || run_id::text || '_retry_' || %s::text
+                            )
                          RETURNING 1
                        )
                        SELECT COUNT(*)::int AS workflow_updated FROM workflow_update""",
@@ -890,6 +901,8 @@ class PostgresSeedWorkflowRunStatusWriter:
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
+                        context.retry_attempt_id,
+                        context.retry_attempt_id,
                     ),
                 )
                 row = cursor.fetchone()
@@ -2030,14 +2043,26 @@ class PostgresAgentProfileSnapshotWriter:
                                GROUP BY elem
                              ) AS deduped
                            ), '[]'::jsonb),
-                           'memory_seeds', COALESCE(
-                             (current_doc.doc->'memory_seeds') || COALESCE(batch.doc->'memory_seeds', '[]'::jsonb),
-                             '[]'::jsonb
-                           ),
-                           'relationship_views', COALESCE(
-                             (current_doc.doc->'relationship_views') || COALESCE(batch.doc->'relationship_views', '[]'::jsonb),
-                             '[]'::jsonb
-                           )
+                           'memory_seeds', COALESCE((
+                             SELECT jsonb_agg(elem ORDER BY elem::text)
+                             FROM (
+                               SELECT DISTINCT elem
+                               FROM jsonb_array_elements(
+                                 COALESCE(current_doc.doc->'memory_seeds', '[]'::jsonb)
+                                 || COALESCE(batch.doc->'memory_seeds', '[]'::jsonb)
+                               ) AS values(elem)
+                             ) AS deduped
+                           ), '[]'::jsonb),
+                           'relationship_views', COALESCE((
+                             SELECT jsonb_agg(elem ORDER BY elem::text)
+                             FROM (
+                               SELECT DISTINCT elem
+                               FROM jsonb_array_elements(
+                                 COALESCE(current_doc.doc->'relationship_views', '[]'::jsonb)
+                                 || COALESCE(batch.doc->'relationship_views', '[]'::jsonb)
+                               ) AS values(elem)
+                             ) AS deduped
+                           ), '[]'::jsonb)
                          ) AS doc
                          FROM current_doc, batch
                        )
@@ -3257,7 +3282,14 @@ class PostgresArchiveCandidateWriter:
                  tenant_id, memory_id, asset_id, project_id, event_type, status,
                  payload_jsonb, actor_user_id
                )
-               VALUES (%s, %s, %s, %s, 'memory.candidate.generated', 'candidate', %s::jsonb, %s)""",
+               SELECT %s, %s, %s, %s, 'memory.candidate.generated', 'candidate', %s::jsonb, %s
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM archive_memory_events existing
+                 WHERE existing.tenant_id = %s
+                   AND existing.memory_id = %s
+                   AND existing.event_type = 'memory.candidate.generated'
+                   AND existing.payload_jsonb->>'source_ref' = %s
+               )""",
             (
                 context.tenant_id,
                 memory_id,
@@ -3274,6 +3306,9 @@ class PostgresArchiveCandidateWriter:
                     separators=(",", ":"),
                 ),
                 _uuid_or_none(context.actor_user_id),
+                context.tenant_id,
+                memory_id,
+                source_ref,
             ),
         )
 
@@ -3915,31 +3950,42 @@ class PostgresProjectReadinessUpdater:
                          ready_entity_count,
                          ready_relationship_count,
                          ready_world_rule_count,
-                         total_segment_count,
-                         succeeded_segment_count,
-                         failed_segment_ids""",
+                         (metadata_jsonb->>'total_segment_count')::int AS total_segment_count,
+                         (metadata_jsonb->>'succeeded_segment_count')::int AS succeeded_segment_count,
+                         metadata_jsonb->'failed_segment_ids' AS failed_segment_ids""",
                     (
+                        # ready_asset_count
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
-                        context.tenant_id,
-                        context.project_id,
-                        context.run_id,
-                        context.run_id,
-                        context.tenant_id,
-                        context.project_id,
-                        context.run_id,
-                        context.run_id,
-                        context.tenant_id,
-                        context.project_id,
-                        context.run_id,
+                        # ready_entity_count
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
                         context.run_id,
+                        # ready_relationship_count
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
+                        context.run_id,
+                        # ready_world_rule_count
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        # total_segment_count
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        # succeeded_segment_count
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        # coverage
+                        context.run_id,
+                        context.tenant_id,
+                        context.project_id,
+                        context.run_id,
+                        # snapshot identity
                         context.tenant_id,
                         context.project_id,
                         context.run_id,
@@ -8562,6 +8608,10 @@ def sequential_reading_activity(
     workflow_event_writer: WorkflowEventWriter | None = None,
     workflow_status_writer: WorkflowRunStatusWriter | None = None,
 ) -> dict[str, Any]:
+    try:
+        activity.heartbeat("starting")
+    except RuntimeError:
+        pass
     context = AgentContext.model_validate(payload.get("context", payload))
     base = _base_payload(context, payload.get("upload_id") if isinstance(payload.get("upload_id"), str) else None)
     if not context.has_permission("seed_pipeline", "run"):
@@ -8650,6 +8700,10 @@ def sequential_reading_activity(
     def _on_sequential_progress(progress_payload: dict[str, Any]) -> None:
         if not isinstance(progress_payload, dict):
             return
+        try:
+            activity.heartbeat(progress_payload.get("phase", "reading"), progress_payload.get("completed_segments", 0))
+        except RuntimeError:
+            pass
         public_payload = {
             key: value
             for key, value in progress_payload.items()
@@ -10441,6 +10495,7 @@ class SeedSegmentRetryWorkflow:
             seed_segment_retry_activity,
             payload,
             start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
 
 
@@ -10449,6 +10504,13 @@ class SeedPipelineWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         retry_from_stage = _seed_retry_from_stage(payload)
+        if retry_from_stage == "finalize":
+            return await workflow.execute_activity(
+                finalize_seed_activity,
+                payload,
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=SEED_ACTIVITY_RETRY_POLICY,
+            )
         if retry_from_stage == "sequential_reading":
             sequential_payload = payload
         else:
@@ -10456,6 +10518,7 @@ class SeedPipelineWorkflow:
                 seed_pipeline_activity,
                 payload,
                 start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=SEED_ACTIVITY_RETRY_POLICY,
             )
             if result.get("status") != "queued" or not _payload_has_parse_source(payload):
                 return result
@@ -10463,6 +10526,7 @@ class SeedPipelineWorkflow:
                 parse_file_activity,
                 payload,
                 start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=SEED_ACTIVITY_RETRY_POLICY,
             )
             if parse_result.get("status") != "completed":
                 return parse_result
@@ -10470,6 +10534,7 @@ class SeedPipelineWorkflow:
                 segment_text_activity,
                 _segment_payload_from_parse(payload, parse_result),
                 start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=SEED_ACTIVITY_RETRY_POLICY,
             )
             if segment_result.get("status") != "completed":
                 return segment_result
@@ -10478,6 +10543,8 @@ class SeedPipelineWorkflow:
             sequential_reading_activity,
             sequential_payload,
             start_to_close_timeout=timedelta(minutes=30),
+            heartbeat_timeout=timedelta(minutes=2),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if sequential_result.get("status") != "completed":
             return sequential_result
@@ -10485,6 +10552,7 @@ class SeedPipelineWorkflow:
             persist_runtime_facts_activity,
             _runtime_facts_payload_from_sequential(payload),
             start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if runtime_facts_result.get("status") != "completed":
             return runtime_facts_result
@@ -10492,6 +10560,7 @@ class SeedPipelineWorkflow:
             global_aggregation_activity,
             _global_aggregation_payload_from_runtime_facts(payload, runtime_facts_result),
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if global_aggregation_result.get("status") != "completed":
             return global_aggregation_result
@@ -10499,6 +10568,7 @@ class SeedPipelineWorkflow:
             ontology_activity,
             _ontology_payload_from_global_aggregation(payload, global_aggregation_result),
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if ontology_result.get("status") != "completed":
             return ontology_result
@@ -10506,6 +10576,7 @@ class SeedPipelineWorkflow:
             entity_resolution_activity,
             _entity_resolution_payload_from_ontology(payload, ontology_result),
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if entity_resolution_result.get("status") != "completed":
             return entity_resolution_result
@@ -10513,6 +10584,7 @@ class SeedPipelineWorkflow:
             agent_profile_activity,
             _agent_profile_payload_from_entity_resolution(payload, entity_resolution_result),
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if agent_profile_result.get("status") != "completed":
             return agent_profile_result
@@ -10520,6 +10592,7 @@ class SeedPipelineWorkflow:
             archive_candidate_activity,
             _archive_candidate_payload_from_agent_profile(payload, agent_profile_result),
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if archive_candidate_result.get("status") != "completed":
             return archive_candidate_result
@@ -10527,6 +10600,7 @@ class SeedPipelineWorkflow:
             index_assets_activity,
             _index_assets_payload_from_archive_candidate(payload, archive_candidate_result),
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if index_assets_result.get("status") != "completed":
             return index_assets_result
@@ -10534,11 +10608,14 @@ class SeedPipelineWorkflow:
             finalize_seed_activity,
             _finalize_payload_from_index_assets(payload, index_assets_result),
             start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
 
 
 def _seed_retry_from_stage(payload: dict[str, Any]) -> str | None:
     stage = payload.get("retry_from_stage")
+    if stage == "finalize":
+        return "finalize"
     if stage != "sequential_reading":
         return None
     segments = payload.get("segments")

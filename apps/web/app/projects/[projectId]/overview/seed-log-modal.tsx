@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { X } from "lucide-react";
+import { ScrollText, X } from "lucide-react";
 
 import type { SeedRun, WorkflowEvent } from "@/lib/api/overview-types";
 import { stageLabel } from "@/lib/api/seed";
@@ -80,24 +80,22 @@ export function SeedLogModal({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.99 }}
             transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="flex max-h-[78vh] w-[min(760px,100%)] flex-col overflow-hidden rounded-[13px] border border-black/50 bg-[#16130f] shadow-[0_30px_80px_-20px_rgba(0,0,0,0.7),inset_0_0_0_1px_rgba(247,236,210,0.06)]"
+            className="flex max-h-[78vh] w-[min(760px,100%)] flex-col overflow-hidden rounded-modal border border-ink-line bg-ink-surface shadow-ink"
           >
-            {/* title bar */}
-            <div className="flex flex-none items-center gap-3 border-b border-[rgba(247,236,210,0.09)] bg-gradient-to-b from-[rgba(247,236,210,0.04)] to-transparent px-4 py-3">
-              <span className="flex gap-1.5">
-                <i className="size-2.5 rounded-full bg-[#b0563f]" />
-                <i className="size-2.5 rounded-full bg-[#b08a3e]" />
-                <i className="size-2.5 rounded-full bg-[#5d7a4e]" />
-              </span>
-              <span className="font-mono text-[12px] tracking-wide text-[rgba(247,236,210,0.72)]">
-                seed · run <b className="font-semibold text-[#f1e6cf]">{runShort}</b> · event stream
+            {/* title bar — a real label, not imitation window furniture. The
+                three coloured dots mimicked macOS traffic lights that closed
+                nothing, and reused the semantic status colours for decoration. */}
+            <div className="flex flex-none items-center gap-2 border-b border-ink-line bg-ink-surface-raised px-4 py-3">
+              <ScrollText className="size-3.5 shrink-0 text-ink-text-muted" aria-hidden />
+              <span className="font-mono text-caption tracking-wide text-ink-text-muted">
+                seed · run <b className="font-semibold text-ink-text">{runShort}</b> · event stream
               </span>
               <button
                 ref={closeRef}
                 type="button"
                 onClick={onClose}
                 aria-label="关闭日志"
-                className="ml-auto grid size-7 place-items-center rounded-[7px] border border-[rgba(247,236,210,0.14)] text-[rgba(247,236,210,0.6)] transition-colors hover:border-[rgba(176,86,63,0.4)] hover:bg-[rgba(176,86,63,0.2)] hover:text-[#f1e6cf]"
+                className="ml-auto grid size-7 place-items-center rounded-control border border-ink-line text-ink-text-muted transition-colors hover:border-danger/50 hover:bg-danger/20 hover:text-ink-text"
               >
                 <X className="size-3.5" aria-hidden />
               </button>
@@ -106,10 +104,10 @@ export function SeedLogModal({
             {/* the stream */}
             <div
               ref={scrollRef}
-              className="seed-log-scroll flex-1 overflow-auto px-4 py-3.5 font-mono text-[12px] leading-[1.75] text-[#cdbf9f]"
+              className="seed-log-scroll flex-1 overflow-auto px-4 py-3.5 font-mono text-caption text-ink-text-muted"
             >
               {lines.length === 0 ? (
-                <div className="py-6 text-center text-[rgba(205,191,159,0.5)]">
+                <div className="py-6 text-center text-ink-text-muted opacity-60">
                   还没有事件。运行开始后会逐行输出在这里。
                 </div>
               ) : (
@@ -123,7 +121,7 @@ export function SeedLogModal({
             </div>
 
             {/* footer */}
-            <div className="flex flex-none items-center justify-between border-t border-[rgba(247,236,210,0.09)] px-4 py-2.5 font-mono text-[10.5px] tracking-wide text-[rgba(247,236,210,0.4)]">
+            <div className="flex flex-none items-center justify-between border-t border-ink-line px-4 py-2.5 font-mono text-caption tracking-wide text-ink-text-muted">
               <span>
                 {lines.length} events{errorCount > 0 ? ` · ${errorCount} errors` : ""}
               </span>
@@ -148,18 +146,18 @@ type LogLineData = {
 function LogLine({ line }: { line: LogLineData }) {
   const levelClass =
     line.level === "OK"
-      ? "text-[#7fae6e]"
+      ? "text-success"
       : line.level === "WARN"
-        ? "text-[#d0a24a]"
+        ? "text-warning"
         : line.level === "ERROR"
-          ? "text-[#d96a52]"
-          : "text-[#7ba0d6]";
+          ? "text-danger"
+          : "text-ink-text-muted";
   return (
     <div className="flex gap-3 whitespace-pre-wrap break-words py-px">
-      <span className="flex-none tabular-nums text-[rgba(205,191,159,0.42)]">{line.ts}</span>
+      <span className="flex-none tabular-nums text-ink-text-muted opacity-60">{line.ts}</span>
       <span className={`w-[52px] flex-none font-bold tracking-wide ${levelClass}`}>{line.level}</span>
-      <span className={`flex-1 ${line.level === "ERROR" ? "text-[#e8a591]" : "text-[#d9cdaf]"}`}>
-        {line.stage && <span className="text-[#b5a377]">[{line.stage}] </span>}
+      <span className={`flex-1 ${line.level === "ERROR" ? "text-danger" : "text-ink-text-muted"}`}>
+        {line.stage && <span className="text-ink-text-muted">[{line.stage}] </span>}
         {line.text}
       </span>
     </div>

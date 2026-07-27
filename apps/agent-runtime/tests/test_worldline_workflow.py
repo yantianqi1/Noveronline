@@ -26,6 +26,7 @@ from mirofish_agents.temporal.worldline import (
     WORLDLINE_PREPARE_WORKFLOW_TYPE,
     WORLDLINE_STEP_MODULE_KEY,
     WORLDLINE_TASK_QUEUE,
+    _worldline_step_messages,
     run_worldline_prepare_workflow_locally,
     run_worldline_step_workflow_locally,
     worker_spec,
@@ -730,6 +731,83 @@ class FailingWorldlineSourceLoaderConnection(RecordingConnection):
         self.cursor_obj = FailingWorldlineSourceLoaderCursor()
 
 
+class WorldlineSessionContextCursor(RecordingCursor):
+    """Dict-row fake over the three load_session_context read sets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_sql = ""
+
+    def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+        self._last_sql = sql
+        super().execute(sql, params)
+
+    def fetchone(self) -> dict[str, Any] | None:
+        if "FROM worldline_sessions" in self._last_sql:
+            return {
+                "session_id": "session-1",
+                "status": "running",
+                "lifecycle": "active",
+                "goal_summary": "守住山门",
+                "anchor_path_id": "",
+            }
+        return super().fetchone()
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        sql = self._last_sql
+        if "FROM worldline_events" in sql and "status = 'canon'" in sql:
+            return [
+                {
+                    "event_id": "canon-1",
+                    "title": "山门议和",
+                    "summary": "双方停火，正史已确认。",
+                    "kind": "political_turn",
+                    "status": "canon",
+                    "step": 2,
+                    "prompt": "db prompt must be stripped",
+                    "event_body": "private event body must be stripped",
+                }
+            ]
+        if "FROM worldline_events" in sql and "status = 'candidate'" in sql:
+            return [
+                {
+                    "event_id": "candidate-1",
+                    "title": "夜袭草案",
+                    "summary": "未采纳的草案。",
+                    "kind": "director",
+                    "status": "candidate",
+                    "step": 3,
+                }
+            ]
+        if "FROM worldline_variables" in sql:
+            return [
+                {
+                    "name": "亲族提前失踪",
+                    "description": "主角亲族在本轮前失踪",
+                    "impact_axis": "kinship_pressure",
+                    "credential_ref": "secret-ref must be stripped",
+                }
+            ]
+        return []
+
+
+class WorldlineSessionContextConnection(RecordingConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_obj = WorldlineSessionContextCursor()
+
+
+class EmptyWorldlineSessionContextCursor(WorldlineSessionContextCursor):
+    def fetchall(self) -> list[dict[str, Any]]:
+        return []
+
+
+class EmptyWorldlineSessionContextConnection(RecordingConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_obj = EmptyWorldlineSessionContextCursor()
+
+
 class WorldlineStepChainCursor:
     def __init__(self, connection: "WorldlineStepChainConnection") -> None:
         self._connection = connection
@@ -1268,6 +1346,84 @@ def test_postgres_worldline_source_loader_sanitizes_query_exception_message() ->
     encoded = json.dumps(connection.cursor_obj.executions, ensure_ascii=False, default=str)
     for forbidden in ["prompt=hidden", "api_key=sk-nope", "credential_ref=secret"]:
         assert forbidden not in encoded
+
+
+def test_postgres_worldline_session_context_splits_canon_candidates_and_locked_variables() -> None:
+    connection = WorldlineSessionContextConnection()
+    loader = PostgresWorldlineSourceLoader(connect=lambda: connection)
+
+    loaded = loader.load_session_context(context=_context(), session_id="session-1")
+
+    assert loaded["confirmed_canon"] == [
+        {
+            "title": "山门议和",
+            "summary": "双方停火，正史已确认。",
+            "kind": "political_turn",
+            "status": "canon",
+        }
+    ]
+    assert loaded["pending_candidates"] == [
+        {
+            "title": "夜袭草案",
+            "summary": "未采纳的草案。",
+            "kind": "director",
+            "status": "candidate",
+        }
+    ]
+    assert loaded["locked_variables"] == [
+        {
+            "name": "亲族提前失踪",
+            "description": "主角亲族在本轮前失踪",
+            "impact_axis": "kinship_pressure",
+        }
+    ]
+    assert "recent_events" not in loaded
+    queries = "\n".join(sql for sql, _ in connection.cursor_obj.executions)
+    assert "FROM worldline_variables" in queries
+    assert "locked = true" in queries
+    assert "LIMIT 24" in queries
+    assert "status = 'canon'" in queries and "LIMIT 8" in queries
+    assert "status = 'candidate'" in queries and "LIMIT 4" in queries
+    encoded = json.dumps([loaded, connection.cursor_obj.executions], ensure_ascii=False, default=str)
+    for forbidden in ["private event body", "db prompt", "secret-ref", "credential_ref", "event_body"]:
+        assert forbidden not in encoded
+
+
+def test_postgres_worldline_session_context_empty_locked_variables_and_events() -> None:
+    connection = EmptyWorldlineSessionContextConnection()
+    loader = PostgresWorldlineSourceLoader(connect=lambda: connection)
+
+    loaded = loader.load_session_context(context=_context(), session_id="session-1")
+
+    # Empty sets stay empty arrays — never an error — so an unlocked session steps normally.
+    assert loaded["locked_variables"] == []
+    assert loaded["confirmed_canon"] == []
+    assert loaded["pending_candidates"] == []
+
+
+def test_worldline_step_messages_carry_locked_variables_and_split_context() -> None:
+    messages = _worldline_step_messages(
+        context=_context(),
+        session_id="session-1",
+        mode="director",
+        options={"goal": "推进一次单世界推演"},
+        session_context={
+            "locked_variables": [{"name": "亲族提前失踪", "impact_axis": "kinship_pressure"}],
+            "confirmed_canon": [{"title": "山门议和", "status": "canon"}],
+            "pending_candidates": [{"title": "夜袭草案", "status": "candidate"}],
+        },
+    )
+
+    system_content = messages[0]["content"]
+    assert "locked_variables" in system_content
+    assert "confirmed_canon" in system_content
+    assert "pending_candidates" in system_content
+    user_payload = json.loads(messages[1]["content"])
+    assert user_payload["session_context"]["locked_variables"] == [
+        {"name": "亲族提前失踪", "impact_axis": "kinship_pressure"}
+    ]
+    assert user_payload["session_context"]["confirmed_canon"][0]["title"] == "山门议和"
+    assert user_payload["session_context"]["pending_candidates"][0]["title"] == "夜袭草案"
 
 
 def test_llm_facility_worldline_step_runner_rejects_resolution_without_provider_before_credential_call() -> None:
@@ -2740,36 +2896,24 @@ def test_worldline_step_activity_runs_db_backed_success_chain_under_same_run_id(
     assert sum(connection.rollbacks for connection in database.connections) == 0
 
 
-def test_worldline_step_activity_returns_structured_failure_when_completed_event_write_fails() -> None:
+def test_worldline_step_activity_retries_when_completed_event_write_fails() -> None:
     event_writer = RaisingWorkflowEventWriter(
         RuntimeError("WORKFLOW_EVENT_WRITE_FAILED: worldline workflow event write failed")
     )
     status_writer = RecordingWorkflowRunStatusWriter()
 
-    result = worldline_step_activity(
-        _payload({"prompt": "hidden prompt", "api_key": "sk-hidden"}),
-        step_runner=SuccessfulWorldlineStepRunner(),
-        workflow_event_writer=event_writer,
-        workflow_status_writer=status_writer,
-    )
+    with pytest.raises(RuntimeError, match="^WORKFLOW_EVENT_WRITE_FAILED: worldline workflow event write failed$"):
+        worldline_step_activity(
+            _payload({"prompt": "hidden prompt", "api_key": "sk-hidden"}),
+            step_runner=SuccessfulWorldlineStepRunner(),
+            workflow_event_writer=event_writer,
+            workflow_status_writer=status_writer,
+        )
 
-    assert result["status"] == "failed"
-    assert result["error"] == {
-        "code": "WORKFLOW_EVENT_WRITE_FAILED",
-        "message": "worldline workflow event write failed",
-    }
-    assert result["stage_event_persisted"] is False
-    assert result["workflow_status_persisted"] is True
     assert status_writer.completed == []
-    assert status_writer.failed == [
-        {
-            "context": _context(),
-            "code": "WORKFLOW_EVENT_WRITE_FAILED",
-            "message": "worldline workflow event write failed",
-        }
-    ]
+    assert status_writer.failed == []
     assert event_writer.calls[0]["event_type"] == "worldline.stage.completed"
-    joined = json.dumps([result, event_writer.calls, status_writer.failed], ensure_ascii=False, default=str)
+    joined = json.dumps([event_writer.calls, status_writer.failed], ensure_ascii=False, default=str)
     for forbidden in ["hidden prompt", "sk-hidden", "must not be persisted", "secret-ref", "private event body"]:
         assert forbidden not in joined
 
@@ -2782,26 +2926,17 @@ def test_worldline_step_activity_sanitizes_completed_persistence_error_message()
     )
     status_writer = RecordingWorkflowRunStatusWriter()
 
-    result = worldline_step_activity(
-        _payload({"prompt": "hidden prompt", "api_key": "sk-hidden", "credential_ref": "secret"}),
-        step_runner=SuccessfulWorldlineStepRunner(),
-        workflow_event_writer=event_writer,
-        workflow_status_writer=status_writer,
-    )
+    with pytest.raises(RuntimeError) as raised:
+        worldline_step_activity(
+            _payload({"prompt": "hidden prompt", "api_key": "sk-hidden", "credential_ref": "secret"}),
+            step_runner=SuccessfulWorldlineStepRunner(),
+            workflow_event_writer=event_writer,
+            workflow_status_writer=status_writer,
+        )
 
-    assert result["status"] == "failed"
-    assert result["error"] == {
-        "code": "WORKFLOW_EVENT_WRITE_FAILED",
-        "message": "worldline workflow event write failed",
-    }
-    assert status_writer.failed == [
-        {
-            "context": _context(),
-            "code": "WORKFLOW_EVENT_WRITE_FAILED",
-            "message": "worldline workflow event write failed",
-        }
-    ]
-    joined = json.dumps([result, status_writer.failed, event_writer.calls], ensure_ascii=False, default=str)
+    assert str(raised.value) == "WORKFLOW_EVENT_WRITE_FAILED: worldline workflow event write failed"
+    assert status_writer.failed == []
+    joined = json.dumps([str(raised.value), status_writer.failed, event_writer.calls], ensure_ascii=False, default=str)
     for forbidden in [
         "prompt=hidden",
         "api_key",

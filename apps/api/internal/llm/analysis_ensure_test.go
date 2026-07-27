@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestEnsureAnalysisModuleBindingsCopiesFromWriterDonor(t *testing.T) {
+func TestEnsureAnalysisModuleBindingsDoesNotBorrowWriterBinding(t *testing.T) {
 	resolver := NewStaticResolver([]ModuleResolution{
 		{
 			TenantID:      "tenant-1",
@@ -32,7 +32,7 @@ func TestEnsureAnalysisModuleBindingsCopiesFromWriterDonor(t *testing.T) {
 		},
 	}
 
-	primary, err := EnsureAnalysisModuleBindings(
+	_, err := EnsureAnalysisModuleBindings(
 		context.Background(),
 		&ensureAwareResolver{inner: resolver, store: store},
 		store,
@@ -40,14 +40,11 @@ func TestEnsureAnalysisModuleBindingsCopiesFromWriterDonor(t *testing.T) {
 		"project-1",
 		"actor-1",
 	)
-	if err != nil {
-		t.Fatalf("ensure analysis bindings: %v", err)
+	if ErrorCode(err) != "LLM_MODULE_UNBOUND" {
+		t.Fatalf("expected explicit unbound error, got %s (%v)", ErrorCode(err), err)
 	}
-	if primary.ModuleKey != "analysis_planner" || primary.ChannelID != "channel-1" || primary.ModelID != "deepseek-v4-flash" {
-		t.Fatalf("unexpected primary resolution: %#v", primary)
-	}
-	if len(store.upserts) != 2 {
-		t.Fatalf("expected planner+worker upserts, got %#v", store.upserts)
+	if len(store.upserts) != 0 {
+		t.Fatalf("analysis binding must not be inferred from writer modules: %#v", store.upserts)
 	}
 }
 

@@ -40,23 +40,23 @@ type ListGoalStartsInput struct {
 }
 
 type GoalStartRecord struct {
-	RunID        string                   `json:"run_id"`
-	TraceID      string                   `json:"trace_id,omitempty"`
-	ProjectID    string                   `json:"project_id"`
-	WorkflowType string                   `json:"workflow_type"`
-	Status       string                   `json:"status"`
-	Goal         string                   `json:"goal,omitempty"`
-	AnchorPathID string                   `json:"anchor_path_id,omitempty"`
-	AgentRefs    []PreparationAgentRef    `json:"agent_refs,omitempty"`
-	SourceRefs   []PreparationSourceRef   `json:"source_refs,omitempty"`
-	Rationale    string                   `json:"rationale,omitempty"`
-	PrepareID    string                   `json:"prepare_id,omitempty"`
-	SessionID    string                   `json:"session_id,omitempty"`
-	ErrorCode    string                   `json:"error_code,omitempty"`
-	ErrorMessage string                   `json:"error_message,omitempty"`
-	CreatedAt    string                   `json:"created_at,omitempty"`
-	UpdatedAt    string                   `json:"updated_at,omitempty"`
-	Result       map[string]any           `json:"result,omitempty"`
+	RunID        string                 `json:"run_id"`
+	TraceID      string                 `json:"trace_id,omitempty"`
+	ProjectID    string                 `json:"project_id"`
+	WorkflowType string                 `json:"workflow_type"`
+	Status       string                 `json:"status"`
+	Goal         string                 `json:"goal,omitempty"`
+	AnchorPathID string                 `json:"anchor_path_id,omitempty"`
+	AgentRefs    []PreparationAgentRef  `json:"agent_refs,omitempty"`
+	SourceRefs   []PreparationSourceRef `json:"source_refs,omitempty"`
+	Rationale    string                 `json:"rationale,omitempty"`
+	PrepareID    string                 `json:"prepare_id,omitempty"`
+	SessionID    string                 `json:"session_id,omitempty"`
+	ErrorCode    string                 `json:"error_code,omitempty"`
+	ErrorMessage string                 `json:"error_message,omitempty"`
+	CreatedAt    string                 `json:"created_at,omitempty"`
+	UpdatedAt    string                 `json:"updated_at,omitempty"`
+	Result       map[string]any         `json:"result,omitempty"`
 }
 
 type GoalStartStarter interface {
@@ -162,6 +162,9 @@ func (s *SQLGoalStartAdmissionStore) AdmitGoalStart(
 		}
 		return existing, true, nil
 	}
+	if err := requireGoalStartAvailable(ctx, tx, input); err != nil {
+		return GoalStartRecord{}, false, err
+	}
 	if err := persistGoalStartAdmission(ctx, tx, input, admission, payload); err != nil {
 		return GoalStartRecord{}, false, err
 	}
@@ -169,6 +172,35 @@ func (s *SQLGoalStartAdmissionStore) AdmitGoalStart(
 		return GoalStartRecord{}, false, goalStartAdmissionFailed()
 	}
 	return admission.Record, false, nil
+}
+
+func requireGoalStartAvailable(ctx context.Context, tx *sql.Tx, input StartGoalStartInput) error {
+	var blocked bool
+	err := tx.QueryRowContext(ctx, `SELECT
+  EXISTS (
+    SELECT 1
+    FROM worldline_goal_starts
+    WHERE tenant_id::text = $1
+      AND project_id::text = $2
+      AND status IN ('queued', 'casting', 'preparing', 'starting')
+  )
+  OR EXISTS (
+    SELECT 1
+    FROM worldline_sessions
+    WHERE tenant_id::text = $1
+      AND project_id::text = $2
+      AND lifecycle = 'active'
+  )`, input.TenantID, input.ProjectID).Scan(&blocked)
+	if err != nil {
+		return goalStartAdmissionFailed()
+	}
+	if blocked {
+		return &AppError{
+			Code:    "WORLDLINE_GOAL_START_ACTIVE",
+			Message: "project already has an active worldline goal-start or current world",
+		}
+	}
+	return nil
 }
 
 func lockGoalStartProject(ctx context.Context, tx *sql.Tx, input StartGoalStartInput) error {
@@ -560,11 +592,17 @@ LIMIT 1`
 	}
 	defer rows.Close()
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return GoalStartRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		}
 		return GoalStartRecord{}, &AppError{Code: "NOT_FOUND", Message: "worldline goal-start not found"}
 	}
 	record, err := scanGoalStartRecord(rows)
 	if err != nil {
 		return GoalStartRecord{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return GoalStartRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
 	return record, nil
 }
@@ -597,6 +635,9 @@ LIMIT $3`
 			return nil, err
 		}
 		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
 	return records, nil
 }
@@ -723,7 +764,7 @@ func sanitizeGoalStartAdmissionError(err error) error {
 		return goalStartAdmissionFailed()
 	}
 	switch appErr.Code {
-	case "VALIDATION_FAILED", "IDEMPOTENCY_CONFLICT", "NOT_FOUND":
+	case "VALIDATION_FAILED", "IDEMPOTENCY_CONFLICT", "NOT_FOUND", "WORLDLINE_GOAL_START_ACTIVE":
 		return &AppError{Code: appErr.Code, Message: appErr.Message}
 	default:
 		return goalStartAdmissionFailed()

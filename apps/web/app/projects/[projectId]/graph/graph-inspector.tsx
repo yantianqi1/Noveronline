@@ -50,7 +50,7 @@ export function GraphInspector({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 24 }}
       transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-      className="flex h-full w-[336px] shrink-0 flex-col overflow-hidden border-l border-line bg-panel"
+      className="hidden h-full w-rail-inspector shrink-0 flex-col overflow-hidden border-l border-line bg-panel wide:flex"
     >
       {/* Header */}
       <div className="relative shrink-0 overflow-hidden border-b border-line-soft px-5 pb-5 pt-5">
@@ -72,14 +72,14 @@ export function GraphInspector({
               <Icon className="size-5" aria-hidden />
             </span>
             <div className="min-w-0">
-              <p className="text-[10.5px] font-medium tracking-[0.22em]" style={{ color: visual.color }}>
+              <p className="text-caption font-medium tracking-label" style={{ color: visual.color }}>
                 {visual.label}
               </p>
-              <h2 className="mt-0.5 truncate font-serif text-[20px] font-semibold leading-tight text-ink">
+              <h2 className="mt-0.5 truncate font-serif text-xl font-semibold leading-tight text-ink">
                 {displayTitle}
               </h2>
               {concept?.isUntitled ? (
-                <p className="mt-1 text-[11px] italic text-muted">原始记录缺少标题，此为系统整理的临时名。</p>
+                <p className="mt-1 text-caption text-muted-soft">原始记录缺少标题，此为系统整理的临时名。</p>
               ) : null}
             </div>
           </div>
@@ -87,7 +87,7 @@ export function GraphInspector({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="grid size-8 shrink-0 place-items-center rounded-[9px] text-muted transition-colors hover:bg-paper-deep hover:text-ink"
+            className="grid size-8 shrink-0 place-items-center rounded-panel text-muted transition-colors hover:bg-paper-deep hover:text-ink"
           >
             <X className="size-4" aria-hidden />
           </button>
@@ -96,7 +96,7 @@ export function GraphInspector({
         {/* Importance + lifecycle */}
         <div className="relative mt-4 flex items-center gap-3">
           <div className="min-w-0 flex-1">
-            <div className="mb-1 flex items-center justify-between text-[10.5px] text-muted">
+            <div className="mb-1 flex items-center justify-between text-caption text-muted">
               <span>重要度</span>
               <span className="tabular-nums text-ink-soft">{Math.round(importance * 100)}</span>
             </div>
@@ -110,7 +110,7 @@ export function GraphInspector({
               />
             </div>
           </div>
-          <span className="shrink-0 rounded-full border border-line bg-paper px-2.5 py-1 text-[10.5px] font-medium text-ink-soft">
+          <span className="shrink-0 rounded-full border border-line bg-paper px-2.5 py-1 text-caption font-medium text-ink-soft">
             {lifecycleLabel(node.lifecycle)}
           </span>
         </div>
@@ -125,19 +125,19 @@ export function GraphInspector({
             {/* Concept provenance — 所属世界 / 类型 / 时间线 */}
             {concept ? (
               <section>
-                <SectionTitle icon={Globe2} label="归 属" />
+                <SectionTitle icon={Globe2} label="归属" />
                 <dl className="grid grid-cols-3 gap-2">
-                  <div className="rounded-[10px] border border-line bg-paper px-3 py-2">
-                    <dt className="text-[10px] tracking-[0.14em] text-muted">所属世界</dt>
-                    <dd className="mt-0.5 text-[12.5px] font-medium text-ink">{concept.world}</dd>
+                  <div className="rounded-panel border border-line bg-paper px-3 py-2">
+                    <dt className="text-caption tracking-label text-muted">所属世界</dt>
+                    <dd className="mt-0.5 text-caption font-medium text-ink">{concept.world}</dd>
                   </div>
-                  <div className="rounded-[10px] border border-line bg-paper px-3 py-2">
-                    <dt className="text-[10px] tracking-[0.14em] text-muted">类型</dt>
-                    <dd className="mt-0.5 text-[12.5px] font-medium text-ink">{concept.subtypeLabel}</dd>
+                  <div className="rounded-panel border border-line bg-paper px-3 py-2">
+                    <dt className="text-caption tracking-label text-muted">类型</dt>
+                    <dd className="mt-0.5 text-caption font-medium text-ink">{concept.subtypeLabel}</dd>
                   </div>
-                  <div className="rounded-[10px] border border-line bg-paper px-3 py-2">
-                    <dt className="text-[10px] tracking-[0.14em] text-muted">时间线</dt>
-                    <dd className="mt-0.5 truncate text-[12.5px] font-medium text-ink" title={concept.timeframe}>
+                  <div className="rounded-panel border border-line bg-paper px-3 py-2">
+                    <dt className="text-caption tracking-label text-muted">时间线</dt>
+                    <dd className="mt-0.5 truncate text-caption font-medium text-ink" title={concept.timeframe}>
                       {concept.timeframe || "—"}
                     </dd>
                   </div>
@@ -148,7 +148,7 @@ export function GraphInspector({
             {/* Summary */}
             <section>
               <SectionTitle icon={FileText} label="梗概" />
-              <p className="text-[13px] leading-relaxed text-ink-soft">
+              <p className="text-sm leading-relaxed text-ink-soft">
                 {node.summary ? node.summary : <span className="text-muted">暂无梗概。</span>}
               </p>
             </section>
@@ -161,14 +161,14 @@ export function GraphInspector({
                   {detail.aliases.map((alias) => (
                     <span
                       key={alias}
-                      className="rounded-full border border-line bg-paper px-2.5 py-1 text-[11.5px] text-ink-soft"
+                      className="rounded-full border border-line bg-paper px-2.5 py-1 text-caption text-ink-soft"
                     >
                       {alias}
                     </span>
                   ))}
                 </div>
               ) : (
-                <p className="text-[12px] text-muted">暂无别名。</p>
+                <p className="text-caption text-muted">暂无别名。</p>
               )}
             </section>
 
@@ -180,7 +180,7 @@ export function GraphInspector({
                   {detail.labels.map((label) => (
                     <span
                       key={label}
-                      className="rounded-full px-2.5 py-1 text-[11.5px]"
+                      className="rounded-full px-2.5 py-1 text-caption"
                       style={{ backgroundColor: visual.soft, color: visual.ink }}
                     >
                       {label}
@@ -204,24 +204,24 @@ export function GraphInspector({
                         <button
                           type="button"
                           onClick={() => onFocusNode(neighbour.node_id)}
-                          className="group flex w-full items-center gap-2.5 rounded-[10px] border border-transparent px-2 py-2 text-left transition-all duration-200 hover:border-line hover:bg-accent-wash"
+                          className="group flex w-full items-center gap-2.5 rounded-panel border border-transparent px-2 py-2 text-left transition-all duration-200 hover:border-line hover:bg-accent-wash"
                         >
                           <span
-                            className="grid size-7 shrink-0 place-items-center rounded-[8px]"
+                            className="grid size-7 shrink-0 place-items-center rounded-panel"
                             style={{ backgroundColor: nVisual.soft, color: nVisual.color }}
                           >
                             <NIcon className="size-3.5" aria-hidden />
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[13px] font-medium text-ink">
+                            <span className="block truncate text-sm font-medium text-ink">
                               {nConcept ? nConcept.displayTitle : neighbour.title}
                             </span>
-                            <span className="block truncate text-[11px] text-muted">
+                            <span className="block truncate text-caption text-muted">
                               {edge.label || edgeTypeLabel(edge.edge_type)}
                             </span>
                           </span>
                           <Waypoints
-                            className="size-3.5 shrink-0 text-muted/50 transition-colors group-hover:text-accent"
+                            className="size-3.5 shrink-0 text-muted-soft transition-colors group-hover:text-accent"
                             aria-hidden
                           />
                         </button>
@@ -230,7 +230,7 @@ export function GraphInspector({
                   })}
                 </ul>
               ) : (
-                <p className="text-[12px] text-muted">这片星区还没有连出关系。</p>
+                <p className="text-caption text-muted">这片星区还没有连出关系。</p>
               )}
             </section>
 
@@ -240,8 +240,8 @@ export function GraphInspector({
               {evidence && evidence.items.length > 0 ? (
                 <ul className="space-y-2">
                   {evidence.items.map((item) => (
-                    <li key={item.evidence_id} className="rounded-[10px] border border-line bg-paper px-3 py-2.5">
-                      <div className="flex items-center justify-between gap-2 text-[10.5px] text-muted">
+                    <li key={item.evidence_id} className="rounded-panel border border-line bg-paper px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2 text-caption text-muted">
                         <span className="truncate">{item.source_type}</span>
                         <span className="shrink-0 tabular-nums text-ink-soft">
                           {Math.round((item.confidence || 0) * 100)}%
@@ -257,7 +257,7 @@ export function GraphInspector({
                   ))}
                 </ul>
               ) : (
-                <p className="text-[12px] text-muted">公开读侧未提供佐证片段。</p>
+                <p className="text-caption text-muted">公开读侧未提供佐证片段。</p>
               )}
             </section>
           </div>
@@ -269,7 +269,7 @@ export function GraphInspector({
 
 function SectionTitle({ icon: Icon, label }: { icon: typeof FileText; label: string }) {
   return (
-    <h3 className="mb-2 flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.2em] text-muted">
+    <h3 className="mb-2 flex items-center gap-1.5 text-caption font-medium tracking-label text-muted">
       <Icon className="size-3" aria-hidden />
       {label}
     </h3>
@@ -279,10 +279,10 @@ function SectionTitle({ icon: Icon, label }: { icon: typeof FileText; label: str
 function InspectorSkeleton() {
   return (
     <div className="space-y-4">
-      <div className="h-4 w-full animate-pulse rounded bg-paper-deep" />
-      <div className="h-4 w-5/6 animate-pulse rounded bg-paper-deep" />
-      <div className="h-4 w-2/3 animate-pulse rounded bg-paper-deep" />
-      <div className="h-20 w-full animate-pulse rounded-[10px] bg-paper-deep" />
+      <div className="h-4 w-full animate-pulse rounded-control bg-paper-deep" />
+      <div className="h-4 w-5/6 animate-pulse rounded-control bg-paper-deep" />
+      <div className="h-4 w-2/3 animate-pulse rounded-control bg-paper-deep" />
+      <div className="h-20 w-full animate-pulse rounded-panel bg-paper-deep" />
     </div>
   );
 }

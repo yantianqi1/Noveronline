@@ -1,5 +1,7 @@
 "use client";
 
+import { Lock, LockOpen } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 import { CharacterRoster, type RosterCharacter } from "@/components/character";
 import type { WorldlineVariable } from "@/lib/api/worldline-types";
@@ -37,22 +39,22 @@ export function WorldlinePrepareRail({
   onResume?: () => void;
 }) {
   return (
-    <aside className="flex h-full w-[260px] shrink-0 flex-col overflow-y-auto border-r border-line bg-paper/40">
+    <aside className="hidden h-full w-rail-filter shrink-0 flex-col overflow-y-auto border-r border-line bg-paper/40 stack:flex">
       {/* preparation status */}
       <section className="border-b border-line-soft px-4 py-4">
         <RailEyebrow>整备状态</RailEyebrow>
         <div className="mt-2.5 flex items-center gap-2">
           <StatusDot tone={status.tone} />
-          <span className="text-[13px] font-medium text-ink">{status.label}</span>
+          <span className="text-sm font-medium text-ink">{status.label}</span>
         </div>
         {status.detail ? (
-          <p className="mt-2 text-[12px] leading-relaxed text-muted">{status.detail}</p>
+          <p className="mt-2 text-caption leading-relaxed text-muted">{status.detail}</p>
         ) : null}
         {status.tone === "failed" && onResume ? (
           <button
             type="button"
             onClick={onResume}
-            className="mt-3 w-full rounded-[8px] border border-accent/40 bg-accent-wash px-3 py-1.5 text-[12px] font-medium text-accent transition-colors hover:bg-accent/15"
+            className="mt-3 w-full rounded-panel border border-accent/50 bg-accent-wash px-3 py-1.5 text-caption font-medium text-accent transition-colors hover:bg-accent/15"
           >
             续传整备
           </button>
@@ -77,7 +79,7 @@ export function WorldlinePrepareRail({
       <section className="px-4 py-4">
         <RailEyebrow>变量锁</RailEyebrow>
         {variables.length === 0 ? (
-          <p className="mt-2.5 rounded-[10px] border border-dashed border-line px-3 py-3 text-center text-[12px] text-muted">
+          <p className="mt-2.5 rounded-panel border border-dashed border-line px-3 py-3 text-center text-caption text-muted">
             还没有注入变量
           </p>
         ) : (
@@ -89,19 +91,19 @@ export function WorldlinePrepareRail({
                   onClick={() => onToggleVariableLock?.(variable)}
                   title={variable.locked ? "解锁（不再约束下一轮）" : "锁定（约束传入下一轮）"}
                   className={cn(
-                    "flex w-full items-start gap-2.5 rounded-[10px] border px-3 py-2.5 text-left transition-colors",
+                    "flex w-full items-start gap-2.5 rounded-panel border px-3 py-2.5 text-left transition-colors",
                     variable.locked
                       ? "border-gold/50 bg-gold/[0.07]"
                       : "border-line bg-panel hover:border-accent/30",
                   )}
                 >
-                  <span aria-hidden className={cn("mt-0.5 text-[13px]", variable.locked ? "text-gold" : "text-muted")}>
-                    {variable.locked ? "🔒" : "🔓"}
+                  <span aria-hidden className={cn("mt-0.5", variable.locked ? "text-candidate" : "text-muted")}>
+                    {variable.locked ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium text-ink">{variable.name}</span>
+                    <span className="block truncate text-sm font-medium text-ink">{variable.name}</span>
                     {variable.description ? (
-                      <span className="mt-0.5 line-clamp-2 block text-[11.5px] leading-snug text-muted">
+                      <span className="mt-0.5 line-clamp-2 block text-caption leading-snug text-muted">
                         {variable.description}
                       </span>
                     ) : null}
@@ -117,7 +119,7 @@ export function WorldlinePrepareRail({
 }
 
 function RailEyebrow({ children }: { children: React.ReactNode }) {
-  return <h3 className="text-[11px] font-medium tracking-[0.24em] text-accent">{children}</h3>;
+  return <h3 className="text-caption font-medium tracking-label text-muted">{children}</h3>;
 }
 
 function StatusDot({ tone }: { tone: PrepareStatus["tone"] }) {

@@ -95,6 +95,21 @@ export type WriterEvent = {
   created_at?: string;
 };
 
+/**
+ * A candidate draft the writer run saved. `content_text` comes back only when
+ * requested with `?include=content`; `status` flips to "adopted" once the
+ * author has adopted it into the manuscript.
+ */
+export type WriterDraft = {
+  draft_id: string;
+  project_id: string;
+  run_id?: string;
+  chapter_id?: string;
+  status: string;
+  word_count?: number;
+  content_text?: string;
+};
+
 /** The result of adopting a candidate draft into the manuscript. */
 export type DraftAdoption = {
   draft_id: string;

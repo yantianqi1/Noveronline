@@ -46,16 +46,16 @@ export function ModuleGroupPanel({
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, y: -6 }}
         transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-        className="overflow-hidden rounded-card border border-line bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.05)]"
+        className="overflow-hidden rounded-modal border border-line bg-panel shadow-hairline"
       >
         <header className="flex items-center justify-between gap-3 border-b border-line-soft bg-paper/40 px-6 py-4">
           <div>
-            <h3 className="font-serif text-[17px] font-semibold text-ink">{group.label}</h3>
-            {group.hint && <p className="mt-0.5 text-[12.5px] text-muted">{group.hint}</p>}
+            <h3 className="font-serif text-lg font-semibold text-ink">{group.label}</h3>
+            {group.hint && <p className="mt-0.5 text-caption text-muted">{group.hint}</p>}
           </div>
           <span
             className={cn(
-              "shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium",
+              "shrink-0 rounded-full px-2.5 py-1 text-caption font-medium",
               boundCount === group.modules.length
                 ? "bg-accent-wash text-accent-strong"
                 : "bg-paper-deep text-muted",

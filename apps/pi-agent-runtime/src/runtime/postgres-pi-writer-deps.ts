@@ -23,8 +23,6 @@ import type {
   AppendWriterThreadMessageRequest,
   CreateWriterApprovalRequest,
   SaveDraftRevisionRequest,
-  RerankRecallRequest,
-  RerankRecallResult,
   SearchAssetsArgs,
   SearchAssetsMode,
   SearchManuscriptArgs,
@@ -77,15 +75,6 @@ export interface PostgresPiWriterDepsOptions {
   composeDraft(request: ComposeDraftRequest): Promise<ComposeDraftResult>;
   leaseTtlSeconds?: number;
   fetchEmbedding?: QueryEmbeddingFetcher;
-  /** Cross-encoder rerank execution (writer_retrieval_rerank); wired by the worker. */
-  rerankRecall?: (request: RerankRecallRequest) => Promise<RerankRecallResult>;
-}
-
-interface RerankCandidateInput {
-  id: string;
-  title?: string;
-  text: string;
-  channels?: string[];
 }
 
 export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions): PiWriterRunActivityDeps {
@@ -319,7 +308,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
     case "search_manuscript":
       return executeSearchManuscript(options, request);
     case "fuse_recall":
-      return executeFuseRecall(options, request, buildRerankCallback(options, request));
+      return executeFuseRecall(request);
     case "query_project_context": {
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT title, description, genre, language, status
@@ -405,6 +394,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
           ORDER BY created_at DESC
           LIMIT 40`,
         [request.tenant_id, request.project_id]);
+      const rulesChapterOrder = await resolveCurrentChapterOrder(db, request);
       const assetRules = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT asset_id::text AS rule_evidence_id, COALESCE(NULLIF(content_text, ''), summary, title) AS rule_text,
                 COALESCE(category, asset_type) AS category, NULL::double precision AS confidence,
@@ -414,9 +404,10 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
             AND enabled = TRUE
             AND lifecycle IN ('seed', 'canon', 'material')
             AND asset_type IN ('world_rule', 'worldview')
+            AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $3)
           ORDER BY pinned DESC, updated_at DESC
           LIMIT 40`,
-        [request.tenant_id, request.project_id]);
+        [request.tenant_id, request.project_id, rulesChapterOrder]);
       return { rules: [...seedRules.rows, ...assetRules.rows].slice(0, 50) };
     }
     case "query_character_profile": {
@@ -441,6 +432,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
           ORDER BY entity.updated_at DESC
           LIMIT 40`,
         [request.tenant_id, request.project_id]);
+      const profilesChapterOrder = await resolveCurrentChapterOrder(db, request);
       const assetProfiles = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT asset_id::text AS entity_id, title AS canonical_name, asset_type AS entity_type,
                 NULL::text AS importance, COALESCE(summary, left(COALESCE(content_text, ''), 400)) AS state_summary,
@@ -450,9 +442,10 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
             AND enabled = TRUE
             AND lifecycle IN ('seed', 'canon', 'material')
             AND asset_type IN ('character', 'seed_character')
+            AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $3)
           ORDER BY pinned DESC, updated_at DESC
           LIMIT 40`,
-        [request.tenant_id, request.project_id]);
+        [request.tenant_id, request.project_id, profilesChapterOrder]);
       return { profiles: [...entityProfiles.rows, ...assetProfiles.rows].slice(0, 50) };
     }
     case "query_graph_neighbors": {
@@ -488,7 +481,8 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
     case "query_asset_relationships": {
       // 召回一个、带出一串: 1-hop expansion over asset_links. Only enabled
       // seed/canon/material assets are visible — the writer lifecycle gate
-      // (candidates/drafts never enter the writing context).
+      // (candidates/drafts never enter the writing context) plus the spoiler
+      // gate (expansion must not reveal assets ahead of the author's chapter).
       const assetId = typeof request.tool_args?.asset_id === "string" ? request.tool_args.asset_id.trim() : "";
       if (!assetId) {
         throw new Error("VALIDATION_FAILED: query_asset_relationships requires a non-empty asset_id");
@@ -498,6 +492,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
         : [];
       const rawTopK = typeof request.tool_args?.top_k === "number" ? Math.floor(request.tool_args.top_k) : 10;
       const topK = Math.min(25, Math.max(1, rawTopK));
+      const currentChapterOrder = await resolveCurrentChapterOrder(db, request);
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
         `SELECT
            related.asset_id::text,
@@ -521,13 +516,14 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
           AND related.asset_id = CASE WHEN link.asset_a_id = $3::uuid THEN link.asset_b_id ELSE link.asset_a_id END
           AND related.enabled = TRUE
           AND related.lifecycle IN ('seed', 'canon', 'material')
+          AND (related.reveal_after_chapter_order IS NULL OR related.reveal_after_chapter_order <= $6)
          WHERE link.tenant_id = $1
            AND link.project_id = $2
            AND (link.asset_a_id = $3::uuid OR link.asset_b_id = $3::uuid)
            AND (cardinality($4::text[]) = 0 OR link.relation_type = ANY($4::text[]))
          ORDER BY related.pinned DESC, related.updated_at DESC
          LIMIT $5`,
-        [request.tenant_id, request.project_id, assetId, relationTypes, topK]);
+        [request.tenant_id, request.project_id, assetId, relationTypes, topK, currentChapterOrder]);
       return { asset_id: assetId, relationships: result.rows };
     }
     case "query_worldline_paths": {
@@ -841,8 +837,92 @@ function toVectorLiteral(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
+// Application-layer tokenization for keyword matching. to_tsvector('simple')
+// cannot segment CJK text, and a single whole-query ILIKE fails as soon as the
+// query has more than one term ("许七安 的 师门" → zero hits even though 许七安
+// matches hundreds of rows). The query is split into terms here and matched
+// term-by-term in SQL, scored by the fraction of terms hit.
+const SEARCH_TERM_MAX = 8;
+const SEARCH_TERM_MIN_LEN = 2;
+// Single-character CJK function words that safely delimit unsegmented runs
+// ("许七安的师门" → 许七安 / 师门). Fragments still substring-match full names
+// in ILIKE, so over-splitting only costs precision, never recall.
+const CJK_SPLIT_CHARS = "的了和与或在是就都而被把向从对于以并也又还让";
+const SEARCH_STOPWORDS = new Set([
+  ...CJK_SPLIT_CHARS,
+  "这", "那", "一个", "什么", "怎么",
+  "the", "a", "an", "of", "to", "and", "or", "in", "on", "for", "with", "at", "by", "is", "are"
+]);
+const CJK_RUN_PATTERN = /[㐀-鿿]/u;
+const CJK_SPLIT_PATTERN = new RegExp(`[${CJK_SPLIT_CHARS}]`, "u");
+
+export function tokenizeSearchQuery(query: string): string[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string): void => {
+    const token = raw.trim();
+    if (token.length < SEARCH_TERM_MIN_LEN) return;
+    const lower = token.toLowerCase();
+    if (SEARCH_STOPWORDS.has(lower) || seen.has(lower)) return;
+    seen.add(lower);
+    if (terms.length < SEARCH_TERM_MAX) terms.push(token);
+  };
+  for (const token of trimmed.split(/[\s\p{P}\p{S}]+/u)) {
+    if (!token) continue;
+    if (CJK_RUN_PATTERN.test(token) && CJK_SPLIT_PATTERN.test(token)) {
+      for (const fragment of token.split(CJK_SPLIT_PATTERN)) push(fragment);
+    } else {
+      push(token);
+    }
+  }
+  return terms.length > 0 ? terms : [trimmed];
+}
+
+function toLikePatterns(terms: string[]): string[] {
+  return terms.map((term) => `%${term.replace(/([\\%_])/g, "\\$1")}%`);
+}
+
 const KEYED_MAX_MATCHES = 12;
 const KEYED_ALIAS_MIN_LEN = 2;
+// Bounded scans: keyed matching loads titles/aliases into memory, so cap the
+// candidate pool instead of scanning an unbounded long-form asset library.
+const KEYED_ASSET_SCAN_MAX = 2000;
+const KEYED_ALIAS_SCAN_MAX = 5000;
+const KEYED_PROSE_TAIL_BLOCKS = 6;
+
+// Recent prose of the run target — the strongest keyed-recall trigger for a
+// long-form author (names on the page beat names in the planner's query).
+async function loadRecentManuscriptTail(
+  db: QueryExecutor,
+  request: ExecuteWriterToolRequest
+): Promise<string[]> {
+  const sceneId = request.scene_id ?? null;
+  const chapterId = request.chapter_id ?? null;
+  if (!sceneId && !chapterId) return [];
+  const rows = (
+    await queryWithTenantContext<{ content_text?: string }>(
+      db,
+      request,
+      sceneId
+        ? `SELECT content_text
+             FROM manuscript_blocks
+            WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND scene_id = $3::uuid
+            ORDER BY block_order DESC
+            LIMIT $4`
+        : `SELECT content_text
+             FROM manuscript_blocks
+            WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND chapter_id = $3::uuid
+            ORDER BY block_order DESC
+            LIMIT $4`,
+      [request.tenant_id, request.project_id, sceneId ?? chapterId, KEYED_PROSE_TAIL_BLOCKS]
+    )
+  ).rows;
+  return rows
+    .map((row) => (typeof row.content_text === "string" ? row.content_text : ""))
+    .filter((text) => text.trim() !== "");
+}
 
 // P1 (doc 41 §4.2): keyed/alias-triggered recall — the deterministic complement
 // to vector search. Proper names (characters, places, techniques) defeat pure
@@ -869,8 +949,10 @@ async function executeKeyedAssets(
          FROM assets
         WHERE tenant_id = $1 AND project_id = $2 AND enabled = TRUE
           AND lifecycle = ANY($3::text[])
-          AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $4)`,
-      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder]
+          AND (reveal_after_chapter_order IS NULL OR reveal_after_chapter_order <= $4)
+        ORDER BY pinned DESC, updated_at DESC
+        LIMIT $5`,
+      [request.tenant_id, request.project_id, [...SEARCH_ASSETS_LIFECYCLES], currentChapterOrder, KEYED_ASSET_SCAN_MAX]
     )
   ).rows;
 
@@ -884,8 +966,9 @@ async function executeKeyedAssets(
          JOIN entities e
            ON e.tenant_id = ea.tenant_id AND e.project_id = ea.project_id AND e.entity_id = ea.entity_id
         WHERE ea.tenant_id = $1 AND ea.project_id = $2
-          AND e.entity_type = 'character'`,
-      [request.tenant_id, request.project_id]
+          AND e.entity_type = 'character'
+        LIMIT $3`,
+      [request.tenant_id, request.project_id, KEYED_ALIAS_SCAN_MAX]
     )
   ).rows;
 
@@ -996,8 +1079,6 @@ async function loadAlwaysOnAssets(
   return { assets };
 }
 
-const WRITER_RETRIEVAL_RERANK_MODULE_KEY = "writer_retrieval_rerank";
-
 // Load the canon a draft is checked against for consistency (doc 41 §4.7):
 // hard world rules + current character states, gated to author-sovereign canon
 // and the same spoiler gate as recall (never check against unrevealed canon).
@@ -1053,58 +1134,16 @@ async function loadConsistencyCanon(
   return { canon };
 }
 
-// Build a rerank callback bound to this run's credential/binding, or undefined
-// when no rerank execution is wired. The callback resolves the writer_retrieval_rerank
-// module and calls the cross-encoder; failures propagate so the caller can degrade.
-function buildRerankCallback(
-  options: PostgresPiWriterDepsOptions,
-  request: ExecuteWriterToolRequest
-): ((query: string, candidates: RerankCandidateInput[]) => Promise<string[]>) | undefined {
-  if (!options.rerankRecall) return undefined;
-  return async (query, candidates) => {
-    const binding = await resolveModuleBinding(options.db, {
-      tenant_id: request.tenant_id,
-      project_id: request.project_id,
-      run_id: request.run_id,
-      module_key: WRITER_RETRIEVAL_RERANK_MODULE_KEY
-    });
-    const { apiKey } = await resolveCredential(options, {
-      tenant_id: request.tenant_id,
-      project_id: request.project_id,
-      run_id: request.run_id,
-      module_key: WRITER_RETRIEVAL_RERANK_MODULE_KEY,
-      channel_id: binding.channel_id,
-      credential_ref: binding.credential_ref
-    });
-    const result = await options.rerankRecall!({
-      tenant_id: request.tenant_id,
-      project_id: request.project_id,
-      run_id: request.run_id,
-      module_key: binding.module_key,
-      channel_id: binding.channel_id,
-      model_id: binding.model_id,
-      provider: binding.provider,
-      base_url: binding.base_url,
-      query,
-      candidates,
-      apiKey,
-      settings: binding.settings
-    });
-    return result.ranked_ids;
-  };
-}
-
 // P2 (doc 41 §4.6): fuse the run's multi-channel recall (keyed / hybrid /
 // manuscript) into one RRF-ranked list. When the caller passes rerank:true with a
-// query and the activity has wired a reranker, the writer_retrieval_rerank
-// cross-encoder re-orders the fused list; reranker unavailable/failed degrades to
-// the RRF order explicitly.
-async function executeFuseRecall(
-  options: PostgresPiWriterDepsOptions,
-  request: ExecuteWriterToolRequest,
-  rerank?: (query: string, candidates: RerankCandidateInput[]) => Promise<string[]>
-): Promise<Record<string, unknown>> {
+// query, the activity-injected rerank executor (request.rerank_executor — wrapped
+// in executeLLMStage so the call carries a provider_call_id and goes through
+// quota, lease, and telemetry) re-orders the fused list with the
+// writer_retrieval_rerank cross-encoder; executor unavailable or failed degrades
+// to the RRF order explicitly, never silently.
+async function executeFuseRecall(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>> {
   const raw = (request.tool_args ?? {}) as Record<string, unknown>;
+  const rerank = request.rerank_executor;
   const lists = Array.isArray(raw.channels) ? raw.channels : [];
   const channelLists: FusionItem[][] = lists.map((entry) => {
     const record = (entry ?? {}) as Record<string, unknown>;
@@ -1132,18 +1171,22 @@ async function executeFuseRecall(
   // Optional cross-encoder rerank of the wide fused list (doc 41 §4.6 second half).
   let rerankedIds: string[] | null = null;
   let rerankDegraded: string | null = null;
-  if (raw.rerank === true && typeof raw.query === "string" && raw.query.trim() && rerank && fused.length > 0) {
-    try {
-      const wide = fused.slice(0, 50).map((item) => ({
-        id: item.id,
-        title: item.title,
-        text: rerankTextFor(item),
-        channels: item.channels
-      }));
-      const ids = await rerank(raw.query.trim(), wide);
-      rerankedIds = ids.filter((id) => byId.has(id));
-    } catch (error) {
-      rerankDegraded = errorMessage(error);
+  if (raw.rerank === true && typeof raw.query === "string" && raw.query.trim() && fused.length > 0) {
+    if (!rerank) {
+      rerankDegraded = "writer_retrieval_rerank execution is not wired for this run";
+    } else {
+      try {
+        const wide = fused.slice(0, 50).map((item) => ({
+          id: item.id,
+          title: item.title,
+          text: rerankTextFor(item),
+          channels: item.channels
+        }));
+        const ids = await rerank(raw.query.trim(), wide);
+        rerankedIds = ids.filter((id) => byId.has(id));
+      } catch (error) {
+        rerankDegraded = errorMessage(error);
+      }
     }
   }
 
@@ -1189,10 +1232,16 @@ async function executeSearchAssets(
   const db = options.db;
   const rawArgs = (request.tool_args ?? {}) as Record<string, unknown>;
   // Keyed channel (planner "keyed" queries): deterministic alias/name-triggered
-  // force-injection, bypassing relevance scoring entirely.
+  // force-injection, bypassing relevance scoring entirely. Triggered not only by
+  // the planner's query but by what the author is actually writing: the recent
+  // manuscript tail plus any explicit context_texts (e.g. the author's selection).
   if (rawArgs.channel === "keyed") {
     const queryText = typeof rawArgs.query === "string" ? rawArgs.query : "";
-    return executeKeyedAssets(options, request, [queryText]);
+    const contextTexts = Array.isArray(rawArgs.context_texts)
+      ? rawArgs.context_texts.filter((value): value is string => typeof value === "string" && value.trim() !== "")
+      : [];
+    const proseTail = await loadRecentManuscriptTail(db, request);
+    return executeKeyedAssets(options, request, [queryText, ...contextTexts, ...proseTail]);
   }
   const args = parseSearchAssetsArgs(request.tool_args);
   const resolution = await resolveSearchAssetsMode(options, request, args);
@@ -1213,7 +1262,7 @@ async function executeSearchAssets(
            $1::text AS tenant_id,
            $2::text AS project_id,
            $3::text AS query_text,
-           ('%' || $3::text || '%') AS keyword_pattern,
+           $11::text[] AS keyword_patterns,
            $4::text AS search_mode,
            CASE WHEN $4::text = 'keyword' THEN NULL::vector ELSE $5::vector END AS query_embedding,
            $6::text AS embedding_model,
@@ -1235,14 +1284,18 @@ async function executeSearchAssets(
            GREATEST(
              ts_rank_cd(search_doc.search_vector, websearch_to_tsquery('simple'::regconfig, input.query_text)),
              CASE
-               WHEN search_doc.title ILIKE input.keyword_pattern
-                 OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
-                 OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern THEN 0.5
-               ELSE 0.0
+               WHEN cardinality(input.keyword_patterns) = 0 THEN 0.0
+               ELSE 0.5 * (
+                 SELECT COUNT(*)::float8
+                   FROM unnest(input.keyword_patterns) AS term(pattern)
+                  WHERE search_doc.title ILIKE term.pattern
+                     OR COALESCE(search_doc.body, '') ILIKE term.pattern
+                     OR COALESCE(asset.content_text, '') ILIKE term.pattern
+               ) / cardinality(input.keyword_patterns)
              END
            )::float8 AS keyword_score,
            CASE
-             WHEN input.search_mode = 'keyword' THEN 0.0
+             WHEN input.search_mode = 'keyword' OR embedding.embedding_id IS NULL THEN 0.0
              ELSE GREATEST(0.0, LEAST(1.0, 1.0 - (embedding.embedding <=> input.query_embedding)))
            END::float8 AS vector_score
          FROM search_input input
@@ -1266,12 +1319,16 @@ async function executeSearchAssets(
            AND (asset.reveal_after_chapter_order IS NULL OR asset.reveal_after_chapter_order <= $10)
            AND (
              (
-               input.search_mode = 'keyword'
+               input.search_mode IN ('keyword', 'hybrid')
                AND (
                  search_doc.search_vector @@ websearch_to_tsquery('simple'::regconfig, input.query_text)
-                 OR search_doc.title ILIKE input.keyword_pattern
-                 OR COALESCE(search_doc.body, '') ILIKE input.keyword_pattern
-                 OR COALESCE(asset.content_text, '') ILIKE input.keyword_pattern
+                 OR EXISTS (
+                   SELECT 1
+                     FROM unnest(input.keyword_patterns) AS term(pattern)
+                    WHERE search_doc.title ILIKE term.pattern
+                       OR COALESCE(search_doc.body, '') ILIKE term.pattern
+                       OR COALESCE(asset.content_text, '') ILIKE term.pattern
+                 )
                )
              )
              OR (
@@ -1334,7 +1391,8 @@ async function executeSearchAssets(
         assetTypes,
         [...SEARCH_ASSETS_LIFECYCLES],
         args.top_k ?? SEARCH_ASSETS_DEFAULT_TOP_K,
-        currentChapterOrder
+        currentChapterOrder,
+        toLikePatterns(tokenizeSearchQuery(args.query))
       ]
     )
   ).rows;
@@ -1364,7 +1422,7 @@ async function executeSearchAssets(
   // 召回一个、带出一串: optionally attach each recalled asset's 1-hop relations.
   let relatedByAsset: Map<string, Record<string, unknown>[]> | undefined;
   if (args.expand_relations === true && assets.length > 0) {
-    relatedByAsset = await loadRelatedAssets(db, request, assets.map((a) => String(a.asset_id)));
+    relatedByAsset = await loadRelatedAssets(db, request, assets.map((a) => String(a.asset_id)), currentChapterOrder);
   }
   if (relatedByAsset) {
     for (const asset of assets) {
@@ -1394,12 +1452,15 @@ async function executeSearchAssets(
 
 /**
  * Batch-load 1-hop related assets for a set of recalled asset ids, grouped by
- * the originating asset. Same lifecycle gate as query_asset_relationships.
+ * the originating asset. Same lifecycle gate as query_asset_relationships, and
+ * the same spoiler gate as direct recall — relation expansion must never leak
+ * an asset the author has not reached yet.
  */
 async function loadRelatedAssets(
   db: QueryExecutor,
   request: ExecuteWriterToolRequest,
-  assetIds: string[]
+  assetIds: string[],
+  currentChapterOrder: number | null
 ): Promise<Map<string, Record<string, unknown>[]>> {
   const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
     `SELECT
@@ -1424,11 +1485,12 @@ async function loadRelatedAssets(
       AND (link.asset_a_id = related.asset_id OR link.asset_b_id = related.asset_id)
       AND related.enabled = TRUE
       AND related.lifecycle IN ('seed', 'canon', 'material')
+      AND (related.reveal_after_chapter_order IS NULL OR related.reveal_after_chapter_order <= $4)
      WHERE link.tenant_id = $1
        AND link.project_id = $2
        AND (link.asset_a_id = ANY($3::uuid[]) OR link.asset_b_id = ANY($3::uuid[]))
      ORDER BY related.pinned DESC, related.updated_at DESC`,
-    [request.tenant_id, request.project_id, assetIds]);
+    [request.tenant_id, request.project_id, assetIds, currentChapterOrder]);
   const map = new Map<string, Record<string, unknown>[]>();
   for (const row of result.rows) {
     const origin = typeof row.origin_asset_id === "string" ? row.origin_asset_id : "";
@@ -1459,6 +1521,67 @@ function safeParseJsonArray(value: unknown): unknown[] {
 const SEARCH_MANUSCRIPT_DEFAULT_TOP_K = 5;
 const SEARCH_MANUSCRIPT_MAX_TOP_K = 12;
 const MANUSCRIPT_SNIPPET_MAX = 240;
+
+// Resolve the exclusive block_order bound for prior-prose recall. block_order
+// is the manuscript-global timeline, so the bound is the writing cursor:
+//   1. target scene has prose      -> its tail (strict <, keeps recall non-adjacent)
+//   2. target chapter has prose    -> just past the chapter tail
+//   3. empty chapter mid-book      -> just past the last block of earlier chapters
+//   4. no target at all            -> the whole existing manuscript is prior
+// A brand-new first chapter resolves to 0: nothing was written before it.
+async function resolveManuscriptCursorBound(
+  db: QueryExecutor,
+  request: ExecuteWriterToolRequest,
+  chapterId: string | null,
+  sceneId: string | null
+): Promise<number> {
+  const maxOrder = async (text: string, values: readonly unknown[]): Promise<number> => {
+    const result = await queryWithTenantContext<Record<string, unknown>>(db, request, text, values);
+    const value = Number(result.rows[0]?.cursor_order ?? -1);
+    return Number.isFinite(value) ? value : -1;
+  };
+  if (sceneId) {
+    const sceneMax = await maxOrder(
+      `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
+         FROM manuscript_blocks
+        WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND scene_id = $3::uuid`,
+      [request.tenant_id, request.project_id, sceneId]
+    );
+    if (sceneMax >= 0) return sceneMax;
+  }
+  if (chapterId) {
+    const chapterMax = await maxOrder(
+      `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
+         FROM manuscript_blocks
+        WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND chapter_id = $3::uuid`,
+      [request.tenant_id, request.project_id, chapterId]
+    );
+    if (chapterMax >= 0) return chapterMax + 1;
+    const priorChaptersMax = await maxOrder(
+      `SELECT COALESCE(MAX(block.block_order), -1)::int AS cursor_order
+         FROM manuscript_blocks block
+         JOIN chapters chapter
+           ON chapter.tenant_id = block.tenant_id
+          AND chapter.project_id = block.project_id
+          AND chapter.chapter_id = block.chapter_id
+        WHERE block.tenant_id = $1 AND block.project_id = $2 AND block.status = 'active'
+          AND chapter.chapter_order < (
+            SELECT current.chapter_order
+              FROM chapters current
+             WHERE current.tenant_id = $1 AND current.project_id = $2 AND current.chapter_id = $3::uuid
+          )`,
+      [request.tenant_id, request.project_id, chapterId]
+    );
+    return priorChaptersMax >= 0 ? priorChaptersMax + 1 : 0;
+  }
+  const projectMax = await maxOrder(
+    `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
+       FROM manuscript_blocks
+      WHERE tenant_id = $1 AND project_id = $2 AND status = 'active'`,
+    [request.tenant_id, request.project_id]
+  );
+  return projectMax + 1;
+}
 
 function parseSearchManuscriptArgs(raw: Record<string, unknown> | undefined): SearchManuscriptArgs {
   const args = (raw ?? {}) as Record<string, unknown>;
@@ -1511,21 +1634,10 @@ async function executeSearchManuscript(
     };
   }
 
-  // Current cursor = highest block_order of the target scene; recall is limited to
-  // strictly earlier prose plus other scenes, never blocks after the cursor.
-  const cursorResult = await queryWithTenantContext<Record<string, unknown>>(
-    db,
-    request,
-    sceneId
-      ? `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
-           FROM manuscript_blocks
-          WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND scene_id = $3::uuid`
-      : `SELECT COALESCE(MAX(block_order), -1)::int AS cursor_order
-           FROM manuscript_blocks
-          WHERE tenant_id = $1 AND project_id = $2 AND status = 'active' AND chapter_id = $3::uuid`,
-    [request.tenant_id, request.project_id, sceneId ?? chapterId ?? ""]
-  );
-  const cursorOrder = Number(cursorResult.rows[0]?.cursor_order ?? -1);
+  // Exclusive timeline bound: recall only prose strictly before the point being
+  // written. The old gate ("... OR other scene") readmitted FUTURE blocks from
+  // other scenes — a timeline leak, not a feature.
+  const cursorOrder = await resolveManuscriptCursorBound(db, request, chapterId, sceneId);
 
   const rows = (
     await queryWithTenantContext<Record<string, unknown>>(
@@ -1549,19 +1661,15 @@ async function executeSearchManuscript(
          AND embedding.project_id::text = $2
          AND embedding.embedding_model = $3
          AND embedding.dimensions = vector_dims($4::vector)
-         AND (
-           block.block_order < $5
-           OR ($6::uuid IS NOT NULL AND block.scene_id IS DISTINCT FROM $6::uuid)
-         )
+         AND block.block_order < $5
        ORDER BY embedding.embedding <=> $4::vector ASC
-       LIMIT $7`,
+       LIMIT $6`,
       [
         request.tenant_id,
         request.project_id,
         embedding.modelId,
         toVectorLiteral(embedding.embedding),
         cursorOrder,
-        sceneId,
         args.top_k ?? SEARCH_MANUSCRIPT_DEFAULT_TOP_K
       ]
     )

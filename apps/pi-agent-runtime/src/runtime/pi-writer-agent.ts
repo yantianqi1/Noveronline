@@ -28,6 +28,12 @@ import { assertToolAllowed, ToolPermissionDenied } from "../tools/permissions.js
 
 const noArguments = ObjectSchema({}, { additionalProperties: false });
 
+// Hard budget on orchestrator tool calls. Parallel execution fires up to ~6
+// calls per round, so this allows a few full retrieval rounds; beyond it every
+// call is blocked with an instruction to write the brief from what was already
+// retrieved. Without a cap, a looping model burns the whole activity timeout.
+const ORCHESTRATOR_TOOL_CALL_MAX = 24;
+
 // The one retrieval tool that takes planning input from the orchestrator: a
 // query string plus optional narrowing. All other tools stay argument-free.
 const searchAssetsArguments = ObjectSchema(
@@ -35,7 +41,9 @@ const searchAssetsArguments = ObjectSchema(
     query: { type: "string", description: "Retrieval intent describing the settings, prior scenes, or canon needed for this passage." },
     asset_types: { type: "array", items: { type: "string" }, description: "Optional asset_type filter such as world_rule, relationship, character." },
     top_k: { type: "number", description: "How many assets to return (default 10, max 25)." },
-    mode: { type: "string", enum: ["keyword", "vector", "hybrid"], description: "Retrieval mode; defaults to hybrid and degrades to keyword when embeddings are unavailable." }
+    mode: { type: "string", enum: ["keyword", "vector", "hybrid"], description: "Retrieval mode; defaults to hybrid and degrades to keyword when embeddings are unavailable." },
+    channel: { type: "string", enum: ["hybrid", "keyed"], description: "Recall channel from the retrieval plan. \"keyed\" runs deterministic proper-name recall: assets whose title — or a character alias — appears in the query text are force-injected, bypassing relevance scoring (use for 人名/地名/功法名). Omit or \"hybrid\" for relevance search." },
+    expand_relations: { type: "boolean", description: "When true, each recalled asset also carries its 1-hop related assets (召回一个、带出一串) — its weapon, sect, allies — with relation_type and direction. Use for the plan's graph queries or when a character/setting's connections matter." }
   },
   { additionalProperties: false }
 );
@@ -84,6 +92,7 @@ export function createPiWriterExecution() {
       const runtime = createRuntime(request);
       const tools = request.tool_names.map((name) => writerTool(name, request));
       let permissionError: ToolPermissionDenied | undefined;
+      let toolCallCount = 0;
       const agent = new Agent({
         initialState: {
           systemPrompt: orchestratorSystemPrompt(),
@@ -95,6 +104,13 @@ export function createPiWriterExecution() {
         getApiKey: (provider) => provider === runtime.providerId ? request.apiKey : undefined,
         toolExecution: request.tool_execution ?? "parallel",
         beforeToolCall: async ({ toolCall }) => {
+          toolCallCount += 1;
+          if (toolCallCount > ORCHESTRATOR_TOOL_CALL_MAX) {
+            return {
+              block: true,
+              reason: `Tool budget exhausted (${ORCHESTRATOR_TOOL_CALL_MAX} calls). Stop calling tools and write the final writing brief from what you already retrieved.`
+            };
+          }
           try {
             assertToolAllowed(toolCall.name, {
               tenant_id: request.tenant_id,
@@ -501,13 +517,26 @@ function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
     graph_node_ids: request.graph_node_ids,
     worldline_path_ids: request.worldline_path_ids,
     target_words: request.target_words,
+    ...(request.always_on_assets && request.always_on_assets.length > 0
+      ? {
+          always_on_canon: {
+            guidance: "Constant canon: these core laws and style constraints are always in force. Carry the binding constraints into the writing brief verbatim where relevant; they are already injected — do not spend retrieval calls re-fetching them.",
+            items: request.always_on_assets.map((asset) => ({
+              title: asset.title,
+              asset_type: asset.asset_type,
+              content: asset.content_preview
+            }))
+          }
+        }
+      : {}),
     ...(request.retrieval_plan
       ? {
           retrieval_plan: {
             intent: request.retrieval_plan.intent,
             coverage: request.retrieval_plan.coverage,
-            guidance: "A retrieval planner already analysed this request. For each planned query below, call search_assets with its text and asset_types. You may add calls for anything the plan missed, and use query_manuscript_context for the immediate scene. Cite what you use.",
+            guidance: "A retrieval planner already analysed this request. Run each planned query on its channel: \"hybrid\" → search_assets with the text and asset_types; \"keyed\" → search_assets with channel:\"keyed\" and the same text (deterministic proper-name recall); \"manuscript\" → search_manuscript with the text; \"graph\" → search_assets with expand_relations:true, then query_asset_relationships on the pivotal asset_id to bring out its connections. After running more than one channel, merge them with fuse_recall. You may add calls for anything the plan missed, and use query_manuscript_context for the immediate scene. Cite what you use.",
             queries: request.retrieval_plan.queries.map((q) => ({
+              channel: q.channel,
               text: q.text,
               asset_types: q.asset_types,
               top_k: q.top_k
@@ -521,9 +550,21 @@ function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
 function composerSystemPrompt(request: ComposeDraftRequest): string {
   const configured = typeof request.settings.system_prompt === "string" ? request.settings.system_prompt.trim() : "";
   if (request.mode === "revise") {
-    return configured || "You revise selected novel prose. Return only the revised selection text. Do not wrap in quotes or commentary. Do not claim manuscript adoption.";
+    return configured || "You revise selected novel prose. Respect every constant_canon constraint if provided. Return only the revised selection text. Do not wrap in quotes or commentary. Do not claim manuscript adoption.";
   }
-  return configured || "Write original novel prose from the supplied writing brief. Return prose only. Do not claim manuscript adoption or review completion.";
+  return configured || "Write original novel prose from the supplied writing brief. Respect every constant_canon constraint if provided. Return prose only. Do not claim manuscript adoption or review completion.";
+}
+
+/** Constant-injection canon rides the composer prompt directly (doc 41 §4.2):
+ * core laws and style/ban rules bind the prose even when the brief is thin. */
+function composerConstantCanon(request: ComposeDraftRequest): Record<string, unknown> {
+  if (!request.always_on_assets || request.always_on_assets.length === 0) return {};
+  return {
+    constant_canon: request.always_on_assets.map((asset) => ({
+      title: asset.title,
+      content: asset.content_preview
+    }))
+  };
 }
 
 function composerPrompt(request: ComposeDraftRequest): string {
@@ -534,13 +575,15 @@ function composerPrompt(request: ComposeDraftRequest): string {
       selection_text: request.revise.selection_text,
       block_id: request.revise.block_id,
       action: request.revise.action,
-      writing_brief: request.writing_brief
+      writing_brief: request.writing_brief,
+      ...composerConstantCanon(request)
     });
   }
   return JSON.stringify({
     instruction: request.instruction,
     writing_brief: request.writing_brief,
-    target_words: request.target_words
+    target_words: request.target_words,
+    ...composerConstantCanon(request)
   });
 }
 

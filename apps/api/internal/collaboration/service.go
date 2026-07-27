@@ -57,6 +57,11 @@ func (s *Service) CreateInvitation(ctx context.Context, input CreateInvitationIn
 	if err := requireManager(ctx, tx, input.TenantID, input.ProjectID, input.ActorID); err != nil {
 		return Invitation{}, err
 	}
+	if input.ProjectID == "" && input.TenantRole == "owner" {
+		if err := requireTenantOwner(ctx, tx, input.TenantID, input.ActorID); err != nil {
+			return Invitation{}, err
+		}
+	}
 	var invitation Invitation
 	err = tx.QueryRowContext(ctx, `INSERT INTO collaboration_invitations (
   tenant_id, project_id, email_normalized, tenant_role, project_role, token_hash,
@@ -225,7 +230,9 @@ WHERE i.tenant_id = $1 AND i.token_hash = $3 FOR UPDATE`, tenantID, input.ActorI
 	}
 	if invitation.ProjectID == "" {
 		_, err = tx.ExecContext(ctx, `INSERT INTO tenant_memberships (tenant_id,user_id,role,status,joined_at,access_scope) VALUES ($1,$2,$3,'active',$4,'tenant')
-ON CONFLICT (tenant_id,user_id) DO UPDATE SET role=EXCLUDED.role,status='active',joined_at=COALESCE(tenant_memberships.joined_at,EXCLUDED.joined_at),access_scope='tenant',updated_at=now()`, tenantID, input.ActorID, invitation.TenantRole, s.now())
+ON CONFLICT (tenant_id,user_id) DO UPDATE SET
+  role=CASE WHEN tenant_memberships.role='owner' AND tenant_memberships.status='active' THEN 'owner' ELSE EXCLUDED.role END,
+  status='active',joined_at=COALESCE(tenant_memberships.joined_at,EXCLUDED.joined_at),access_scope='tenant',updated_at=now()`, tenantID, input.ActorID, invitation.TenantRole, s.now())
 	} else {
 		_, err = tx.ExecContext(ctx, `INSERT INTO tenant_memberships (tenant_id,user_id,role,status,joined_at,access_scope) VALUES ($1,$2,'viewer','active',$3,'project_bridge')
 	ON CONFLICT (tenant_id,user_id) DO UPDATE SET
@@ -381,6 +388,11 @@ func (s *Service) ChangeMembership(ctx context.Context, input MembershipChangeIn
 	if err := requireManager(ctx, tx, input.TenantID, input.ProjectID, input.ActorID); err != nil {
 		return Member{}, err
 	}
+	if input.ProjectID == "" && input.Role == "owner" {
+		if err := requireTenantOwner(ctx, tx, input.TenantID, input.ActorID); err != nil {
+			return Member{}, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, input.TenantID); err != nil {
 		return Member{}, backendError()
 	}
@@ -419,13 +431,18 @@ func (s *Service) ChangeMembership(ctx context.Context, input MembershipChangeIn
 		}
 	}
 	var member Member
-	query := "UPDATE " + table + " SET role=$4,status=$5,updated_at=now() WHERE " + scopeWhere + " RETURNING tenant_id::text," + func() string {
+	rolePlaceholder, statusPlaceholder := "$3", "$4"
+	queryArgs := []any{input.TenantID, input.UserID, afterRole, afterStatus}
+	if input.ProjectID != "" {
+		rolePlaceholder, statusPlaceholder = "$4", "$5"
+		queryArgs = []any{input.TenantID, input.UserID, input.ProjectID, afterRole, afterStatus}
+	}
+	query := "UPDATE " + table + " SET role=" + rolePlaceholder + ",status=" + statusPlaceholder + ",updated_at=now() WHERE " + scopeWhere + " RETURNING tenant_id::text," + func() string {
 		if input.ProjectID != "" {
 			return "project_id::text"
 		}
 		return "''"
 	}() + ",user_id::text,role,status,created_at,updated_at"
-	queryArgs := []any{input.TenantID, input.UserID, input.ProjectID, afterRole, afterStatus}
 	if err := tx.QueryRowContext(ctx, query, queryArgs...).Scan(&member.TenantID, &member.ProjectID, &member.UserID, &member.Role, &member.Status, &member.CreatedAt, &member.UpdatedAt); err != nil {
 		return Member{}, backendError()
 	}
@@ -530,6 +547,21 @@ func requireManager(ctx context.Context, tx *sql.Tx, tenantID, projectID, actorI
 	}
 	if !allowed {
 		return &AppError{Code: CodeAccessDenied, Message: "membership management access is required"}
+	}
+	return nil
+}
+func requireTenantOwner(ctx context.Context, tx *sql.Tx, tenantID, actorID string) error {
+	var allowed bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+  SELECT 1 FROM tenant_memberships
+  WHERE tenant_id=$1 AND user_id=$2 AND access_scope='tenant'
+    AND status='active' AND role='owner'
+)`, tenantID, actorID).Scan(&allowed)
+	if err != nil {
+		return backendError()
+	}
+	if !allowed {
+		return &AppError{Code: CodeAccessDenied, Message: "tenant owner access is required to grant owner role"}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check, RefreshCw, ScrollText, X } from "lucide-react";
 import { useId, useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ReadinessSnapshot, SeedRun, WorkflowEvent } from "@/lib/api/overview-types";
 import { runStatusLabel, type EnrichmentProgress, type SeedProgress } from "@/lib/api/seed";
@@ -58,13 +59,13 @@ export function SeedProgressPanel({
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
-      className="overflow-hidden rounded-card border border-line bg-panel shadow-[0_1px_2px_rgba(23,26,27,0.05)]"
+      className="overflow-hidden rounded-modal border border-line bg-panel shadow-hairline"
     >
       {/* header: title + status + actions */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-line-soft px-7 py-5">
         <div className="min-w-0">
-          <h2 className="font-serif text-[17px] font-semibold text-ink">分析进度</h2>
-          <p className="mt-1 truncate text-[13px] text-muted" title={progress.headline}>
+          <h2 className="font-serif text-lg font-semibold text-ink">分析进度</h2>
+          <p className="mt-1 truncate text-sm text-muted" title={progress.headline}>
             {progress.headline}
           </p>
         </div>
@@ -108,8 +109,8 @@ export function SeedProgressPanel({
             transition={{ duration: 0.3 }}
             className="overflow-hidden border-t border-line-soft"
           >
-            <div className="mx-7 my-5 rounded-[10px] border border-line-soft bg-paper/60 px-4 py-3">
-              <div className="flex items-center justify-between text-[12px]">
+            <div className="mx-7 my-5 rounded-panel border border-line-soft bg-paper/60 px-4 py-3">
+              <div className="flex items-center justify-between text-caption">
                 <span className="text-muted">
                   {progress.sequentialReading.chapterGuess
                     ? `正在读「${progress.sequentialReading.chapterGuess}」`
@@ -146,7 +147,7 @@ export function SeedProgressPanel({
 
       {run && (
         <div className="border-t border-line-soft px-7 py-3">
-          <p className="text-[11px] tracking-wide text-muted/60">{runStatusLabel(run)} · 分析由 Seed 流水线驱动</p>
+          <p className="text-caption tracking-wide text-muted-soft">{runStatusLabel(run)} · 分析由 Seed 流水线驱动</p>
         </div>
       )}
 
@@ -155,7 +156,7 @@ export function SeedProgressPanel({
           (cancel the wedged run so it becomes retryable) plus a refresh. */}
       {stalled && run && (
         <div className="border-t border-line-soft bg-paper/40 px-7 py-4">
-          <p className="text-[12.5px] leading-relaxed text-muted">
+          <p className="text-caption leading-relaxed text-muted">
             这一步的进度状态没有正常更新，所以暂时无法直接重试。已读出的内容不会丢。取消这次卡住的分析后，就能重新开始了。
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -212,8 +213,8 @@ function EnrichmentBlock({
           transition={{ duration: 0.3 }}
           className="overflow-hidden border-t border-line-soft"
         >
-          <div className="mx-7 my-5 rounded-[10px] border border-line-soft bg-paper/60 px-4 py-3">
-            <div className="flex items-center justify-between gap-3 text-[12px]">
+          <div className="mx-7 my-5 rounded-panel border border-line-soft bg-paper/60 px-4 py-3">
+            <div className="flex items-center justify-between gap-3 text-caption">
               <span className="truncate text-muted" title={progress.message}>
                 {progress.message}
               </span>
@@ -272,13 +273,13 @@ function CoverageBlock({
   return (
     <div className="border-t border-line-soft px-7 py-4">
       {complete ? (
-        <p className="text-[12.5px] text-muted">
+        <p className="text-caption text-muted">
           全书 <span className="font-medium text-ink">{total}</span> 章已全部拆解完成。
         </p>
       ) : (
-        <div className="rounded-[10px] border border-accent/30 bg-accent-wash/40 px-4 py-3">
+        <div className="rounded-panel border border-accent/30 bg-accent-wash/40 px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-[12.5px] text-ink">
+            <p className="text-caption text-ink">
               已拆解 <span className="font-semibold text-accent">{succeeded}/{total}</span> 章，
               <span className="text-accent"> {failedIds.length > 0 ? `${failedIds.length} 章` : `部分章节`}</span>
               没有读成功，这些章的内容不会进资产库。
@@ -295,13 +296,13 @@ function CoverageBlock({
               {failedIds.slice(0, 24).map((id) => (
                 <span
                   key={id}
-                  className="rounded-[5px] border border-accent/30 bg-panel px-1.5 py-0.5 font-mono text-[10.5px] text-accent"
+                  className="rounded-control border border-accent/30 bg-panel px-1.5 py-0.5 font-mono text-caption text-accent"
                 >
                   {shortSegmentId(id)}
                 </span>
               ))}
               {failedIds.length > 24 && (
-                <span className="px-1 py-0.5 text-[10.5px] text-muted">+{failedIds.length - 24} 章</span>
+                <span className="px-1 py-0.5 text-caption text-muted">+{failedIds.length - 24} 章</span>
               )}
             </div>
           )}
@@ -487,14 +488,14 @@ function InkTrail({
           return (
             <span
               key={stage.key}
-              className={`absolute whitespace-nowrap text-[11px] transition-colors ${
-                active
+              className={`absolute whitespace-nowrap text-caption transition-colors ${
+ active
                   ? "font-semibold text-ink"
                   : stage.status === "completed"
                     ? "text-ink-soft"
                     : stage.status === "failed"
                       ? "text-accent"
-                      : "text-muted/70"
+                      : "text-muted-soft"
               }`}
               style={{
                 ...alignStyle,
@@ -605,6 +606,12 @@ function StageSeal({
   );
 }
 
+/**
+ * Run status. "已完成" and "失败" were previously both solid vermilion, which
+ * meant the colour said nothing about the outcome — the icon was doing all the
+ * work. Success now reads green, failure danger-red, in progress neutral gold,
+ * each still paired with an icon so colour is never the only signal.
+ */
 function StatusChip({
   tone,
   label,
@@ -612,17 +619,11 @@ function StatusChip({
   tone: "running" | "failed" | "done";
   label: string;
 }) {
-  const cls =
-    tone === "failed"
-      ? "bg-accent text-white"
-      : tone === "done"
-        ? "bg-accent-strong text-white"
-        : "bg-accent-wash text-accent-strong";
   return (
-    <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11.5px] font-medium ${cls}`}>
-      {tone === "done" && <Check className="mr-1 size-3" aria-hidden />}
-      {tone === "failed" && <X className="mr-1 size-3" aria-hidden />}
+    <Badge tone={tone === "failed" ? "danger" : tone === "done" ? "success" : "warning"}>
+      {tone === "done" && <Check className="size-3" aria-hidden />}
+      {tone === "failed" && <X className="size-3" aria-hidden />}
       {label}
-    </span>
+    </Badge>
   );
 }

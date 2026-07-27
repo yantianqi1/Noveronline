@@ -530,6 +530,22 @@ type recordingDraftAdoptionStore struct {
 	called bool
 }
 
+type recordingWriterDraftReader struct {
+	input  workflows.GetWriterDraftInput
+	result workflows.WriterDraftDetail
+	err    error
+	called bool
+}
+
+func (r *recordingWriterDraftReader) GetWriterDraft(_ context.Context, input workflows.GetWriterDraftInput) (workflows.WriterDraftDetail, error) {
+	r.input = input
+	r.called = true
+	if r.err != nil {
+		return workflows.WriterDraftDetail{}, r.err
+	}
+	return r.result, nil
+}
+
 func (s *recordingDraftAdoptionStore) AdoptDraft(ctx context.Context, input workflows.DraftAdoptionInput) (workflows.DraftAdoptionResult, error) {
 	s.input = input
 	s.called = true
@@ -1017,9 +1033,14 @@ func (s *recordingWorldlineEventMutationStore) UpdateEvent(ctx context.Context, 
 }
 
 type recordingWorldlineVariableStore struct {
-	input    worldline.InjectVariableInput
-	variable worldline.VariableRecord
-	err      error
+	input     worldline.InjectVariableInput
+	lockInput worldline.SetVariableLockedInput
+	listInput worldline.ListVariablesInput
+	variable  worldline.VariableRecord
+	variables []worldline.VariableRecord
+	err       error
+	lockErr   error
+	listErr   error
 }
 
 func (s *recordingWorldlineVariableStore) InjectVariable(ctx context.Context, input worldline.InjectVariableInput) (worldline.VariableRecord, error) {
@@ -1028,6 +1049,24 @@ func (s *recordingWorldlineVariableStore) InjectVariable(ctx context.Context, in
 		return worldline.VariableRecord{}, s.err
 	}
 	return s.variable, nil
+}
+
+func (s *recordingWorldlineVariableStore) SetVariableLocked(ctx context.Context, input worldline.SetVariableLockedInput) (worldline.VariableRecord, error) {
+	s.lockInput = input
+	if s.lockErr != nil {
+		return worldline.VariableRecord{}, s.lockErr
+	}
+	variable := s.variable
+	variable.Locked = input.Locked
+	return variable, nil
+}
+
+func (s *recordingWorldlineVariableStore) ListVariables(ctx context.Context, input worldline.ListVariablesInput) ([]worldline.VariableRecord, error) {
+	s.listInput = input
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.variables, nil
 }
 
 type recordingWorldlinePreparationStore struct {
@@ -10327,6 +10366,151 @@ func TestInjectWorldlineVariableFailsClosedWithoutConfiguredStore(t *testing.T) 
 	}
 }
 
+func TestSetWorldlineVariableLockedCarriesTenantSessionActorContext(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
+	store := &recordingWorldlineVariableStore{
+		variable: worldline.VariableRecord{
+			VariableID: "variable-1",
+			SessionID:  "session-1",
+			ProjectID:  "project-owner",
+			Name:       "主角亲族提前失踪",
+			Locked:     false,
+		},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineVariableStore: store})
+	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-sessions/session-1/variables/variable-1", strings.NewReader(`{
+		"tenant_id":"tenant-from-body",
+		"locked":true
+	}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-lock-1")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-lock-1")
+	if store.lockInput.TenantID != "tenant-123" ||
+		store.lockInput.SessionID != "session-1" ||
+		store.lockInput.VariableID != "variable-1" ||
+		store.lockInput.ActorUserID != "user-456" ||
+		!store.lockInput.Locked {
+		t.Fatalf("variable lock store lost context: %#v", store.lockInput)
+	}
+	if store.lockInput.TenantID == "tenant-from-body" {
+		t.Fatalf("variable lock store trusted body tenant: %#v", store.lockInput)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"variable_id":"variable-1"`) || !strings.Contains(body, `"locked":true`) {
+		t.Fatalf("unexpected variable lock response: %s", body)
+	}
+	if strings.Contains(body, "tenant-from-body") {
+		t.Fatalf("variable lock response echoed body tenant: %s", body)
+	}
+}
+
+func TestSetWorldlineVariableLockedRejectsMalformedPaths(t *testing.T) {
+	store := &recordingWorldlineVariableStore{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineVariableStore: store})
+	for _, path := range []string{
+		"/v1/worldline-sessions/session-1/variables",
+		"/v1/worldline-sessions/session-1/variables/",
+		"/v1/worldline-sessions/session-1/variables/variable-1/extra",
+	} {
+		request := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(`{"locked":true}`))
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s, got %d: %s", path, response.Code, response.Body.String())
+		}
+	}
+	if store.lockInput.VariableID != "" {
+		t.Fatalf("malformed path reached the variable store: %#v", store.lockInput)
+	}
+}
+
+func TestSetWorldlineVariableLockedFailsClosedWithoutConfiguredStore(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+	}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
+	request := httptest.NewRequest(http.MethodPatch, "/v1/worldline-sessions/session-1/variables/variable-1", strings.NewReader(`{"locked":true}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED") {
+		t.Fatalf("expected fail-closed worldline variable error, got %s", response.Body.String())
+	}
+}
+
+func TestListWorldlineVariablesAuthorizesReadAndReturnsItems(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-owner"},
+	}
+	store := &recordingWorldlineVariableStore{
+		variables: []worldline.VariableRecord{
+			{VariableID: "variable-1", SessionID: "session-1", ProjectID: "project-owner", Name: "亲族提前失踪", Locked: true},
+			{VariableID: "variable-2", SessionID: "session-1", ProjectID: "project-owner", Name: "未锁定变量", Locked: false},
+		},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineSessionReader: reader, WorldlineVariableStore: store})
+	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1/variables", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-list-1")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	assertSingleProjectReadAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-list-1")
+	if store.listInput.TenantID != "tenant-123" || store.listInput.SessionID != "session-1" {
+		t.Fatalf("variable list lost scope: %#v", store.listInput)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"variable_id":"variable-1"`) ||
+		!strings.Contains(body, `"variable_id":"variable-2"`) ||
+		!strings.Contains(body, `"locked":true`) {
+		t.Fatalf("unexpected variable list response: %s", body)
+	}
+}
+
+func TestListWorldlineVariablesFailsClosedWithoutConfiguredStore(t *testing.T) {
+	reader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-123"},
+	}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineSessionReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/v1/worldline-sessions/session-1/variables", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "WORLDLINE_VARIABLE_BACKEND_UNCONFIGURED") {
+		t.Fatalf("expected fail-closed worldline variable error, got %s", response.Body.String())
+	}
+}
+
 func TestListWorldlineSessionsFailsClosedWithoutConfiguredReader(t *testing.T) {
 	server := newDevelopmentServer(projectReadAllowedConfig(Config{WriterStarter: &recordingStarter{}}))
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/worldline-sessions", nil)
@@ -14567,7 +14751,7 @@ func TestStartAssetReindexFailsClosedWithoutConfiguredStarter(t *testing.T) {
 
 func TestStartStoryGraphBuildCarriesTenantProjectActorRequestAndOptionsContext(t *testing.T) {
 	starter := &recordingStoryGraphBuildStarter{}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StoryGraphBuildStarter: starter})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, StoryGraphBuildStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/story-graph/builds",
@@ -14614,10 +14798,11 @@ func TestStartStoryGraphBuildCarriesTenantProjectActorRequestAndOptionsContext(t
 }
 
 func TestStartStoryGraphBuildFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/builds", strings.NewReader(`{"mode":"full"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -14636,7 +14821,7 @@ func TestStartStoryGraphBuildFailsClosedWithoutConfiguredStarter(t *testing.T) {
 
 func TestStartStoryGraphBondGenerationCarriesTenantProjectActorRequestSelectionAndOptionsContext(t *testing.T) {
 	starter := &recordingStoryGraphBondGenerationStarter{}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StoryGraphBondGenerationStarter: starter})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, StoryGraphBondGenerationStarter: starter})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/projects/project-123/story-graph/bond-generations",
@@ -14686,10 +14871,11 @@ func TestStartStoryGraphBondGenerationCarriesTenantProjectActorRequestSelectionA
 }
 
 func TestStartStoryGraphBondGenerationFailsClosedWithoutConfiguredStarter(t *testing.T) {
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/story-graph/bond-generations", strings.NewReader(`{"node_ids":["node-1","node-2"],"options":{"generate_bonds":true}}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -15366,7 +15552,7 @@ func TestStartSeedRunCarriesTenantProjectUploadActorAndRequestContext(t *testing
 			ParseStatus: "uploaded",
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	requestBody := bytes.NewBufferString(`{
 		"tenant_id":"evil-tenant",
 		"upload_id":"upload-123",
@@ -15456,7 +15642,7 @@ func TestStartSeedRunSanitizesSensitiveRequestIDBeforeStarter(t *testing.T) {
 			ParseStatus: "uploaded",
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
@@ -15480,13 +15666,14 @@ func TestStartSeedRunSanitizesSensitiveRequestIDBeforeStarter(t *testing.T) {
 }
 
 func TestErrorEnvelopeSanitizesSensitiveRequestIDHeader(t *testing.T) {
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: &recordingSeedStarter{}, SourceFileStore: &recordingSourceFileStore{}})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: &recordingSeedStarter{}, SourceFileStore: &recordingSourceFileStore{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{
 		"upload_id":"upload-123",
 		"api_key":"sk-hidden"
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/project-123/source-files/upload-123/book.txt draft=private manuscript=private")
 	response := httptest.NewRecorder()
 
@@ -15512,13 +15699,14 @@ func TestErrorEnvelopeSanitizesSensitiveRequestIDHeader(t *testing.T) {
 func TestStartSeedRunValidationErrorDoesNotEchoSensitiveUnknownField(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{
 		"upload_id":"upload-123",
 		"api_key":"sk-hidden"
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-seed-validation")
 	response := httptest.NewRecorder()
 
@@ -15548,10 +15736,11 @@ func TestStartSeedRunSanitizesSourceFileValidationErrorAtHTTPBoundary(t *testing
 	sourceStore := &recordingSourceFileStore{
 		validateErr: sourcefiles.NewAppError("SOURCE_FILE_QUERY_FAILED", "driver exploded prompt=hidden api_key=sk-hidden credential_ref=cred-hidden object_key=projects/project-123/source-files/upload-123/book.txt"),
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", strings.NewReader(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-seed-source-validation")
 	response := httptest.NewRecorder()
 
@@ -15583,10 +15772,11 @@ func TestStartSeedRunSanitizesSourceFileValidationErrorAtHTTPBoundary(t *testing
 
 func TestStartSeedRunFailsClosedWithoutSourceFileBackendBeforeWorkflowStart(t *testing.T) {
 	starter := &recordingSeedStarter{}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	request.Header.Set("X-Request-Id", "req-seed-source-unconfigured")
 	response := httptest.NewRecorder()
 
@@ -15617,10 +15807,11 @@ func TestStartSeedRunFailsClosedWithoutSourceFileBackendBeforeWorkflowStart(t *t
 func TestStartSeedRunFailsWhenUploadDoesNotBelongToTenantProject(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{validateErr: sourcefiles.NewAppError("NOT_FOUND", "source file upload not found")}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-missing"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -15643,10 +15834,11 @@ func TestStartSeedRunFailsWhenUploadDoesNotBelongToTenantProject(t *testing.T) {
 func TestStartSeedRunFailsWhenUploadIsNotCompleted(t *testing.T) {
 	starter := &recordingSeedStarter{}
 	sourceStore := &recordingSourceFileStore{validateErr: sourcefiles.NewAppError("SOURCE_FILE_NOT_UPLOADED", "source file upload must be completed before seed run")}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SeedStarter: starter, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-pending"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -15680,10 +15872,11 @@ func TestStartSeedRunFailsClosedWithoutConfiguredStarter(t *testing.T) {
 			ParseStatus: "uploaded",
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SourceFileStore: sourceStore})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}, SourceFileStore: sourceStore})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/seed-runs", bytes.NewBufferString(`{"upload_id":"upload-123"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -18469,7 +18662,9 @@ func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t
 			BlockOrder: 12,
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	reader := &recordingWriterDraftReader{result: workflows.WriterDraftDetail{DraftID: "draft-123", ProjectID: "project-789", Status: "candidate"}}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{Authorizer: authorizer, WriterStarter: &recordingStarter{}, WriterDraftReader: reader, DraftAdoptionStore: store})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{
 		"tenant_id":"tenant-from-body",
 		"chapter_id":"chapter-override",
@@ -18500,6 +18695,12 @@ func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t
 	}
 	if store.input.TenantID == "tenant-from-body" {
 		t.Fatalf("draft adoption trusted body tenant: %#v", store.input)
+	}
+	if !reader.called || reader.input.DraftID != "draft-123" || reader.input.IncludeContent {
+		t.Fatalf("draft adoption owner lookup lost scope: %#v", reader)
+	}
+	if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-789" || authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+		t.Fatalf("draft adoption did not authorize the owner project: %#v", authorizer.inputs)
 	}
 	body := response.Body.String()
 	for _, expected := range []string{
@@ -18535,9 +18736,15 @@ func TestAdoptDraftCarriesTenantDraftActorRequestContextAndReturnsMetadataOnly(t
 
 func TestAdoptDraftRejectsSceneOverrideUntilManuscriptBlocksSupportScenes(t *testing.T) {
 	store := &recordingDraftAdoptionStore{}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	server := newDevelopmentServer(Config{
+		Authorizer:         &recordingAuthorizer{},
+		WriterStarter:      &recordingStarter{},
+		WriterDraftReader:  &recordingWriterDraftReader{result: workflows.WriterDraftDetail{DraftID: "draft-123", ProjectID: "project-123"}},
+		DraftAdoptionStore: store,
+	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"scene_id":"scene-123"}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -18560,9 +18767,15 @@ func TestAdoptDraftSanitizesStoreErrorMessagesAtHTTPBoundary(t *testing.T) {
 			Message: "driver leaked prompt=hidden api_key=sk-hidden credential_ref=cred draft=private manuscript=private content_text=secret",
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, DraftAdoptionStore: store})
+	server := newDevelopmentServer(Config{
+		Authorizer:         &recordingAuthorizer{},
+		WriterStarter:      &recordingStarter{},
+		WriterDraftReader:  &recordingWriterDraftReader{result: workflows.WriterDraftDetail{DraftID: "draft-123", ProjectID: "project-123"}},
+		DraftAdoptionStore: store,
+	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/drafts/draft-123/adoptions", strings.NewReader(`{"block_order":1}`))
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -18615,6 +18828,103 @@ func TestAdoptDraftFailsClosedWithoutConfiguredStore(t *testing.T) {
 	}
 	if body.Error.Code != "DRAFT_ADOPTION_BACKEND_UNCONFIGURED" || body.Error.RequestID != "reqadopt" {
 		t.Fatalf("expected explicit draft adoption backend error, got %#v", body)
+	}
+}
+
+func TestProjectWriteEndpointsDenyBeforeDecodeOrSideEffects(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		body      string
+		configure func(*recordingAuthorizer) (Config, func() bool)
+		projectID string
+	}{
+		{
+			name: "seed run",
+			path: "/v1/projects/project-123/seed-runs",
+			body: `{not-json}`,
+			configure: func(authorizer *recordingAuthorizer) (Config, func() bool) {
+				starter := &recordingSeedStarter{}
+				sourceStore := &recordingSourceFileStore{}
+				return Config{Authorizer: authorizer, SeedStarter: starter, SourceFileStore: sourceStore}, func() bool {
+					return starter.input.ProjectID != "" || sourceStore.validateInput.ProjectID != ""
+				}
+			},
+			projectID: "project-123",
+		},
+		{
+			name: "story graph build",
+			path: "/v1/projects/project-123/story-graph/builds",
+			body: `{not-json}`,
+			configure: func(authorizer *recordingAuthorizer) (Config, func() bool) {
+				starter := &recordingStoryGraphBuildStarter{}
+				return Config{Authorizer: authorizer, StoryGraphBuildStarter: starter}, func() bool {
+					return starter.input.ProjectID != ""
+				}
+			},
+			projectID: "project-123",
+		},
+		{
+			name: "story graph bond generation",
+			path: "/v1/projects/project-123/story-graph/bond-generations",
+			body: `{not-json}`,
+			configure: func(authorizer *recordingAuthorizer) (Config, func() bool) {
+				starter := &recordingStoryGraphBondGenerationStarter{}
+				return Config{Authorizer: authorizer, StoryGraphBondGenerationStarter: starter}, func() bool {
+					return starter.input.ProjectID != ""
+				}
+			},
+			projectID: "project-123",
+		},
+		{
+			name: "hello agent",
+			path: "/v1/projects/project-123/agent-runtime/hello-runs",
+			configure: func(authorizer *recordingAuthorizer) (Config, func() bool) {
+				starter := &recordingHelloStarter{}
+				return Config{Authorizer: authorizer, AgentHelloStarter: starter}, func() bool {
+					return starter.input.ProjectID != ""
+				}
+			},
+			projectID: "project-123",
+		},
+		{
+			name: "draft adoption",
+			path: "/v1/drafts/draft-123/adoptions",
+			body: `{not-json}`,
+			configure: func(authorizer *recordingAuthorizer) (Config, func() bool) {
+				store := &recordingDraftAdoptionStore{}
+				reader := &recordingWriterDraftReader{result: workflows.WriterDraftDetail{DraftID: "draft-123", ProjectID: "owner-project"}}
+				return Config{Authorizer: authorizer, WriterDraftReader: reader, DraftAdoptionStore: store}, func() bool {
+					return store.called
+				}
+			},
+			projectID: "owner-project",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "private denial detail"}}
+			config, sideEffectCalled := tt.configure(authorizer)
+			server := newDevelopmentServer(config)
+			request := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.Header.Set("X-User-Id", "user-123")
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+			}
+			if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != tt.projectID || authorizer.inputs[0].Permission != auth.PermissionCreativeWrite {
+				t.Fatalf("unexpected authorization input: %#v", authorizer.inputs)
+			}
+			if sideEffectCalled() {
+				t.Fatal("write endpoint reached a downstream side effect after authorization denial")
+			}
+		})
 	}
 }
 
@@ -19131,9 +19441,10 @@ func TestCancelWriterRunFailsClosedWhenBackendIsUnavailable(t *testing.T) {
 }
 
 func TestStartAgentRuntimeHelloWithoutConfiguredStarterFailsExplicitly(t *testing.T) {
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
+	server := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}, WriterStarter: &recordingStarter{}})
 	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/agent-runtime/hello-runs", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -19153,6 +19464,7 @@ func TestStartAgentRuntimeHelloWithoutConfiguredStarterFailsExplicitly(t *testin
 func TestStartAgentRuntimeHelloCarriesContext(t *testing.T) {
 	starter := &recordingHelloStarter{}
 	server := newDevelopmentServer(Config{
+		Authorizer:        &recordingAuthorizer{},
 		WriterStarter:     &recordingStarter{},
 		AgentHelloStarter: starter,
 	})

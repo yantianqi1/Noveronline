@@ -164,10 +164,50 @@ func (s *SQLStore) UpdateBlock(ctx context.Context, input UpdateBlockInput) (Pri
 	if err := recordVersion(ctx, tx, input.Scope, updated, reason, ""); err != nil {
 		return PrivateBlock{}, mutationFailed()
 	}
+	// An adopted block whose prose no longer matches the draft it came from has
+	// been hand-edited: the rail's settled card must stop linking to it as "the
+	// adopted text". Cleared in the same transaction so rail and canvas never
+	// disagree. DeleteBlock funnels here with ContentText == nil and is skipped.
+	if input.ContentText != nil {
+		if err := clearThreadAdoptionOnDivergence(ctx, tx, input.Scope, current, updated); err != nil {
+			return PrivateBlock{}, mutationFailed()
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return PrivateBlock{}, mutationFailed()
 	}
 	return updated, nil
+}
+
+// clearThreadAdoptionOnDivergence un-marks the thread messages of the run that
+// produced this block once the block's text diverges from its source draft.
+// RLS sees the draft row because this tx holds the block's FOR UPDATE lock.
+func clearThreadAdoptionOnDivergence(ctx context.Context, tx *sql.Tx, scope Scope, current, updated PrivateBlock) error {
+	if current.SourceWriterRunID == "" || current.SourceDraftID == "" {
+		return nil
+	}
+	if current.ContentText == updated.ContentText {
+		return nil
+	}
+	var sourceText string
+	err := tx.QueryRowContext(ctx, `SELECT content_text FROM writer_drafts
+WHERE tenant_id::text = $1 AND project_id::text = $2 AND draft_id::text = $3`,
+		scope.TenantID, scope.ProjectID, current.SourceDraftID).Scan(&sourceText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(sourceText) == strings.TrimSpace(updated.ContentText) {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE writer_thread_messages
+SET metadata_jsonb = COALESCE(metadata_jsonb, '{}'::jsonb) - 'adopted' - 'adopted_block_id' - 'adopted_chapter_id'
+WHERE tenant_id::text = $1 AND project_id::text = $2 AND run_id::text = $3
+  AND COALESCE(metadata_jsonb->>'adopted', 'false') = 'true'`,
+		scope.TenantID, scope.ProjectID, current.SourceWriterRunID)
+	return err
 }
 
 func (s *SQLStore) DeleteBlock(ctx context.Context, input DeleteBlockInput) (BlockMetadata, error) {

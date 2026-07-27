@@ -36,7 +36,7 @@ export function WriterComposer({
 
   return (
     <div className="shrink-0 border-t border-line-soft bg-panel/60 p-3">
-      <div className="flex items-end gap-2 rounded-[14px] border border-line bg-panel px-3 py-2 shadow-[0_1px_0_rgba(255,255,255,0.6)_inset] transition-colors focus-within:border-accent/50">
+      <div className="flex items-end gap-2 rounded-modal border border-line bg-panel px-3 py-2 shadow-panel transition-colors focus-within:border-accent/50">
         <textarea
           ref={areaRef}
           value={value}
@@ -51,19 +51,19 @@ export function WriterComposer({
           disabled={disabled}
           placeholder={placeholder ?? "让合著者起草、续写或改写… (Enter 发送)"}
           aria-label="给合著者的指令"
-          className="max-h-[132px] flex-1 resize-none bg-transparent py-1.5 text-[13.5px] leading-relaxed text-ink placeholder:text-muted/60 focus:outline-none disabled:opacity-60"
+          className="max-h-[132px] flex-1 resize-none bg-transparent py-1.5 text-sm leading-relaxed text-ink placeholder:text-muted-soft focus:outline-none disabled:opacity-60"
         />
         <button
           type="button"
           onClick={submit}
           disabled={disabled || value.trim().length === 0}
           aria-label="发送"
-          className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-accent text-white shadow-[0_6px_14px_-6px_rgba(143,33,27,0.6)] transition-all hover:bg-accent-strong disabled:opacity-40 disabled:shadow-none"
+          className="grid size-8 shrink-0 place-items-center rounded-panel bg-accent text-panel shadow-accent transition-all hover:bg-accent-strong disabled:opacity-40 disabled:shadow-none"
         >
           <ArrowUp className="size-4" aria-hidden />
         </button>
       </div>
-      <p className="mt-1.5 px-1 text-[10.5px] leading-relaxed text-muted/70">
+      <p className="mt-1.5 px-1 text-caption leading-relaxed text-muted-soft">
         起草的内容先作候选稿，经你采用才进手稿。Shift+Enter 换行。
       </p>
     </div>

@@ -49,8 +49,7 @@ export async function createWorkerActivityBundle(options: WorkerActivityBundleOp
   const deps = createPostgresPiWriterDeps({
     db,
     decryptCredential,
-    composeDraft: options.composeDraft ?? writerExecution.composeDraft,
-    rerankRecall: options.composeDraft ? undefined : writerExecution.rerankRecall
+    composeDraft: options.composeDraft ?? writerExecution.composeDraft
   });
   deps.cancellationSignal = options.cancellationSignal;
   deps.loadProviderStageCheckpoint = options.loadProviderStageCheckpoint;

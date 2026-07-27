@@ -80,10 +80,10 @@ export function CoverMasthead() {
         animate="show"
         className="relative z-10 flex items-center gap-3 px-12 pt-12"
       >
-        <span className="grid size-10 place-items-center rounded-[10px] bg-white/12 text-white ring-1 ring-white/25 backdrop-blur-sm">
+        <span className="grid size-10 place-items-center rounded-panel bg-panel/12 text-panel ring-1 ring-white/25 backdrop-blur-sm">
           <Feather className="size-4.5" aria-hidden />
         </span>
-        <span className="text-[13px] font-medium tracking-[0.28em] text-white/85">
+        <span className="text-sm font-medium tracking-label text-panel/85">
           MIROFISH NOVEL
         </span>
       </motion.div>
@@ -99,7 +99,7 @@ export function CoverMasthead() {
           {/* vertical title — one motion.span per hanzi, staggered */}
           <h1
             aria-label={TITLE}
-            className="select-none font-brush font-semibold text-white"
+            className="select-none font-brush font-semibold text-panel"
             style={{
               writingMode: "vertical-rl",
               textOrientation: "upright",
@@ -132,7 +132,7 @@ export function CoverMasthead() {
           {/* vertical subtitle */}
           <motion.p
             variants={subtitle}
-            className="select-none font-serif text-white/70"
+            className="select-none font-serif text-panel/70"
             style={{
               writingMode: "vertical-rl",
               textOrientation: "upright",
@@ -147,9 +147,9 @@ export function CoverMasthead() {
           {/* seal — stamps in at the foot of the masthead */}
           <motion.div
             variants={seal}
-            className="absolute -bottom-2 right-0 grid size-14 place-items-center rounded-[6px] bg-white text-accent shadow-[0_6px_18px_-4px_rgba(60,8,6,0.5)] ring-1 ring-black/5"
+            className="absolute -bottom-2 right-0 grid size-14 place-items-center rounded-control bg-panel text-accent shadow-accent ring-1 ring-ink/5"
           >
-            <span className="font-brush text-[26px] leading-none">著</span>
+            <span className="font-brush text-display">著</span>
           </motion.div>
         </motion.div>
       </div>
@@ -161,12 +161,12 @@ export function CoverMasthead() {
         animate="show"
         className="relative z-10 flex items-end justify-between gap-6 px-12 pb-12"
       >
-        <p className="max-w-[250px] font-serif text-[14px] leading-[1.9] text-white/75">
+        <p className="max-w-[250px] font-serif text-base text-panel/75">
           把故事世界、人物与章节，
           <br />
           收进一处安静的地方。
         </p>
-        <p className="shrink-0 text-[11px] tracking-[0.3em] text-white/45">NO.01 — 卷首</p>
+        <p className="shrink-0 text-caption tracking-label text-panel/45">NO.01 — 卷首</p>
       </motion.div>
     </>
   );

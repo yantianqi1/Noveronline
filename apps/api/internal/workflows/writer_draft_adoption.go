@@ -290,6 +290,10 @@ candidate_draft AS (
   FROM draft_scope
   WHERE status = 'candidate'
 ),
+project_order_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(candidate_draft.project_id::text, 0))
+  FROM candidate_draft
+),
 existing_adoption AS (
   SELECT
     draft_scope.draft_id::text AS draft_id,
@@ -318,6 +322,7 @@ next_order AS (
         AND existing.project_id = candidate_draft.project_id
     )) AS block_order
   FROM candidate_draft
+  CROSS JOIN project_order_lock
 ),
 inserted_block AS (
   INSERT INTO manuscript_blocks (
@@ -445,6 +450,27 @@ audit_insert AS (
   JOIN inserted_version
     ON inserted_version.block_id = inserted_block.block_id
   RETURNING resource_id
+),
+thread_adoption AS (
+  -- Mark this run's thread turns as adopted in the same transaction, so a
+  -- page reload reconstructs the rail's settled card from the messages alone.
+  -- Idempotent (re-adopt replays land here too) and cheap: usually one row.
+  UPDATE writer_thread_messages m
+  SET metadata_jsonb = COALESCE(m.metadata_jsonb, '{}'::jsonb) || jsonb_build_object(
+    'adopted', true,
+    'adopted_block_id', inserted_block.block_id::text,
+    'adopted_chapter_id', inserted_block.chapter_id::text
+  )
+  FROM candidate_draft
+  JOIN inserted_block
+    ON inserted_block.source_draft_id = candidate_draft.draft_id
+  JOIN updated_draft
+    ON updated_draft.draft_id = candidate_draft.draft_id
+  WHERE m.tenant_id = candidate_draft.tenant_id
+    AND m.project_id = candidate_draft.project_id
+    AND m.run_id = candidate_draft.run_id
+    AND m.role IN ('user', 'agent')
+  RETURNING m.message_id
 ),
 new_adoption AS (
   SELECT

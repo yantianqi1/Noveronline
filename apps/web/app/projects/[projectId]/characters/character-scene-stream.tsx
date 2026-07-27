@@ -3,7 +3,7 @@
 import { motion } from "motion/react";
 import { CandidateReviewCard } from "@/components/character";
 import type { CharacterProposal, CharacterTurn } from "@/lib/api/character-console-types";
-import { DUR, EASE, useFadeUp } from "./character-motion";
+import { DUR, EASE, useFadeUp } from "@/lib/motion";
 
 /**
  * The scene stream — the soul of the Character Console. A first-person script
@@ -56,8 +56,8 @@ export function CharacterSceneStream({
         transition={{ duration: DUR.med, ease: EASE }}
         className="flex h-full flex-col items-center justify-center px-8 py-16 text-center"
       >
-        <p className="font-serif text-[17px] font-medium text-ink">舞台还空着</p>
-        <p className="mt-1.5 max-w-[300px] text-[13px] leading-relaxed text-muted">
+        <p className="font-serif text-lg font-medium text-ink">舞台还空着</p>
+        <p className="mt-1.5 max-w-[300px] text-sm leading-relaxed text-muted">
           此刻，你想让 TA 做什么？说一句、做一件事，世界会回应你。
         </p>
       </motion.div>
@@ -74,7 +74,7 @@ export function CharacterSceneStream({
       {streamingBody ? (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
           <div className="max-w-[680px]">
-            <p className="font-serif text-[15px] leading-[1.9] text-ink-soft">
+            <p className="font-serif text-md text-ink-soft">
               {streamingBody}
               <span className="ml-0.5 inline-block h-[1.1em] w-[2px] animate-pulse bg-accent align-middle" />
             </p>
@@ -113,8 +113,8 @@ function SceneTurn({ turn, index }: { turn: CharacterTurn; index: number }) {
         transition={{ duration: DUR.med, ease: EASE }}
         className="flex justify-center"
       >
-        <p className="max-w-[560px] text-center text-[12.5px] italic leading-relaxed tracking-wide text-muted">
-          ⌇ {turn.summary}
+        <p className="max-w-[560px] text-center font-serif text-caption leading-relaxed tracking-wide text-muted">
+          {turn.summary}
         </p>
       </motion.div>
     );
@@ -130,9 +130,9 @@ function SceneTurn({ turn, index }: { turn: CharacterTurn; index: number }) {
         className="flex justify-end"
       >
         <div className="max-w-[560px]">
-          <p className="mb-1 text-right text-[10.5px] font-medium tracking-[0.2em] text-accent">{label}</p>
-          <div className="rounded-[14px] rounded-tr-[4px] border border-accent/25 bg-accent-wash px-4 py-3">
-            <p className="font-serif text-[14.5px] leading-[1.85] text-ink">{turn.summary}</p>
+          <p className="mb-1 text-right text-caption font-medium tracking-label text-muted">{label}</p>
+          <div className="rounded-modal rounded-tr-control border border-accent/30 bg-accent-wash px-4 py-3">
+            <p className="font-serif text-base text-ink">{turn.summary}</p>
           </div>
         </div>
       </motion.div>
@@ -148,7 +148,7 @@ function SceneTurn({ turn, index }: { turn: CharacterTurn; index: number }) {
       className="flex justify-start"
     >
       <div className="max-w-[680px]">
-        <p className="font-serif text-[15px] leading-[1.9] text-ink-soft">{turn.summary}</p>
+        <p className="font-serif text-md text-ink-soft">{turn.summary}</p>
       </div>
     </motion.div>
   );

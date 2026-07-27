@@ -6,7 +6,7 @@ import { motion } from "motion/react";
 import { cn } from "@/lib/utils";
 import type { AssetRecord } from "@/lib/api/asset-types";
 
-import { DUR, EASE, useFadeUp } from "./asset-motion";
+import { DUR, EASE, useFadeUp } from "@/lib/motion";
 import { formatAssetTime, lifecycleChip, presentSource, presentType } from "./asset-present";
 
 /**
@@ -43,18 +43,18 @@ export function AssetList({
               onClick={() => onSelect(asset.asset_id)}
               aria-current={active ? "true" : undefined}
               className={cn(
-                "flex w-full items-start gap-3 rounded-[10px] border px-4 py-3 text-left",
+                "flex w-full items-start gap-3 rounded-panel border px-4 py-3 text-left",
                 "transition-[transform,box-shadow,background-color,border-color] duration-200",
                 "motion-safe:hover:-translate-y-px",
                 active
-                  ? "border-accent/35 bg-accent-wash/60"
+                  ? "border-accent/30 bg-accent-wash/60"
                   : "border-transparent hover:border-line hover:bg-panel hover:shadow-(--shadow-lift)",
               )}
             >
               <span
                 className={cn(
-                  "mt-0.5 grid size-9 shrink-0 place-items-center rounded-[9px] border",
-                  active ? "border-accent/35 bg-panel text-accent" : "border-line bg-panel text-muted",
+                  "mt-0.5 grid size-9 shrink-0 place-items-center rounded-panel border",
+                  active ? "border-accent/30 bg-panel text-accent" : "border-line bg-panel text-muted",
                 )}
               >
                 <type.icon className="size-[17px]" aria-hidden />
@@ -65,21 +65,21 @@ export function AssetList({
                   {asset.pinned ? (
                     <Pin className="size-[13px] shrink-0 fill-accent/70 text-accent" aria-label="已置顶" />
                   ) : null}
-                  <span className="truncate font-serif text-[15.5px] font-semibold text-ink">
+                  <span className="truncate font-serif text-md font-semibold text-ink">
                     {asset.title || "未命名资产"}
                   </span>
                 </span>
                 {asset.summary ? (
-                  <span className="mt-1 line-clamp-1 block text-[13px] leading-relaxed text-muted">
+                  <span className="mt-1 line-clamp-1 block text-sm leading-relaxed text-muted">
                     {asset.summary}
                   </span>
                 ) : null}
-                <span className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px] text-muted/80">
+                <span className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-muted">
                   <span>{type.label}</span>
                   <Dot />
                   <span>{presentSource(asset.source_kind)}</span>
                   {asset.tags.slice(0, 3).map((tag) => (
-                    <span key={tag} className="rounded-full bg-paper-deep/70 px-2 py-px text-[11px] text-muted">
+                    <span key={tag} className="rounded-full bg-paper-deep/70 px-2 py-px text-caption text-muted">
                       {tag}
                     </span>
                   ))}
@@ -89,7 +89,7 @@ export function AssetList({
 
               <span
                 className={cn(
-                  "mt-0.5 shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                  "mt-0.5 shrink-0 rounded-full border px-2 py-0.5 text-caption font-medium",
                   chip.className,
                 )}
               >
@@ -105,7 +105,7 @@ export function AssetList({
 
 function Dot() {
   return (
-    <span aria-hidden className="text-muted/40">
+    <span aria-hidden className="text-muted-soft">
       ·
     </span>
   );

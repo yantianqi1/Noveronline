@@ -96,6 +96,17 @@ func TestLiveAssetDistillationSettingsAdmissionProposalsAndRLS(t *testing.T) {
 	if err != nil || !replay || replayed.RunID != admission.RunID {
 		t.Fatalf("fingerprint replay: %#v replay=%v err=%v", replayed, replay, err)
 	}
+	if _, err := admin.Exec(`UPDATE workflow_runs SET status='failed', message='failed for retry test' WHERE tenant_id=$1 AND run_id=$2`, liveDistillTenant, admission.RunID); err != nil {
+		t.Fatalf("mark first distillation failed: %v", err)
+	}
+	retried, replay, err := store.AdmitManual(ctx, StartManualInput{
+		Scope:    Scope{TenantID: liveDistillTenant, ProjectID: liveDistillProject, ActorUserID: liveDistillUser, RequestID: "live-distill-3"},
+		BlockIDs: []string{liveDistillBlock}, ExpectedVersions: map[string]int{liveDistillBlock: 1},
+	})
+	if err != nil || replay || retried.RunID == admission.RunID || retried.RequestID == admission.RequestID {
+		t.Fatalf("failed fingerprint retry: %#v replay=%v err=%v", retried, replay, err)
+	}
+	admission = retried
 
 	// Persist a disabled candidate + pending proposal + evidence as worker would.
 	candidateID := insertLiveCandidate(t, admin, admission.RequestID)
@@ -237,7 +248,7 @@ func schemaReady(t *testing.T, db *sql.DB) bool {
 	  AND to_regclass('public.manuscript_asset_distillation_requests') IS NOT NULL
 	  AND to_regclass('public.asset_candidate_proposals') IS NOT NULL
 	  AND to_regclass('public.asset_candidate_evidence') IS NOT NULL
-	  AND EXISTS (SELECT 1 FROM mirofish_schema_migrations WHERE version='0018_manuscript_asset_distillation')`).Scan(&ok)
+	  AND EXISTS (SELECT 1 FROM mirofish_schema_migrations WHERE version='0031_asset_distillation_retryable_fingerprint')`).Scan(&ok)
 	if err != nil {
 		t.Logf("schema probe: %v", err)
 		return false

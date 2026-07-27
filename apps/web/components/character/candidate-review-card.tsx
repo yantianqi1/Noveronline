@@ -47,27 +47,27 @@ export function CandidateReviewCard({
   return (
     <article
       className={cn(
-        "relative rounded-[12px] border border-dashed border-gold/60 bg-gold/[0.05] p-4",
+        "relative rounded-modal border border-dashed border-gold/60 bg-gold/[0.05] p-4",
         className,
       )}
     >
       <div className="flex items-start justify-between gap-3">
-        <h4 className="font-serif text-[15px] font-semibold leading-snug text-ink">{title}</h4>
-        <span className="shrink-0 rounded-[5px] border border-gold/50 bg-gold/10 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-gold">
+        <h4 className="font-serif text-md font-semibold leading-snug text-ink">{title}</h4>
+        <span className="shrink-0 rounded-control border border-gold/50 bg-gold/10 px-1.5 py-0.5 text-caption font-medium tracking-wide text-gold">
           候选
         </span>
       </div>
 
       {sourceLabel ? (
-        <p className="mt-1 text-[11px] tracking-wide text-muted">{sourceLabel}</p>
+        <p className="mt-1 text-caption tracking-wide text-muted">{sourceLabel}</p>
       ) : null}
 
-      <p className="mt-2 font-serif text-[13.5px] leading-[1.85] text-ink-soft">{summary}</p>
+      <p className="mt-2 font-serif text-sm text-ink-soft">{summary}</p>
 
       {metas.length > 0 ? (
         <dl className="mt-3 space-y-1.5 border-t border-gold/25 pt-3">
           {metas.map((meta) => (
-            <div key={meta.label} className="flex items-baseline justify-between gap-3 text-[12px]">
+            <div key={meta.label} className="flex items-baseline justify-between gap-3 text-caption">
               <dt className="shrink-0 text-muted">{meta.label}</dt>
               <dd className="min-w-0 truncate text-right text-ink-soft">{meta.value}</dd>
             </div>
@@ -81,7 +81,7 @@ export function CandidateReviewCard({
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             rows={3}
-            className="w-full resize-none rounded-[8px] border border-line bg-panel px-3 py-2 font-serif text-[13px] leading-relaxed text-ink outline-none focus:border-accent/50"
+            className="w-full resize-none rounded-panel border border-line bg-panel px-3 py-2 font-serif text-sm leading-relaxed text-ink outline-none focus:border-accent/50"
             placeholder="修正这条候选的走向…"
           />
           <div className="mt-2 flex justify-end gap-2">
@@ -91,7 +91,7 @@ export function CandidateReviewCard({
                 setEditing(false);
                 setDraft(summary);
               }}
-              className="rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[12px] text-muted transition-colors hover:text-ink"
+              className="rounded-panel border border-line bg-panel px-3 py-1.5 text-caption text-muted transition-colors hover:text-ink"
             >
               取消
             </button>
@@ -102,7 +102,7 @@ export function CandidateReviewCard({
                 onEdit?.(draft);
                 setEditing(false);
               }}
-              className="rounded-[8px] border border-accent/40 bg-accent-wash px-3 py-1.5 text-[12px] font-medium text-accent transition-colors hover:bg-accent/15 disabled:opacity-50"
+              className="rounded-panel border border-accent/50 bg-accent-wash px-3 py-1.5 text-caption font-medium text-accent transition-colors hover:bg-accent/15 disabled:opacity-50"
             >
               保存修改
             </button>
@@ -117,7 +117,7 @@ export function CandidateReviewCard({
               type="button"
               disabled={busy}
               onClick={onAdopt}
-              className="rounded-[8px] bg-accent px-3.5 py-1.5 text-[12.5px] font-medium text-panel shadow-sm transition-colors hover:bg-accent-strong disabled:opacity-50"
+              className="rounded-panel bg-accent px-3.5 py-1.5 text-caption font-medium text-panel shadow-hairline transition-colors hover:bg-accent-strong disabled:opacity-50"
             >
               采纳
             </button>
@@ -130,7 +130,7 @@ export function CandidateReviewCard({
                 setDraft(summary);
                 setEditing(true);
               }}
-              className="rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[12px] text-ink transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+              className="rounded-panel border border-line bg-panel px-3 py-1.5 text-caption text-ink transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-50"
             >
               编辑后果
             </button>
@@ -140,7 +140,7 @@ export function CandidateReviewCard({
               type="button"
               disabled={busy}
               onClick={onReject}
-              className="ml-auto rounded-[8px] px-3 py-1.5 text-[12px] text-muted transition-colors hover:text-accent disabled:opacity-50"
+              className="ml-auto rounded-panel px-3 py-1.5 text-caption text-muted transition-colors hover:text-accent disabled:opacity-50"
             >
               拒绝
             </button>

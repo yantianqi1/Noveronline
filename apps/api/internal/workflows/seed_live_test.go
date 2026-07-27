@@ -52,7 +52,7 @@ func TestLiveSeedGoUploadCompleteAndAdmissionUseMinIOAndAppRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new minio writer: %v", err)
 	}
-	verifier, err := sourcefiles.NewMinIOObjectVerifier(sourcefiles.MinIOObjectVerifierConfig(storageConfig))
+	verifier, err := sourcefiles.NewMinIOObjectVerifier(liveSeedObjectVerifierConfig(storageConfig))
 	if err != nil {
 		t.Fatalf("new minio verifier: %v", err)
 	}
@@ -286,6 +286,16 @@ func liveSeedObjectStorageConfig(t *testing.T) sourcefiles.MinIOObjectWriterConf
 	}
 }
 
+func liveSeedObjectVerifierConfig(config sourcefiles.MinIOObjectWriterConfig) sourcefiles.MinIOObjectVerifierConfig {
+	return sourcefiles.MinIOObjectVerifierConfig{
+		Endpoint:  config.Endpoint,
+		AccessKey: config.AccessKey,
+		SecretKey: config.SecretKey,
+		Bucket:    config.Bucket,
+		UseSSL:    config.UseSSL,
+	}
+}
+
 func prepareLiveSeedGoDatabase(t *testing.T, adminURL string) {
 	t.Helper()
 	db, err := sql.Open("pgx", adminURL)
@@ -295,7 +305,7 @@ func prepareLiveSeedGoDatabase(t *testing.T, adminURL string) {
 	defer db.Close()
 	migrationPath := filepath.Join("..", "..", "..", "..", "infra", "postgres", "migrations", "0001_core_saas.sql")
 	if err := testschema.EnsureLiveSchema(context.Background(), db, migrationPath,
-		"tenants", "projects", "source_files", "workflow_runs", "seed_tasks", "workflow_events",
+		"tenants", "projects", "source_files", "workflow_runs", "text_segments", "seed_segment_retry_requests", "workflow_events",
 	); err != nil {
 		t.Fatalf("ensure live Seed schema: %v", err)
 	}
@@ -372,7 +382,7 @@ func prepareLiveSeedGoRetryFixture(t *testing.T) liveSeedGoRetryFixture {
 	if err != nil {
 		t.Fatalf("new minio writer: %v", err)
 	}
-	verifier, err := sourcefiles.NewMinIOObjectVerifier(sourcefiles.MinIOObjectVerifierConfig(storageConfig))
+	verifier, err := sourcefiles.NewMinIOObjectVerifier(liveSeedObjectVerifierConfig(storageConfig))
 	if err != nil {
 		t.Fatalf("new minio verifier: %v", err)
 	}

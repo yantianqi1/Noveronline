@@ -26,7 +26,7 @@ wait_batch() {
   batch_size=0
 }
 
-for queue in maintenance seed-heavy asset-light graph-heavy worldline-interactive character-interactive writer-reviewer writer-planning writer-streaming legacy-import; do
+for queue in maintenance seed-heavy asset-light graph-heavy worldline-interactive character-interactive writer-reviewer writer-planning writer-streaming analysis-streaming worldline-cast-streaming legacy-import; do
   for queue_type in workflow activity; do
     (
       output="$(temporal task-queue describe \

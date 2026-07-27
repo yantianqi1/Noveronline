@@ -49,6 +49,9 @@ func TestSQLManuscriptArtifactExporterBuildsRealUTF8TXTFromAdoptedBlocks(t *test
 	if !strings.Contains(queryer.query, "content_text") || !strings.Contains(queryer.query, "ORDER BY block_order") {
 		t.Fatalf("export query must read adopted prose in manuscript order: %s", queryer.query)
 	}
+	if !strings.Contains(queryer.query, "status = 'active'") {
+		t.Fatalf("export query must exclude soft-deleted manuscript blocks: %s", queryer.query)
+	}
 }
 
 func TestSQLManuscriptArtifactExporterFailsClosedForEmptyOrUnsupportedExport(t *testing.T) {

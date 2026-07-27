@@ -51,20 +51,20 @@ export function GraphFilterRail({
   const hiddenCount = hidden.size;
 
   return (
-    <aside className="flex h-full w-[236px] shrink-0 flex-col gap-5 overflow-y-auto border-r border-line-soft bg-panel px-4 py-5">
+    <aside className="hidden h-full w-rail-filter shrink-0 flex-col gap-5 overflow-y-auto border-r border-line-soft bg-panel px-4 py-5 stack:flex">
       {/* Snapshot provenance */}
       <motion.section
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-        className="rounded-[14px] border border-line bg-paper p-4"
+        className="rounded-modal border border-line bg-paper p-4"
       >
-        <div className="flex items-center gap-2 text-[11px] font-medium tracking-[0.2em] text-gold">
+        <div className="flex items-center gap-2 text-caption font-medium tracking-label text-gold">
           <Sparkles className="size-3.5" aria-hidden />
-          图 谱 快 照
+          图谱快照
         </div>
         {snapshot ? (
-          <dl className="mt-3 space-y-2 text-[12.5px]">
+          <dl className="mt-3 space-y-2 text-caption">
             <div className="flex items-baseline justify-between">
               <dt className="text-muted">版本</dt>
               <dd className="font-medium tabular-nums text-ink">v{snapshot.version}</dd>
@@ -83,7 +83,7 @@ export function GraphFilterRail({
             </div>
           </dl>
         ) : (
-          <p className="mt-3 text-[12.5px] leading-relaxed text-muted">尚无快照</p>
+          <p className="mt-3 text-caption leading-relaxed text-muted">尚无快照</p>
         )}
       </motion.section>
 
@@ -95,12 +95,12 @@ export function GraphFilterRail({
         className="flex min-h-0 flex-1 flex-col"
       >
         <div className="mb-2.5 flex items-center justify-between px-1">
-          <h2 className="text-[11px] font-medium tracking-[0.24em] text-muted">图 层</h2>
+          <h2 className="text-caption font-medium tracking-label text-muted">图层</h2>
           {hiddenCount > 0 ? (
             <button
               type="button"
               onClick={onShowAll}
-              className="text-[11.5px] font-medium text-accent transition-colors hover:text-accent-strong"
+              className="text-caption font-medium text-accent transition-colors hover:text-accent-strong"
             >
               全部显示
             </button>
@@ -117,7 +117,7 @@ export function GraphFilterRail({
           <>
             <div className="my-3 flex items-center gap-2 px-1">
               <span className="h-px flex-1 bg-line-soft" />
-              <span className="text-[10px] tracking-[0.2em] text-muted/70">背 景 概 念</span>
+              <span className="text-caption tracking-label text-muted-soft">背景概念</span>
               <span className="h-px flex-1 bg-line-soft" />
             </div>
             <ul className="space-y-1 overflow-y-auto">
@@ -130,12 +130,12 @@ export function GraphFilterRail({
 
         {/* 世界 scope — narrows the timeline-event band */}
         {hasEvents ? (
-          <div className="mt-4 rounded-[12px] border border-line bg-paper p-3">
-            <div className="mb-2 flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.18em] text-muted">
+          <div className="mt-4 rounded-modal border border-line bg-paper p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-caption font-medium tracking-label text-muted">
               <Globe2 className="size-3" aria-hidden />
-              世 界
+              世界
             </div>
-            <div className="grid grid-cols-3 gap-1 rounded-[9px] bg-paper-deep p-1">
+            <div className="grid grid-cols-3 gap-1 rounded-panel bg-paper-deep p-1">
               {[
                 { value: "all", label: "全部" },
                 { value: "modern", label: "现代" },
@@ -148,8 +148,8 @@ export function GraphFilterRail({
                     type="button"
                     onClick={() => onWorldScope(opt.value)}
                     aria-pressed={active}
-                    className={`rounded-[7px] px-1 py-1.5 text-[11.5px] font-medium transition-all ${
-                      active ? "bg-panel text-accent shadow-[0_1px_3px_rgba(23,26,27,0.12)]" : "text-muted hover:text-ink"
+                    className={`rounded-control px-1 py-1.5 text-caption font-medium transition-all ${
+ active ? "bg-panel text-accent shadow-hairline" : "text-muted hover:text-ink"
                     }`}
                   >
                     {opt.label}
@@ -157,11 +157,11 @@ export function GraphFilterRail({
                 );
               })}
             </div>
-            <p className="mt-2 text-[10.5px] leading-relaxed text-muted/70">只影响「分析·事件」星点的归属。</p>
+            <p className="mt-2 text-caption leading-relaxed text-muted-soft">只影响「分析·事件」星点的归属。</p>
           </div>
         ) : null}
 
-        <p className="mt-auto px-1 pt-4 text-[11px] leading-relaxed text-muted/70">
+        <p className="mt-auto px-1 pt-4 text-caption leading-relaxed text-muted-soft">
           点按图层可隐藏或显示对应星点；背景概念默认收起，点亮后按世界成带收纳。
         </p>
       </motion.section>
@@ -193,12 +193,12 @@ function LayerRow({
         type="button"
         onClick={() => onToggle(layer.key)}
         aria-pressed={!isHidden}
-        className={`group flex w-full items-center gap-3 rounded-[10px] px-2.5 py-2 text-left transition-all duration-200 ${
-          isHidden ? "opacity-45 hover:opacity-75" : "hover:bg-accent-wash"
+        className={`group flex w-full items-center gap-3 rounded-panel px-2.5 py-2 text-left transition-all duration-200 ${
+ isHidden ? "opacity-45 hover:opacity-75" : "hover:bg-accent-wash"
         }`}
       >
         <span
-          className="grid size-7 shrink-0 place-items-center rounded-[8px] transition-transform duration-200 group-hover:scale-110"
+          className="grid size-7 shrink-0 place-items-center rounded-panel transition-transform duration-200 group-hover:scale-110"
           style={{
             backgroundColor: isHidden ? "rgba(86,69,45,0.06)" : visual.soft,
             color: isHidden ? "#a89f88" : visual.color,
@@ -206,8 +206,8 @@ function LayerRow({
         >
           <Icon className="size-3.5" aria-hidden />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{layer.label}</span>
-        <span className="shrink-0 text-[11.5px] tabular-nums text-muted">{layer.count}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{layer.label}</span>
+        <span className="shrink-0 text-caption tabular-nums text-muted">{layer.count}</span>
       </button>
     </motion.li>
   );

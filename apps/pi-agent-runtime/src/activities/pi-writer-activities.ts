@@ -1,4 +1,5 @@
 import { validateWriterWorkflowPayload } from "../worker-spec.js";
+import { ApplicationFailure } from "@temporalio/activity";
 import type { WriterRunInput } from "../contracts/writer-run.js";
 import { runtimeContextFromInput, type RuntimeContext } from "../contracts/writer-run.js";
 import type { AgentEvent, ToolExecutionMode } from "@earendil-works/pi-agent-core";
@@ -63,6 +64,8 @@ export interface ComposeDraftRequest {
   settings: Record<string, unknown>;
   provider_call_id?: string;
   abort_signal?: AbortSignal;
+  /** Constant-injection (always_on) canon, present on every dual-stage run. */
+  always_on_assets?: AlwaysOnAssetItem[];
   onToken?(token: string): Promise<void>;
 }
 
@@ -135,6 +138,13 @@ export interface ExecuteWriterToolRequest {
   worldline_path_ids: string[];
   tool_name: WriterToolName;
   tool_args?: Record<string, unknown>;
+  /**
+   * Activity-wrapped cross-encoder rerank for fuse_recall. The activity wraps it
+   * in executeLLMStage (stage "rerank") so the call carries a provider_call_id
+   * and goes through quota reservation, lease, and telemetry like every other
+   * provider stage. Absent → fuse_recall degrades to RRF order, visibly.
+   */
+  rerank_executor?(query: string, candidates: RerankCandidate[]): Promise<string[]>;
 }
 
 /** One constant-injected (always_on) canon asset — core law or style/ban rule. */
@@ -408,6 +418,7 @@ export interface RecordWorkflowEventRequest {
     | "writer.retrieval_plan.completed"
     | "writer.retrieval_plan.degraded"
     | "writer.retrieval_plan.skipped"
+    | "writer.always_on.injected"
     | "writer.context_budget.trimmed"
     | "writer.consistency.violations"
     | "writer.consistency.clean"
@@ -548,7 +559,12 @@ export interface CreateWriterApprovalRequest {
 
 export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps> = {}) {
   return async function runPiWriterRunActivity(payload: unknown): Promise<PiWriterActivityResult> {
-    const input = validateWriterWorkflowPayload(payload);
+    let input: WriterRunInput;
+    try {
+      input = validateWriterWorkflowPayload(payload);
+    } catch (error) {
+      throw ApplicationFailure.nonRetryable("Pi writer workflow payload is invalid", "VALIDATION_FAILED", error instanceof Error ? error.message : "invalid payload");
+    }
     if (deps.resolveModuleBinding && deps.orchestrateWritingBrief && deps.executeWriterTool) {
       return runDualStagePiWriterActivity(input, deps as PiWriterRunActivityDeps);
     }
@@ -1104,8 +1120,10 @@ async function runDualStagePiWriterActivity(
     // P1 (doc 41 §4.2 always_on): constant injection of core world laws and
     // style/ban constraints. This is NOT a tool the orchestrator might forget to
     // call — the activity loads it unconditionally, before the loop, and injects
-    // it as the top-priority channel of every fuse_recall (never relevance-ranked,
-    // never budget-trimmed). Absence is a silent no-op (no always_on canon yet).
+    // it twice: straight into the orchestrator/composer prompts (guaranteed,
+    // tool-independent) and as the top-priority channel of every fuse_recall
+    // (never relevance-ranked, never budget-trimmed). Absence is a silent no-op
+    // (no always_on canon yet); presence is a visible event.
     let alwaysOnAssets: AlwaysOnAssetItem[] = [];
     if (deps.loadAlwaysOnAssets) {
       try {
@@ -1129,6 +1147,55 @@ async function runDualStagePiWriterActivity(
         }, "always_on:load_failed");
       }
     }
+    if (alwaysOnAssets.length > 0) {
+      await recordWorkflow("writer.always_on.injected", {
+        count: alwaysOnAssets.length,
+        items: alwaysOnAssets.map((asset) => ({
+          asset_id: asset.asset_id,
+          title: asset.title,
+          asset_type: asset.asset_type
+        }))
+      }, "always_on:injected");
+    }
+
+    // P2 (doc 41 §4.6): the cross-encoder rerank fires inside the orchestrator's
+    // fuse_recall tool, but it is a billed provider call like any other stage —
+    // it must run under executeLLMStage so it carries a provider_call_id and
+    // goes through quota reservation, lease, and telemetry. Unbound module or a
+    // failed call throws into executeFuseRecall, which degrades to RRF order
+    // with a visible rerank_degraded reason.
+    let rerankCallIndex = 0;
+    const rerankExecutor = deps.rerankRecall && deps.resolveModuleBinding
+      ? async (query: string, candidates: RerankCandidate[]): Promise<string[]> => {
+        const reranker = await resolveRequiredModule(deps, input, "writer_retrieval_rerank");
+        const call = await executeLLMStage(deps, input, reranker, "rerank", rerankCallIndex++, async (apiKey, providerCallID) => {
+          await recordTrace(reranker.module_key, "llm_call_started", resolutionSummary(reranker));
+          return deps.rerankRecall!({
+            tenant_id: input.tenant_id,
+            project_id: input.project_id,
+            run_id: input.run_id,
+            module_key: reranker.module_key,
+            channel_id: reranker.channel_id,
+            model_id: reranker.model_id,
+            provider: reranker.provider,
+            base_url: reranker.base_url,
+            query,
+            candidates,
+            thinking_level: input.options.thinking_level,
+            apiKey,
+            settings: reranker.settings,
+            provider_call_id: providerCallID,
+            abort_signal: deps.cancellationSignal?.()
+          });
+        });
+        await recordStageTelemetry(deps, input, reranker, call.result.usage, Date.now() - startedAt, call.provider_call_id);
+        await recordTrace(reranker.module_key, "llm_call_completed", {
+          ...resolutionSummary(reranker),
+          ...call.result.usage
+        }, "summary", "completed");
+        return call.result.ranked_ids;
+      }
+      : undefined;
 
     const orchestrator = await resolveRequiredModule(deps, input, "writer_orchestrator");
     if (!orchestrator.supports_tools) {
@@ -1157,6 +1224,7 @@ async function runDualStagePiWriterActivity(
         "query_world_rules",
         "query_character_profile",
         "query_graph_neighbors",
+        "query_asset_relationships",
         "query_worldline_paths",
         "query_manuscript_context"
       ];
@@ -1176,6 +1244,7 @@ async function runDualStagePiWriterActivity(
         tool_execution: input.options.tool_execution,
         tool_names: toolNames,
         retrieval_plan: retrievalPlan,
+        always_on_assets: alwaysOnAssets,
         runtime_context: {
           ...runtimeContext,
           permissions: { tools: toolNames, can_write_draft: false }
@@ -1214,7 +1283,8 @@ async function runDualStagePiWriterActivity(
             graph_node_ids: input.graph_node_ids,
             worldline_path_ids: input.worldline_path_ids,
             tool_name: toolName,
-            tool_args: toolArgs
+            tool_args: toolArgs,
+            ...(toolName === "fuse_recall" && rerankExecutor ? { rerank_executor: rerankExecutor } : {})
           });
           // always_on is constant context, not relevance recall — it never counts
           // against the retrieval token budget.
@@ -1286,6 +1356,7 @@ async function runDualStagePiWriterActivity(
       const result = await deps.composeDraft({
         ...composeRequest(input, composer, apiKey, providerCallID, deps.cancellationSignal?.()),
         writing_brief: writingBrief.writing_brief,
+        always_on_assets: alwaysOnAssets,
         onToken: async (token) => {
           const index = ++chunkIndex;
           await recordWorkflow("writer.token", { token, chunk_index: index }, `composer:token:${index}`);
@@ -1557,6 +1628,14 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
       neighbors: recordArray(source.neighbors).map((item) => pickFields(item, ["node_id", "node_type", "title", "summary", "lifecycle", "relationship", "edge_type", "direction"]))
     };
   }
+  if (toolName === "query_asset_relationships") {
+    return {
+      ...(typeof source.asset_id === "string" ? { asset_id: source.asset_id } : {}),
+      items: recordArray(source.relationships).map((item) => pickFields(item, [
+        "asset_id", "asset_type", "lifecycle", "title", "relation_type", "direction"
+      ]))
+    };
+  }
   if (toolName === "query_worldline_paths") {
     return {
       items: recordArray(source.paths).map((item) => pickFields(item, ["path_id", "title", "summary", "lifecycle", "writer_instruction", "selected_event_ids"])),
@@ -1720,7 +1799,7 @@ async function executeLLMStage<T extends { usage?: PiWriterUsage }>(
       reserved_tokens: budget.reserved_tokens,
       reserved_cost_micros: budget.reserved_cost_micros,
       pricing_status: budget.pricing_status,
-      ttl_seconds: positiveIntegerSetting(resolution.settings, "quota_reservation_ttl_seconds") ?? 300
+      ttl_seconds: positiveIntegerSetting(resolution.settings, "quota_reservation_ttl_seconds") ?? 900
     });
     if (reservation.provider_call_id !== providerCallID) {
       throw runtimeFailure("LLM_PROVIDER_CALL_CONFLICT", "Pi writer provider call identity conflicts with its reservation", resolution.module_key);

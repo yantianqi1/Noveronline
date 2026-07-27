@@ -308,7 +308,7 @@ func TestSQLReaderSearchesSanitizedAssetIndex(t *testing.T) {
 		t.Fatalf("asset search query used content_text outside the keyword-match predicate: %s", queryer.query)
 	}
 	if !reflect.DeepEqual(queryer.args, []any{
-		"tenant-123", "project-123", "灵气", "%灵气%", "keyword", nil, "",
+		"tenant-123", "project-123", "灵气", []string{"%灵气%"}, "keyword", nil, "",
 		[]string{}, []string{}, []string{}, []string{}, []string{}, (*bool)(nil), 100,
 	}) {
 		t.Fatalf("unexpected search args: %#v", queryer.args)
@@ -410,7 +410,7 @@ func TestSQLReaderUsesTenantContextQueryerForAssetReadSide(t *testing.T) {
 				return err
 			},
 			args: []any{
-				"tenant-123", "project-123", "灵气", "%灵气%", "keyword", nil, "",
+				"tenant-123", "project-123", "灵气", []string{"%灵气%"}, "keyword", nil, "",
 				[]string{}, []string{}, []string{}, []string{}, []string{}, (*bool)(nil), 100,
 			},
 		},
