@@ -31,18 +31,11 @@ export function ManuscriptPaper({
 }) {
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-[760px] px-6 pb-10 pt-5">
-        {/* Chapter heading on the sheet */}
-        <header className="mx-auto max-w-[680px]">
-          <p className="text-caption tracking-label text-muted">手稿</p>
-          <h1 className="mt-1 font-serif text-xl font-semibold leading-snug text-ink">
-            {chapter ? chapter.title : "未命名章节"}
-          </h1>
-          <div aria-hidden className="mt-3 h-px w-16 bg-gold/60" />
-        </header>
-
-        {/* The continuous sheet */}
-        <div className="mt-5 rounded-control border border-line-soft bg-panel px-10 py-9 shadow-panel sm:px-14 sm:py-12">
+      <div className="mx-auto w-full max-w-[760px] px-6 pb-10 pt-4">
+        {/* The continuous sheet. Chapter identity/word count/save state live in
+            the toolbar above (WriterCanvasTop), so the paper opens straight
+            onto the prose — no repeated chapter heading, no dead gap. */}
+        <div className="rounded-control border border-line-soft bg-panel px-10 py-8 shadow-panel sm:px-14 sm:py-10">
           {segments.length === 0 ? (
             readOnly ? (
               <p className="font-serif text-md text-muted-soft">
@@ -68,7 +61,7 @@ export function ManuscriptPaper({
           )}
         </div>
 
-        <p className="mx-auto mt-4 max-w-[680px] text-caption leading-relaxed text-muted-soft">
+        <p className="mx-auto mt-4 text-caption leading-relaxed text-muted-soft">
           你写的每一个字都会自动存入手稿。让人工智能合著者起草的内容永远是「候选稿」，经你明确采用后才会进到这张稿纸上。
         </p>
       </div>

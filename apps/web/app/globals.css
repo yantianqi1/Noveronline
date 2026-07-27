@@ -150,10 +150,12 @@
   /* ── Rail widths ────────────────────────────────────────────────────
    * Replaces eight hand-picked widths (218/236/260/280/336/340/360/380). */
   --spacing-rail-nav: 224px;
+  --spacing-rail-nav-collapsed: 64px;
   --spacing-rail-filter: 240px;
   --spacing-rail-inspector: 360px;
 
   --animate-fade-up: fade-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-count-up: count-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
 
   @keyframes fade-up {
     from {
@@ -163,6 +165,18 @@
     to {
       opacity: 1;
       transform: translateY(0);
+    }
+  }
+
+  /* A pending-count badge pops when the number changes (待审资产 trigger). */
+  @keyframes count-up {
+    from {
+      opacity: 0.4;
+      transform: scale(0.7);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
     }
   }
 }
@@ -196,6 +210,18 @@ a {
 ::selection {
   background: var(--color-accent);
   color: var(--color-panel);
+}
+
+/* ── Project workspace nav rail ───────────────────────────────────────────
+ * The aside's width is driven by the client nav island via data-collapsed,
+ * so the rail collapses to a slim icon strip and the content reclaims width. */
+.nav-rail-aside {
+  width: var(--spacing-rail-nav);
+  transition: width 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.nav-rail-aside[data-collapsed="true"] {
+  width: var(--spacing-rail-nav-collapsed);
 }
 
 /*

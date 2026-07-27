@@ -35,7 +35,7 @@ export function WriterComposer({
   }
 
   return (
-    <div className="shrink-0 border-t border-line-soft bg-panel/60 p-3">
+    <div className="shrink-0 p-3">
       <div className="flex items-end gap-2 rounded-modal border border-line bg-panel px-3 py-2 shadow-panel transition-colors focus-within:border-accent/50">
         <textarea
           ref={areaRef}

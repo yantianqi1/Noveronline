@@ -1,25 +1,30 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { AssetProposal, AssetProposalDetail } from "@/lib/api/asset-proposal-types";
+import { fetchAssetProposalDetail, decideAssetProposal, fetchAssetProposals } from "@/lib/api/asset-proposal-client";
 import {
-  decideAssetProposal,
-  fetchAssetProposalDetail,
-  fetchAssetProposals,
-} from "@/lib/api/asset-proposal-client";
-import { Check, ChevronDown, ChevronRight, RefreshCw, X } from "lucide-react";
+  Check,
+  CheckCheck,
+  ChevronRight,
+  RefreshCw,
+  Sparkles,
+  X,
+} from "lucide-react";
 
 /**
- * 待审资产 panel — the author's review queue for manuscript asset distillation.
+ * 待审资产 — the author's review queue for manuscript asset distillation.
  *
  * After a draft is adopted, the distillation pipeline extracts candidate
  * characters/settings/relationships/rules from the new prose. Nothing enters
  * the asset library (or the Writer agent's recall) until the author accepts it
  * here — candidates stay lifecycle=candidate and invisible to query tools.
- * Each proposal shows its evidence (which manuscript spans it came from) and
- * offers 采纳新建 / 采纳合并 / 拒绝.
+ *
+ * This panel fills the back face of the complete conversation/review card. It
+ * owns the queue toolbar and scrollable proposal list; the flip shell owns the
+ * back-face title and the return-to-conversation actions.
  */
 export function ProposalRail({
   projectId,
@@ -27,18 +32,23 @@ export function ProposalRail({
   csrfToken,
   /** Bump to re-fetch (e.g. after a draft adoption enqueues new candidates). */
   refreshKey,
+  /** Called whenever the pending list changes, so the trigger badge stays in sync. */
+  onCountChange,
 }: {
   projectId: string;
   tenantId: string;
   csrfToken: string | null;
   refreshKey: number;
+  onCountChange?: (count: number) => void;
 }) {
   const [proposals, setProposals] = useState<AssetProposal[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
-  const load = useCallback(async () => {
+  async function load() {
     if (!tenantId) return;
     try {
       setError(null);
@@ -48,11 +58,18 @@ export function ProposalRail({
       setError(err instanceof Error ? err.message : "待审资产加载失败");
       setProposals([]);
     }
-  }, [projectId, tenantId]);
+  }
 
   useEffect(() => {
     void load();
-  }, [load, refreshKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, tenantId, refreshKey]);
+
+  const count = proposals?.length ?? 0;
+
+  useEffect(() => {
+    onCountChange?.(count);
+  }, [count, onCountChange]);
 
   async function decide(
     proposal: AssetProposal,
@@ -77,33 +94,91 @@ export function ProposalRail({
     }
   }
 
-  const count = proposals?.length ?? 0;
+  /**
+   * 一键全部通过 — adopts every pending proposal in one go. Update proposals
+   * merge into their existing target (accept_update); new candidates become new
+   * assets (accept_create). Fires the natural decision for each card and only
+   * drops the ones that succeed, so a version race on one merge never silently
+   * discards the rest — failures stay in the queue for the author to retry.
+   */
+  async function approveAll() {
+    if (!csrfToken || bulkBusy || busyId || !proposals || proposals.length === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    const queue = [...proposals];
+    setBulkProgress({ done: 0, total: queue.length });
+    const succeeded: string[] = [];
+    let failed = 0;
+    for (const p of queue) {
+      const isUpdate = p.operation === "update" && p.target_asset_id;
+      try {
+        await decideAssetProposal(projectId, tenantId, csrfToken, p.candidate_asset_id, {
+          decision: isUpdate ? "accept_update" : "accept_create",
+          target_asset_id: isUpdate ? p.target_asset_id : undefined,
+          expected_target_version: isUpdate ? p.expected_target_version : undefined,
+        });
+        succeeded.push(p.candidate_asset_id);
+      } catch {
+        failed += 1;
+      }
+      setBulkProgress({ done: succeeded.length + failed, total: queue.length });
+    }
+    setProposals((prev) => prev?.filter((p) => !succeeded.includes(p.candidate_asset_id)) ?? null);
+    if (openId && succeeded.includes(openId)) setOpenId(null);
+    if (failed > 0) {
+      setError(`${failed} 条没能通过（多为合并目标已被改动），已留在列表里，请逐条核对。`);
+    }
+    setBulkProgress(null);
+    setBulkBusy(false);
+  }
 
   return (
-    <section className="flex min-h-0 flex-col border-t border-line">
-      <header className="flex shrink-0 items-center justify-between px-4 py-2.5">
-        <h3 className="flex items-center gap-2 text-caption font-semibold text-ink">
-          待审资产
-          {count > 0 && (
-            <span className="rounded-full bg-accent px-1.5 py-px text-caption font-medium text-panel">
-              {count}
-            </span>
+    <section className="flex h-full min-h-0 flex-col overflow-hidden">
+      {/* Slim action toolbar — the back face's header already carries the
+          "待审资产" title + count, so this row is just the queue's controls:
+          approve-all + refresh. No duplicate title, no close button (the card
+          header flips back). */}
+      {(count > 1 || proposals === null) && (
+        <div className="flex h-9 shrink-0 items-center justify-end gap-0.5 border-b border-line-soft px-3">
+          {count > 1 && (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => void approveAll()}
+              loading={bulkBusy}
+              disabled={!csrfToken || Boolean(busyId)}
+              aria-label="全部通过待审资产"
+              title="逐条采纳：合并建议并入已有资产，其余作为新资产入库"
+              className="text-candidate hover:bg-gold/15 hover:text-candidate"
+            >
+              <CheckCheck className="size-3.5" aria-hidden />
+              {bulkBusy && bulkProgress ? `${bulkProgress.done}/${bulkProgress.total}` : "全部通过"}
+            </Button>
           )}
-        </h3>
-        <Button variant="ghost" size="sm" onClick={() => void load()} aria-label="刷新待审资产">
-          <RefreshCw className="size-3.5" aria-hidden />
-        </Button>
-      </header>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => void load()}
+            disabled={bulkBusy}
+            aria-label="刷新待审资产"
+            className="px-1.5"
+          >
+            <RefreshCw className="size-3.5" aria-hidden />
+          </Button>
+        </div>
+      )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        {error && <p className="mb-2 rounded-panel bg-accent-wash px-3 py-2 text-caption text-accent">{error}</p>}
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {error && (
+          <p className="mb-2 rounded-panel border border-danger/30 bg-danger-wash px-3 py-2 text-caption leading-relaxed text-danger">
+            {error}
+          </p>
+        )}
 
         {proposals === null ? (
-          <p className="px-1 py-3 text-caption text-muted">加载中…</p>
+          <QueueSkeleton />
         ) : proposals.length === 0 ? (
-          <p className="px-1 py-3 text-caption leading-relaxed text-muted">
-            暂时没有待审资产。采纳 AI 草稿后，新出现的人物、设定会自动抽出来放在这里等你过目——你点头之前，它们不会进资产库。
-          </p>
+          <EmptyQueue />
         ) : (
           <ul className="flex flex-col gap-2">
             {proposals.map((p) => (
@@ -139,6 +214,35 @@ const ASSET_TYPE_LABEL: Record<string, string> = {
 
 function assetTypeLabel(assetType: string): string {
   return ASSET_TYPE_LABEL[assetType] ?? assetType;
+}
+
+/** Calm loading placeholder — three candidate-card outlines, not a spinner. */
+function QueueSkeleton() {
+  return (
+    <div className="flex flex-col gap-2" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="rounded-panel border border-line-soft bg-panel px-3 py-2.5">
+          <div className="h-3.5 w-2/3 animate-pulse rounded-control bg-line-soft" />
+          <div className="mt-2 h-3 w-full animate-pulse rounded-control bg-line-soft/70" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** An empty queue reads as a resolved state, not a blank hole. */
+function EmptyQueue() {
+  return (
+    <div className="flex h-full flex-col items-center justify-center rounded-panel border border-dashed border-line-soft bg-panel/50 px-4 py-6 text-center">
+      <span className="grid size-9 place-items-center rounded-full bg-success-wash text-success">
+        <Check className="size-4" aria-hidden />
+      </span>
+      <p className="mt-2.5 text-sm font-medium text-ink">队列已清空</p>
+      <p className="mt-1 max-w-[240px] text-caption leading-relaxed text-muted">
+        暂时没有待审资产。采纳 AI 草稿后，新出现的人物、设定会抽出来放在这里等你过目——你点头之前不进资产库。
+      </p>
+    </div>
+  );
 }
 
 function ProposalCard({
@@ -181,21 +285,27 @@ function ProposalCard({
   const isUpdate = proposal.operation === "update" && proposal.target_asset_id;
 
   return (
-    <li className="rounded-panel border border-line bg-panel">
+    <li
+      className={`overflow-hidden rounded-panel border bg-panel transition-colors ${
+        open ? "border-gold/60 shadow-hairline" : "border-line hover:border-gold/40"
+      }`}
+    >
+      {/* Summary row — the whole row is the expand toggle; decision buttons
+          live only in the open body so a collapsed card is a single calm line. */}
       <button
         type="button"
         onClick={onToggle}
+        aria-expanded={open}
         className="flex w-full items-start gap-2 px-3 py-2.5 text-left"
       >
-        {open ? (
-          <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted" aria-hidden />
-        ) : (
-          <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-muted" aria-hidden />
-        )}
+        <ChevronRight
+          className={`mt-0.5 size-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}
+          aria-hidden
+        />
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
+          <span className="flex items-center gap-1.5">
             <span className="truncate text-sm font-medium text-ink">{proposal.title}</span>
-            <span className="shrink-0 rounded-control border border-line bg-paper px-1.5 py-px text-caption text-muted">
+            <span className="shrink-0 rounded-control border border-gold/40 bg-gold/10 px-1.5 py-px text-caption text-candidate">
               {assetTypeLabel(proposal.asset_type)}
             </span>
             {isUpdate && (
@@ -215,10 +325,11 @@ function ProposalCard({
       {open && (
         <div className="border-t border-line-soft px-3 py-2.5">
           {/* Evidence: where in the manuscript this candidate came from. */}
-          <p className="text-caption font-medium tracking-wide text-muted">
+          <p className="flex items-center gap-1.5 text-caption font-medium tracking-label text-muted">
+            <Sparkles className="size-3 text-candidate" aria-hidden />
             出处（{proposal.evidence_count} 处）
           </p>
-          {detailError && <p className="mt-1 text-caption text-accent">{detailError}</p>}
+          {detailError && <p className="mt-1 text-caption text-danger">{detailError}</p>}
           {!detail && !detailError && <p className="mt-1 text-caption text-muted">加载出处…</p>}
           {detail && (
             <ul className="mt-1.5 flex flex-col gap-1.5">
@@ -273,6 +384,7 @@ function ProposalCard({
               onClick={() => onDecide(proposal, "reject")}
               loading={busy}
               disabled={!csrfReady}
+              className="hover:bg-danger-wash hover:text-danger"
             >
               <X className="size-3.5" aria-hidden />
               拒绝

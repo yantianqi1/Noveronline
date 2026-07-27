@@ -31,9 +31,11 @@ import type {
 import { WriterCanvasTop } from "./writer-canvas-top";
 import { WriterEmpty } from "./writer-empty";
 import { ManuscriptPaper } from "./manuscript-paper";
+import { ProjectTopbarSlot } from "../project-topbar-slot";
 import { WriterRail, buildConversationTurns, type ConversationTurn, type SettledRunInfo } from "./writer-rail";
 import { WriterComposer } from "./writer-composer";
 import { ProposalRail } from "./proposal-rail";
+import { ConversationReviewFlip } from "./composer-review-flip";
 
 type LoadState =
   | { status: "loading" }
@@ -577,16 +579,21 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <WriterCanvasTop
-        bookTitle={bookTitle || "未命名作品"}
-        chapters={chapters}
-        activeChapter={activeChapter}
-        wordCount={segments.reduce((sum, s) => sum + countWords(s.content_text), 0)}
-        saveState={saveState}
-        onSelectChapter={handleSelectChapter}
-        onNewChapter={handleNewChapter}
-        busy={busy}
-      />
+      {/* The writer's context lives in the single shared project top bar (via
+          portal), not in a second stacked bar — one calm header for the whole
+          workbench. */}
+      <ProjectTopbarSlot>
+        <WriterCanvasTop
+          bookTitle={bookTitle || "未命名作品"}
+          chapters={chapters}
+          activeChapter={activeChapter}
+          wordCount={segments.reduce((sum, s) => sum + countWords(s.content_text), 0)}
+          saveState={saveState}
+          onSelectChapter={handleSelectChapter}
+          onNewChapter={handleNewChapter}
+          busy={busy}
+        />
+      </ProjectTopbarSlot>
 
       {actionError ? (
         <div className="shrink-0 border-b border-line bg-accent-wash px-6 py-2.5 text-sm text-accent">
@@ -599,38 +606,48 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
       ) : (
         /* Task state: conversation rail (entry) + manuscript canvas (protagonist) */
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Conversation rail — the single entry to the agent, with the
-              proposal review dock underneath: adopted drafts distill into
-              candidate assets that wait here for the author's decision. */}
-          <aside className="hidden h-full w-rail-inspector shrink-0 flex-col overflow-hidden border-r border-line bg-paper/40 wide:flex">
-            <div className="flex min-h-0 flex-1 flex-col">
-              <WriterRail
-                turns={turns}
-                selection={selection}
-                csrfToken={csrfToken}
-                adoptedRunIds={adoptedRunIds}
-                settledRuns={settledRuns}
-                adoptingDraftId={adoptingDraftId}
-                onAdopt={handleAdopt}
-                onCancelRun={handleCancelRun}
-                onRunSettled={handleRunSettled}
-                onRevealAdopted={handleRevealAdopted}
-                onTaskAdopted={handleTaskAdopted}
-              />
-              <WriterComposer
-                onSend={handleSend}
-                disabled={!csrfToken || anyLive}
-                placeholder={anyLive ? "合著者起草中，完成后继续…" : undefined}
-              />
-            </div>
-            <div className="flex max-h-[42%] min-h-[120px] shrink-0 flex-col">
-              <ProposalRail
-                projectId={projectId}
-                tenantId={selection?.tenant_id ?? ""}
-                csrfToken={csrfToken}
-                refreshKey={proposalRefreshKey}
-              />
-            </div>
+          {/* The whole co-writer dock is one two-sided card. Its front is the
+              complete conversation UI; its back is the complete asset-review
+              workbench. Individual composer/proposal cards never flip alone. */}
+          <aside className="hidden h-full w-rail-inspector shrink-0 overflow-hidden border-r border-line bg-paper/40 wide:block">
+            <ConversationReviewFlip
+              projectId={projectId}
+              tenantId={selection?.tenant_id ?? ""}
+              refreshKey={proposalRefreshKey}
+              conversation={
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="min-h-0 flex-1">
+                    <WriterRail
+                      turns={turns}
+                      selection={selection}
+                      csrfToken={csrfToken}
+                      adoptedRunIds={adoptedRunIds}
+                      settledRuns={settledRuns}
+                      adoptingDraftId={adoptingDraftId}
+                      onAdopt={handleAdopt}
+                      onCancelRun={handleCancelRun}
+                      onRunSettled={handleRunSettled}
+                      onRevealAdopted={handleRevealAdopted}
+                      onTaskAdopted={handleTaskAdopted}
+                    />
+                  </div>
+                  <WriterComposer
+                    onSend={handleSend}
+                    disabled={!csrfToken || anyLive}
+                    placeholder={anyLive ? "合著者起草中，完成后继续…" : undefined}
+                  />
+                </div>
+              }
+              review={(onCountChange) => (
+                <ProposalRail
+                  projectId={projectId}
+                  tenantId={selection?.tenant_id ?? ""}
+                  csrfToken={csrfToken}
+                  refreshKey={proposalRefreshKey}
+                  onCountChange={onCountChange}
+                />
+              )}
+            />
           </aside>
 
           {/* Manuscript canvas — the dominant artifact */}

@@ -47,6 +47,7 @@ export function WriterRail({
   onRunSettled,
   onRevealAdopted,
   onTaskAdopted,
+  hideHeader,
 }: {
   turns: ConversationTurn[];
   selection: WriterSelection | null;
@@ -62,6 +63,65 @@ export function WriterRail({
   onRevealAdopted: (runId: string) => void;
   /** A live turn discovered its draft is adopted — fold it into settled state. */
   onTaskAdopted: (runId: string) => void;
+  /** Render just the thread (no 合著者 header) — used when the rail sits on the
+      front face of the conversation/review flip card, whose own header owns
+      the title row. */
+  hideHeader?: boolean;
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      {!hideHeader && (
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line-soft px-4">
+          <span className="grid size-6 place-items-center rounded-control bg-accent-wash text-accent">
+            <Feather className="size-3" aria-hidden />
+          </span>
+          <span className="text-sm font-medium text-ink">合著者</span>
+          <span className="ml-auto text-caption text-muted">常驻协作</span>
+        </div>
+      )}
+      <WriterRailThread
+        turns={turns}
+        selection={selection}
+        csrfToken={csrfToken}
+        adoptedRunIds={adoptedRunIds}
+        settledRuns={settledRuns}
+        adoptingDraftId={adoptingDraftId}
+        onAdopt={onAdopt}
+        onCancelRun={onCancelRun}
+        onRunSettled={onRunSettled}
+        onRevealAdopted={onRevealAdopted}
+        onTaskAdopted={onTaskAdopted}
+      />
+    </div>
+  );
+}
+
+/** The scrolling thread alone — exported so the flip card's front face can host
+    the conversation without the rail's own header. */
+export function WriterRailThread({
+  turns,
+  selection,
+  csrfToken,
+  adoptedRunIds,
+  settledRuns,
+  adoptingDraftId,
+  onAdopt,
+  onCancelRun,
+  onRunSettled,
+  onRevealAdopted,
+  onTaskAdopted,
+}: {
+  turns: ConversationTurn[];
+  selection: WriterSelection | null;
+  csrfToken: string | null;
+  adoptedRunIds: ReadonlySet<string>;
+  settledRuns: ReadonlyMap<string, SettledRunInfo>;
+  adoptingDraftId: string | null;
+  onAdopt: (runId: string, draftId: string) => void;
+  onCancelRun: (runId: string) => void;
+  onRunSettled: (runId: string) => void;
+  onRevealAdopted: (runId: string) => void;
+  onTaskAdopted: (runId: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -72,45 +132,33 @@ export function WriterRail({
   }, [turns.length]);
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Quiet header */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line-soft px-4">
-        <span className="grid size-6 place-items-center rounded-control bg-accent-wash text-accent">
-          <Feather className="size-3" aria-hidden />
-        </span>
-        <span className="text-sm font-medium text-ink">合著者</span>
-        <span className="ml-auto text-caption text-muted">常驻协作</span>
-      </div>
-
-      {/* Thread */}
-      <div ref={scrollRef} className="min-h-0 basis-0 flex-1 overflow-y-auto px-4 py-4">
-        {turns.length === 0 ? (
-          <RailGreeting />
-        ) : (
-          <div className="flex flex-col gap-4">
-            {turns.map((turn) => {
-              if (turn.kind === "user") return <UserBubble key={turn.id} body={turn.body} />;
-              if (turn.kind === "agent") return <AgentLine key={turn.id} body={turn.body} />;
-              return (
-                <TaskTurn
-                  key={turn.id}
-                  runId={turn.runId}
-                  selection={selection}
-                  csrfToken={csrfToken}
-                  adopted={adoptedRunIds.has(turn.runId)}
-                  settled={settledRuns.get(turn.runId) ?? null}
-                  adoptingDraftId={adoptingDraftId}
-                  onAdopt={onAdopt}
-                  onCancelRun={onCancelRun}
-                  onSettled={onRunSettled}
-                  onRevealAdopted={onRevealAdopted}
-                  onTaskAdopted={onTaskAdopted}
-                />
-              );
-            })}
-          </div>
-        )}
-      </div>
+    <div ref={scrollRef} className="min-h-0 basis-0 flex-1 overflow-y-auto px-4 py-4">
+      {turns.length === 0 ? (
+        <RailGreeting />
+      ) : (
+        <div className="flex flex-col gap-4">
+          {turns.map((turn) => {
+            if (turn.kind === "user") return <UserBubble key={turn.id} body={turn.body} />;
+            if (turn.kind === "agent") return <AgentLine key={turn.id} body={turn.body} />;
+            return (
+              <TaskTurn
+                key={turn.id}
+                runId={turn.runId}
+                selection={selection}
+                csrfToken={csrfToken}
+                adopted={adoptedRunIds.has(turn.runId)}
+                settled={settledRuns.get(turn.runId) ?? null}
+                adoptingDraftId={adoptingDraftId}
+                onAdopt={onAdopt}
+                onCancelRun={onCancelRun}
+                onSettled={onRunSettled}
+                onRevealAdopted={onRevealAdopted}
+                onTaskAdopted={onTaskAdopted}
+              />
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

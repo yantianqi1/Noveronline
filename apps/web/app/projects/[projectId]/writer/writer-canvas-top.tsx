@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { Chapter } from "@/lib/api/writer-types";
 
-type SaveState =
+export type SaveState =
   | { kind: "idle" }
   | { kind: "dirty" }
   | { kind: "saving" }
@@ -14,9 +14,10 @@ type SaveState =
   | { kind: "error"; message: string };
 
 /**
- * The canvas top bar: book title, a chapter switcher (dropdown tree), live
- * word count, and an honest save-state indicator. One primary action only —
- * the chapter switcher; "new chapter" is a quiet secondary button.
+ * The writer's top-strip — the chapter switcher, live word count, save state,
+ * and the new-chapter action. It renders nothing on its own; the workspace
+ * mounts it into the single shared project top bar (via a portal) so the
+ * writer has exactly one header row instead of a stacked second bar.
  */
 export function WriterCanvasTop({
   bookTitle,
@@ -38,7 +39,7 @@ export function WriterCanvasTop({
   busy: boolean;
 }) {
   return (
-    <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-paper/80 px-5 backdrop-blur-sm">
+    <div className="flex h-full min-w-0 flex-1 items-center gap-3">
       {/* Chapter switcher */}
       <ChapterSwitcher
         bookTitle={bookTitle}
@@ -47,14 +48,14 @@ export function WriterCanvasTop({
         onSelect={onSelectChapter}
       />
 
-      <span aria-hidden className="h-4 w-px bg-line" />
+      <span aria-hidden className="h-4 w-px shrink-0 bg-line" />
 
       {/* Word count */}
-      <span className="text-caption tabular-nums text-muted">
+      <span className="shrink-0 text-caption tabular-nums text-muted">
         {wordCount > 0 ? `${wordCount} 字` : "尚未落笔"}
       </span>
 
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex shrink-0 items-center gap-3">
         <SaveIndicator state={saveState} />
         <button
           type="button"
@@ -103,13 +104,13 @@ function ChapterSwitcher({
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative min-w-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-panel px-2 py-1.5 text-left transition-colors hover:bg-panel"
+        className="flex min-w-0 items-center gap-1.5 rounded-panel px-2 py-1.5 text-left transition-colors hover:bg-panel"
       >
         <span className="max-w-[140px] truncate font-serif text-md font-semibold text-ink">
           {bookTitle}
@@ -121,7 +122,7 @@ function ChapterSwitcher({
           {activeChapter ? activeChapter.title : "选择章节"}
         </span>
         <ChevronDown
-          className={`size-3.5 text-muted transition-transform ${open ? "rotate-180" : ""}`}
+          className={`size-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`}
           aria-hidden
         />
       </button>
@@ -130,7 +131,7 @@ function ChapterSwitcher({
         <div
           role="listbox"
           aria-label="章节列表"
-          className="absolute left-0 top-full z-20 mt-1.5 w-[280px] overflow-hidden rounded-modal border border-line bg-panel shadow-lift"
+          className="absolute left-0 top-full z-30 mt-1.5 w-[280px] overflow-hidden rounded-modal border border-line bg-panel shadow-lift"
         >
           <div className="max-h-[320px] overflow-y-auto py-1.5">
             {chapters.map((chapter) => {
@@ -146,7 +147,7 @@ function ChapterSwitcher({
                     setOpen(false);
                   }}
                   className={`flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm transition-colors ${
- active ? "bg-accent-wash text-accent" : "text-ink hover:bg-paper"
+                    active ? "bg-accent-wash text-accent" : "text-ink hover:bg-paper"
                   }`}
                 >
                   <span className="w-4 shrink-0">

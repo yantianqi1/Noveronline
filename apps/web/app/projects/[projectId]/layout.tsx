@@ -38,8 +38,8 @@ async function Shell({
           body below, so the nav rail's vertical border meets the header's
           bottom border instead of floating free on wide screens. */}
       <header className="shrink-0 border-b border-line bg-paper/85 backdrop-blur-md">
-        <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center justify-between gap-4 px-5">
-          <div className="flex min-w-0 items-center gap-3">
+        <div className="mx-auto flex h-14 w-full max-w-[1600px] items-center gap-4 px-5">
+          <div className="flex min-w-0 shrink-0 items-center gap-3">
             <Link
               href="/workspace"
               className="flex items-center gap-2.5 rounded-control transition-opacity hover:opacity-80"
@@ -63,14 +63,16 @@ async function Shell({
               >
                 书架
               </Link>
-              <span aria-hidden className="text-muted-soft">
-                /
-              </span>
-              <span className="truncate font-medium text-ink">项目工作台</span>
             </nav>
             {/* Phone band: the rail is gone, so navigation lives in a drawer. */}
             <WorkbenchNavDrawer projectId={projectId} />
           </div>
+
+          {/* One shared slot for the active workbench's context. The writer
+              portals its chapter switcher / word count / save state / new-chapter
+              here, so the whole workbench has a single header row instead of a
+              stacked second bar. Empty on the other sections. */}
+          <div id="project-topbar-slot" className="flex min-w-0 flex-1 items-center gap-3" />
         </div>
       </header>
 
@@ -80,7 +82,13 @@ async function Shell({
           workbench scrolls internally, so the whole page never scrolls. dvh
           tracks the visible viewport, not the layout viewport. */}
       <div className="mx-auto flex h-[calc(100dvh-3.5rem)] w-full max-w-[1600px] overflow-hidden">
-        <aside className="hidden h-full w-rail-nav shrink-0 overflow-y-auto border-r border-line-soft py-5 stack:block">
+        {/* The nav rail owns its width: the client island flips data-collapsed
+            on this aside, and the inline style below transitions between the
+            expanded/collapsed spacing tokens. */}
+        <aside
+          data-collapsed="false"
+          className="nav-rail-aside hidden h-full shrink-0 overflow-hidden border-r border-line-soft py-5 stack:block"
+        >
           <WorkbenchNav projectId={projectId} />
         </aside>
         <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">{children}</main>
