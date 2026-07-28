@@ -158,6 +158,19 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
       return `/v1/drafts/${encodeURIComponent(m[1])}${query}`;
     },
   },
+  // /api/projects/{id}/chapters/{chapterId}/scenes[/reorder] → /v1/chapters/{chapterId}/scenes[/reorder]
+  // A chapter's scenes mount at the TOP level under /v1/chapters (the Go
+  // writer-workspace handler keys them by chapter id, not under /projects).
+  // Must run before the generic PROJECT_PATHS fallthrough, which would
+  // otherwise forward the project-prefixed shape to a route the Go API never
+  // registered (→ 404 "route not found").
+  {
+    prefix: /^chapters\/([^/]+)\/scenes(\/reorder)?$/,
+    toGo: (rest, query) => {
+      const m = rest.match(/^chapters\/([^/]+)\/scenes(\/reorder)?$/)!;
+      return `/v1/chapters/${encodeURIComponent(m[1])}/scenes${m[2] ?? ""}${query}`;
+    },
+  },
   // /api/projects/{id}/scenes/{sceneId}[/versions] → /v1/scenes/{sceneId}[/versions]
   // A single scene mounts at the TOP level (not under /projects), like drafts.
   {

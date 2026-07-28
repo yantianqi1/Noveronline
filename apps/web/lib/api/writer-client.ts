@@ -493,8 +493,11 @@ export function adoptDraft(
 /** Unwrap a record that may or may not be `data`-wrapped, depending on mount. */
 function unwrapMaybe<T>(value: DataEnvelope<T> | T): T {
   if (value && typeof value === "object" && "data" in (value as DataEnvelope<T>)) {
-    const wrapped = (value as DataEnvelope<T>).data;
-    if (wrapped !== undefined && wrapped !== null) return wrapped;
+    // The Go read side always wraps payloads as {"data": ...}; an empty list
+    // arrives as {"data": null}. Unwrap unconditionally — returning the whole
+    // envelope when data is null would surface the wrapper object where the
+    // caller expects the payload (e.g. a non-array crashing `.map`).
+    return (value as DataEnvelope<T>).data;
   }
   return value as T;
 }
