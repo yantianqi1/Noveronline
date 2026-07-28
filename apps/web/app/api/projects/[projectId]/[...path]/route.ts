@@ -33,8 +33,16 @@ const PROJECT_PATHS: Record<Method, RegExp[]> = {
     // Writer: structure + manuscript workspace reads
     /^chapters$/,
     /^chapters\/([^/]+)$/,
+    /^chapters\/([^/]+)\/scenes$/,
     /^manuscript-workspace\/blocks$/,
     /^manuscript-workspace\/blocks\/([^/]+)$/,
+    // Writer 审校: project-wide review-issue queue (grouped per draft)
+    /^draft-review-issues$/,
+    // Writer 工具: exports list, dedup candidates, presets, forbidden lexicon
+    /^manuscript-workspace\/exports$/,
+    /^manuscript-workspace\/dedup-patterns$/,
+    /^writer-presets$/,
+    /^forbidden-lexicon$/,
     // Writer: conversation thread
     /^writer-threads$/,
     /^writer-threads\/([^/]+)\/messages$/,
@@ -70,7 +78,16 @@ const PROJECT_PATHS: Record<Method, RegExp[]> = {
     /^story-graph\/builds$/,
     // Writer: create chapters + manuscript blocks
     /^chapters$/,
+    /^chapters\/reorder$/,
+    /^chapters\/([^/]+)\/scenes$/,
+    /^chapters\/([^/]+)\/scenes\/reorder$/,
     /^manuscript-workspace\/blocks$/,
+    // Writer 工具: start an export, triage a dedup candidate, add a lexicon
+    // entry or preset.
+    /^manuscript-workspace\/exports$/,
+    /^manuscript-workspace\/dedup-patterns\/([^/]+)\/(accept|reject)$/,
+    /^forbidden-lexicon$/,
+    /^writer-presets$/,
     // Writer: ensure thread, append message, start a run
     /^writer-threads$/,
     /^writer-threads\/([^/]+)\/messages$/,
@@ -139,6 +156,36 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
     toGo: (rest, query) => {
       const m = rest.match(/^drafts\/([^/]+)$/)!;
       return `/v1/drafts/${encodeURIComponent(m[1])}${query}`;
+    },
+  },
+  // /api/projects/{id}/scenes/{sceneId}[/versions] → /v1/scenes/{sceneId}[/versions]
+  // A single scene mounts at the TOP level (not under /projects), like drafts.
+  {
+    prefix: /^scenes\/([^/]+)(\/versions)?$/,
+    toGo: (rest, query) => {
+      const m = rest.match(/^scenes\/([^/]+)(\/versions)?$/)!;
+      return `/v1/scenes/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
+    },
+  },
+  // /api/projects/{id}/draft-review-issues/{issueId} → /v1/draft-review-issues/{issueId}
+  // A single review issue PATCH mounts at the TOP level (owner project looked up
+  // server-side from the issue id), like scenes/drafts.
+  {
+    prefix: /^draft-review-issues\/([^/]+)$/,
+    toGo: (rest, query) => {
+      const m = rest.match(/^draft-review-issues\/([^/]+)$/)!;
+      return `/v1/draft-review-issues/${encodeURIComponent(m[1])}${query}`;
+    },
+  },
+  // /api/projects/{id}/writer-presets/{presetId} → /v1/writer-presets/{presetId}
+  // /api/projects/{id}/forbidden-lexicon/{entryId} → /v1/forbidden-lexicon/{entryId}
+  // Single preset/lexicon-entry PATCH+DELETE mount at the TOP level (the
+  // project-prefixed form only serves list/create).
+  {
+    prefix: /^(writer-presets|forbidden-lexicon)\/([^/]+)$/,
+    toGo: (rest, query) => {
+      const m = rest.match(/^(writer-presets|forbidden-lexicon)\/([^/]+)$/)!;
+      return `/v1/${m[1]}/${encodeURIComponent(m[2])}${query}`;
     },
   },
   // /api/projects/{id}/assets/search → /v1/assets/search (POST body carries project_id)

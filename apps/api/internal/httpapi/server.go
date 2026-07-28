@@ -2507,6 +2507,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartDraftReview(response, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/drafts/") && strings.HasSuffix(request.URL.Path, "/reviews"):
 		s.handleListDraftReviews(response, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/projects/") && strings.HasSuffix(request.URL.Path, "/draft-review-issues"):
+		s.handleListProjectReviewIssues(response, request)
 	case request.Method == http.MethodGet && isDraftDetailPath(request.URL.Path):
 		s.handleGetWriterDraft(response, request)
 	case request.Method == http.MethodPatch && isDraftReviewIssuePath(request.URL.Path):
@@ -7738,6 +7740,40 @@ func (s *Server) handleListDraftReviews(response http.ResponseWriter, request *h
 		return
 	}
 	writeJSON(response, http.StatusOK, sanitizeDraftReviewList(reviews))
+}
+
+// handleListProjectReviewIssues serves the 审校 canvas view: every draft in the
+// project with issues in the requested status (default open), grouped per draft
+// with chapter + instruction context. Project-scoped read, no body content.
+func (s *Server) handleListProjectReviewIssues(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	projectID := projectIDFromPathWithSuffix(request.URL.Path, "draft-review-issues")
+	if projectID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project review issues route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return
+	}
+	if s.draftReviewStore == nil {
+		writeError(response, request, http.StatusServiceUnavailable, "WRITER_REVIEW_BACKEND_UNCONFIGURED", publicDraftReviewErrorMessage("WRITER_REVIEW_BACKEND_UNCONFIGURED"), nil)
+		return
+	}
+	queue, err := s.draftReviewStore.ListProjectReviewIssues(request.Context(), workflows.ListProjectReviewIssuesInput{
+		TenantID:  tenantID,
+		ProjectID: projectID,
+		Status:    strings.TrimSpace(request.URL.Query().Get("status")),
+	})
+	if err != nil {
+		code := workflows.ErrorCode(err)
+		writeError(response, request, statusForWorkflowError(err), code, publicDraftReviewErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusOK, queue)
 }
 
 func (s *Server) handleUpdateDraftReviewIssue(response http.ResponseWriter, request *http.Request) {

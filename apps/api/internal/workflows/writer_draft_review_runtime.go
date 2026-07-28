@@ -42,6 +42,7 @@ type DraftReviewStarter interface {
 
 type DraftReviewReader interface {
 	ListDraftReviews(context.Context, ListDraftReviewsInput) (DraftReviewList, error)
+	ListProjectReviewIssues(context.Context, ListProjectReviewIssuesInput) (ProjectDraftReviewQueue, error)
 }
 
 type DraftReviewRuntimeService struct {
@@ -65,6 +66,13 @@ func (s *DraftReviewRuntimeService) ListDraftReviews(ctx context.Context, input 
 		return DraftReviewList{}, &AppError{Code: "WRITER_REVIEW_BACKEND_UNCONFIGURED", Message: "writer review backend is not configured"}
 	}
 	return s.reader.ListDraftReviews(ctx, input)
+}
+
+func (s *DraftReviewRuntimeService) ListProjectReviewIssues(ctx context.Context, input ListProjectReviewIssuesInput) (ProjectDraftReviewQueue, error) {
+	if s == nil || s.reader == nil {
+		return ProjectDraftReviewQueue{}, &AppError{Code: "WRITER_REVIEW_BACKEND_UNCONFIGURED", Message: "writer review backend is not configured"}
+	}
+	return s.reader.ListProjectReviewIssues(ctx, input)
 }
 
 func NewTemporalDraftReviewStarter(config TemporalDraftReviewConfig) *TemporalDraftReviewStarter {

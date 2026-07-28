@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>写作台 · 画布视图预览(章节 / 审校 / 工具)</title>
+<style>
+  /* ── Design tokens · MiroFish Novel "paper & vermilion" ─────────────
+     Mirrors apps/web/app/globals.css so the preview reads as the product. */
+  :root {
+    --ink: #171a1b;
+    --ink-soft: #3c3a36;
+    --paper: #f7f2e9;
+    --paper-deep: #efe7d8;
+    --panel: #fffdf8;
+    --line: rgba(86, 69, 45, 0.22);
+    --line-soft: rgba(86, 69, 45, 0.12);
+    --muted: #5a5146;
+    --muted-soft: #6f6559;
+    --accent: #8f211b;
+    --accent-strong: #7a1a15;
+    --accent-soft: #b04a42;
+    --accent-wash: rgba(143, 33, 27, 0.07);
+    --success: #3f7a4a;
+    --success-wash: rgba(63, 122, 74, 0.1);
+    --warning: #95651f;
+    --warning-wash: rgba(149, 101, 31, 0.1);
+    --danger: #b8402f;
+    --danger-wash: rgba(184, 64, 47, 0.1);
+    --gold: #b5854a;
+    --candidate: #856530;
+    --candidate-wash: rgba(181, 133, 74, 0.12);
+    --ink-surface: #16130f;
+    --ink-surface-raised: #1e1a15;
+    --ink-line: rgba(247, 236, 210, 0.1);
+    --ink-text: #f1e6cf;
+    --ink-text-muted: #cdbf9f;
+
+    --radius-control: 6px;
+    --radius-panel: 10px;
+    --radius-modal: 14px;
+
+    --shadow-hairline: 0 1px 2px rgba(23, 26, 27, 0.05);
+    --shadow-lift: 0 1px 2px rgba(23,26,27,.08), 0 10px 28px -12px rgba(23,26,27,.28);
+
+    --serif: "Songti SC", "SimSun", Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+    --text-micro: 11px;
+    --text-caption: 12px;
+    --text-sm: 13.5px;
+    --text-base: 15px;
+    --text-md: 16.5px;
+    --text-lg: 20px;
+    --text-display: 30px;
+    --text-reading: 17px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--text-base);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  ::selection { background: var(--accent); color: var(--panel); }
+
+  /* ── App chrome ──────────────────────────────────────────────────── */
+  .topbar {
+    height: 56px;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--serif); font-weight: 700; font-size: 15px;
+  }
+  .seal {
+    width: 24px; height: 24px; border-radius: 6px;
+    background: var(--accent); color: var(--panel);
+    display: grid; place-items: center;
+    font-size: 13px; font-family: var(--serif);
+  }
+  .crumb { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--text-sm); }
+  .crumb .book { font-family: var(--serif); font-weight: 600; color: var(--ink); }
+  .crumb .sep { color: var(--muted-soft); }
+  .crumb .ch { color: var(--ink); }
+
+  .viewtabs {
+    display: flex; align-items: center;
+    background: var(--paper-deep);
+    border-radius: var(--radius-control);
+    padding: 3px;
+    margin: 0 auto;
+  }
+  .viewtabs button {
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 5px 15px;
+    border-radius: var(--radius-control);
+    font-size: var(--text-caption);
+    color: var(--muted);
+    transition: color .18s, background .18s, border-color .18s;
+  }
+  .viewtabs button:hover:not(.active) { color: var(--ink-soft); }
+  .viewtabs button.active {
+    background: var(--panel);
+    border-color: var(--line-soft);
+    color: var(--ink);
+    font-weight: 500;
+    box-shadow: var(--shadow-hairline);
+  }
+
+  .status { display: flex; align-items: center; gap: 14px; margin-left: auto; }
+  .wc { font-family: var(--mono); font-size: var(--text-caption); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .save { display: flex; align-items: center; gap: 6px; font-size: var(--text-caption); color: var(--muted); }
+  .save .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+  .btn-new {
+    display: flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: var(--radius-panel); padding: 7px 13px;
+    font-size: var(--text-caption); font-weight: 500; color: var(--ink);
+  }
+  .btn-new:hover { border-color: var(--accent-soft); color: var(--accent); }
+
+  /* ── Layout: dock + canvas ───────────────────────────────────────── */
+  .workbench { display: flex; height: calc(100vh - 56px); }
+  .dock {
+    width: 372px; flex-shrink: 0;
+    background: var(--paper);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .dock-head { padding: 14px 18px 0; }
+  .dock-tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); }
+  .dock-tabs button {
+    background: none; border: none; padding: 0 2px 10px;
+    font-size: var(--text-sm); color: var(--muted);
+    border-bottom: 2px solid transparent;
+  }
+  .dock-tabs button.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 500; }
+  .dock-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+
+  .bubble {
+    max-width: 82%;
+    background: var(--panel);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-panel);
+    padding: 9px 13px;
+    font-size: var(--text-sm);
+    margin-left: auto; margin-bottom: 14px;
+  }
+  .task {
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-panel);
+    background: var(--panel);
+    margin-bottom: 14px;
+    overflow: hidden;
+  }
+  .task-row { display: flex; align-items: center; gap: 8px; padding: 11px 13px; font-size: var(--text-sm); }
+  .task-row .ic { color: var(--success); flex-shrink: 0; }
+  .task-sub {
+    margin: 0 13px 11px; padding: 9px 12px;
+    background: var(--candidate-wash);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-control);
+    font-size: var(--text-caption); color: var(--ink-soft);
+  }
+  .task-sub .flag { display: flex; gap: 7px; align-items: flex-start; color: var(--warning); }
+  .task-sub .flag b { color: var(--warning); font-weight: 600; }
+
+  .dock-foot { border-top: 1px solid var(--line); padding: 12px 14px; background: var(--panel); }
+  .composer {
+    border: 1px solid var(--line); border-radius: var(--radius-panel);
+    padding: 10px 12px; color: var(--muted-soft); font-size: var(--text-sm);
+    background: var(--paper); min-height: 44px;
+  }
+  .composer-bar { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+  .chip { font-family: var(--mono); font-size: var(--text-micro); color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 2px 6px; background: var(--paper-deep); }
+  .send { margin-left: auto; width: 30px; height: 30px; border-radius: var(--radius-control); background: var(--accent); border: none; color: var(--panel); display: grid; place-items: center; }
+  .dock-note { font-size: var(--text-micro); color: var(--muted-soft); margin-top: 8px; }
+
+  /* ── Canvas ──────────────────────────────────────────────────────── */
+  .canvas { flex: 1; overflow-y: auto; min-width: 0; }
+  .view { display: none; }
+  .view.active { display: block; animation: fade .3s cubic-bezier(.22,1,.36,1); }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  /* manuscript */
+  .paper-col { max-width: 664px; margin: 0 auto; padding: 44px 24px 80px; }
+  .ch-kicker { text-align: center; font-family: var(--serif); color: var(--muted-soft); font-size: var(--text-caption); letter-spacing: .2em; }
+  .ch-title { text-align: center; font-family: var(--serif); font-weight: 700; font-size: var(--text-display); margin: 10px 0 14px; }
+  .ch-orn { display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 34px; }
+  .ch-orn .ln { height: 1px; width: 52px; background: var(--line); }
+  .ch-orn .dm { width: 7px; height: 7px; background: var(--accent); transform: rotate(45deg); }
+  .paper-col p.para {
+    font-family: var(--serif); font-size: var(--text-reading); line-height: 1.85;
+    color: var(--ink); text-indent: 2em; text-align: justify; margin-bottom: 1.1em;
+  }
+  .seg-rule { display: flex; align-items: center; gap: 14px; margin: 26px 0; }
+  .seg-rule span { height: 1px; flex: 1; background: var(--line-soft); }
+
+  /* structure (chapters) */
+  .panel-wrap { max-width: 1080px; margin: 0 auto; padding: 28px 26px 60px; }
+  .panel-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .panel-title { font-family: var(--serif); font-size: var(--text-lg); font-weight: 700; }
+  .panel-sub { color: var(--muted); font-size: var(--text-sm); }
+  .panel-hint { color: var(--muted-soft); font-size: var(--text-caption); margin-bottom: 20px; }
+
+  .tree { display: grid; grid-template-columns: 300px 1fr; gap: 22px; }
+  .tree-col { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-panel); overflow: hidden; }
+  .tree-col-head { padding: 11px 15px; border-bottom: 1px solid var(--line-soft); font-size: var(--text-caption); color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .tree-col-head .cta { margin-left: auto; color: var(--accent); font-size: var(--text-caption); background: none; border: none; }
+  .vol { padding: 8px 15px; font-family: var(--serif); font-weight: 600; font-size: var(--text-sm); color: var(--ink-soft); background: var(--paper-deep); border-bottom: 1px solid var(--line-soft); }
+  .node {
+    display: flex; align-items: center; gap: 9px; padding: 10px 15px;
+    border-bottom: 1px solid var(--line-soft); cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .node:hover { background: var(--paper); }
+  .node.sel { background: var(--accent-wash); border-left-color: var(--accent); }
+  .node .grip { color: var(--muted-soft); cursor: grab; flex-shrink: 0; }
+  .node .t { flex: 1; min-width: 0; }
+  .node .t .name { font-size: var(--text-sm); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node .t .meta { font-size: var(--text-micro); color: var(--muted-soft); font-family: var(--mono); }
+  .badge { font-size: var(--text-micro); padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line-soft); flex-shrink: 0; }
+  .b-done { color: var(--success); background: var(--success-wash); }
+  .b-doing { color: var(--candidate); background: var(--candidate-wash); }
+  .b-plan { color: var(--muted); }
+  .b-rev { color: var(--warning); background: var(--warning-wash); border-color: var(--warning); }
+
+  .scene-detail { padding: 20px 22px; }
+  .sd-kicker { font-size: var(--text-caption); color: var(--muted); }
+  .sd-title { font-family: var(--serif); font-size: var(--text-lg); font-weight: 700; margin: 4px 0 14px; }
+  .sd-label { font-size: var(--text-micro); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 16px 0 6px; }
+  .sd-brief { font-size: var(--text-sm); color: var(--ink-soft); line-height: 1.7; }
+  .sd-outline { font-size: var(--text-sm); color: var(--ink-soft); line-height: 1.8; padding-left: 18px; }
+  .sd-outline li { margin-bottom: 4px; }
+  .sd-actions { display: flex; gap: 9px; margin-top: 22px; }
+  .btn { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-panel); padding: 7px 13px; font-size: var(--text-caption); color: var(--ink); }
+  .btn:hover { border-color: var(--accent-soft); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+  .btn.primary:hover { background: var(--accent-strong); color: var(--panel); }
+
+  /* review */
+  .review-grid { display: grid; grid-template-columns: 280px 1fr; gap: 22px; }
+  .queue-item { display: flex; align-items: center; gap: 10px; padding: 12px 15px; border-bottom: 1px solid var(--line-soft); cursor: pointer; border-left: 2px solid transparent; }
+  .queue-item:hover { background: var(--paper); }
+  .queue-item.sel { background: var(--accent-wash); border-left-color: var(--accent); }
+  .queue-item .n { width: 22px; height: 22px; border-radius: 50%; background: var(--warning-wash); color: var(--warning); font-size: var(--text-micro); font-weight: 600; display: grid; place-items: center; flex-shrink: 0; }
+  .queue-item .t { flex: 1; min-width: 0; }
+  .queue-item .name { font-size: var(--text-sm); color: var(--ink); }
+  .queue-item .meta { font-size: var(--text-micro); color: var(--muted-soft); font-family: var(--mono); }
+
+  .issue {
+    border: 1px solid var(--line-soft); border-radius: var(--radius-panel);
+    background: var(--panel); margin-bottom: 16px; overflow: hidden;
+  }
+  .issue.sev-high { border-left: 3px solid var(--danger); }
+  .issue.sev-med { border-left: 3px solid var(--warning); }
+  .issue.sev-low { border-left: 3px solid var(--line); }
+  .issue-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px 0; }
+  .sev { font-size: var(--text-micro); font-weight: 600; padding: 2px 8px; border-radius: 99px; }
+  .sev-high .sev, .sev.sev-high { color: var(--danger); background: var(--danger-wash); }
+  .sev.sev-med { color: var(--warning); background: var(--warning-wash); }
+  .sev.sev-low { color: var(--muted); background: var(--paper-deep); }
+  .issue-title { font-size: var(--text-sm); font-weight: 600; color: var(--ink); }
+  .issue-loc { margin-left: auto; font-family: var(--mono); font-size: var(--text-micro); color: var(--muted); }
+  .issue-quote {
+    margin: 11px 16px; padding: 11px 14px;
+    background: var(--paper); border: 1px solid var(--line-soft); border-radius: var(--radius-control);
+    font-family: var(--serif); font-size: var(--text-sm); line-height: 1.75; color: var(--ink-soft);
+  }
+  .issue-quote mark { background: var(--candidate-wash); color: var(--candidate); padding: 0 2px; border-radius: 3px; }
+  .issue-explain { padding: 0 16px; font-size: var(--text-sm); color: var(--ink-soft); line-height: 1.7; }
+  .issue-canon { padding: 8px 16px 0; font-size: var(--text-caption); color: var(--muted); }
+  .issue-canon code { font-family: var(--mono); font-size: var(--text-micro); background: var(--paper-deep); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  .issue-actions { display: flex; gap: 9px; padding: 14px 16px 15px; }
+  .issue-actions .btn.accept { color: var(--success); border-color: var(--success); }
+  .issue-actions .btn.dismiss { color: var(--muted); }
+  .review-empty { text-align: center; color: var(--muted-soft); padding: 60px 0; font-size: var(--text-sm); }
+
+  /* tools */
+  .tools-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; }
+  .tool-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-panel); padding: 20px 22px; display: flex; flex-direction: column; }
+  .tool-card .ti { display: flex; align-items: center; gap: 11px; margin-bottom: 6px; }
+  .tool-card .ti .ico { width: 34px; height: 34px; border-radius: var(--radius-control); background: var(--accent-wash); color: var(--accent); display: grid; place-items: center; flex-shrink: 0; }
+  .tool-card .ti .name { font-family: var(--serif); font-weight: 700; font-size: var(--text-md); }
+  .tool-card .desc { font-size: var(--text-sm); color: var(--muted); line-height: 1.65; flex: 1; }
+  .tool-card .foot { margin-top: 16px; display: flex; align-items: center; gap: 10px; }
+  .tool-card .foot .meta { font-size: var(--text-micro); color: var(--muted-soft); font-family: var(--mono); }
+  .seg { display: flex; background: var(--paper-deep); border-radius: var(--radius-control); padding: 2px; }
+  .seg button { border: none; background: none; font-size: var(--text-micro); padding: 3px 10px; border-radius: 4px; color: var(--muted); }
+  .seg button.on { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-hairline); }
+
+  .draft-tag {
+    position: fixed; right: 18px; bottom: 16px; z-index: 50;
+    background: var(--ink-surface); color: var(--ink-text);
+    border: 1px solid var(--ink-line); border-radius: 99px;
+    font-size: var(--text-micro); padding: 6px 13px; letter-spacing: .04em;
+  }
+  .draft-tag b { color: var(--gold); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- ══ Top chrome ══════════════════════════════════════════════════ -->
+<header class="topbar">
+  <div class="brand"><span class="seal">墨</span>墨鱼小说</div>
+  <div class="crumb">
+    <span>书架</span>
+    <span class="sep">/</span>
+    <span class="book">测试6</span>
+    <span class="sep">/</span>
+    <span class="ch" id="crumb-ch">第3章 赤铜粉</span>
+  </div>
+
+  <nav class="viewtabs" aria-label="画布视图">
+    <button data-view="manuscript" class="active">稿件</button>
+    <button data-view="chapters">章节</button>
+    <button data-view="review">审校</button>
+    <button data-view="tools">工具</button>
+  </nav>
+
+  <div class="status">
+    <span class="wc">6,980 字</span>
+    <span class="save"><span class="dot"></span>已保存</span>
+    <button class="btn-new">＋ 新章节</button>
+  </div>
+</header>
+
+<div class="workbench">
+
+  <!-- ══ Agent dock(常驻,四视图共享) ═══════════════════════════ -->
+  <aside class="dock">
+    <div class="dock-head">
+      <div class="dock-tabs">
+        <button class="active">对话</button>
+        <button>待审资产</button>
+      </div>
+    </div>
+    <div class="dock-body">
+      <div class="bubble">把赤铜粉那一段再压紧一点,突出许七安的警觉。</div>
+
+      <div class="task">
+        <div class="task-row"><span class="ic">✓</span>已完成 · 候选稿 1424 字</div>
+        <div class="task-sub">
+          <div class="flag"><b>!</b><div><b>与设定可能有出入 · 1 处较严重</b><br/>许七安: 持有司天监令牌 · 褚采薇说许七安拿着打更人的令牌</div></div>
+        </div>
+      </div>
+
+      <div class="task">
+        <div class="task-row"><span class="ic">✓</span>已采用 · 1,424 字进手稿</div>
+      </div>
+
+      <div class="bubble">继续</div>
+      <div class="task">
+        <div class="task-row"><span class="ic">✓</span>已完成 · 候选稿 2046 字</div>
+      </div>
+    </div>
+    <div class="dock-foot">
+      <div class="composer">让合著者起草、续写或改写…</div>
+      <div class="composer-bar">
+        <span class="chip">⏎ 发送</span>
+        <span class="chip">⇧⏎ 换行</span>
+        <span class="send">↑</span>
+      </div>
+      <div class="dock-note">起草内容先作候选稿,经你采用才进手稿。</div>
+    </div>
+  </aside>
+
+  <!-- ══ Canvas: four views ═══════════════════════════════════════ -->
+  <main class="canvas">
+
+    <!-- 稿件 -->
+    <section class="view active" id="view-manuscript">
+      <div class="paper-col">
+        <div class="ch-kicker">第 三 章</div>
+        <h1 class="ch-title">赤铜粉</h1>
+        <div class="ch-orn"><span class="ln"></span><span class="dm"></span><span class="ln"></span></div>
+
+        <p class="para">许七安收回发散的思绪,快步走到墙边的木架前,扫了一眼标着"赤铜粉"的瓷瓶,递了过去。褚采薇接过去倒进釜中,又往里面丢了块什么矿石,铜釜里"滋滋"作响,冒出一股青绿色的烟,总算是消停了。</p>
+        <p class="para">她站起身拍了拍手上的灰,一副习以为常的样子:"最近这炉子总不太对劲,回头得让监正大人看看。"</p>
+
+        <div class="seg-rule"><span></span><span></span></div>
+
+        <p class="para">许七安趁机把话题拉回来:"褚姑娘,你方才说银灵粉若用在别处,可以炼制很厉害的东西——到底是什么东西,能让你这位司天监的炼金术士都讳莫如深?"</p>
+        <p class="para">褚采薇擦了擦脸上的灰,露出一个狡黠的笑容:"这东西嘛……我要是说多了,监正大人会罚我去抄三个月的天象图。"她压低声音,"不过你既然拿着打更人的令牌,也不算外人。我只能告诉你,银灵粉若是配合某些灵材,能炼制一种'蚀骨散'。这玩意儿沾上一点,再坚固的东西也能化成一滩水。"</p>
+        <p class="para">许七安心里一凛:"蚀骨散?能化什么东西?银子?"</p>
+        <p class="para">"不止。"褚采薇摇头,眼神变得郑重,"它能消融大部分金属,包括精铁、青铜,甚至……法器上的禁制符文。若是用量足够,连城墙都能给你化出一个窟窿来。"</p>
+        <p class="para">许七安倒吸一口凉气。一个能消融精铁、青铜甚至法器禁制的炼金产物,若是落入有心人手中,用途可就太大了。而税银案中出现的假银,恰恰提炼出了这种银灵粉——这说明幕后黑手的目的绝不仅仅是在银子上造假牟利那么简单。</p>
+        <p class="para">"那这东西能炼制出来的条件很苛刻吧?"许七安追问,"不然司天监早就批量炼制了。"</p>
+      </div>
+    </section>
+
+    <!-- 章节(结构) -->
+    <section class="view" id="view-chapters">
+      <div class="panel-wrap">
+        <div class="panel-head">
+          <span class="panel-title">章节结构</span>
+          <span class="panel-sub">3 卷 · 12 章 · 41 场景</span>
+        </div>
+        <div class="panel-hint">拖拽调整顺序;点选场景查看与编辑摘要、大纲。字数与待审标记来自手稿与审校链路。</div>
+
+        <div class="tree">
+          <!-- 章节树 -->
+          <div class="tree-col">
+            <div class="tree-col-head">章节目录 <button class="cta">＋ 新章节</button></div>
+            <div class="vol">卷一 · 京察风云</div>
+            <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">第1章 牢狱之灾</div><div class="meta">3,210 字 · 4 场景</div></div><span class="badge b-done">已完成</span></div>
+            <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">第2章 税银案</div><div class="meta">2,845 字 · 3 场景</div></div><span class="badge b-done">已完成</span></div>
+            <div class="node sel"><span class="grip">⠿</span><div class="t"><div class="name">第3章 赤铜粉</div><div class="meta">6,980 字 · 5 场景</div></div><span class="badge b-doing">写作中</span></div>
+            <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">第4章 打更人</div><div class="meta">大纲 · 4 场景</div></div><span class="badge b-plan">规划中</span></div>
+            <div class="vol">卷二 · 云州迷云</div>
+            <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">第5章 南下</div><div class="meta">大纲 · 3 场景</div></div><span class="badge b-plan">规划中</span></div>
+            <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">第6章 白帝城</div><div class="meta">未开始</div></div><span class="badge b-plan">规划中</span></div>
+          </div>
+
+          <!-- 场景 + 详情 -->
+          <div style="display:flex;flex-direction:column;gap:18px;">
+            <div class="tree-col">
+              <div class="tree-col-head">第3章 · 场景 <button class="cta">＋ 新场景</button></div>
+              <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">3-1 司天监炼金房</div><div class="meta">1,860 字</div></div><span class="badge b-done">已完成</span></div>
+              <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">3-2 赤铜粉试炼</div><div class="meta">2,120 字</div></div><span class="badge b-done">已完成</span></div>
+              <div class="node sel"><span class="grip">⠿</span><div class="t"><div class="name">3-3 蚀骨散之秘</div><div class="meta">3,000 字</div></div><span class="badge b-rev">待审校 1</span></div>
+              <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">3-4 褚采薇的提醒</div><div class="meta">大纲</div></div><span class="badge b-plan">规划中</span></div>
+              <div class="node"><span class="grip">⠿</span><div class="t"><div class="name">3-5 夜探藏书阁</div><div class="meta">大纲</div></div><span class="badge b-plan">规划中</span></div>
+            </div>
+
+            <div class="tree-col">
+              <div class="scene-detail">
+                <div class="sd-kicker">场景 3-3 · 第3章 赤铜粉</div>
+                <div class="sd-title">蚀骨散之秘</div>
+                <div class="sd-label">场景摘要</div>
+                <div class="sd-brief">褚采薇向许七安透露银灵粉可炼制"蚀骨散",能消融金属与法器禁制。许七安意识到税银案背后另有图谋,二人的信任在对话中加深。</div>
+                <div class="sd-label">场景大纲</div>
+                <ul class="sd-outline">
+                  <li>许七安追问银灵粉的真正用途,褚采薇故作神秘。</li>
+                  <li>揭示"蚀骨散"的炼制条件与威力,埋下税银案伏笔。</li>
+                  <li>许七安警觉:幕后黑手目标不止造假牟利。</li>
+                  <li>以褚采薇一句提醒收束,引出夜探藏书阁。</li>
+                </ul>
+                <div class="sd-actions">
+                  <button class="btn">编辑摘要</button>
+                  <button class="btn">编辑大纲</button>
+                  <button class="btn primary">在稿件中打开</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 审校 -->
+    <section class="view" id="view-review">
+      <div class="panel-wrap">
+        <div class="panel-head">
+          <span class="panel-title">审校</span>
+          <span class="panel-sub">3 条待处理 · 12 条已处置</span>
+        </div>
+        <div class="panel-hint">对候选稿发起审校,逐条处置:采纳(回写设定)、驳回,或先在稿件中定位。较严重问题会标红。</div>
+
+        <div class="review-grid">
+          <!-- 待审队列 -->
+          <div class="tree-col">
+            <div class="tree-col-head">待审校 <button class="cta">发起审校</button></div>
+            <div class="queue-item sel"><span class="n">1</span><div class="t"><div class="name">第3章 · 蚀骨散之秘</div><div class="meta">候选稿 1,424 字</div></div></div>
+            <div class="queue-item"><span class="n">2</span><div class="t"><div class="name">第3章 · 赤铜粉试炼</div><div class="meta">候选稿 2,046 字</div></div></div>
+            <div class="queue-item"><span class="n">0</span><div class="t"><div class="name">第2章 · 税银案</div><div class="meta">已采用 · 2,845 字</div></div></div>
+          </div>
+
+          <!-- issue 卡片 -->
+          <div>
+            <div class="issue sev-high">
+              <div class="issue-head">
+                <span class="sev sev-high">较严重</span>
+                <span class="issue-title">与设定可能有出入</span>
+                <span class="issue-loc">第3章 · 场景3-3 · ¶4</span>
+              </div>
+              <div class="issue-quote">……不过你既然拿着<mark>打更人的令牌</mark>,也不算外人。我只能告诉你,银灵粉若是配合某些灵材……</div>
+              <div class="issue-explain">正文称许七安持有"打更人的令牌",但当前角色设定中许七安持有的是<strong>司天监令牌</strong>,此时尚未获发打更人令牌。两者为不同信物,直接沿用会与既有设定冲突。</div>
+              <div class="issue-canon">冲突依据:<code>角色 · 许七安 · 持有物</code> · <code>常驻 · 司天监令牌</code></div>
+              <div class="issue-actions">
+                <button class="btn accept">采纳并回写设定</button>
+                <button class="btn dismiss">驳回</button>
+                <button class="btn">在稿件中定位</button>
+              </div>
+            </div>
+
+            <div class="issue sev-med">
+              <div class="issue-head">
+                <span class="sev sev-med">建议</span>
+                <span class="issue-title">称谓一致性</span>
+                <span class="issue-loc">第3章 · 场景3-2 · ¶2</span>
+              </div>
+              <div class="issue-quote">……<mark>褚姑娘</mark>,你方才说银灵粉若用在别处……</div>
+              <div class="issue-explain">前文同章内许七安对褚采薇的称谓为"褚炼金师",此处改用"褚姑娘"。建议统一称谓,或在首次改口处补一笔过渡。</div>
+              <div class="issue-actions">
+                <button class="btn accept">采纳并回写设定</button>
+                <button class="btn dismiss">驳回</button>
+                <button class="btn">在稿件中定位</button>
+              </div>
+            </div>
+
+            <div class="issue sev-low">
+              <div class="issue-head">
+                <span class="sev sev-low">提示</span>
+                <span class="issue-title">节奏</span>
+                <span class="issue-loc">第3章 · 场景3-3 · ¶7</span>
+              </div>
+              <div class="issue-explain" style="padding-top:12px;">本段对话信息密度较高,连续三段问答未见动作或神态穿插,可考虑插入一处褚采薇的动作节拍,缓一缓节奏。</div>
+              <div class="issue-actions">
+                <button class="btn accept">采纳并回写设定</button>
+                <button class="btn dismiss">驳回</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 工具(形态草案,待评审) -->
+    <section class="view" id="view-tools">
+      <div class="panel-wrap">
+        <div class="panel-head">
+          <span class="panel-title">工具</span>
+          <span class="panel-sub">形态草案 · 待评审</span>
+        </div>
+        <div class="panel-hint">下面是「工具」视图可能聚合的能力,最终收录哪些、以何种形态呈现,需先评审定稿。</div>
+
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div class="ti"><span class="ico">⇩</span><span class="name">导出手稿</span></div>
+            <div class="desc">把当前作品的手稿导出为纯文本或排印稿,含全部已采用章节,带内容校验指纹。</div>
+            <div class="foot">
+              <div class="seg"><button class="on">TXT</button><button>排印稿</button></div>
+              <button class="btn primary" style="margin-left:auto;">导出</button>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="ti"><span class="ico">⊘</span><span class="name">违禁词库</span></div>
+            <div class="desc">维护本项目禁用的词与表述,起草与审校时实时校验,命中即提示替换。</div>
+            <div class="foot"><span class="meta">12 条规则</span><button class="btn" style="margin-left:auto;">管理</button></div>
+          </div>
+
+          <div class="tool-card">
+            <div class="ti"><span class="ico">⧉</span><span class="name">重复检测</span></div>
+            <div class="desc">扫描手稿中重复或近似的段落与句式,避免候选稿与正文自我重复。</div>
+            <div class="foot"><span class="meta">上次:3 处</span><button class="btn" style="margin-left:auto;">运行</button></div>
+          </div>
+
+          <div class="tool-card">
+            <div class="ti"><span class="ico">✎</span><span class="name">写作预设</span></div>
+            <div class="desc">保存常用的语气、视角、节奏等写作偏好,起草时一键套用为合著者的写作约束。</div>
+            <div class="foot"><span class="meta">4 个预设</span><button class="btn" style="margin-left:auto;">管理</button></div>
+          </div>
+
+          <div class="tool-card">
+            <div class="ti"><span class="ico">◈</span><span class="name">手动蒸馏</span></div>
+            <div class="desc">从指定手稿章节即时提炼资产(角色、设定、规则),写入待审队列供你采纳。</div>
+            <div class="foot"><span class="meta">源:当前章</span><button class="btn" style="margin-left:auto;">蒸馏</button></div>
+          </div>
+
+          <div class="tool-card">
+            <div class="ti"><span class="ico">⏱</span><span class="name">写作统计</span></div>
+            <div class="desc">按章节与日期统计字数、起草轮次与采用率,看清这本书的写作进展。</div>
+            <div class="foot"><span class="meta">本周 +8,540 字</span><button class="btn" style="margin-left:auto;">查看</button></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="draft-tag">静态预览 · <b>形态待评审</b> · 数据为虚构样例</div>
+
+<script>
+  const tabs = document.querySelectorAll('.viewtabs button');
+  const views = {
+    manuscript: document.getElementById('view-manuscript'),
+    chapters:   document.getElementById('view-chapters'),
+    review:     document.getElementById('view-review'),
+    tools:      document.getElementById('view-tools'),
+  };
+  const crumb = document.getElementById('crumb-ch');
+  const crumbFor = { manuscript: '第3章 赤铜粉', chapters: '章节结构', review: '审校', tools: '工具' };
+
+  tabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabs.forEach(b => b.classList.toggle('active', b === btn));
+      Object.values(views).forEach(v => v.classList.remove('active'));
+      views[btn.dataset.view].classList.add('active');
+      crumb.textContent = crumbFor[btn.dataset.view];
+      document.querySelector('.canvas').scrollTop = 0;
+    });
+  });
+
+  // 轻量选中态:结构树 / 审校队列节点点击高亮(仅预览交互)
+  document.querySelectorAll('.node, .queue-item').forEach(n => {
+    n.addEventListener('click', () => {
+      n.parentElement.querySelectorAll('.sel').forEach(s => s.classList.remove('sel'));
+      n.classList.add('sel');
+    });
+  });
+</script>
+</body>
+</html>

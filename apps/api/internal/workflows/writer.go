@@ -75,6 +75,14 @@ type ListDraftReviewsInput struct {
 	DraftID  string
 }
 
+// ListProjectReviewIssuesInput scopes the project-wide review queue. Status
+// defaults to "open" when empty.
+type ListProjectReviewIssuesInput struct {
+	TenantID  string
+	ProjectID string
+	Status    string
+}
+
 type GetManuscriptInput struct {
 	TenantID  string
 	ProjectID string
@@ -179,6 +187,31 @@ type DraftReviewIssue struct {
 	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
+// Project-wide review queue (the 审校 canvas view). One entry per draft that
+// has issues in the requested status, carrying just enough context for the
+// queue row plus that draft's issues inline.
+type ProjectDraftReviewQueue struct {
+	ProjectID string                     `json:"project_id"`
+	Items     []ProjectDraftReviewBucket `json:"items"`
+}
+
+type ProjectDraftReviewBucket struct {
+	DraftID        string                `json:"draft_id"`
+	ChapterID      string                `json:"chapter_id,omitempty"`
+	Instruction    string                `json:"instruction,omitempty"`
+	DraftWordCount int                   `json:"word_count"`
+	OpenCount      int                   `json:"open_count"`
+	Issues         []ProjectReviewIssue  `json:"issues"`
+}
+
+// ProjectReviewIssue embeds the issue with its draft + chapter context. The
+// review-issue PATCH uses `updated_at` as the optimistic-lock `version`.
+type ProjectReviewIssue struct {
+	DraftReviewIssue
+	DraftID   string `json:"draft_id"`
+	ChapterID string `json:"chapter_id,omitempty"`
+}
+
 type WriterRunCancellation struct {
 	RunID  string
 	Status string
@@ -217,6 +250,7 @@ type DraftAdoptionStore interface {
 type DraftReviewStore interface {
 	StartDraftReview(context.Context, StartDraftReviewInput) (DraftReviewAdmission, error)
 	ListDraftReviews(context.Context, ListDraftReviewsInput) (DraftReviewList, error)
+	ListProjectReviewIssues(context.Context, ListProjectReviewIssuesInput) (ProjectDraftReviewQueue, error)
 }
 
 type ManuscriptReader interface {
@@ -455,6 +489,13 @@ func (s *DisabledDraftReviewStore) StartDraftReview(context.Context, StartDraftR
 
 func (s *DisabledDraftReviewStore) ListDraftReviews(context.Context, ListDraftReviewsInput) (DraftReviewList, error) {
 	return DraftReviewList{}, &AppError{
+		Code:    "WRITER_REVIEW_BACKEND_UNCONFIGURED",
+		Message: "writer review backend is not configured",
+	}
+}
+
+func (s *DisabledDraftReviewStore) ListProjectReviewIssues(context.Context, ListProjectReviewIssuesInput) (ProjectDraftReviewQueue, error) {
+	return ProjectDraftReviewQueue{}, &AppError{
 		Code:    "WRITER_REVIEW_BACKEND_UNCONFIGURED",
 		Message: "writer review backend is not configured",
 	}

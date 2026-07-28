@@ -13,6 +13,9 @@ export type SaveState =
   | { kind: "conflict"; message: string }
   | { kind: "error"; message: string };
 
+/** The canvas views the author can switch between. */
+export type CanvasView = "manuscript" | "chapters" | "review" | "tools";
+
 /**
  * The writer's top-strip — the chapter switcher, the centred segmented view
  * tabs (manuscript only this wave), live word count, save state, and the
@@ -26,6 +29,8 @@ export function WriterCanvasTop({
   activeChapter,
   wordCount,
   saveState,
+  activeView,
+  onSelectView,
   onSelectChapter,
   onNewChapter,
   busy,
@@ -35,6 +40,8 @@ export function WriterCanvasTop({
   activeChapter: Chapter | null;
   wordCount: number;
   saveState: SaveState;
+  activeView: CanvasView;
+  onSelectView: (view: CanvasView) => void;
   onSelectChapter: (chapterId: string) => void;
   onNewChapter: () => void;
   busy: boolean;
@@ -52,7 +59,7 @@ export function WriterCanvasTop({
       </div>
 
       {/* Canvas view tabs — centred between switcher and status cluster. */}
-      <ViewTabs />
+      <ViewTabs activeView={activeView} onSelect={onSelectView} />
 
       <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
         {/* Word count */}
@@ -75,23 +82,30 @@ export function WriterCanvasTop({
   );
 }
 
-const CANVAS_VIEWS = [
+const CANVAS_VIEWS: ReadonlyArray<{ id: CanvasView; label: string; available: boolean }> = [
   { id: "manuscript", label: "稿件", available: true },
-  { id: "chapters", label: "章节", available: false },
-  { id: "review", label: "审校", available: false },
-  { id: "tools", label: "工具", available: false },
-] as const;
+  { id: "chapters", label: "章节", available: true },
+  { id: "review", label: "审校", available: true },
+  { id: "tools", label: "工具", available: true },
+];
 
 /**
- * The mandated canvas view switcher (稿件 / 章节 / 审校 / 工具). Only the
- * manuscript view exists this wave — the remaining slots render disabled with
- * an honest title instead of fake panels.
+ * The mandated canvas view switcher (稿件 / 章节 / 审校 / 工具). Manuscript and
+ * the chapters structure view are live; 审校 / 工具 stay honest-disabled until
+ * their waves land. Selection is lifted to the workspace, which renders the
+ * matching canvas panel.
  */
-function ViewTabs() {
+function ViewTabs({
+  activeView,
+  onSelect,
+}: {
+  activeView: CanvasView;
+  onSelect: (view: CanvasView) => void;
+}) {
   return (
     <nav aria-label="画布视图" className="flex shrink-0 items-center rounded-control bg-paper-deep p-0.5">
       {CANVAS_VIEWS.map((view) => {
-        const active = view.id === "manuscript";
+        const active = view.id === activeView;
         return (
           <button
             key={view.id}
@@ -99,6 +113,7 @@ function ViewTabs() {
             disabled={!view.available}
             aria-current={active ? "page" : undefined}
             title={view.available ? undefined : "后续波次提供"}
+            onClick={() => view.available && onSelect(view.id)}
             className={`rounded-control border px-3 py-1 text-caption transition-colors ${
               active
                 ? "border-line-soft bg-panel font-medium text-ink"

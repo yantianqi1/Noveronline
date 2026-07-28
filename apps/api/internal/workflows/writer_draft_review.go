@@ -300,6 +300,112 @@ func draftReviewQueryFailed() *AppError {
 	return &AppError{Code: "WRITER_REVIEW_QUERY_FAILED", Message: "writer review query failed"}
 }
 
+// ListProjectReviewIssues powers the 审校 canvas view: every draft in the
+// project that has issues in the requested status (default "open"), grouped per
+// draft with the draft's chapter + the run's instruction for queue context. It
+// joins draft → run so the queue can show "which chapter / what prompt" without
+// a second round-trip.
+func (s *SQLDraftReviewStore) ListProjectReviewIssues(ctx context.Context, input ListProjectReviewIssuesInput) (ProjectDraftReviewQueue, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "open"
+	}
+	if tenantID == "" || projectID == "" {
+		return ProjectDraftReviewQueue{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and project_id are required"}
+	}
+	if s.queryer == nil {
+		return ProjectDraftReviewQueue{}, &AppError{Code: "WRITER_REVIEW_BACKEND_UNCONFIGURED", Message: "writer review backend is not configured"}
+	}
+	query := `SELECT
+  issues.issue_id::text,
+  issues.draft_id::text,
+  issues.severity,
+  issues.category,
+  issues.summary,
+  issues.suggestion,
+  issues.status,
+  issues.created_at::text,
+  issues.updated_at::text,
+  drafts.chapter_id::text,
+  drafts.word_count,
+  runs.instruction
+FROM draft_review_issues issues
+JOIN writer_drafts drafts
+  ON drafts.tenant_id = issues.tenant_id
+ AND drafts.draft_id = issues.draft_id
+JOIN writer_runs runs
+  ON runs.tenant_id = drafts.tenant_id
+ AND runs.run_id = drafts.run_id
+WHERE issues.tenant_id::text = $1
+  AND issues.project_id::text = $2
+  AND issues.status = $3
+ORDER BY drafts.created_at DESC, issues.created_at ASC`
+	rows, err := queryWorkflowEventRows(ctx, s.queryer, tenantID, query, tenantID, projectID, status)
+	if err != nil {
+		return ProjectDraftReviewQueue{}, draftReviewQueryFailed()
+	}
+	defer rows.Close()
+
+	result := ProjectDraftReviewQueue{ProjectID: projectID, Items: []ProjectDraftReviewBucket{}}
+	indexByDraftID := map[string]int{}
+	for rows.Next() {
+		var issueID, draftID, severity, category, summary string
+		var suggestion, issueStatus, createdAt, updatedAt string
+		var chapterID sql.NullString
+		var wordCount int
+		var instruction sql.NullString
+		if err := rows.Scan(
+			&issueID,
+			&draftID,
+			&severity,
+			&category,
+			&summary,
+			&suggestion,
+			&issueStatus,
+			&createdAt,
+			&updatedAt,
+			&chapterID,
+			&wordCount,
+			&instruction,
+		); err != nil {
+			return ProjectDraftReviewQueue{}, draftReviewQueryFailed()
+		}
+		index, exists := indexByDraftID[draftID]
+		if !exists {
+			result.Items = append(result.Items, ProjectDraftReviewBucket{
+				DraftID:        draftID,
+				ChapterID:      chapterID.String,
+				Instruction:    instruction.String,
+				DraftWordCount: wordCount,
+				Issues:         []ProjectReviewIssue{},
+			})
+			index = len(result.Items) - 1
+			indexByDraftID[draftID] = index
+		}
+		result.Items[index].OpenCount++
+		result.Items[index].Issues = append(result.Items[index].Issues, ProjectReviewIssue{
+			DraftReviewIssue: DraftReviewIssue{
+				IssueID:    issueID,
+				Severity:   severity,
+				Category:   category,
+				Summary:    publicDraftReviewText(summary),
+				Suggestion: publicDraftReviewText(suggestion),
+				Status:     issueStatus,
+				CreatedAt:  createdAt,
+				UpdatedAt:  updatedAt,
+			},
+			DraftID:   draftID,
+			ChapterID: chapterID.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return ProjectDraftReviewQueue{}, draftReviewQueryFailed()
+	}
+	return result, nil
+}
+
 func sanitizeDraftReviewOptions(options map[string]any) map[string]any {
 	value := sanitizeWriterAdmissionValue(options)
 	typed, ok := value.(map[string]any)

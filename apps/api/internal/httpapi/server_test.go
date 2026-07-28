@@ -556,13 +556,16 @@ func (s *recordingDraftAdoptionStore) AdoptDraft(ctx context.Context, input work
 }
 
 type recordingDraftReviewStore struct {
-	startInput workflows.StartDraftReviewInput
-	listInput  workflows.ListDraftReviewsInput
-	result     workflows.DraftReviewAdmission
-	reviews    workflows.DraftReviewList
-	startErr   error
-	listErr    error
-	called     bool
+	startInput   workflows.StartDraftReviewInput
+	listInput    workflows.ListDraftReviewsInput
+	projectInput workflows.ListProjectReviewIssuesInput
+	result       workflows.DraftReviewAdmission
+	reviews      workflows.DraftReviewList
+	queue        workflows.ProjectDraftReviewQueue
+	startErr     error
+	listErr      error
+	projectErr   error
+	called       bool
 }
 
 type recordingDraftReviewOwnerLookup struct {
@@ -606,6 +609,15 @@ func (s *recordingDraftReviewStore) ListDraftReviews(ctx context.Context, input 
 		return workflows.DraftReviewList{}, s.listErr
 	}
 	return s.reviews, nil
+}
+
+func (s *recordingDraftReviewStore) ListProjectReviewIssues(ctx context.Context, input workflows.ListProjectReviewIssuesInput) (workflows.ProjectDraftReviewQueue, error) {
+	s.projectInput = input
+	s.called = true
+	if s.projectErr != nil {
+		return workflows.ProjectDraftReviewQueue{}, s.projectErr
+	}
+	return s.queue, nil
 }
 
 type recordingManuscriptReader struct {
@@ -6388,6 +6400,77 @@ func TestListDraftReviewsSanitizesStoreReturnedIssueTextAtHTTPBoundary(t *testin
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("review list leaked store-returned forbidden value %q: %s", forbidden, body)
 		}
+	}
+}
+
+func TestListProjectReviewIssuesGroupsByDraftAndAuthorizesProject(t *testing.T) {
+	store := &recordingDraftReviewStore{
+		queue: workflows.ProjectDraftReviewQueue{
+			ProjectID: "project-123",
+			Items: []workflows.ProjectDraftReviewBucket{{
+				DraftID:        "draft-1",
+				ChapterID:      "chapter-1",
+				Instruction:    "润色赤铜粉出场",
+				DraftWordCount: 1820,
+				OpenCount:      2,
+				Issues: []workflows.ProjectReviewIssue{{
+					DraftReviewIssue: workflows.DraftReviewIssue{
+						IssueID: "issue-1", Severity: "high", Category: "pov",
+						Summary: "public summary", Suggestion: "public suggestion", Status: "open",
+					},
+					DraftID: "draft-1", ChapterID: "chapter-1",
+				}},
+			}},
+		},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{DraftReviewStore: store, Authorizer: authorizer})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/draft-review-issues?status=open", nil)
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if store.projectInput.TenantID != "tenant-123" || store.projectInput.ProjectID != "project-123" || store.projectInput.Status != "open" {
+		t.Fatalf("project review issues lost tenant/project/status scope: %#v", store.projectInput)
+	}
+	if authorizer.input.ProjectID != "project-123" || authorizer.input.Permission != auth.PermissionProjectRead {
+		t.Fatalf("project review issues did not authorize project read: %#v", authorizer.input)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"project_id":"project-123"`, `"draft_id":"draft-1"`, `"chapter_id":"chapter-1"`, `"instruction":"润色赤铜粉出场"`, `"open_count":2`, `"issue_id":"issue-1"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("project review issues missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"content_text", "prompt", "credential_ref", "api_key", "manuscript"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("project review issues leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestListProjectReviewIssuesRequiresTenantAndStore(t *testing.T) {
+	server := newDevelopmentServer(Config{DraftReviewStore: &recordingDraftReviewStore{}, Authorizer: &recordingAuthorizer{}})
+	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/draft-review-issues", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without tenant, got %d: %s", response.Code, response.Body.String())
+	}
+
+	unconfigured := newDevelopmentServer(Config{Authorizer: &recordingAuthorizer{}})
+	authenticated := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/draft-review-issues", nil)
+	authenticated.Header.Set("X-Tenant-Id", "tenant-123")
+	authenticated.Header.Set("X-User-Id", "user-123")
+	unconfiguredResponse := httptest.NewRecorder()
+	unconfigured.ServeHTTP(unconfiguredResponse, authenticated)
+	if unconfiguredResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 without store, got %d: %s", unconfiguredResponse.Code, unconfiguredResponse.Body.String())
 	}
 }
 

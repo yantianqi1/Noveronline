@@ -28,9 +28,12 @@ import type {
   WriterThread,
 } from "@/lib/api/writer-types";
 
-import { WriterCanvasTop } from "./writer-canvas-top";
+import { WriterCanvasTop, type CanvasView } from "./writer-canvas-top";
 import { WriterEmpty } from "./writer-empty";
 import { ManuscriptPaper } from "./manuscript-paper";
+import { ChaptersStructurePanel } from "./chapters-structure-panel";
+import { ReviewPanel } from "./review-panel";
+import { ToolsPanel } from "./tools-panel";
 import { ProjectTopbarSlot } from "../project-topbar-slot";
 import { WriterRail, buildConversationTurns, type ConversationTurn, type SettledRunInfo } from "./writer-rail";
 import { WriterComposer } from "./writer-composer";
@@ -70,6 +73,12 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
 
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // Block metadata for the whole project — feeds the chapters structure view's
+  // per-chapter word counts without re-reading bodies.
+  const [blockMetas, setBlockMetas] = useState<ManuscriptBlockMeta[]>([]);
+  // The canvas view the author is on (manuscript / chapters). 审校/工具 stay
+  // honest-disabled in the top strip until their waves land.
+  const [activeView, setActiveView] = useState<CanvasView>("manuscript");
 
   // The active chapter rendered as an ordered sequence of editable segments
   // (one manuscript block each). The canvas is a continuous document, not a
@@ -100,8 +109,13 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
   // so the composer disables while the agent is working.
   const [activeRunIds, setActiveRunIds] = useState<ReadonlySet<string>>(new Set());
   // Bumped after each draft adoption so the proposal rail re-fetches — the
-  // adoption enqueues a distillation that lands new candidates a few seconds later.
+  // adoption enqueues a distillation that often takes 30–180s (LLM extract).
   const [proposalRefreshKey, setProposalRefreshKey] = useState(0);
+  // True while we are polling for post-adoption distillation candidates.
+  const [distilling, setDistilling] = useState(false);
+  const pendingCountRef = useRef(0);
+  const distillBaselineRef = useRef<number | null>(null);
+  const distillTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const messageSeqRef = useRef(0);
 
   const saveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -129,6 +143,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
       fetchBlocks(sel.project_id, sel.tenant_id),
     ]);
     setChapters(chapterList);
+    setBlockMetas(blockList);
     // Adopted runs settle from their manuscript blocks' provenance — this is
     // what lets a reload restore every settled turn without any local state.
     setAdoptedRunIds(
@@ -444,6 +459,30 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
     return true;
   }
 
+  // Switch the canvas view. Leaving the manuscript flushes pending edits first,
+  // so an unsaved paragraph is never stranded when the author moves to the
+  // structure view.
+  async function handleSelectView(view: CanvasView) {
+    if (view === activeView) return;
+    if (activeView === "manuscript" && view !== "manuscript") {
+      if (!(await flushPendingSegmentSaves())) {
+        setActionError("当前手稿尚未保存，已留在稿件视图。请先处理保存错误。");
+        return;
+      }
+    }
+    setActiveView(view);
+  }
+
+  // The structure view's "在稿件中打开" — flush, switch chapters, return to the
+  // manuscript so the author lands on the prose.
+  async function handleOpenInManuscript(chapterId: string) {
+    if (chapterId !== activeChapterId) {
+      const changed = await handleSelectChapter(chapterId);
+      if (!changed) return;
+    }
+    setActiveView("manuscript");
+  }
+
   // ── W2: conversation actions ───────────────────────────────────────────
 
   // The composer only locks while the newest request is still running.
@@ -491,6 +530,50 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
     });
   }
 
+  function stopDistillWatch() {
+    if (distillTimerRef.current) {
+      clearInterval(distillTimerRef.current);
+      distillTimerRef.current = null;
+    }
+    distillBaselineRef.current = null;
+    setDistilling(false);
+  }
+
+  /**
+   * After 采用, distillation is admitted in the same TX but the LLM extract
+   * commonly finishes in 30–180s (we've seen 19s–11min). A single 12s refresh
+   * leaves 待审 empty even when candidates already landed in the DB. Poll the
+   * pending queue until the count rises above the pre-adopt baseline, or until
+   * the watch window expires.
+   */
+  function startDistillWatch() {
+    stopDistillWatch();
+    distillBaselineRef.current = pendingCountRef.current;
+    setDistilling(true);
+    setProposalRefreshKey((k) => k + 1);
+    const startedAt = Date.now();
+    distillTimerRef.current = setInterval(() => {
+      setProposalRefreshKey((k) => k + 1);
+      if (Date.now() - startedAt >= 240_000) stopDistillWatch();
+    }, 5_000);
+  }
+
+  function handleProposalCountChange(count: number) {
+    pendingCountRef.current = count;
+    const baseline = distillBaselineRef.current;
+    if (baseline !== null && count > baseline) stopDistillWatch();
+  }
+
+  useEffect(
+    () => () => {
+      if (distillTimerRef.current) {
+        clearInterval(distillTimerRef.current);
+        distillTimerRef.current = null;
+      }
+    },
+    [],
+  );
+
   /** Scroll the canvas to the prose this run contributed (switching chapter). */
   function handleRevealAdopted(runId: string) {
     const info = settledRuns.get(runId);
@@ -529,10 +612,9 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
         });
         return next;
       });
-      // Distillation runs async (outbox → ~5s dispatch → extraction), so refresh
-      // the proposal rail now and once more shortly after to catch new candidates.
-      setProposalRefreshKey((k) => k + 1);
-      setTimeout(() => setProposalRefreshKey((k) => k + 1), 12_000);
+      // Distillation runs async (outbox → dispatch → LLM extract). Poll 待审
+      // for up to ~4 minutes so candidates appear once the run completes.
+      startDistillWatch();
       // The adopted prose is now a trailing manuscript block — reload the
       // chapter's segments so it appears on the canvas as the newest page,
       // merging so the author's unsaved edits are never clobbered.
@@ -589,6 +671,8 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
           activeChapter={activeChapter}
           wordCount={segments.reduce((sum, s) => sum + countWords(s.content_text), 0)}
           saveState={saveState}
+          activeView={activeView}
+          onSelectView={(view) => void handleSelectView(view)}
           onSelectChapter={handleSelectChapter}
           onNewChapter={handleNewChapter}
           busy={busy}
@@ -614,6 +698,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
               projectId={projectId}
               tenantId={selection?.tenant_id ?? ""}
               refreshKey={proposalRefreshKey}
+              distilling={distilling}
               conversation={() => (
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="min-h-0 flex-1">
@@ -645,22 +730,65 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
                   tenantId={selection?.tenant_id ?? ""}
                   csrfToken={csrfToken}
                   refreshKey={proposalRefreshKey}
-                  onCountChange={onCountChange}
+                  distilling={distilling}
+                  onCountChange={(count) => {
+                    onCountChange(count);
+                    handleProposalCountChange(count);
+                  }}
                 />
               )}
             />
           </aside>
 
-          {/* Manuscript canvas — the dominant artifact */}
+          {/* The canvas — manuscript by default, with the chapters structure
+              (章节) and review (审校) views as live siblings. The Agent dock on
+              the left stays persistent across every view. */}
           <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-            <ManuscriptPaper
-              chapter={activeChapter}
-              segments={segments}
-              onChangeSegment={handleEditSegment}
-              readOnly={!csrfToken}
-              revealBlockId={revealBlockId}
-              onRevealConsumed={() => setRevealBlockId(null)}
-            />
+            {activeView === "chapters" ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ChaptersStructurePanel
+                  projectId={selection?.project_id ?? ""}
+                  tenantId={selection?.tenant_id ?? ""}
+                  csrfToken={csrfToken}
+                  chapters={chapters}
+                  blocks={blockMetas}
+                  activeChapterId={activeChapterId}
+                  onChaptersChanged={() => {
+                    if (selection) void loadStructure(selection);
+                  }}
+                  onOpenInManuscript={(chapterId) => void handleOpenInManuscript(chapterId)}
+                  onNewChapter={handleNewChapter}
+                  busy={busy}
+                />
+              </div>
+            ) : activeView === "review" ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ReviewPanel
+                  projectId={selection?.project_id ?? ""}
+                  tenantId={selection?.tenant_id ?? ""}
+                  csrfToken={csrfToken}
+                  chapters={chapters}
+                  onOpenInManuscript={(chapterId) => void handleOpenInManuscript(chapterId)}
+                />
+              </div>
+            ) : activeView === "tools" ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ToolsPanel
+                  projectId={selection?.project_id ?? ""}
+                  tenantId={selection?.tenant_id ?? ""}
+                  csrfToken={csrfToken}
+                />
+              </div>
+            ) : (
+              <ManuscriptPaper
+                chapter={activeChapter}
+                segments={segments}
+                onChangeSegment={handleEditSegment}
+                readOnly={!csrfToken}
+                revealBlockId={revealBlockId}
+                onRevealConsumed={() => setRevealBlockId(null)}
+              />
+            )}
           </div>
         </div>
       )}
