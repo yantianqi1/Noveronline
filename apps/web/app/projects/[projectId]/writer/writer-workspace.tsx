@@ -609,12 +609,12 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
           {/* The whole co-writer dock is one two-sided card. Its front is the
               complete conversation UI; its back is the complete asset-review
               workbench. Individual composer/proposal cards never flip alone. */}
-          <aside className="hidden h-full w-rail-inspector shrink-0 overflow-hidden border-r border-line bg-paper/40 wide:block">
+          <aside className="hidden h-full w-rail-inspector shrink-0 overflow-hidden border-r border-line bg-paper wide:block">
             <ConversationReviewFlip
               projectId={projectId}
               tenantId={selection?.tenant_id ?? ""}
               refreshKey={proposalRefreshKey}
-              conversation={
+              conversation={() => (
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="min-h-0 flex-1">
                     <WriterRail
@@ -629,6 +629,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
                       onRunSettled={handleRunSettled}
                       onRevealAdopted={handleRevealAdopted}
                       onTaskAdopted={handleTaskAdopted}
+                      hideHeader
                     />
                   </div>
                   <WriterComposer
@@ -637,7 +638,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
                     placeholder={anyLive ? "合著者起草中，完成后继续…" : undefined}
                   />
                 </div>
-              }
+              )}
               review={(onCountChange) => (
                 <ProposalRail
                   projectId={projectId}

@@ -233,10 +233,18 @@ a {
  * any component that defines its own focus-visible treatment (Button, Input)
  * still overrides it, while everything else inherits the vermilion ring.
  * `outline` follows the element's own border-radius automatically.
+ *
+ * The rule lives in `@layer base`: unlayered author styles beat every cascade
+ * layer, which let this ring punch through utility-layer overrides such as
+ * `focus:outline-none` on the manuscript textarea and draw a form-style box
+ * around clicked paragraphs. Layered, the zero-specificity `:where()` keeps
+ * its original "any explicit treatment wins" semantics in both directions.
  */
-:where(a, button, [role="button"], [role="option"], [role="tab"], summary, input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
-  outline-offset: 2px;
+@layer base {
+  :where(a, button, [role="button"], [role="option"], [role="tab"], summary, input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+    outline-offset: 2px;
+  }
 }
 
 /*
@@ -246,6 +254,27 @@ a {
 :lang(zh) i,
 :lang(zh) em {
   font-style: normal;
+}
+
+/*
+ * Keyboard key cap (⌘⏎ / ⏎ / ⇧⏎ hints in the writer dock).
+ * Equivalent to `font-mono text-micro border border-line rounded-control
+ * bg-paper-deep text-muted px-[5px] py-[1px] leading-normal`, expressed with
+ * the theme variables directly. Kept in `@layer components` so a solid
+ * vermilion host (adopt / send buttons) can restyle it with ordinary
+ * utilities — the utilities layer always wins over this block.
+ */
+@layer components {
+  .kbd {
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: 1.5;
+    padding: 1px 5px;
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-control);
+    background: var(--color-paper-deep);
+    color: var(--color-muted);
+  }
 }
 
 /*

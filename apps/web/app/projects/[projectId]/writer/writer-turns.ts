@@ -29,14 +29,14 @@ export function buildConversationTurns(messages: WriterMessage[]): ConversationT
       continue;
     }
     if (message.role === "agent") {
-      turns.push({ kind: "agent", id: message.message_id, body: message.body });
+      turns.push({ kind: "agent", id: message.message_id, body: message.body, createdAt: message.created_at });
     } else {
-      turns.push({ kind: "user", id: message.message_id, body: message.body });
+      turns.push({ kind: "user", id: message.message_id, body: message.body, createdAt: message.created_at });
     }
     if (!runId || seenRunIds.has(runId)) continue;
     seenRunIds.add(runId);
     anchoredRunIds.add(runId);
-    turns.push({ kind: "task", id: `task-${runId}`, runId });
+    turns.push({ kind: "task", id: `task-${runId}`, runId, createdAt: message.created_at });
   }
   return turns;
 }

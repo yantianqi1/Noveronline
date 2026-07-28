@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, CloudOff, FilePlus2, Loader2 } from "lucide-react";
+import { Check, ChevronDown, FilePlus2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { Chapter } from "@/lib/api/writer-types";
@@ -14,10 +14,11 @@ export type SaveState =
   | { kind: "error"; message: string };
 
 /**
- * The writer's top-strip — the chapter switcher, live word count, save state,
- * and the new-chapter action. It renders nothing on its own; the workspace
- * mounts it into the single shared project top bar (via a portal) so the
- * writer has exactly one header row instead of a stacked second bar.
+ * The writer's top-strip — the chapter switcher, the centred segmented view
+ * tabs (manuscript only this wave), live word count, save state, and the
+ * new-chapter action. It renders nothing on its own; the workspace mounts it
+ * into the single shared project top bar (via a portal) so the writer has
+ * exactly one header row instead of a stacked second bar.
  */
 export function WriterCanvasTop({
   bookTitle,
@@ -41,22 +42,25 @@ export function WriterCanvasTop({
   return (
     <div className="flex h-full min-w-0 flex-1 items-center gap-3">
       {/* Chapter switcher */}
-      <ChapterSwitcher
-        bookTitle={bookTitle}
-        chapters={chapters}
-        activeChapter={activeChapter}
-        onSelect={onSelectChapter}
-      />
+      <div className="flex min-w-0 flex-1 items-center">
+        <ChapterSwitcher
+          bookTitle={bookTitle}
+          chapters={chapters}
+          activeChapter={activeChapter}
+          onSelect={onSelectChapter}
+        />
+      </div>
 
-      <span aria-hidden className="h-4 w-px shrink-0 bg-line" />
+      {/* Canvas view tabs — centred between switcher and status cluster. */}
+      <ViewTabs />
 
-      {/* Word count */}
-      <span className="shrink-0 text-caption tabular-nums text-muted">
-        {wordCount > 0 ? `${wordCount} 字` : "尚未落笔"}
-      </span>
-
-      <div className="ml-auto flex shrink-0 items-center gap-3">
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
+        {/* Word count */}
+        <span className="shrink-0 font-mono text-caption tabular-nums text-muted">
+          {wordCount > 0 ? `${wordCount.toLocaleString("en-US")} 字` : "尚未落笔"}
+        </span>
         <SaveIndicator state={saveState} />
+        <span aria-hidden className="h-4 w-px shrink-0 bg-line" />
         <button
           type="button"
           onClick={onNewChapter}
@@ -68,6 +72,44 @@ export function WriterCanvasTop({
         </button>
       </div>
     </div>
+  );
+}
+
+const CANVAS_VIEWS = [
+  { id: "manuscript", label: "稿件", available: true },
+  { id: "chapters", label: "章节", available: false },
+  { id: "review", label: "审校", available: false },
+  { id: "tools", label: "工具", available: false },
+] as const;
+
+/**
+ * The mandated canvas view switcher (稿件 / 章节 / 审校 / 工具). Only the
+ * manuscript view exists this wave — the remaining slots render disabled with
+ * an honest title instead of fake panels.
+ */
+function ViewTabs() {
+  return (
+    <nav aria-label="画布视图" className="flex shrink-0 items-center rounded-control bg-paper-deep p-0.5">
+      {CANVAS_VIEWS.map((view) => {
+        const active = view.id === "manuscript";
+        return (
+          <button
+            key={view.id}
+            type="button"
+            disabled={!view.available}
+            aria-current={active ? "page" : undefined}
+            title={view.available ? undefined : "后续波次提供"}
+            className={`rounded-control border px-3 py-1 text-caption transition-colors ${
+              active
+                ? "border-line-soft bg-panel font-medium text-ink"
+                : "border-transparent text-muted hover:text-ink-soft disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-muted"
+            }`}
+          >
+            {view.label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -116,7 +158,7 @@ function ChapterSwitcher({
           {bookTitle}
         </span>
         <span aria-hidden className="text-muted-soft">
-          ›
+          /
         </span>
         <span className="max-w-[180px] truncate text-sm text-ink">
           {activeChapter ? activeChapter.title : "选择章节"}
@@ -171,28 +213,33 @@ function SaveIndicator({ state }: { state: SaveState }) {
   if (state.kind === "idle") return null;
 
   if (state.kind === "dirty") {
-    return <span className="text-caption text-muted">未保存的修改…</span>;
+    return (
+      <span className="flex shrink-0 items-center gap-1.5 text-caption text-muted">
+        <span aria-hidden className="size-1.5 rounded-full bg-candidate" />
+        未保存
+      </span>
+    );
   }
   if (state.kind === "saving") {
     return (
-      <span className="flex items-center gap-1.5 text-caption text-muted">
-        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+      <span className="flex shrink-0 items-center gap-1.5 text-caption text-muted">
+        <span aria-hidden className="size-1.5 animate-spin rounded-full border border-line border-t-muted" />
         正在保存
       </span>
     );
   }
   if (state.kind === "saved") {
     return (
-      <span className="flex items-center gap-1.5 text-caption text-success">
-        <Check className="size-3.5" aria-hidden />
+      <span className="flex shrink-0 items-center gap-1.5 text-caption text-muted">
+        <span aria-hidden className="size-1.5 rounded-full bg-success" />
         已保存
       </span>
     );
   }
   // conflict | error — honest, never a fake "saved".
   return (
-    <span className="flex max-w-[300px] items-center gap-1.5 text-caption text-accent" role="alert">
-      <CloudOff className="size-3.5 shrink-0" aria-hidden />
+    <span className="flex max-w-[300px] items-center gap-1.5 text-caption text-danger" role="alert">
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-danger" />
       <span className="truncate">{state.message}</span>
     </span>
   );

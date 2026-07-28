@@ -102,3 +102,9 @@ test("system and approval messages are not thread content", () => {
     ["user", "task"],
   );
 });
+
+test("turns carry the message's created_at so the rail can group by day", () => {
+  const turns = buildConversationTurns([msg("user", "开始第一章", "run-1")]);
+  assert.equal(turns[0].createdAt, "2026-07-26T00:00:00Z");
+  assert.equal(turns[1].createdAt, "2026-07-26T00:00:00Z");
+});

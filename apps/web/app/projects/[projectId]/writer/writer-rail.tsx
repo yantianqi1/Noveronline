@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, CheckCircle2, ChevronDown, CircleDashed, Feather, Loader2, MapPin, Square, XCircle } from "lucide-react";
+import { Check, CheckCircle2, ChevronDown, CircleDashed, Feather, FileCheck, Loader2, MapPin, Square, XCircle } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 
@@ -23,14 +23,14 @@ export { buildConversationTurns };
  * Turns survive a reload: the workspace rebuilds them from the persistent
  * thread (a user message anchors the request, its run_id anchors the task),
  * and each task re-reads its run's event stream. Adoption settles the turn
- * into a calm card that keeps the recall chips and a link back to the prose
- * on the canvas — nothing about what the agent did is lost.
+ * into quiet history rows that keep the recall line and a link back to the
+ * prose on the canvas — nothing about what the agent did is lost.
  */
 
 export type ConversationTurn =
-  | { kind: "user"; id: string; body: string }
-  | { kind: "agent"; id: string; body: string }
-  | { kind: "task"; id: string; runId: string };
+  | { kind: "user"; id: string; body: string; createdAt?: string }
+  | { kind: "agent"; id: string; body: string; createdAt?: string }
+  | { kind: "task"; id: string; runId: string; createdAt?: string };
 
 /** A settled turn the workspace knows about (run adopted into the manuscript). */
 export type SettledRunInfo = { blockId: string; chapterId: string };
@@ -63,9 +63,9 @@ export function WriterRail({
   onRevealAdopted: (runId: string) => void;
   /** A live turn discovered its draft is adopted — fold it into settled state. */
   onTaskAdopted: (runId: string) => void;
-  /** Render just the thread (no 合著者 header) — used when the rail sits on the
-      front face of the conversation/review flip card, whose own header owns
-      the title row. */
+  /** Render just the thread (no 合著者 header) — used when the rail sits inside
+      the conversation/review tabbed dock, whose dock-head tabs own the title
+      row. */
   hideHeader?: boolean;
 }) {
   return (
@@ -131,34 +131,102 @@ export function WriterRailThread({
     if (node) node.scrollTop = node.scrollHeight;
   }, [turns.length]);
 
+  const renderTurn = (turn: ConversationTurn) => {
+    if (turn.kind === "user") return <UserBubble key={turn.id} body={turn.body} />;
+    if (turn.kind === "agent") return <AgentLine key={turn.id} body={turn.body} />;
+    return (
+      <TaskTurn
+        key={turn.id}
+        runId={turn.runId}
+        selection={selection}
+        csrfToken={csrfToken}
+        adopted={adoptedRunIds.has(turn.runId)}
+        settled={settledRuns.get(turn.runId) ?? null}
+        adoptingDraftId={adoptingDraftId}
+        onAdopt={onAdopt}
+        onCancelRun={onCancelRun}
+        onSettled={onRunSettled}
+        onRevealAdopted={onRevealAdopted}
+        onTaskAdopted={onTaskAdopted}
+      />
+    );
+  };
+
   return (
-    <div ref={scrollRef} className="min-h-0 basis-0 flex-1 overflow-y-auto px-4 py-4">
+    <div ref={scrollRef} className="min-h-0 basis-0 flex-1 overflow-y-auto px-3.5 pb-2 pt-3">
       {turns.length === 0 ? (
         <RailGreeting />
       ) : (
-        <div className="flex flex-col gap-4">
-          {turns.map((turn) => {
-            if (turn.kind === "user") return <UserBubble key={turn.id} body={turn.body} />;
-            if (turn.kind === "agent") return <AgentLine key={turn.id} body={turn.body} />;
-            return (
-              <TaskTurn
-                key={turn.id}
-                runId={turn.runId}
-                selection={selection}
-                csrfToken={csrfToken}
-                adopted={adoptedRunIds.has(turn.runId)}
-                settled={settledRuns.get(turn.runId) ?? null}
-                adoptingDraftId={adoptingDraftId}
-                onAdopt={onAdopt}
-                onCancelRun={onCancelRun}
-                onSettled={onRunSettled}
-                onRevealAdopted={onRevealAdopted}
-                onTaskAdopted={onTaskAdopted}
-              />
-            );
-          })}
+        <div className="flex flex-col gap-5.5">
+          {buildThreadBlocks(turns).map((block) =>
+            block.kind === "day" ? (
+              <DaySeparator key={block.key} label={block.label} />
+            ) : (
+              <div key={block.key} className="flex flex-col gap-2.5">
+                {block.turns.map(renderTurn)}
+              </div>
+            ),
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+type ThreadBlock =
+  | { kind: "day"; key: string; label: string }
+  | { kind: "turns"; key: string; turns: ConversationTurn[] };
+
+/** Fold the flat turn list into display blocks: a message starts a turn, its
+    task cards attach to it; a day separator anchors each new calendar day.
+    Turns carry the persistent message's created_at; a local optimistic turn
+    has none yet and is truthfully grouped under today. */
+function buildThreadBlocks(turns: ConversationTurn[]): ThreadBlock[] {
+  const groups: ConversationTurn[][] = [];
+  for (const turn of turns) {
+    if (turn.kind === "task" && groups.length > 0) groups[groups.length - 1].push(turn);
+    else groups.push([turn]);
+  }
+  const blocks: ThreadBlock[] = [];
+  let lastDayKey: string | null = null;
+  for (const group of groups) {
+    const createdAt = group[0].createdAt;
+    const dayKey = createdAt ? dayKeyOf(createdAt) : dayKeyOf(new Date().toISOString());
+    if (dayKey && dayKey !== lastDayKey) {
+      blocks.push({ kind: "day", key: `day-${dayKey}`, label: createdAt ? dayLabel(createdAt) : "今天" });
+      lastDayKey = dayKey;
+    }
+    blocks.push({ kind: "turns", key: group[0].id, turns: group });
+  }
+  return blocks;
+}
+
+/** Local calendar-day key for grouping; unparseable dates collapse to "". */
+function dayKeyOf(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+/** Day separator label, relative to local today: 今天 / 昨天 / M月D日 / YYYY年M月D日. */
+function dayLabel(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.round((startOf(now) - startOf(date)) / 86_400_000);
+  if (diffDays <= 0) return "今天";
+  if (diffDays === 1) return "昨天";
+  if (date.getFullYear() === now.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+/** The day anchor — hairline with a centred quiet label, the thread's only clock. */
+function DaySeparator({ label }: { label: string }) {
+  return (
+    <div className="flex select-none items-center gap-2.5 text-micro text-muted-soft">
+      <span className="h-px flex-1 bg-line-soft" aria-hidden />
+      {label}
+      <span className="h-px flex-1 bg-line-soft" aria-hidden />
     </div>
   );
 }
@@ -180,7 +248,7 @@ function RailGreeting() {
 function UserBubble({ body }: { body: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] whitespace-pre-wrap rounded-modal rounded-br-control bg-accent px-3.5 py-2.5 text-sm leading-relaxed text-panel shadow-accent">
+      <div className="max-w-[85%] whitespace-pre-wrap rounded-modal rounded-br-control border border-line-soft bg-paper-deep px-3.5 py-2.5 text-sm leading-relaxed text-ink">
         {body}
       </div>
     </div>
@@ -200,8 +268,8 @@ function AgentLine({ body }: { body: string }) {
 /**
  * One request's run, owned end-to-end: it re-reads its own event stream so a
  * later request never steals it and a reload never loses it. While live it
- * streams the candidate; once the author adopts, it settles into a calm card
- * that keeps the steps, the recall chips, and a link to the prose on the
+ * streams the candidate; once the author adopts, it settles into quiet history
+ * rows that keep the steps, the recall line, and a link to the prose on the
  * canvas. Settled runs stop polling — the events are all already durably
  * stored, one pass re-reads them.
  */
@@ -265,8 +333,8 @@ function TaskTurn({
     ? { draftId: draftId ?? "", text: candidateText, complete: state.isTerminal && Boolean(draftId) }
     : null;
 
-  // A fully-adopted run settles into a quiet history card that keeps the
-  // whole exchange legible: what it consulted, what it wrote, where it landed.
+  // A fully-adopted run settles into quiet history rows that keep the whole
+  // exchange legible: what it consulted, what it wrote, where it landed.
   if (isAdopted && candidate) {
     return (
       <SettledCard
@@ -279,12 +347,12 @@ function TaskTurn({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       <TaskCard liveRun={liveRun} onCancel={() => onCancelRun(runId)} />
       <ConsistencyNotice violations={state.consistencyViolations} />
       <CitationsRow citations={state.citations} degraded={state.citationsDegraded} trimmedItems={state.contextTrimmedItems} />
       {state.isTerminal && state.phase === "failed" ? (
-        <p className="rounded-panel border border-accent/30 bg-accent-wash px-3 py-2 text-caption leading-relaxed text-accent">
+        <p className="rounded-panel border border-danger/30 bg-danger-wash px-3 py-2 text-caption leading-relaxed text-danger">
           {state.terminalMessage ?? "这次起草没写成"}。换个说法再试一次，或稍后再发。
         </p>
       ) : null}
@@ -329,53 +397,46 @@ function ConsistencyNotice({ violations }: { violations: ConsistencyViolation[] 
   );
 }
 
-/** The recall chips — which settings/canon the agent grounded this draft in. */
+/** The recall line — which settings/canon the agent grounded this draft in,
+    collapsed to one truncated muted row; every chip's title note (channel,
+    relevance, degraded, budget-trimmed) is preserved in the row's title. */
 function CitationsRow({ citations, degraded, trimmedItems = 0 }: { citations: RunCitation[]; degraded: boolean; trimmedItems?: number }) {
   if (citations.length === 0 && trimmedItems === 0) return null;
+  const fullTitle = [
+    ...citations.map((c) => `${c.channel === "always_on" ? "常驻 · " : ""}${c.title}：${citationHint(c)}`),
+    ...(degraded ? ["向量检索不可用，已退回关键词召回"] : []),
+    ...(trimmedItems > 0 ? [`另有 ${trimmedItems} 条因预算未带入`] : []),
+  ].join("\n");
   return (
-    <div className="flex flex-wrap items-center gap-1.5 px-0.5" aria-label="本轮召回的设定">
-      <span className="text-caption text-muted">参考了</span>
-      {citations.slice(0, 8).map((c) => (
-        <span
-          key={c.assetId}
-          title={
-            c.channel === "always_on"
-              ? "常驻设定 · 每次写作都在场"
-              : c.channel === "search_manuscript"
-                ? "前文呼应 · 召回的早期正文"
-                : typeof c.score === "number"
-                  ? `相关度 ${Math.round(c.score * 100)}%${c.lifecycle ? ` · ${c.lifecycle}` : ""}`
-                  : c.lifecycle
-                    ? `设定 · ${c.lifecycle}`
-                    : "设定"
-          }
-          className={
-            c.channel === "always_on"
-              ? "rounded-full border border-gold/60 bg-gold/10 px-2 py-0.5 text-caption text-ink"
-              : c.channel === "search_manuscript"
-                ? "rounded-full border border-line-soft bg-panel px-2 py-0.5 text-caption text-muted"
-                : "rounded-full border border-line-soft bg-panel px-2 py-0.5 text-caption text-ink/80"
-          }
-        >
-          {c.channel === "always_on" ? "常驻 · " : ""}
-          {c.title}
+    <div className="ml-5.5 truncate text-caption text-muted" title={fullTitle} aria-label="本轮召回的设定">
+      参考了{" "}
+      {citations.slice(0, 8).map((c, i) => (
+        <span key={c.assetId}>
+          {i > 0 ? " · " : ""}
+          {c.channel === "always_on" ? (
+            <span className="text-ink-soft">常驻 · {c.title}</span>
+          ) : (
+            c.title
+          )}
         </span>
       ))}
       {citations.length > 8 ? (
-        <span className="text-caption text-muted">+{citations.length - 8}</span>
+        <span className="font-mono text-micro"> +{citations.length - 8}</span>
       ) : null}
-      {degraded ? (
-        <span className="text-caption text-muted" title="向量检索不可用，已退回关键词召回">
-          ·关键词召回
-        </span>
-      ) : null}
-      {trimmedItems > 0 ? (
-        <span className="text-caption text-muted" title="上下文预算有限，部分召回内容没有进入本次写作">
-          ·另有 {trimmedItems} 条因预算未带人
-        </span>
-      ) : null}
+      {degraded ? " ·关键词召回" : null}
+      {trimmedItems > 0 ? ` ·另有 ${trimmedItems} 条因预算未带入` : null}
     </div>
   );
+}
+
+/** The per-citation title note, unchanged from the chip era. */
+function citationHint(c: RunCitation): string {
+  if (c.channel === "always_on") return "常驻设定 · 每次写作都在场";
+  if (c.channel === "search_manuscript") return "前文呼应 · 召回的早期正文";
+  if (typeof c.score === "number") {
+    return `相关度 ${Math.round(c.score * 100)}%${c.lifecycle ? ` · ${c.lifecycle}` : ""}`;
+  }
+  return c.lifecycle ? `设定 · ${c.lifecycle}` : "设定";
 }
 
 /** The collapsible task status — one calm line that expands to its steps. */
@@ -386,8 +447,8 @@ function TaskCard({ liveRun, onCancel }: { liveRun: LiveRun; onCancel: () => voi
   const hasSteps = state.steps.length > 0;
 
   return (
-    <div className="overflow-hidden rounded-modal border border-line bg-panel">
-      <div className="flex items-center gap-1.5 px-3.5 py-3">
+    <div>
+      <div className="-mx-1.5 flex min-h-8 items-center gap-1.5 rounded-control px-1.5 py-1 transition-colors hover:bg-line/25">
         <button
           type="button"
           onClick={() => hasSteps && setOpen((v) => !v)}
@@ -399,13 +460,15 @@ function TaskCard({ liveRun, onCancel }: { liveRun: LiveRun; onCancel: () => voi
             <Loader2 className="size-3.5 shrink-0 animate-spin text-accent" aria-hidden />
           ) : state.phase === "completed" ? (
             <CheckCircle2 className="size-3.5 shrink-0 text-success" aria-hidden />
+          ) : state.phase === "failed" ? (
+            <span className="size-3.5 shrink-0 rounded-full bg-danger/70" aria-hidden />
           ) : (
-            <span className="size-3.5 shrink-0 rounded-full bg-accent/70" aria-hidden />
+            <span className="size-3.5 shrink-0 rounded-full bg-muted/50" aria-hidden />
           )}
-          <span className="min-w-0 flex-1 truncate text-caption text-ink">{state.statusLine}</span>
+          <span className="min-w-0 flex-1 truncate text-sm tabular-nums text-ink-soft">{state.statusLine}</span>
           {hasSteps ? (
             <ChevronDown
-              className={`size-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`}
+              className={`size-3 shrink-0 text-muted-soft transition-transform ${open ? "rotate-180" : ""}`}
               aria-hidden
             />
           ) : null}
@@ -431,9 +494,8 @@ function TaskCard({ liveRun, onCancel }: { liveRun: LiveRun; onCancel: () => voi
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-            className="border-t border-line-soft"
           >
-            <div className="flex flex-col gap-2 px-3.5 py-3">
+            <div className="mb-1 ml-5.5 mt-0.5 flex flex-col gap-1.5">
               {state.steps.map((step) => (
                 <StepRow key={step.id} step={step} />
               ))}
@@ -453,7 +515,7 @@ function StepRow({ step }: { step: RunStep }) {
       ) : step.status === "completed" ? (
         <Check className="size-3 shrink-0 text-success" aria-hidden />
       ) : step.status === "error" ? (
-        <XCircle className="size-3 shrink-0 text-accent" aria-hidden />
+        <XCircle className="size-3 shrink-0 text-danger" aria-hidden />
       ) : (
         <CircleDashed className="size-3 shrink-0 text-muted" aria-hidden />
       )}
@@ -464,7 +526,8 @@ function StepRow({ step }: { step: RunStep }) {
   );
 }
 
-/** The candidate draft — old-gold dashed frame, vermilion only on adopt. */
+/** The candidate draft — hairline card (head / serif excerpt + fade toggle /
+    foot); solid vermilion only on the adopt action. */
 function CandidateCard({
   candidate,
   adopting,
@@ -474,6 +537,7 @@ function CandidateCard({
   adopting: boolean;
   onAdopt: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const words = candidate.text.replace(/\s/g, "").length;
   return (
     <motion.div
@@ -481,32 +545,51 @@ function CandidateCard({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className="relative rounded-modal border border-dashed border-gold/60 bg-panel px-4 py-3.5"
+      className="ml-5.5 overflow-hidden rounded-panel border border-line bg-panel"
     >
-      {/* corner badge */}
-      <span className="absolute -top-2 left-3 rounded-full bg-gold px-2 py-0.5 text-caption font-medium tracking-wide text-panel">
-        {candidate.complete ? "候选稿" : "起草中"}
-      </span>
+      <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2">
+        <span className="text-micro font-semibold tracking-wider text-candidate">
+          {candidate.complete ? "候选稿" : "起草中"}
+        </span>
+        <span className="ml-auto font-mono text-micro tabular-nums text-muted">
+          {words.toLocaleString()} 字
+        </span>
+      </div>
 
-      <div className="mt-1.5 max-h-[280px] overflow-y-auto">
-        <p className="whitespace-pre-wrap font-serif text-base text-ink">
+      <div className="px-3.5 py-2.5">
+        <p
+          className={`whitespace-pre-wrap font-serif text-sm text-ink ${
+            candidate.complete && !expanded ? "line-clamp-2" : ""
+          }`}
+        >
           {candidate.text}
           {!candidate.complete ? (
             <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-accent align-baseline" />
           ) : null}
         </p>
+        {candidate.complete ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="mt-1 block text-caption text-muted transition-colors hover:text-accent"
+          >
+            全稿 {words.toLocaleString()} 字 · {expanded ? "收起" : "展开查看"}
+          </button>
+        ) : null}
       </div>
 
       {candidate.complete ? (
-        <div className="mt-3 flex items-center gap-2 border-t border-line-soft pt-3">
-          <span className="text-caption text-muted">{words} 字</span>
+        <div className="flex items-center gap-2.5 border-t border-line-soft px-3 py-2">
+          <span className="text-caption text-muted">采用后进入手稿末尾</span>
           <button
             type="button"
             onClick={onAdopt}
             disabled={adopting}
-            className="ml-auto rounded-panel bg-accent px-4 py-1.5 text-caption font-medium text-panel shadow-accent transition-colors hover:bg-accent-strong disabled:opacity-60"
+            className="ml-auto flex items-center gap-1.5 rounded-control bg-accent px-3 py-1.5 text-caption font-medium text-panel transition-colors hover:bg-accent-strong disabled:opacity-60"
           >
             {adopting ? "采用中…" : "采用进手稿"}
+            <kbd className="kbd border-panel/35 bg-transparent px-1 py-0 text-panel/85">⌘⏎</kbd>
           </button>
         </div>
       ) : null}
@@ -515,9 +598,9 @@ function CandidateCard({
 }
 
 /**
- * A settled exchange: the adopted prose kept as a calm read-only card, with
- * the run's steps and recall chips still attached, and a link that reveals
- * where the prose landed on the canvas.
+ * A settled exchange: the adopted prose kept as a calm read-only run-row,
+ * with the run's steps and recall line still attached, and a trail link that
+ * reveals where the prose landed on the canvas.
  */
 function SettledCard({
   liveRun,
@@ -533,23 +616,35 @@ function SettledCard({
   const [open, setOpen] = useState(false);
   const words = text.replace(/\s/g, "").length;
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       <TaskCard liveRun={liveRun} onCancel={() => {}} />
       <ConsistencyNotice violations={liveRun.state.consistencyViolations} />
       <CitationsRow citations={liveRun.state.citations} degraded={liveRun.state.citationsDegraded} trimmedItems={liveRun.state.contextTrimmedItems} />
-      <div className="rounded-modal border border-line-soft/80 bg-panel/60 px-4 py-3">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          className="flex w-full items-center gap-2 text-left"
-        >
-          <CheckCircle2 className="size-3.5 shrink-0 text-success" aria-hidden />
-          <span className="min-w-0 flex-1 truncate text-caption text-muted">
-            已采用 · {words} 字进手稿
-          </span>
-          <ChevronDown className={`size-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
-        </button>
+      <div>
+        <div className="-mx-1.5 flex min-h-8 items-center gap-1.5 rounded-control px-1.5 py-1 transition-colors hover:bg-line/25">
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          >
+            <FileCheck className="size-3.5 shrink-0 text-muted" aria-hidden />
+            <span className="min-w-0 flex-1 truncate text-sm tabular-nums text-ink-soft">
+              已采用 · {words.toLocaleString()} 字进手稿
+            </span>
+            <ChevronDown className={`size-3 shrink-0 text-muted-soft transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
+          </button>
+          {settled ? (
+            <button
+              type="button"
+              onClick={onRevealAdopted}
+              className="flex shrink-0 items-center gap-1 rounded-control px-1.5 py-1 text-caption text-muted transition-colors hover:text-accent"
+            >
+              <MapPin className="size-3" aria-hidden />
+              查看正文
+            </button>
+          ) : null}
+        </div>
         <AnimatePresence initial={false}>
           {open ? (
             <motion.div
@@ -560,25 +655,12 @@ function SettledCard({
               transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
               className="overflow-hidden"
             >
-              <p className="mt-2.5 max-h-[220px] overflow-y-auto whitespace-pre-wrap border-t border-line-soft pt-2.5 font-serif text-sm text-muted">
+              <p className="mt-1 max-h-[220px] overflow-y-auto whitespace-pre-wrap font-serif text-sm text-muted">
                 {text}
               </p>
             </motion.div>
           ) : null}
         </AnimatePresence>
-        <div className="mt-2.5 flex items-center justify-between border-t border-line-soft/70 pt-2.5">
-          <span className="text-caption text-muted">已进手稿，可在稿纸上继续改</span>
-          {settled ? (
-            <button
-              type="button"
-              onClick={onRevealAdopted}
-              className="flex items-center gap-1 rounded-control px-2 py-1 text-caption font-medium text-accent transition-colors hover:bg-accent-wash"
-            >
-              <MapPin className="size-3" aria-hidden />
-              查看正文
-            </button>
-          ) : null}
-        </div>
       </div>
     </div>
   );

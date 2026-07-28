@@ -3,15 +3,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { fetchAssetProposals } from "@/lib/api/asset-proposal-client";
-import { ArrowLeft, ArrowRight, Feather, ScrollText } from "lucide-react";
 
 /**
- * The entire conversation dock is one two-sided card.
+ * The conversation dock is one tabbed panel.
  *
- * Front: complete co-writer interface (header, durable thread and composer).
- * Back: complete manuscript-asset review interface. The small queue row on the
- * front is only the trigger; the transform is applied to the full-height dock,
- * never to the composer or an individual proposal card.
+ * 对话: the complete co-writer interface (durable thread + composer).
+ * 待审资产: the complete manuscript-asset review queue. The dock-head tabs own
+ * switching (⌘J toggles as well); both faces stay mounted and crossfade, so
+ * thread scroll and queue state survive every switch.
  */
 export function ConversationReviewFlip({
   projectId,
@@ -24,7 +23,7 @@ export function ConversationReviewFlip({
   projectId: string;
   tenantId: string;
   refreshKey: number;
-  conversation: ReactNode;
+  conversation: (reviewTrigger: ReactNode) => ReactNode;
   review: (onCountChange: (count: number) => void) => ReactNode;
 }) {
   const [flipped, setFlipped] = useState(false);
@@ -62,85 +61,96 @@ export function ConversationReviewFlip({
     if (flipped) setHasNew(false);
   }, [flipped]);
 
+  // ⌘J toggles the two dock faces from anywhere in the workbench.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        setFlipped((value) => !value);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
-    <div className="h-full w-full [perspective:1800px]">
-      <div
-        className={`relative h-full w-full transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
-          flipped ? "[transform:rotateY(180deg)]" : ""
-        }`}
-        style={{ transformStyle: "preserve-3d" }}
-      >
+    <div className="flex h-full w-full min-h-0 flex-col">
+      <div className="flex h-12 shrink-0 items-center border-b border-line px-3.5">
+        <div role="tablist" aria-label="对话与待审资产切换" className="flex h-full items-center gap-3.5">
+          <DockTab active={!flipped} onClick={() => setFlipped(false)}>
+            对话
+          </DockTab>
+          <DockTab active={flipped} onClick={() => setFlipped(true)}>
+            待审资产
+            {pendingCount > 0 ? (
+              <span
+                key={pendingCount}
+                className="animate-count-up rounded-full bg-paper-deep px-1.5 font-mono text-micro leading-4 text-ink-soft tabular-nums"
+              >
+                {pendingCount}
+              </span>
+            ) : null}
+            {hasNew ? <span className="size-1.5 rounded-full bg-accent" aria-hidden /> : null}
+          </DockTab>
+        </div>
+        <kbd className="kbd ml-auto">⌘J</kbd>
+      </div>
+
+      <div className="relative min-h-0 flex-1">
         <section
-          className={`absolute inset-0 flex min-h-0 flex-col bg-paper/40 ${flipped ? "pointer-events-none" : ""}`}
-          style={{ backfaceVisibility: "hidden" }}
+          className={`absolute inset-0 flex min-h-0 flex-col bg-paper/40 transition-opacity duration-[160ms] motion-reduce:transition-none ${
+            flipped ? "pointer-events-none opacity-0" : "opacity-100"
+          }`}
           aria-hidden={flipped}
           inert={flipped}
           aria-label="合著者对话"
         >
-          <div className="min-h-0 flex-1">{conversation}</div>
-          <button
-            type="button"
-            onClick={() => setFlipped(true)}
-            aria-label="翻转到待审资产"
-            className="group mx-3 mb-3 flex min-h-12 shrink-0 items-center gap-2.5 rounded-modal border border-line bg-panel px-3.5 text-left shadow-panel transition-colors hover:border-gold/50 hover:bg-gold/5 focus-visible:border-gold"
-          >
-            <span className="relative grid size-7 shrink-0 place-items-center rounded-control bg-gold/15 text-candidate">
-              <ScrollText className="size-3.5" aria-hidden />
-              {hasNew ? <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-accent" aria-hidden /> : null}
-            </span>
-            <span>
-              <span className="block text-caption font-semibold tracking-label text-ink">待审资产</span>
-              <span className="mt-0.5 block text-caption text-muted">
-                {pendingCount > 0 ? `${pendingCount} 条蒸馏结果等你审核` : "查看资产蒸馏审核台"}
-              </span>
-            </span>
-            {pendingCount > 0 ? (
-              <span key={pendingCount} className="ml-auto animate-count-up rounded-full bg-candidate px-2 py-0.5 text-caption font-medium tabular-nums text-panel">
-                {pendingCount}
-              </span>
-            ) : null}
-            <ArrowRight className="size-4 shrink-0 text-muted-soft transition-transform group-hover:translate-x-0.5" aria-hidden />
-          </button>
+          {/* The dock-head tabs own switching now, so nothing is injected into
+              the rail header — the render-prop slot stays for the workspace's
+              wiring and simply receives no node. */}
+          <div className="min-h-0 flex-1">{conversation(null)}</div>
         </section>
 
         <section
-          className={`absolute inset-0 flex min-h-0 flex-col bg-paper/40 ${!flipped ? "pointer-events-none" : ""}`}
-          style={{ backfaceVisibility: "hidden", transform: "rotateY(180deg)" }}
+          className={`absolute inset-0 flex min-h-0 flex-col bg-paper/40 transition-opacity duration-[160ms] motion-reduce:transition-none ${
+            !flipped ? "pointer-events-none opacity-0" : "opacity-100"
+          }`}
           aria-hidden={!flipped}
           inert={!flipped}
           aria-label="待审资产审核台"
         >
-          <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line-soft bg-panel/70 px-3">
-            <button
-              type="button"
-              onClick={() => setFlipped(false)}
-              className="grid size-8 shrink-0 place-items-center rounded-control text-muted transition-colors hover:bg-paper hover:text-ink"
-              aria-label="返回合著者对话"
-            >
-              <ArrowLeft className="size-4" aria-hidden />
-            </button>
-            <span className="grid size-6 place-items-center rounded-control bg-gold/15 text-candidate">
-              <ScrollText className="size-3" aria-hidden />
-            </span>
-            <span className="text-sm font-medium text-ink">待审资产</span>
-            <span className="text-caption text-muted">逐条核对后才进入资产库</span>
-            {pendingCount > 0 ? (
-              <span className="ml-auto rounded-full bg-candidate px-2 py-0.5 text-caption font-medium tabular-nums text-panel">
-                {pendingCount}
-              </span>
-            ) : null}
-          </header>
           <div className="min-h-0 flex-1">{review(handleCountChange)}</div>
-          <button
-            type="button"
-            onClick={() => setFlipped(false)}
-            className="mx-3 mb-3 flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-panel border border-line bg-panel text-caption font-medium text-muted transition-colors hover:border-accent/30 hover:text-ink"
-          >
-            <Feather className="size-3.5" aria-hidden />
-            返回合著者
-          </button>
         </section>
       </div>
     </div>
+  );
+}
+
+/** A dock-head tab: quiet muted text that gains ink weight + a 2px ink
+    underline when active — the active marker stays neutral ink, never
+    vermilion. */
+function DockTab({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`relative flex h-full items-center gap-1.5 text-sm transition-colors ${
+        active
+          ? "font-semibold text-ink after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-ink after:content-['']"
+          : "text-muted hover:text-ink-soft"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

@@ -22,9 +22,9 @@ import {
  * the asset library (or the Writer agent's recall) until the author accepts it
  * here — candidates stay lifecycle=candidate and invisible to query tools.
  *
- * This panel fills the back face of the complete conversation/review card. It
- * owns the queue toolbar and scrollable proposal list; the flip shell owns the
- * back-face title and the return-to-conversation actions.
+ * This panel fills the 待审资产 tab of the conversation dock. It owns the
+ * queue toolbar and scrollable proposal list; the dock-head tabs in the shell
+ * own the title, the count, and switching back to the conversation.
  */
 export function ProposalRail({
   projectId,
@@ -134,10 +134,9 @@ export function ProposalRail({
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* Slim action toolbar — the back face's header already carries the
+      {/* Slim action toolbar — the dock-head tab already carries the
           "待审资产" title + count, so this row is just the queue's controls:
-          approve-all + refresh. No duplicate title, no close button (the card
-          header flips back). */}
+          approve-all + refresh. No duplicate title, no close button. */}
       {(count > 1 || proposals === null) && (
         <div className="flex h-9 shrink-0 items-center justify-end gap-0.5 border-b border-line-soft px-3">
           {count > 1 && (
@@ -149,7 +148,6 @@ export function ProposalRail({
               disabled={!csrfToken || Boolean(busyId)}
               aria-label="全部通过待审资产"
               title="逐条采纳：合并建议并入已有资产，其余作为新资产入库"
-              className="text-candidate hover:bg-gold/15 hover:text-candidate"
             >
               <CheckCheck className="size-3.5" aria-hidden />
               {bulkBusy && bulkProgress ? `${bulkProgress.done}/${bulkProgress.total}` : "全部通过"}
@@ -287,7 +285,7 @@ function ProposalCard({
   return (
     <li
       className={`overflow-hidden rounded-panel border bg-panel transition-colors ${
-        open ? "border-gold/60 shadow-hairline" : "border-line hover:border-gold/40"
+        open ? "border-line shadow-hairline" : "border-line-soft hover:border-line"
       }`}
     >
       {/* Summary row — the whole row is the expand toggle; decision buttons
@@ -305,11 +303,11 @@ function ProposalCard({
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
             <span className="truncate text-sm font-medium text-ink">{proposal.title}</span>
-            <span className="shrink-0 rounded-control border border-gold/40 bg-gold/10 px-1.5 py-px text-caption text-candidate">
+            <span className="shrink-0 text-caption text-candidate">
               {assetTypeLabel(proposal.asset_type)}
             </span>
             {isUpdate && (
-              <span className="shrink-0 rounded-control border border-accent/30 bg-accent-wash px-1.5 py-px text-caption text-accent">
+              <span className="shrink-0 text-caption text-muted">
                 合并建议
               </span>
             )}
