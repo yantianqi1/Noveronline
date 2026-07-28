@@ -37,6 +37,27 @@ func TestSplitRelationshipTitle(t *testing.T) {
 	}
 }
 
+func TestSplitRelationshipTitleChinese(t *testing.T) {
+	cases := []struct {
+		title          string
+		source, target string
+	}{
+		{"李玉春与许七安的交易", "李玉春", "许七安"},
+		{"林晚和陈舟", "林晚", "陈舟"},
+		{"林晚跟陈舟的恩怨", "林晚", "陈舟"},
+		{"林晚同陈舟的同盟", "林晚", "陈舟"},
+		{"林晚对陈舟的仇恨", "林晚", "陈舟"},
+		{"林晚、陈舟", "林晚", "陈舟"},
+		{"林晚与陈舟", "林晚", "陈舟"},
+	}
+	for _, tc := range cases {
+		parts := splitRelationshipTitle(tc.title)
+		if len(parts) != 2 || parts[0] != tc.source || parts[1] != tc.target {
+			t.Fatalf("%q: got %#v, want [%q %q]", tc.title, parts, tc.source, tc.target)
+		}
+	}
+}
+
 func TestPayloadHelpers(t *testing.T) {
 	payload := map[string]any{
 		"source_entity_name": "林晚",

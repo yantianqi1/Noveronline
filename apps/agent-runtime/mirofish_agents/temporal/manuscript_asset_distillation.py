@@ -41,6 +41,42 @@ SUPPORTED_TYPES = {
     "plot_thread",
     "terminology",
 }
+ASSET_PAYLOAD_GUIDANCE = {
+    "character": (
+        "canonical_name, aliases, narrative_role, appearance, personality, occupation, affiliations, "
+        "abilities, limitations, goals, motivations, relationships, possessions, current_state"
+    ),
+    "organization": (
+        "canonical_name, aliases, organization_type, leaders, members, hierarchy, goals, territory, "
+        "resources, rules, relationships, current_state"
+    ),
+    "location": (
+        "canonical_name, aliases, location_type, parent_location, appearance, atmosphere, notable_features, "
+        "inhabitants, access_rules, related_events, current_state"
+    ),
+    "item": (
+        "canonical_name, aliases, item_type, appearance, owner, creator, origin, abilities, limitations, "
+        "usage, related_characters, current_state"
+    ),
+    "world_rule": (
+        "rule_text, scope, conditions, mechanism, limitations, exceptions, consequences, known_examples"
+    ),
+    "relationship": (
+        "source_entity_name, target_entity_name, relationship_type, direction, history, current_state, "
+        "emotional_dynamic, conflicts, obligations, turning_points"
+    ),
+    "event": (
+        "event_type, participants, location, time_order, trigger, actions, outcome, consequences, "
+        "related_items, related_threads, status"
+    ),
+    "plot_thread": (
+        "thread_type, setup, participants, clues, current_development, unresolved_questions, stakes, "
+        "possible_dependencies, status"
+    ),
+    "terminology": (
+        "canonical_name, aliases, category, definition, usage_context, origin, related_concepts, restrictions"
+    ),
+}
 # Token-aware long-chapter windowing (CONN-011 / W13).
 # Estimate ~4 characters per token; target windows of ~6-8k tokens.
 CHARS_PER_TOKEN = 4
@@ -367,6 +403,8 @@ class PostgresManuscriptAssetDistillationStore:
                     "status": "completed",
                     "source_count": int(result.get("source_count") or 0),
                     "candidate_count": int(result.get("candidate_count") or 0),
+                    "model_candidate_count": int(result.get("model_candidate_count") or 0),
+                    "filtered_candidate_count": int(result.get("filtered_candidate_count") or 0),
                     "create_count": int((result.get("counts") or {}).get("create") or 0),
                     "update_count": int((result.get("counts") or {}).get("update") or 0),
                     "conflict_count": int((result.get("counts") or {}).get("conflict") or 0),
@@ -726,6 +764,92 @@ def _validate_evidence_quote(
     return None
 
 
+def _split_relationship_title(title: str) -> tuple[str, str] | None:
+    """Recover (source, target) entity names from a natural-language relationship title.
+
+    Mirrors the Go assetdistillation.splitRelationshipTitle fallback so the
+    distiller can backfill payload endpoints the model left only in the title.
+    Handles "A / B", "A→B" style separators, Chinese conjunctions (与/和/跟/…),
+    and the "X与Y的<关系名词>" form (strips the trailing relation noun).
+    """
+    text = title.strip()
+    if not text:
+        return None
+    for sep in (" / ", " -> ", "→", "—", " - ", "、"):
+        if sep in text:
+            left, _, right = text.partition(sep)
+            left, right = left.strip(), right.strip()
+            if left and right:
+                return left, right
+    for conj in ("与", "和", "跟", "同", "及", "对"):
+        idx = text.find(conj)
+        if idx <= 0:
+            continue
+        source = text[:idx].strip()
+        target = text[idx + len(conj):].strip()
+        if not source or not target:
+            continue
+        target = _strip_relation_suffix(target)
+        if source and target:
+            return source, target
+    return None
+
+
+_RELATION_SUFFIXES = (
+    "关系", "交易", "约定", "冲突", "纠葛", "恩怨", "往来", "合作", "结盟", "联盟",
+    "对立", "矛盾", "牵连", "牵扯", "联系", "接触", "相遇", "相识", "重逢", "决裂",
+    "和解", "对峙", "同盟", "羁绊", "渊源", "旧怨", "新仇", "密谋", "密约", "婚约",
+    "仇怨", "仇恨",
+)
+
+
+def _strip_relation_suffix(target: str) -> str:
+    for noun in _RELATION_SUFFIXES:
+        if target.endswith(noun):
+            stripped = target[: -len(noun)].strip().rstrip("的").strip()
+            if stripped:
+                return stripped
+    return target
+
+
+def _normalize_relationship_payload(candidate: dict[str, Any]) -> None:
+    """Ensure a relationship candidate carries structured endpoint names.
+
+    The model sometimes puts both entity names only in the title; backfill
+    source_entity_name/target_entity_name from it so the Go graph projection
+    (which requires both) never has to guess. relationship_type defaults to
+    "related" when absent. Drops nothing — only fills gaps.
+    """
+    payload = candidate.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        candidate["payload"] = payload
+
+    def _first(*keys: str) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    source = _first("source_entity_name", "source_entity", "source")
+    target = _first("target_entity_name", "target_entity", "target")
+    if not source or not target:
+        parts = _split_relationship_title(str(candidate.get("title") or ""))
+        if parts:
+            source = source or parts[0]
+            target = target or parts[1]
+    if source:
+        payload["source_entity_name"] = source
+    if target:
+        payload["target_entity_name"] = target
+    if not _first("relationship_type", "kind"):
+        payload["relationship_type"] = "related"
+
+
 def validate_model_candidates(
     response: dict[str, Any],
     sources: list[dict[str, Any]],
@@ -746,7 +870,12 @@ def validate_model_candidates(
         if asset_type not in SUPPORTED_TYPES or asset_type not in allowed or not title:
             continue
         evidence_in = item.get("evidence") or []
-        if not isinstance(evidence_in, list):
+        # Some JSON-capable providers collapse a single-item array into an
+        # object. Accept that equivalent shape while keeping all evidence
+        # validation below unchanged.
+        if isinstance(evidence_in, dict):
+            evidence_in = [evidence_in]
+        elif not isinstance(evidence_in, list):
             continue
         valid_evidence = []
         for ev in evidence_in:
@@ -778,20 +907,21 @@ def validate_model_candidates(
             confidence = float(conf) if conf is not None else None
         except (TypeError, ValueError):
             confidence = None
-        out.append(
-            {
-                "local_id": str(item.get("local_id") or uuid4()),
-                "asset_type": asset_type,
-                "title": title,
-                "summary": str(item.get("summary") or ""),
-                "category": str(item.get("category") or asset_type),
-                "tags": list(item.get("tags") or []),
-                "payload": dict(item.get("payload") or {}),
-                "identity_hints": list(item.get("identity_hints") or []),
-                "confidence": confidence,
-                "evidence": valid_evidence,
-            }
-        )
+        candidate = {
+            "local_id": str(item.get("local_id") or uuid4()),
+            "asset_type": asset_type,
+            "title": title,
+            "summary": str(item.get("summary") or ""),
+            "category": str(item.get("category") or asset_type),
+            "tags": list(item.get("tags") or []),
+            "payload": dict(item.get("payload") or {}),
+            "identity_hints": list(item.get("identity_hints") or []),
+            "confidence": confidence,
+            "evidence": valid_evidence,
+        }
+        if asset_type == "relationship":
+            _normalize_relationship_payload(candidate)
+        out.append(candidate)
     return out
 
 
@@ -813,19 +943,50 @@ def _messages(
     return [
         {
             "role": "system",
-            "content": (
-                "You extract structured story assets from active manuscript text. "
-                "Return JSON object {\"candidates\":[...]}. Each candidate needs asset_type, title, summary, "
-                "identity_hints, confidence, and evidence with block_id, start_offset, end_offset, quote. "
-                "Evidence quote must be an exact substring of the provided block text. "
-                "start_offset/end_offset are relative to the provided block text segment only "
-                "(not the full original chapter when base_offset is present). "
-                f"Only extract these asset_type values: {', '.join(allowed)}. "
-                "Do not invent asset types outside this list."
-            ),
+            "content": _distillation_system_prompt(allowed),
         },
         {"role": "user", "content": body},
     ]
+
+
+def _distillation_system_prompt(allowed: list[str]) -> str:
+    payload_contract = "\n".join(
+        f"- {asset_type}: {ASSET_PAYLOAD_GUIDANCE[asset_type]}"
+        for asset_type in allowed
+    )
+    return (
+        "You are a story-knowledge distiller. Extract detailed, reusable story assets from active manuscript "
+        "text, not a broad chapter recap. Return one JSON object with shape {\"candidates\":[...]}.\n\n"
+        "Extraction rules:\n"
+        "1. Create one candidate per stable character, organization, location, item, world rule, relationship, "
+        "event, plot thread, or terminology concept that the manuscript materially establishes or updates. "
+        "Split unrelated identities or facts instead of combining them into a vague asset.\n"
+        "2. title must identify the exact subject. summary is the asset's primary readable content: write a "
+        "detailed, self-contained dossier in the manuscript's language. Name the subject explicitly and retain "
+        "concrete facts such as appearance, role, state, goals, motives, abilities, restrictions, ownership, "
+        "relationships, actions, causes, outcomes, and unresolved stakes whenever the text supports them. Preserve "
+        "specific names, places, objects, and causal links. Avoid generic summaries such as 'an important person', "
+        "'a mysterious item', or 'an event that advances the plot'.\n"
+        "3. payload is the structured fact record. Populate every applicable field supported by the text; use "
+        "arrays for multiple values and objects only when structure is useful. Omit unknown fields. Never invent "
+        "facts or add empty placeholder values merely to fill the schema. Keep current state distinct from history, "
+        "rumor, hypothesis, intention, and confirmed outcome.\n"
+        "4. identity_hints contains only aliases, titles, or stable disambiguators. tags contains concise retrieval "
+        "labels. confidence is a number from 0 to 1 reflecting textual support.\n"
+        "5. evidence MUST be a JSON array even when there is one item. Each evidence object needs block_id, "
+        "start_offset, end_offset, and quote. quote must be an exact substring of the provided block segment. "
+        "Offsets are relative to that provided segment, not the full chapter when base_offset is present. Include "
+        "enough evidence spans to support the candidate's main detailed claims; do not use commentary as evidence.\n"
+        "6. Write title, summary, tags, and textual payload values in the same language as the manuscript. Do not "
+        "copy long prose passages into summary or payload. Do not expose block IDs or offsets outside evidence.\n\n"
+        f"Only extract these asset_type values: {', '.join(allowed)}. Do not invent other asset types.\n\n"
+        "Type-specific payload fields (include only fields supported by evidence):\n"
+        f"{payload_contract}\n\n"
+        "For relationship candidates, source_entity_name, target_entity_name, and relationship_type are mandatory "
+        "and must name both endpoints exactly as they appear in the manuscript. Do not leave endpoints only in the "
+        "title. Every candidate must contain asset_type, title, summary, payload, identity_hints, tags, confidence, "
+        "and evidence."
+    )
 
 
 class LLMFacilityManuscriptAssetDistiller:
@@ -858,6 +1019,7 @@ class LLMFacilityManuscriptAssetDistiller:
             validated = {**validated, "enabled_asset_types": enabled}
             windows = build_source_windows(validated["sources"])
             aggregated: list[dict[str, Any]] = []
+            model_candidate_count = 0
             for window in windows:
                 response = self._chat_client.complete_json(
                     context=context,
@@ -865,6 +1027,9 @@ class LLMFacilityManuscriptAssetDistiller:
                     api_key=api_key,
                     messages=_messages(window, enabled_asset_types=enabled),
                 )
+                response_candidates = response.get("candidates")
+                if isinstance(response_candidates, list):
+                    model_candidate_count += len(response_candidates)
                 window_candidates = validate_model_candidates(
                     response,
                     window,
@@ -890,6 +1055,8 @@ class LLMFacilityManuscriptAssetDistiller:
                 **distilled,
                 "window_count": len(windows),
                 "enabled_asset_types": enabled,
+                "model_candidate_count": model_candidate_count,
+                "filtered_candidate_count": max(model_candidate_count - len(aggregated), 0),
             }
             return self._store.finalize(context=context, result=distilled, resolution=resolution)
         except Exception as exc:

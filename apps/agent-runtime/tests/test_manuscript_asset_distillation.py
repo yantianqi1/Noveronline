@@ -95,6 +95,45 @@ def test_quote_unique_lookup_fallback() -> None:
     assert candidates[0]["evidence"][0]["start_offset"] == 4
 
 
+def test_single_evidence_object_is_normalized_to_list() -> None:
+    sources = [
+        {
+            "block_id": "b1",
+            "block_version": 1,
+            "content_sha256": "f" * 64,
+            "content_text": "许七安持有司天监令牌。",
+        }
+    ]
+    response = {
+        "candidates": [
+            {
+                "asset_type": "character",
+                "title": "许七安",
+                "evidence": {
+                    "block_id": "b1",
+                    "start_offset": 0,
+                    "end_offset": 3,
+                    "quote": "许七安",
+                },
+            }
+        ]
+    }
+
+    candidates = validate_model_candidates(response, sources)
+
+    assert len(candidates) == 1
+    assert candidates[0]["evidence"] == [
+        {
+            "block_id": "b1",
+            "block_version": 1,
+            "content_sha256": "f" * 64,
+            "start_offset": 0,
+            "end_offset": 3,
+            "quote": "许七安",
+        }
+    ]
+
+
 def test_identity_resolution_create_update_conflict() -> None:
     existing = [
         {"asset_id": "a1", "asset_type": "character", "title": "林晚", "summary": "", "lifecycle": "canon", "enabled": True},
@@ -172,6 +211,13 @@ def test_messages_include_enabled_types_only() -> None:
     assert "world_rule" in system
     assert "location" not in system or "Only extract these asset_type values: character, world_rule" in system
     assert "Only extract these asset_type values: character, world_rule" in system
+    assert "evidence MUST be a JSON array" in system
+    assert "summary is the asset's primary readable content" in system
+    assert "canonical_name, aliases, narrative_role, appearance" in system
+    assert "rule_text, scope, conditions, mechanism" in system
+    assert "organization_type" not in system
+    assert "Omit unknown fields" in system
+    assert "same language as the manuscript" in system
 
 
 def test_estimate_tokens_chars_over_four() -> None:

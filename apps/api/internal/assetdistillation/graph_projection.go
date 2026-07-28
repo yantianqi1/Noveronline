@@ -447,7 +447,7 @@ func splitRelationshipTitle(title string) []string {
 	if title == "" {
 		return nil
 	}
-	for _, sep := range []string{" / ", " -> ", "→", "—", " - "} {
+	for _, sep := range []string{" / ", " -> ", "→", "—", " - ", "、", "vs", "VS"} {
 		if strings.Contains(title, sep) {
 			parts := strings.SplitN(title, sep, 2)
 			out := make([]string, 0, 2)
@@ -462,7 +462,46 @@ func splitRelationshipTitle(title string) []string {
 			}
 		}
 	}
+	// Chinese relationship titles are usually "X与Y的<关系名词>" / "X和Y…". The
+	// distiller often leaves the endpoints only in this natural-language title
+	// (sparse payload), so recover them by splitting on the conjunction and
+	// trimming the trailing relation-noun suffix from the target side.
+	for _, conj := range []string{"与", "和", "跟", "同", "及", "对"} {
+		idx := strings.Index(title, conj)
+		if idx <= 0 {
+			continue
+		}
+		source := strings.TrimSpace(title[:idx])
+		target := strings.TrimSpace(title[idx+len(conj):])
+		if source == "" || target == "" {
+			continue
+		}
+		if before, ok := cutChineseRelationSuffix(target); ok {
+			target = before
+		}
+		if source != "" && target != "" {
+			return []string{source, target}
+		}
+	}
 	return nil
+}
+
+// cutChineseRelationSuffix strips a trailing relation noun ("…的交易" → "…")
+// from the target side of a Chinese relationship title, returning the bare
+// entity name. Returns ok=false when no known suffix is present so the caller
+// can keep the original target text.
+func cutChineseRelationSuffix(target string) (string, bool) {
+	for _, noun := range []string{"关系", "交易", "约定", "冲突", "纠葛", "恩怨", "往来", "合作", "结盟", "联盟", "对立", "矛盾", "牵连", "牵扯", "联系", "接触", "相遇", "相识", "重逢", "决裂", "和解", "对峙", "同盟", "羁绊", "渊源", "旧怨", "新仇", "密谋", "密约", "婚约", "仇怨", "仇恨"} {
+		if strings.HasSuffix(target, noun) {
+			stripped := strings.TrimSpace(target[:len(target)-len(noun)])
+			stripped = strings.TrimSuffix(stripped, "的")
+			stripped = strings.TrimSpace(stripped)
+			if stripped != "" {
+				return stripped, true
+			}
+		}
+	}
+	return target, false
 }
 
 func payloadString(payload map[string]any, key string) string {
