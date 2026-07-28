@@ -499,6 +499,12 @@ SET context_window = $4,
     supports_json = $6,
     input_cost = $7,
     output_cost = $8,
+    raw_payload_jsonb = jsonb_set(
+      COALESCE(model.raw_payload_jsonb, '{}'::jsonb),
+      '{capabilities_explicit}',
+      'true'::jsonb,
+      true
+    ),
     updated_at = now()
 WHERE model.tenant_id::text = $1
   AND model.channel_id::text = $2

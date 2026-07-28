@@ -296,6 +296,9 @@ func TestSQLChannelStoreUpdatesTenantModelMetadata(t *testing.T) {
 	if !strings.Contains(queryer.query, "UPDATE llm_models") || !strings.Contains(queryer.query, "context_window") {
 		t.Fatalf("expected model metadata update query, got %s", queryer.query)
 	}
+	if !strings.Contains(queryer.query, "capabilities_explicit") || !strings.Contains(queryer.query, "jsonb_set") {
+		t.Fatalf("model capability updates must record explicit override provenance: %s", queryer.query)
+	}
 	if queryer.tenantWriteID != "tenant-123" || queryer.rawCalls != 0 {
 		t.Fatalf("model update bypassed tenant write context: tenant=%q raw_calls=%d", queryer.tenantWriteID, queryer.rawCalls)
 	}

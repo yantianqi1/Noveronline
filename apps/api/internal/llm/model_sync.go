@@ -192,8 +192,8 @@ func (s *SQLModelSyncer) upsertModels(ctx context.Context, input ModelSyncInput,
 		return ModelSyncResult{}, &AppError{Code: "LLM_MODEL_SYNC_FAILED", Message: "provider models must be JSON serializable"}
 	}
 	status := fmt.Sprintf("ok:%d", len(models))
-	// Capability metadata seeds new discovery rows. Existing rows preserve the
-	// operator's stored values, including explicit false overrides.
+	// Capability metadata upgrades legacy discovery rows unless an operator has
+	// explicitly overridden the capability flags through UpdateModel.
 	query := `WITH incoming AS (
   SELECT model_id, owned_by, supports_json, supports_tools
   FROM jsonb_to_recordset($3::jsonb) AS model(model_id TEXT, owned_by TEXT, supports_json BOOLEAN, supports_tools BOOLEAN)
@@ -209,6 +209,16 @@ func (s *SQLModelSyncer) upsertModels(ctx context.Context, input ModelSyncInput,
     AND c.channel_id = $2::uuid
   ON CONFLICT (channel_id, model_id) DO UPDATE SET
     owned_by = EXCLUDED.owned_by,
+    supports_json = CASE
+      WHEN llm_models.raw_payload_jsonb @> '{"capabilities_explicit":true}'::jsonb
+        THEN llm_models.supports_json
+      ELSE EXCLUDED.supports_json
+    END,
+    supports_tools = CASE
+      WHEN llm_models.raw_payload_jsonb @> '{"capabilities_explicit":true}'::jsonb
+        THEN llm_models.supports_tools
+      ELSE EXCLUDED.supports_tools
+    END,
     updated_at = now()
   RETURNING
     model_id,

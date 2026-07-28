@@ -128,9 +128,10 @@ func TestSQLModelSyncerSyncsOpenAICompatibleModelsWithDecryptedCredential(t *tes
 	if !strings.Contains(queryer.args[1][2].(string), "\"supports_json\":true") {
 		t.Fatalf("expected documented capability metadata in upsert payload, got %#v", queryer.args[1][2])
 	}
-	if strings.Contains(queryer.queries[1], "supports_json = llm_models.supports_json OR EXCLUDED.supports_json") ||
-		strings.Contains(queryer.queries[1], "supports_tools = llm_models.supports_tools OR EXCLUDED.supports_tools") {
-		t.Fatalf("sync query overwrites explicit capability overrides: %s", queryer.queries[1])
+	if !strings.Contains(queryer.queries[1], `raw_payload_jsonb @> '{"capabilities_explicit":true}'::jsonb`) ||
+		!strings.Contains(queryer.queries[1], "ELSE EXCLUDED.supports_json") ||
+		!strings.Contains(queryer.queries[1], "ELSE EXCLUDED.supports_tools") {
+		t.Fatalf("sync query must upgrade inferred capabilities while preserving explicit overrides: %s", queryer.queries[1])
 	}
 }
 
