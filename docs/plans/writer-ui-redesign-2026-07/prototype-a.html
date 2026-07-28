@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>写作台 · 方案 A 原型 — 纸墨精进化</title>
+<style>
+  /* ================================================================
+     方案 A「纸墨精进化」设计 token（对应 globals.css @theme 的改法草案）
+     ================================================================ */
+  :root {
+    /* surfaces & ink —— 墨更暖半度，纸分三层：案 / 栏 / 纸 */
+    --ink: #1b1813;
+    --ink-soft: #443f37;
+    --paper: #f6f1e7;          /* 栏面 */
+    --paper-deep: #eee7d6;     /* 桌案（画布底） */
+    --panel: #fffdf8;          /* 稿纸 / 卡片 */
+    --line: rgba(86, 69, 45, 0.20);
+    --hairline: rgba(86, 69, 45, 0.14);
+    --line-soft: rgba(86, 69, 45, 0.09);
+    --muted: #57503f;
+    --muted-soft: #6f6559;
+
+    /* vermilion —— 只给唯一主动作、选中态、品牌印 */
+    --accent: #8f211b;
+    --accent-strong: #771a14;
+    --accent-wash: rgba(143, 33, 27, 0.07);
+    --accent-veil: rgba(143, 33, 27, 0.045);
+
+    /* semantics */
+    --success: #3f7a4a;
+    --success-wash: rgba(63, 122, 74, 0.10);
+    --gold: #b5854a;
+    --candidate: #856530;
+    --candidate-wash: rgba(181, 133, 74, 0.11);
+
+    /* elevation —— 暖墨单光源；稿纸用发丝线 + 极轻托影，不用大投影 */
+    --shadow-hairline: 0 1px 2px rgba(27, 24, 19, 0.05);
+    --shadow-sheet:
+      0 1px 2px rgba(27, 24, 19, 0.04),
+      0 24px 48px -32px rgba(27, 24, 19, 0.22);
+    --shadow-lift: 0 1px 2px rgba(27, 24, 19, 0.05), 0 12px 32px -12px rgba(27, 24, 19, 0.18);
+    --shadow-accent: 0 1px 2px rgba(27, 24, 19, 0.16), 0 6px 16px -6px rgba(143, 33, 27, 0.42);
+
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    --serif: "Songti SC", "STSong", "Noto Serif SC", "SimSun", Georgia, serif;
+
+    --ease-paper: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    background: var(--paper);
+    color: var(--ink);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  ::selection { background: var(--accent); color: var(--panel); }
+
+  /* 纸纤维耳语 —— 2% 的颗粒只负责打破数码平光，不负责被看见 */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 50;
+    opacity: 0.016;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ================================================================
+     顶栏 —— 一行 52px：印、面包屑、字数 / 保存态 / 新章节
+     ================================================================ */
+  .topbar {
+    height: 52px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px 0 12px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .seal {
+    width: 30px; height: 30px;
+    border-radius: 7px;
+    background: linear-gradient(160deg, #9a261f, var(--accent) 55%, var(--accent-strong));
+    color: #fdf6ea;
+    display: grid; place-items: center;
+    box-shadow: var(--shadow-accent), inset 0 1px 0 rgba(255, 244, 224, 0.22);
+    flex: none;
+  }
+  .crumbs { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 13px; }
+  .crumbs .brand { font-weight: 600; letter-spacing: 0.01em; }
+  .crumbs .sep { color: var(--muted-soft); opacity: 0.65; font-size: 12px; }
+  .crumbs .crumb { color: var(--muted); white-space: nowrap; }
+  .crumbs .crumb.current { color: var(--ink); font-weight: 500; }
+  .chapter-switch {
+    display: inline-flex; align-items: center; gap: 3px;
+    color: var(--ink); font-weight: 500; white-space: nowrap;
+    border-radius: 6px; padding: 2px 6px;
+  }
+  .chapter-switch svg { color: var(--muted-soft); }
+  .crumbs .gt { color: var(--muted-soft); opacity: 0.8; }
+  .topbar .vline { width: 1px; height: 14px; background: var(--line); flex: none; margin: 0 2px; }
+  .wordcount {
+    font-size: 12px; color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+  }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .saved {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .saved svg { color: var(--success); }
+  .btn-outline {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 12px;
+    font-size: 12px; font-weight: 500; color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: var(--shadow-hairline);
+  }
+
+  .main { display: flex; flex: 1; min-height: 0; }
+
+  /* ================================================================
+     图标导航轨 64px
+     ================================================================ */
+  .iconrail {
+    width: 64px; flex: none;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 14px 0 12px;
+    gap: 4px;
+    background: var(--paper);
+    border-right: 1px solid var(--hairline);
+    position: relative;
+  }
+  .railbtn {
+    width: 40px; height: 40px;
+    display: grid; place-items: center;
+    border-radius: 9px;
+    color: var(--muted);
+    position: relative;
+  }
+  .railbtn.active {
+    color: var(--accent);
+    background: var(--accent-wash);
+  }
+  .railbtn.active::before {
+    content: "";
+    position: absolute;
+    left: -12px; top: 10px; bottom: 10px;
+    width: 2px; border-radius: 2px;
+    background: var(--accent);
+  }
+  .iconrail .spacer { flex: 1; }
+  .avatar {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: #221e18; color: #f2e9d8;
+    display: grid; place-items: center;
+    font-size: 11px; font-weight: 600;
+    margin-top: 10px;
+    box-shadow: inset 0 0 0 1px rgba(247, 236, 210, 0.14);
+  }
+
+  /* ================================================================
+     合著者 dock 360px —— 纸栏比稿纸低半阶，发丝线分隔
+     ================================================================ */
+  .dock {
+    width: 360px; flex: none;
+    display: flex; flex-direction: column;
+    background:
+      linear-gradient(180deg, rgba(255, 253, 248, 0.35), rgba(255, 253, 248, 0) 120px),
+      var(--paper);
+    border-right: 1px solid var(--hairline);
+    min-height: 0;
+  }
+  .dock-head {
+    height: 48px; flex: none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px 0 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .dock-head .tile {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: var(--accent-wash); color: var(--accent);
+    display: grid; place-items: center; flex: none;
+  }
+  .dock-head .title { font-size: 13px; font-weight: 600; letter-spacing: 0.01em; }
+  .review-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 26px; padding: 0 9px;
+    border-radius: 6px;
+    border: 1px solid rgba(181, 133, 74, 0.42);
+    background: var(--candidate-wash);
+    color: var(--candidate);
+    font-size: 12px; font-weight: 500;
+    white-space: nowrap;
+  }
+  .review-chip svg { opacity: 0.85; }
+  .dock-head .hint { margin-left: auto; font-size: 12px; color: var(--muted-soft); white-space: nowrap; }
+
+  /* thread —— 活动流：节点列对齐出节奏，短接头连接相邻事件 */
+  .thread {
+    flex: 1; min-height: 0;
+    padding: 16px 14px 8px 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  .turn { position: relative; margin-bottom: 14px; }
+  .day-divider {
+    display: flex; align-items: center; gap: 10px;
+    margin: 2px 0 16px 32px;
+    font-size: 11px; color: var(--muted-soft); letter-spacing: 0.10em;
+  }
+  .day-divider::before,
+  .day-divider::after {
+    content: ""; flex: 1; height: 1px; background: var(--line-soft);
+  }
+
+  /* 用户气泡：不再实心朱砂 —— 纸面 + 朱砂发丝描边 + 洗色底 */
+  .bubble-row { display: flex; justify-content: flex-end; margin-left: 32px; }
+  /* 连续多条来自作者的话，收成一叠 */
+  .bubble-row + .bubble-row { margin-top: -8px; }
+  .bubble {
+    max-width: 88%;
+    background: var(--accent-veil);
+    border: 1px solid rgba(143, 33, 27, 0.15);
+    border-radius: 12px 12px 4px 12px;
+    padding: 7px 12px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink);
+    box-shadow: var(--shadow-hairline);
+  }
+
+  /* 状态事件：22px 节点 + 内容列；节点上方一小段接头把时间线串起来 */
+  .event { display: grid; grid-template-columns: 22px 1fr; gap: 10px; align-items: start; }
+  .event::before {
+    content: "";
+    position: absolute;
+    left: 11px; top: -14px;
+    width: 1px; height: 23px;
+    background: var(--line-soft);
+  }
+  .event .node {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    display: grid; place-items: center;
+    position: relative; z-index: 1;
+    margin-top: 9px;
+  }
+  .event .node svg { display: block; }
+  .event .node.ok { color: var(--success); border-color: rgba(63, 122, 74, 0.35); background: var(--success-wash); }
+  .event .node.gold { color: var(--candidate); border-color: rgba(181, 133, 74, 0.40); background: var(--candidate-wash); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    box-shadow: var(--shadow-hairline);
+    overflow: hidden;
+  }
+  .card-row {
+    display: flex; align-items: center; gap: 7px;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .card-row .lead { font-weight: 500; color: var(--ink); white-space: nowrap; }
+  .card-row .tail { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .card-row .chev { margin-left: auto; color: var(--muted-soft); flex: none; }
+
+  .card.calm { background: rgba(255, 253, 248, 0.55); box-shadow: none; }
+  .card-foot {
+    border-top: 1px solid var(--line-soft);
+    padding: 7px 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .card-foot .note { font-size: 12px; color: var(--muted-soft); }
+  .link-accent {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 12px; font-weight: 500; color: var(--accent);
+    white-space: nowrap;
+  }
+
+  /* 引用 chips —— 一行低饱和 pill，常驻用旧金 */
+  .cites { margin-left: 32px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .cites .label { font-size: 12px; color: var(--muted-soft); margin-right: 1px; }
+  .chip {
+    display: inline-flex; align-items: center;
+    height: 23px; padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid var(--hairline);
+    background: var(--panel);
+    font-size: 12px; color: var(--ink-soft);
+    white-space: nowrap;
+  }
+  .chip.gold {
+    border-color: rgba(181, 133, 74, 0.48);
+    background: var(--candidate-wash);
+    color: var(--candidate);
+    font-weight: 500;
+  }
+  .chip.more { border: none; background: none; color: var(--muted-soft); padding: 0 2px; }
+  .cites .degraded { font-size: 12px; color: var(--muted-soft); }
+
+  /* composer —— 一方墨砚：发丝描边，聚焦一圈朱砂洗色 */
+  .composer { flex: none; padding: 10px 12px 12px; }
+  .inkwell {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow-sheet);
+    padding: 10px 10px 10px 13px;
+    display: flex; align-items: flex-end; gap: 9px;
+  }
+  .inkwell .ph {
+    flex: 1;
+    font-size: 13px; color: var(--muted-soft);
+    line-height: 1.55; padding-bottom: 4px;
+  }
+  .send {
+    width: 30px; height: 30px; flex: none;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fdf6ea;
+    display: grid; place-items: center;
+    box-shadow: var(--shadow-accent);
+  }
+  .composer .tip {
+    margin-top: 7px; padding: 0 4px;
+    font-size: 12px; color: var(--muted-soft); line-height: 1.5;
+  }
+
+  /* ================================================================
+     稿件画布 —— 桌案底 + 一张纸
+     ================================================================ */
+  .canvas {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column;
+    background:
+      radial-gradient(120% 80% at 50% 0%, rgba(255, 253, 248, 0.55), rgba(255, 253, 248, 0) 55%),
+      var(--paper-deep);
+  }
+  .canvas-head {
+    height: 46px; flex: none;
+    display: flex; align-items: center;
+    padding: 0 20px;
+    gap: 12px;
+  }
+  .seg {
+    display: inline-flex;
+    background: rgba(86, 69, 45, 0.07);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 1px;
+  }
+  .seg .item {
+    padding: 3px 13px;
+    font-size: 12px;
+    color: var(--muted);
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  .seg .item.on {
+    background: var(--panel);
+    color: var(--ink);
+    font-weight: 500;
+    box-shadow: var(--shadow-hairline);
+  }
+  .canvas-head .side {
+    margin-left: auto;
+    font-size: 12px; color: var(--muted-soft);
+    white-space: nowrap;
+  }
+
+  .scroll { flex: 1; min-height: 0; overflow: hidden; padding: 6px 24px 0; }
+  .sheet {
+    max-width: 720px;
+    margin: 4px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;              /* 纸张近直角，圆角是卡片的语言 */
+    box-shadow: var(--shadow-sheet);
+    padding: 52px 76px 64px;
+    position: relative;
+  }
+
+  .placeholder-line {
+    font-family: var(--serif);
+    font-size: 14px;
+    color: var(--muted-soft);
+    display: flex; align-items: baseline; gap: 6px;
+  }
+  .placeholder-line .caret {
+    width: 2px; height: 1em; background: var(--accent);
+    transform: translateY(2px);
+    opacity: 0.6;
+    flex: none;
+    order: -1;
+  }
+
+  .chapter-title {
+    margin-top: 30px;
+    text-align: center;
+  }
+  .chapter-title h1 {
+    font-family: var(--serif);
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: 0.42em;
+    text-indent: 0.42em; /* 视觉居中补偿 */
+    color: var(--ink);
+  }
+  .chapter-title .rule {
+    margin: 14px auto 0;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+  }
+  .chapter-title .rule::before,
+  .chapter-title .rule::after {
+    content: "";
+    width: 56px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(181, 133, 74, 0.55));
+  }
+  .chapter-title .rule::after {
+    background: linear-gradient(90deg, rgba(181, 133, 74, 0.55), transparent);
+  }
+  .chapter-title .rule .dot {
+    width: 5px; height: 5px;
+    transform: rotate(45deg);
+    background: var(--gold);
+    opacity: 0.8;
+  }
+
+  .prose { margin-top: 26px; }
+  .prose p {
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.95;
+    letter-spacing: 0.015em;
+    color: #262119;
+    text-indent: 2em;          /* 中文书版工艺：首行缩进两字符 */
+    margin-bottom: 0.55em;
+    text-align: justify;
+  }
+  .prose p.dialogue { text-indent: 2em; }
+
+  .footnote {
+    max-width: 720px;
+    margin: 14px auto 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted-soft);
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <span class="seal" aria-hidden="true">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+    </span>
+    <nav class="crumbs" aria-label="面包屑">
+      <span class="brand">墨鱼小说</span>
+      <span class="sep">/</span>
+      <span class="crumb">书架</span>
+      <span class="sep">/</span>
+      <span class="crumb current">测试6</span>
+      <span class="gt">›</span>
+      <span class="chapter-switch">第1章
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </span>
+    </nav>
+    <span class="vline" aria-hidden="true"></span>
+    <span class="wordcount">5556 字</span>
+    <div class="topbar-right">
+      <span class="saved">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        已保存 · 刚刚
+      </span>
+      <button class="btn-outline" type="button">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M12 18v-6"/><path d="M9 15h6"/></svg>
+        新章节
+      </button>
+    </div>
+  </header>
+
+  <div class="main">
+
+    <!-- 图标导航轨 -->
+    <nav class="iconrail" aria-label="项目导航">
+      <span class="railbtn">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      </span>
+      <span class="railbtn">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M12 8v4a2 2 0 0 1-2 2H5M12 12a2 2 0 0 0 2 2h5"/></svg>
+      </span>
+      <span class="railbtn">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M12 22V12"/><path d="m3 7 9 5 9-5"/></svg>
+      </span>
+      <span class="railbtn">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8.2 7.3 10.5 16M15.8 7.3 13.5 16M8.5 6h7"/></svg>
+      </span>
+      <span class="railbtn">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </span>
+      <span class="railbtn active" aria-current="page">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+      </span>
+      <span class="spacer"></span>
+      <span class="railbtn">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </span>
+      <span class="avatar">N</span>
+    </nav>
+
+    <!-- 合著者 dock -->
+    <aside class="dock" aria-label="合著者">
+      <div class="dock-head">
+        <span class="tile">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+        </span>
+        <span class="title">合著者</span>
+        <span class="review-chip">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m9 15 2 2 4-4"/></svg>
+          待审资产
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+        </span>
+        <span class="hint">常驻协作</span>
+      </div>
+
+      <div class="thread">
+
+        <div class="day-divider">今天</div>
+
+        <div class="turn bubble-row"><div class="bubble">开始第一章</div></div>
+        <div class="turn bubble-row"><div class="bubble">开始第一章</div></div>
+
+        <div class="turn event">
+          <span class="node ok">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </span>
+          <div class="card">
+            <div class="card-row">
+              <span class="lead">已完成</span>
+              <span class="tail">· 候选稿 3510 字</span>
+              <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="turn event">
+          <span class="node ok">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </span>
+          <div class="card calm">
+            <div class="card-row">
+              <span class="lead">已采用</span>
+              <span class="tail">· 3510 字进手稿</span>
+              <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+            <div class="card-foot">
+              <span class="note">已进手稿，可在稿纸上继续改</span>
+              <span class="link-accent">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                查看正文
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="turn bubble-row"><div class="bubble">继续</div></div>
+
+        <div class="turn event">
+          <span class="node ok">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </span>
+          <div class="card">
+            <div class="card-row">
+              <span class="lead">已完成</span>
+              <span class="tail">· 候选稿 2046 字</span>
+              <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="turn cites">
+          <span class="label">参考了</span>
+          <span class="chip gold">常驻 · 李典史</span>
+          <span class="chip">炼精境</span>
+          <span class="chip">假银</span>
+          <span class="chip">税银案</span>
+          <span class="chip">李玉春</span>
+          <span class="chip">许平志</span>
+          <span class="chip">许七安</span>
+          <span class="chip">打更人</span>
+          <span class="chip more">+12</span>
+          <span class="degraded">· 关键词召回</span>
+        </div>
+
+        <div class="turn event">
+          <span class="node ok">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </span>
+          <div class="card calm">
+            <div class="card-row">
+              <span class="lead">已采用</span>
+              <span class="tail">· 2046 字进手稿</span>
+              <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+            <div class="card-foot">
+              <span class="note">已进手稿，可在稿纸上继续改</span>
+              <span class="link-accent">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                查看正文
+              </span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="composer">
+        <div class="inkwell">
+          <span class="ph">让合著者起草、续写或改写… (Enter 发送)</span>
+          <span class="send">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
+          </span>
+        </div>
+        <p class="tip">起草的内容先作候选稿，经你采用才进手稿。<br />Shift+Enter 换行。</p>
+      </div>
+    </aside>
+
+    <!-- 稿件画布 -->
+    <section class="canvas" aria-label="稿件画布">
+      <div class="canvas-head">
+        <div class="seg" role="tablist" aria-label="画布视图">
+          <span class="item on" role="tab" aria-selected="true">稿件</span>
+          <span class="item" role="tab">章节</span>
+          <span class="item" role="tab">审校</span>
+          <span class="item" role="tab">工具</span>
+        </div>
+        <span class="side">选中字句，可让合著者就地改写</span>
+      </div>
+
+      <div class="scroll">
+        <article class="sheet">
+          <p class="placeholder-line"><span class="caret"></span>从这里开始写。空白的稿纸，等第一个字落下。</p>
+
+          <div class="chapter-title">
+            <h1>第一章</h1>
+            <div class="rule" aria-hidden="true"><span class="dot"></span></div>
+          </div>
+
+          <div class="prose">
+            <p>许七安觉得自己的运气实在不好。</p>
+            <p>明明是个穿越者，明明脑子里装着几千年的诗词歌赋，偏偏投生到了这个鬼地方——一个连科举都没资格参加的武夫家庭。更要命的是，他现在的身份是大奉王朝京兆府辖下的一名典史，说白了就是个底层公务员，整天跟鸡毛蒜皮的案子打交道。</p>
+            <p>今天又是无聊的一天。</p>
+            <p>许七安从县衙出来，伸了个懒腰，骨节咔咔作响。炼精境的修为让他的身体素质远超常人，但这点实力在真正的强者面前根本不够看——他那个当捕头的二叔许平志就是练气境，比他高出一个大境界，一巴掌就能把他拍趴下。</p>
+            <p class="dialogue">“七安，走，喝酒去。”</p>
+            <p>同僚李典史从后面追上来，拍了拍他的肩膀。这人三十出头，圆脸微胖，一副市井油滑的模样。</p>
+            <p class="dialogue">许七安摆摆手：“今天不行，家里有事。”</p>
+            <p class="dialogue">“得了吧你，谁不知道你家那点破事。”李典史嘿嘿一笑，“你那婶婶又给你脸色看了？”</p>
+            <p>许七安没说话，算是默认。</p>
+            <p>说起来也怪他自己。穿越过来三年了，除了练出一身蛮力，什么正经事都没干成。许家在京城算是底层官吏家庭，二叔许平志在衙门当捕头，勉强维持一家生计。婶婶李茹是个精明势利的女人，早就看这个吃白饭的侄子不顺眼。</p>
+          </div>
+        </article>
+        <p class="footnote">你写的每一个字都会自动存入手稿。合著者起草的内容永远是「候选稿」，经你明确采用后才会进到这张稿纸上。</p>
+      </div>
+    </section>
+
+  </div>
+</div>
+</body>
+</html>

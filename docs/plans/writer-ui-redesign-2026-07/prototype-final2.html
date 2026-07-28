@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>写作台 · 终版 — B 画布 × C dock × 纸墨色板</title>
+<style>
+  :root {
+    /* ── paper & vermilion 原值（与 apps/web/app/globals.css 一致，不动） ── */
+    --paper:        #f7f2e9;
+    --paper-deep:   #efe7d8;
+    --panel:        #fffdf8;
+    --ink:          #171a1b;
+    --ink-soft:     #3c3a36;
+    --muted:        #5a5146;
+    --muted-soft:   #6f6559;
+    --line:         rgba(86,69,45,.22);
+    --line-soft:    rgba(86,69,45,.12);
+    --accent:       #8f211b;
+    --accent-strong:#7a1a15;
+    --accent-wash:  rgba(143,33,27,.07);
+    --candidate:    #856530;
+    --success:      #3f7a4a;
+    --danger:       #b8402f;
+    --serif: "Songti SC","STSong","Noto Serif CJK SC","Source Han Serif SC","SimSun",Georgia,serif;
+    --sans:  "PingFang SC","Helvetica Neue",system-ui,-apple-system,sans-serif;
+    --mono:  ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.55;
+    background: var(--paper);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  ::selection { background: var(--accent); color: var(--panel); }
+  svg { display: block; }
+
+  .app { display: flex; height: 100vh; }
+
+  /* ═══ 图标导航轨（C 几何 52px，纸墨配色） ═══ */
+  .rail {
+    width: 52px; flex: none;
+    border-right: 1px solid var(--line-soft);
+    background: var(--paper);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 10px 0 12px; gap: 2px;
+  }
+  .seal {
+    width: 28px; height: 28px; border-radius: 5px;
+    background: var(--accent); color: var(--panel);
+    display: grid; place-items: center;
+    font-family: var(--serif); font-size: 14px; font-weight: 600;
+    box-shadow: 0 1px 2px rgba(23,26,27,.2), inset 0 0 0 1px rgba(255,253,248,.16);
+    margin-bottom: 12px; user-select: none;
+  }
+  .rail-ico {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: grid; place-items: center;
+    color: var(--muted);
+    border: 1px solid transparent;
+  }
+  .rail-ico:hover { background: var(--panel); color: var(--ink-soft); }
+  .rail-ico.active { background: var(--panel); border-color: var(--line-soft); color: var(--ink); }
+  .rail-spacer { flex: 1; }
+  .avatar {
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--paper-deep); border: 1px solid var(--line-soft);
+    color: var(--ink-soft); font-size: 11px;
+    display: grid; place-items: center; margin-top: 8px;
+  }
+
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  /* ═══ 顶栏（C 布局，纸墨配色） ═══ */
+  .topbar {
+    height: 48px; flex: none;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 14px 0 16px;
+  }
+  .crumb { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .crumb .dim { color: var(--muted); font-size: 13px; }
+  .crumb .sep { color: var(--muted-soft); font-size: 12px; }
+  .crumb .book {
+    font-family: var(--serif); font-size: 15px; font-weight: 600; color: var(--ink);
+    max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chapter-drop {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 13px; color: var(--ink);
+    padding: 4px 6px; border-radius: 5px;
+  }
+  .chapter-drop:hover { background: rgba(86,69,45,.07); }
+  .chapter-drop svg { color: var(--muted); }
+
+  .viewtabs {
+    display: flex; align-items: center;
+    background: var(--paper-deep);
+    border-radius: 7px; padding: 2px; margin-left: 8px;
+  }
+  .viewtab {
+    font-size: 12px; color: var(--muted);
+    padding: 4px 12px; border-radius: 5px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .viewtab:hover { color: var(--ink-soft); }
+  .viewtab.active {
+    background: var(--panel); color: var(--ink); font-weight: 500;
+    border: 1px solid var(--line-soft); margin: -1px;
+  }
+
+  .top-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .wc { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .saved { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .saved .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+
+  kbd {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-soft);
+    background: var(--panel);
+    border: 1px solid var(--line); border-bottom-width: 1.5px;
+    border-radius: 4px; padding: 1px 5px; line-height: 1.4; white-space: nowrap;
+  }
+  .cmd-chip {
+    display: flex; align-items: center; gap: 5px;
+    color: var(--muted); font-size: 12px;
+    padding: 4px 7px; border-radius: 5px;
+    border: 1px solid var(--line-soft); background: var(--panel);
+  }
+  .cmd-chip:hover { background: var(--paper); color: var(--ink-soft); }
+  .vr { width: 1px; height: 16px; background: var(--line); flex: none; }
+  .btn-ghost {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 500; color: var(--ink-soft);
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: 5px; padding: 5px 10px;
+    transition: all .18s ease;
+  }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  .content { flex: 1; min-height: 0; display: flex; }
+
+  /* ═══ Agent dock（C 结构与密度，纸墨 token） ═══ */
+  .dock {
+    width: 352px; flex: none;
+    border-right: 1px solid var(--line);
+    background: var(--paper);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .dock-head {
+    height: 45px; flex: none;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .dtab {
+    position: relative; height: 45px;
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--muted);
+  }
+  .dtab:hover { color: var(--ink-soft); }
+  .dtab.active { color: var(--ink); font-weight: 600; }
+  .dtab.active::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; background: var(--accent);
+  }
+  .dtab .n { font-family: var(--mono); font-size: 11px; color: var(--candidate); font-variant-numeric: tabular-nums; }
+  .dock-head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+  .thread {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 12px 14px 8px;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+  .day-sep {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 10.5px; letter-spacing: .18em; color: var(--muted-soft);
+    user-select: none;
+  }
+  .day-sep::before, .day-sep::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+
+  .turn { display: flex; flex-direction: column; gap: 8px; }
+
+  /* 用户指令：纯文本（宋体作者之声），无气泡、无 meta 时间 */
+  .say {
+    font-family: var(--serif); font-size: 13.5px; line-height: 1.7; color: var(--ink);
+  }
+
+  /* run：一 run 一行，状态与「查看正文」合并 */
+  .run-row {
+    display: flex; align-items: center; gap: 8px;
+    min-height: 30px;
+    padding: 3px 6px; margin: 0 -6px;
+    border-radius: 5px;
+    font-size: 13px;
+  }
+  .run-row:hover { background: rgba(86,69,45,.06); }
+  .run-row .ic { flex: none; color: var(--success); }
+  .run-row .label { color: var(--ink-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-row .label b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .run-row .trail { margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px; }
+  .reveal {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 12px; color: var(--muted); white-space: nowrap;
+  }
+  .reveal:hover { color: var(--accent); }
+  .run-row .chev { color: var(--muted-soft); }
+
+  /* 召回：一行 truncated */
+  .recall {
+    margin-left: 22px;
+    font-size: 12px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .recall .who { color: var(--ink-soft); }
+
+  /* 候选稿卡：panel 底 + 单 hairline；金色仅文字级 */
+  .galley {
+    margin: 4px 0 0 22px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .galley-head {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .galley-head .tag { font-size: 11px; font-weight: 600; letter-spacing: .12em; color: var(--candidate); }
+  .galley-head .meta { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .galley-warn { padding: 7px 12px 0; font-size: 11.5px; line-height: 1.6; color: var(--candidate); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .galley-body { position: relative; padding: 9px 14px 10px; }
+  .galley-body p {
+    font-family: var(--serif); font-size: 13.5px; line-height: 1.8; color: var(--ink);
+    text-indent: 2em;
+  }
+  .galley-body.clipped { max-height: 108px; overflow: hidden; }
+  .galley-body.clipped::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 42px;
+    background: linear-gradient(to bottom, transparent, var(--panel));
+  }
+  .galley-foot {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .galley-foot .note { font-size: 11px; color: var(--muted-soft); }
+  .adopt-btn {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 6px;
+    background: var(--accent); color: var(--panel);
+    font-size: 12px; font-weight: 500;
+    border-radius: 5px; padding: 6px 12px;
+    box-shadow: 0 1px 2px rgba(23,26,27,.18);
+    transition: background .18s ease;
+  }
+  .adopt-btn:hover { background: var(--accent-strong); }
+  .adopt-btn kbd {
+    background: transparent; border-color: rgba(255,253,248,.35); border-bottom-width: 1px;
+    color: rgba(255,253,248,.85); font-size: 10px; padding: 0 4px;
+  }
+
+  /* composer：hairline 盒 + kbd 提示 + 一行 note */
+  .composer {
+    flex: none;
+    border-top: 1px solid var(--line-soft);
+    padding: 10px 12px 8px;
+    background: var(--paper);
+  }
+  .composer-box {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    padding: 9px 11px 7px;
+  }
+  .composer-box:focus-within { border-color: rgba(143,33,27,.5); }
+  .composer-input { font-size: 13px; color: var(--muted-soft); line-height: 1.55; min-height: 20px; }
+  .composer-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .composer-row .keys { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+  .send {
+    margin-left: auto;
+    width: 26px; height: 26px; border-radius: 5px;
+    background: var(--accent); color: var(--panel);
+    display: grid; place-items: center;
+    box-shadow: 0 1px 2px rgba(23,26,27,.18);
+  }
+  .send:hover { background: var(--accent-strong); }
+  .composer-note {
+    margin-top: 7px; padding: 0 2px;
+    font-size: 11px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ═══ 稿件画布（B 终版原样搬运） ═══ */
+  .canvas {
+    flex: 1; min-width: 0; overflow: hidden;
+    background:
+      radial-gradient(140% 100% at 50% 0%, #faf6ec 0%, var(--paper) 62%);
+    position: relative;
+  }
+  .page {
+    position: relative;
+    width: 664px; margin: 0 auto;
+    padding: 44px 0 26px;
+  }
+  .runhead { text-align: center; margin-bottom: 30px; }
+  .runhead .kicker { font-size: 10.5px; letter-spacing: .3em; color: var(--muted); }
+  .runhead h1 { font-family: var(--serif); font-size: 30px; font-weight: 700; margin-top: 10px; letter-spacing: .04em; }
+  .ornament { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px; }
+  .ornament i { display: block; width: 52px; height: 1px; background: var(--line); }
+  .ornament b { width: 7px; height: 7px; background: var(--accent); transform: rotate(45deg); }
+
+  .prose { font-family: var(--serif); font-size: 17px; line-height: 1.95; color: var(--ink); }
+  .prose p { text-indent: 2em; text-align: justify; margin-bottom: 2px; position: relative; }
+  .prose p + p { margin-top: 4px; }
+
+  .dropcap {
+    float: left;
+    width: 56px; height: 56px;
+    margin: 5px 14px 5px 0;
+    background: var(--accent);
+    color: var(--panel);
+    display: grid; place-items: center;
+    font-size: 33px; font-weight: 700; text-indent: 0;
+    border-radius: 4px;
+    box-shadow: 0 2px 5px rgba(23,26,27,.2), inset 0 0 0 1px rgba(255,253,248,.14);
+  }
+  .prose p.lead { text-indent: 0; }
+
+  .sel { position: relative; background: rgba(143,33,27,.13); box-shadow: 0 1px 0 var(--accent); padding-bottom: 1px; }
+  .sel-pop {
+    position: absolute; left: 50%; top: -5px; transform: translate(-50%, -100%);
+    display: flex; align-items: center; gap: 2px;
+    background: var(--panel);
+    border: 1px solid var(--line); border-radius: 4px;
+    box-shadow: 0 1px 2px rgba(23,26,27,.05), 0 12px 32px -12px rgba(23,26,27,.18);
+    padding: 3px;
+    white-space: nowrap;
+    z-index: 5;
+  }
+  .sel-pop::after {
+    content: ""; position: absolute; left: 50%; bottom: -4px; transform: translateX(-50%) rotate(45deg);
+    width: 7px; height: 7px; background: var(--panel);
+    border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  }
+  .sel-pop button { font-size: 12px; color: var(--ink-soft); padding: 5px 9px; border-radius: 3px; }
+  .sel-pop button:hover { background: var(--accent-wash); color: var(--accent); }
+  .sel-pop .v { width: 1px; height: 12px; background: var(--line-soft); }
+
+  .marginote {
+    position: absolute; left: calc(100% + 24px); top: 1px;
+    width: 160px;
+    border-left: 1px solid var(--line);
+    padding-left: 10px;
+    font-size: 11px; line-height: 1.7; color: var(--muted);
+    font-family: var(--sans);
+  }
+  .marginote .no { color: var(--accent); letter-spacing: .1em; font-weight: 600; }
+  .marginote a { color: var(--accent); }
+
+  .ghost-next { color: var(--muted-soft); }
+  .ghost-next .caret { animation: blink 1.1s steps(1) infinite; }
+  .caret { display: inline-block; width: 2px; height: 1em; background: var(--accent); vertical-align: -2px; margin-left: 1px; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .pagefoot {
+    margin-top: 46px;
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    font-size: 10.5px; letter-spacing: .22em; color: var(--muted);
+  }
+  .pagefoot i { display: block; width: 64px; height: 1px; background: var(--line-soft); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ═══ 图标导航轨 ═══ -->
+  <nav class="rail" aria-label="项目导航">
+    <div class="seal" title="墨鱼小说">墨</div>
+    <button class="rail-ico" title="总览"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></button>
+    <button class="rail-ico" title="故事图谱"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="7" r="2.4"/><circle cx="12" cy="17" r="2.4"/><path d="M8.2 7 15.8 7M7.2 8.2 10.8 14.9M16.8 9.2 13.2 14.9"/></svg></button>
+    <button class="rail-ico" title="资产库"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19V5a1.5 1.5 0 0 1 1.5-1.5H9v16H5.5A1.5 1.5 0 0 1 4 18z"/><path d="M9 3.5h9.5A1.5 1.5 0 0 1 20 5v13a1.5 1.5 0 0 1-1.5 1.5H9"/><path d="M12.5 7.5h4M12.5 11h4"/></svg></button>
+    <button class="rail-ico" title="世界线"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M7 8.2v7.6M7 8.5c3.5 0 6.5.2 8 .3"/></svg></button>
+    <button class="rail-ico" title="角色控制"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9.5" cy="8" r="3"/><path d="M4.5 19.5c.6-3 2.7-4.5 5-4.5s4.4 1.5 5 4.5"/><circle cx="16.5" cy="9" r="2.3"/><path d="M15.6 15.2c2.2.2 3.5 1.6 3.9 3.8"/></svg></button>
+    <button class="rail-ico active" title="写作台" aria-current="page"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16.8 3.8a2.3 2.3 0 0 1 3.3 3.3L8.5 18.7 4 20l1.3-4.5z"/><path d="M14 6.5l3.4 3.4"/></svg></button>
+    <div class="rail-spacer"></div>
+    <button class="rail-ico" title="设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 8h9M17 8h3M4 16h3M11 16h9"/><circle cx="15" cy="8" r="2"/><circle cx="9" cy="16" r="2"/></svg></button>
+    <div class="avatar" title="颜天奇">颜</div>
+  </nav>
+
+  <!-- ═══ 主列 ═══ -->
+  <div class="main">
+
+    <!-- 顶栏 / 画布头 -->
+    <header class="topbar">
+      <div class="crumb">
+        <span class="dim">书架</span>
+        <span class="sep">/</span>
+        <span class="book">清河夜航船</span>
+        <span class="sep">/</span>
+        <button class="chapter-drop">
+          第一章
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+      </div>
+
+      <nav class="viewtabs" aria-label="画布视图">
+        <button class="viewtab active">稿件</button>
+        <button class="viewtab">章节</button>
+        <button class="viewtab">审校</button>
+        <button class="viewtab">工具</button>
+      </nav>
+
+      <div class="top-right">
+        <span class="wc">5,556 字</span>
+        <span class="saved"><span class="dot"></span>已保存</span>
+        <button class="cmd-chip">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-3.8-3.8"/></svg>
+          <kbd>⌘K</kbd>
+        </button>
+        <span class="vr"></span>
+        <button class="btn-ghost">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          新章节
+        </button>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <!-- ═══ Agent dock ═══ -->
+      <aside class="dock" aria-label="合著者">
+        <div class="dock-head">
+          <button class="dtab active">对话</button>
+          <button class="dtab">待审资产<span class="n">2</span></button>
+          <div class="dock-head-right"><kbd>⌘J</kbd></div>
+        </div>
+
+        <div class="thread">
+          <div class="day-sep"><span>昨天</span></div>
+
+          <!-- turn：已入稿 -->
+          <div class="turn">
+            <p class="say">先试了一段开头——雨夜、县衙、税银入库的引子，方向可以。明天接着把日常立住。</p>
+            <div class="run-row">
+              <svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.9"/></svg>
+              <span class="label">已采用 · <b>1,872 字</b>进手稿</span>
+              <span class="trail">
+                <button class="reveal">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6.5-5.1-6.5-10a6.5 6.5 0 1 1 13 0c0 4.9-6.5 10-6.5 10z"/><circle cx="12" cy="11" r="2.3"/></svg>
+                  查看正文
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <div class="day-sep"><span>今天</span></div>
+
+          <!-- turn：已入稿 -->
+          <div class="turn">
+            <p class="say">开始第一章：雨夜、县衙、税银入库的引子，先把沈砚舟的日常立住。</p>
+            <div class="run-row">
+              <svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.9"/></svg>
+              <span class="label">已采用 · <b>3,510 字</b>进手稿</span>
+              <span class="trail">
+                <button class="reveal">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6.5-5.1-6.5-10a6.5 6.5 0 1 1 13 0c0 4.9-6.5 10-6.5 10z"/><circle cx="12" cy="11" r="2.3"/></svg>
+                  查看正文
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <!-- turn：候选稿待采用 -->
+          <div class="turn">
+            <p class="say">继续——让李栓拉他去喝酒，顺手把家里的矛盾带出来。</p>
+            <div class="run-row">
+              <svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.9"/></svg>
+              <span class="label">已完成 · 候选稿 <b>3,510 字</b></span>
+              <span class="trail">
+                <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>
+              </span>
+            </div>
+            <p class="recall">参考了 <span class="who">常驻 · 李典史</span> · 炼精境 · 假银 · 税银案 · 李玉春 · 赵四海 <span class="who">+4</span></p>
+
+            <div class="galley">
+              <div class="galley-head">
+                <span class="tag">候选稿</span>
+                <span class="meta">3,510 字</span>
+              </div>
+              <p class="galley-warn" title="与设定可能有出入 · 1 处 —— 沈平志的职务与人物档案不符">与设定可能有出入 · 1 处：沈平志职务与档案不符</p>
+              <div class="galley-body clipped">
+                <p>“砚舟，走，喝酒去。”同僚李栓从后面追上来，拍了拍他的肩膀。这人三十出头，圆脸微胖，一副市井油滑的模样。沈砚舟摆摆手：“今天不行，家里有事。”“得了吧你，谁不知道你们家那点破事。”李栓嘿嘿一笑，“你那婶婶又给你脸色看了？”沈砚舟没说话，算是默认。</p>
+                <p>雨是傍晚落起来的。他站在廊下看雨，看雨脚把青石板砸出一个个小坑。</p>
+              </div>
+              <div class="galley-foot">
+                <span class="note">采用后进入手稿末尾</span>
+                <button class="adopt-btn">
+                  采用进手稿
+                  <kbd>⌘⏎</kbd>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- composer -->
+        <div class="composer">
+          <div class="composer-box">
+            <div class="composer-input">让合著者起草、续写或改写…</div>
+            <div class="composer-row">
+              <span class="keys"><kbd>⏎</kbd> 发送</span>
+              <span class="keys"><kbd>⇧⏎</kbd> 换行</span>
+              <button class="send" aria-label="发送">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+              </button>
+            </div>
+          </div>
+          <p class="composer-note">起草内容先作候选稿，经你采用才进手稿。</p>
+        </div>
+      </aside>
+
+      <!-- ═══ 稿件画布（B 终版原样） ═══ -->
+      <main class="canvas">
+        <div class="page">
+          <div class="runhead">
+            <div class="kicker">卷一 · 清河县</div>
+            <h1>第一章 · 雨夜借刀</h1>
+            <div class="ornament"><i></i><b></b><i></i></div>
+          </div>
+
+          <div class="prose">
+            <p class="lead"><span class="dropcap">沈</span>砚舟觉得自己的运气实在不好。明明是个穿越者，脑子里装着一肚子后世的刑名之学，偏偏投生到了这个鬼地方——一个连科举都没资格参加的胥吏家庭。更要命的是，他现在的身份是大胤朝清河县衙下辖的一名捕快，说白了就是个底层公门中人，整天跟鸡毛蒜皮的案子打交道。</p>
+
+            <p>今天又是无聊的一天。沈砚舟从县衙出来，伸了个懒腰，骨节咔咔作响。炼精境的修为让他的身体素质远超常人，但这点实力在真正的强者面前根本不够看——他那个当捕头的师父赵四海就是练气境，比他高出一个大境界，一巴掌就能把他拍趴下。</p>
+
+            <p>“砚舟，走，喝酒去。”同僚李栓从后面追上来，拍了拍他的肩膀。这人三十出头，圆脸微胖，一副市井油滑的模样。沈砚舟摆摆手：“今天不行，家里有事。”“得了吧你，谁不知道你们家那点破事。”李栓嘿嘿一笑，“你那婶婶又给你脸色看了？”
+              <span class="marginote"><span class="no">№10</span> 候选稿入稿<br>23:04 · <a href="#">查看往来 →</a></span>
+            </p>
+
+            <p>沈砚舟没说话，算是默认。说起来也怪他自己。穿越过来三年了，除了练出一身蛮力，什么正经事都没干成。沈家在清河算是底层吏员家庭，二叔沈平志在衙门当捕头，勉强维持一家生计。婶婶李茹是个精明势利的女人，一见他这个白吃饭的侄子就皱眉。</p>
+
+            <p><span class="sel">雨是傍晚落起来的<span class="sel-pop"><button>改写此段</button><span class="v"></span><button>自此续写</button><span class="v"></span><button>送审校</button></span></span>。他站在廊下看雨，看雨脚把青石板砸出一个个小坑。库房的更声远远传来，三长两短——那是税银入库的号子。他忽然心里一动：入库的数目，好像对不上。</p>
+
+            <p class="ghost-next">接着写——<span class="caret"></span></p>
+          </div>
+
+          <div class="pagefoot"><i></i>第一章 · 共 5,556 字 · 稿纸自动留痕<i></i></div>
+        </div>
+      </main>
+    </div>
+  </div>
+</div>
+</body>
+</html>
