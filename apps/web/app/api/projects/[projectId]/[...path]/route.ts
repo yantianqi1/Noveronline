@@ -239,11 +239,11 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
       return `/v1/worldline-preparations/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
     },
   },
-  // /api/projects/{id}/worldline-events/{eventId}[/adoptions] → /v1/worldline-events/{eventId}[/adoptions]
+  // /api/projects/{id}/worldline-events/{eventId}[/adoptions|/rejections] → /v1/worldline-events/{eventId}[...]
   {
-    prefix: /^worldline-events\/([^/]+)(\/adoptions)?$/,
+    prefix: /^worldline-events\/([^/]+)(\/adoptions|\/rejections)?$/,
     toGo: (rest, query) => {
-      const m = rest.match(/^worldline-events\/([^/]+)(\/adoptions)?$/)!;
+      const m = rest.match(/^worldline-events\/([^/]+)(\/adoptions|\/rejections)?$/)!;
       return `/v1/worldline-events/${encodeURIComponent(m[1])}${m[2] ?? ""}${query}`;
     },
   },

@@ -57,12 +57,11 @@ test("banner 步号用领域步 current_step，不再读编排 sequence", async 
 });
 
 test("时间线卡片步号统一为领域步：采纳卡读正史事件的 step，编排标记不显式步号", async () => {
-  const workspace = await source("app/projects/[projectId]/worldline/worldline-workspace.tsx");
+  const model = await source("app/projects/[projectId]/worldline/worldline-model.ts");
   // Adoption rows resolve the step from the adopted canon event, not t.sequence…
-  assert.match(workspace, /step: adopted\?\.step \?\? 0/);
-  // …and the mapping no longer reads the orchestration sequence at all.
-  const mapping = workspace.slice(workspace.indexOf("function timelineEventToWorldlineEvent"));
-  assert.doesNotMatch(mapping.slice(0, mapping.indexOf("function resolveInspectEvent")), /t\.sequence/);
+  assert.match(model, /step: adopted\?\.step \?\? 0/);
+  // …and nothing in the mapping layer reads the orchestration sequence at all.
+  assert.doesNotMatch(model, /\.sequence/);
 
   const card = await source("app/projects/[projectId]/worldline/worldline-event-card.tsx");
   // Orchestration markers show 整备 instead of a fabricated step number.
@@ -74,9 +73,13 @@ test("时间线卡片步号统一为领域步：采纳卡读正史事件的 step
   assert.match(timeline, /stepRangeLabel/);
 });
 
-test("inspector 的步号也用领域 step，不回读编排 sequence", async () => {
+test("卡片就地展开的明细来自领域事件本身，不回读编排 sequence", async () => {
+  const card = await source("app/projects/[projectId]/worldline/worldline-event-card.tsx");
+  // 展开明细读事件自身的涉及角色与状态变化（采纳行已在映射层换成正史事件）。
+  assert.match(card, /stateChangeView\(event\.state_changes\)/);
+  assert.match(card, /involvedNames\.join/);
   const workspace = await source("app/projects/[projectId]/worldline/worldline-workspace.tsx");
-  assert.match(workspace, /\{ \.\.\.canonById, event_type: row\?\.event_type \?\? event\.event_type \}/);
-  const inspector = workspace.slice(workspace.indexOf("function EventInspector"));
-  assert.doesNotMatch(inspector, /row\.sequence/);
+  // The old side inspector is gone — expansion lives inside the timeline card.
+  assert.doesNotMatch(workspace, /EventInspector/);
+  assert.doesNotMatch(workspace, /inspectEvent/);
 });

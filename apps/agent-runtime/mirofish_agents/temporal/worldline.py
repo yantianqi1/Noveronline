@@ -43,6 +43,16 @@ WORLDLINE_ACTIVITY_RETRY_POLICY = RetryPolicy(
 WORLDLINE_STEP_WORKFLOW_TYPE = "worldline_step"
 WORLDLINE_AUTO_EVOLUTION_WORKFLOW_TYPE = "worldline_auto_evolution"
 WORLDLINE_STEP_MODULE_KEY = "worldline_director"
+# Narrative kind set the director prompt constrains candidate events to. Normalization
+# adopts in-set kinds and keeps any other non-empty kind verbatim for plain-text UI
+# rendering; a missing kind keeps the "director" default in _candidate_event.
+WORLDLINE_CANDIDATE_EVENT_KINDS = (
+    ("铺垫", "为后文蓄力的日常推进"),
+    ("伏笔", "埋下后续回收的线索"),
+    ("冲突", "正面矛盾升级"),
+    ("揭示", "真相/身份/信息揭露"),
+    ("转折", "方向或关系逆转"),
+)
 SENSITIVE_WORLDLINE_KEYS = {
     "api_key",
     "body",
@@ -1427,10 +1437,10 @@ class PostgresWorkflowRunStatusWriter:
                         context.project_id,
                         context.run_id,
                         normalized_session_id,
+                        status,
                         context.tenant_id,
                         context.project_id,
                         normalized_session_id,
-                        status,
                         status,
                         context.tenant_id,
                         context.project_id,
@@ -2136,6 +2146,10 @@ def _validate_worldline_resolution(resolution: ModuleBindingResolution) -> None:
             raise LLMFacilityError("LLM_PROVIDER_ERROR", f"resolved LLM module is missing {field_name}")
 
 
+def _candidate_event_kind_constraint() -> str:
+    return "、".join(f"{kind}（{definition}）" for kind, definition in WORLDLINE_CANDIDATE_EVENT_KINDS)
+
+
 def _worldline_step_messages(
     *,
     context: AgentContext,
@@ -2166,6 +2180,8 @@ def _worldline_step_messages(
                 "You are the MiroFish worldline director. Return one JSON object with candidate_events. "
                 "Each candidate event must include title, summary, kind, optional confidence, "
                 "optional involved_agent_ids, and optional state_change_summary. "
+                "Every candidate event's kind must be exactly one of "
+                f"{_candidate_event_kind_constraint()}; never use any other value for kind. "
                 "session_context.locked_variables are hard constraints the author injected into the world; "
                 "every candidate event this round must stay consistent with all of them. "
                 "session_context.confirmed_canon is confirmed history; continue in a way that stays "
@@ -2270,6 +2286,9 @@ def _candidate_event(value: dict[str, Any], *, step: int) -> dict[str, Any]:
         summary = _required_text(value.get("summary"), "summary")
     except ValueError as exc:
         raise LLMFacilityError("SCHEMA_VALIDATION_FAILED", str(exc)) from exc
+    # In-set narrative kinds (WORLDLINE_CANDIDATE_EVENT_KINDS) are adopted; any other
+    # non-empty kind is kept verbatim so the UI renders it as plain text instead of
+    # silently rewriting LLM output. A missing kind keeps the "director" default.
     kind = _optional_text(value.get("kind")) or "director"
     return {
         "step": step,

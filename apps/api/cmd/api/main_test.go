@@ -2090,6 +2090,41 @@ func TestNewWorldlineEventAdoptionStoreUsesSQLStoreWithDatabaseURL(t *testing.T)
 	}
 }
 
+func TestNewWorldlineEventRejectionStoreUsesDisabledStoreWithoutDatabaseURL(t *testing.T) {
+	store, closeStore, err := newWorldlineEventRejectionStore("")
+
+	if err != nil {
+		t.Fatalf("new worldline event rejection store: %v", err)
+	}
+	if closeStore != nil {
+		t.Fatal("expected no close function without database URL")
+	}
+	if _, ok := store.(*worldline.DisabledEventRejectionStore); !ok {
+		t.Fatalf("expected disabled worldline event rejection store, got %T", store)
+	}
+}
+
+func TestNewWorldlineEventRejectionStoreUsesSQLStoreWithDatabaseURL(t *testing.T) {
+	store, closeStore, err := newWorldlineEventRejectionStore("postgres://mirofish:secret@127.0.0.1:5432/mirofish?sslmode=disable")
+	if closeStore != nil {
+		defer func() {
+			if err := closeStore(); err != nil {
+				t.Fatalf("close worldline event rejection store: %v", err)
+			}
+		}()
+	}
+
+	if err != nil {
+		t.Fatalf("new worldline event rejection store: %v", err)
+	}
+	if _, ok := store.(*worldline.SQLEventRejectionStore); !ok {
+		t.Fatalf("expected SQL worldline event rejection store, got %T", store)
+	}
+	if closeStore == nil {
+		t.Fatal("expected close function with database URL")
+	}
+}
+
 func TestNewWorldlineEventMutationStoreUsesDisabledStoreWithoutDatabaseURL(t *testing.T) {
 	store, closeStore, err := newWorldlineEventMutationStore("")
 

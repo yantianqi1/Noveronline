@@ -1,8 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, MotionConfig, motion } from "motion/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MotionConfig, motion } from "motion/react";
 
 import { fetchCsrfToken } from "@/lib/api/session";
 import {
@@ -18,6 +18,7 @@ import {
   fetchWorldlineVariables,
   injectWorldlineVariable,
   readWorldlineSelection,
+  rejectWorldlineEvent,
   setWorldlineVariableLocked,
   startWorldlineGoalStart,
   startWorldlineStep,
@@ -31,16 +32,24 @@ import type {
   WorldlineTimelineEvent,
   WorldlineVariable,
 } from "@/lib/api/worldline-types";
-import { WORLDLINE_CANDIDATE, WORLDLINE_CANON } from "@/lib/api/worldline-types";
 import type { RosterCharacter } from "@/components/character";
 import { Button } from "@/components/ui/button";
 
 import { WorldlineCandidateRail } from "./worldline-candidate-rail";
-import { WorldlinePrepareRail, type PrepareStatus } from "./worldline-prepare-rail";
+import {
+  formatWorldlineCounts,
+  GOAL_START_STAGES,
+  goalStartStageIndex,
+  involvedNamesForEvent,
+  partitionWorldlineEvents,
+  pendingStepFor,
+  timelineEventsToWorldlineEvents,
+  worldlineChipState,
+} from "./worldline-model";
 import { WorldlineRunControls, type EvolutionMode } from "./worldline-run-controls";
-import { WorldlineStateBanner } from "./worldline-state-banner";
+import { WorldlineStatusRow } from "./worldline-status-row";
 import { WorldlineTimeline } from "./worldline-timeline";
-import { DUR, EASE, useFadeUp, useSlideIn } from "@/lib/motion";
+import { DUR, EASE, useFadeUp } from "@/lib/motion";
 import { WorkbenchMasthead } from "@/components/workbench-masthead";
 import { PanelRight } from "lucide-react";
 
@@ -51,13 +60,14 @@ type LoadState =
   | { status: "ready" };
 
 /**
- * The Worldline (世界线) workbench — the 导演监视器. Three states on one route:
- * 起点态 (a goal prompt), 整备态 (the Pi cast planner decomposes the goal,
- * pulls assets from the 资产库, and prepares the cast), and 推演态 (a
- * three-column monitor: prepare rail / evolution timeline / candidate rail).
- * The timeline only ever shows confirmed canon; candidates wait in gold until
- * the author adopts them. Nothing here fabricates events — the backend drives
- * every card, and a missing backend renders an honest error.
+ * The Worldline (世界线) workbench — 方案A「主线＋裁决队列」. Three states on
+ * one route: 起点态 (a goal prompt), 整备态 (the Pi cast planner decomposes the
+ * goal, pulls assets from the 资产库, and prepares the cast), and 推演态 (状态行
+ * + 正史时间线主区 + 右栏待定夺队列与推演上下文 + 底栏推演控制). The timeline
+ * only ever shows confirmed canon; candidates wait in gold until the author
+ * adopts them, and 暂不采纳 is a persisted rejection, not a local hide. Nothing
+ * here fabricates events — the backend drives every card, and a missing backend
+ * renders an honest error.
  */
 const GOAL_START_POLL_MS = 2000;
 const GOAL_START_TIMEOUT_MS = 30 * 60 * 1000;
@@ -69,7 +79,6 @@ const STEP_SETTLED_STATUSES = new Set(["paused", "ready", "failed", "completed",
 export function WorldlineWorkspace({ projectId }: { projectId: string }) {
   const router = useRouter();
   const fadeUp = useFadeUp();
-  const slideIn = useSlideIn();
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [selection, setSelection] = useState<{ tenant_id: string; project_id: string } | null>(null);
   const [csrfToken, setCsrfToken] = useState<string | null>(null);
@@ -89,40 +98,15 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null);
   const [evolving, setEvolving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [inspectEvent, setInspectEvent] = useState<WorldlineEvent | null>(null);
   // Candidate rail is inline at the wide band and a drawer below it.
   const [candidateRailOpen, setCandidateRailOpen] = useState(false);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const pendingVariableLocksRef = useRef<Set<string>>(new Set());
 
-  // Resolve an involved_agent_ids entry (UUID, slug, or display name) to a
-  // display name. The director writes slugs like "xu_qi_an"; the roster keys
-  // agents by UUID — so we match by the roster's display names, which are unique.
-  const agentNames = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const r of roster) {
-      map.set(r.id, r.name);
-      map.set(r.name, r.name);
-    }
-    return map;
-  }, [roster]);
-  const resolveAgentName = useCallback(
-    (raw: string): string => {
-      const key = raw.trim();
-      if (!key) return "";
-      const direct = agentNames.get(key);
-      if (direct) return direct;
-      // slug form (xu_qi_an / wang-bu-tou): match against roster display names by
-      // shared CJK characters — reliable since prepared agents carry Chinese names.
-      const latin = key.replace(/[_-]+/g, " ").trim().toLowerCase();
-      for (const r of roster) {
-        const name = r.name;
-        if (!name) continue;
-        if (name.toLowerCase() === latin) return name;
-      }
-      return "";
-    },
-    [agentNames, roster],
+  /** Resolve an event's involved agents to roster display names (候选卡与时间线
+   * 展开共用). Unresolvable ids fall back to names the event text itself names. */
+  const involvedNames = useCallback(
+    (event: WorldlineEvent): string[] => involvedNamesForEvent(event, roster),
+    [roster],
   );
   // The one public "第 X 步" is the domain step the backend reports on the
   // session (MAX(worldline_events.step)) — never the orchestration sequence,
@@ -134,17 +118,19 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
 
   const loadSessionData = useCallback(
     async (sel: { tenant_id: string; project_id: string }, sessionId: string) => {
-      const [sess, tl, evs, canon, vars] = await Promise.all([
+      const [sess, tl, evs, vars] = await Promise.all([
         fetchWorldlineSession(sel.project_id, sel.tenant_id, sessionId),
         fetchWorldlineTimeline(sel.project_id, sel.tenant_id, sessionId).catch(() => []),
-        fetchWorldlineEvents(sel.project_id, sel.tenant_id, sessionId, WORLDLINE_CANDIDATE).catch(() => []),
-        fetchWorldlineEvents(sel.project_id, sel.tenant_id, sessionId, WORLDLINE_CANON).catch(() => []),
+        fetchWorldlineEvents(sel.project_id, sel.tenant_id, sessionId).catch(() => []),
         fetchWorldlineVariables(sel.project_id, sel.tenant_id, sessionId).catch(() => []),
       ]);
+      // One fetch, one honest partition: candidates wait in the queue, canon
+      // feeds the timeline join, rejected stays out of both lanes for good.
+      const lanes = partitionWorldlineEvents(evs);
       setSession(sess);
       setTimeline(tl);
-      setCandidates(evs);
-      setCanonEvents(canon);
+      setCandidates(lanes.candidates);
+      setCanonEvents(lanes.canon);
       setVariables((current) => {
         const local = new Map(current.map((variable) => [variable.variable_id, variable]));
         return vars.map((variable) =>
@@ -375,32 +361,6 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     else void handleStart();
   }, [session, handleStep, handleStart]);
 
-  /** Inspect a timeline card: resolve an adoption card to the canon domain
-   * event it adopted (agents/confidence/state changes) instead of showing the
-   * orchestration placeholder. Clicking the open card again closes the panel. */
-  const handleInspect = useCallback(
-    (event: WorldlineEvent) => {
-      setInspectEvent((current) =>
-        current && current.event_id === event.event_id ? null : resolveInspectEvent(event, timeline, canonEvents),
-      );
-    },
-    [timeline, canonEvents],
-  );
-
-  /** Names the event actually involves: resolved agent ids first, else roster
-   * characters whose display name appears in the event text (the director's
-   * involved_agent_ids are slugs that don't map back, so we fall back to what
-   * the event itself says). */
-  const involvedNamesFor = useCallback(
-    (event: WorldlineEvent): string[] => {
-      const resolved = (event.involved_agent_ids ?? []).map((id) => resolveAgentName(id)).filter(Boolean);
-      if (resolved.length > 0) return [...new Set(resolved)];
-      const text = `${event.title} ${event.summary}`;
-      return roster.filter((r) => r.name && text.includes(r.name)).map((r) => r.name);
-    },
-    [resolveAgentName, roster],
-  );
-
   const handleInjectVariable = useCallback(
     async (input: { name: string; description: string }) => {
       if (!selection || !csrfToken || !session) return;
@@ -453,6 +413,9 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     [selection, csrfToken, session],
   );
 
+  /** 采纳: persist the adoption, then refetch — the backend turns the adopted
+   * candidate into canon and rejects the step's remaining candidates in the
+   * same transaction, so the queue empties itself and the new canon lands. */
   const handleAdoptCandidate = useCallback(
     async (event: WorldlineEvent) => {
       if (!selection || !csrfToken || !session) return;
@@ -490,10 +453,25 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     [selection, csrfToken],
   );
 
-  const handleRejectCandidate = useCallback((event: WorldlineEvent) => {
-    // A rejected candidate simply leaves the queue; it never touches the timeline.
-    setCandidates((prev) => prev.filter((c) => c.event_id !== event.event_id));
-  }, []);
+  /** 暂不采纳: persist the rejection first, then drop the card from the queue.
+   * The local removal only ever mirrors a rejection the backend already wrote —
+   * a rejected candidate can never resurface on refetch. */
+  const handleRejectCandidate = useCallback(
+    async (event: WorldlineEvent) => {
+      if (!selection || !csrfToken) return;
+      setBusyCandidateId(event.event_id);
+      setActionError(null);
+      try {
+        await rejectWorldlineEvent(selection.project_id, selection.tenant_id, csrfToken, event.event_id);
+        setCandidates((prev) => prev.filter((c) => c.event_id !== event.event_id));
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : "暂不采纳失败，请重试。");
+      } finally {
+        setBusyCandidateId(null);
+      }
+    },
+    [selection, csrfToken],
+  );
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -508,9 +486,11 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     );
   }
 
-  const prepareStatus: PrepareStatus = session
-    ? { label: "整备就绪", tone: "ready", detail: `会话 ${session.session_id.slice(0, 8)} · ${session.status}` }
-    : { label: "待整备", tone: "working", detail: "填一个推演目标，启动第一次整备。" };
+  const chip = worldlineChipState({
+    sessionStatus: session?.status ?? "",
+    candidateCount: candidates.length,
+    evolving,
+  });
 
   return (
     <MotionConfig reducedMotion="user">
@@ -524,7 +504,7 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
             session ? (
               <>
                 <span className="text-caption tabular-nums text-muted">
-                  {timeline.length} 段正史 · {candidates.length} 条候选
+                  {formatWorldlineCounts(canonEvents.length, candidates.length)}
                 </span>
                 {/* Below the wide band the candidate rail is a drawer, so it
                     needs a way in. Hidden at wide, where it is already inline. */}
@@ -535,7 +515,7 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
                   onClick={() => setCandidateRailOpen(true)}
                 >
                   <PanelRight className="size-3.5" aria-hidden />
-                  候选
+                  待定夺 {candidates.length}
                 </Button>
               </>
             ) : undefined
@@ -594,78 +574,49 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
             </motion.div>
           </div>
         ) : (
-          /* 推演态 — three columns + bottom run controls */
-          <>
-            <div className="flex min-h-0 flex-1 overflow-hidden">
-              <WorldlinePrepareRail
-                status={prepareStatus}
-                roster={roster}
-                variables={variables}
-                selectedAgentId={selectedAgentId}
-                onSelectAgent={(id) => setSelectedAgentId(id === selectedAgentId ? null : id)}
-                onToggleVariableLock={handleToggleVariableLock}
-              />
+          /* 推演态 — 方案A: 状态行 + 正史主线 + 待定夺右栏 + 底栏 */
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <WorldlineStatusRow goal={session.goal_summary} currentStep={currentStep} chip={chip} />
 
-              {/* center: state banner + timeline */}
-              <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-                <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
-                  <div className="mx-auto max-w-[720px]">
-                    <WorldlineStateBanner
-                      session={session}
-                      currentStep={currentStep}
-                      variableNames={variables.filter((v) => v.locked).map((v) => v.name)}
-                    />
-                    <div className="mt-6">
-                      <WorldlineTimeline
-                        events={timelineEventsToWorldlineEvents(timeline, session.project_id, canonEvents)}
-                        agents={agentNames}
-                        onInspect={handleInspect}
-                      />
-                    </div>
-                  </div>
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+              {/* 主区: 正史时间线, one reading column */}
+              <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
+                <div className="mx-auto max-w-[720px]">
+                  <WorldlineTimeline
+                    events={timelineEventsToWorldlineEvents(timeline, session.project_id, canonEvents)}
+                    involvedNames={involvedNames}
+                  />
                 </div>
-                <WorldlineRunControls
-                  hasSession
-                  busy={busy}
-                  evolving={evolving}
-                  mode={mode}
-                  onModeChange={setMode}
-                  onPrimary={handlePrimary}
-                  onInjectVariable={handleInjectVariable}
-                />
               </div>
 
-              {/* right: candidate rail (or inspector overlay) */}
-              <AnimatePresence mode="wait">
-                {inspectEvent ? (
-                  <motion.aside
-                    key={inspectEvent.event_id}
-                    initial={slideIn.initial}
-                    animate={slideIn.animate}
-                    exit={slideIn.exit}
-                    transition={{ duration: DUR.med, ease: EASE }}
-                    className="flex h-full w-rail-inspector shrink-0 flex-col overflow-y-auto border-l border-line bg-panel px-6 py-6 max-wide:fixed max-wide:inset-y-0 max-wide:right-0 max-wide:z-40 max-wide:w-full max-wide:max-w-[420px] max-wide:shadow-panel"
-                  >
-                    <EventInspector
-                      event={inspectEvent}
-                      involvedNames={involvedNamesFor(inspectEvent)}
-                      onClose={() => setInspectEvent(null)}
-                    />
-                  </motion.aside>
-                ) : (
-                  <WorldlineCandidateRail
-                    candidates={candidates}
-                    busyId={busyCandidateId}
-                    open={candidateRailOpen}
-                    onClose={() => setCandidateRailOpen(false)}
-                    onAdopt={handleAdoptCandidate}
-                    onEdit={handleEditCandidate}
-                    onReject={handleRejectCandidate}
-                  />
-                )}
-              </AnimatePresence>
+              {/* 右栏: 待定夺队列 + 推演上下文 */}
+              <WorldlineCandidateRail
+                candidates={candidates}
+                pendingStep={pendingStepFor(currentStep)}
+                busyId={busyCandidateId}
+                variables={variables}
+                roster={roster}
+                open={candidateRailOpen}
+                onClose={() => setCandidateRailOpen(false)}
+                onAdopt={handleAdoptCandidate}
+                onEdit={handleEditCandidate}
+                onReject={(event) => void handleRejectCandidate(event)}
+                onToggleVariableLock={handleToggleVariableLock}
+                involvedNames={involvedNames}
+              />
             </div>
-          </>
+
+            <WorldlineRunControls
+              hasSession
+              busy={busy}
+              evolving={evolving}
+              pendingCount={candidates.length}
+              mode={mode}
+              onModeChange={setMode}
+              onPrimary={handlePrimary}
+              onInjectVariable={handleInjectVariable}
+            />
+          </div>
         )}
       </div>
     </MotionConfig>
@@ -673,12 +624,6 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
-
-const GOAL_START_STAGES: { key: string; label: string; hint: string }[] = [
-  { key: "casting", label: "选角", hint: "拆解目标，从资产库挑选演员与素材" },
-  { key: "preparing", label: "整备演员", hint: "为每位演员生成档案与就位状态" },
-  { key: "starting", label: "建立会话", hint: "把整备好的世界线装订成一次推演" },
-];
 
 /** The 整备态 panel — stage ladder + assembling roster + rationale, or failure. */
 function GoalStartProgress({
@@ -781,152 +726,6 @@ function GoalStartProgress({
           </div>
         ) : null}
       </div>
-    </div>
-  );
-}
-
-/** queued → casting → preparing → starting → ready, mapped onto the 3-stage ladder. */
-function goalStartStageIndex(status: string): number {
-  switch (status) {
-    case "casting":
-      return 0;
-    case "preparing":
-      return 1;
-    case "starting":
-      return 2;
-    case "ready":
-      return GOAL_START_STAGES.length;
-    default:
-      return 0; // queued — the cast stage is about to start
-  }
-}
-
-/** Map one timeline row onto an event card. Adoption rows surface the adopted
- * domain event's title/summary (via the backend's event_ref_id join) instead of
- * the orchestration bookkeeping text. The card's step is the DOMAIN step of the
- * referenced event — the timeline's own `sequence` counts orchestration rows
- * (an adoption bumps it without stepping the world), so it never feeds "第 N 步". */
-function timelineEventToWorldlineEvent(
-  t: WorldlineTimelineEvent,
-  projectId: string,
-  canonById: ReadonlyMap<string, WorldlineEvent>,
-): WorldlineEvent {
-  const isAdoption = t.kind === "event_adoption" || Boolean(t.event_ref_id);
-  const adopted = isAdoption && t.event_ref_id?.trim() ? canonById.get(t.event_ref_id) : undefined;
-  return {
-    event_id: t.event_ref_id?.trim() ? t.event_ref_id : t.event_id,
-    session_id: t.session_id,
-    project_id: projectId,
-    step: adopted?.step ?? 0,
-    title: adopted?.title ?? (isAdoption && t.adopted_title?.trim() ? t.adopted_title : t.title),
-    summary: adopted?.summary ?? (isAdoption && t.adopted_summary?.trim() ? t.adopted_summary : t.summary),
-    kind: t.kind,
-    status: t.status,
-    lifecycle: t.lifecycle,
-    event_type: t.event_type,
-    confidence: "",
-    involved_agent_ids: [],
-    state_changes: {},
-    source_run_id: t.run_id,
-    created_by: "",
-    created_at: t.created_at,
-    updated_at: t.created_at,
-  };
-}
-
-function timelineEventsToWorldlineEvents(
-  timeline: WorldlineTimelineEvent[],
-  projectId: string,
-  canonEvents: WorldlineEvent[],
-): WorldlineEvent[] {
-  const canonById = new Map(canonEvents.map((e) => [e.event_id, e] as const));
-  return timeline.map((t) => timelineEventToWorldlineEvent(t, projectId, canonById));
-}
-
-/** Resolve the full domain event for the inspector: an adoption card looks up
- * the canon event it adopted (so the inspector shows agents/confidence/state
- * changes); anything else is shown as-is. */
-function resolveInspectEvent(
-  event: WorldlineEvent,
-  timeline: WorldlineTimelineEvent[],
-  canonEvents: WorldlineEvent[],
-): WorldlineEvent {
-  const row = timeline.find((t) => t.event_ref_id?.trim() && t.event_ref_id === event.event_id);
-  const canonById = canonEvents.find((e) => e.event_id === event.event_id);
-  if (canonById) return { ...canonById, event_type: row?.event_type ?? event.event_type };
-  return event;
-}
-
-function EventInspector({
-  event,
-  involvedNames,
-  onClose,
-}: {
-  event: WorldlineEvent;
-  involvedNames: string[];
-  onClose: () => void;
-}) {
-  const canon = event.lifecycle === "canon" || event.lifecycle === "canon_reference" || event.status === "canon";
-  const stateChanges = event.state_changes ?? {};
-  const stateSummary = typeof stateChanges.summary === "string" ? stateChanges.summary.trim() : "";
-  const stateEntries = Object.entries(stateChanges).filter(
-    ([key]) => !["summary", "model_id", "mode", "source_step_index", "source_workflow_type"].includes(key),
-  );
-  return (
-    <div>
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="font-serif text-lg font-semibold leading-snug text-ink">{event.title || "未命名事件"}</h3>
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 rounded-control px-2 py-1 text-caption text-muted transition-colors hover:bg-paper hover:text-ink"
-        >
-          关闭
-        </button>
-      </div>
-      <p className="mt-1 text-caption tracking-wide text-muted">
-        {event.step > 0 ? `第 ${event.step} 步` : "整备"}
-        {event.kind ? ` · ${event.kind}` : ""} · {canon ? "正史" : "候选"}
-      </p>
-      {event.summary ? (
-        <p className="mt-4 font-serif text-sm text-ink-soft">{event.summary}</p>
-      ) : null}
-
-      {involvedNames.length > 0 || event.confidence ? (
-        <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line-soft pt-4">
-          {involvedNames.length > 0 ? (
-            <div>
-              <h4 className="text-caption font-medium tracking-label text-muted">涉及角色</h4>
-              <p className="mt-1.5 font-serif text-sm text-ink-soft">{involvedNames.join("、")}</p>
-            </div>
-          ) : null}
-          {event.confidence ? (
-            <div>
-              <h4 className="text-caption font-medium tracking-label text-muted">置信度</h4>
-              <p className="mt-1.5 text-sm tabular-nums text-ink-soft">{event.confidence}</p>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {stateSummary || stateEntries.length > 0 ? (
-        <div className="mt-5 border-t border-line-soft pt-4">
-          <h4 className="text-caption font-medium tracking-label text-muted">状态变化</h4>
-          {stateSummary ? (
-            <p className="mt-2 font-serif text-sm text-ink-soft">{stateSummary}</p>
-          ) : null}
-          {stateEntries.length > 0 ? (
-            <dl className="mt-2.5 space-y-1.5">
-              {stateEntries.map(([key, value]) => (
-                <div key={key} className="flex items-baseline justify-between gap-3 text-caption">
-                  <dt className="text-muted">{key}</dt>
-                  <dd className="min-w-0 truncate text-right text-ink-soft">{String(value)}</dd>
-                </div>
-              ))}
-            </dl>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
 }

@@ -1028,6 +1028,22 @@ func (s *recordingWorldlineEventAdoptionStore) AdoptEvent(ctx context.Context, i
 	return s.event, nil
 }
 
+type recordingWorldlineEventRejectionStore struct {
+	input  worldline.RejectEventInput
+	event  worldline.EventRecord
+	err    error
+	called bool
+}
+
+func (s *recordingWorldlineEventRejectionStore) RejectEvent(ctx context.Context, input worldline.RejectEventInput) (worldline.EventRecord, error) {
+	s.input = input
+	s.called = true
+	if s.err != nil {
+		return worldline.EventRecord{}, s.err
+	}
+	return s.event, nil
+}
+
 type recordingWorldlineEventMutationStore struct {
 	input  worldline.UpdateEventInput
 	event  worldline.EventRecord
@@ -10100,6 +10116,180 @@ func TestAdoptWorldlineEventStoreErrorIsSanitizedAfterAuthorization(t *testing.T
 	for _, forbidden := range []string{"driver leaked", "prompt", "secret", "api_key", "sk-hidden", "draft=private"} {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("event adoption store error leaked forbidden field %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestRejectWorldlineEventCarriesTenantEventActorContextAndSanitizesResponse(t *testing.T) {
+	reader := &recordingWorldlineEventReader{
+		event: worldline.EventRecord{
+			EventID:   "event-1",
+			SessionID: "session-1",
+			ProjectID: "project-owner",
+		},
+	}
+	store := &recordingWorldlineEventRejectionStore{
+		event: worldline.EventRecord{
+			EventID:          "event-1",
+			SessionID:        "session-1",
+			ProjectID:        "project-123",
+			Step:             3,
+			Title:            "密谈破裂",
+			Summary:          "公开候选事件摘要",
+			Kind:             "director",
+			Status:           "rejected",
+			Lifecycle:        "simulation",
+			Confidence:       "0.86",
+			InvolvedAgentIDs: []string{"agent-1", "agent-2"},
+			StateChanges:     map[string]any{"tension": "raised"},
+			SourceRunID:      "run-1",
+			CreatedBy:        "user-456",
+			CreatedAt:        "2026-07-05T00:00:00Z",
+			UpdatedAt:        "2026-07-05T00:01:00Z",
+		},
+	}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventRejectionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/rejections", strings.NewReader(`{
+		"tenant_id":"tenant-from-body",
+		"project_id":"malicious-project",
+		"note":"Reject this branch",
+		"prompt":"must be stripped",
+		"api_key":"must be stripped"
+	}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-789")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, response.Code, response.Body.String())
+	}
+	if reader.getInput.TenantID != "tenant-123" || reader.getInput.EventID != "event-1" {
+		t.Fatalf("event reader lost owner lookup scope: %#v", reader.getInput)
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-789")
+	if store.input.TenantID != "tenant-123" ||
+		store.input.EventID != "event-1" ||
+		store.input.ActorUserID != "user-456" ||
+		store.input.RequestID != "req-789" ||
+		store.input.Note != "Reject this branch" {
+		t.Fatalf("event rejection store lost context: %#v", store.input)
+	}
+	if store.input.TenantID == "tenant-from-body" {
+		t.Fatalf("event rejection store trusted body tenant: %#v", store.input)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"event_id":"event-1"`) ||
+		!strings.Contains(body, `"status":"rejected"`) {
+		t.Fatalf("unexpected event rejection response: %s", body)
+	}
+	for _, forbidden := range []string{"tenant-from-body", "malicious-project", "prompt", "response", "body_text", "content_text", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("event rejection response leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestRejectWorldlineEventFailsClosedWithoutConfiguredStore(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: &recordingAuthorizer{}, WorldlineEventReader: reader})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/rejections", strings.NewReader(`{"note":"drop"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "WORLDLINE_EVENT_REJECTION_BACKEND_UNCONFIGURED") {
+		t.Fatalf("expected fail-closed worldline event rejection error, got %s", response.Body.String())
+	}
+}
+
+func TestRejectWorldlineEventDeniedBeforeDecodeAndStore(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventRejectionStore{}
+	authorizer := &recordingAuthorizer{err: &auth.AppError{Code: auth.CodeAccessDenied, Message: "actor user-456 denied for hidden-title prompt=secret api_key=sk-hidden"}}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventRejectionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/rejections", strings.NewReader(`{"note":"private-note","prompt":"secret","api_key":"sk-hidden"`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-deny-reject")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-deny-reject")
+	if store.called {
+		t.Fatalf("rejection store ran after RBAC denial: %#v", store.input)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, auth.CodeAccessDenied) || !strings.Contains(body, "current user access is denied") {
+		t.Fatalf("expected public access denied response, got %s", body)
+	}
+	for _, forbidden := range []string{"private-note", "prompt", "secret", "api_key", "sk-hidden", "hidden-title", "user-456"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("event rejection denial leaked forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestRejectWorldlineEventNonCandidateReturnsConflictNotFound(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventRejectionStore{err: &worldline.AppError{Code: "NOT_FOUND", Message: "candidate worldline event not found"}}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventRejectionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/rejections", strings.NewReader(`{"note":"already decided"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-reject-canon")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-reject-canon")
+	if !store.called {
+		t.Fatal("expected rejection store after successful auth")
+	}
+	if !strings.Contains(response.Body.String(), "NOT_FOUND") {
+		t.Fatalf("expected NOT_FOUND rejection response, got %s", response.Body.String())
+	}
+}
+
+func TestRejectWorldlineEventStoreErrorIsSanitizedAfterAuthorization(t *testing.T) {
+	reader := &recordingWorldlineEventReader{event: worldline.EventRecord{EventID: "event-1", ProjectID: "project-owner"}}
+	store := &recordingWorldlineEventRejectionStore{err: &worldline.AppError{Code: "WORLDLINE_EVENT_REJECTION_WRITE_FAILED", Message: "driver leaked prompt=secret api_key=sk-hidden draft=private"}}
+	authorizer := &recordingAuthorizer{}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, Authorizer: authorizer, WorldlineEventReader: reader, WorldlineEventRejectionStore: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/worldline-events/event-1/rejections", strings.NewReader(`{"note":"public note"}`))
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-456")
+	request.Header.Set("X-Request-Id", "req-store-reject")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	assertSingleCreativeWriteAuthorizationForProject(t, authorizer, "user-456", "project-owner", "req-store-reject")
+	if !store.called {
+		t.Fatal("expected rejection store after successful auth")
+	}
+	for _, forbidden := range []string{"driver leaked", "prompt", "secret", "api_key", "sk-hidden", "draft=private"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("event rejection store error leaked forbidden field %q: %s", forbidden, response.Body.String())
 		}
 	}
 }

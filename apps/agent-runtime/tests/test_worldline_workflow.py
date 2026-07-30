@@ -22,10 +22,12 @@ from mirofish_agents.temporal.worldline import (
     PostgresWorkflowRunStatusWriter,
     PostgresWorldlineSourceLoader,
     PostgresWorldlineCandidateEventWriter,
+    WORLDLINE_CANDIDATE_EVENT_KINDS,
     WORLDLINE_PREPARE_MODULE_KEY,
     WORLDLINE_PREPARE_WORKFLOW_TYPE,
     WORLDLINE_STEP_MODULE_KEY,
     WORLDLINE_TASK_QUEUE,
+    _candidate_event,
     _worldline_step_messages,
     run_worldline_prepare_workflow_locally,
     run_worldline_step_workflow_locally,
@@ -1424,6 +1426,46 @@ def test_worldline_step_messages_carry_locked_variables_and_split_context() -> N
     ]
     assert user_payload["session_context"]["confirmed_canon"][0]["title"] == "山门议和"
     assert user_payload["session_context"]["pending_candidates"][0]["title"] == "夜袭草案"
+
+
+def test_worldline_step_messages_constrain_candidate_kind_to_narrative_set() -> None:
+    messages = _worldline_step_messages(
+        context=_context(),
+        session_id="session-1",
+        mode="director",
+        options={"goal": "推进一次单世界推演"},
+    )
+
+    system_content = messages[0]["content"]
+    for kind, definition in WORLDLINE_CANDIDATE_EVENT_KINDS:
+        assert kind in system_content
+        assert definition in system_content
+
+
+def test_candidate_event_adopts_in_set_narrative_kinds() -> None:
+    for kind, _definition in WORLDLINE_CANDIDATE_EVENT_KINDS:
+        event = _candidate_event(
+            {"title": "山门议和", "summary": "两派暂歇争端。", "kind": kind},
+            step=3,
+        )
+        assert event["kind"] == kind
+
+
+def test_candidate_event_keeps_out_of_set_kind_verbatim() -> None:
+    event = _candidate_event(
+        {"title": "雨夜谈判破裂", "summary": "联盟关系进入冻结期。", "kind": "political_turn"},
+        step=1,
+    )
+
+    assert event["kind"] == "political_turn"
+
+
+def test_candidate_event_defaults_missing_kind_to_director() -> None:
+    missing = _candidate_event({"title": "旧物触发", "summary": "一枚旧印引出前史。"}, step=1)
+    blank = _candidate_event({"title": "旧物触发", "summary": "一枚旧印引出前史。", "kind": "  "}, step=1)
+
+    assert missing["kind"] == "director"
+    assert blank["kind"] == "director"
 
 
 def test_llm_facility_worldline_step_runner_rejects_resolution_without_provider_before_credential_call() -> None:

@@ -8,19 +8,19 @@ import { WorldlineEventCard } from "./worldline-event-card";
 import { DUR, EASE, useFadeUp } from "@/lib/motion";
 
 /**
- * The evolution timeline — the soul of the Worldline workbench. A vertical ink
- * rail of canon event cards, oldest at top, the current step glowing vermilion.
- * Candidate events never land here; they wait in the right rail until adopted,
- * which keeps "the timeline is always confirmed history" visually true.
+ * The 正史时间线 — the main reading column of the Worldline workbench. A
+ * vertical ink rail of canon event cards, oldest at top, the current step's
+ * seal filled vermilion. Candidate events never land here; they wait in the
+ * right 待定夺 queue until adopted, which keeps "the timeline is always
+ * confirmed history" visually true.
  *
- * Long runs fold into an in-place accordion: the older canon collapses behind a
- * divider that stays exactly where those steps belong, and expanding it swaps
- * the divider for the hidden events with a matching collapse control in the
- * same spot — so the author always knows which steps are folded away.
+ * Cards expand in place and only one stays open at a time (方案A accordion),
+ * so reading the mainline never splits into a side panel. Long runs fold into
+ * an in-place 展开更早 divider that stays exactly where those steps belong.
  */
 
 /** Keep this many trailing events on screen; fold the rest behind the accordion. */
-const VISIBLE_TAIL = 2;
+const VISIBLE_TAIL = 4;
 
 /** Fold-divider range label. Orchestration markers carry no domain step (0),
  * so the range only ever speaks in real steps: "第 1 – 5 步". */
@@ -32,16 +32,16 @@ function stepRangeLabel(first: number, last: number): string {
 
 export function WorldlineTimeline({
   events,
-  agents,
-  onInspect,
+  involvedNames,
 }: {
   /** Canon events in chronological (step) order. */
   events: WorldlineEvent[];
-  agents?: ReadonlyMap<string, string>;
-  onInspect?: (event: WorldlineEvent) => void;
+  /** Resolve an event's involved agents to display names for the details. */
+  involvedNames?: (event: WorldlineEvent) => string[];
 }) {
   const fadeUp = useFadeUp();
   const [expanded, setExpanded] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
   const currentStep = events.length > 0 ? Math.max(...events.map((e) => e.step)) : 0;
 
   if (events.length === 0) {
@@ -93,7 +93,7 @@ export function WorldlineTimeline({
           >
             <span className="flex items-center gap-3">
               <span className="text-caption font-medium text-muted transition-colors group-hover:text-accent">
-                更早的 {hiddenCount} 段正史
+                展开更早的 {hiddenCount} 段正史
               </span>
               <span className="ml-auto text-caption tabular-nums text-muted-soft">
                 {stepRangeLabel(hidden[0].step, hidden[hidden.length - 1].step)}
@@ -126,8 +126,9 @@ export function WorldlineTimeline({
             <WorldlineEventCard
               event={event}
               isCurrent={event.step === currentStep}
-              agents={agents}
-              onInspect={onInspect}
+              open={openId === event.event_id}
+              involvedNames={involvedNames?.(event) ?? []}
+              onToggle={(e) => setOpenId((current) => (current === e.event_id ? null : e.event_id))}
             />
           </motion.div>
         ))}

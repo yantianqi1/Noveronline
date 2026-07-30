@@ -837,6 +837,17 @@ func main() {
 			}
 		}()
 	}
+	worldlineEventRejectionStore, closeWorldlineEventRejectionStore, err := newWorldlineEventRejectionStore(databaseURL)
+	if err != nil {
+		log.Fatalf("configure worldline event rejection store: %v", err)
+	}
+	if closeWorldlineEventRejectionStore != nil {
+		defer func() {
+			if err := closeWorldlineEventRejectionStore(); err != nil {
+				log.Printf("close worldline event rejection store: %v", err)
+			}
+		}()
+	}
 	worldlineEventMutationStore, closeWorldlineEventMutationStore, err := newWorldlineEventMutationStore(databaseURL)
 	if err != nil {
 		log.Fatalf("configure worldline event mutation store: %v", err)
@@ -1187,6 +1198,7 @@ func main() {
 		WorldlineTimelineReader:          worldlineTimelineReader,
 		WorldlineEventReader:             worldlineEventReader,
 		WorldlineEventAdoptionStore:      worldlineEventAdoptionStore,
+		WorldlineEventRejectionStore:     worldlineEventRejectionStore,
 		WorldlineEventMutationStore:      worldlineEventMutationStore,
 		WorldlineVariableStore:           worldlineVariableStore,
 		WorldlinePreparationStarter:      worldlinePreparationStarter,
@@ -2501,6 +2513,19 @@ func newWorldlineEventAdoptionStore(databaseURL string) (worldline.EventAdoption
 		return nil, nil, err
 	}
 	return worldline.NewSQLEventAdoptionStore(worldline.SQLEventAdoptionStoreConfig{
+		Queryer: worldline.NewSQLDBQueryer(db),
+	}), db.Close, nil
+}
+
+func newWorldlineEventRejectionStore(databaseURL string) (worldline.EventRejectionStore, func() error, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return worldline.NewDisabledEventRejectionStore(), nil, nil
+	}
+	db, err := openAppDatabase(databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return worldline.NewSQLEventRejectionStore(worldline.SQLEventRejectionStoreConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
 	}), db.Close, nil
 }

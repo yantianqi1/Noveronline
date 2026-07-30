@@ -258,6 +258,27 @@ export function adoptWorldlineEvent(
   );
 }
 
+/**
+ * Set a candidate aside (候选 → rejected) — the 「暂不采纳」 counterpart of
+ * adopt. Persisted server-side, so a rejected candidate never re-enters the
+ * queue on refetch; the UI must not fake-remove it without this call landing.
+ */
+export function rejectWorldlineEvent(
+  projectId: string,
+  tenantId: string,
+  csrfToken: string,
+  eventId: string,
+  note?: string,
+): Promise<WorldlineEvent> {
+  return sendJson<WorldlineEvent>(
+    "POST",
+    `/api/projects/${projectId}/worldline-events/${encodeURIComponent(eventId)}/rejections`,
+    tenantId,
+    csrfToken,
+    { note: note ?? "" },
+  );
+}
+
 /** Edit a candidate event's title/summary/kind before adopting. */
 export function updateWorldlineEvent(
   projectId: string,

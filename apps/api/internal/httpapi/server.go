@@ -116,6 +116,7 @@ type Config struct {
 	WorldlineTimelineReader          worldline.TimelineReader
 	WorldlineEventReader             worldline.EventReader
 	WorldlineEventAdoptionStore      worldline.EventAdoptionStore
+	WorldlineEventRejectionStore     worldline.EventRejectionStore
 	WorldlineEventMutationStore      worldline.EventMutationStore
 	WorldlineVariableStore           worldline.VariableStore
 	WorldlinePreparationStarter      worldline.PreparationStarter
@@ -259,6 +260,7 @@ type Server struct {
 	worldlineTimelineReader          worldline.TimelineReader
 	worldlineEventReader             worldline.EventReader
 	worldlineEventAdoptionStore      worldline.EventAdoptionStore
+	worldlineEventRejectionStore     worldline.EventRejectionStore
 	worldlineEventMutationStore      worldline.EventMutationStore
 	worldlineVariableStore           worldline.VariableStore
 	worldlinePreparationStarter      worldline.PreparationStarter
@@ -513,6 +515,11 @@ type createWorldlineSavedPathRequest struct {
 }
 
 type adoptWorldlineEventRequest struct {
+	BodyTenantID string `json:"tenant_id"`
+	Note         string `json:"note"`
+}
+
+type rejectWorldlineEventRequest struct {
 	BodyTenantID string `json:"tenant_id"`
 	Note         string `json:"note"`
 }
@@ -1090,6 +1097,10 @@ func NewServer(config Config) *Server {
 	if worldlineEventAdoptionStore == nil {
 		worldlineEventAdoptionStore = worldline.NewDisabledEventAdoptionStore()
 	}
+	worldlineEventRejectionStore := config.WorldlineEventRejectionStore
+	if worldlineEventRejectionStore == nil {
+		worldlineEventRejectionStore = worldline.NewDisabledEventRejectionStore()
+	}
 	worldlineEventMutationStore := config.WorldlineEventMutationStore
 	if worldlineEventMutationStore == nil {
 		worldlineEventMutationStore = worldline.NewDisabledEventMutationStore()
@@ -1207,6 +1218,7 @@ func NewServer(config Config) *Server {
 		worldlineTimelineReader:          worldlineTimelineReader,
 		worldlineEventReader:             worldlineEventReader,
 		worldlineEventAdoptionStore:      worldlineEventAdoptionStore,
+		worldlineEventRejectionStore:     worldlineEventRejectionStore,
 		worldlineEventMutationStore:      worldlineEventMutationStore,
 		worldlineVariableStore:           worldlineVariableStore,
 		worldlinePreparationStarter:      worldlinePreparationStarter,
@@ -2032,6 +2044,10 @@ func isWorldlineEventAdoptionPath(path string) bool {
 	return worldlineEventAdoptionPathPart(path) != ""
 }
 
+func isWorldlineEventRejectionPath(path string) bool {
+	return worldlineEventRejectionPathPart(path) != ""
+}
+
 func isWorldlineEventMutationPath(path string) bool {
 	return worldlineEventPathPart(path) != ""
 }
@@ -2109,6 +2125,20 @@ func worldlineEventAdoptionPathPart(path string) string {
 	eventID, suffix, ok := strings.Cut(remainder, "/")
 	eventID = strings.TrimSpace(eventID)
 	if !ok || suffix != "adoptions" || eventID == "" || strings.Contains(eventID, "/") {
+		return ""
+	}
+	return eventID
+}
+
+func worldlineEventRejectionPathPart(path string) string {
+	const prefix = "/v1/worldline-events/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	remainder := strings.TrimPrefix(path, prefix)
+	eventID, suffix, ok := strings.Cut(remainder, "/")
+	eventID = strings.TrimSpace(eventID)
+	if !ok || suffix != "rejections" || eventID == "" || strings.Contains(eventID, "/") {
 		return ""
 	}
 	return eventID
@@ -2451,6 +2481,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleStartWorldlineAutoEvolution(response, request)
 	case request.Method == http.MethodPost && isWorldlineEventAdoptionPath(request.URL.Path):
 		s.handleAdoptWorldlineEvent(response, request)
+	case request.Method == http.MethodPost && isWorldlineEventRejectionPath(request.URL.Path):
+		s.handleRejectWorldlineEvent(response, request)
 	case request.Method == http.MethodPatch && isWorldlineEventMutationPath(request.URL.Path):
 		s.handleUpdateWorldlineEvent(response, request)
 	case request.Method == http.MethodPatch && isWorldlineSessionVariableMutationPath(request.URL.Path):
@@ -5320,6 +5352,41 @@ func (s *Server) handleAdoptWorldlineEvent(response http.ResponseWriter, request
 	if err != nil {
 		code := worldline.ErrorCode(err)
 		writeError(response, request, statusForAppCode(code), code, worldlineEventAdoptionPublicErrorMessage(code), nil)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, record)
+}
+
+func (s *Server) handleRejectWorldlineEvent(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	eventID := worldlineEventRejectionPathPart(request.URL.Path)
+	if eventID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "worldline event rejection route not found", nil)
+		return
+	}
+	if !s.authorizeWorldlineEventCreativeWrite(response, request, tenantID, eventID) {
+		return
+	}
+	var payload rejectWorldlineEventRequest
+	decoder := json.NewDecoder(request.Body)
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid worldline event rejection payload", nil)
+		return
+	}
+	record, err := s.worldlineEventRejectionStore.RejectEvent(request.Context(), worldline.RejectEventInput{
+		TenantID:    tenantID,
+		EventID:     eventID,
+		ActorUserID: s.actorUserID(request),
+		RequestID:   requestID(request),
+		Note:        strings.TrimSpace(payload.Note),
+	})
+	if err != nil {
+		code := worldline.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, worldlineEventRejectionPublicErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, record)
@@ -9596,6 +9663,19 @@ func worldlineEventAdoptionPublicErrorMessage(code string) string {
 		return "worldline event adoption backend is not configured"
 	default:
 		return "worldline event adoption failed"
+	}
+}
+
+func worldlineEventRejectionPublicErrorMessage(code string) string {
+	switch code {
+	case "NOT_FOUND":
+		return "worldline event was not found"
+	case "VALIDATION_FAILED":
+		return "invalid worldline event rejection request"
+	case "WORLDLINE_EVENT_REJECTION_BACKEND_UNCONFIGURED":
+		return "worldline event rejection backend is not configured"
+	default:
+		return "worldline event rejection failed"
 	}
 }
 

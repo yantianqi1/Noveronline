@@ -57,18 +57,30 @@ test("整备态展示真实编排阶段与演员落位，不伪造数据", async
 });
 
 test("时间线把采纳行解析为真实领域事件，而不是编排占位符", async () => {
-  const workspace = await source("app/projects/[projectId]/worldline/worldline-workspace.tsx");
+  const model = await source("app/projects/[projectId]/worldline/worldline-model.ts");
   // Adoption rows map to the referenced canon event (title/summary + full detail).
-  assert.match(workspace, /event_ref_id/);
-  assert.match(workspace, /adopted_title/);
-  assert.match(workspace, /resolveInspectEvent/);
-  assert.match(workspace, /WORLDLINE_CANON/);
-  // The inspector surfaces agents/confidence/state-change summary for the canon event.
-  assert.match(workspace, /involved_agent_ids/);
-  assert.match(workspace, /涉及角色/);
-  assert.match(workspace, /置信度/);
+  assert.match(model, /event_ref_id/);
+  assert.match(model, /adopted_title/);
+  assert.match(model, /adopted_summary/);
+  // …and carry the canon event's kind/confidence/agents/state changes into the card.
+  assert.match(model, /kind: adopted\?\.kind \?\? t\.kind/);
+  assert.match(model, /confidence: adopted\?\.confidence \?\? ""/);
+  assert.match(model, /involved_agent_ids: adopted\?\.involved_agent_ids \?\? \[\]/);
+  assert.match(model, /state_changes: adopted\?\.state_changes \?\? \{\}/);
+
+  const card = await source("app/projects/[projectId]/worldline/worldline-event-card.tsx");
+  // The expanded card surfaces agents/state changes for the canon event…
+  assert.match(card, /涉及角色/);
+  assert.match(card, /状态变化/);
+  assert.match(card, /WORLDLINE_CANON/);
+  const candidateCard = await source("app/projects/[projectId]/worldline/worldline-candidate-card.tsx");
+  // …and the candidate queue surfaces confidence (把握) before adoption.
+  assert.match(candidateCard, /把握/);
+
+  const workspace = await source("app/projects/[projectId]/worldline/worldline-workspace.tsx");
   // And the placeholder string is gone from the frontend mapping.
   assert.doesNotMatch(workspace, /Worldline event adopted/);
+  assert.doesNotMatch(model, /Worldline event adopted/);
 });
 
 test("时间线卡片把编排标记渲染为静态节点，不给空检查器", async () => {

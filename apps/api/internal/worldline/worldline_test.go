@@ -972,6 +972,167 @@ func TestSQLEventAdoptionStoreAdoptsTenantScopedCandidateAndWritesSanitizedEvent
 	}
 }
 
+func TestSQLEventAdoptionStoreRejectsSiblingCandidatesInSameStep(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"dddddddd-dddd-dddd-dddd-dddddddddddd",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			3,
+			"密谈破裂",
+			"公开候选事件摘要",
+			"director",
+			"canon",
+			"canon_reference",
+			"0.86",
+			`["agent-1","agent-2"]`,
+			`{"tension":"raised"}`,
+			"11111111-1111-1111-1111-111111111111",
+			"cccccccc-cccc-cccc-cccc-cccccccccccc",
+			"2026-07-05T00:00:00Z",
+			"2026-07-05T00:01:00Z",
+		}}},
+	}
+	store := NewSQLEventAdoptionStore(SQLEventAdoptionStoreConfig{
+		Queryer: queryer,
+		NewID: fixedWorldlineIDs(
+			"22222222-2222-2222-2222-222222222222",
+			"33333333-3333-3333-3333-333333333333",
+		),
+	})
+
+	_, err := store.AdoptEvent(context.Background(), AdoptEventInput{
+		TenantID:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		EventID:     "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		RequestID:   "req-adopt-event-auto-reject",
+	})
+
+	if err != nil {
+		t.Fatalf("adopt event: %v", err)
+	}
+	query := strings.ToLower(queryer.query)
+	for _, required := range []string{
+		"rejected_siblings as (",
+		"status = 'rejected'",
+		"worldline_events.session_id = candidate_scope.session_id",
+		"worldline_events.step = candidate_scope.step",
+		"worldline_events.status = 'candidate'",
+		"worldline_events.event_id <> candidate_scope.event_id",
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("expected sibling rejection clause %q in adopt query, got %s", required, queryer.query)
+		}
+	}
+}
+
+func TestDisabledEventRejectionStoreFailsClosed(t *testing.T) {
+	store := NewDisabledEventRejectionStore()
+
+	_, err := store.RejectEvent(context.Background(), RejectEventInput{
+		TenantID: "tenant-123",
+		EventID:  "event-1",
+	})
+
+	if code := ErrorCode(err); code != "WORLDLINE_EVENT_REJECTION_BACKEND_UNCONFIGURED" {
+		t.Fatalf("expected fail-closed event rejection backend error, got %s (%v)", code, err)
+	}
+}
+
+func TestSQLEventRejectionStoreRejectsTenantScopedCandidateAndWritesSanitizedEvents(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"dddddddd-dddd-dddd-dddd-dddddddddddd",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			3,
+			"密谈破裂",
+			"公开候选事件摘要",
+			"director",
+			"rejected",
+			"simulation",
+			"0.86",
+			`["agent-1","agent-2"]`,
+			`{"tension":"raised"}`,
+			"11111111-1111-1111-1111-111111111111",
+			"cccccccc-cccc-cccc-cccc-cccccccccccc",
+			"2026-07-05T00:00:00Z",
+			"2026-07-05T00:01:00Z",
+		}}},
+	}
+	store := NewSQLEventRejectionStore(SQLEventRejectionStoreConfig{
+		Queryer: queryer,
+		NewID:   fixedWorldlineIDs("33333333-3333-3333-3333-333333333333"),
+	})
+
+	event, err := store.RejectEvent(context.Background(), RejectEventInput{
+		TenantID:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		EventID:     "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		RequestID:   "req-reject-event-123",
+		Note:        "Reject this branch",
+	})
+
+	if err != nil {
+		t.Fatalf("reject event: %v", err)
+	}
+	if event.EventID != "dddddddd-dddd-dddd-dddd-dddddddddddd" ||
+		event.SessionID != "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" ||
+		event.ProjectID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		event.Status != "rejected" {
+		t.Fatalf("unexpected rejected event metadata: %#v", event)
+	}
+	query := strings.ToLower(queryer.query)
+	for _, required := range []string{
+		"update worldline_events",
+		"status = 'candidate'",
+		"status = 'rejected'",
+		"insert into workflow_events",
+		"worldline.event.rejected",
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("expected %s query, got %s", required, queryer.query)
+		}
+	}
+	for _, forbidden := range []string{"body_text", "content_text", "prompt", "response", "api_key", "encrypted_api_key", "credential_ref", "manuscript", "draft"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("event rejection query mentioned forbidden field %q: %s", forbidden, queryer.query)
+		}
+	}
+	for _, arg := range queryer.args {
+		if value, ok := arg.(string); ok {
+			for _, forbidden := range []string{"prompt", "response", "api_key", "credential_ref", "manuscript", "draft"} {
+				if strings.Contains(strings.ToLower(value), forbidden) {
+					t.Fatalf("event rejection args leaked forbidden value: %#v", queryer.args)
+				}
+			}
+		}
+	}
+	if queryer.tenantID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ||
+		queryer.actorUserID != "cccccccc-cccc-cccc-cccc-cccccccccccc" || queryer.actorCalls != 1 {
+		t.Fatalf("event rejection skipped tenant actor context: %#v", queryer)
+	}
+}
+
+func TestSQLEventRejectionStoreReturnsNotFoundForNonCandidate(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{}
+	store := NewSQLEventRejectionStore(SQLEventRejectionStoreConfig{
+		Queryer: queryer,
+		NewID:   fixedWorldlineIDs("33333333-3333-3333-3333-333333333333"),
+	})
+
+	_, err := store.RejectEvent(context.Background(), RejectEventInput{
+		TenantID:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		EventID:     "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		ActorUserID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		RequestID:   "req-reject-event-canon",
+	})
+
+	if code := ErrorCode(err); code != "NOT_FOUND" {
+		t.Fatalf("expected NOT_FOUND for non-candidate event rejection, got %s (%v)", code, err)
+	}
+}
+
 func TestDisabledVariableStoreFailsClosed(t *testing.T) {
 	store := NewDisabledVariableStore()
 

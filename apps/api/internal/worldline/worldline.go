@@ -202,6 +202,18 @@ type EventAdoptionStore interface {
 	AdoptEvent(context.Context, AdoptEventInput) (EventRecord, error)
 }
 
+type RejectEventInput struct {
+	TenantID    string
+	EventID     string
+	ActorUserID string
+	RequestID   string
+	Note        string
+}
+
+type EventRejectionStore interface {
+	RejectEvent(context.Context, RejectEventInput) (EventRecord, error)
+}
+
 type UpdateEventInput struct {
 	TenantID    string
 	EventID     string
@@ -488,6 +500,19 @@ func (s *DisabledEventAdoptionStore) AdoptEvent(context.Context, AdoptEventInput
 	return EventRecord{}, &AppError{
 		Code:    "WORLDLINE_EVENT_ADOPTION_BACKEND_UNCONFIGURED",
 		Message: "worldline event adoption backend is not configured",
+	}
+}
+
+type DisabledEventRejectionStore struct{}
+
+func NewDisabledEventRejectionStore() *DisabledEventRejectionStore {
+	return &DisabledEventRejectionStore{}
+}
+
+func (s *DisabledEventRejectionStore) RejectEvent(context.Context, RejectEventInput) (EventRecord, error) {
+	return EventRecord{}, &AppError{
+		Code:    "WORLDLINE_EVENT_REJECTION_BACKEND_UNCONFIGURED",
+		Message: "worldline event rejection backend is not configured",
 	}
 }
 
@@ -2361,6 +2386,7 @@ candidate_scope AS (
     e.project_id,
     e.session_id,
     e.event_id,
+    e.step,
     e.status AS from_status,
     s.run_id
   FROM worldline_events e
@@ -2402,6 +2428,20 @@ updated_event AS (
     worldline_events.created_by,
     worldline_events.created_at,
     worldline_events.updated_at
+),
+rejected_siblings AS (
+  UPDATE worldline_events
+  SET
+    status = 'rejected',
+    updated_at = now()
+  FROM candidate_scope
+  WHERE worldline_events.tenant_id = candidate_scope.tenant_id
+    AND worldline_events.project_id = candidate_scope.project_id
+    AND worldline_events.session_id = candidate_scope.session_id
+    AND worldline_events.step = candidate_scope.step
+    AND worldline_events.status = 'candidate'
+    AND worldline_events.event_id <> candidate_scope.event_id
+  RETURNING worldline_events.event_id
 ),
 adoption_insert AS (
   INSERT INTO worldline_event_adoptions (
@@ -2458,6 +2498,188 @@ workflow_event_insert AS (
   FROM candidate_scope
   JOIN adoption_insert
     ON true
+  RETURNING 1
+)
+SELECT
+  updated_event.event_id::text,
+  updated_event.session_id::text,
+  updated_event.project_id::text,
+  updated_event.step,
+  updated_event.title,
+  updated_event.summary,
+  updated_event.kind,
+  updated_event.status,
+  updated_event.lifecycle,
+  COALESCE(updated_event.confidence::text, ''),
+  COALESCE(updated_event.involved_agent_ids_jsonb, '[]'::jsonb)::text,
+  COALESCE(updated_event.state_changes_jsonb, '{}'::jsonb)::text,
+  COALESCE(updated_event.source_run_id::text, ''),
+  COALESCE(updated_event.created_by::text, ''),
+  updated_event.created_at::text,
+  updated_event.updated_at::text
+FROM updated_event
+JOIN workflow_event_insert
+  ON true`
+}
+
+type SQLEventRejectionStoreConfig struct {
+	Queryer SQLQueryer
+	NewID   func() string
+}
+
+type SQLEventRejectionStore struct {
+	queryer SQLQueryer
+	newID   func() string
+}
+
+func NewSQLEventRejectionStore(config SQLEventRejectionStoreConfig) *SQLEventRejectionStore {
+	newID := config.NewID
+	if newID == nil {
+		newID = newUUID
+	}
+	return &SQLEventRejectionStore{
+		queryer: config.Queryer,
+		newID:   newID,
+	}
+}
+
+func (s *SQLEventRejectionStore) RejectEvent(ctx context.Context, input RejectEventInput) (EventRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	eventID := strings.TrimSpace(input.EventID)
+	if tenantID == "" || eventID == "" {
+		return EventRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and event_id are required"}
+	}
+	if s.queryer == nil {
+		return EventRecord{}, &AppError{Code: "WORLDLINE_EVENT_REJECTION_BACKEND_UNCONFIGURED", Message: "worldline event rejection backend is not configured"}
+	}
+	workflowEventID := s.newID()
+	actorUserID := strings.TrimSpace(input.ActorUserID)
+	note := strings.TrimSpace(input.Note)
+	// Mirror the adoption payload: the timeline surfaces the rejected domain
+	// event's own title/summary via the event_ref_id join. Note stays for the
+	// audit trail.
+	eventPayload, err := json.Marshal(map[string]any{
+		"status":       "rejected",
+		"kind":         "event_rejection",
+		"event_ref_id": eventID,
+		"event_id":     eventID,
+		"note":         note,
+		"request_id":   strings.TrimSpace(input.RequestID),
+	})
+	if err != nil {
+		return EventRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline event rejection payload must be JSON serializable"}
+	}
+
+	rows, err := queryWorldlineTenantActorSQL(
+		ctx,
+		s.queryer,
+		tenantID,
+		actorUserID,
+		rejectEventReturningQuery(),
+		tenantID,
+		eventID,
+		workflowEventID,
+		actorUserID,
+		string(eventPayload),
+	)
+	if err != nil {
+		return EventRecord{}, &AppError{Code: "WORLDLINE_EVENT_REJECTION_WRITE_FAILED", Message: err.Error()}
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return EventRecord{}, &AppError{Code: "WORLDLINE_EVENT_REJECTION_WRITE_FAILED", Message: err.Error()}
+		}
+		return EventRecord{}, &AppError{Code: "NOT_FOUND", Message: "candidate worldline event not found"}
+	}
+	record, err := scanEventRecord(rows)
+	if err != nil {
+		return EventRecord{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return EventRecord{}, &AppError{Code: "WORLDLINE_EVENT_REJECTION_WRITE_FAILED", Message: err.Error()}
+	}
+	return record, nil
+}
+
+func rejectEventReturningQuery() string {
+	return `WITH tenant_context AS MATERIALIZED (
+  SELECT app_set_tenant_context($1::uuid, NULLIF($4, '')::uuid, false)
+),
+candidate_scope AS (
+  SELECT
+    e.tenant_id,
+    e.project_id,
+    e.session_id,
+    e.event_id,
+    s.run_id
+  FROM worldline_events e
+  CROSS JOIN tenant_context
+  JOIN worldline_sessions s
+    ON s.tenant_id = e.tenant_id
+   AND s.project_id = e.project_id
+   AND s.session_id = e.session_id
+  WHERE e.tenant_id = $1::uuid
+    AND e.event_id = $2::uuid
+    AND e.status = 'candidate'
+  LIMIT 1
+),
+updated_event AS (
+  UPDATE worldline_events
+  SET
+    status = 'rejected',
+    updated_at = now()
+  FROM candidate_scope
+  WHERE worldline_events.tenant_id = candidate_scope.tenant_id
+    AND worldline_events.project_id = candidate_scope.project_id
+    AND worldline_events.session_id = candidate_scope.session_id
+    AND worldline_events.event_id = candidate_scope.event_id
+  RETURNING
+    worldline_events.event_id,
+    worldline_events.session_id,
+    worldline_events.project_id,
+    worldline_events.step,
+    worldline_events.title,
+    worldline_events.summary,
+    worldline_events.kind,
+    worldline_events.status,
+    worldline_events.lifecycle,
+    worldline_events.confidence,
+    worldline_events.involved_agent_ids_jsonb,
+    worldline_events.state_changes_jsonb,
+    worldline_events.source_run_id,
+    worldline_events.created_by,
+    worldline_events.created_at,
+    worldline_events.updated_at
+),
+workflow_event_insert AS (
+  INSERT INTO workflow_events (
+    tenant_id,
+    event_id,
+    run_id,
+    workflow_type,
+    project_id,
+    event_type,
+    sequence,
+    payload_jsonb
+  )
+  SELECT
+    candidate_scope.tenant_id,
+    $3::uuid,
+    candidate_scope.run_id,
+    'worldline_session',
+    candidate_scope.project_id,
+    'worldline.event.rejected',
+    COALESCE((
+      SELECT MAX(sequence) + 1
+      FROM workflow_events existing
+      WHERE existing.tenant_id = candidate_scope.tenant_id
+        AND existing.run_id = candidate_scope.run_id
+    ), 1),
+    $5::jsonb
+  FROM candidate_scope
+  JOIN updated_event
+    ON updated_event.event_id = candidate_scope.event_id
   RETURNING 1
 )
 SELECT

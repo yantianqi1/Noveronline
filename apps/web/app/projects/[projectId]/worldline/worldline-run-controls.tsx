@@ -22,6 +22,7 @@ export function WorldlineRunControls({
   hasSession,
   busy = false,
   evolving = false,
+  pendingCount = 0,
   mode,
   onModeChange,
   onPrimary,
@@ -31,6 +32,8 @@ export function WorldlineRunControls({
   busy?: boolean;
   /** True while auto-evolution is streaming (primary becomes a breathing loader). */
   evolving?: boolean;
+  /** Candidates awaiting 定夺 — the world cannot move on until they are settled. */
+  pendingCount?: number;
   mode: EvolutionMode;
   onModeChange: (mode: EvolutionMode) => void;
   /** Start preparation (no session) or push one step (live session). */
@@ -53,7 +56,7 @@ export function WorldlineRunControls({
   return (
     <div className="shrink-0 border-t border-line bg-panel">
       {injectOpen && hasSession ? (
-        <div className="flex items-end gap-2 border-b border-line-soft px-6 py-3">
+        <div className="flex flex-wrap items-end gap-2 border-b border-line-soft px-6 py-3">
           <label className="flex-1">
             <span className="mb-1 block text-caption text-muted">变量名</span>
             <input
@@ -87,6 +90,9 @@ export function WorldlineRunControls({
           >
             收起
           </button>
+          <p className="w-full text-caption text-muted-soft">
+            注入的变量默认未锁定，可在右栏「锁定变量」里锁为硬约束。
+          </p>
         </div>
       ) : null}
 
@@ -95,7 +101,8 @@ export function WorldlineRunControls({
         <button
           type="button"
           onClick={onPrimary}
-          disabled={busy}
+          disabled={busy || pendingCount > 0}
+          title={pendingCount > 0 ? "先定夺完这一步的候选" : undefined}
           className={cn(
             "shrink-0 whitespace-nowrap rounded-control bg-accent px-5 py-2.5 text-sm font-medium text-panel shadow-accent transition-colors hover:bg-accent-strong disabled:opacity-60",
             evolving && "animate-pulse",
