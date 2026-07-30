@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+
+package-lock.json linguist-generated=true
+uv.lock linguist-generated=true
+go.sum linguist-generated=true

@@ -28,7 +28,8 @@ MiroFish-Novel 是一个面向长篇小说创作的多智能体分析与写作�
 
 ## 快速启动
 
-需要 Docker Desktop / Docker Engine 和 Compose。
+需要 Git、Docker Desktop 或 Docker Engine，以及 Docker Compose v2。首次启动会构建
+Web、API 和 Agent Runtime 镜像，并初始化本地 Postgres、Redis、Temporal 与 MinIO。
 
 ```bash
 cp infra/.env.example infra/.env
@@ -38,6 +39,12 @@ docker compose -f infra/docker-compose.yml up -d --build
 - Web：`http://localhost:3999`
 - API：`http://localhost:3888`
 - Readiness：`http://localhost:3888/readyz`
+
+停止服务：
+
+```bash
+docker compose -f infra/docker-compose.yml down
+```
 
 LLM 模块未绑定时必须显式失败。不要用环境变量单渠道 fallback、mock 成功或伪数据绕过 LLM Facility。
 
@@ -87,6 +94,9 @@ tasks/               活动任务板
 backend/             Legacy import / compatibility reference only
 ```
 
+本机缓存、参考仓库、测试数据库、上传物和生成素材不属于发行内容，均由
+`.gitignore` 排除。公开仓库不依赖任何未声明的 Git submodule。
+
 `docs/plans/` 和 `docs/superpowers/` 是历史设计记录。其中指向旧 `frontend/`、Vue/Vite 或旧 Writer 长页的命令不是当前开发入口。
 
 ## 开发约束
@@ -106,6 +116,12 @@ backend/             Legacy import / compatibility reference only
 
 ## 贡献与许可
 
-提交前请阅读 `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md` 和 `SECURITY.md`。不要提交 API Key、用户小说原文、私有数据库、上传产物或 LLM trace。
+提交前请阅读 `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md` 和
+`SUPPORT.md`。Pull request 会运行 Go、Python、Next.js、Pi Runtime 与共享契约检查。
+不要提交 API Key、用户小说原文、私有数据库、上传产物或 LLM trace。
 
 本项目使用 `AGPL-3.0-only` 许可，详见 `LICENSE`。
+
+本项目部分能力源自 [MiroFish](https://github.com/666ghj/MiroFish)，并自
+2026 年 3 月起针对长篇小说创作和 SaaS 架构进行了实质性重构。来源与修改声明见
+`NOTICE`。

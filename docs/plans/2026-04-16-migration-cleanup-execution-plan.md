@@ -130,7 +130,7 @@
   - `docs/` 全量 + CLAUDE.md/README.md/AGENTS.md 里 `FLASK_PORT=3888 uv run ...` 示例改为 `APP_PORT=3888 uv run ...`
   - commit
 
-完整 commit message 模板见前序会话 plan 文件（`/Users/yantianqi/.claude/plans/humming-hatching-dragonfly.md`）。
+完整 commit message 模板曾保存在维护者本地的前序会话计划中，未纳入仓库。
 
 ### Phase C — 修剩余测试失败（桶 B/C/D）
 
@@ -258,7 +258,6 @@ commit：`feat(search): add sqlite/postgres search backend abstraction`
 | `docs/plans/2026-04-14-database-unification-migration-plan.md` | P0+P1 的权威技术方案（见其中 §五 Task 1-12） |
 | `docs/plans/2026-04-16-migration-cleanup-execution-plan.md`（本文件） | 执行层路线图 + 当前状态快照 |
 | `docs/plans/2026-04-17-remaining-phases-implementation-guide.md` | 剩余 Phase 的深度调研 + 文件级实施指南（Task 4/6/7/8/9/11） |
-| `/Users/yantianqi/.claude/plans/humming-hatching-dragonfly.md` | 前序会话的仓库整理原始 plan（Phase A 入库操作手册） |
 | `backend/app/database.py` | 统一数据库入口 |
 | `backend/app/tables/*.py` | 12 张 SQLAlchemy Core 表 |
 | `backend/app/repositories/*.py` | 22 个 repo 模块 |

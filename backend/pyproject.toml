@@ -3,7 +3,7 @@ name = "mirofish-novel-backend"
 version = "0.1.0"
 description = "Narrative prediction and parallel-world simulation backend for novels"
 requires-python = ">=3.11"
-license = { text = "AGPL-3.0" }
+license = { text = "AGPL-3.0-only" }
 authors = [
     { name = "MiroFish-Novel Team" }
 ]

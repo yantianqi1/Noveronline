@@ -1,14 +1,9 @@
 {
-  "name": "ui-preview",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "name": "@mirofish/ui-preview-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Playwright helpers for MiroFish UI verification.",
+  "license": "AGPL-3.0-only",
   "type": "commonjs",
   "dependencies": {
     "playwright-core": "^1.62.0"

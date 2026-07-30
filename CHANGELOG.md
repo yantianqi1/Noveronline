@@ -9,3 +9,8 @@ This project follows a lightweight changelog format while it is in pre-1.0 activ
 - Refresh public README, agent handoff docs, Claude Code guidance, and frontend README.
 - Add open-source governance files: contributing guide, code of conduct, security policy, support guide, issue templates, and pull request template.
 - Document `AGPL-3.0-only` licensing intent.
+- Add full-stack CI, dependency updates, repository formatting metadata, and
+  history-aware secret scanning.
+- Remove invalid local reference gitlinks and document the MiroFish upstream
+  attribution.
+- Move the legacy backend example environment into its owning directory.

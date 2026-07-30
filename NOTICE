@@ -1,0 +1,13 @@
+MiroFish-Novel
+Copyright 2026 MiroFish-Novel contributors
+
+This project is derived in part from MiroFish:
+https://github.com/666ghj/MiroFish
+
+MiroFish is licensed under the GNU Affero General Public License v3.0.
+MiroFish-Novel has been substantially modified since March 2026 for long-form
+fiction analysis and writing, including a new SaaS architecture, control
+plane, web application, agent runtimes, data model, and product semantics.
+
+MiroFish-Novel is distributed under AGPL-3.0-only. See LICENSE for the full
+license text. Third-party dependencies retain their respective licenses.

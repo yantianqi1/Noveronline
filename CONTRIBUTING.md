@@ -11,6 +11,8 @@
 
 ## 本地开发
 
+完整产品开发只需要 Git、Docker 和 Docker Compose v2：
+
 ```bash
 cp infra/.env.example infra/.env
 docker compose -f infra/docker-compose.yml up -d --build
@@ -37,6 +39,10 @@ PR 描述应包含：
 - 保持小说创作领域语义，避免引入上游舆情分析抽象。
 
 ## 测试
+
+直接在宿主机运行全部检查需要 Go 1.24、Node.js 22.19+ 和 Python 3.11+。
+依赖安装方式见各应用的 lockfile 与 `pyproject.toml`；CI 使用锁定的 Node 依赖和
+Python 3.12。
 
 ```bash
 cd apps/api

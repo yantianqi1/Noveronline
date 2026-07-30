@@ -1,0 +1,23 @@
+title = "MiroFish-Novel secret scanning configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic cryptographic values used by tests"
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef$''',
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=$''',
+  '''^YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=$''',
+  '''^YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODl=$''',
+]
+
+[[allowlists]]
+description = "Story archive template identifiers misclassified as API keys"
+regexTarget = "secret"
+regexes = [
+  '''^(character|organization|relationship)\.protagonist\.v1$''',
+  '''^organization\.major\.v1$''',
+]

@@ -8,7 +8,10 @@ This project is in active pre-1.0 development. Security fixes target the default
 
 Please do not open a public issue for vulnerabilities involving credentials, private manuscripts, user data, database files, LLM traces, authentication bypass, or remote code execution.
 
-Report privately by contacting the maintainers listed on the GitHub repository. If private vulnerability reporting is enabled for the repository, use GitHub Security Advisories.
+Use the repository's private vulnerability reporting page when it is enabled.
+If it is unavailable, contact the repository owner privately through the
+contact method listed on their GitHub profile. Do not include exploit details
+in a public issue.
 
 ## Sensitive Data Rules
 
