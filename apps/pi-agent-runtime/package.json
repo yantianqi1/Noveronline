@@ -2,6 +2,7 @@
   "name": "@mirofish-novel/pi-agent-runtime",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -17,10 +18,10 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.80.3",
     "@earendil-works/pi-ai": "0.80.3",
-    "@temporalio/activity": "1.19.0",
-    "@temporalio/client": "^1.19.0",
-    "@temporalio/worker": "^1.19.0",
-    "@temporalio/workflow": "^1.19.0",
+    "@temporalio/activity": "1.21.1",
+    "@temporalio/client": "1.21.1",
+    "@temporalio/worker": "1.21.1",
+    "@temporalio/workflow": "1.21.1",
     "@types/pg": "^8.20.0",
     "pg": "^8.22.0",
     "typebox": "1.1.38"
